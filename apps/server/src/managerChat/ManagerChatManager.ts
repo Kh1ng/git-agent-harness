@@ -17,7 +17,20 @@ import { compactionSummary, isCompactionCommand, isUsageLimitError } from './acp
 import { backendForProfile, modelOverrideForProfile, setModelOverrideForProfile } from './settingsStore.js';
 import { effectiveContextPolicy, applyContextBudget } from '../gatewaySettingsStore.js';
 import { appendEvents, createEventWriter, deriveModelHistory, foldSession, loadLog, type SessionLogOptions } from './sessionLog.js';
+import {
+  archiveSession,
+  chatKey,
+  chatSessionStoreOptions,
+  createSession,
+  getSession,
+  listSessions,
+  resolveSessionCwd,
+  touchSession,
+  type ChatSessionStoreOptions
+} from './chatSessions.js';
+import { runProfileList } from '../gahCli.js';
 import type { ChatSessionEvent, ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
+import type { ProfileSummary } from '@git-agent-harness/contracts';
 
 // Serializes turns per profile -- without this, two concurrent messages for
 // the same profile (e.g. two open browser tabs) would both prompt the same
@@ -75,9 +88,53 @@ export function setSessionLogOptions(opts: SessionLogOptions): void {
   logOptions.stateDir = opts.stateDir;
 }
 
+/** Chat session store options (tests may point at a temp state dir). */
+export function setChatSessionStoreOptions(opts: ChatSessionStoreOptions): void {
+  chatSessionStoreOptions.stateDir = opts.stateDir;
+}
+
+let profileInfoCache: { at: number; profiles: ProfileSummary[] } | null = null;
+const PROFILE_INFO_TTL_MS = 30_000;
+
+/** Resolves a profile's config facts (repo_id, local_path, worktree_base)
+ * for session worktree management. Cached briefly: profiles are hot-path
+ * enough (every session turn) but change rarely, and `gah profile list`
+ * shells out to the Rust CLI. */
+async function findProfileInfo(profile: string): Promise<ProfileSummary | null> {
+  const now = Date.now();
+  if (!profileInfoCache || now - profileInfoCache.at > PROFILE_INFO_TTL_MS) {
+    profileInfoCache = { at: now, profiles: await runProfileList() };
+  }
+  return profileInfoCache.profiles.find((p) => p.name === profile) ?? null;
+}
+
 /** The full folded view, including cursor + streaming state. */
-export function getSessionView(profile: string) {
-  return foldSession(profile, logOptions, !activeProfiles.has(profile));
+export function getSessionView(profile: string, sessionId?: string) {
+  const opts = sessionId ? { ...logOptions, sessionId } : logOptions;
+  return foldSession(profile, opts, !activeProfiles.has(chatKey(profile, sessionId)));
+}
+
+/** Lists a profile's chat sessions (WP2). */
+export function listChatSessions(profile: string) {
+  return listSessions(profile, chatSessionStoreOptions);
+}
+
+/** Creates a chat session bound to a fresh worktree (WP2). The backend
+ * resolves at create time: explicit request, else the profile default. */
+export async function createChatSession(profile: string, backend?: string, title?: string) {
+  const profileInfo = await findProfileInfo(profile);
+  if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
+  return createSession(
+    { profile, profileInfo, backend: backend ?? backendForProfile(profile), title },
+    chatSessionStoreOptions
+  );
+}
+
+/** Archives a chat session: dirty worktree patched first, branch survives (WP2). */
+export async function archiveChatSession(profile: string, sessionId: string) {
+  const profileInfo = await findProfileInfo(profile);
+  if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
+  return archiveSession(profile, sessionId, profileInfo, chatSessionStoreOptions);
 }
 
 export function listCommandsForProfile(profile: string): Promise<ManagerCommandInfo[]> {
@@ -172,6 +229,16 @@ export type TurnRunResult = {
   handoff: HandoffInfo | null;
 };
 
+export interface RunTurnContext {
+  /** Composite key identifying this conversation (profile or profile#session). */
+  key: string;
+  /** Backend serving this conversation; the session's own backend for
+   * session-bound turns, the profile default otherwise. */
+  backend: string;
+  /** Session working directory (WP2); undefined = the server's cwd. */
+  cwd?: string;
+}
+
 export async function runTurn(
   profile: string,
   message: string,
@@ -179,19 +246,21 @@ export async function runTurn(
   history: ChatTranscriptTurn[],
   onChunk: (text: string) => void,
   onToolResult: (name: string, text: string) => void,
-  active: ActiveTurn
+  active: ActiveTurn,
+  context: RunTurnContext
 ): Promise<TurnRunResult> {
   const isSlashCommand = message.trim().startsWith('/');
   // #962: flush the session to the gateway before the handoff so the new
   // backend's recall sees the pre-handoff exchange. Best-effort: a flush
-  // failure must not block the handoff itself.
+  // failure must not block the handoff itself. The flush is per-PROFILE --
+  // project memory is shared across a profile's sessions by design.
   const result = await handoffAttempt({
-    startBackend: backendForProfile(profile),
-    fallbackBackends: listManagerBackends().filter((b) => b.implemented && b.id !== backendForProfile(profile)).map((b) => b.id),
+    startBackend: context.backend,
+    fallbackBackends: listManagerBackends().filter((b) => b.implemented && b.id !== context.backend).map((b) => b.id),
     attempt: async (backendId) => {
       const adapter = resolveAdapter(backendId);
       const attempt = async () => {
-        const r = await adapter.runTurn(profile, { prompt, history, onChunk, onToolResult });
+        const r = await adapter.runTurn(context.key, { prompt, history, onChunk, onToolResult, cwd: context.cwd });
         return r;
       };
       try {
@@ -235,28 +304,51 @@ export interface ManagerChatTurnResult {
   cancelled: boolean;
 }
 
-/** Cancels the in-flight turn for a profile, if one is running. Safe to call
- * when nothing is in flight (returns false) -- never appends a spurious
+/** Cancels the in-flight turn for a conversation, if one is running. Safe to
+ * call when nothing is in flight (returns false) -- never appends a spurious
  * turn/end in that case (#960). The ACP session itself survives; only the
  * current prompt turn is stopped. */
-export async function cancelManagerChatTurn(profile: string): Promise<boolean> {
-  const active = activeTurns.get(profile);
+export async function cancelManagerChatTurn(profile: string, sessionId?: string): Promise<boolean> {
+  const key = chatKey(profile, sessionId);
+  const active = activeTurns.get(key);
   if (!active) return false;
   active.cancelled = true;
   active.resolveCancel();
-  const backendId = backendForProfile(profile);
+  const backendId = (sessionId ? getSession(profile, sessionId, chatSessionStoreOptions)?.backend : undefined)
+    ?? backendForProfile(profile);
   try {
-    await resolveAdapter(backendId).cancelTurn(profile);
+    await resolveAdapter(backendId).cancelTurn(key);
   } catch (error) {
-    console.error(`[managerChat] cancel failed for profile ${profile}:`, error);
+    console.error(`[managerChat] cancel failed for ${key}:`, error);
   }
   return true;
 }
 
-export function sendManagerChatMessage(profile: string, message: string, requestId?: string): Promise<ManagerChatTurnResult> {
-  const prior = turnQueueByProfile.get(profile) ?? Promise.resolve();
+export function sendManagerChatMessage(profile: string, message: string, requestId?: string, sessionId?: string): Promise<ManagerChatTurnResult> {
+  // Session-bound turns (WP2): resolve the session's worktree cwd (re-
+  // materializing it from the branch if prune reclaimed the idle worktree)
+  // and serve the turn from the session's own backend. Unknown or archived
+  // sessions fail loudly rather than silently landing in the default log.
+  const prepareSession = async (): Promise<{ cwd?: string; backend: string }> => {
+    if (!sessionId || sessionId === 'default') {
+      return { backend: backendForProfile(profile) };
+    }
+    const profileInfo = await findProfileInfo(profile);
+    if (!profileInfo) {
+      throw new Error(`Profile '${profile}' not found for chat session '${sessionId}'`);
+    }
+    const resolved = await resolveSessionCwd(profile, sessionId, profileInfo, chatSessionStoreOptions);
+    if (!resolved) {
+      throw new Error(`No active chat session '${sessionId}' for profile '${profile}'`);
+    }
+    return { cwd: resolved.cwd, backend: resolved.session.backend };
+  };
+
+  const key = chatKey(profile, sessionId);
+  const sessionOpts = sessionId && sessionId !== 'default' ? { ...logOptions, sessionId } : logOptions;  const prior = turnQueueByProfile.get(key) ?? Promise.resolve();
   const turn = prior.catch(() => undefined).then(async (): Promise<ManagerChatTurnResult> => {
-    const existing = loadLog(profile, logOptions);
+    const sessionContext = await prepareSession();
+    const existing = loadLog(profile, sessionOpts);
     const history = deriveModelHistory(existing);
     const turnNo = existing.reduce((highest, event) => Math.max(highest, event.turn), 0) + 1;
     const now = Date.now();
@@ -271,13 +363,13 @@ export function sendManagerChatMessage(profile: string, message: string, request
       cancelSettled: new Promise<void>((resolve) => { resolveCancel = resolve; }),
       resolveCancel: () => resolveCancel()
     };
-    activeTurns.set(profile, active);
-    activeProfiles.add(profile);
+    activeTurns.set(key, active);
+    activeProfiles.add(key);
     appendEvents(profile, [
       ...(compaction ? [{ type: 'compaction/start' as const, seq: ++active.seq, turn: turnNo, timestamp: now }] : []),
       { type: 'turn/start', seq: ++active.seq, turn: turnNo, timestamp: now },
       { type: 'user/message', seq: ++active.seq, turn: turnNo, text: message, source: 'prompt', timestamp: now }
-    ], logOptions);
+    ], sessionOpts);
 
     try {
       // Keep slash commands bare so the backend dispatches them instead of
@@ -328,9 +420,9 @@ export function sendManagerChatMessage(profile: string, message: string, request
           timestamp: Date.now(),
           policy: injectPolicy,
           truncated
-        }], logOptions);
+        }], sessionOpts);
       }
-      active.chunkWriter = createEventWriter(profile, logOptions);
+      active.chunkWriter = createEventWriter(profile, sessionOpts);
       const run = runTurn(
         profile,
         message,
@@ -350,6 +442,7 @@ export function sendManagerChatMessage(profile: string, message: string, request
               type: 'manager.chat.chunk',
               requestId: requestId ?? '',
               profile,
+              ...(sessionId ? { sessionId } : {}),
               turn: turnNo,
               seq: chunk.seq,
               text
@@ -364,7 +457,8 @@ export function sendManagerChatMessage(profile: string, message: string, request
           text,
           timestamp: Date.now()
         }),
-        active
+        active,
+        { key, backend: sessionContext.backend, cwd: sessionContext.cwd }
       );
       // A cancel is a barrier for the queue: once we've sent session/cancel
       // to the backend, don't let an unresponsive agent wedge the profile's
@@ -429,7 +523,7 @@ export function sendManagerChatMessage(profile: string, message: string, request
             }] : []),
             ...(compaction ? [{ type: 'compaction/end' as const, seq: ++active.seq, turn: turnNo, timestamp: Date.now() }] : [])
           ];
-      appendEvents(profile, done, logOptions);
+      appendEvents(profile, done, sessionOpts);
       return { turn: assistant, cancelled: active.cancelled };
     } catch (error) {
       await active.chunkWriter?.close().catch(() => undefined);
@@ -438,13 +532,14 @@ export function sendManagerChatMessage(profile: string, message: string, request
         { type: 'harness/error', seq: ++active.seq, turn: turnNo, text, timestamp: Date.now() },
         { type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'error', message: text }, timestamp: Date.now() }
       ];
-      appendEvents(profile, done, logOptions);
+      appendEvents(profile, done, sessionOpts);
       throw error;
     } finally {
-      activeProfiles.delete(profile);
-      activeTurns.delete(profile);
+      if (sessionId && sessionId !== 'default') touchSession(profile, sessionId, chatSessionStoreOptions);
+      activeProfiles.delete(key);
+      activeTurns.delete(key);
     }
   });
-  turnQueueByProfile.set(profile, turn.catch(() => undefined));
+  turnQueueByProfile.set(key, turn.catch(() => undefined));
   return turn;
 }

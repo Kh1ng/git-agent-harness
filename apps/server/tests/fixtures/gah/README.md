@@ -76,3 +76,13 @@ subcommand exit non-zero instead of replaying its recorded response --
 this is how the 5xx/stderr-propagation tests work. Optional
 `GAH_FIXTURE_FAIL_CODE` (default `1`) and `GAH_FIXTURE_FAIL_MESSAGE` (default
 a generic message) customize the failure.
+
+## Overriding the profile list
+
+Set `GAH_FIXTURE_PROFILE_LIST=<path.json>` to serve an arbitrary profile
+array for `profile list --json` instead of the recorded response. The
+WP2 chat-session tests use this to point `repo_id`/`local_path`/
+`worktree_base` at a real temp git repository so worktree creation runs
+against actual git. `repo_id` and `worktree_base` were also added to the
+recorded response (post-capture edit: those fields postdate the capture
+commit) because ProfileSummary now carries them.

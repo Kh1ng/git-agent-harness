@@ -4,7 +4,7 @@
  */
 
 import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary, DependencyBlocker } from './gah.js';
-import type { ChatSessionView, ChatTranscriptTurn } from './chat-session.js';
+import type { ChatSessionSummary, ChatSessionView, ChatTranscriptTurn } from './chat-session.js';
 
 // Provider types
 export type ProviderKind = 
@@ -134,6 +134,7 @@ export type ServerMessage =
       type: "manager.chat.reply";
       requestId: string;
       profile: string;
+      sessionId?: string;
       reply: string;
       backend: string;
       model: string | null;
@@ -147,6 +148,7 @@ export type ServerMessage =
       type: "manager.chat.chunk";
       requestId: string;
       profile: string;
+      sessionId?: string;
       turn: number;
       seq: number;
       text: string;
@@ -155,6 +157,7 @@ export type ServerMessage =
       type: "manager.chat.history";
       requestId: string;
       profile: string;
+      sessionId?: string;
       turns: ManagerChatTurn[];
       /** Monotonic log position; the client can resume requesting after it. */
       cursor: number;
@@ -165,7 +168,26 @@ export type ServerMessage =
       /** Signals clients to reload one profile after its active turn ends. */
       type: "manager.chat.updated";
       profile: string;
+      sessionId?: string;
       requestId: string;
+    }
+  | {
+      type: "manager.chat.sessionList";
+      requestId: string;
+      profile: string;
+      sessions: ChatSessionSummary[];
+    }
+  | {
+      type: "manager.chat.sessionCreated";
+      requestId: string;
+      profile: string;
+      session: ChatSessionSummary;
+    }
+  | {
+      type: "manager.chat.sessionArchived";
+      requestId: string;
+      profile: string;
+      session: ChatSessionSummary;
     };
 
 export type ManagerChatTurn = ChatTranscriptTurn;
@@ -228,6 +250,9 @@ export type ClientMessage =
       requestId: string;
       profile: string;
       message: string;
+      /** WP2 sessions: target session within the profile. Omitted (or
+       * 'default') addresses the profile's legacy single conversation. */
+      sessionId?: string;
     }
   | {
       /** Stops the in-flight turn for a profile (#960). Safe to send when no
@@ -235,11 +260,37 @@ export type ClientMessage =
       type: "manager.chat.cancel";
       requestId: string;
       profile: string;
+      sessionId?: string;
     }
   | {
       type: "manager.chat.historyRequest";
       requestId: string;
       profile: string;
+      sessionId?: string;
+    }
+  | {
+      /** WP2: list a profile's chat sessions. */
+      type: "manager.chat.sessionList";
+      requestId: string;
+      profile: string;
+    }
+  | {
+      /** WP2: create a session bound to a fresh worktree. */
+      type: "manager.chat.sessionCreate";
+      requestId: string;
+      profile: string;
+      /** Backend to serve the session; omitted = profile default. */
+      backend?: string;
+      title?: string;
+    }
+  | {
+      /** WP2: archive a session -- dirty worktree is patched into the
+       * session's state dir first, then the worktree is removed. The branch
+       * and the event log survive for later resume. */
+      type: "manager.chat.sessionArchive";
+      requestId: string;
+      profile: string;
+      sessionId: string;
     };
 
 export type ClientCapabilities = {

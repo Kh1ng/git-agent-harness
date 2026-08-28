@@ -60,7 +60,10 @@ import { listManagerBackends } from './managerChat/registry.js';
 import {
   listCommandsForProfile as listManagerChatCommands,
   listModelsForProfile as listManagerChatModels,
-  setModelForProfile as setManagerChatModel
+  setModelForProfile as setManagerChatModel,
+  listChatSessions,
+  createChatSession,
+  archiveChatSession
 } from './managerChat/ManagerChatManager.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
 import {
@@ -1146,6 +1149,48 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to set manager chat model',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // WP2 chat sessions: a session is one conversation bound to one worktree.
+  // List/create/archive are plain REST (the UI's session rail); turns
+  // themselves keep flowing over the WS manager.chat.* messages, which now
+  // carry an optional sessionId.
+  app.get('/api/manager-chat/sessions', (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    res.json({ sessions: listChatSessions(profile) });
+  });
+
+  app.post('/api/manager-chat/sessions', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const backend = typeof req.body?.backend === 'string' ? req.body.backend : undefined;
+    const title = typeof req.body?.title === 'string' ? req.body.title : undefined;
+    try {
+      const session = await createChatSession(profile, backend, title);
+      res.status(201).json(session);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to create chat session',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/manager-chat/sessions/archive', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : undefined;
+    if (!sessionId) {
+      res.status(400).json({ error: 'Missing required field: sessionId' });
+      return;
+    }
+    try {
+      const session = await archiveChatSession(profile, sessionId);
+      res.json(session);
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to archive chat session',
         message: error instanceof Error ? error.message : String(error)
       });
     }

@@ -28,6 +28,8 @@ interface ManagerAdapter extends ManagerBackendInfo {
       history: ChatTranscriptTurn[];
       onChunk: (text: string) => void;
       onToolResult: (name: string, text: string) => void;
+      /** Session working directory (WP2); omitted = the server's cwd. */
+      cwd?: string;
     }
   ): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }>;
   listCommands(gahProfile: string): Promise<ManagerCommandInfo[]>;

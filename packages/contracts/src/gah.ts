@@ -554,6 +554,15 @@ export interface ProfileSummary {
   provider: string;
   repo: string;
   local_path: string;
+  /** Stable repo identity used for GAH-owned branch/worktree naming
+   * (`gah/<repo_id>-<ts>`, `gah-chat-<repo_id>-<session>`). Clients that
+   * materialize worktrees MUST use this rather than deriving from `repo`,
+   * or prune's prefix matching silently misses their worktrees. */
+  repo_id: string;
+  /** Effective worktree root (defaults.worktree_base). Chat sessions and
+   * other clients that materialize worktrees create theirs here so
+   * `gah prune` governs them under one base and naming convention. */
+  worktree_base: string;
   /** Human-facing repo link (github.com/... or the gitlab host), null if
    * the provider isn't recognized or a self-hosted gitlab is missing
    * provider_api_base. */

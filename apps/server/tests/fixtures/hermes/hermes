@@ -5,6 +5,10 @@ import * as acp from '@agentclientprotocol/sdk';
 let nextSession = 0;
 let prompts = 0;
 const remembered = new Map();
+// The ACP cwd GAH passed for this session (WP2: a chat session's worktree).
+// Prompts containing "report cwd" get it echoed back, so tests can assert
+// which directory a conversation ran in without the agent touching the fs.
+const sessionCwds = new Map();
 
 class MockHermes {
   constructor(connection) {
@@ -16,9 +20,10 @@ class MockHermes {
     return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: false } };
   }
 
-  async newSession() {
+  async newSession(params) {
     const sessionId = `mock-${++nextSession}`;
     remembered.set(sessionId, null);
+    sessionCwds.set(sessionId, params?.cwd ?? null);
     return { sessionId };
   }
 
@@ -50,6 +55,8 @@ class MockHermes {
     } else if (/remember code word/i.test(text) && !/previous chat/i.test(text)) {
       remembered.set(sessionId, codeWord);
       reply = 'OK';
+    } else if (/report cwd/i.test(text)) {
+      reply = sessionCwds.get(sessionId) ?? 'NO-CWD';
     } else {
       reply = codeWord ?? remembered.get(sessionId) ?? 'UNKNOWN';
     }
