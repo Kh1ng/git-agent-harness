@@ -401,6 +401,8 @@ export function ManagerChatPage() {
         setStreaming(null);
         setPermission(null);
         setLiveTools({});
+        setRemoteTurnBusy(false);
+        setPendingRequest(null);
         setTurns((prev) => [...prev, {
           role: 'assistant',
           text: last.reply,
@@ -411,6 +413,8 @@ export function ManagerChatPage() {
         setStreaming(null);
         setPermission(null);
         setLiveTools({});
+        setRemoteTurnBusy(false);
+        setPendingRequest(null);
         setTurns((prev) => [...prev, { role: 'error', text: last.error }]);
       }
     }
