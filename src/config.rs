@@ -207,7 +207,7 @@ pub struct Profile {
     /// Optional absolute/relative path to the Mistral Vibe CLI executable.
     #[serde(default)]
     pub vibe_path: Option<String>,
-    /// Extra CLI args appended to `opencode run` (e.g. `--format json`).
+    /// Role-agnostic `opencode run` args; GAH owns and filters `--agent` selection.
     /// Worker/fix backend only -- not wired into review.
     #[serde(default)]
     pub opencode_args: Vec<String>,

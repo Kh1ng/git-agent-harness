@@ -71,6 +71,10 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     run_command(&repo, binary.to_string_lossy().as_ref(), &["--help"])?;
     println!("Installed CLI: {}", binary.display());
 
+    for agent in copy_opencode_agent_configs(&repo, &user_config_home()?)? {
+        println!("Installed OpenCode agent: {}", agent.display());
+    }
+
     if args.role == HostRole::Central {
         // The control-plane server is part of the MVP; web/desktop/mobile
         // clients intentionally have independent release workflows. A
@@ -295,17 +299,46 @@ fn ensure_no_running_loop_before_server_restart() -> Result<()> {
     );
 }
 
+/// Resolve the platform-neutral root for per-user configuration assets.
+fn user_config_home() -> Result<PathBuf> {
+    env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .context("HOME or XDG_CONFIG_HOME is required to install user configuration")
+}
+
+fn copy_opencode_agent_configs(repo: &Path, config_home: &Path) -> Result<[PathBuf; 2]> {
+    let source_dir = repo.join("packaging/opencode/agents");
+    let target_dir = config_home.join("opencode/agents");
+    create_dir_all(&target_dir)
+        .with_context(|| format!("creating OpenCode agent directory {}", target_dir.display()))?;
+
+    let mut installed = Vec::with_capacity(2);
+    for name in ["gah-reviewer.md", "gah-implementer.md"] {
+        let source = source_dir.join(name);
+        if !source.is_file() {
+            bail!("OpenCode agent config is missing: {}", source.display());
+        }
+        let target = target_dir.join(name);
+        copy(&source, &target).with_context(|| {
+            format!(
+                "installing OpenCode agent from {} to {}",
+                source.display(),
+                target.display()
+            )
+        })?;
+        installed.push(target);
+    }
+
+    Ok(installed
+        .try_into()
+        .expect("two OpenCode agents are installed"))
+}
+
 /// Keep the dashboard's lifecycle unit in lockstep with the installed CLI and
 /// control plane. Local operator customization belongs in `systemctl --user
 /// edit gah-loop@<profile>` drop-ins, so replacing this base template on every
 /// deterministic update is safe and prevents source/runtime ownership drift.
-fn systemd_user_config_home() -> Result<PathBuf> {
-    env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .context("HOME or XDG_CONFIG_HOME is required to install a systemd user unit")
-}
-
 fn copy_systemd_unit(repo: &Path, config_home: &Path, unit_file_name: &str) -> Result<PathBuf> {
     let source = repo.join("packaging/systemd").join(unit_file_name);
     if !source.is_file() {
@@ -561,7 +594,7 @@ fn install_loop_unit_template(repo: &Path) -> Result<Option<PathBuf>> {
     if !systemd_available() {
         return Ok(None);
     }
-    let config_home = systemd_user_config_home()?;
+    let config_home = user_config_home()?;
     let target = copy_systemd_unit(repo, &config_home, "gah-loop@.service")?;
     reload_user_systemd("installing gah-loop@.service")?;
     Ok(Some(target))
@@ -578,7 +611,7 @@ fn install_watchdog_unit_template(repo: &Path) -> Result<Option<[PathBuf; 2]>> {
     if !systemd_available() {
         return Ok(None);
     }
-    let config_home = systemd_user_config_home()?;
+    let config_home = user_config_home()?;
     let service = copy_systemd_unit(repo, &config_home, "gah-watchdog.service")?;
     let timer = copy_systemd_unit(repo, &config_home, "gah-watchdog.timer")?;
     reload_user_systemd("installing gah-watchdog.service/.timer")?;
@@ -599,7 +632,7 @@ fn install_quota_refresh_unit_template(repo: &Path) -> Result<Option<[PathBuf; 2
     if !systemd_available() {
         return Ok(None);
     }
-    let config_home = systemd_user_config_home()?;
+    let config_home = user_config_home()?;
     let service = copy_systemd_unit(repo, &config_home, "gah-quota-refresh.service")?;
     let timer = copy_systemd_unit(repo, &config_home, "gah-quota-refresh.timer")?;
     reload_user_systemd("installing gah-quota-refresh.service/.timer")?;
@@ -620,7 +653,7 @@ fn install_prune_unit_template(repo: &Path) -> Result<Option<[PathBuf; 2]>> {
     if !systemd_available() {
         return Ok(None);
     }
-    let config_home = systemd_user_config_home()?;
+    let config_home = user_config_home()?;
     let service = copy_systemd_unit(repo, &config_home, "gah-prune.service")?;
     let timer = copy_systemd_unit(repo, &config_home, "gah-prune.timer")?;
     reload_user_systemd("installing gah-prune.service/.timer")?;
@@ -689,10 +722,10 @@ fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_clean, ensure_default_branch_checkout, install_prune_unit_template,
-        install_quota_refresh_unit_template, install_server_unit_template,
-        install_watchdog_unit_template, installed_binary_path, resolve_web_deploy_root, run,
-        stale_asset_names, HostRole, UpdateArgs, WEB_BUILD_ARGS,
+        copy_opencode_agent_configs, ensure_clean, ensure_default_branch_checkout,
+        install_prune_unit_template, install_quota_refresh_unit_template,
+        install_server_unit_template, install_watchdog_unit_template, installed_binary_path,
+        resolve_web_deploy_root, run, stale_asset_names, HostRole, UpdateArgs, WEB_BUILD_ARGS,
     };
     use crate::test_support::PathGuard;
     use std::collections::HashSet;
@@ -781,6 +814,22 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some("bin")
         );
+    }
+
+    #[test]
+    fn update_assets_keep_opencode_roles_distinct() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config_home = TempDir::new().unwrap();
+
+        let [reviewer, implementer] =
+            copy_opencode_agent_configs(repo, config_home.path()).unwrap();
+
+        let reviewer = std::fs::read_to_string(reviewer).unwrap();
+        let implementer = std::fs::read_to_string(implementer).unwrap();
+        assert!(reviewer.contains("bash: false"));
+        assert!(reviewer.contains("read: false"));
+        assert!(implementer.contains("bash: true"));
+        assert!(implementer.contains("read: true"));
     }
 
     #[test]
