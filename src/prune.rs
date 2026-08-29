@@ -689,6 +689,7 @@ mod tests {
             state: state.map(|s| s.to_string()),
             draft: false,
             source_sha: None,
+            merge_commit_sha: None,
             merge_status: None,
             merged,
             updated_at: None,

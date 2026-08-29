@@ -106,6 +106,7 @@ pub(super) fn fetch_active_github_mrs(
             state: Some(pr.state),
             draft: pr.draft,
             source_sha: pr.head.sha,
+            merge_commit_sha: None,
             merge_status: None,
             merged: false,
             updated_at: pr.updated_at,
@@ -133,7 +134,7 @@ pub(super) fn fetch_historical_github_mrs(
             "--limit",
             "1000",
             "--json",
-            "title,body,headRefName,headRefOid,url,labels,number,state,isDraft,mergeStateStatus,mergedAt,updatedAt,statusCheckRollup",
+            "title,body,headRefName,headRefOid,mergeCommit,url,labels,number,state,isDraft,mergeStateStatus,mergedAt,updatedAt,statusCheckRollup",
         ])
         .output()
         .context("gh pr list")?;
@@ -148,6 +149,7 @@ pub(super) fn fetch_historical_github_mrs(
         .into_iter()
         .filter(|pr| !filter_gah_branches || pr.head_ref_name.starts_with("gah/"))
         .map(|pr| SyncMr {
+            merge_commit_sha: pr.merge_commit_sha(),
             work_id: extract_work_id_from_title(&pr.title),
             title: pr.title,
             body: pr.body,
@@ -280,6 +282,7 @@ fn github_repository_prs_rest(profile: &config::Profile) -> Result<Vec<SyncMr>> 
             state: Some(pr.state),
             draft: pr.draft,
             source_sha: pr.head.sha,
+            merge_commit_sha: None,
             merge_status: None,
             merged: false,
             updated_at: pr.updated_at,
@@ -305,6 +308,7 @@ fn github_repository_prs_rest(profile: &config::Profile) -> Result<Vec<SyncMr>> 
                 state: Some("closed".into()),
                 draft: false,
                 source_sha: None,
+                merge_commit_sha: None,
                 merge_status: None,
                 merged: true,
                 updated_at: pr.updated_at,

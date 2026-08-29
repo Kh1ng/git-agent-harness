@@ -50,7 +50,7 @@ function session(id: string, branch: string, ageDays: number, outcome: ChatSessi
   };
 }
 
-function mergeRequest(branch: string, classification: string): MergeRequest {
+function mergeRequest(branch: string, classification: string, shas?: { head: string; merge: string }): MergeRequest {
   return {
     branch,
     id: '1',
@@ -61,6 +61,8 @@ function mergeRequest(branch: string, classification: string): MergeRequest {
     merged: classification === 'MERGED',
     ci_passed: true,
     ci_pending: false,
+    source_sha: shas?.head,
+    merge_commit_sha: shas?.merge,
     review_contract_version: 1,
     classification,
     recommended_action: 'NONE'
@@ -131,7 +133,7 @@ test('the sweep threads provider details so the settled event records the PR or 
   const details: { id: string; details?: SettleDetails }[] = [];
   const deps: ChatMaintenanceDeps = {
     listProfiles: async () => [profile()],
-    sync: async () => [mergeRequest(sessions[0].branch, 'MERGED')],
+    sync: async () => [mergeRequest(sessions[0].branch, 'MERGED', { head: 'head-sha', merge: 'merge-sha' })],
     issueState: async () => 'closed',
     listSessions: () => sessions,
     archive: async (_profile, id, settlement, settleDetails) => {
@@ -144,7 +146,7 @@ test('the sweep threads provider details so the settled event records the PR or 
 
   await reclaimChatSessions({ profile: 'repo', dryRun: false }, deps);
   assert.deepEqual(details, [
-    { id: 'merged', details: { pullRequest: { id: '1', url: null, sourceSha: null } } },
+    { id: 'merged', details: { pullRequest: { id: '1', url: null, sourceSha: 'merge-sha' } } },
     { id: 'issue', details: { issue: { number: 990 } } },
     { id: 'idle', details: undefined }
   ]);

@@ -121,6 +121,10 @@ pub struct SyncMrJson {
     /// to decide whether historical review-derived gates remain authoritative.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_sha: Option<String>,
+    /// Provider-created commit that landed a merged PR. Kept separate from
+    /// `source_sha`, which remains the reviewed head/source identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_commit_sha: Option<String>,
     pub review_contract_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub review_generation: Option<String>,
@@ -146,6 +150,8 @@ pub struct SyncMr {
     pub draft: bool,
     /// Immutable source commit currently attached to the provider MR.
     pub source_sha: Option<String>,
+    /// Provider-created commit that landed this MR, when merged.
+    pub merge_commit_sha: Option<String>,
     pub merge_status: Option<String>,
     pub merged: bool,
     pub updated_at: Option<String>,
@@ -358,6 +364,7 @@ pub fn sync_mr_to_json(
         review_verdict,
         review_gate_reason,
         source_sha: mr.source_sha.clone(),
+        merge_commit_sha: mr.merge_commit_sha.clone(),
         review_contract_version: crate::ledger::REVIEW_CONTRACT_VERSION,
         review_generation,
         review_generation_status,
@@ -391,6 +398,9 @@ struct GithubPr {
     #[serde(rename = "headRefOid")]
     head_ref_oid: Option<String>,
     #[serde(default)]
+    #[serde(rename = "mergeCommit")]
+    merge_commit: Option<GithubCommit>,
+    #[serde(default)]
     url: Option<String>,
     #[serde(default)]
     labels: Vec<GithubLabel>,
@@ -413,6 +423,17 @@ struct GithubPr {
     #[serde(default)]
     #[serde(rename = "statusCheckRollup")]
     status_check_rollup: Option<Vec<GithubCheck>>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct GithubCommit {
+    oid: String,
+}
+
+impl GithubPr {
+    fn merge_commit_sha(&self) -> Option<String> {
+        self.merge_commit.as_ref().map(|commit| commit.oid.clone())
+    }
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -538,6 +559,7 @@ fn gitlab_mrs(
                 state: mr.state,
                 draft: mr.draft,
                 source_sha: mr.sha,
+                merge_commit_sha: None,
                 merge_status: mr.detailed_merge_status.or(mr.merge_status),
                 merged: mr.merged_at.is_some(),
                 updated_at: mr.updated_at,
@@ -829,6 +851,19 @@ mod tests {
     }
 
     #[test]
+    fn github_merged_pr_uses_merge_commit_for_terminal_delivery() {
+        let pr: GithubPr = serde_json::from_str(
+            r#"{"title":"Test","headRefName":"gah/test","headRefOid":"head-sha","mergedAt":"2026-08-29T00:00:00Z","mergeCommit":{"oid":"merge-sha"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            (pr.head_ref_oid.as_deref(), pr.merge_commit_sha().as_deref()),
+            (Some("head-sha"), Some("merge-sha"))
+        );
+    }
+
+    #[test]
     fn gitlab_list_fixture_retains_source_sha_for_review_identity() {
         let mr: GitlabMr = serde_json::from_str(
             r#"{"title":"Test","source_branch":"gah/test","draft":true,"sha":"def456"}"#,
@@ -856,6 +891,7 @@ mod tests {
             state: Some("OPEN".into()),
             draft: false,
             source_sha: None,
+            merge_commit_sha: None,
             merge_status: None,
             merged: false,
             updated_at: None,

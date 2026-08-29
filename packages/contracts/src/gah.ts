@@ -236,7 +236,10 @@ export interface MergeRequest {
   review_verdict?: string | null;
   /** Deterministic reason GAH made a reviewer result non-mergeable. */
   review_gate_reason?: string | null;
+  /** Immutable PR/MR head commit used for review identity. */
   source_sha?: string | null;
+  /** Provider-created commit that landed a merged PR/MR. */
+  merge_commit_sha?: string | null;
   review_contract_version: number;
   review_generation?: string | null;
   review_generation_status?: string | null;

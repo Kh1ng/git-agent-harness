@@ -164,7 +164,15 @@ export async function reclaimChatSessions(
         if (candidate.outcome === 'settled' && settledSession) {
           const mr = mrByBranch.get(settledSession.branch);
           if (mr && (candidate.reason === 'merged' || candidate.reason === 'closed')) {
-            details = { pullRequest: { id: mr.id, url: mr.url, sourceSha: mr.source_sha ?? null } };
+            details = {
+              pullRequest: {
+                id: mr.id,
+                url: mr.url,
+                sourceSha: candidate.reason === 'merged'
+                  ? mr.merge_commit_sha ?? null
+                  : mr.source_sha ?? null
+              }
+            };
           } else if (candidate.reason === 'closed') {
             const issueNumber = issueNumberForBranch(settledSession.branch, profile.repo_id);
             if (issueNumber !== null) details = { issue: { number: issueNumber } };

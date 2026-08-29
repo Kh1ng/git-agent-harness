@@ -1063,6 +1063,7 @@ fn needs_fix_mr(branch: &str, work_id: &str) -> crate::sync::SyncMrJson {
         review_verdict: None,
         review_gate_reason: None,
         source_sha: None,
+        merge_commit_sha: None,
         review_contract_version: crate::ledger::REVIEW_CONTRACT_VERSION,
         review_generation: None,
         review_generation_status: None,
