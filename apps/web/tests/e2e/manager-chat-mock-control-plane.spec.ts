@@ -22,6 +22,12 @@ async function selectScenario(request: APIRequestContext, name: Scenario): Promi
   expect(response.ok(), await response.text()).toBe(true);
 }
 
+async function connectionCount(request: APIRequestContext): Promise<number> {
+  const response = await request.get(`${MOCK_BASE_URL}/api/mock/state`);
+  expect(response.ok(), await response.text()).toBe(true);
+  return (await response.json() as { connections: number }).connections;
+}
+
 async function openChat(page: Page): Promise<void> {
   await page.goto('/');
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
@@ -57,14 +63,14 @@ test('streaming resumes after the mock drops and restores the real socket', asyn
   test.setTimeout(25_000);
   await selectScenario(request, 'reconnect-stream');
   await openChat(page);
+  const connectionsBeforeTurn = await connectionCount(request);
 
   await page.getByPlaceholder(/Message the manager/).fill('resume this turn');
   await page.getByRole('button', { name: 'Send' }).click();
   await expect(page.getByText('Before disconnect…', { exact: true })).toBeVisible();
-  await expect.poll(async () => {
-    const response = await request.get(`${MOCK_BASE_URL}/api/mock/state`);
-    return (await response.json() as { connections: number }).connections;
-  }, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
+  await expect
+    .poll(() => connectionCount(request), { timeout: 15_000 })
+    .toBeGreaterThan(connectionsBeforeTurn);
   await expect(page.getByText('Before disconnect… resumed after reconnect.', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0);
 });
@@ -73,6 +79,7 @@ test('disconnect restores a pending permission card and resumes actionably', asy
   test.setTimeout(25_000);
   await selectScenario(request, 'reconnect-permission');
   await openChat(page);
+  const connectionsBeforeTurn = await connectionCount(request);
 
   await page.getByPlaceholder(/Message the manager/).fill('disconnect while permission is pending');
   await page.getByRole('button', { name: 'Send' }).click();
@@ -80,10 +87,9 @@ test('disconnect restores a pending permission card and resumes actionably', asy
 
   // The mock closes the real socket. Wait for the app's own reconnect loop,
   // then prove history restored both busy state and the actionable card.
-  await expect.poll(async () => {
-    const response = await request.get(`${MOCK_BASE_URL}/api/mock/state`);
-    return (await response.json() as { connections: number }).connections;
-  }, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
+  await expect
+    .poll(() => connectionCount(request), { timeout: 15_000 })
+    .toBeGreaterThan(connectionsBeforeTurn);
   await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
   await expect(page.getByRole('alertdialog', { name: 'Permission request' })).toContainText('Run focused Playwright tests');
 
