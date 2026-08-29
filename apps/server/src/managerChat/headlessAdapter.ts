@@ -8,6 +8,13 @@
  * history (see resumePrompt in acpAdapter.ts): full transcript replay for
  * a fresh process, since a one-shot process has no memory at all.
  *
+ * The replayed prompt (full history + new message) is delivered to the
+ * child process over stdin, never argv (issue #1009): a long-running
+ * session's replayed transcript easily exceeds the OS ARG_MAX when passed
+ * as a command-line argument, and spawn(2) fails with E2BIG before the
+ * backend even starts. Argv stays a small, fixed set of flags regardless
+ * of conversation length.
+ *
  * What this buys: every backend in the unified chat surface, session
  * worktree binding (cwd per conversation), backend interchange, quota
  * handoff, and the event-sourced log — everything except streaming,
@@ -15,7 +22,8 @@
  * round-trip, which need a structured protocol.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
+import { readFileSync, realpathSync } from 'node:fs';
 import type { ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 import type { ManagerAdapter, ManagerCommandInfo, ManagerModelInfo } from './registry.js';
 
@@ -28,17 +36,28 @@ export interface HeadlessSpawnSpec {
   env?: Record<string, string>;
 }
 
-/** Builds the CLI argv for one turn: prompt and cwd are passed by the
- * engine; the spec adds backend-specific flags. */
+interface HeadlessProcessResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+}
+
+/** Builds the CLI argv for one turn: cwd is passed by the engine; the spec
+ * adds backend-specific flags. Bounded and content-free — never derived
+ * from the prompt or history, so argv size cannot grow with conversation
+ * length (issue #1009). */
 export interface HeadlessBackendSpec {
   id: string;
   displayName: string;
-  /** argv builder for one print-mode turn. */
-  turnArgs: (prompt: string) => string[];
-  /** Parse the CLI's stdout into the reply text. Default: trimmed stdout. */
-  parseReply?: (stdout: string) => string;
-  /** Per-conversation in-memory transcript state (for historyDelta). */
-  // (kept by the engine, not the spec)
+  /** Fixed argv for a print-mode turn. Must not embed prompt/history. */
+  turnArgs: () => string[];
+  /** Encode this turn's full prompt (history already replayed in) for the
+   * backend's stdin channel. */
+  encodeStdin: (prompt: string) => string;
+  /** Extract the reply text from a finished process, or throw a
+   * descriptive error. Default: trimmed stdout on exit 0, else an error
+   * built from stderr. */
+  parseReply?: (result: HeadlessProcessResult) => string;
 }
 
 interface ConversationState {
@@ -46,8 +65,6 @@ interface ConversationState {
   /** Process handle for the in-flight turn (cancel support). */
   child: ReturnType<typeof spawn> | null;
 }
-
-const conversations = new Map<string, ConversationState>();
 
 /** Mirrors acpAdapter's resumePrompt: fresh process => replay the whole
  * conversation as text before the new prompt. */
@@ -57,10 +74,21 @@ function replayPrompt(message: string, history: ChatTranscriptTurn[]): string {
   return `${lines.join('\n')}\n\nuser: ${message}`;
 }
 
+function defaultParseReply(displayName: string): (result: HeadlessProcessResult) => string {
+  return ({ stdout, stderr, exitCode }) => {
+    if (exitCode !== 0) {
+      const detail = stderr.trim().slice(0, 400) || `exit code ${exitCode}`;
+      throw new Error(`${displayName} turn failed: ${detail}`);
+    }
+    return stdout.trim();
+  };
+}
+
 const TURN_TIMEOUT_MS = 10 * 60_000;
 
 export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter {
   const states = new Map<string, ConversationState>();
+  const parseReply = spec.parseReply ?? defaultParseReply(spec.displayName);
 
   function stateFor(key: string): ConversationState {
     let state = states.get(key);
@@ -84,11 +112,11 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
       const prompt = replayPrompt(input.prompt, input.history);
       const cwd = input.cwd ?? process.cwd();
 
-      const args = spec.turnArgs(prompt);
+      const args = spec.turnArgs();
       const child = spawn(args[0], args.slice(1), {
         cwd,
         env: { ...process.env },
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: ['pipe', 'pipe', 'pipe']
       });
       state.child = child;
 
@@ -96,6 +124,12 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
       let stderr = '';
       child.stdout.on('data', (chunk) => { stdout += chunk; });
       child.stderr.on('data', (chunk) => { stderr += chunk; });
+      // The child may exit (e.g. a fast validation failure) before we
+      // finish writing; a write past that point would otherwise raise an
+      // unhandled EPIPE and crash the server.
+      child.stdin.on('error', () => {});
+      child.stdin.write(spec.encodeStdin(prompt));
+      child.stdin.end();
 
       const killTimer = setTimeout(() => {
         child.kill('SIGKILL');
@@ -107,13 +141,9 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
           child.on('error', reject);
           child.on('close', (exitCode) => resolve(exitCode));
         });
-        if (code !== 0) {
-          const detail = stderr.trim().slice(0, 400) || `exit code ${code}`;
-          throw new Error(`${spec.displayName} turn failed: ${detail}`);
-        }
-        const reply = (spec.parseReply ?? ((out: string) => out.trim()))(stdout);
+        const reply = parseReply({ stdout, stderr, exitCode: code });
         if (reply.trim().length === 0) {
-          throw new Error(`${spec.displayName} turn exited 0 but produced no output.`);
+          throw new Error(`${spec.displayName} turn produced no output.`);
         }
         state.knownHistory = [
           ...input.history,
@@ -162,33 +192,119 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
   };
 }
 
-/** vibe: Mistral's CLI, print mode. */
-export function vibeBackendSpec(): HeadlessBackendSpec {
+/** Fixed `-c` bootstrap for vibe's own Python interpreter: reads the prompt
+ * from stdin, sets it into *in-process* `sys.argv`, then calls the same
+ * `vibe.cli.entrypoint.main` the real launcher calls. Argv is assigned after
+ * the interpreter is already running, so it never goes through execve() and
+ * stays outside ARG_MAX (issue #1009).
+ *
+ * Also sidesteps a bug in vibe's own `get_prompt_from_stdin()`
+ * (vibe/cli/cli.py): it reads a piped prompt, then reopens `/dev/tty` to
+ * restore interactive stdin, which raises OSError with no controlling
+ * terminal (as under this server) and discards the prompt it just read. This
+ * bridge drains stdin first, so that call sees EOF and returns None — our
+ * sys.argv prompt wins instead. Confirmed against the installed CLI. */
+const VIBE_STDIN_BRIDGE = [
+  'import sys',
+  'prompt = sys.stdin.buffer.read().decode("utf-8", "replace")',
+  'sys.argv = ["vibe", "-p", prompt, "--output", "text"]',
+  'from vibe.cli.entrypoint import main',
+  'sys.exit(main())'
+].join('\n');
+
+/** Resolve the Python interpreter backing the installed `vibe` launcher
+ * from its own shebang, rather than hard-coding a host-specific path. Not
+ * cached: it's one cheap `command -v` + file read per turn, and caching
+ * would make the resolved interpreter outlive a test's fake PATH. */
+function resolveVibeInterpreter(): string {
+  const launcherPath = execFileSync('/bin/sh', ['-c', 'command -v vibe'], { encoding: 'utf8' }).trim();
+  if (!launcherPath) {
+    throw new Error('vibe executable not found on PATH.');
+  }
+  const realLauncher = realpathSync(launcherPath);
+  const shebang = readFileSync(realLauncher, 'utf8').split('\n', 1)[0];
+  const match = /^#!(\S+)/.exec(shebang);
+  if (!match) {
+    throw new Error(`Could not determine vibe's Python interpreter from ${realLauncher}.`);
+  }
+  return match[1];
+}
+
+/** vibe: Mistral's CLI, print mode, driven through the stdin bridge above
+ * so the replayed transcript never reaches process argv.
+ * `resolveInterpreter` is overridable so tests can prove the argv/stdin
+ * split against a fake interpreter instead of requiring a real vibe
+ * install. */
+export function vibeBackendSpec(overrides: { resolveInterpreter?: () => string } = {}): HeadlessBackendSpec {
+  const resolveInterpreter = overrides.resolveInterpreter ?? resolveVibeInterpreter;
   return {
     id: 'vibe',
     displayName: 'Vibe',
-    turnArgs: (prompt) => ['vibe', '-p', prompt, '--output', 'text']
+    turnArgs: () => [resolveInterpreter(), '-c', VIBE_STDIN_BRIDGE],
+    encodeStdin: (prompt) => prompt
   };
 }
 
-/** agy: print mode with text output for a clean reply parse.
+interface AgyStreamResult {
+  status: 'SUCCESS' | 'ERROR' | string;
+  response?: string;
+  error?: string;
+}
+
+/** agy: print mode with NDJSON stdin/stdout so the prompt never touches
+ * argv (issue #1009). `--input-format stream-json` reads one `{"event":
+ * "user", "message": {"content": [{"type": "text", "text": "..."}]}}`
+ * line per turn; `--output-format stream-json` emits one JSON object per
+ * line, terminated by an `{"event": "result", "result": {...}}` line
+ * carrying the final text and status. This exact shape was confirmed
+ * against the installed CLI (its own errors named the required "event",
+ * "message", and "content" fields one at a time) — none of it is
+ * documented in `agy --help`.
  *
- * Headless has no permission round-trip (stdin is ignored), so without
- * --dangerously-skip-permissions agy auto-denies every tool call and the
- * turn silently degrades to a no-tool reply. --sandbox is kept alongside
- * it so the auto-approved tools still run confined to the session cwd. */
+ * Headless has no permission round-trip (stdin is the prompt channel, not
+ * a TTY), so without --dangerously-skip-permissions agy auto-denies every
+ * tool call and the turn silently degrades to a no-tool reply. --sandbox
+ * is kept alongside it so the auto-approved tools still run confined to
+ * the session cwd. */
 export function agyBackendSpec(): HeadlessBackendSpec {
   return {
     id: 'agy',
     displayName: 'Agy',
-    turnArgs: (prompt) => [
+    turnArgs: () => [
       'agy',
-      '--print',
-      prompt,
+      '--input-format',
+      'stream-json',
       '--output-format',
-      'text',
+      'stream-json',
       '--dangerously-skip-permissions',
       '--sandbox'
-    ]
+    ],
+    encodeStdin: (prompt) =>
+      `${JSON.stringify({
+        event: 'user',
+        message: { content: [{ type: 'text', text: prompt }] }
+      })}\n`,
+    parseReply: ({ stdout, stderr, exitCode }) => {
+      const lines = stdout.split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        let event: { event?: string; result?: AgyStreamResult };
+        try {
+          event = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (event.event !== 'result' || !event.result) continue;
+        const result = event.result;
+        if (result.status === 'SUCCESS') return result.response ?? '';
+        const detail = result.error || stderr.trim().slice(0, 400) || `exit code ${exitCode}`;
+        throw new Error(`Agy turn failed: ${detail}`);
+      }
+      // No result line at all: a fatal failure before agy could emit one
+      // (missing binary, killed by signal, crash).
+      const detail = stderr.trim().slice(0, 400) || `exit code ${exitCode}`;
+      throw new Error(`Agy turn failed: ${detail}`);
+    }
   };
 }
