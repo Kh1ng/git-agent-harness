@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ChildProcess, spawn, spawnSync } from 'node:child_process';
@@ -97,7 +97,7 @@ test('readAdminUpdateState leaves a running state alone while its pid is still a
 });
 
 test('startAdminUpdate launches gah update pinned to this checkout via --repo and records output/exit', () => {
-  withStatePath(() => {
+  withStatePath((statePath) => {
     let capturedBin = '';
     let capturedArgs: string[] = [];
     const child = fakeChildProcess(4242);
@@ -122,6 +122,12 @@ test('startAdminUpdate launches gah update pinned to this checkout via --repo an
     assert.equal(finalState.status, 'success');
     assert.equal(finalState.output, 'hello world');
     assert.equal(finalState.exitCode, 0);
+
+    // Written via temp-file + rename (not truncated in place), so the file
+    // on disk is always valid, complete JSON, and mode 0600 (not world/group
+    // readable -- build output can include repo paths/command args).
+    assert.equal(statSync(statePath).mode & 0o777, 0o600);
+    assert.deepEqual(JSON.parse(readFileSync(statePath, 'utf8')), finalState);
   });
 });
 

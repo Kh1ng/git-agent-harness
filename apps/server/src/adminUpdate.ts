@@ -13,7 +13,7 @@
  * -- whichever process answers the next GET, the answer is the same.
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import type { AdminUpdateCommitInfo, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
@@ -95,11 +95,20 @@ export function readAdminUpdateState(): AdminUpdateState {
   }
 }
 
+/** Writes via a same-directory temp file + rename so a concurrent GET never
+ * observes a partially-written file: `writeFileSync` on the live path
+ * truncates in place, and a read racing that truncation sees invalid JSON,
+ * falls back to `idle`, and a polling client stops and never reloads.
+ * `rename(2)` within one directory is atomic. Mode 0600 keeps the build
+ * output (which can include repo paths/command args) readable only by the
+ * server's own user. */
 function writeAdminUpdateState(state: AdminUpdateState): void {
   const path = statePath();
   const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(path, JSON.stringify(state, null, 2));
+  const tmpPath = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(state, null, 2), { mode: 0o600 });
+  renameSync(tmpPath, path);
 }
 
 function pidAlive(pid: number): boolean {
