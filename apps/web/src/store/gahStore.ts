@@ -20,7 +20,7 @@ import type {
   LedgerEntry,
   ControllerEvent,
   ProfileSummary,
-  ConfigProfileSummary,
+  SettingsConfigProfileSummary,
   DoctorSnapshot,
   DependencyBlocker
 } from '@git-agent-harness/contracts';
@@ -66,7 +66,7 @@ interface GahStoreState {
   profiles: Resource<ProfileSummary[]>;
   profileCrud: ProfileCrudState;
   config: Resource<ConfigSummary>;
-  profileConfig: Resource<ConfigProfileSummary>;
+  profileConfig: Resource<SettingsConfigProfileSummary>;
   loopStatus: Resource<LoopStatus>;
   loopAction: { pending: boolean; error: string | null };
 

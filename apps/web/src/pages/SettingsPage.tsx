@@ -12,7 +12,7 @@ import { ProfileEditor } from '../components/ProfileEditor.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt } from '../lib/format.js';
 import { gahApi, GahApiError } from '../api/client.js';
-import type { WakeAutonomyValue, ConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
+import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
 
 const SCM_PROVIDER_KINDS = new Set(['github', 'gitlab']);
 const SETTINGS_REFRESH_MS = 60 * 1000;
@@ -429,13 +429,13 @@ interface GlobalManagerSectionProps {
 interface ProfileConfigViewerSectionProps {
   selectedName: string;
   profileConfig: {
-    data: ConfigProfileSummary | null;
+    data: SettingsConfigProfileSummary | null;
     loading: boolean;
     error: string | null;
   };
 }
 
-function ProfileConfigViewerSection({ selectedName, profileConfig }: ProfileConfigViewerSectionProps) {
+export function ProfileConfigViewerSection({ selectedName, profileConfig }: ProfileConfigViewerSectionProps) {
   if (!selectedName) {
     return (
       <section className="card-padded max-w-3xl">
@@ -576,7 +576,8 @@ function ProfileConfigViewerSection({ selectedName, profileConfig }: ProfileConf
         </p>
         <p className="text-xs text-muted mt-1">
           Manager wake: {effective.notifications.manager_wake_autonomy} · dev env:{' '}
-          {effective.notifications.env_file ?? 'unknown'} · prod env: {effective.notifications.env_file_prod ?? 'unknown'}
+          {effective.notifications.env_file_configured ? 'configured' : 'not configured'} · prod env:{' '}
+          {effective.notifications.env_file_prod_configured ? 'configured' : 'not configured'}
         </p>
         <p className="text-xs text-muted mt-1">Command contents and credentials are intentionally excluded.</p>
       </div>

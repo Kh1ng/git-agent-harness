@@ -30,7 +30,7 @@ const EFFECTIVE_CONFIG = {
     profile_override: null,
     effective_by_backend: []
   },
-  notifications: { configured: true, transport: 'telegram', manager_wake_autonomy: 'review_only', env_file: '/config/dev.env', env_file_prod: null }
+  notifications: { configured: true, transport: 'telegram', manager_wake_autonomy: 'review_only', env_file_configured: true, env_file_prod_configured: false }
 };
 
 test('Settings exposes validation timeout and sends it to profile update API', async ({ page }) => {
@@ -108,7 +108,7 @@ test('Settings exposes validation timeout and sends it to profile update API', a
   await expect(page.getByText('opencode/unknown')).toBeVisible();
   await expect(page.getByText(/codex\/gpt-5\.3-codex-spark/)).toBeVisible();
   await expect(page.getByText(/Target: telegram/)).toBeVisible();
-  await expect(page.getByText(/prod env: unknown/)).toBeVisible();
+  await expect(page.getByText(/prod env: not configured/)).toBeVisible();
 
   await validationTimeoutInput.fill('0');
   await expect(page.getByRole('alert')).toContainText(/whole number of seconds greater than zero/i);

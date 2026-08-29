@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from './server.js';
 import { resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
-import type { ConfigProfileSummary, DoctorSnapshot, ProfileSummary } from '@git-agent-harness/contracts';
+import type { ConfigProfileSummary, DoctorSnapshot, ProfileSummary, SettingsConfigProfileSummary } from '@git-agent-harness/contracts';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -101,11 +101,36 @@ test('GET /api/config/effective returns profile JSON on success', async () => {
     return profilePayload(profile);
   }, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/config/effective?profile=repo`);
-    const body = (await response.json()) as ConfigProfileSummary;
+    const body = (await response.json()) as SettingsConfigProfileSummary;
 
     assert.equal(response.status, 200);
     assert.equal(body.profile, 'repo');
     assert.equal(calledProfile, 'repo');
+  });
+});
+
+test('GET /api/config/effective omits environment values while preserving configured status', async () => {
+  const canary = 'TDAI_GATEWAY_API_KEY=GAH_TEST_CANARY_1014_DO_NOT_SERIALIZE';
+
+  await withTestServer(async (profile) => {
+    const payload = profilePayload(profile);
+    payload.notifications.env_file = canary;
+    payload.notifications.env_file_prod = `${canary}_PROD`;
+    return payload;
+  }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/config/effective?profile=repo`);
+    const serialized = await response.text();
+    const body = JSON.parse(serialized) as SettingsConfigProfileSummary;
+
+    assert.equal(response.status, 200);
+    assert.equal(serialized.includes(canary), false);
+    assert.deepEqual(body.notifications, {
+      configured: false,
+      transport: null,
+      manager_wake_autonomy: 'off',
+      env_file_configured: true,
+      env_file_prod_configured: true
+    });
   });
 });
 
@@ -145,7 +170,7 @@ test('GET /api/config/effective falls back to default profile when profile query
     },
     async (baseUrl) => {
       const response = await fetch(`${baseUrl}/api/config/effective`);
-      const body = (await response.json()) as ConfigProfileSummary;
+      const body = (await response.json()) as SettingsConfigProfileSummary;
 
       assert.equal(response.status, 200);
       assert.equal(body.profile, 'gah');
