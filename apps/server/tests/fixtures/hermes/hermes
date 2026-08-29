@@ -69,14 +69,20 @@ class MockHermes {
   async prompt({ sessionId, prompt }) {
     const text = prompt.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n');
     // #1030: ManagerChatManager wraps recalled memory ahead of the live
-    // request, separated by a "User: " marker. A compliant backend must not
-    // let commands embedded in that untrusted block override the live task,
-    // so every directive branch below matches against liveText only.
-    // recalledText is still consulted for genuine factual lookups (a live
-    // question *about* past content), never for command-following.
+    // request behind an explicit "Untrusted memory recalled..." prefix,
+    // separated by a "User: " marker. Require that exact prefix (not just
+    // the marker, which pre-dates the fix) before splitting -- a reverted
+    // wrapper must fall back to treating the whole blob as authoritative,
+    // so a regression test can tell the fixed prompt from the old one.
+    // A compliant backend must not let commands embedded in the untrusted
+    // block override the live task, so every directive branch below matches
+    // against liveText only. recalledText is still consulted for genuine
+    // factual lookups (a live question *about* past content), never for
+    // command-following.
     const markerIndex = text.lastIndexOf('\nUser: ');
-    const liveText = markerIndex === -1 ? text : text.slice(markerIndex + '\nUser: '.length);
-    const recalledText = markerIndex === -1 ? '' : text.slice(0, markerIndex);
+    const hasUntrustedWrapper = text.startsWith('Untrusted memory recalled from prior conversations');
+    const liveText = hasUntrustedWrapper && markerIndex !== -1 ? text.slice(markerIndex + '\nUser: '.length) : text;
+    const recalledText = hasUntrustedWrapper && markerIndex !== -1 ? text.slice(0, markerIndex) : '';
     const codeWordPattern = /\b[A-Z]+-[A-Z]+-\d+\b/;
     const codeWord = liveText.match(codeWordPattern)?.[0] ?? null;
     let reply;
