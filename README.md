@@ -65,6 +65,51 @@ The default product installation covers the Rust CLI and Node control-plane
 server. Web, desktop, mobile, and other clients are separate packages with
 independent build/deployment workflows.
 
+## Manager chat mock development
+
+Run the real Vite frontend against the stateful, in-memory mock control plane:
+
+```bash
+npm ci --include=dev
+npm run dev:mock
+```
+
+Open `http://localhost:3000` and choose **Chat**. The mock reuses the committed
+`apps/server/tests/fixtures/gah/responses` dashboard data and implements the
+production REST and WebSocket types from `@git-agent-harness/contracts`. It
+does not import the production server, provider adapters, worktree helpers, or
+state stores, so it cannot call a provider, create a worktree, or write
+production state. The normal production server and web build have no mock
+route or runtime mode switch; the mock entry point lives outside
+`apps/server/src`.
+
+List scenarios, select one, or reset its in-memory state without restarting
+Vite or the repository:
+
+```bash
+curl http://127.0.0.1:3774/api/mock/scenarios
+curl -X POST -H 'content-type: application/json' \
+  -d '{"name":"reconnect-permission"}' \
+  http://127.0.0.1:3774/api/mock/scenario
+curl -X POST http://127.0.0.1:3774/api/mock/reset
+```
+
+You can also choose the initial scenario when starting development:
+
+```bash
+npm run dev:mock -- --scenario models-agy
+```
+
+Named scenarios are `normal`, `slow-cancel-steer`, `reconnect-stream`,
+`reconnect-permission`, `archive-success`, `archive-failure`,
+`preview-unavailable`, `preview-available`, `preview-blocked`, `preview-error`,
+`models-success`, `models-empty`, `models-delayed`, `models-failure`,
+`models-agy`, `rest-error`, and `ws-error`. Scenario selection resets all
+sessions, turns, selector choices, previews, and archive mutations to fixed
+seed data. The Playwright manager-chat control-plane spec uses these same
+endpoints and the same real HTTP/WebSocket server; it does not install browser
+route mocks.
+
 Provider-specific examples:
 
 - `config/gah-config.github.example.toml`

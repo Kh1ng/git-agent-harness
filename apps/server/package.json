@@ -12,10 +12,13 @@
   ],
   "scripts": {
     "dev": "tsx --watch src/bin.ts",
+    "dev:mock": "tsx mock/bin.ts",
     "build": "tsc",
     "test": "tsx --test src/*.test.ts src/managerChat/sessionLog.test.ts",
+    "test:mock": "tsx --test mock/*.test.ts",
     "start": "node dist/bin.js",
     "typecheck": "tsc --noEmit",
+    "typecheck:mock": "tsc -p tsconfig.mock.json --noEmit",
     "register-node": "tsx src/registerNodeCli.ts"
   },
   "dependencies": {

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev-runner.js dev",
+    "dev:mock": "node scripts/dev-runner.js dev:mock",
     "dev:server": "node scripts/dev-runner.js dev:server",
     "dev:web": "node scripts/dev-runner.js dev:web",
     "dev:desktop": "node scripts/dev-runner.js dev:desktop",
@@ -21,7 +22,7 @@
     "build:all": "npm run build && npm run build:desktop",
     "build:desktop": "npm run --workspace=apps/desktop build",
     "test:server": "npm run --workspace=apps/server test",
-    "typecheck": "npm run build:contracts && npm run build:shared && npm run --workspace=apps/server typecheck && npm run --workspace=apps/web typecheck && npm run --workspace=apps/mcp-server typecheck",
+    "typecheck": "npm run build:contracts && npm run build:shared && npm run --workspace=apps/server typecheck && npm run --workspace=apps/server typecheck:mock && npm run --workspace=apps/web typecheck && npm run --workspace=apps/mcp-server typecheck",
     "lint": "npm run --workspace=apps/server lint && npm run --workspace=apps/web lint && npm run --workspace=apps/desktop lint",
     "clean": "rm -rf apps/*/node_modules apps/*/dist packages/*/dist"
   },
