@@ -24,12 +24,20 @@ export interface SessionOutput {
   stderr: string;
 }
 
+export interface WebSocketInboxEntry {
+  /** Monotonic for this provider lifetime, including across reconnects. */
+  id: number;
+  message: ServerMessage;
+}
+
 type WebSocketContextType = {
   socket: WebSocket | null;
   isConnected: boolean;
   isConnecting: boolean;
   error: string | null;
-  messages: ServerMessage[];
+  /** Bounded inbox. Consumers advance by entry id, never array position,
+   * because older entries are evicted from the front. */
+  messages: WebSocketInboxEntry[];
   sessions: Session[];
   /** Real per-line stdout/stderr streamed from the server, keyed by
    * session id -- see SessionManager.ts's getServerPushBus().publish()
@@ -63,6 +71,7 @@ type WebSocketContextType = {
 };
 
 const WebSocketContext = createContext<WebSocketContextType | undefined>(undefined);
+const MAX_INBOX_MESSAGES = 100;
 
 // Vite injects import.meta.env - use type assertion for TypeScript
 const SERVER_WS_BASE = (import.meta as unknown as { env: { VITE_WS_URL?: string } }).env?.VITE_WS_URL ||
@@ -82,7 +91,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ServerMessage[]>([]);
+  const [messages, setMessages] = useState<WebSocketInboxEntry[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionOutput, setSessionOutput] = useState<Record<SessionId, SessionOutput>>({});
   const [providers, setProviders] = useState<ProviderInstance[]>([]);
@@ -104,6 +113,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [reconnectSeq, setReconnectSeq] = useState(0);
   const socketRef = useRef<WebSocket | null>(null);
   const hasConnectedOnceRef = useRef(false);
+  const nextMessageIdRef = useRef(0);
 
   const activityProfile = profileOverride ?? profile ?? 'gah';
   useEffect(() => {
@@ -171,7 +181,8 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         try {
           const message = JSON.parse(event.data) as ServerMessage;
 
-          setMessages(prev => [...prev.slice(-100), message]);
+          const entry = { id: ++nextMessageIdRef.current, message };
+          setMessages(prev => [...prev.slice(-(MAX_INBOX_MESSAGES - 1)), entry]);
 
           switch (message.type) {
             case 'server.welcome':
