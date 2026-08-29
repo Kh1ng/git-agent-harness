@@ -55,16 +55,13 @@ fi
 # everything else alone.
 #
 # Targets depend on role: gah-server.service (central only) reads
-# /etc/gah/server.env via its EnvironmentFile= directive; gah-loop@.service
-# (worker, and central's own loop -- a central node runs its own dispatch
-# loop in addition to gah-server.service) reads ~/.config/gah/gah-loop.env.
-# A central install must therefore upsert into *both* files; a worker only
-# has the second. Getting this wrong left a worker's gateway vars in a file
-# nothing read (bug found 2026-08-08), and separately left a central node's
-# own loop with zero gateway creds (issue #919, found 2026-08-09).
+# /etc/gah/server.env; gah-loop@.service (worker, and central's own dispatch
+# loop) reads ~/.config/gah/gah-loop.env -- so central must upsert into
+# *both* files, worker only the second (issue #919: central's own loop had
+# zero gateway creds because only server.env was written).
 # gateway-target-mapping:start -- extracted verbatim by
-# tests/fixtures/install_linux_gateway_mapping_test.sh, keep this block
-# self-contained (only $role/$server_env_file/$HOME as inputs).
+# tests/source_structure.rs::install_linux_gateway_mapping_writes_both_targets_for_central,
+# keep this block self-contained (only $role/$server_env_file/$HOME as inputs).
 if [ "$role" = "central" ]; then
   gateway_env_files=("$server_env_file" "$HOME/.config/gah/gah-loop.env")
   gateway_env_sudo=("sudo" "")

@@ -1085,3 +1085,60 @@ fn module_declaration_recognizes_path_attribute() {
         "the #[path] attribute must be captured for the following mod decl"
     );
 }
+
+/// Extracts the `gateway-target-mapping:start`/`:end` block from
+/// scripts/install-linux.sh verbatim and evaluates it under bash for each
+/// role, asserting only the array assignment (no file I/O happens -- the
+/// block just defines `gateway_env_files`/`upsert_*` and neither is
+/// called). Regression test for issue #919: a central install must upsert
+/// TDAI gateway creds into *both* /etc/gah/server.env and
+/// ~/.config/gah/gah-loop.env, since central runs its own gah-loop@.service
+/// alongside gah-server.service; a worker install only has the latter.
+#[test]
+fn install_linux_gateway_mapping_writes_both_targets_for_central() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = fs::read_to_string(repo_root.join("scripts/install-linux.sh")).unwrap();
+    let start = script
+        .find("# gateway-target-mapping:start")
+        .expect("install-linux.sh must carry the gateway-target-mapping:start marker");
+    let end_marker = start
+        + script[start..]
+            .find("# gateway-target-mapping:end")
+            .expect("install-linux.sh must carry the gateway-target-mapping:end marker");
+    let end = script[end_marker..]
+        .find('\n')
+        .map(|i| end_marker + i)
+        .unwrap_or(script.len());
+    let block = &script[start..end];
+
+    for (role, want) in [
+        (
+            "central",
+            vec![
+                "/tmp/gah-src-test/server.env",
+                "/tmp/gah-src-test/home/.config/gah/gah-loop.env",
+            ],
+        ),
+        ("worker", vec!["/tmp/gah-src-test/home/.config/gah/gah-loop.env"]),
+    ] {
+        let probe = format!(
+            "role={role}\nserver_env_file=/tmp/gah-src-test/server.env\nHOME=/tmp/gah-src-test/home\n{block}\nprintf '%s\\n' \"${{gateway_env_files[@]}}\"\n"
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(&probe)
+            .output()
+            .expect("bash must be runnable");
+        assert!(
+            output.status.success(),
+            "role={role} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let got: Vec<&str> = std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .trim_end()
+            .lines()
+            .collect();
+        assert_eq!(got, want, "role={role} gateway target mapping regressed (issue #919)");
+    }
+}
