@@ -580,6 +580,9 @@ export interface ProfileSummary {
    * to 300). If unset in TOML, this is computed and returned as the effective
    * timeout. */
   validation_timeout_seconds: number;
+  /** Effective idle window before daily chat maintenance archives a live
+   * session. Defaults to 14 when omitted from profile TOML. */
+  chat_session_idle_days?: number;
 }
 
 export interface ProjectImportData {

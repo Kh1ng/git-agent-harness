@@ -17,11 +17,11 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import type { ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
+import type { ChatProfileStorage, ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
 
 const execFileAsync = promisify(execFile);
 
@@ -78,9 +78,15 @@ function readIndex(profile: string, opts?: ChatSessionStoreOptions): ChatSession
   if (typeof parsed !== 'object' || parsed === null || !Array.isArray((parsed as { sessions?: unknown }).sessions)) {
     throw new Error(`Invalid chat session index at ${path}: expected an object with a "sessions" array`);
   }
-  return (parsed as SessionIndexFile).sessions.filter(
-    (s) => typeof s?.id === 'string' && typeof s?.branch === 'string'
-  );
+  return (parsed as SessionIndexFile).sessions
+    .filter((s) => typeof s?.id === 'string' && typeof s?.branch === 'string')
+    .map((session) => ({
+      ...session,
+      // Backward-compatible read migration for indexes written before #990.
+      outcome: session.outcome ?? (session.archivedAt === null ? 'live' : 'archived'),
+      settledAt: session.settledAt ?? null,
+      settledReason: session.settledReason ?? null
+    }));
 }
 
 function writeIndex(profile: string, sessions: ChatSessionSummary[], opts?: ChatSessionStoreOptions): void {
@@ -155,7 +161,10 @@ export async function createSession(input: CreateSessionInput, opts?: ChatSessio
     title: input.title ?? null,
     createdAt: now,
     lastActiveAt: now,
-    archivedAt: null
+    archivedAt: null,
+    outcome: 'live',
+    settledAt: null,
+    settledReason: null
   };
 
   if (profileInfo.worktree_base.trim().length > 0) {
@@ -237,7 +246,8 @@ export async function archiveSession(
   profile: string,
   sessionId: string,
   profileInfo: Pick<ProfileSummary, 'local_path'>,
-  opts?: ChatSessionStoreOptions
+  opts?: ChatSessionStoreOptions,
+  settlement?: { reason: 'merged' | 'closed' | 'delivered'; at?: number }
 ): Promise<ChatSessionSummary> {
   const sessions = readIndex(profile, opts);
   const session = sessions.find((s) => s.id === sessionId);
@@ -259,8 +269,54 @@ export async function archiveSession(
     await git(profileInfo.local_path, 'worktree', 'remove', '--force', session.worktreePath);
   }
 
-  session.archivedAt = Date.now();
+  const completedAt = settlement?.at ?? Date.now();
+  session.archivedAt = completedAt;
   session.worktreePath = null;
+  session.outcome = settlement ? 'settled' : 'archived';
+  session.settledAt = settlement ? completedAt : null;
+  session.settledReason = settlement?.reason ?? null;
   writeIndex(profile, sessions, opts);
   return session;
+}
+
+/** Filesystem allocation used by a worktree. `du` does not follow symlinks by
+ * default and keeps multi-GB trees off the server's event loop. */
+async function allocatedBytes(path: string): Promise<number> {
+  if (!existsSync(path)) return 0;
+  try {
+    const { stdout } = await execFileAsync('du', ['-sk', path], { encoding: 'utf8' });
+    const kibibytes = Number.parseInt(stdout.trim().split(/\s+/, 1)[0] ?? '', 10);
+    return Number.isFinite(kibibytes) ? kibibytes * 1024 : 0;
+  } catch {
+    // A concurrent archive may remove the worktree while du is running. The
+    // next dry run refreshes it; visibility must not block safe maintenance.
+    return 0;
+  }
+}
+
+export async function profileStorage(
+  profile: string,
+  idleDays: number,
+  reclaimSessionIds: ReadonlySet<string> = new Set(),
+  opts?: ChatSessionStoreOptions,
+  now = Date.now()
+): Promise<ChatProfileStorage> {
+  const idleCutoff = now - idleDays * 86_400_000;
+  const sessions = [];
+  for (const session of listSessions(profile, opts)) {
+    const worktreeBytes = session.worktreePath ? await allocatedBytes(session.worktreePath) : 0;
+    sessions.push({
+      sessionId: session.id,
+      worktreeBytes,
+      projectedReclaimBytes: reclaimSessionIds.has(session.id) ? worktreeBytes : 0,
+      idle: session.outcome === 'live' && session.lastActiveAt <= idleCutoff
+    });
+  }
+  return {
+    profile,
+    idleDays,
+    worktreeBytes: sessions.reduce((sum, session) => sum + session.worktreeBytes, 0),
+    projectedReclaimBytes: sessions.reduce((sum, session) => sum + session.projectedReclaimBytes, 0),
+    sessions
+  };
 }

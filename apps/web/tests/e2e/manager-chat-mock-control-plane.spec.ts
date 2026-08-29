@@ -149,6 +149,23 @@ test('archive and preview states mutate through the same REST control plane', as
   await expect(page.getByText('Failed to archive session: Mock archive failed')).toBeVisible();
 });
 
+test('storage dry run selects idle sessions and bulk archives them safely', async ({ page, request }) => {
+  await selectScenario(request, 'archive-success');
+  await openChat(page);
+
+  await page.getByRole('button', { name: 'Storage', exact: true }).click();
+  const storage = page.getByRole('region', { name: 'Chat storage' });
+  await expect(storage).toContainText('12.0 MiB in worktrees');
+  await expect(storage).toContainText('12.0 MiB projected reclaim');
+  await expect(storage).toContainText('archive · idle');
+
+  await storage.getByRole('button', { name: 'Select idle (1)' }).click();
+  await expect(storage.getByLabel('Select Mock session')).toBeChecked();
+  await storage.getByRole('button', { name: 'Archive selected (1)' }).click();
+  await expect(page.getByLabel('Chat session').locator('optgroup[label^="Archived"]')).toContainText('Mock session');
+  await expect(storage).toContainText('No live chat sessions.');
+});
+
 test('backend/model controls cover success, delayed, empty, failed, and AGY shapes', async ({ page, request }) => {
   await selectScenario(request, 'models-success');
   await openChat(page);

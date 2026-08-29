@@ -23,6 +23,7 @@ struct ProfileSummary<'a> {
     max_parallel_workers: Option<u32>,
     max_open_managed_mrs: u32,
     validation_timeout_seconds: u64,
+    chat_session_idle_days: u64,
     manager_wake_autonomy: &'a str,
     delivery_mode: &'a str,
 }
@@ -46,6 +47,7 @@ pub(crate) fn list_json(cfg: &GahConfig) -> Result<String> {
                 max_parallel_workers: profile.max_parallel_workers,
                 max_open_managed_mrs: profile.max_open_managed_mrs(),
                 validation_timeout_seconds: profile.validation_timeout_seconds(),
+                chat_session_idle_days: profile.effective_chat_session_idle_days(),
                 manager_wake_autonomy: match profile.manager_wake_autonomy {
                     WakeAutonomy::Off => "off",
                     WakeAutonomy::ReviewOnly => "review_only",
@@ -88,5 +90,6 @@ default_target_branch = "main"
         let summary = &parsed[0];
         assert_eq!(summary["worktree_base"], "/srv/gah/worktrees");
         assert_eq!(summary["repo_id"], "repo");
+        assert_eq!(summary["chat_session_idle_days"], 14);
     }
 }

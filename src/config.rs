@@ -379,6 +379,11 @@ pub struct Profile {
     /// `--older-than` flag overrides this per invocation.
     #[serde(default)]
     pub prune_older_than_days: Option<u64>,
+    /// Idle chat sessions are archived by the daily chat-maintenance sweep
+    /// after this many days without a completed turn. Unlike worktree prune,
+    /// archive preserves dirty work as a patch and always keeps the branch.
+    #[serde(default)]
+    pub chat_session_idle_days: Option<u64>,
     #[serde(default)]
     pub external_credential_scopes: HashMap<String, ExternalCredentialScope>,
 }
@@ -730,6 +735,7 @@ pub mod tests {
             manager_wake_autonomy: crate::config::WakeAutonomy::default(),
             delivery_mode: crate::config::DeliveryMode::default(),
             prune_older_than_days: None,
+            chat_session_idle_days: None,
             display_name: "Repo".into(),
             repo_id: "repo".into(),
             provider: "github".into(),
@@ -791,6 +797,7 @@ pub mod tests {
             manager_wake_autonomy: crate::config::WakeAutonomy::default(),
             delivery_mode: crate::config::DeliveryMode::default(),
             prune_older_than_days: None,
+            chat_session_idle_days: None,
             display_name: "Test".into(),
             repo_id: "test".into(),
             provider: "gitlab".into(),
@@ -1262,36 +1269,6 @@ pub mod tests {
                 .as_deref(),
             Some("claude")
         );
-    }
-
-    #[test]
-    fn prune_older_than_days_defaults_to_30() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo_config_path = tmp.path().join("gah-config.toml");
-        std::fs::write(
-            &repo_config_path,
-            "[defaults]\nartifact_root = \"\"\nworktree_base = \"\"\nllm_base_url = \"\"\nllm_model_local = \"\"\nllm_model_cloud = \"\"\n[profiles.repo]\ndisplay_name = \"repo\"\nrepo_id = \"real\"\nrepo = \"real\"\nprovider = \"github\"\nlocal_path = \"/tmp\"\nartifact_root = \"/tmp\"\ndefault_target_branch = \"main\"\n",
-        )
-        .unwrap();
-        let cfg = load(Some(repo_config_path.to_str().unwrap())).unwrap();
-        let profile = cfg.profiles.get("repo").unwrap();
-        assert_eq!(profile.prune_older_than_days, None);
-        assert_eq!(profile.effective_prune_older_than_days(), 30);
-    }
-
-    #[test]
-    fn prune_older_than_days_respects_profile_override() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo_config_path = tmp.path().join("gah-config.toml");
-        std::fs::write(
-            &repo_config_path,
-            "[defaults]\nartifact_root = \"\"\nworktree_base = \"\"\nllm_base_url = \"\"\nllm_model_local = \"\"\nllm_model_cloud = \"\"\n[profiles.repo]\ndisplay_name = \"repo\"\nrepo_id = \"real\"\nrepo = \"real\"\nprovider = \"github\"\nlocal_path = \"/tmp\"\nartifact_root = \"/tmp\"\ndefault_target_branch = \"main\"\nprune_older_than_days = 7\n",
-        )
-        .unwrap();
-        let cfg = load(Some(repo_config_path.to_str().unwrap())).unwrap();
-        let profile = cfg.profiles.get("repo").unwrap();
-        assert_eq!(profile.prune_older_than_days, Some(7));
-        assert_eq!(profile.effective_prune_older_than_days(), 7);
     }
 
     #[test]

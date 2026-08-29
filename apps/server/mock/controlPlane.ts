@@ -18,6 +18,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import type {
   ChatNodeInfo,
   ChatPreviewInfo,
+  ChatReclaimResult,
   ChatSessionSummary,
   ChatSessionView,
   ChatTranscriptTurn,
@@ -245,7 +246,10 @@ function seededSession(): ChatSessionSummary {
     title: 'Mock session',
     createdAt: FIXED_NOW,
     lastActiveAt: FIXED_NOW,
-    archivedAt: null
+    archivedAt: null,
+    outcome: 'live',
+    settledAt: null,
+    settledReason: null
   } satisfies ChatSessionSummary;
 }
 
@@ -676,7 +680,10 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       title: title ?? null,
       createdAt: FIXED_NOW + state.sessions.size,
       lastActiveAt: FIXED_NOW + state.sessions.size,
-      archivedAt: null
+      archivedAt: null,
+      outcome: 'live',
+      settledAt: null,
+      settledReason: null
     } satisfies ChatSessionSummary;
     state.sessions.set(id, created);
     return created;
@@ -700,7 +707,14 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     if (state.scenario === 'archive-failure') return null;
     const current = state.sessions.get(id);
     if (!current || current.profile !== profile) return null;
-    const archived = { ...current, worktreePath: null, archivedAt: FIXED_NOW + state.reset } satisfies ChatSessionSummary;
+    const archived = {
+      ...current,
+      worktreePath: null,
+      archivedAt: FIXED_NOW + state.reset,
+      outcome: 'archived',
+      settledAt: null,
+      settledReason: null
+    } satisfies ChatSessionSummary;
     state.sessions.set(id, archived);
     state.previews.delete(sessionKey(profile, id));
     return archived;
@@ -824,6 +838,48 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     const profile = bodyString(req.query.profile) ?? 'fixture';
     res.json({ sessions: [...state.sessions.values()].filter((session) => session.profile === profile) } satisfies { sessions: ChatSessionSummary[] });
   });
+  function storagePayload(profile: string, dryRun: boolean): ChatReclaimResult {
+    const sessions = [...state.sessions.values()].filter((session) => session.profile === profile);
+    const candidateSessions = sessions.filter((session) => session.outcome === 'live' && session.id === 'mock-session-1');
+    return {
+      dryRun,
+      profiles: [{
+        profile,
+        idleDays: 14,
+        worktreeBytes: sessions.filter((session) => session.outcome === 'live').length * 12_582_912,
+        projectedReclaimBytes: candidateSessions.length * 12_582_912,
+        sessions: sessions.map((session) => ({
+          sessionId: session.id,
+          worktreeBytes: session.outcome === 'live' ? 12_582_912 : 0,
+          projectedReclaimBytes: candidateSessions.some((candidate) => candidate.id === session.id) ? 12_582_912 : 0,
+          idle: candidateSessions.some((candidate) => candidate.id === session.id)
+        }))
+      }],
+      candidates: candidateSessions.map((session) => ({
+        profile,
+        sessionId: session.id,
+        outcome: 'archived',
+        reason: 'idle',
+        reclaimBytes: 12_582_912
+      })),
+      sessions: [],
+      warnings: []
+    };
+  }
+  app.get('/api/manager-chat/storage', (req, res) => {
+    res.json(storagePayload(bodyString(req.query.profile) ?? 'fixture', true));
+  });
+  app.post('/api/manager-chat/reclaim', (req, res) => {
+    const profile = bodyString(req.body?.profile) ?? 'fixture';
+    const dryRun = req.body?.dryRun !== false;
+    const plan = storagePayload(profile, dryRun);
+    if (!dryRun) {
+      plan.sessions = plan.candidates
+        .map((candidate) => archiveSession(profile, candidate.sessionId))
+        .filter((session): session is ChatSessionSummary => session !== null);
+    }
+    res.json(plan);
+  });
   app.post('/api/manager-chat/sessions', (req, res) => {
     const created = createSession(
       bodyString(req.body?.profile) ?? 'fixture',
@@ -848,10 +904,16 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   app.post('/api/manager-chat/sessions/archive', (req, res) => {
     const profile = bodyString(req.body?.profile) ?? 'fixture';
     const id = bodyString(req.body?.sessionId);
-    if (!id) return jsonError(res, 400, 'Missing required field: sessionId', 'sessionId is required');
-    const archived = archiveSession(profile, id);
-    if (!archived) return jsonError(res, 502, 'Failed to archive chat session', 'Mock archive failed');
-    res.json(archived satisfies ChatSessionSummary);
+    const ids: string[] = id
+      ? [id]
+      : Array.isArray(req.body?.sessionIds)
+        ? req.body.sessionIds.filter((value: unknown): value is string => typeof value === 'string')
+        : [];
+    if (ids.length === 0) return jsonError(res, 400, 'Missing required field: sessionId or sessionIds', 'a session id is required');
+    if (state.scenario === 'archive-failure') return jsonError(res, 502, 'Failed to archive chat session', 'Mock archive failed');
+    const archived = ids.map((sessionId) => archiveSession(profile, sessionId));
+    if (archived.some((session) => session === null)) return jsonError(res, 502, 'Failed to archive chat session', 'Mock archive failed');
+    res.json(id ? archived[0] : { sessions: archived });
   });
   app.get('/api/manager-chat/preview', (req, res) => {
     const profile = bodyString(req.query.profile) ?? 'fixture';

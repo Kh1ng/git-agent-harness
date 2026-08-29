@@ -159,6 +159,7 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 external_credential_scopes: std::collections::HashMap::new(),
                 pacing: Default::default(),
                 prune_older_than_days: None,
+                chat_session_idle_days: None,
             };
             config::add_profile(&mut cfg, &name, profile)?;
             config::save(&cfg, config_path.as_deref())?;

@@ -63,6 +63,7 @@ pub(super) fn profile(local_path: &Path) -> Profile {
             ..Default::default()
         },
         prune_older_than_days: None,
+        chat_session_idle_days: None,
     }
 }
 

@@ -19,6 +19,7 @@ repo = "group/project"
 local_path = "/path/to/local/clone"
 artifact_root = "/home/you/.local/share/gah/artifacts/self-hosted-gitlab"
 default_target_branch = "main"
+chat_session_idle_days = 14
 provider_api_base = "https://gitlab.example.com/api/v4"
 provider_project_id = "12345"
 oh_profile = "cloud-coder"

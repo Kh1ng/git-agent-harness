@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink } from 'lucide-react';
+import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
@@ -16,7 +16,8 @@ import type {
   ProfileSummary,
   ManagerBackendInfo,
   ChatSessionSummary,
-  ChatPreviewInfo
+  ChatPreviewInfo,
+  ChatReclaimResult
 } from '@git-agent-harness/contracts';
 
 interface ChatTurn {
@@ -54,6 +55,18 @@ interface LivePermission {
   title: string;
   options: { optionId: string; name: string; kind: string }[];
   locations: string[];
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && value >= 1024; index += 1) {
+    value /= 1024;
+    unit = units[index];
+  }
+  return `${value.toFixed(value >= 10 ? 1 : 2)} ${unit}`;
 }
 
 function fromServerTurn(turn: ManagerChatTurn): ChatTurn {
@@ -217,6 +230,12 @@ export function ManagerChatPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const [sessionsError, setSessionsError] = useState(false);
+  const [storageOpen, setStorageOpen] = useState(false);
+  const [storage, setStorage] = useState<ChatReclaimResult | null>(null);
+  const [storageError, setStorageError] = useState<string | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
+  const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
+  const [archiveBusy, setArchiveBusy] = useState(false);
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === sessionId) ?? null,
     [sessions, sessionId]
@@ -244,9 +263,35 @@ export function ManagerChatPage() {
 
   useEffect(() => {
     refreshSessions(profile);
-    return () => { setSessions([]); setSessionId(null); };
+    return () => {
+      setSessions([]);
+      setSessionId(null);
+      setStorage(null);
+      setSelectedSessionIds(new Set());
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile]);
+
+  const refreshStorage = async (forProfile = profile) => {
+    setStorageLoading(true);
+    try {
+      const result = await gahApi.getChatStorage(forProfile);
+      if (activeProfileRef.current !== forProfile) return;
+      setStorage(result);
+      setStorageError(null);
+    } catch (error) {
+      if (activeProfileRef.current === forProfile) {
+        setStorageError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (activeProfileRef.current === forProfile) setStorageLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (storageOpen) void refreshStorage(profile);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageOpen, profile]);
 
   // Restore history on mount, on profile change, on session change, and
   // after a reconnect -- otherwise leaving the page (or a dropped
@@ -752,6 +797,40 @@ export function ManagerChatPage() {
     }
   };
 
+  const handleBulkArchive = async () => {
+    const ids = [...selectedSessionIds];
+    if (ids.length === 0) return;
+    setArchiveBusy(true);
+    try {
+      await gahApi.bulkArchiveChatSessions(profile, ids);
+      if (sessionId && selectedSessionIds.has(sessionId)) setSessionId(null);
+      setSelectedSessionIds(new Set());
+      refreshSessions(profile);
+      await refreshStorage(profile);
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setArchiveBusy(false);
+    }
+  };
+
+  const handleReclaimNow = async () => {
+    setArchiveBusy(true);
+    try {
+      const result = await gahApi.reclaimChatSessions(profile, false);
+      if (sessionId && result.sessions.some((session) => session.id === sessionId)) setSessionId(null);
+      setStorage(result);
+      setStorageError(result.warnings[0] ?? null);
+      setSelectedSessionIds(new Set());
+      refreshSessions(profile);
+      await refreshStorage(profile);
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setArchiveBusy(false);
+    }
+  };
+
   const [newChatOpen, setNewChatOpen] = useState(false);
 
   useEffect(() => {
@@ -895,19 +974,32 @@ export function ManagerChatPage() {
           aria-label="Chat session"
         >
           <option value="">Default conversation</option>
-          {sessions.filter((s) => s.archivedAt === null).map((s) => (
+          {sessions.filter((s) => s.outcome === 'live').map((s) => (
             <option key={s.id} value={s.id}>
               {s.title ?? s.branch}
             </option>
           ))}
           {(() => {
-            const archived = sessions.filter((s) => s.archivedAt !== null);
+            const archived = sessions.filter((s) => s.outcome === 'archived');
             if (archived.length === 0) return null;
             return [
               <optgroup key="archived" label={`Archived (${archived.length})`}>
                 {archived.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.title ?? s.branch}
+                  </option>
+                ))}
+              </optgroup>
+            ];
+          })()}
+          {(() => {
+            const settled = sessions.filter((s) => s.outcome === 'settled');
+            if (settled.length === 0) return null;
+            return [
+              <optgroup key="settled" label={`Settled (${settled.length})`}>
+                {settled.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.title ?? s.branch} · {s.settledReason ?? 'delivered'}
                   </option>
                 ))}
               </optgroup>
@@ -931,6 +1023,15 @@ export function ManagerChatPage() {
           title="New chat: choose project, node, and provider/model — starts in a fresh worktree"
         >
           <Plus size={13} aria-hidden="true" /> New chat
+        </button>
+        <button
+          type="button"
+          onClick={() => setStorageOpen((open) => !open)}
+          className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-secondary hover:bg-white/5 inline-flex items-center gap-1"
+          aria-expanded={storageOpen}
+          title="Inspect per-session storage and preview safe reclaim"
+        >
+          <HardDrive size={13} aria-hidden="true" /> Storage
         </button>
         {activeSession && activeSession.archivedAt === null && (
           <>
@@ -998,10 +1099,100 @@ export function ManagerChatPage() {
             </button>
           </>
         )}
-        {activeSession?.archivedAt != null && (
-          <span className="text-[10px] text-muted">archived — read only</span>
+        {activeSession?.outcome !== 'live' && activeSession && (
+          <span className="text-[10px] text-muted">
+            {activeSession.outcome === 'settled' ? `settled · ${activeSession.settledReason ?? 'delivered'}` : 'archived'} — read only
+          </span>
         )}
       </div>
+
+      {storageOpen && (() => {
+        const profileStorage = storage?.profiles[0];
+        const storageBySession = new Map(profileStorage?.sessions.map((item) => [item.sessionId, item]) ?? []);
+        const liveSessions = sessions.filter((session) => session.outcome === 'live');
+        const idleIds = liveSessions.filter((session) => storageBySession.get(session.id)?.idle).map((session) => session.id);
+        return (
+          <section className="card-padded space-y-3" aria-label="Chat storage">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-semibold text-primary">Chat storage · {profile}</h2>
+                <p className="text-[11px] text-muted">
+                  {profileStorage
+                    ? `${formatBytes(profileStorage.worktreeBytes)} in worktrees · ${formatBytes(profileStorage.projectedReclaimBytes)} projected reclaim · idle after ${profileStorage.idleDays} days`
+                    : 'Calculating worktree usage and dry-run projection…'}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setSelectedSessionIds(new Set(idleIds))}
+                  disabled={idleIds.length === 0 || archiveBusy}
+                  className="btn-secondary text-xs"
+                >
+                  Select idle ({idleIds.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleBulkArchive()}
+                  disabled={selectedSessionIds.size === 0 || archiveBusy}
+                  className="btn-secondary text-xs inline-flex items-center gap-1"
+                >
+                  <Archive size={12} aria-hidden="true" /> Archive selected ({selectedSessionIds.size})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleReclaimNow()}
+                  disabled={!storage || storage.candidates.length === 0 || archiveBusy}
+                  className="btn-primary text-xs"
+                  title="Apply this dry-run plan through the patch-preserving archive path"
+                >
+                  Reclaim now ({storage?.candidates.length ?? 0})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void refreshStorage(profile)}
+                  disabled={storageLoading || archiveBusy}
+                  className="btn-secondary text-xs"
+                  aria-label="Refresh storage dry run"
+                >
+                  <RefreshCw size={12} className={storageLoading ? 'animate-spin' : ''} aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+            {storageError && <p className="text-xs text-red-400" role="alert">{storageError}</p>}
+            {storage?.warnings.map((warning) => <p key={warning} className="text-xs text-amber-300">{warning}</p>)}
+            <div className="divide-y divide-subtle rounded-md border border-subtle">
+              {liveSessions.map((session) => {
+                const item = storageBySession.get(session.id);
+                const candidate = storage?.candidates.find((entry) => entry.sessionId === session.id);
+                return (
+                  <label key={session.id} className="flex cursor-pointer items-center gap-3 px-3 py-2 text-xs hover:bg-white/5">
+                    <input
+                      type="checkbox"
+                      checked={selectedSessionIds.has(session.id)}
+                      onChange={(event) => setSelectedSessionIds((current) => {
+                        const next = new Set(current);
+                        if (event.target.checked) next.add(session.id); else next.delete(session.id);
+                        return next;
+                      })}
+                      aria-label={`Select ${session.title ?? session.branch}`}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-primary">{session.title ?? session.branch}</span>
+                    {item?.idle && <span className="text-amber-300">idle</span>}
+                    {candidate && <span className="text-accent">{candidate.outcome === 'settled' ? `settle · ${candidate.reason}` : 'archive · idle'}</span>}
+                    <span className="font-mono text-muted">{formatBytes(item?.worktreeBytes ?? 0)}</span>
+                    {(item?.projectedReclaimBytes ?? 0) > 0 && (
+                      <span className="font-mono text-accent">→ {formatBytes(item?.projectedReclaimBytes ?? 0)}</span>
+                    )}
+                  </label>
+                );
+              })}
+              {liveSessions.length === 0 && <p className="px-3 py-4 text-xs text-muted">No live chat sessions.</p>}
+            </div>
+            <p className="text-[10px] text-muted">Dry run only until you choose Reclaim now or Archive selected. Dirty work is saved as a patch; every branch survives.</p>
+          </section>
+        );
+      })()}
 
       <NewChatModal
         open={newChatOpen}
