@@ -129,6 +129,20 @@ export interface StartAdminUpdateResult {
   state: AdminUpdateState;
 }
 
+export function adminUpdateEnvironment(
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  uid: number | undefined
+): NodeJS.ProcessEnv {
+  if (platform !== 'linux' || uid === undefined) return environment;
+  const runtimeDir = `/run/user/${uid}`;
+  return {
+    ...environment,
+    XDG_RUNTIME_DIR: environment.XDG_RUNTIME_DIR ?? runtimeDir,
+    DBUS_SESSION_BUS_ADDRESS: environment.DBUS_SESSION_BUS_ADDRESS ?? `unix:path=${runtimeDir}/bus`
+  };
+}
+
 /** Launches `gah update --repo <cwd> --role central --restart-server`
  * detached (so it outlives this HTTP request, and survives this process
  * being the one that gets restarted) and streams its combined output into
@@ -142,12 +156,13 @@ export function startAdminUpdate(options: StartAdminUpdateOptions = {}): StartAd
   }
 
   const spawnFn = options.spawnFn ?? spawn;
+  const uid = process.platform === 'linux' && typeof process.getuid === 'function' ? process.getuid() : undefined;
   const child: ChildProcess = spawnFn(
     findGahBinary(),
     ['update', '--repo', process.cwd(), '--role', 'central', '--restart-server'],
     {
       cwd: process.cwd(),
-      env: process.env,
+      env: adminUpdateEnvironment(process.env, process.platform, uid),
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe']
     }

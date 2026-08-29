@@ -4,8 +4,8 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { getPendingCommits, readAdminUpdateState, startAdminUpdate } from './adminUpdate.js';
+import type { ChildProcess, SpawnOptions, spawn, spawnSync } from 'node:child_process';
+import { adminUpdateEnvironment, getPendingCommits, readAdminUpdateState, startAdminUpdate } from './adminUpdate.js';
 
 function withStatePath(fn: (statePath: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), 'gah-admin-update-'));
@@ -100,10 +100,12 @@ test('startAdminUpdate launches gah update pinned to this checkout via --repo an
   withStatePath((statePath) => {
     let capturedBin = '';
     let capturedArgs: string[] = [];
+    let capturedOptions: SpawnOptions | undefined;
     const child = fakeChildProcess(4242);
-    const spawnFn = ((bin: string, args: string[]) => {
+    const spawnFn = ((bin: string, args: string[], options: SpawnOptions) => {
       capturedBin = bin;
       capturedArgs = args;
+      capturedOptions = options;
       return child;
     }) as unknown as typeof spawn;
 
@@ -113,6 +115,14 @@ test('startAdminUpdate launches gah update pinned to this checkout via --repo an
     assert.equal(result.state.pid, 4242);
     assert.ok(capturedBin);
     assert.deepEqual(capturedArgs, ['update', '--repo', process.cwd(), '--role', 'central', '--restart-server']);
+    if (process.platform === 'linux' && typeof process.getuid === 'function') {
+      const runtimeDir = `/run/user/${process.getuid()}`;
+      assert.equal(capturedOptions?.env?.XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR ?? runtimeDir);
+      assert.equal(
+        capturedOptions?.env?.DBUS_SESSION_BUS_ADDRESS,
+        process.env.DBUS_SESSION_BUS_ADDRESS ?? `unix:path=${runtimeDir}/bus`
+      );
+    }
 
     (child.stdout as unknown as EventEmitter).emit('data', Buffer.from('hello '));
     (child.stderr as unknown as EventEmitter).emit('data', Buffer.from('world'));
@@ -129,6 +139,39 @@ test('startAdminUpdate launches gah update pinned to this checkout via --repo an
     assert.equal(statSync(statePath).mode & 0o777, 0o600);
     assert.deepEqual(JSON.parse(readFileSync(statePath, 'utf8')), finalState);
   });
+});
+
+test('adminUpdateEnvironment supplies Linux user-bus defaults when both values are absent', () => {
+  assert.deepEqual(adminUpdateEnvironment({ PATH: '/bin' }, 'linux', 1234), {
+    PATH: '/bin',
+    XDG_RUNTIME_DIR: '/run/user/1234',
+    DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1234/bus'
+  });
+});
+
+test('adminUpdateEnvironment fills only the absent Linux user-bus value', () => {
+  assert.deepEqual(adminUpdateEnvironment({ XDG_RUNTIME_DIR: '/custom/runtime' }, 'linux', 1234), {
+    XDG_RUNTIME_DIR: '/custom/runtime',
+    DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1234/bus'
+  });
+  assert.deepEqual(adminUpdateEnvironment({ DBUS_SESSION_BUS_ADDRESS: 'unix:path=/custom/bus' }, 'linux', 1234), {
+    XDG_RUNTIME_DIR: '/run/user/1234',
+    DBUS_SESSION_BUS_ADDRESS: 'unix:path=/custom/bus'
+  });
+});
+
+test('adminUpdateEnvironment preserves fully configured Linux user-bus values', () => {
+  const environment = {
+    XDG_RUNTIME_DIR: '/custom/runtime',
+    DBUS_SESSION_BUS_ADDRESS: 'unix:path=/custom/bus'
+  };
+  assert.deepEqual(adminUpdateEnvironment(environment, 'linux', 1234), environment);
+});
+
+test('adminUpdateEnvironment does nothing off Linux or when getuid is unavailable', () => {
+  const environment = { PATH: '/bin' };
+  assert.deepEqual(adminUpdateEnvironment(environment, 'darwin', 1234), environment);
+  assert.deepEqual(adminUpdateEnvironment(environment, 'linux', undefined), environment);
 });
 
 test('startAdminUpdate records failure on a non-zero exit code', () => {
