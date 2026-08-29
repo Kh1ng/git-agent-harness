@@ -125,10 +125,11 @@ test('cancelTurn kills the in-flight process and the turn rejects, leaving the s
     // disposition — immediate termination — is deterministic and doesn't
     // depend on shell exec-optimization or orphaned descendants holding
     // stdio pipes open.
+    let cli = [execPath, '-e', 'setTimeout(() => {}, 30000)'];
     const backend = createHeadlessBackend({
       id: 'fake',
       displayName: 'Fake',
-      turnArgs: () => [execPath, '-e', 'setTimeout(() => {}, 30000)'],
+      turnArgs: () => cli,
       encodeStdin: (prompt) => prompt
     });
 
@@ -142,15 +143,11 @@ test('cancelTurn kills the in-flight process and the turn rejects, leaving the s
     await backend.cancelTurn('p#cancel');
     await assert.rejects(turnPromise);
 
-    // The session is recoverable: a fresh turn on the same key still runs.
-    const cli2 = fakeCli(dir);
-    const backend2 = createHeadlessBackend({
-      id: 'fake',
-      displayName: 'Fake',
-      turnArgs: () => [cli2],
-      encodeStdin: (prompt) => prompt
-    });
-    const result = await backend2.runTurn('p#cancel', { prompt: 'again', history: [], onChunk: () => {}, onToolResult: () => {} });
+    // The same backend/session is recoverable: swap in a real command and
+    // run a second turn on the same profile key, proving cancelTurn cleared
+    // state.child rather than leaving the session wedged.
+    cli = [fakeCli(dir)];
+    const result = await backend.runTurn('p#cancel', { prompt: 'again', history: [], onChunk: () => {}, onToolResult: () => {} });
     assert.match(result.reply, /again/);
   } finally {
     rmSync(dir, { recursive: true, force: true });

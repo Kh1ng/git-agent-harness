@@ -192,24 +192,18 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
   };
 }
 
-/** Fixed (content-free) bootstrap handed to vibe's own Python interpreter
- * via `-c`. It drains the prompt from its stdin, sets the *in-process*
- * `sys.argv` — never the OS-level exec argv — and calls the same
- * `vibe.cli.entrypoint.main` the real `vibe` launcher script calls. Because
- * sys.argv is assigned after the interpreter is already running, this never
- * goes through execve() with the prompt as an argument, so it stays outside
- * ARG_MAX regardless of size (issue #1009).
+/** Fixed `-c` bootstrap for vibe's own Python interpreter: reads the prompt
+ * from stdin, sets it into *in-process* `sys.argv`, then calls the same
+ * `vibe.cli.entrypoint.main` the real launcher calls. Argv is assigned after
+ * the interpreter is already running, so it never goes through execve() and
+ * stays outside ARG_MAX (issue #1009).
  *
- * This also sidesteps a real bug in the installed vibe CLI: its
- * `get_prompt_from_stdin()` (vibe/cli/cli.py) reads a piped prompt
- * correctly, then unconditionally tries to reopen `/dev/tty` to restore
- * interactive stdin — which raises OSError with no controlling terminal
- * (as under this server), and the handler discards the prompt it just read,
- * so `vibe -p` with a piped prompt silently fails outside a TTY. Because
- * this bridge fully drains stdin itself before vibe's own code ever runs,
- * vibe's later get_prompt_from_stdin() call sees EOF and returns None
- * immediately — args.prompt (set directly on sys.argv) wins, and the
- * /dev/tty path is never reached. Confirmed against the installed CLI. */
+ * Also sidesteps a bug in vibe's own `get_prompt_from_stdin()`
+ * (vibe/cli/cli.py): it reads a piped prompt, then reopens `/dev/tty` to
+ * restore interactive stdin, which raises OSError with no controlling
+ * terminal (as under this server) and discards the prompt it just read. This
+ * bridge drains stdin first, so that call sees EOF and returns None — our
+ * sys.argv prompt wins instead. Confirmed against the installed CLI. */
 const VIBE_STDIN_BRIDGE = [
   'import sys',
   'prompt = sys.stdin.buffer.read().decode("utf-8", "replace")',
