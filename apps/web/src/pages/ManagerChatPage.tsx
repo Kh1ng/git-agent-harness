@@ -8,7 +8,16 @@ import { NewChatModal } from '../components/NewChatModal.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
 import { generateRequestId } from '@git-agent-harness/shared';
-import type { ManagerChatTurn, ManagerCommandInfo, ManagerModelInfo, ProfileSummary, ManagerBackendInfo, ChatSessionSummary, ChatPreviewInfo } from '@git-agent-harness/contracts';
+import type {
+  ManagerChatTurn,
+  ManagerCommandInfo,
+  ManagerModelInfo,
+  ManagerReasoningEffortInfo,
+  ProfileSummary,
+  ManagerBackendInfo,
+  ChatSessionSummary,
+  ChatPreviewInfo
+} from '@git-agent-harness/contracts';
 
 interface ChatTurn {
   role: 'user' | 'assistant' | 'system' | 'error' | 'tool';
@@ -183,10 +192,13 @@ export function ManagerChatPage() {
   const [commands, setCommands] = useState<ManagerCommandInfo[]>([]);
   const [models, setModels] = useState<ManagerModelInfo[]>([]);
   const [currentModelId, setCurrentModelId] = useState<string | null>(null);
+  const [reasoningEfforts, setReasoningEfforts] = useState<ManagerReasoningEffortInfo[]>([]);
+  const [currentReasoningEffortId, setCurrentReasoningEffortId] = useState<string | null>(null);
   /** True once the model list fetch completed (an empty list is "this
    * backend exposes no picker", not "still loading"). */
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [modelChanging, setModelChanging] = useState(false);
+  const [reasoningEffortChanging, setReasoningEffortChanging] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteIndex, setPaletteIndex] = useState(0);
   const processedRequestIds = useRef(new Set<string>());
@@ -276,6 +288,8 @@ export function ManagerChatPage() {
     setCommands([]);
     setModels([]);
     setCurrentModelId(null);
+    setReasoningEfforts([]);
+    setCurrentReasoningEffortId(null);
     setModelsLoaded(false);
     setModelChanging(false);
     gahApi
@@ -296,15 +310,16 @@ export function ManagerChatPage() {
       .getManagerChatCommands(profile)
       .then(({ commands }) => { if (!cancelled) setCommands(commands); })
       .catch(() => { if (!cancelled) setCommands([]); });
-    // Real selectable models from the backend's own ACP session state --
-    // empty for backends that don't expose this (e.g. Claude's bridge
-    // today), in which case no picker renders at all.
+    // Real selectable models and reasoning efforts from the backend's own
+    // ACP session state. Empty means no corresponding picker renders.
     gahApi
       .getManagerChatModels(profile)
-      .then(({ models, currentModelId }) => {
+      .then(({ models, currentModelId, reasoningEfforts: advertisedEfforts, currentReasoningEffortId: effortId }) => {
         if (!cancelled) {
           setModels(models);
           setCurrentModelId(currentModelId);
+          setReasoningEfforts(advertisedEfforts ?? []);
+          setCurrentReasoningEffortId(effortId ?? null);
           setModelsLoaded(true);
         }
       })
@@ -312,6 +327,8 @@ export function ManagerChatPage() {
         if (!cancelled) {
           setModels([]);
           setCurrentModelId(null);
+          setReasoningEfforts([]);
+          setCurrentReasoningEffortId(null);
           setModelsLoaded(true);
         }
       });
@@ -367,13 +384,35 @@ export function ManagerChatPage() {
     const requestedProfile = profile;
     try {
       await gahApi.setManagerChatModel(requestedProfile, modelId);
-      if (activeProfileRef.current === requestedProfile) setCurrentModelId(modelId);
+      const summary = await gahApi.getManagerChatModels(requestedProfile);
+      if (activeProfileRef.current === requestedProfile) {
+        setModels(summary.models);
+        setCurrentModelId(summary.currentModelId);
+        setReasoningEfforts(summary.reasoningEfforts ?? []);
+        setCurrentReasoningEffortId(summary.currentReasoningEffortId ?? null);
+      }
     } catch (err) {
       if (activeProfileRef.current === requestedProfile) {
         setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch model: ${err instanceof Error ? err.message : String(err)}` }]);
       }
     } finally {
       if (activeProfileRef.current === requestedProfile) setModelChanging(false);
+    }
+  };
+
+  const handleReasoningEffortChange = async (effortId: string) => {
+    if (turnBusy) return;
+    setReasoningEffortChanging(true);
+    const requestedProfile = profile;
+    try {
+      await gahApi.setManagerChatReasoningEffort(requestedProfile, effortId);
+      if (activeProfileRef.current === requestedProfile) setCurrentReasoningEffortId(effortId);
+    } catch (err) {
+      if (activeProfileRef.current === requestedProfile) {
+        setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch reasoning effort: ${err instanceof Error ? err.message : String(err)}` }]);
+      }
+    } finally {
+      if (activeProfileRef.current === requestedProfile) setReasoningEffortChanging(false);
     }
   };
 
@@ -583,17 +622,29 @@ export function ManagerChatPage() {
       });
       if (activeProfileRef.current === requestedProfile) {
         setActiveBackendId(backendId);
+        setModelsLoaded(false);
+        setReasoningEfforts([]);
+        setCurrentReasoningEffortId(null);
         // Refresh the new backend's command palette + model list (the
         // settings effect only re-runs on profile change, not backend change).
         gahApi.getManagerChatCommands(requestedProfile)
           .then(({ commands }) => setCommands(commands))
           .catch(() => setCommands([]));
         gahApi.getManagerChatModels(requestedProfile)
-          .then(({ models, currentModelId }) => {
+          .then(({ models, currentModelId, reasoningEfforts: advertisedEfforts, currentReasoningEffortId: effortId }) => {
             setModels(models);
             setCurrentModelId(currentModelId);
+            setReasoningEfforts(advertisedEfforts ?? []);
+            setCurrentReasoningEffortId(effortId ?? null);
+            setModelsLoaded(true);
           })
-          .catch(() => { setModels([]); setCurrentModelId(null); });
+          .catch(() => {
+            setModels([]);
+            setCurrentModelId(null);
+            setReasoningEfforts([]);
+            setCurrentReasoningEffortId(null);
+            setModelsLoaded(true);
+          });
       }
     } catch (err) {
       if (activeProfileRef.current === requestedProfile) {
@@ -798,13 +849,29 @@ export function ManagerChatPage() {
                 ))}
               </select>
             )}
+            {!activeSession && reasoningEfforts.length > 0 && (
+              <select
+                value={currentReasoningEffortId ?? ''}
+                onChange={(e) => handleReasoningEffortChange(e.target.value)}
+                disabled={reasoningEffortChanging || modelChanging || backendChanging || turnBusy}
+                title={turnBusy ? 'Switching reasoning effort is disabled while a turn is in flight' : 'Reasoning effort'}
+                className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary max-w-[170px]"
+                aria-label="Reasoning effort"
+              >
+                {reasoningEfforts.map((effort) => (
+                  <option key={effort.id} value={effort.id} title={effort.description}>
+                    {effort.name}
+                  </option>
+                ))}
+              </select>
+            )}
             {/* This provider doesn't expose a model picker over its protocol
                 (e.g. Hermes over ACP): say so instead of silently hiding the
                 control. Codex / Claude / OpenCode expose live lists. */}
             {!activeSession && modelsLoaded && models.length === 0 && activeBackendId && (
               <span
                 className="rounded-md border border-subtle bg-raised px-2 py-1.5 text-[11px] text-muted"
-                title="This provider uses its configured default model and doesn't expose a picker. Switch provider (Codex, Claude, OpenCode expose live model lists) or use its own model command in chat."
+                title="This provider uses its configured default model and doesn't expose a picker. Switch to a provider that advertises models or use its own model command in chat."
               >
                 Default model · {activeBackendLabel}
               </span>

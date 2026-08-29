@@ -277,9 +277,8 @@ pub fn run_agy_with_executable(
     let agy_version = detect_agy_version(executable, worktree, env_vars);
 
     let mut cmd = Command::new(executable);
-    cmd.arg("--print");
+    cmd.arg("--print").arg(task);
     cmd.args(["--output-format", "stream-json"]);
-    cmd.arg(task);
     cmd.args(["--model", llm.model.as_str()]);
     if let Some(secs) = print_timeout_seconds {
         cmd.args(["--print-timeout", &format!("{secs}s")]);
@@ -591,8 +590,9 @@ mod tests {
 
         let argv = recorded_argv(&f.record_dir);
         assert_eq!(argv[0], "--print");
-        assert_eq!(argv[1], "--output-format");
-        assert_eq!(argv[2], "stream-json");
+        assert_eq!(argv[1], "the agy task");
+        assert_eq!(argv[2], "--output-format");
+        assert_eq!(argv[3], "stream-json");
         assert!(argv.contains(&"--model".to_string()));
         assert!(argv.contains(&"gpt-5.4".to_string()));
         assert!(argv.contains(&"--dangerously-skip-permissions".to_string()));

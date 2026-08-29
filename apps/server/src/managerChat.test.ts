@@ -5,8 +5,13 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { compactionSummary, isCompactionCommand, isUsageLimitError } from './managerChat/acpAdapter.js';
 import { normalizeRemoteUrl } from './managerChat/memoryGatewayClient.js';
-import { modelOverrideForProfile, setModelOverrideForProfile } from './managerChat/settingsStore.js';
-import { historyDelta, readModelConfig, resumePrompt, toChatUsage } from './managerChat/acpAdapter.js';
+import {
+  modelOverrideForProfile,
+  reasoningEffortOverrideForProfile,
+  setModelOverrideForProfile,
+  setReasoningEffortOverrideForProfile
+} from './managerChat/settingsStore.js';
+import { historyDelta, readModelConfig, readReasoningConfig, resumePrompt, toChatUsage } from './managerChat/acpAdapter.js';
 import { handoffAttempt } from './managerChat/ManagerChatManager.js';
 
 test('isCompactionCommand recognizes known compact/clear synonyms across backends', () => {
@@ -101,6 +106,36 @@ test('ACP model config drives the existing model picker', () => {
   });
 });
 
+test('ACP thought-level config drives reasoning effort without inventing choices', () => {
+  assert.deepEqual(readReasoningConfig([{
+    id: 'reasoning_effort',
+    name: 'Reasoning Effort',
+    category: 'thought_level',
+    type: 'select',
+    currentValue: 'high',
+    options: [
+      { value: 'low', name: 'Low' },
+      { value: 'high', name: 'High' },
+      { value: 'ultra', name: 'Ultra', description: 'Backend-specific maximum' }
+    ]
+  }, {
+    id: 'thinking',
+    name: 'Non-standard thinking option',
+    category: 'thinking',
+    type: 'select',
+    currentValue: 'made-up',
+    options: [{ value: 'made-up', name: 'Made up' }]
+  }]), {
+    efforts: [
+      { id: 'low', name: 'Low', description: undefined },
+      { id: 'high', name: 'High', description: undefined },
+      { id: 'ultra', name: 'Ultra', description: 'Backend-specific maximum' }
+    ],
+    currentEffortId: 'high',
+    configId: 'reasoning_effort'
+  });
+});
+
 test('normalizeRemoteUrl collapses https/ssh/scp variants of the same remote', () => {
   assert.equal(normalizeRemoteUrl('https://github.com/Kh1ng/git-agent-harness.git'), 'github.com/kh1ng/git-agent-harness');
   assert.equal(normalizeRemoteUrl('git@github.com:Kh1ng/git-agent-harness.git'), 'github.com/kh1ng/git-agent-harness');
@@ -126,6 +161,23 @@ test('model override persists per profile+backend and survives a fresh read', ()
     assert.equal(modelOverrideForProfile('gah', 'claude'), undefined);
     setModelOverrideForProfile('gah', 'hermes', 'deepseek/deepseek-v4-flash-0731');
     assert.equal(modelOverrideForProfile('gah', 'hermes'), 'deepseek/deepseek-v4-flash-0731');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    if (prevPath === undefined) delete process.env.GAH_MANAGER_CHAT_SETTINGS_PATH;
+    else process.env.GAH_MANAGER_CHAT_SETTINGS_PATH = prevPath;
+  }
+});
+
+test('reasoning effort override persists per profile+backend', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-manager-chat-reasoning-'));
+  const prevPath = process.env.GAH_MANAGER_CHAT_SETTINGS_PATH;
+  process.env.GAH_MANAGER_CHAT_SETTINGS_PATH = join(dir, 'settings.json');
+  try {
+    assert.equal(reasoningEffortOverrideForProfile('gah', 'codex'), undefined);
+    setReasoningEffortOverrideForProfile('gah', 'codex', 'xhigh');
+    assert.equal(reasoningEffortOverrideForProfile('gah', 'codex'), 'xhigh');
+    assert.equal(reasoningEffortOverrideForProfile('gah', 'opencode'), undefined);
+    assert.equal(reasoningEffortOverrideForProfile('other', 'codex'), undefined);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     if (prevPath === undefined) delete process.env.GAH_MANAGER_CHAT_SETTINGS_PATH;

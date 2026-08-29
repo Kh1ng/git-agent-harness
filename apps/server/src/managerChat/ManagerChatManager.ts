@@ -12,9 +12,21 @@
  */
 
 import { recall, capture, flushSession } from './memoryGatewayClient.js';
-import { resolveAdapter, listManagerBackends, type ManagerCommandInfo, type ManagerModelInfo } from './registry.js';
+import {
+  resolveAdapter,
+  listManagerBackends,
+  type ManagerCommandInfo,
+  type ManagerModelInfo,
+  type ManagerReasoningEffortInfo
+} from './registry.js';
 import { compactionSummary, isCompactionCommand, isUsageLimitError } from './acpAdapter.js';
-import { backendForProfile, modelOverrideForProfile, setModelOverrideForProfile } from './settingsStore.js';
+import {
+  backendForProfile,
+  modelOverrideForProfile,
+  reasoningEffortOverrideForProfile,
+  setModelOverrideForProfile,
+  setReasoningEffortOverrideForProfile
+} from './settingsStore.js';
 import { effectiveContextPolicy, applyContextBudget } from '../gatewaySettingsStore.js';
 import { appendEvents, createEventWriter, deriveModelHistory, foldSession, loadLog, type SessionLogOptions } from './sessionLog.js';
 import {
@@ -303,22 +315,46 @@ export function listCommandsForProfile(profile: string): Promise<ManagerCommandI
 // to remember across its own lifetime.
 export async function listModelsForProfile(
   profile: string
-): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }> {
+): Promise<{
+  models: ManagerModelInfo[];
+  currentModelId: string | null;
+  reasoningEfforts: ManagerReasoningEffortInfo[];
+  currentReasoningEffortId: string | null;
+}> {
   const backendId = backendForProfile(profile);
   const adapter = resolveAdapter(backendId);
-  const { models, currentModelId } = await adapter.listModels(profile);
-  const override = modelOverrideForProfile(profile, backendId);
-  if (override && override !== currentModelId && models.some((m) => m.id === override)) {
-    await adapter.setModel(profile, override);
-    return { models, currentModelId: override };
+  let summary = await adapter.listModels(profile);
+  const modelOverride = modelOverrideForProfile(profile, backendId);
+  if (
+    modelOverride
+    && modelOverride !== summary.currentModelId
+    && summary.models.some((model) => model.id === modelOverride)
+  ) {
+    await adapter.setModel(profile, modelOverride);
+    summary = await adapter.listModels(profile);
   }
-  return { models, currentModelId };
+  const effortOverride = reasoningEffortOverrideForProfile(profile, backendId);
+  if (
+    effortOverride
+    && effortOverride !== summary.currentReasoningEffortId
+    && summary.reasoningEfforts.some((effort) => effort.id === effortOverride)
+  ) {
+    await adapter.setReasoningEffort(profile, effortOverride);
+    summary = await adapter.listModels(profile);
+  }
+  return summary;
 }
 
 export async function setModelForProfile(profile: string, modelId: string): Promise<void> {
   const backendId = backendForProfile(profile);
   await resolveAdapter(backendId).setModel(profile, modelId);
   setModelOverrideForProfile(profile, backendId, modelId);
+}
+
+export async function setReasoningEffortForProfile(profile: string, effortId: string): Promise<void> {
+  const backendId = backendForProfile(profile);
+  await resolveAdapter(backendId).setReasoningEffort(profile, effortId);
+  setReasoningEffortOverrideForProfile(profile, backendId, effortId);
 }
 
 /** Lists a specific backend's models for a profile (new-chat flow): the
@@ -328,14 +364,14 @@ export async function setModelForProfile(profile: string, modelId: string): Prom
 export async function listModelsForBackend(
   profile: string,
   backendId: string
-): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }> {
+): ReturnType<typeof listModelsForProfile> {
   const adapter = resolveAdapter(backendId);
-  const { models, currentModelId } = await adapter.listModels(profile);
+  const summary = await adapter.listModels(profile);
   const override = modelOverrideForProfile(profile, backendId);
-  if (override && override !== currentModelId && models.some((m) => m.id === override)) {
-    return { models, currentModelId: override };
+  if (override && override !== summary.currentModelId && summary.models.some((model) => model.id === override)) {
+    return { ...summary, currentModelId: override };
   }
-  return { models, currentModelId };
+  return summary;
 }
 
 interface HandoffInfo {

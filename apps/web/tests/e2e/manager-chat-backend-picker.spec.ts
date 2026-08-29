@@ -17,6 +17,8 @@ const WELCOME = {
 test('the chat header switches the harness and persists a per-profile override', async ({ page }) => {
   let socket: WebSocketRoute;
   let lastPost: { profileOverrides?: Record<string, string> } | null = null;
+  let selectedBackend = 'hermes';
+  let selectedReasoningEffort: string | null = null;
 
   // The chat reply is gated until the AC5 block releases it, so the
   // in-flight (Stop) state is observed deterministically.
@@ -35,6 +37,7 @@ test('the chat header switches the harness and persists a per-profile override',
     if (url.pathname === '/api/manager-chat/settings') {
       if (route.request().method() === 'POST') {
         lastPost = route.request().postDataJSON() as { profileOverrides?: Record<string, string> };
+        selectedBackend = lastPost.profileOverrides?.alpha ?? selectedBackend;
         return route.fulfill({ json: { success: true } });
       }
       return route.fulfill({ json: {
@@ -47,10 +50,29 @@ test('the chat header switches the harness and persists a per-profile override',
         ]
       } });
     }
+    if (url.pathname === '/api/manager-chat/reasoning-effort') {
+      selectedReasoningEffort = (route.request().postDataJSON() as { effortId: string }).effortId;
+      return route.fulfill({ json: { success: true } });
+    }
     if (url.pathname === '/api/manager-chat/commands') return route.fulfill({ json: { commands: [] } });
     if (url.pathname === '/api/manager-chat/models') {
-      const backend = url.searchParams.get('profile') === 'alpha' ? 'claude' : 'hermes';
-      return route.fulfill({ json: { models: [{ id: `${backend}-model`, name: `${backend} model` }], currentModelId: `${backend}-model` } });
+      if (selectedBackend === 'claude') {
+        return route.fulfill({ json: {
+          models: [{ id: 'claude-model', name: 'claude model' }],
+          currentModelId: 'claude-model',
+          reasoningEfforts: [
+            { id: 'low', name: 'Low' },
+            { id: 'ultra', name: 'Ultra' }
+          ],
+          currentReasoningEffortId: 'low'
+        } });
+      }
+      return route.fulfill({ json: {
+        models: [],
+        currentModelId: null,
+        reasoningEfforts: [],
+        currentReasoningEffortId: null
+      } });
     }
     return route.continue();
   });
@@ -94,6 +116,7 @@ test('the chat header switches the harness and persists a per-profile override',
 
   const harness = page.getByLabel('Harness / backend');
   await expect(harness).toHaveValue('hermes');
+  await expect(page.getByLabel('Reasoning effort')).toHaveCount(0);
   // A configured-but-unimplemented backend is shown, not silently skipped.
   await expect(harness.locator('option[value="vibe"]')).toHaveText('Vibe (unavailable)');
 
@@ -103,6 +126,14 @@ test('the chat header switches the harness and persists a per-profile override',
   await expect.poll(() => lastPost).not.toBeNull();
   expect(lastPost?.profileOverrides).toEqual({ alpha: 'claude' });
 
+  // Capability-aware: render exactly the active backend's advertised
+  // thought-level values. There is no GAH-owned low/medium/high enum.
+  const reasoning = page.getByLabel('Reasoning effort');
+  await expect(reasoning).toHaveValue('low');
+  await expect(reasoning.locator('option')).toHaveText(['Low', 'Ultra']);
+  await reasoning.selectOption('ultra');
+  await expect.poll(() => selectedReasoningEffort).toBe('ultra');
+
   // AC5: the picker is disabled while a turn is in flight, and re-enables
   // when the reply lands -- the busy state clears on the reply itself, not
   // only on the post-turn history reload. The reply is held until Stop is
@@ -111,7 +142,9 @@ test('the chat header switches the harness and persists a per-profile override',
   await page.getByRole('button', { name: 'Send' }).click();
   await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
   await expect(harness).toBeDisabled();
+  await expect(reasoning).toBeDisabled();
   releaseReply();
   await expect(page.getByRole('button', { name: 'Send' })).toBeVisible();
   await expect(harness).toBeEnabled();
+  await expect(reasoning).toBeEnabled();
 });

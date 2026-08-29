@@ -1,8 +1,8 @@
 /**
  * Headless (Tier B) manager-chat adapter (slice 4).
  *
- * For backends with no ACP or equivalent structured protocol (vibe, agy,
- * openhands): each turn is ONE non-interactive CLI invocation (`--print`-
+ * For backends with no ACP or equivalent structured protocol (vibe, agy):
+ * each turn is ONE non-interactive CLI invocation (`--print`-
  * style). Conversation context is reconstructed textually per turn — the
  * same replay approach the ACP path uses when a backend forgets its
  * history (see resumePrompt in acpAdapter.ts): full transcript replay for
@@ -11,10 +11,8 @@
  * What this buys: every backend in the unified chat surface, session
  * worktree binding (cwd per conversation), backend interchange, quota
  * handoff, and the event-sourced log — everything except streaming,
- * native slash commands, per-backend model listing, and the permission
- * round-trip, which need a structured protocol (upgrade to Tier A later:
- * opencode already has native ACP; agy has a stream-json mode worth
- * exploring).
+ * native slash commands, per-backend config options, and the permission
+ * round-trip, which need a structured protocol.
  */
 
 import { spawn } from 'node:child_process';
@@ -130,12 +128,21 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
       return []; // no native slash commands over a one-shot pipe
     },
 
-    async listModels(): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }> {
-      return { models: [], currentModelId: null }; // no model picker protocol
+    async listModels() {
+      return {
+        models: [],
+        currentModelId: null,
+        reasoningEfforts: [],
+        currentReasoningEffortId: null
+      }; // no config-option protocol
     },
 
     async setModel(): Promise<void> {
       throw new Error(`${spec.displayName} doesn't support model selection in headless mode.`);
+    },
+
+    async setReasoningEffort(): Promise<void> {
+      throw new Error(`${spec.displayName} doesn't support reasoning-effort selection in headless mode.`);
     },
 
     async steerTurn(): Promise<{ outcome: 'injected' }> {
@@ -166,6 +173,6 @@ export function agyBackendSpec(): HeadlessBackendSpec {
   return {
     id: 'agy',
     displayName: 'Agy',
-    turnArgs: (prompt) => ['agy', '--print', '--output-format', 'text', prompt]
+    turnArgs: (prompt) => ['agy', '--print', prompt, '--output-format', 'text']
   };
 }

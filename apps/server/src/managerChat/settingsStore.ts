@@ -19,6 +19,8 @@ export interface ManagerChatSettings {
    * error, server restart), a fresh session reverts to the backend's own
    * default. This survives that. */
   modelOverrides: Record<string, string>;
+  /** Last ACP-advertised thought level picked per profile/backend. */
+  reasoningEffortOverrides: Record<string, string>;
 }
 
 function settingsPath(): string {
@@ -33,13 +35,22 @@ export function readSettings(): ManagerChatSettings {
       return {
         defaultBackend: typeof data.defaultBackend === 'string' ? data.defaultBackend : DEFAULT_BACKEND_ID,
         profileOverrides: typeof data.profileOverrides === 'object' && data.profileOverrides ? data.profileOverrides : {},
-        modelOverrides: typeof data.modelOverrides === 'object' && data.modelOverrides ? data.modelOverrides : {}
+        modelOverrides: typeof data.modelOverrides === 'object' && data.modelOverrides ? data.modelOverrides : {},
+        reasoningEffortOverrides:
+          typeof data.reasoningEffortOverrides === 'object' && data.reasoningEffortOverrides
+            ? data.reasoningEffortOverrides
+            : {}
       };
     } catch {
       // Fall through to defaults on a corrupt file rather than crash.
     }
   }
-  return { defaultBackend: DEFAULT_BACKEND_ID, profileOverrides: {}, modelOverrides: {} };
+  return {
+    defaultBackend: DEFAULT_BACKEND_ID,
+    profileOverrides: {},
+    modelOverrides: {},
+    reasoningEffortOverrides: {}
+  };
 }
 
 export function writeSettings(settings: ManagerChatSettings): void {
@@ -67,5 +78,15 @@ export function modelOverrideForProfile(profile: string, backendId: string): str
 export function setModelOverrideForProfile(profile: string, backendId: string, modelId: string): void {
   const settings = readSettings();
   settings.modelOverrides[modelOverrideKey(profile, backendId)] = modelId;
+  writeSettings(settings);
+}
+
+export function reasoningEffortOverrideForProfile(profile: string, backendId: string): string | undefined {
+  return readSettings().reasoningEffortOverrides[modelOverrideKey(profile, backendId)];
+}
+
+export function setReasoningEffortOverrideForProfile(profile: string, backendId: string, effortId: string): void {
+  const settings = readSettings();
+  settings.reasoningEffortOverrides[modelOverrideKey(profile, backendId)] = effortId;
   writeSettings(settings);
 }
