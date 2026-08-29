@@ -250,6 +250,76 @@ test('folding a live turn does not repair it as interrupted', () => {
   }
 });
 
+test('a live fold restores the actionable pending permission until it is decided', () => {
+  const dir = tempStateDir();
+  const permission = {
+    type: 'permission/request' as const,
+    seq: 3,
+    turn: 1,
+    permissionId: 'perm-1',
+    title: 'Run the focused tests',
+    options: [
+      { optionId: 'allow-once', name: 'Allow', kind: 'allow_once' },
+      { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' }
+    ],
+    locations: ['/repo/apps/server/src/wsServer.ts'],
+    timestamp: 3000
+  } satisfies ChatSessionEvent;
+
+  try {
+    appendEvents('gah', [turnStart(1, 1), userMsg(1, 2, 'please test'), permission], { stateDir: dir });
+
+    const pending = foldSession('gah', { stateDir: dir }, false);
+    assert.deepEqual(pending.permission, {
+      turn: 1,
+      permissionId: 'perm-1',
+      title: 'Run the focused tests',
+      options: permission.options,
+      locations: permission.locations
+    });
+
+    appendEvents('gah', [{
+      type: 'permission/decision',
+      seq: 4,
+      turn: 1,
+      permissionId: 'perm-1',
+      optionId: 'allow-once',
+      timestamp: 4000
+    }], { stateDir: dir });
+
+    assert.equal(foldSession('gah', { stateDir: dir }, false).permission, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an accepted steer remains a user message inside the original turn on replay', () => {
+  const dir = tempStateDir();
+  const events: ChatSessionEvent[] = [
+    turnStart(1, 1),
+    userMsg(1, 2, 'start slowly'),
+    { type: 'user/message', seq: 3, turn: 1, text: 'change direction', source: 'steer', timestamp: 3000 },
+    assistantMsg(1, 4, 'changed'),
+    turnEnd(1, 5)
+  ];
+
+  try {
+    appendEvents('gah', events, { stateDir: dir });
+    assert.deepEqual(foldSession('gah', { stateDir: dir }).turns.map((turn) => [turn.role, turn.text]), [
+      ['user', 'start slowly'],
+      ['user', 'change direction'],
+      ['assistant', 'changed']
+    ]);
+    assert.deepEqual(deriveModelHistory(events).map((turn) => [turn.role, turn.text]), [
+      ['user', 'start slowly'],
+      ['user', 'change direction'],
+      ['assistant', 'changed']
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a completed turn is not rewritten and no interrupted marker appears', () => {
   const dir = tempStateDir();
   try {

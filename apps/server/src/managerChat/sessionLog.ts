@@ -185,6 +185,8 @@ export function deriveModelHistory(events: ChatSessionEvent[]): ChatTranscriptTu
     } else if (event.type === 'user/message' && event.source === 'prompt') {
       const prompt = prompts.get(event.turn) ?? event;
       history.push({ role: 'user', text: prompt.text, timestamp: prompt.timestamp });
+    } else if (event.type === 'user/message' && event.source === 'steer') {
+      history.push({ role: 'user', text: event.text, timestamp: event.timestamp });
     } else if (event.type === 'assistant/chunk') {
       partialText += event.text;
     } else if (event.type === 'assistant/message') {
@@ -287,12 +289,14 @@ export function foldSession(
   let cursor = events.reduce((highest, event) => Math.max(highest, event.seq), 0);
   let partialText = '';
   let openTurn: number | null = null;
+  let permission: ChatSessionView['permission'] = null;
 
   for (const e of events.slice(completedCompactionBoundary(events))) {
     switch (e.type) {
       case 'turn/start':
         openTurn = e.turn;
         partialText = '';
+        permission = null;
         break;
       case 'turn/end':
         if (openTurn === e.turn) {
@@ -306,10 +310,11 @@ export function foldSession(
           }
           openTurn = null;
           partialText = '';
+          permission = null;
         }
         break;
       case 'user/message':
-        if (e.source === 'prompt') {
+        if (e.source === 'prompt' || e.source === 'steer') {
           turns.push({ role: 'user', text: e.text, timestamp: e.timestamp });
         }
         break;
@@ -351,6 +356,13 @@ export function foldSession(
       }
       case 'permission/request':
         turns.push({ role: 'system', text: `[permission requested] ${e.title}`, timestamp: e.timestamp });
+        permission = {
+          turn: e.turn,
+          permissionId: e.permissionId,
+          title: e.title,
+          options: e.options,
+          locations: e.locations
+        };
         break;
       case 'permission/decision':
         turns.push({
@@ -358,6 +370,7 @@ export function foldSession(
           text: `[permission ${e.optionId === 'cancelled' ? 'cancelled' : `granted: ${e.optionId}`}]`,
           timestamp: e.timestamp
         });
+        if (permission?.permissionId === e.permissionId) permission = null;
         break;
       case 'tool/result':
         turns.push({ role: 'system', text: `[${e.name}] ${e.text}`, timestamp: e.timestamp });
@@ -390,5 +403,5 @@ export function foldSession(
     streaming = { turn: openTurn, partialText };
   }
 
-  return { profile, cursor, turns, streaming };
+  return { profile, cursor, turns, streaming, permission };
 }

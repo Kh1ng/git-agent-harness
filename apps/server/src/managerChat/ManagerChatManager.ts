@@ -22,7 +22,6 @@ import {
   chatKey,
   chatSessionStoreOptions,
   createSession,
-  getSession,
   listSessions,
   resolveSessionCwd,
   touchSession,
@@ -88,12 +87,23 @@ export type PermissionPublish = (event: {
 }) => void;
 let permissionPublisher: PermissionPublish | undefined;
 
+/** Durable live state changed; clients refetch the authoritative fold. */
+export type UpdatedPublish = (event: {
+  type: 'manager.chat.updated';
+  requestId: string;
+  profile: string;
+  sessionId?: string;
+}) => void;
+let updatedPublisher: UpdatedPublish | undefined;
+
 export function setChatEventPublishers(publishers: {
   toolCall?: ToolCallPublish;
   permission?: PermissionPublish;
+  updated?: UpdatedPublish;
 }): void {
   toolCallPublisher = publishers.toolCall;
   permissionPublisher = publishers.permission;
+  updatedPublisher = publishers.updated;
 }
 
 /** Live preview push (WP3): fired when a session's preview port is set or
@@ -126,6 +136,8 @@ export function getChunkPublisher(): ChunkPublish | undefined {
  * the closure's own locals (#960). */
 interface ActiveTurn {
   requestId: string;
+  /** Adapter currently serving this turn (updated on quota handoff). */
+  backend: string;
   turnNo: number;
   seq: number;
   chunkWriter: ReturnType<typeof createEventWriter> | undefined;
@@ -428,6 +440,7 @@ export async function runTurn(
     fallbackBackends: listManagerBackends().filter((b) => b.implemented && b.id !== context.backend).map((b) => b.id),
     attempt: async (backendId) => {
       const adapter = resolveAdapter(backendId);
+      active.backend = backendId;
       const attempt = async () => {
         // Model override applies to the session's own backend only -- a
         // handoff fallback backend uses its own default (the override is
@@ -527,14 +540,36 @@ export async function cancelManagerChatTurn(profile: string, sessionId?: string)
   // A cancel also answers any live permission request fail-closed -- the
   // turn is going away, so the backend must not proceed on it.
   active.pendingPermission?.resolve('cancelled');
-  const backendId = (sessionId ? getSession(profile, sessionId, chatSessionStoreOptions)?.backend : undefined)
-    ?? backendForProfile(profile);
   try {
-    await resolveAdapter(backendId).cancelTurn(key);
+    await resolveAdapter(active.backend).cancelTurn(key);
   } catch (error) {
     console.error(`[managerChat] cancel failed for ${key}:`, error);
   }
   return true;
+}
+
+/** Injects a human follow-up into the turn already running on this exact
+ * conversation's active adapter session. It is never queued as a new turn. */
+export async function steerManagerChatTurn(
+  profile: string,
+  message: string,
+  sessionId?: string
+): Promise<{ outcome: 'injected' }> {
+  const key = chatKey(profile, sessionId);
+  const active = activeTurns.get(key);
+  if (!active) throw new Error('No turn is in flight for this conversation.');
+
+  const result = await resolveAdapter(active.backend).steerTurn(key, message);
+  const sessionOpts = sessionId && sessionId !== 'default' ? { ...logOptions, sessionId } : logOptions;
+  appendEvents(profile, [{
+    type: 'user/message',
+    seq: ++active.seq,
+    turn: active.turnNo,
+    text: message,
+    source: 'steer',
+    timestamp: Date.now()
+  }], sessionOpts);
+  return result;
 }
 
 /** Answers the live permission request for a conversation (slice 3).
@@ -558,6 +593,12 @@ export async function respondManagerChatPermission(
     timestamp: Date.now()
   }], logOpts);
   active.pendingPermission.resolve(optionId);
+  updatedPublisher?.({
+    type: 'manager.chat.updated',
+    requestId: active.requestId,
+    profile,
+    ...(sessionId ? { sessionId } : {})
+  });
   return true;
 }
 
@@ -593,6 +634,7 @@ export function sendManagerChatMessage(profile: string, message: string, request
     let resolveCancel!: () => void;
     const active: ActiveTurn = {
       requestId: requestId ?? '',
+      backend: sessionContext.backend,
       turnNo,
       seq: existing.reduce((highest, event) => Math.max(highest, event.seq), 0),
       chunkWriter: undefined,
@@ -610,6 +652,12 @@ export function sendManagerChatMessage(profile: string, message: string, request
       { type: 'turn/start', seq: ++active.seq, turn: turnNo, timestamp: now },
       { type: 'user/message', seq: ++active.seq, turn: turnNo, text: message, source: 'prompt', timestamp: now }
     ], sessionOpts);
+    updatedPublisher?.({
+      type: 'manager.chat.updated',
+      requestId: requestId ?? '',
+      profile,
+      ...(sessionId ? { sessionId } : {})
+    });
 
     try {
       // Keep slash commands bare so the backend dispatches them instead of

@@ -16,6 +16,8 @@ interface ChatTurn {
   /** Present on assistant turns: which backend + model produced this reply. */
   backend?: string;
   model?: string | null;
+  /** Optimistic mid-turn steer, removed again if the backend rejects it. */
+  steeringRequestId?: string;
   /** Present on tool turns (slice 3): structured info for the activity card. */
   tool?: {
     toolCallId: string;
@@ -188,6 +190,7 @@ export function ManagerChatPage() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteIndex, setPaletteIndex] = useState(0);
   const processedRequestIds = useRef(new Set<string>());
+  const steeringRequestIds = useRef(new Set<string>());
   const historyRequestId = useRef<string | null>(null);
   const activeProfileRef = useRef(profile);
   activeProfileRef.current = profile;
@@ -245,6 +248,7 @@ export function ManagerChatPage() {
     setPreview(null);
     setPreviewOpen(false);
     setPreviewPortDraft('');
+    steeringRequestIds.current.clear();
     if (sessionId && sessionId !== 'default') {
       gahApi
         .getChatPreview(profile, sessionId)
@@ -382,6 +386,16 @@ export function ManagerChatPage() {
     processedMessagesRef.current = messages.length;
 
     for (const last of batch) {
+      // Generic errors carry no profile/session fields. Match known steering
+      // request ids before applying the conversation-scoping guard below.
+      if (last.type === 'error' && steeringRequestIds.current.delete(last.requestId)) {
+        setTurns((prev) => [
+          ...prev.filter((turn) => turn.steeringRequestId !== last.requestId),
+          { role: 'error', text: `Steering failed: ${last.error}` }
+        ]);
+        continue;
+      }
+
       // Session-scoped messages must match the conversation being rendered;
       // messages without a sessionId belong to the default conversation.
       const messageProfile = 'profile' in last ? last.profile : undefined;
@@ -420,6 +434,12 @@ export function ManagerChatPage() {
         lastAppliedSeqRef.current = Math.max(lastAppliedSeqRef.current, last.cursor);
         setStreaming(last.streaming?.partialText ? { turn: last.streaming.turn, text: last.streaming.partialText } : null);
         setRemoteTurnBusy(Boolean(last.streaming));
+        setPermission(last.permission ? {
+          permissionId: last.permission.permissionId,
+          title: last.permission.title,
+          options: last.permission.options,
+          locations: last.permission.locations
+        } : null);
         continue;
       }
 
@@ -484,6 +504,12 @@ export function ManagerChatPage() {
           options: last.options,
           locations: last.locations
         });
+        setRemoteTurnBusy(true);
+        continue;
+      }
+
+      if (last.type === 'manager.chat.steered') {
+        steeringRequestIds.current.delete(last.requestId);
         continue;
       }
 
@@ -534,7 +560,7 @@ export function ManagerChatPage() {
   }, [messages, pendingRequest, profile, sessionId]);
 
   const turnBusy = pendingRequest !== null || remoteTurnBusy || streaming !== null;
-  const sendBlocked = !historyLoaded || turnBusy;
+  const sendBlocked = !historyLoaded;
   // #945: the header shows the actual configured harness, and flags a
   // configured-but-unimplemented backend rather than silently falling back.
   const activeBackendInfo = availableBackends.find((b) => b.id === activeBackendId);
@@ -607,9 +633,24 @@ export function ManagerChatPage() {
     const text = draft.trim();
     if (!text || sendBlocked) return;
     const requestId = generateRequestId();
-    setTurns((prev) => [...prev, { role: 'user', text }]);
+    setTurns((prev) => [...prev, {
+      role: 'user',
+      text,
+      ...(turnBusy ? { steeringRequestId: requestId } : {})
+    }]);
     setDraft('');
     setPaletteOpen(false);
+    if (turnBusy) {
+      steeringRequestIds.current.add(requestId);
+      sendMessage({
+        type: 'manager.chat.steer',
+        requestId,
+        profile,
+        message: text,
+        ...(sessionId ? { sessionId } : {})
+      });
+      return;
+    }
     setPendingRequest({ id: requestId, profile });
     sendMessage({
       type: 'manager.chat.send',
@@ -1030,7 +1071,7 @@ export function ManagerChatPage() {
               <p className="text-xs text-muted">Context is shared across backends — switching models keeps this session's memory.</p>
             </div>
           )}
-          {turns.map((turn, i) => (
+          {turns.filter((turn) => !turn.tool || !liveTools[turn.tool.toolCallId]).map((turn, i) => (
             <div key={i} className={`flex flex-col ${turn.role === 'user' ? 'items-end' : 'items-start'}`}>
               {turn.role === 'tool' && turn.tool ? (
                 <ToolCallCard tool={turn.tool} />
@@ -1163,7 +1204,16 @@ export function ManagerChatPage() {
             rows={2}
             className="flex-1 bg-raised border border-subtle rounded-md px-3 py-2 text-sm text-primary resize-none disabled:opacity-50"
           />
-          {turnBusy ? (
+          <button
+            onClick={handleSend}
+            disabled={!isConnected || !draft.trim() || sendBlocked}
+            className="btn-primary h-fit"
+            aria-label="Send"
+            title={turnBusy ? 'Steer this turn' : undefined}
+          >
+            <Send size={14} aria-hidden="true" />
+          </button>
+          {turnBusy && (
             <button
               onClick={handleCancel}
               className="btn-primary h-fit"
@@ -1171,15 +1221,6 @@ export function ManagerChatPage() {
               title="Stop this turn"
             >
               <Square size={14} aria-hidden="true" />
-            </button>
-          ) : (
-            <button
-              onClick={handleSend}
-              disabled={!isConnected || !draft.trim() || sendBlocked}
-              className="btn-primary h-fit"
-              aria-label="Send"
-            >
-              <Send size={14} aria-hidden="true" />
             </button>
           )}
         </div>

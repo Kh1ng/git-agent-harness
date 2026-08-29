@@ -175,6 +175,14 @@ export type ServerMessage =
       url: string;
     }
   | {
+      /** A steering message was injected into the currently running turn. */
+      type: "manager.chat.steered";
+      requestId: string;
+      profile: string;
+      sessionId?: string;
+      outcome: "injected";
+    }
+  | {
       type: "manager.chat.reply";
       requestId: string;
       profile: string;
@@ -211,6 +219,8 @@ export type ServerMessage =
       cursor: number;
       /** Partial assistant reply when the requested turn is still running. */
       streaming: ChatSessionView['streaming'];
+      /** Actionable permission still blocking the live turn, if any. */
+      permission: ChatSessionView['permission'];
     }
   | {
       /** Signals clients to reload one profile after its active turn ends. */
@@ -306,6 +316,15 @@ export type ClientMessage =
       message: string;
       /** WP2 sessions: target session within the profile. Omitted (or
        * 'default') addresses the profile's legacy single conversation. */
+      sessionId?: string;
+    }
+  | {
+      /** Inject a user follow-up into the active turn on the same backend
+       * session. This is distinct from queueing a later turn. */
+      type: "manager.chat.steer";
+      requestId: string;
+      profile: string;
+      message: string;
       sessionId?: string;
     }
   | {
