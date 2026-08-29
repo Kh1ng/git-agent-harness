@@ -394,6 +394,15 @@ fn resolve_web_deploy_root(configured: Option<OsString>) -> Result<Option<PathBu
     Ok(Some(root))
 }
 
+/// Runs the `apps/web` workspace build directly rather than the root
+/// `build:web` script. `build:web` carries an npm `prebuild:web` lifecycle
+/// hook that reruns the whole server integration suite -- fine for CI, but
+/// on the production host it can hang on a flaky integration test (issue
+/// #1010) and wedge the updater before it ever restarts the server. CI still
+/// calls `npm run build:web` and keeps exercising that hook; only this
+/// deploy path skips it.
+const WEB_BUILD_ARGS: &[&str] = &["run", "--workspace=apps/web", "build"];
+
 /// Deploys `apps/web/dist` into the configured web root. Ordering makes the
 /// swap atomic for a browser (issue #896 review): Vite content-hashes every
 /// asset filename, and `index.html` is the only file a browser loads first,
@@ -414,7 +423,7 @@ fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
     let Some(root_path) = resolve_web_deploy_root(env::var_os("GAH_WEB_DEPLOY_ROOT"))? else {
         return Ok(None);
     };
-    run_command(repo, "npm", &["run", "build:web"])?;
+    run_command(repo, "npm", WEB_BUILD_ARGS)?;
     let dist = repo.join("apps/web/dist");
     if !dist.join("index.html").is_file() {
         bail!("web build did not produce apps/web/dist/index.html");
@@ -683,7 +692,7 @@ mod tests {
         ensure_clean, ensure_default_branch_checkout, install_prune_unit_template,
         install_quota_refresh_unit_template, install_server_unit_template,
         install_watchdog_unit_template, installed_binary_path, resolve_web_deploy_root, run,
-        stale_asset_names, HostRole, UpdateArgs,
+        stale_asset_names, HostRole, UpdateArgs, WEB_BUILD_ARGS,
     };
     use crate::test_support::PathGuard;
     use std::collections::HashSet;
@@ -1033,6 +1042,16 @@ mod tests {
         assert!(resolve_web_deploy_root(Some(OsString::from("/"))).is_err());
         assert!(resolve_web_deploy_root(Some(OsString::from("/tmp/.."))).is_err());
         assert!(resolve_web_deploy_root(Some(OsString::from("/var/www/gah/../../.."))).is_err());
+    }
+
+    /// Issue #1010: the production updater must build `apps/web` directly,
+    /// not via the root `build:web` script -- that script's `prebuild:web`
+    /// lifecycle hook reruns the whole server integration suite, which can
+    /// hang and wedge `gah update` on the very host it's supposed to update.
+    #[test]
+    fn web_build_targets_workspace_directly_not_root_build_web_script() {
+        assert_eq!(WEB_BUILD_ARGS, &["run", "--workspace=apps/web", "build"]);
+        assert!(!WEB_BUILD_ARGS.contains(&"build:web"));
     }
 
     /// Issue #896 review: the deploy prunes stale hashed assets. Vite
