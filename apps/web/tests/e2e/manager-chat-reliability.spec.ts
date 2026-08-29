@@ -110,6 +110,73 @@ test('reconnect restores actionable activity and a durable terminal clears a mis
   await expect(page.getByRole('button', { name: 'Send' })).toBeEnabled();
 });
 
+test('permission and terminal frames remain live after the shared inbox rolls over', async ({ page }) => {
+  await stubManagerChatApis(page);
+  let socket: WebSocketRoute;
+  let activeRequestId = '';
+
+  await page.routeWebSocket('**/ws**', (ws) => {
+    socket = ws;
+    ws.send(JSON.stringify(WELCOME));
+    ws.onMessage((raw) => {
+      const message = JSON.parse(String(raw));
+      if (message.type === 'manager.chat.send') activeRequestId = message.requestId;
+      if (message.type !== 'manager.chat.historyRequest') return;
+      ws.send(JSON.stringify({
+        type: 'manager.chat.history',
+        requestId: message.requestId,
+        profile: 'alpha',
+        turns: [],
+        cursor: 0,
+        streaming: null,
+        permission: null
+      } satisfies ServerMessage));
+    });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  const composer = page.getByPlaceholder(/Message the manager/);
+  await composer.fill('long running turn');
+  await page.getByRole('button', { name: 'Send' }).click();
+  await expect.poll(() => activeRequestId).not.toBe('');
+
+  for (let seq = 1; seq <= 102; seq += 1) {
+    socket!.send(JSON.stringify({
+      type: 'manager.chat.chunk',
+      requestId: activeRequestId,
+      profile: 'alpha',
+      turn: 1,
+      seq,
+      text: 'x'
+    } satisfies ServerMessage));
+  }
+
+  socket!.send(JSON.stringify({
+    type: 'manager.chat.permission',
+    requestId: activeRequestId,
+    profile: 'alpha',
+    turn: 1,
+    permissionId: 'permission-after-rollover',
+    title: 'Approve after rollover',
+    options: [{ optionId: 'allow-once', name: 'Allow', kind: 'allow_once' }],
+    locations: ['/repo/package.json']
+  } satisfies ServerMessage));
+  await expect(page.getByRole('alertdialog', { name: 'Permission request' })).toContainText('Approve after rollover');
+
+  socket!.send(JSON.stringify({
+    type: 'manager.chat.reply',
+    requestId: activeRequestId,
+    profile: 'alpha',
+    reply: 'finished after rollover',
+    backend: 'codex',
+    model: null,
+    usage: null
+  } satisfies ServerMessage));
+  await expect(page.getByText('finished after rollover', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0);
+});
+
 test('the composer steers the active turn while Stop remains available, then cancellation returns it idle', async ({ page }) => {
   await stubManagerChatApis(page);
   let socket: WebSocketRoute;

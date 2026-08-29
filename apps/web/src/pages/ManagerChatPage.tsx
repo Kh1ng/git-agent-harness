@@ -181,7 +181,10 @@ export function ManagerChatPage() {
    * so they're skipped -- gives exactly-once rendering for a client that
    * connects mid-turn. */
   const lastAppliedSeqRef = useRef(0);
-  const processedMessagesRef = useRef(0);
+  // The provider evicts old inbox entries to keep memory bounded. Track its
+  // monotonic receive id rather than an array offset, which becomes invalid
+  // as soon as the front of that array rolls over.
+  const processedMessageIdRef = useRef(messages.at(-1)?.id ?? 0);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   /** Which harness answers this profile's chat (#945): a stored per-profile
    * override, not client state. The header picker writes it via
@@ -268,7 +271,6 @@ export function ManagerChatPage() {
         .catch(() => {});
     }
     lastAppliedSeqRef.current = 0;
-    processedMessagesRef.current = 0;
     if (!isConnected) return;
     const requestId = generateRequestId();
     historyRequestId.current = requestId;
@@ -420,11 +422,11 @@ export function ManagerChatPage() {
     // Process every not-yet-consumed message in order. React can batch
     // several websocket frames into one render, so only looking at the last
     // message would silently drop intermediate chunk fragments.
-    const batch = messages.slice(processedMessagesRef.current);
+    const batch = messages.filter(({ id }) => id > processedMessageIdRef.current);
     if (batch.length === 0) return;
-    processedMessagesRef.current = messages.length;
+    processedMessageIdRef.current = batch.at(-1)!.id;
 
-    for (const last of batch) {
+    for (const { message: last } of batch) {
       // Generic errors carry no profile/session fields. Match known steering
       // request ids before applying the conversation-scoping guard below.
       if (last.type === 'error' && steeringRequestIds.current.delete(last.requestId)) {
