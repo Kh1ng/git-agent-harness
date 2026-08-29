@@ -114,7 +114,7 @@ function acpManagerAdapter(
   id: string,
   displayName: string,
   spawnSpec: () => import('./acpAdapter.js').SpawnSpec,
-  options?: { nativeSteering?: boolean }
+  options?: { nativeSteering?: boolean; consecutiveFailureReconnectThreshold?: number }
 ): ManagerAdapter {
   const backend = createAcpBackend(displayName, spawnSpec, options);
   return { id, displayName, implemented: true, ...backend };
@@ -122,7 +122,7 @@ function acpManagerAdapter(
 
 const REGISTRY: Record<string, ManagerAdapter> = {
   hermes: acpManagerAdapter('hermes', 'Hermes', hermesSpawnSpec),
-  codex: acpManagerAdapter('codex', 'Codex', codexSpawnSpec),
+  codex: acpManagerAdapter('codex', 'Codex', codexSpawnSpec, { consecutiveFailureReconnectThreshold: 2 }),
   // claude-agent-acp currently lets an injected steer outlive and detach
   // from the owning session/prompt (agentclientprotocol/claude-agent-acp#934).
   // Do not advertise that unsafe path until the adapter preserves lifecycle.
