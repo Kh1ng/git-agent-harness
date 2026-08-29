@@ -11,6 +11,7 @@ import { test } from 'node:test';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { ClientMessage, ServerMessage } from '@git-agent-harness/contracts';
 import { createWebSocketHandler } from './wsServer.js';
+import { previewProxy } from './managerChat/previewProxy.js';
 
 const fixtures = resolve(dirname(fileURLToPath(import.meta.url)), '../tests/fixtures');
 
@@ -484,6 +485,16 @@ test('a session preview auto-detects the dev-server port and proxies it', { time
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
   const wsUrl = `ws://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
+  // Pin the advertised preview host to loopback: the real code path falls
+  // back to this node's own Tailscale IPv4 when present (see
+  // previewProxy.ts), but a node whose tailscaled runs in userspace-network
+  // mode (no TUN) can report a Tailscale IP that black-holes a self-connect
+  // from this same process -- the http.get() below would hang until the
+  // whole test's 30s timeout, wedging `gah update`'s web-build prebuild
+  // gate. Tailscale detection itself is covered hermetically in
+  // tailscaleDetect.test.ts; this test only needs a reachable target.
+  previewProxy.configure({ advertiseHost: '127.0.0.1' });
+
   let createdSessionId: string | null = null;
   // The "dev server" the agent allegedly started: records the Host header.
   const seenHosts: string[] = [];
@@ -538,7 +549,6 @@ test('a session preview auto-detects the dev-server port and proxies it', { time
     await new Promise<void>((done) => server.close(() => done()));
     await new Promise<void>((done) => gateway.close(() => done()));
     await new Promise<void>((done) => devServer.close(() => done()));
-    const { previewProxy } = await import('./managerChat/previewProxy.js');
     if (createdSessionId) await previewProxy.clear(profile, createdSessionId);
     execFileSync('git', ['worktree', 'prune'], { cwd: checkout });
     process.env = savedEnv;
