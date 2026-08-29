@@ -130,6 +130,8 @@ export interface CreateSessionInput {
   profile: string;
   /** The profile's config facts (repo_id, local_path, worktree_base). */
   profileInfo: Pick<ProfileSummary, 'repo_id' | 'local_path' | 'worktree_base'>;
+  /** Pull request identity for PR chats; omitted for issue and general sessions. */
+  prNumber?: number;
   backend: string;
   /** Model override for the backend; null = backend default. */
   model?: string | null;
@@ -160,6 +162,7 @@ export async function createSession(input: CreateSessionInput, opts?: ChatSessio
   const record: ChatSessionSummary = {
     id: sessionId,
     profile,
+    ...(input.prNumber === undefined ? {} : { prNumber: input.prNumber }),
     worktreePath: null,
     branch: input.branch ?? sessionBranchName(profileInfo.repo_id, sessionId),
     backend,

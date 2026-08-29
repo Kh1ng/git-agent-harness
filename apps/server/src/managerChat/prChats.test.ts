@@ -99,6 +99,7 @@ test('startPrChat opens a read-only seeded session: no branch, no worktree, no P
   });
   assert.equal(existing, false);
   assert.equal(session.branch, 'feat/pr-chat', 'session rides the PR head branch name');
+  assert.equal(session.prNumber, 12, 'session records its PR identity');
   assert.equal(session.title, '#12 Ship the PR chat mode');
   assert.equal(session.worktreePath, null, 'no worktree materialized');
   assert.ok(!existsSync(env.profileInfo.worktree_base), 'worktree base never created');
@@ -157,6 +158,7 @@ test('startPrChat does not reuse a writable issue session on the PR head branch'
   assert.equal(started.existing, false);
   assert.notEqual(started.session.id, issue.session.id);
   assert.equal(started.session.branch, issue.session.branch);
+  assert.equal(started.session.prNumber, 13);
   assert.equal(started.session.worktreePath, null, 'PR chat is read-only and worktree-less');
   assert.equal(started.session.backend, 'vibe');
   assert.equal(started.session.model, 'pr-model');
@@ -170,9 +172,31 @@ test('startPrChat does not reuse a writable issue session on the PR head branch'
   });
   assert.equal(reopened.existing, true);
   assert.equal(reopened.session.id, started.session.id);
+  assert.equal(reopened.session.prNumber, 13);
   assert.equal(reopened.session.worktreePath, null);
   assert.deepEqual(listSessions('p').find((session) => session.id === issue.session.id), issueState);
   assert.equal(readFileSync(env.stateFile, 'utf8'), providerState, 'PR starts do not mutate issue provider state');
+  assert.equal(listSessions('p').length, 2);
+}));
+
+test('startPrChat does not reuse a checkout-mode issue session on the PR head branch', withEnv(async (env) => {
+  const profileInfo = { ...env.profileInfo, worktree_base: '' };
+  const issue = await startIssueChat({
+    profile: 'p',
+    profileInfo,
+    issueNumber: 42,
+    backend: 'codex'
+  });
+  assert.equal(issue.session.worktreePath, null, 'checkout-mode issue sessions have no worktree path');
+
+  const started = await startPrChat({
+    profile: 'p',
+    profileInfo,
+    prNumber: 13,
+    backend: 'vibe'
+  });
+  assert.equal(started.existing, false);
+  assert.notEqual(started.session.id, issue.session.id);
   assert.equal(listSessions('p').length, 2);
 }));
 
