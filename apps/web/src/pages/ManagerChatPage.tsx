@@ -8,6 +8,7 @@ import { NewChatModal } from '../components/NewChatModal.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
+import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { generateRequestId } from '@git-agent-harness/shared';
 import type {
   ManagerChatTurn,
@@ -68,6 +69,10 @@ function formatBytes(bytes: number): string {
     unit = units[index];
   }
   return `${value.toFixed(value >= 10 ? 1 : 2)} ${unit}`;
+}
+
+function activeChatSessions(sessions: ChatSessionSummary[]): ChatSessionSummary[] {
+  return sessions.filter((session) => session.archivedAt === null);
 }
 
 function fromServerTurn(turn: ManagerChatTurn): ChatTurn {
@@ -251,7 +256,7 @@ export function ManagerChatPage() {
       .getChatSessions(forProfile)
       .then(({ sessions: fetched }) => {
         if (activeProfileRef.current !== forProfile) return;
-        setSessions(fetched);
+        setSessions(activeChatSessions(fetched));
         setSessionsError(false);
       })
       .catch(() => {
@@ -263,6 +268,7 @@ export function ManagerChatPage() {
   };
 
   useAutoRefresh(() => refreshSessions(profile), 5_000);
+  useWsReconnectRefresh(() => refreshSessions(profile));
 
   useEffect(() => {
     refreshSessions(profile);
@@ -792,7 +798,8 @@ export function ManagerChatPage() {
   const handleArchiveSession = async () => {
     if (!activeSession) return;
     try {
-      await gahApi.archiveChatSession(profile, activeSession.id);
+      const archived = await gahApi.archiveChatSession(profile, activeSession.id);
+      setSessions((current) => activeChatSessions(current.filter((session) => session.id !== archived.id)));
       refreshSessions(profile);
       setSessionId(null);
     } catch (err) {
