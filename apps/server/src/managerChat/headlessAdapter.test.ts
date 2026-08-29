@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHeadlessBackend, type HeadlessBackendSpec } from './headlessAdapter.js';
+import { agyBackendSpec, createHeadlessBackend, type HeadlessBackendSpec } from './headlessAdapter.js';
 
 /** A fake one-shot CLI: echoes its cwd marker file's content so the test
  * proves the turn ran in the session cwd, and echoes the prompt tail. */
@@ -76,7 +76,7 @@ test('a headless backend surfaces CLI failure text and rejects cleanly', async (
   }
 });
 
-test('headless backends advertise no commands/models and refuse setModel', async () => {
+test('headless backends advertise no config options and refuse config changes', async () => {
   const backend = createHeadlessBackend({
     id: 'fake',
     displayName: 'Fake',
@@ -85,5 +85,17 @@ test('headless backends advertise no commands/models and refuse setModel', async
   assert.deepEqual(await backend.listCommands('p'), []);
   const models = await backend.listModels('p');
   assert.equal(models.models.length, 0);
+  assert.equal(models.reasoningEfforts.length, 0);
   await assert.rejects(backend.setModel('p', 'x'), /headless mode/);
+  await assert.rejects(backend.setReasoningEffort('p', 'high'), /headless mode/);
+});
+
+test('AGY receives the prompt as the value of --print before other flags', () => {
+  assert.deepEqual(agyBackendSpec().turnArgs('three-turn remembered fact'), [
+    'agy',
+    '--print',
+    'three-turn remembered fact',
+    '--output-format',
+    'text'
+  ]);
 });

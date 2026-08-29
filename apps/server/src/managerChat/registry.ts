@@ -1,19 +1,26 @@
 /**
  * Manager backend registry for the manager-chat MVP.
  *
- * Hermes, Codex, and Claude all have real ACP-backed adapters (see
- * acpAdapter.ts -- Hermes speaks ACP natively, Codex/Claude via their
- * official Zed-maintained bridge packages). Vibe/opencode/agy have no ACP
- * or equivalent structured protocol, so they stay unimplemented for manager
- * chat -- picking one fails loudly with a clear message instead of the chat
- * silently doing nothing or falling back to a different backend.
+ * Hermes and OpenCode speak ACP natively; Codex and Claude use their
+ * official ACP bridge packages. Vibe and AGY use the headless adapter,
+ * which preserves transcript replay but does not advertise live config
+ * options such as model or reasoning-effort selection.
  */
 
-import { createAcpBackend, hermesSpawnSpec, codexSpawnSpec, claudeSpawnSpec, opencodeSpawnSpec, type ManagerCommandInfo, type ManagerModelInfo } from './acpAdapter.js';
+import {
+  createAcpBackend,
+  hermesSpawnSpec,
+  codexSpawnSpec,
+  claudeSpawnSpec,
+  opencodeSpawnSpec,
+  type ManagerCommandInfo,
+  type ManagerModelInfo,
+  type ManagerReasoningEffortInfo
+} from './acpAdapter.js';
 import { createHeadlessBackend, vibeBackendSpec, agyBackendSpec } from './headlessAdapter.js';
 import type { ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 
-export type { ManagerCommandInfo, ManagerModelInfo };
+export type { ManagerCommandInfo, ManagerModelInfo, ManagerReasoningEffortInfo };
 
 export interface ManagerBackendInfo {
   id: string;
@@ -52,8 +59,14 @@ export interface ManagerAdapter extends ManagerBackendInfo {
     }
   ): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }>;
   listCommands(gahProfile: string): Promise<ManagerCommandInfo[]>;
-  listModels(gahProfile: string): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }>;
+  listModels(gahProfile: string): Promise<{
+    models: ManagerModelInfo[];
+    currentModelId: string | null;
+    reasoningEfforts: ManagerReasoningEffortInfo[];
+    currentReasoningEffortId: string | null;
+  }>;
   setModel(gahProfile: string, modelId: string): Promise<void>;
+  setReasoningEffort(gahProfile: string, effortId: string): Promise<void>;
   steerTurn(gahProfile: string, message: string): Promise<{ outcome: 'injected' }>;
   cancelTurn(gahProfile: string): Promise<void>;
 }
@@ -76,11 +89,15 @@ class NotImplementedAdapter implements ManagerAdapter {
     return [];
   }
 
-  async listModels(): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }> {
-    return { models: [], currentModelId: null };
+  async listModels() {
+    return { models: [], currentModelId: null, reasoningEfforts: [], currentReasoningEffortId: null };
   }
 
   async setModel(): Promise<void> {
+    throw new Error(`${this.displayName} isn't wired up as a manager chat backend yet (${this.trackingIssue}).`);
+  }
+
+  async setReasoningEffort(): Promise<void> {
     throw new Error(`${this.displayName} isn't wired up as a manager chat backend yet (${this.trackingIssue}).`);
   }
 

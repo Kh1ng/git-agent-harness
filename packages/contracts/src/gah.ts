@@ -1071,11 +1071,18 @@ export interface ManagerCommandInfo {
   argsHint?: string;
 }
 
-/** A real selectable model from the active backend's own ACP session state
- * (session/new's `models` field, ACP's session/set_model method) -- not a
- * list GAH maintains. Not every backend exposes this (Claude's ACP bridge
- * doesn't today); an empty list means no model picker for that backend. */
+/** A real selectable model from the active backend's own ACP session config
+ * options -- not a list GAH maintains. An empty list means no model picker
+ * for that backend. */
 export interface ManagerModelInfo {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+/** A reasoning-effort choice advertised by the active backend through ACP's
+ * `thought_level` session config category. Values are provider-owned. */
+export interface ManagerReasoningEffortInfo {
   id: string;
   name: string;
   description?: string;
@@ -1084,6 +1091,8 @@ export interface ManagerModelInfo {
 export interface ManagerModelsSummary {
   models: ManagerModelInfo[];
   currentModelId: string | null;
+  reasoningEfforts: ManagerReasoningEffortInfo[];
+  currentReasoningEffortId: string | null;
 }
 
 // ---------------------------------------------------------------------------

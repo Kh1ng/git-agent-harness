@@ -33,6 +33,12 @@ export interface ManagerModelInfo {
   description?: string;
 }
 
+export interface ManagerReasoningEffortInfo {
+  id: string;
+  name: string;
+  description?: string;
+}
+
 export interface SpawnSpec {
   command: string;
   args: string[];
@@ -192,6 +198,26 @@ export function readModelConfig(options: acp.SessionConfigOption[]): {
   };
 }
 
+/** ACP owns the reasoning vocabulary. Only the standard thought_level
+ * category is surfaced, and every value/name comes from the backend's
+ * advertised select option rather than a GAH-maintained enum. */
+export function readReasoningConfig(options: acp.SessionConfigOption[]): {
+  efforts: ManagerReasoningEffortInfo[];
+  currentEffortId: string | null;
+  configId: string | null;
+} {
+  const reasoning = options.find((option) => option.type === 'select' && option.category === 'thought_level');
+  if (!reasoning || reasoning.type !== 'select') {
+    return { efforts: [], currentEffortId: null, configId: null };
+  }
+  const choices = reasoning.options.flatMap((option) => 'options' in option ? option.options : [option]);
+  return {
+    efforts: choices.map((option) => ({ id: option.value, name: option.name, description: option.description ?? undefined })),
+    currentEffortId: reasoning.currentValue,
+    configId: reasoning.id
+  };
+}
+
 interface ProfileConnection {
   process: ChildProcessByStdio<NodeWritable, NodeReadable, null>;
   connection: acp.ClientSideConnection;
@@ -205,6 +231,9 @@ interface ProfileConnection {
   models: ManagerModelInfo[];
   currentModelId: string | null;
   modelConfigId: string | null;
+  reasoningEfforts: ManagerReasoningEffortInfo[];
+  currentReasoningEffortId: string | null;
+  reasoningConfigId: string | null;
   steeringSupported: boolean;
   knownHistory: ChatTranscriptTurn[];
   ready: Promise<void>;
@@ -315,35 +344,56 @@ export function createAcpBackend(
 ) {
   const connections = new Map<string, ProfileConnection>();
 
-  function updateModels(state: ProfileConnection, options: acp.SessionConfigOption[]): void {
+  function updateSessionConfig(state: ProfileConnection, options: acp.SessionConfigOption[]): void {
     const model = readModelConfig(options);
     state.models = model.models;
     state.currentModelId = model.currentModelId;
     state.modelConfigId = model.configId;
+    const reasoning = readReasoningConfig(options);
+    state.reasoningEfforts = reasoning.efforts;
+    state.currentReasoningEffortId = reasoning.currentEffortId;
+    state.reasoningConfigId = reasoning.configId;
+  }
+
+  async function selectConfigOption(state: ProfileConnection, configId: string, value: string): Promise<void> {
+    const response = await state.connection.setSessionConfigOption({
+      sessionId: state.sessionId,
+      configId,
+      value
+    });
+    state.client.configOptions = response.configOptions;
+    updateSessionConfig(state, response.configOptions);
   }
 
   async function selectModel(state: ProfileConnection, modelId: string): Promise<void> {
     if (!state.modelConfigId) throw new Error(`${label} does not advertise model selection.`);
-    const response = await state.connection.setSessionConfigOption({
-      sessionId: state.sessionId,
-      configId: state.modelConfigId,
-      value: modelId
-    });
-    state.client.configOptions = response.configOptions;
-    updateModels(state, response.configOptions);
+    await selectConfigOption(state, state.modelConfigId, modelId);
   }
 
-  async function startSession(state: ProfileConnection, preserveModel = false): Promise<void> {
-    const previousModel = preserveModel ? state.currentModelId : null;
+  async function selectReasoningEffort(state: ProfileConnection, effortId: string): Promise<void> {
+    if (!state.reasoningConfigId) throw new Error(`${label} does not advertise reasoning-effort selection.`);
+    await selectConfigOption(state, state.reasoningConfigId, effortId);
+  }
+
+  async function startSession(state: ProfileConnection, preserveConfig = false): Promise<void> {
+    const previousModel = preserveConfig ? state.currentModelId : null;
+    const previousReasoningEffort = preserveConfig ? state.currentReasoningEffortId : null;
     state.client.sessionCostUsd = 0;
     state.client.usageUpdate = null;
     state.client.cumulativeUsage = null;
     const session = await state.connection.newSession({ cwd: state.cwd, mcpServers: [] });
     state.sessionId = session.sessionId;
     state.client.configOptions = session.configOptions ?? [];
-    updateModels(state, state.client.configOptions);
+    updateSessionConfig(state, state.client.configOptions);
     if (previousModel && previousModel !== state.currentModelId && state.models.some((model) => model.id === previousModel)) {
       await selectModel(state, previousModel);
+    }
+    if (
+      previousReasoningEffort
+      && previousReasoningEffort !== state.currentReasoningEffortId
+      && state.reasoningEfforts.some((effort) => effort.id === previousReasoningEffort)
+    ) {
+      await selectReasoningEffort(state, previousReasoningEffort);
     }
   }
 
@@ -373,6 +423,9 @@ export function createAcpBackend(
       models: [],
       currentModelId: null,
       modelConfigId: null,
+      reasoningEfforts: [],
+      currentReasoningEffortId: null,
+      reasoningConfigId: null,
       steeringSupported: false,
       knownHistory: [],
       ready: Promise.resolve()
@@ -484,7 +537,7 @@ export function createAcpBackend(
     if (result.stopReason !== 'end_turn') {
       console.warn(`[managerChat] ${label} turn ended with stopReason=${result.stopReason} for profile ${gahProfile}`);
     }
-    updateModels(state, state.client.configOptions);
+    updateSessionConfig(state, state.client.configOptions);
     const reply = state.client.replyChunks.join('');
     if (isCompactionCommand(input.prompt)) {
       state.knownHistory = [{ role: 'system', text: compactionSummary(input.prompt, reply), timestamp: Date.now() }];
@@ -517,9 +570,14 @@ export function createAcpBackend(
     return state.client.availableCommands;
   }
 
-  async function listModels(gahProfile: string): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }> {
+  async function listModels(gahProfile: string) {
     const state = await connect(gahProfile);
-    return { models: state.models, currentModelId: state.currentModelId };
+    return {
+      models: state.models,
+      currentModelId: state.currentModelId,
+      reasoningEfforts: state.reasoningEfforts,
+      currentReasoningEffortId: state.currentReasoningEffortId
+    };
   }
 
   async function setModel(gahProfile: string, modelId: string): Promise<void> {
@@ -528,6 +586,14 @@ export function createAcpBackend(
       throw new Error(`Unknown model "${modelId}" for ${label}`);
     }
     await selectModel(state, modelId);
+  }
+
+  async function setReasoningEffort(gahProfile: string, effortId: string): Promise<void> {
+    const state = await connect(gahProfile);
+    if (!state.reasoningEfforts.some((effort) => effort.id === effortId)) {
+      throw new Error(`Unknown reasoning effort "${effortId}" for ${label}`);
+    }
+    await selectReasoningEffort(state, effortId);
   }
 
   async function steerTurn(gahProfile: string, message: string): Promise<{ outcome: 'injected' }> {
@@ -560,5 +626,5 @@ export function createAcpBackend(
     await state.connection.cancel({ sessionId: state.sessionId });
   }
 
-  return { runTurn, listCommands, listModels, setModel, steerTurn, cancelTurn };
+  return { runTurn, listCommands, listModels, setModel, setReasoningEffort, steerTurn, cancelTurn };
 }

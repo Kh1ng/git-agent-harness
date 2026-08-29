@@ -63,6 +63,7 @@ import {
   listModelsForProfile as listManagerChatModels,
   listModelsForBackend as listManagerChatModelsForBackend,
   setModelForProfile as setManagerChatModel,
+  setReasoningEffortForProfile as setManagerChatReasoningEffort,
   listChatSessions,
   createChatSession,
   archiveChatSession,
@@ -1042,7 +1043,12 @@ export function createServer(
         typeof req.body?.profileOverrides === 'object' && req.body.profileOverrides !== null
           ? req.body.profileOverrides
           : current.profileOverrides;
-      writeManagerChatSettings({ defaultBackend, profileOverrides, modelOverrides: current.modelOverrides });
+      writeManagerChatSettings({
+        defaultBackend,
+        profileOverrides,
+        modelOverrides: current.modelOverrides,
+        reasoningEffortOverrides: current.reasoningEffortOverrides
+      });
       res.json({ success: true });
     } catch (error) {
       res.status(400).json({
@@ -1127,10 +1133,10 @@ export function createServer(
     }
   });
 
-  // Real selectable models for the active backend, sourced live from its
-  // own ACP session state -- not a list GAH maintains. Empty for backends
-  // that don't expose this (Claude's ACP bridge doesn't today). `backend`
-  // overrides the profile default (new-chat flow shows per-backend lists).
+  // Real selectable models and reasoning efforts for the active backend,
+  // sourced live from its own ACP session state -- not lists GAH maintains.
+  // `backend` overrides the profile default (new-chat flow shows
+  // per-backend lists).
   app.get('/api/manager-chat/models', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const backend = typeof req.query.backend === 'string' ? req.query.backend : undefined;
@@ -1160,6 +1166,26 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to set manager chat model',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Capability-aware reasoning effort: values come from the active ACP
+  // backend's thought_level config option and are validated by that adapter.
+  app.post('/api/manager-chat/reasoning-effort', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const effortId = typeof req.body?.effortId === 'string' ? req.body.effortId : undefined;
+    if (!effortId) {
+      res.status(400).json({ error: 'Missing required field: effortId' });
+      return;
+    }
+    try {
+      await setManagerChatReasoningEffort(profile, effortId);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to set manager chat reasoning effort',
         message: error instanceof Error ? error.message : String(error)
       });
     }

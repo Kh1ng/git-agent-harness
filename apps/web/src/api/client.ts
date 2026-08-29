@@ -219,6 +219,7 @@ export interface GahDataSource {
   getManagerChatCommands(profile: string): Promise<{ commands: ManagerCommandInfo[] }>;
   getManagerChatModels(profile: string): Promise<ManagerModelsSummary>;
   setManagerChatModel(profile: string, modelId: string): Promise<{ success: boolean }>;
+  setManagerChatReasoningEffort(profile: string, effortId: string): Promise<{ success: boolean }>;
   getChatSessions(profile: string): Promise<{ sessions: ChatSessionSummary[] }>;
   createChatSession(profile: string, backend?: string, model?: string | null, title?: string): Promise<ChatSessionSummary>;
   updateChatSession(profile: string, sessionId: string, patch: { backend?: string; model?: string | null; title?: string }): Promise<ChatSessionSummary>;
@@ -451,6 +452,12 @@ export const gahApi: GahDataSource = {
   },
   setManagerChatModel(profile, modelId) {
     return postJson<{ success: boolean }, { profile: string; modelId: string }>('/api/manager-chat/model', { profile, modelId });
+  },
+  setManagerChatReasoningEffort(profile, effortId) {
+    return postJson<{ success: boolean }, { profile: string; effortId: string }>(
+      '/api/manager-chat/reasoning-effort',
+      { profile, effortId }
+    );
   },
   getChatSessions(profile) {
     return getJson<{ sessions: ChatSessionSummary[] }>('/api/manager-chat/sessions', { profile });
