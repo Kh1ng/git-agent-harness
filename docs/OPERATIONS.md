@@ -77,27 +77,23 @@ gah update --repo /path/to/git-agent-harness --restart-server
 The updater never starts or restarts a recurring `gah loop`; with
 `--restart-server` it also refuses to restart the service while one is active.
 
-### Known issue: `gah update` web step can wedge on the central node
+### Fixed: `gah update` web step used to wedge on the central node (issue #1010)
 
-The workspace-root `npm run build:web` runs a `prebuild` hook (`npm run
-test:server`, the full `apps/server` battery) before `vite build`. On the
-central node that battery wedges inside
-`apps/server/src/managerChatSessions.integration.test.ts`, so the update's
-web-build step never completes: observed 39 min at 0% CPU with no runner-level
-timeout, and a bounded reproduction where subtest 4 ("a session preview
-auto-detects the dev-server port and proxies it") fails at exactly its 30 s
-timeout. The same battery passes on macOS. The CLI install, `apps/server/dist`
-build, and systemd unit reinstall all precede the web step, so those still land
-correctly; only the dashboard goes stale. Tracked as issue #994.
+The workspace-root `npm run build:web` script carries a `prebuild:web`
+lifecycle hook (`npm run test:server`, the full `apps/server` battery) that
+npm runs before `vite build`. On the central node that battery once wedged
+inside `apps/server/src/managerChatSessions.integration.test.ts`, so the
+update's web-build step never completed: observed 39 min at 0% CPU with no
+runner-level timeout, in a bounded reproduction where subtest 4 ("a session
+preview auto-detects the dev-server port and proxies it") failed at exactly
+its 30 s timeout. The same battery passes on macOS. Tracked as issue #994.
 
-Verified workaround (used when the issue → chat work shipped, #991–#993) —
-skip the test gate, build and deploy the dashboard directly:
-
-```bash
-cd apps/web && npx vite build
-sudo rm -rf /var/www/gah/* && sudo cp -r dist/* /var/www/gah/
-sudo systemctl restart gah-server   # only if the server build also changed
-```
+`gah update`'s `deploy_web_ui` step (`src/update.rs`) now runs `npm run
+--workspace=apps/web build` directly instead of the root `build:web` script,
+so the production updater never triggers `prebuild:web` and can't wedge on
+that suite. CI still runs `npm run build:web` (see `.github/workflows/CI.yml`
+and `frontend.yml`), so the integration battery is still exercised as a merge
+gate -- it's just no longer on the production deploy path.
 
 ### Deployed state (2026-08-28)
 
