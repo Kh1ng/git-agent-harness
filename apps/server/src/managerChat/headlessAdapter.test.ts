@@ -195,6 +195,86 @@ test('Vibe argv is fixed and content-free regardless of prompt; the prompt trave
   assert.equal(spec.encodeStdin('anything, arbitrarily large'), 'anything, arbitrarily large');
 });
 
+test('Vibe has no model/effort flag, so a session pin is silently ignored rather than threaded through (#1032 reopened)', () => {
+  const spec = vibeBackendSpec({ resolveInterpreter: () => '/fake/python3' });
+  const unpinned = spec.turnArgs();
+  const pinned = spec.turnArgs({ model: 'claude-sonnet-4.6-thinking', reasoningEffort: 'high' });
+  assert.deepEqual(pinned, unpinned, 'Vibe argv is unaffected by a session pin -- Vibe stays unchanged');
+});
+
+test('#1032 reopened: a pinned session reaches fake AGY as --model and --effort alongside the existing permission/sandbox flags', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-headless-agy-pinned-'));
+  const originalPath = process.env.PATH;
+  try {
+    const argvRecordPath = join(dir, 'argv.txt');
+    const fakeAgy = join(dir, 'agy');
+    writeFileSync(fakeAgy, `#!/bin/sh
+printf '%s\\n' "$@" > "${argvRecordPath}"
+cat >/dev/null
+echo '{"event":"result","result":{"status":"SUCCESS","response":"agy-fake-reply"}}'
+`, { mode: 0o755 });
+    process.env.PATH = `${dir}:${originalPath}`;
+
+    const backend = createHeadlessBackend(agyBackendSpec());
+    const result = await backend.runTurn('p#agy-pinned', {
+      prompt: 'question',
+      history: [],
+      onChunk: () => {},
+      onToolResult: () => {},
+      model: 'claude-sonnet-4.6-thinking',
+      reasoningEffort: 'high'
+    });
+
+    assert.equal(result.reply, 'agy-fake-reply');
+    const capturedArgv = readFileSync(argvRecordPath, 'utf8').trim().split('\n');
+    assert.deepEqual(capturedArgv, [
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
+      '--dangerously-skip-permissions',
+      '--sandbox',
+      '--model',
+      'claude-sonnet-4.6-thinking',
+      '--effort',
+      'high'
+    ]);
+  } finally {
+    process.env.PATH = originalPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#1032 reopened: an unpinned session emits neither --model nor --effort to fake AGY', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-headless-agy-unpinned-'));
+  const originalPath = process.env.PATH;
+  try {
+    const argvRecordPath = join(dir, 'argv.txt');
+    const fakeAgy = join(dir, 'agy');
+    writeFileSync(fakeAgy, `#!/bin/sh
+printf '%s\\n' "$@" > "${argvRecordPath}"
+cat >/dev/null
+echo '{"event":"result","result":{"status":"SUCCESS","response":"agy-fake-reply"}}'
+`, { mode: 0o755 });
+    process.env.PATH = `${dir}:${originalPath}`;
+
+    const backend = createHeadlessBackend(agyBackendSpec());
+    await backend.runTurn('p#agy-unpinned', {
+      prompt: 'question',
+      history: [],
+      onChunk: () => {},
+      onToolResult: () => {}
+    });
+
+    const capturedArgv = readFileSync(argvRecordPath, 'utf8');
+    assert.ok(!capturedArgv.includes('--model'), 'no model pin means no --model flag');
+    assert.ok(!capturedArgv.includes('--effort'), 'no effort pin means no --effort flag');
+  } finally {
+    process.env.PATH = originalPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('an oversized accumulated AGY prompt reaches the backend via stdin while argv stays a handful of fixed bytes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'gah-headless-agy-oversized-'));
   const originalPath = process.env.PATH;

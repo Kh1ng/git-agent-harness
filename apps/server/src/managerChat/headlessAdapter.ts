@@ -59,8 +59,11 @@ interface HeadlessProcessResult {
 export interface HeadlessBackendSpec {
   id: string;
   displayName: string;
-  /** Fixed argv for a print-mode turn. Must not embed prompt/history. */
-  turnArgs: () => string[];
+  /** Argv for a print-mode turn. Must not embed prompt/history -- only the
+   * session's pinned model/reasoning-effort (#1032 reopened), which are
+   * bounded ids, not conversation content. A spec that has no native flag
+   * for one or both (e.g. vibe) may ignore the argument entirely. */
+  turnArgs: (opts?: { model?: string | null; reasoningEffort?: string | null }) => string[];
   /** Encode this turn's full prompt (history already replayed in) for the
    * backend's stdin channel. */
   encodeStdin: (prompt: string) => string;
@@ -134,7 +137,7 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
 
       // One non-interactive invocation: fixed argv, prompt over stdin.
       const invoke = async (prompt: string): Promise<string> => {
-        const args = spec.turnArgs();
+        const args = spec.turnArgs({ model: input.model, reasoningEffort: input.reasoningEffort });
         const child = spawn(args[0], args.slice(1), {
           cwd,
           env: { ...process.env },
@@ -340,6 +343,8 @@ export function vibeBackendSpec(overrides: { resolveInterpreter?: () => string }
   return {
     id: 'vibe',
     displayName: 'Vibe',
+    // vibe's CLI has no model/effort flag; the session's pin (if any) has
+    // nowhere to go here, unlike agyBackendSpec below.
     turnArgs: () => [resolveInterpreter(), '-c', VIBE_STDIN_BRIDGE],
     encodeStdin: (prompt) => prompt,
     decodeToolRequest: decodeVibeToolRequest
@@ -468,20 +473,32 @@ interface AgyStreamResult {
  * a TTY), so without --dangerously-skip-permissions agy auto-denies every
  * tool call and the turn silently degrades to a no-tool reply. --sandbox
  * is kept alongside it so the auto-approved tools still run confined to
- * the session cwd. */
+ * the session cwd.
+ *
+ * #1032 reopened: a session pinned to a model/effort was displayed as such
+ * but silently launched agy with its own default (model="", whichever pool
+ * `agy` itself falls back to) because turnArgs never carried the pin. The
+ * installed CLI takes both natively as `--model`/`--effort`; append them
+ * only when the session actually pinned one, so an unpinned session's argv
+ * is unchanged. */
 export function agyBackendSpec(): HeadlessBackendSpec {
   return {
     id: 'agy',
     displayName: 'Agy',
-    turnArgs: () => [
-      'agy',
-      '--input-format',
-      'stream-json',
-      '--output-format',
-      'stream-json',
-      '--dangerously-skip-permissions',
-      '--sandbox'
-    ],
+    turnArgs: (opts = {}) => {
+      const args = [
+        'agy',
+        '--input-format',
+        'stream-json',
+        '--output-format',
+        'stream-json',
+        '--dangerously-skip-permissions',
+        '--sandbox'
+      ];
+      if (opts.model) args.push('--model', opts.model);
+      if (opts.reasoningEffort) args.push('--effort', opts.reasoningEffort);
+      return args;
+    },
     encodeStdin: (prompt) =>
       `${JSON.stringify({
         event: 'user',
