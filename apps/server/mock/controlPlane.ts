@@ -759,6 +759,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       branch: pr.headRefName ?? `gah/pr/${id}`,
       backend: backend ?? state.settings.defaultBackend,
       model,
+      reasoningEffort: null,
       title: `#${pr.number} ${pr.title}`,
       createdAt: FIXED_NOW + state.sessions.size,
       lastActiveAt: FIXED_NOW + state.sessions.size,
