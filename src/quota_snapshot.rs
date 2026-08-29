@@ -9,6 +9,10 @@ use std::collections::{BTreeSet, HashMap};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+mod checks;
+use checks::{build_freshness, build_quota_checks};
+pub use checks::{QuotaCheck, QuotaCheckStatus};
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UsageSummary {
     pub entries: usize,
@@ -75,6 +79,7 @@ pub struct QuotaSnapshot {
     pub schema_version: u32,
     pub generated_at: String,
     pub freshness: QuotaFreshness,
+    pub quota_checks: Vec<QuotaCheck>,
     pub profile: ProfileIdentity,
     pub since: String,
     pub usage: UsageSummary,
@@ -90,6 +95,8 @@ pub struct QuotaFreshness {
     pub ledger_observed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub availability_observed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_checked_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_observed_at: Option<String>,
 }
@@ -247,25 +254,14 @@ pub fn build_snapshot(
         &account_quota,
     );
 
-    let freshness = QuotaFreshness {
-        ledger_observed_at,
-        availability_observed_at: latest_timestamp(
-            candidates
-                .iter()
-                .filter_map(|candidate| candidate.observed_at.clone()),
-        ),
-        quota_observed_at: latest_timestamp(
-            candidates
-                .iter()
-                .flat_map(|candidate| candidate.quota_observations.iter())
-                .filter_map(|observation| observation.observed_at.clone()),
-        ),
-    };
+    let freshness = build_freshness(ledger_observed_at, &candidates, &account_quota);
+    let quota_checks = build_quota_checks(&account_quota);
 
     Ok(QuotaSnapshot {
         schema_version: 2,
         generated_at,
         freshness,
+        quota_checks,
         profile: ProfileIdentity {
             profile: profile_name.to_string(),
             display_name: profile.display_name.clone(),
@@ -777,6 +773,8 @@ mod tests {
             quota_remaining_percent: remaining_percent,
             quota_reset_at: None,
             observed_at: Some(observed_at.to_string()),
+            checked_at: None,
+            check_error: None,
             usage_source: None,
             mistral_admin: None,
         }

@@ -421,14 +421,23 @@ export interface QuotaCandidateStatus {
   quota_observations?: QuotaObservation[];
 }
 
+export interface QuotaCheck {
+  backend: string;
+  checked_at: string;
+  status: 'data' | 'no_data' | 'failed';
+  error?: string | null;
+}
+
 export interface QuotaSnapshot {
   schema_version: number;
   generated_at: string;
   freshness: {
     ledger_observed_at?: string | null;
     availability_observed_at?: string | null;
+    quota_checked_at?: string | null;
     quota_observed_at?: string | null;
   };
+  quota_checks: QuotaCheck[];
   profile: ProfileIdentity;
   since: string;
   usage: QuotaUsageSummary;

@@ -45,6 +45,7 @@ export function MockStoreProvider({ children, statusData }: MockStoreProviderPro
       schema_version: 1,
       generated_at: new Date().toISOString(),
       freshness: {},
+      quota_checks: [],
       profile: mockProfile,
       since: '7d',
       usage: {

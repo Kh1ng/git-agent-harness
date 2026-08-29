@@ -4,8 +4,22 @@
   "freshness": {
     "ledger_observed_at": "2026-08-07T15:18:10.130973215Z",
     "availability_observed_at": "2026-08-07T15:18:10.130973215Z",
+    "quota_checked_at": "2099-08-07T15:20:00Z",
     "quota_observed_at": "2026-08-07T15:18:10.130973215Z"
   },
+  "quota_checks": [
+    {
+      "backend": "codex",
+      "checked_at": "2099-08-07T15:20:00Z",
+      "status": "no_data"
+    },
+    {
+      "backend": "vibe",
+      "checked_at": "2026-08-07T15:19:00Z",
+      "status": "failed",
+      "error": "Mistral Admin API unavailable"
+    }
+  ],
   "profile": {
     "profile": "fixture",
     "display_name": "Fixture",

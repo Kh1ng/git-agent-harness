@@ -31,6 +31,21 @@ test('GET /api/quota returns 200 with a parseable typed payload', async () => {
     assert.equal(response.status, 200);
     assert.equal(body.schema_version, 2);
     assert.equal(body.profile.repo_id, 'fixture-repo');
+    assert.equal(body.freshness.quota_checked_at, '2099-08-07T15:20:00Z');
+    assert.equal(body.freshness.quota_observed_at, '2026-08-07T15:18:10.130973215Z');
+    assert.deepEqual(body.quota_checks, [
+      {
+        backend: 'codex',
+        checked_at: '2099-08-07T15:20:00Z',
+        status: 'no_data'
+      },
+      {
+        backend: 'vibe',
+        checked_at: '2026-08-07T15:19:00Z',
+        status: 'failed',
+        error: 'Mistral Admin API unavailable'
+      }
+    ]);
   });
 });
 
