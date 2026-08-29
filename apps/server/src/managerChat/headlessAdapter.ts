@@ -24,6 +24,7 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
+import path from 'node:path';
 import type { ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 import type { ManagerAdapter, ManagerCommandInfo, ManagerModelInfo } from './registry.js';
 
@@ -34,6 +35,15 @@ export interface HeadlessSpawnSpec {
   args: string[];
   /** Env for the child process. */
   env?: Record<string, string>;
+}
+
+/** A backend tool request decoded out of reply text (#1041). */
+export interface HeadlessToolRequest {
+  name: string;
+  args: Record<string, unknown>;
+  /** The exact reply the request was decoded from, replayed back to the
+   * backend so its own context stays intact across the continuation. */
+  raw: string;
 }
 
 interface HeadlessProcessResult {
@@ -58,6 +68,11 @@ export interface HeadlessBackendSpec {
    * descriptive error. Default: trimmed stdout on exit 0, else an error
    * built from stderr. */
   parseReply?: (result: HeadlessProcessResult) => string;
+  /** Detect a tool request the backend leaked into the reply text instead
+   * of executing (#1041). Returns null for an ordinary reply; throws when
+   * tool-request-shaped text cannot be decoded, so the turn ends with an
+   * actionable error instead of a false-success reply. */
+  decodeToolRequest?: (reply: string) => HeadlessToolRequest | null;
 }
 
 interface ConversationState {
@@ -72,6 +87,15 @@ function replayPrompt(message: string, history: ChatTranscriptTurn[]): string {
   if (history.length === 0) return message;
   const lines = history.map((turn) => `${turn.role}: ${turn.text}`);
   return `${lines.join('\n')}\n\nuser: ${message}`;
+}
+
+/** The continuation prompt after servicing a decoded tool request (#1041):
+ * the same roleful replay format with the backend's own request and the
+ * tool result appended, so the model continues from the result. */
+function continuationPrompt(message: string, history: ChatTranscriptTurn[], exchange: ChatTranscriptTurn[]): string {
+  const lines = history.map((turn) => `${turn.role}: ${turn.text}`);
+  const prefix = lines.length > 0 ? `${lines.join('\n')}\n\n` : '';
+  return `${prefix}user: ${message}\n${exchange.map((turn) => `${turn.role}: ${turn.text}`).join('\n')}`;
 }
 
 function defaultParseReply(displayName: string): (result: HeadlessProcessResult) => string {
@@ -106,55 +130,131 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
 
     async runTurn(gahProfile, input) {
       const state = stateFor(gahProfile);
+      const cwd = input.cwd ?? process.cwd();
+
+      // One non-interactive invocation: fixed argv, prompt over stdin.
+      const invoke = async (prompt: string): Promise<string> => {
+        const args = spec.turnArgs();
+        const child = spawn(args[0], args.slice(1), {
+          cwd,
+          env: { ...process.env },
+          stdio: ['pipe', 'pipe', 'pipe']
+        });
+        state.child = child;
+
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        // The child may exit (e.g. a fast validation failure) before we
+        // finish writing; a write past that point would otherwise raise an
+        // unhandled EPIPE and crash the server.
+        child.stdin.on('error', () => {});
+        child.stdin.write(spec.encodeStdin(prompt));
+        child.stdin.end();
+
+        const killTimer = setTimeout(() => {
+          child.kill('SIGKILL');
+        }, TURN_TIMEOUT_MS);
+        killTimer.unref?.();
+
+        try {
+          const code = await new Promise<number | null>((resolve, reject) => {
+            child.on('error', reject);
+            child.on('close', (exitCode) => resolve(exitCode));
+          });
+          const reply = parseReply({ stdout, stderr, exitCode: code });
+          if (reply.trim().length === 0) {
+            throw new Error(`${spec.displayName} turn produced no output.`);
+          }
+          return reply;
+        } finally {
+          clearTimeout(killTimer);
+          state.child = null;
+        }
+      };
+
       // A headless process has no memory: every turn replays the full
       // conversation. (historyDelta-style catch-up is meaningless here, but
       // keeping knownHistory lets future stream-json modes upgrade in place.)
-      const prompt = replayPrompt(input.prompt, input.history);
-      const cwd = input.cwd ?? process.cwd();
+      let prompt = replayPrompt(input.prompt, input.history);
+      let reply = await invoke(prompt);
 
-      const args = spec.turnArgs();
-      const child = spawn(args[0], args.slice(1), {
-        cwd,
-        env: { ...process.env },
-        stdio: ['pipe', 'pipe', 'pipe']
-      });
-      state.child = child;
-
-      let stdout = '';
-      let stderr = '';
-      child.stdout.on('data', (chunk) => { stdout += chunk; });
-      child.stderr.on('data', (chunk) => { stderr += chunk; });
-      // The child may exit (e.g. a fast validation failure) before we
-      // finish writing; a write past that point would otherwise raise an
-      // unhandled EPIPE and crash the server.
-      child.stdin.on('error', () => {});
-      child.stdin.write(spec.encodeStdin(prompt));
-      child.stdin.end();
-
-      const killTimer = setTimeout(() => {
-        child.kill('SIGKILL');
-      }, TURN_TIMEOUT_MS);
-      killTimer.unref?.();
-
-      try {
-        const code = await new Promise<number | null>((resolve, reject) => {
-          child.on('error', reject);
-          child.on('close', (exitCode) => resolve(exitCode));
-        });
-        const reply = parseReply({ stdout, stderr, exitCode: code });
-        if (reply.trim().length === 0) {
-          throw new Error(`${spec.displayName} turn produced no output.`);
+      // #1041: a print-mode backend whose model emits a tool call the CLI
+      // didn't execute leaks the raw request syntax as reply text, which
+      // used to surface verbatim as a successful assistant reply. Decode
+      // it, gate it through the same permission round-trip the ACP backends
+      // use, execute the servable read-only subset GAH-side, then continue
+      // the turn with the tool result replayed into the next invocation.
+      // Undecodable or unknown requests fail the turn with an actionable
+      // error instead.
+      const toolExchange: ChatTranscriptTurn[] = [];
+      if (spec.decodeToolRequest) {
+        for (let round = 1; ; round += 1) {
+          const request = spec.decodeToolRequest(reply);
+          if (!request) break;
+          if (round > MAX_TOOL_ROUNDS_PER_TURN) {
+            throw new Error(`${spec.displayName} requested more than ${MAX_TOOL_ROUNDS_PER_TURN} tool calls in a single turn; stopping so raw tool syntax can never surface as a reply.`);
+          }
+          const plan = planHeadlessTool(spec.displayName, request.name, request.args, cwd);
+          const toolCallId = `${spec.id}-tool-${Date.now().toString(36)}-${round}`;
+          const emitToolCall = (status: 'pending' | 'completed' | 'failed', summary: string | null) =>
+            input.onToolCall?.({
+              toolCallId,
+              name: request.name,
+              title: plan.title,
+              kind: plan.kind,
+              status,
+              locations: plan.locations,
+              summary
+            });
+          emitToolCall('pending', null);
+          let decision: string;
+          if (input.requestPermission) {
+            decision = await input.requestPermission({
+              title: plan.title,
+              options: [
+                { optionId: 'allow-once', name: 'Allow', kind: 'allow_once' },
+                { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' }
+              ],
+              locations: plan.locations
+            });
+          } else {
+            console.warn(`[managerChat] ${spec.displayName} requested permission for "${plan.title}" -- declining (no permission UI attached)`);
+            decision = 'cancelled';
+          }
+          if (decision !== 'allow-once') {
+            const outcome = decision === 'cancelled' ? 'cancelled' : `declined (${decision})`;
+            const message = `${spec.displayName} requested "${plan.title}" but the permission request was ${outcome}; the turn cannot continue without it.`;
+            emitToolCall('failed', message);
+            throw new Error(message);
+          }
+          let output: string;
+          try {
+            output = await plan.run();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            emitToolCall('failed', summarizeOutput(message));
+            throw error;
+          }
+          emitToolCall('completed', summarizeOutput(output));
+          input.onToolResult(request.name, output);
+          toolExchange.push(
+            { role: 'assistant', text: request.raw, timestamp: Date.now() },
+            { role: 'tool', text: output, timestamp: Date.now() }
+          );
+          prompt = continuationPrompt(input.prompt, input.history, toolExchange);
+          reply = await invoke(prompt);
         }
-        state.knownHistory = [
-          ...input.history,
-          { role: 'user', text: input.prompt, timestamp: Date.now() },
-          { role: 'assistant', text: reply, timestamp: Date.now() }
-        ];
-        return { reply, model: null, usage: null };
-      } finally {
-        clearTimeout(killTimer);
-        state.child = null;
       }
+
+      state.knownHistory = [
+        ...input.history,
+        { role: 'user', text: input.prompt, timestamp: Date.now() },
+        ...toolExchange,
+        { role: 'assistant', text: reply, timestamp: Date.now() }
+      ];
+      return { reply, model: null, usage: null };
     },
 
     async listCommands(): Promise<ManagerCommandInfo[]> {
@@ -241,8 +341,111 @@ export function vibeBackendSpec(overrides: { resolveInterpreter?: () => string }
     id: 'vibe',
     displayName: 'Vibe',
     turnArgs: () => [resolveInterpreter(), '-c', VIBE_STDIN_BRIDGE],
-    encodeStdin: (prompt) => prompt
+    encodeStdin: (prompt) => prompt,
+    decodeToolRequest: decodeVibeToolRequest
   };
+}
+
+/** Bounded servicing budget per turn (#1041): every decoded request costs
+ * one more backend invocation, and an unbounded loop would let a backend
+ * that only ever emits tool requests spin the turn forever. */
+const MAX_TOOL_ROUNDS_PER_TURN = 5;
+const MAX_TOOL_OUTPUT_BYTES = 256 * 1024;
+
+/** The wire shape vibe's print mode leaks when its model emits a tool call
+ * the CLI didn't execute (#1041): `<name>\u{C8F0}<json args>` -- one Unicode
+ * separator (U+C8F0) between the tool name and the JSON argument object,
+ * observed live as
+ * `read_file\u{C8F0}{"file_path": ".../memoryGatewayClient.ts"}`. Returns
+ * null for an ordinary reply; throws when the shape IS present but cannot
+ * be decoded, so the turn ends with an actionable error rather than
+ * surfacing raw tool syntax as a successful assistant reply. */
+export function decodeVibeToolRequest(reply: string): HeadlessToolRequest | null {
+  const raw = reply.trim();
+  const match = /^(\S+?)\u{C8F0}(\{[\s\S]*\})$/u.exec(raw);
+  if (!match) return null;
+  const name = match[1];
+  let args: unknown;
+  try {
+    args = JSON.parse(match[2]);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Vibe emitted a tool request for "${name}" whose arguments are not valid JSON (${detail}); refusing to surface raw tool syntax as a reply.`);
+  }
+  return { name, args: args as Record<string, unknown>, raw };
+}
+
+interface HeadlessToolPlan {
+  title: string;
+  kind: string;
+  locations: string[];
+  run: () => Promise<string>;
+}
+
+function isInside(child: string, parent: string): boolean {
+  return child === parent || child.startsWith(parent + path.sep);
+}
+
+/** getcwd() may hand the backend child a symlink-resolved cwd (macOS
+ * /var -> /private/var), and the emitted file_path is absolute, so
+ * containment is judged on canonical paths -- falling back to the lexical
+ * form only for a target that does not exist on disk yet. A target that
+ * realpath-resolves somewhere new (a symlink escape) is judged on its
+ * canonical form alone, never its lexical one. */
+function isInsideWorkingDirectory(resolved: string, cwd: string): boolean {
+  const canonical = (target: string): string => {
+    try {
+      return realpathSync(target);
+    } catch {
+      return target;
+    }
+  };
+  const realCwd = canonical(cwd);
+  const realResolved = canonical(resolved);
+  if (realResolved !== resolved) return isInside(realResolved, realCwd);
+  return isInside(resolved, cwd) || isInside(resolved, realCwd);
+}
+
+/** GAH-side executor for decoded tool requests (#1041). The request names
+ * the BACKEND's tool vocabulary, so only the read-only subset GAH can
+ * safely execute itself (a bounded repository read) is servable; anything
+ * else fails the turn with an actionable error. Reads are confined to the
+ * conversation's working directory -- the session worktree a headless turn
+ * already runs in. */
+function planHeadlessTool(displayName: string, name: string, args: Record<string, unknown>, cwd: string): HeadlessToolPlan {
+  if (name !== 'read_file') {
+    throw new Error(`${displayName} requested tool "${name}", which GAH cannot execute on the backend's behalf. Executable tools: read_file.`);
+  }
+  const requested = args.file_path;
+  if (typeof requested !== 'string' || requested.trim().length === 0) {
+    throw new Error(`${displayName} requested read_file without a valid "file_path" argument.`);
+  }
+  const resolved = path.resolve(cwd, requested);
+  if (!isInsideWorkingDirectory(resolved, cwd)) {
+    throw new Error(`${displayName} requested to read "${requested}", which resolves outside this conversation's working directory (${cwd}).`);
+  }
+  return {
+    title: `Read ${resolved}`,
+    kind: 'read',
+    locations: [resolved],
+    run: async () => {
+      let content: Buffer;
+      try {
+        content = readFileSync(resolved);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`${displayName} requested to read "${resolved}" but the read failed: ${detail}`);
+      }
+      return content.length > MAX_TOOL_OUTPUT_BYTES
+        ? `${content.subarray(0, MAX_TOOL_OUTPUT_BYTES).toString('utf8')}\n[GAH truncated the read at ${MAX_TOOL_OUTPUT_BYTES} bytes]`
+        : content.toString('utf8');
+    }
+  };
+}
+
+/** Mirrors acpAdapter's card digest: first 5 lines, 400 chars. */
+function summarizeOutput(text: string): string {
+  return text.split('\n').slice(0, 5).join('\n').slice(0, 400);
 }
 
 interface AgyStreamResult {

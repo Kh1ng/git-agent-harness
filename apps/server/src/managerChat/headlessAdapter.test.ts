@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execPath } from 'node:process';
 import type { ChatTranscriptTurn } from '@git-agent-harness/contracts';
-import { agyBackendSpec, createHeadlessBackend, vibeBackendSpec, type HeadlessBackendSpec } from './headlessAdapter.js';
+import { agyBackendSpec, createHeadlessBackend, decodeVibeToolRequest, vibeBackendSpec, type HeadlessBackendSpec } from './headlessAdapter.js';
 
 /** A fake one-shot CLI: echoes its cwd marker file's content so the test
  * proves the turn ran in the session cwd, and echoes the prompt tail. The
@@ -260,5 +260,223 @@ echo 'vibe-fake-reply'
     assert.ok(capturedStdin.includes(canary), 'the prompt reached the backend over stdin, where the bridge sets sys.argv in-process');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A fake vibe interpreter that leaks the observed #1041 wire shape on its
+ * first invocation, then — once the continuation prompt carries the read
+ * file's content — emits the review text. Each prompt is recorded to its
+ * own file so tests assert exactly what each invocation received. */
+function fakeVibeInterpreter(dir: string, targetMarker: string): string {
+  const path = join(dir, 'fake-python3');
+  const firstStdin = join(dir, 'stdin-1.txt');
+  const secondStdin = join(dir, 'stdin-2.txt');
+  writeFileSync(path, `#!/bin/sh
+prompt=$(cat)
+case "$prompt" in
+  *${targetMarker}*)
+    printf '%s' "$prompt" > "${secondStdin}"
+    echo 'Review complete: the target file is intact.'
+    ;;
+  *)
+    printf '%s' "$prompt" > "${firstStdin}"
+    printf 'read_file죰{"file_path": "target.md"}'
+    ;;
+esac
+`, { mode: 0o755 });
+  return path;
+}
+
+test('decodeVibeToolRequest parses the observed U+C8F0 wire shape and rejects undecodable requests', () => {
+  const observed = 'read_file죰{"file_path": "/path/to/apps/server/src/managerChat/memoryGatewayClient.ts"}';
+  assert.deepEqual(decodeVibeToolRequest(observed), {
+    name: 'read_file',
+    args: { file_path: '/path/to/apps/server/src/managerChat/memoryGatewayClient.ts' },
+    raw: observed
+  });
+  assert.equal(decodeVibeToolRequest('an ordinary assistant reply'), null);
+  assert.equal(decodeVibeToolRequest(''), null);
+  assert.equal(decodeVibeToolRequest('text before read_file죰{"file_path": "x"}'), null, 'only a bare tool request decodes');
+  assert.equal(decodeVibeToolRequest('read_file죰{"file_path": "x"} trailing text'), null);
+  assert.throws(() => decodeVibeToolRequest('read_file죰{"file_path": }'), /not valid JSON/);
+  assert.equal(decodeVibeToolRequest('read_file죰{"file_path": '), null, 'truncated syntax without a closing brace is not a decodable request');
+});
+
+test('only vibe declares a tool-request decoder; agy is untouched', () => {
+  assert.equal(vibeBackendSpec({ resolveInterpreter: () => '/fake/python3' }).decodeToolRequest?.('read_file죰{}')?.name, 'read_file');
+  assert.equal(agyBackendSpec().decodeToolRequest, undefined);
+});
+
+test('a leaked Vibe tool request is decoded, permission-gated, executed, and the turn continues with the result replayed', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-headless-vibe-tool-'));
+  const workdir = mkdtempSync(join(tmpdir(), 'gah-headless-vibe-wt-'));
+  try {
+    writeFileSync(join(workdir, 'target.md'), 'VIBE-TARGET-CONTENT-1041');
+    const interpreter = fakeVibeInterpreter(dir, 'VIBE-TARGET-CONTENT-1041');
+    const backend = createHeadlessBackend(vibeBackendSpec({ resolveInterpreter: () => interpreter }));
+
+    const toolCalls: { toolCallId: string; name: string | null; status: string; locations: string[]; summary: string | null }[] = [];
+    const toolResults: { name: string; text: string }[] = [];
+    const result = await backend.runTurn('p#vibe-tool', {
+      prompt: 'review target.md',
+      history: [],
+      onChunk: () => {},
+      onToolResult: (name, text) => toolResults.push({ name, text }),
+      cwd: workdir,
+      onToolCall: (tool) => toolCalls.push(tool),
+      requestPermission: async (request) => {
+        assert.deepEqual(request.locations, [join(workdir, 'target.md')]);
+        return 'allow-once';
+      }
+    });
+
+    // The review continues after the read: the final reply is the
+    // continuation's output, never the raw tool syntax.
+    assert.equal(result.reply, 'Review complete: the target file is intact.');
+    assert.ok(!result.reply.includes('\u{C8F0}'));
+    assert.deepEqual(toolCalls.map((tool) => tool.status), ['pending', 'completed']);
+    assert.equal(toolCalls[0].name, 'read_file');
+    assert.equal(toolCalls[0].toolCallId, toolCalls[1].toolCallId, 'one card per decoded request');
+    assert.deepEqual(toolCalls[0].locations, [join(workdir, 'target.md')], 'locations resolve against the session cwd');
+    assert.equal(toolCalls[1].summary, 'VIBE-TARGET-CONTENT-1041');
+    assert.deepEqual(toolResults, [{ name: 'read_file', text: 'VIBE-TARGET-CONTENT-1041' }]);
+
+    // The continuation prompt replays the exchange so the backend sees its
+    // own request plus the tool result.
+    const firstPrompt = readFileSync(join(dir, 'stdin-1.txt'), 'utf8');
+    assert.ok(!firstPrompt.includes('read_file'), 'the first invocation only carries the replayed conversation');
+    const secondPrompt = readFileSync(join(dir, 'stdin-2.txt'), 'utf8');
+    assert.match(secondPrompt, /user: review target\.md/);
+    assert.match(secondPrompt, /assistant: read_file죰\{"file_path": "target\.md"\}/);
+    assert.match(secondPrompt, /tool: VIBE-TARGET-CONTENT-1041/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test('a declined vibe tool request fails the turn with an actionable error and never continues', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-headless-vibe-decline-'));
+  const workdir = mkdtempSync(join(tmpdir(), 'gah-headless-vibe-decline-wt-'));
+  try {
+    writeFileSync(join(workdir, 'target.md'), 'VIBE-TARGET-CONTENT-1041');
+    const interpreter = fakeVibeInterpreter(dir, 'VIBE-TARGET-CONTENT-1041');
+    const backend = createHeadlessBackend(vibeBackendSpec({ resolveInterpreter: () => interpreter }));
+
+    const toolCalls: { status: string; summary: string | null }[] = [];
+    await assert.rejects(
+      backend.runTurn('p#vibe-decline', {
+        prompt: 'review target.md',
+        history: [],
+        onChunk: () => {},
+        onToolResult: () => {},
+        cwd: workdir,
+        onToolCall: (tool) => toolCalls.push({ status: tool.status, summary: tool.summary }),
+        requestPermission: async () => 'reject-once'
+      }),
+      /declined \(reject-once\); the turn cannot continue/
+    );
+    assert.deepEqual(toolCalls.map((tool) => tool.status), ['pending', 'failed']);
+    assert.match(toolCalls[1].summary ?? '', /declined/);
+    assert.throws(() => readFileSync(join(dir, 'stdin-2.txt'), 'utf8'), /ENOENT/, 'no continuation invocation after a decline');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test('a decoded tool request with no permission UI attached fails closed instead of executing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-headless-vibe-noperm-'));
+  const workdir = mkdtempSync(join(tmpdir(), 'gah-headless-vibe-noperm-wt-'));
+  try {
+    writeFileSync(join(workdir, 'target.md'), 'VIBE-TARGET-CONTENT-1041');
+    const interpreter = fakeVibeInterpreter(dir, 'VIBE-TARGET-CONTENT-1041');
+    const backend = createHeadlessBackend(vibeBackendSpec({ resolveInterpreter: () => interpreter }));
+    await assert.rejects(
+      backend.runTurn('p#vibe-noperm', {
+        prompt: 'review target.md',
+        history: [],
+        onChunk: () => {},
+        onToolResult: () => {},
+        cwd: workdir
+      }),
+      /permission request was cancelled/
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test('undecodable or unservable vibe tool requests end the turn with an actionable error, never raw text', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-headless-vibe-badtool-'));
+  const workdir = mkdtempSync(join(tmpdir(), 'gah-headless-vibe-badtool-wt-'));
+  try {
+    const runWithReply = (reply: string) => {
+      const interpreter = join(dir, `fake-python3-${reply.replace(/\W/g, '')}`);
+      writeFileSync(interpreter, `#!/bin/sh
+cat >/dev/null
+printf '${reply}'
+`, { mode: 0o755 });
+      return createHeadlessBackend(vibeBackendSpec({ resolveInterpreter: () => interpreter })).runTurn('p#vibe-badtool', {
+        prompt: 'go',
+        history: [],
+        onChunk: () => {},
+        onToolResult: () => {},
+        cwd: workdir,
+        requestPermission: async () => 'allow-once'
+      });
+    };
+    await assert.rejects(
+      runWithReply('rm_rf죰{}'),
+      /requested tool "rm_rf", which GAH cannot execute .*Executable tools: read_file/
+    );
+    await assert.rejects(
+      runWithReply('read_file죰{"file_path": }'),
+      /arguments are not valid JSON/
+    );
+    await assert.rejects(
+      runWithReply('read_file죰{}'),
+      /without a valid "file_path" argument/
+    );
+    await assert.rejects(
+      runWithReply('read_file죰{"file_path": "../outside.txt"}'),
+      /resolves outside this conversation's working directory/
+    );
+    await assert.rejects(
+      runWithReply('read_file죰{"file_path": "missing.md"}'),
+      /the read failed/
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test('a vibe turn stops before servicing more than the bounded number of tool requests', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-headless-vibe-loop-'));
+  const workdir = mkdtempSync(join(tmpdir(), 'gah-headless-vibe-loop-wt-'));
+  try {
+    writeFileSync(join(workdir, 'target.md'), 'VIBE-TARGET-CONTENT-1041');
+    const interpreter = join(dir, 'fake-python3');
+    writeFileSync(interpreter, `#!/bin/sh
+cat >/dev/null
+printf 'read_file죰{"file_path": "target.md"}'
+`, { mode: 0o755 });
+    const backend = createHeadlessBackend(vibeBackendSpec({ resolveInterpreter: () => interpreter }));
+    await assert.rejects(
+      backend.runTurn('p#vibe-loop', {
+        prompt: 'review target.md',
+        history: [],
+        onChunk: () => {},
+        onToolResult: () => {},
+        cwd: workdir,
+        requestPermission: async () => 'allow-once'
+      }),
+      /more than 5 tool calls in a single turn/
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(workdir, { recursive: true, force: true });
   }
 });
