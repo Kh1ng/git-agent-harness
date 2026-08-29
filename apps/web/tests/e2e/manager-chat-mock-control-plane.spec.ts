@@ -45,6 +45,18 @@ async function selectSeededSession(page: Page): Promise<void> {
 // this file intentionally contains no page.route/routeWebSocket shims.
 test.describe.configure({ mode: 'serial' });
 
+test('active picker discovers sessions created through REST', async ({ page, request }) => {
+  await selectScenario(request, 'normal');
+  await openChat(page);
+
+  const response = await request.post(`${MOCK_BASE_URL}/api/manager-chat/sessions`, {
+    data: { profile: 'fixture', backend: 'codex', title: 'Externally created session' }
+  });
+  expect(response.ok(), await response.text()).toBe(true);
+
+  await expect(page.getByLabel('Chat session').locator('option', { hasText: 'Externally created session' })).toHaveCount(1, { timeout: 10_000 });
+});
+
 test('shared mock streams multiple chunks, tool activity, and completion', async ({ page, request }) => {
   await selectScenario(request, 'normal');
   await openChat(page);
@@ -140,11 +152,11 @@ test('archive and preview states mutate through the same REST control plane', as
   await openChat(page);
   await selectSeededSession(page);
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
+  await expect(page.getByLabel('Chat session').locator('option', { hasText: 'Mock session' })).toHaveCount(0);
   const archived = await request.get(`${MOCK_BASE_URL}/api/manager-chat/sessions?profile=fixture`);
   expect(archived.ok(), await archived.text()).toBe(true);
   const archivedSessions = (await archived.json() as { sessions: { id: string; archivedAt: number | null }[] }).sessions;
   expect(archivedSessions.find((session) => session.id === 'mock-session-1')?.archivedAt).not.toBeNull();
-  await expect(page.getByLabel('Chat session').locator('option', { hasText: 'Mock session' })).toHaveCount(0);
 
   await page.reload();
   await page.getByRole('button', { name: 'Chat', exact: true }).click();

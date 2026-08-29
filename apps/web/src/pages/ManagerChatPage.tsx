@@ -7,6 +7,7 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { NewChatModal } from '../components/NewChatModal.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
+import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { generateRequestId } from '@git-agent-harness/shared';
 import type {
   ManagerChatTurn,
@@ -260,6 +261,8 @@ export function ManagerChatPage() {
         if (activeProfileRef.current === forProfile) setSessionsError(true);
       });
   };
+
+  useAutoRefresh(() => refreshSessions(profile), 5_000);
 
   useEffect(() => {
     refreshSessions(profile);
