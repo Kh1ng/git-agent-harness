@@ -233,7 +233,13 @@ export async function capture(
   if (!gatewayEnabledForProfile(profile)) {
     return { l0Recorded: 0 };
   }
-  return captureForKey(await sessionKeyForProfile(profile), userContent, assistantContent);
+  // Manager-chat capture contract (#1034): the gateway rejects an empty
+  // assistant_content, but the user's half of that completed turn is still
+  // memory worth retaining. Send one stable, extraction-friendly placeholder
+  // instead of skipping the whole capture. Every non-empty reply is preserved
+  // verbatim; ticket-scoped captures keep their existing caller-owned contract.
+  const capturedAssistantContent = assistantContent === '' ? '[No assistant reply]' : assistantContent;
+  return captureForKey(await sessionKeyForProfile(profile), userContent, capturedAssistantContent);
 }
 
 /** Ticket-scoped recall for repair/review agents -- callers never see key
