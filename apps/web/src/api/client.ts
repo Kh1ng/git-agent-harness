@@ -229,7 +229,7 @@ export interface GahDataSource {
   setManagerChatReasoningEffort(profile: string, effortId: string): Promise<{ success: boolean }>;
   getChatSessions(profile: string): Promise<{ sessions: ChatSessionSummary[] }>;
   createChatSession(profile: string, backend?: string, model?: string | null, title?: string): Promise<ChatSessionSummary>;
-  updateChatSession(profile: string, sessionId: string, patch: { backend?: string; model?: string | null; title?: string }): Promise<ChatSessionSummary>;
+  updateChatSession(profile: string, sessionId: string, patch: { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string }): Promise<ChatSessionSummary>;
   archiveChatSession(profile: string, sessionId: string): Promise<ChatSessionSummary>;
   bulkArchiveChatSessions(profile: string, sessionIds: string[]): Promise<{ sessions: ChatSessionSummary[] }>;
   getChatStorage(profile: string): Promise<ChatReclaimResult>;
@@ -484,7 +484,7 @@ export const gahApi: GahDataSource = {
     return postJson<ChatSessionSummary, { profile: string; backend?: string; model?: string | null; title?: string }>('/api/manager-chat/sessions', { profile, backend, model, title });
   },
   updateChatSession(profile, sessionId, patch) {
-    return postJson<ChatSessionSummary, { profile: string; sessionId: string } & { backend?: string; model?: string | null; title?: string }>('/api/manager-chat/sessions/update', { profile, sessionId, ...patch });
+    return postJson<ChatSessionSummary, { profile: string; sessionId: string } & { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string }>('/api/manager-chat/sessions/update', { profile, sessionId, ...patch });
   },
   archiveChatSession(profile, sessionId) {
     return postJson<ChatSessionSummary, { profile: string; sessionId: string }>('/api/manager-chat/sessions/archive', { profile, sessionId });

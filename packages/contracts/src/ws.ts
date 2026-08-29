@@ -365,6 +365,8 @@ export type ClientMessage =
       backend?: string;
       /** Model override for the session's backend; omitted = backend default. */
       model?: string;
+      /** Per-session reasoning effort; omitted = backend default. */
+      reasoningEffort?: string;
       title?: string;
     }
   | {
@@ -377,6 +379,7 @@ export type ClientMessage =
       sessionId: string;
       backend?: string;
       model?: string | null;
+      reasoningEffort?: string | null;
       title?: string;
     }
   | {

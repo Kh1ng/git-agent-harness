@@ -296,6 +296,10 @@ export interface ChatSessionSummary {
   /** Model override for the session's backend; null = the backend's default.
    * Applied on the session's connection before each turn. */
   model: string | null;
+  /** Per-session reasoning-effort selection; null = the backend's (or the
+   * profile override's) default. Applied like model: only on the session's
+   * own backend, only when the backend advertises the control. */
+  reasoningEffort: string | null;
   title: string | null;
   createdAt: number;
   lastActiveAt: number;

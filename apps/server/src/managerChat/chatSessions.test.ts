@@ -75,6 +75,23 @@ test('createSession without a worktree_base still works (checkout mode)', withEn
   assert.ok(session.branch, 'branch still named for later promotion');
 }));
 
+test('reasoning effort persists on the session and updates in place', withEnv(async (env) => {
+  const created = await createSession({
+    profile: 'p',
+    profileInfo: env.profileInfo,
+    backend: 'codex',
+    reasoningEffort: 'xhigh'
+  });
+  assert.equal(created.reasoningEffort, 'xhigh');
+  assert.equal(getSession('p', created.id)?.reasoningEffort, 'xhigh');
+
+  const cleared = updateSession('p', created.id, { reasoningEffort: null });
+  assert.equal(cleared.reasoningEffort, null);
+
+  const pinned = updateSession('p', created.id, { reasoningEffort: 'low' });
+  assert.equal(pinned.reasoningEffort, 'low');
+}));
+
 test('legacy indexes derive live/archive outcomes without a migration command', withEnv(async (env) => {
   const projectDir = join(env.stateDir, 'project-p');
   execFileSync('mkdir', ['-p', projectDir]);

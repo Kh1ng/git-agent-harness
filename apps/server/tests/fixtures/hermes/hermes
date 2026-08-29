@@ -12,11 +12,39 @@ const sessionCwds = new Map();
 // Per-session current model id (WP2: per-session model override). "report
 // model" prompts get it echoed back.
 const sessionModels = new Map();
+// Per-session current reasoning effort (#1032: the thought_level config
+// option). "report effort" prompts get it echoed back.
+const sessionEfforts = new Map();
 
 const MODEL_OPTIONS = [
   { value: 'mock-default', name: 'Mock Default' },
   { value: 'mock-strong', name: 'Mock Strong' }
 ];
+
+const EFFORT_OPTIONS = [
+  { value: 'mock-low', name: 'Mock Low' },
+  { value: 'mock-high', name: 'Mock High' }
+];
+
+function configOptionsFor(sessionId) {
+  return [
+    {
+      type: 'select',
+      id: 'model',
+      label: 'Model',
+      options: MODEL_OPTIONS,
+      currentValue: sessionModels.get(sessionId) ?? 'mock-default'
+    },
+    {
+      type: 'select',
+      id: 'thought_level',
+      category: 'thought_level',
+      label: 'Reasoning effort',
+      options: EFFORT_OPTIONS,
+      currentValue: sessionEfforts.get(sessionId) ?? 'mock-low'
+    }
+  ];
+}
 
 class MockHermes {
   constructor(connection) {
@@ -37,28 +65,18 @@ class MockHermes {
     remembered.set(sessionId, null);
     sessionCwds.set(sessionId, params?.cwd ?? null);
     sessionModels.set(sessionId, 'mock-default');
+    sessionEfforts.set(sessionId, 'mock-low');
     return {
       sessionId,
-      configOptions: [{
-        type: 'select',
-        id: 'model',
-        label: 'Model',
-        options: MODEL_OPTIONS,
-        currentValue: 'mock-default'
-      }]
+      configOptions: configOptionsFor(sessionId)
     };
   }
 
-  async setSessionConfigOption({ sessionId, value }) {
-    sessionModels.set(sessionId, value);
+  async setSessionConfigOption({ sessionId, configId, value }) {
+    if (configId === 'thought_level') sessionEfforts.set(sessionId, value);
+    else sessionModels.set(sessionId, value);
     return {
-      configOptions: [{
-        type: 'select',
-        id: 'model',
-        label: 'Model',
-        options: MODEL_OPTIONS,
-        currentValue: sessionModels.get(sessionId) ?? 'mock-default'
-      }]
+      configOptions: configOptionsFor(sessionId)
     };
   }
 
@@ -229,6 +247,8 @@ class MockHermes {
       reply = sessionCwds.get(sessionId) ?? 'NO-CWD';
     } else if (/report model/i.test(liveText)) {
       reply = sessionModels.get(sessionId) ?? 'NO-MODEL';
+    } else if (/report effort/i.test(liveText)) {
+      reply = sessionEfforts.get(sessionId) ?? 'NO-EFFORT';
     } else {
       // No recognized live directive: never fall back to scanning recalled
       // memory for a code-word-shaped token here, or an injected directive

@@ -37,6 +37,7 @@ function session(id: string, branch: string, ageDays: number, outcome: ChatSessi
     branch,
     backend: 'codex',
     model: null,
+    reasoningEffort: null,
     title: id,
     createdAt: NOW - ageDays * 86_400_000,
     lastActiveAt: NOW - ageDays * 86_400_000,

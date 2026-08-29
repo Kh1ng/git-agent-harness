@@ -419,7 +419,7 @@ async function handleManagerChatSessionList(ws: WebSocket, message: Extract<Clie
 
 async function handleManagerChatSessionCreate(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.sessionCreate' }>, requestId: string) {
   try {
-    const session = await createChatSession(message.profile, message.backend, message.model ?? null, message.title);
+    const session = await createChatSession(message.profile, message.backend, message.model ?? null, message.title, message.reasoningEffort);
     const payload: ServerMessage = {
       type: 'manager.chat.sessionCreated',
       requestId,
@@ -434,9 +434,10 @@ async function handleManagerChatSessionCreate(ws: WebSocket, message: Extract<Cl
 
 async function handleManagerChatSessionUpdate(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.sessionUpdate' }>, requestId: string) {
   try {
-    const patch: { backend?: string; model?: string | null; title?: string } = {};
+    const patch: { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string } = {};
     if (message.backend !== undefined) patch.backend = message.backend;
     if (message.model !== undefined) patch.model = message.model;
+    if (message.reasoningEffort !== undefined) patch.reasoningEffort = message.reasoningEffort;
     if (message.title !== undefined) patch.title = message.title;
     const session = updateChatSession(message.profile, message.sessionId, patch);
     const payload: ServerMessage = {
