@@ -227,7 +227,7 @@ fn capacity_deferral_survives_stuck_action_redispatch() {
 }
 
 #[test]
-fn terminal_parallel_result_suppresses_refill_for_the_rest_of_the_iteration() {
+fn successful_sibling_reopens_refill_after_capacity_deferral() {
     let mut remaining = 0;
     let mut suppressed = false;
 
@@ -237,17 +237,19 @@ fn terminal_parallel_result_suppresses_refill_for_the_rest_of_the_iteration() {
         &mut remaining,
         &mut suppressed,
     ));
-    assert!(suppressed);
+    assert!(!suppressed);
     assert_eq!(remaining, 0);
 
-    // A later successful sibling must not reopen the refill slot.
+    // A later successful sibling proves the transient condition did not
+    // disable discovery for the rest of the batch.
     assert!(!update_parallel_refill_budget(
         "Dispatched review for branch 'gah/example'",
         2,
         &mut remaining,
         &mut suppressed,
     ));
-    assert_eq!(remaining, 0);
+    assert!(!suppressed);
+    assert_eq!(remaining, 2);
 }
 
 #[test]
