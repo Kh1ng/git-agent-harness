@@ -11,8 +11,8 @@ import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
 import { ProfileEditor } from '../components/ProfileEditor.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt } from '../lib/format.js';
-import { gahApi } from '../api/client.js';
-import type { WakeAutonomyValue, ConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary } from '@git-agent-harness/contracts';
+import { gahApi, GahApiError } from '../api/client.js';
+import type { WakeAutonomyValue, ConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
 
 const SCM_PROVIDER_KINDS = new Set(['github', 'gitlab']);
 const SETTINGS_REFRESH_MS = 60 * 1000;
@@ -221,6 +221,8 @@ export function SettingsPage() {
       <GatewaySettingsSection />
 
       <AddNodeSection />
+
+      <AdminUpdateSection />
 
       <ProfileConfigViewerSection
         selectedName={selectedName}
@@ -1002,6 +1004,117 @@ function AddNodeSection() {
         </p>
       )}
       {error && <p className="mt-3 text-xs text-critical">Error: {error}</p>}
+    </section>
+  );
+}
+
+/** Issue #989: in-app "pull, build, restart" path so updating GAH no longer
+ * requires SSH. The endpoint restarts this very server on success, so the
+ * request that started it can never itself report completion -- this polls
+ * `/api/admin/update/status` (backed by a state file that survives the
+ * restart, see apps/server/src/adminUpdate.ts) until it reaches a terminal
+ * status, tolerating the brief window where the server is down mid-restart,
+ * then reloads the page once it's confirmed back up. Renders nothing when
+ * the server has the feature disabled (GAH_ENABLE_ADMIN_UPDATE unset). */
+export function AdminUpdateSection() {
+  const [enabled, setEnabled] = useState(true);
+  const [pending, setPending] = useState<AdminUpdatePendingInfo | null>(null);
+  const [status, setStatus] = useState<AdminUpdateState | null>(null);
+  const [polling, setPolling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    gahApi
+      .getAdminUpdatePending()
+      .then(setPending)
+      .catch((err) => {
+        if (err instanceof GahApiError && err.status === 404) {
+          setEnabled(false);
+          return;
+        }
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    gahApi
+      .getAdminUpdateStatus()
+      .then((data) => {
+        setStatus(data);
+        if (data.status === 'running') setPolling(true);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!polling) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const next = await gahApi.getAdminUpdateStatus();
+        if (cancelled) return;
+        setStatus(next);
+        if (next.status === 'running') {
+          setTimeout(tick, 2000);
+        } else {
+          setPolling(false);
+          if (next.status === 'success' || next.status === 'inferred_restart') {
+            window.location.reload();
+          }
+        }
+      } catch {
+        // The restart step briefly takes the server down -- keep polling
+        // instead of surfacing a transient fetch failure as an error.
+        if (!cancelled) setTimeout(tick, 2000);
+      }
+    };
+    tick();
+    return () => {
+      cancelled = true;
+    };
+  }, [polling]);
+
+  const runUpdate = async () => {
+    setError(null);
+    try {
+      const state = await gahApi.startAdminUpdate();
+      setStatus(state);
+      if (state.status === 'running') setPolling(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  if (!enabled) return null;
+
+  const running = status?.status === 'running';
+
+  return (
+    <section className="card-padded max-w-2xl space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-primary">Update GAH</h3>
+        <button onClick={runUpdate} disabled={running} className="btn-primary text-xs px-3 py-1.5 disabled:opacity-50">
+          {running ? 'Updating…' : 'Update now'}
+        </button>
+      </div>
+      {pending && (
+        <p className="text-xs text-muted font-mono">
+          {pending.upToDate
+            ? `Up to date at ${pending.current?.short ?? '?'}`
+            : `${pending.commitsBehind} commit(s) behind: ${pending.current?.short ?? '?'} → ${pending.latest?.short ?? '?'}`}
+        </p>
+      )}
+      {status && status.status !== 'idle' && (
+        <div>
+          <p className="text-xs text-secondary">
+            Status: {status.status}
+            {status.status === 'inferred_restart' && ' — server restarted, reloading…'}
+          </p>
+          {status.output && (
+            <pre className="mt-1 max-h-64 overflow-auto bg-raised border border-subtle rounded-md px-3 py-2 text-xs font-mono whitespace-pre-wrap">
+              {status.output}
+            </pre>
+          )}
+        </div>
+      )}
+      {error && <p className="text-xs text-critical">{error}</p>}
     </section>
   );
 }

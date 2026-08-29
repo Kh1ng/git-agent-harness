@@ -82,6 +82,14 @@ import {
   putSkill,
   seedSkillFromDocs
 } from './skillBank.js';
+import {
+  getPendingCommits,
+  readAdminUpdateState,
+  startAdminUpdate,
+  type AdminUpdatePendingInfo,
+  type AdminUpdateState,
+  type StartAdminUpdateResult
+} from './adminUpdate.js';
 
 const SERVER_VERSION = '0.1.0';
 
@@ -96,6 +104,9 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   registryService?: RegistryService;
   claimsService?: ClaimsService;
   coordinatorPort?: number;
+  getPendingCommits?: typeof getPendingCommits;
+  startAdminUpdate?: typeof startAdminUpdate;
+  readAdminUpdateState?: typeof readAdminUpdateState;
 };
 
 const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
@@ -138,6 +149,9 @@ export function createServer(
   const coordinatorPort = configDeps.coordinatorPort ?? 3773;
   const listProfiles = configDeps.runProfileList ?? runProfileList;
   const addProfile = configDeps.runProfileAdd ?? runProfileAdd;
+  const getPendingCommitsFn = configDeps.getPendingCommits ?? getPendingCommits;
+  const startAdminUpdateFn = configDeps.startAdminUpdate ?? startAdminUpdate;
+  const readAdminUpdateStateFn = configDeps.readAdminUpdateState ?? readAdminUpdateState;
 
   const registryService =
     configDeps.registryService ||
@@ -169,6 +183,20 @@ export function createServer(
   // /api/skills (issue #963/#964): the central skill bank mutates the
   // versioned store, so it gets the same narrow auth gate as projects.
   app.use('/api/skills', authMiddleware);
+  // /api/admin/update (issue #989) shells out to `gah update`, which runs
+  // arbitrary build commands and restarts the control-plane service -- the
+  // same auth gate as registry/claims/settings, plus an explicit opt-in env
+  // flag so this surface doesn't exist at all unless an operator enables it.
+  app.use('/api/admin', authMiddleware);
+  app.use('/api/admin', (req, res, next) => {
+    if (process.env.GAH_ENABLE_ADMIN_UPDATE !== '1') {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Admin update is disabled; set GAH_ENABLE_ADMIN_UPDATE=1 on the server to enable it.'
+      });
+    }
+    next();
+  });
   app.use('/api/projects/import', rateLimit({
     windowMs: 60_000,
     limit: 10,
@@ -1531,6 +1559,24 @@ export function createServer(
     const { ok, out } = cliInDir('gh', args, cwd);
     if (!ok) return res.status(502).json({ error: 'gh pr create failed' });
     res.json({ url: out.trim() });
+  });
+
+  // Issue #989: in-app update path. Operates on this server's own GAH
+  // checkout (process.cwd(), the repo `gah-server.service`'s
+  // WorkingDirectory points at) -- not a managed profile's repo.
+  app.get('/api/admin/update', (req, res) => {
+    const pending: AdminUpdatePendingInfo = getPendingCommitsFn(process.cwd());
+    res.json(pending);
+  });
+
+  app.post('/api/admin/update', (req, res) => {
+    const result: StartAdminUpdateResult = startAdminUpdateFn();
+    res.status(result.started ? 202 : 409).json(result.state);
+  });
+
+  app.get('/api/admin/update/status', (req, res) => {
+    const state: AdminUpdateState = readAdminUpdateStateFn();
+    res.json(state);
   });
 
   // 404 handler
