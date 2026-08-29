@@ -7,8 +7,8 @@
  * the session branch, so the maintenance settle-by-branch sweep sees it
  * when the PR merges or closes.
  *
- * Starting is idempotent per (profile, PR): a live session on the PR's
- * head branch is returned as-is instead of creating a second one.
+ * Starting is idempotent per (profile, PR): a live worktree-less session on
+ * the PR's head branch is returned as-is instead of creating a second one.
  */
 
 import { execFile } from 'node:child_process';
@@ -129,9 +129,12 @@ export async function startPrChat(input: StartPrChatInput): Promise<StartPrChatR
   // created, so the name never collides with one gah would cut.
   const canonicalBranch = pr.headRefName ?? `gah/pr/${profileInfo.repo_id}-${prNumber}`;
 
-  // Idempotent open: one live session per (profile, PR).
+  // Idempotent open: one live, read-only session per (profile, PR). A
+  // writable issue chat can share the PR's head branch and must not be reused.
   const live = listSessions(profile, storeOptions).find(
-    (session) => session.archivedAt === null && session.branch === canonicalBranch
+    (session) => session.archivedAt === null
+      && session.worktreePath === null
+      && session.branch === canonicalBranch
   );
   if (live) return { session: live, existing: true };
 

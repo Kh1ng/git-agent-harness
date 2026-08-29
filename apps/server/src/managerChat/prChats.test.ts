@@ -7,6 +7,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
 import { listChatPrs, startPrChat } from './prChats.js';
+import { startIssueChat } from './issueChats.js';
 import { archiveSession, setChatSessionStoreOptions, listSessions } from './chatSessions.js';
 import { setSessionLogOptions } from './ManagerChatManager.js';
 
@@ -130,6 +131,48 @@ test('startPrChat opens a read-only seeded session: no branch, no worktree, no P
   assert.equal(third.existing, false);
   assert.equal(third.session.branch, 'feat/pr-chat');
   assert.equal(third.session.worktreePath, null);
+  assert.equal(listSessions('p').length, 2);
+}));
+
+test('startPrChat does not reuse a writable issue session on the PR head branch', withEnv(async (env) => {
+  const issue = await startIssueChat({
+    profile: 'p',
+    profileInfo: env.profileInfo,
+    issueNumber: 42,
+    backend: 'codex',
+    model: 'issue-model'
+  });
+  assert.equal(issue.session.branch, 'gah/issue/repo-42');
+  assert.ok(issue.session.worktreePath, 'issue session has a writable worktree');
+  const issueState = { ...issue.session };
+  const providerState = readFileSync(env.stateFile, 'utf8');
+
+  const started = await startPrChat({
+    profile: 'p',
+    profileInfo: env.profileInfo,
+    prNumber: 13,
+    backend: 'vibe',
+    model: 'pr-model'
+  });
+  assert.equal(started.existing, false);
+  assert.notEqual(started.session.id, issue.session.id);
+  assert.equal(started.session.branch, issue.session.branch);
+  assert.equal(started.session.worktreePath, null, 'PR chat is read-only and worktree-less');
+  assert.equal(started.session.backend, 'vibe');
+  assert.equal(started.session.model, 'pr-model');
+
+  const reopened = await startPrChat({
+    profile: 'p',
+    profileInfo: env.profileInfo,
+    prNumber: 13,
+    backend: 'hermes',
+    model: 'other-model'
+  });
+  assert.equal(reopened.existing, true);
+  assert.equal(reopened.session.id, started.session.id);
+  assert.equal(reopened.session.worktreePath, null);
+  assert.deepEqual(listSessions('p').find((session) => session.id === issue.session.id), issueState);
+  assert.equal(readFileSync(env.stateFile, 'utf8'), providerState, 'PR starts do not mutate issue provider state');
   assert.equal(listSessions('p').length, 2);
 }));
 
