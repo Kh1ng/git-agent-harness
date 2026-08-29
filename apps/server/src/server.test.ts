@@ -307,7 +307,7 @@ test('skill bank mutation routes reject unauthenticated non-loopback requests li
     if (!nonLoopbackIp) return;
     const baseUrl = `http://${nonLoopbackIp}:${port}`;
     // No TLS, no token -> 403 Forbidden, exactly like /api/projects.
-    for (const path of ['/api/skills', '/api/projects']) {
+    for (const path of ['/api/skills', '/api/projects', '/api/admin/update']) {
       const res = await fetch(`${baseUrl}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -321,4 +321,132 @@ test('skill bank mutation routes reject unauthenticated non-loopback requests li
     rmSync(dir, { recursive: true, force: true });
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+async function withAdminUpdateEnv(value: string | undefined, fn: () => Promise<void>): Promise<void> {
+  const saved = process.env.GAH_ENABLE_ADMIN_UPDATE;
+  if (value === undefined) delete process.env.GAH_ENABLE_ADMIN_UPDATE;
+  else process.env.GAH_ENABLE_ADMIN_UPDATE = value;
+  try {
+    await fn();
+  } finally {
+    if (saved === undefined) delete process.env.GAH_ENABLE_ADMIN_UPDATE;
+    else process.env.GAH_ENABLE_ADMIN_UPDATE = saved;
+  }
+}
+
+test('/api/admin/update is 404 (not just unimplemented) without GAH_ENABLE_ADMIN_UPDATE=1', async () => {
+  await withAdminUpdateEnv(undefined, async () => {
+    await withTestServer(
+      async (profile) => profilePayload(profile),
+      async (baseUrl) => {
+        const getRes = await fetch(`${baseUrl}/api/admin/update`);
+        assert.equal(getRes.status, 404);
+        const postRes = await fetch(`${baseUrl}/api/admin/update`, { method: 'POST' });
+        assert.equal(postRes.status, 404);
+        const statusRes = await fetch(`${baseUrl}/api/admin/update/status`);
+        assert.equal(statusRes.status, 404);
+      }
+    );
+  });
+});
+
+test('GET /api/admin/update returns the injected pending-commits check when enabled', async () => {
+  await withAdminUpdateEnv('1', async () => {
+    const pending = {
+      current: { hash: 'aaa', short: 'aaa', subject: 'current' },
+      latest: { hash: 'bbb', short: 'bbb', subject: 'latest' },
+      commitsBehind: 2,
+      upToDate: false
+    };
+    const app = createServer({ getPendingCommits: () => pending });
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/admin/update`);
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), pending);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+test('POST /api/admin/update launches the update via the injected helper and returns 202', async () => {
+  await withAdminUpdateEnv('1', async () => {
+    const runningState = {
+      status: 'running' as const,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      finishedAt: null,
+      exitCode: null,
+      pid: 1234,
+      output: ''
+    };
+    let startCalled = false;
+    const app = createServer({
+      startAdminUpdate: () => {
+        startCalled = true;
+        return { started: true, state: runningState };
+      }
+    });
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/admin/update`, { method: 'POST' });
+      assert.equal(res.status, 202);
+      assert.equal(startCalled, true);
+      assert.deepEqual(await res.json(), runningState);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+test('POST /api/admin/update returns 409 when an update is already running', async () => {
+  await withAdminUpdateEnv('1', async () => {
+    const runningState = {
+      status: 'running' as const,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      finishedAt: null,
+      exitCode: null,
+      pid: 1234,
+      output: ''
+    };
+    const app = createServer({ startAdminUpdate: () => ({ started: false, state: runningState }) });
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/admin/update`, { method: 'POST' });
+      assert.equal(res.status, 409);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+test('GET /api/admin/update/status returns reconnect-safe state via the injected reader', async () => {
+  await withAdminUpdateEnv('1', async () => {
+    const inferredState = {
+      status: 'inferred_restart' as const,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      finishedAt: '2026-01-01T00:05:00.000Z',
+      exitCode: null,
+      pid: 1234,
+      output: 'build output...'
+    };
+    const app = createServer({ readAdminUpdateState: () => inferredState });
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/admin/update/status`);
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), inferredState);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });

@@ -1145,3 +1145,34 @@ export interface SkillSummary {
   /** True when this skill has live bindings (deletion would be refused). */
   bound: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// In-app update (issue #989): `gah update --role central --restart-server`
+// driven from the dashboard instead of SSH. `inferred_restart` exists
+// because the update's own final step restarts this server, which kills the
+// updater before it can record its exit code -- see apps/server/src/adminUpdate.ts.
+// ---------------------------------------------------------------------------
+
+export interface AdminUpdateCommitInfo {
+  hash: string;
+  short: string;
+  subject: string;
+}
+
+export interface AdminUpdatePendingInfo {
+  current: AdminUpdateCommitInfo | null;
+  latest: AdminUpdateCommitInfo | null;
+  commitsBehind: number;
+  upToDate: boolean;
+}
+
+export type AdminUpdateStatus = 'idle' | 'running' | 'success' | 'failed' | 'inferred_restart';
+
+export interface AdminUpdateState {
+  status: AdminUpdateStatus;
+  startedAt: string | null;
+  finishedAt: string | null;
+  exitCode: number | null;
+  pid: number | null;
+  output: string;
+}

@@ -44,7 +44,9 @@ import type {
   ChatPreviewInfo,
   ChatIssueSummary,
   ChatIssueStartResult,
-  ChatReclaimResult
+  ChatReclaimResult,
+  AdminUpdatePendingInfo,
+  AdminUpdateState
 } from '@git-agent-harness/contracts';
 
 const SERVER_URL =
@@ -234,6 +236,9 @@ export interface GahDataSource {
   setChatPreview(profile: string, sessionId: string, port: number | null): Promise<{ preview: ChatPreviewInfo | null }>;
   getChatIssues(profile: string): Promise<{ issues: ChatIssueSummary[] }>;
   startChatFromIssue(profile: string, issueNumber: number, backend?: string, model?: string | null): Promise<ChatIssueStartResult>;
+  getAdminUpdatePending(): Promise<AdminUpdatePendingInfo>;
+  getAdminUpdateStatus(): Promise<AdminUpdateState>;
+  startAdminUpdate(): Promise<AdminUpdateState>;
 }
 
 async function postJson<T, U>(path: string, body: U): Promise<T> {
@@ -501,5 +506,31 @@ export const gahApi: GahDataSource = {
   },
   startChatFromIssue(profile, issueNumber, backend, model) {
     return postJson<ChatIssueStartResult, { profile: string; issueNumber: number; backend?: string; model?: string | null }>('/api/manager-chat/issues/start', { profile, issueNumber, backend, model });
+  },
+  getAdminUpdatePending() {
+    return getJson<AdminUpdatePendingInfo>('/api/admin/update');
+  },
+  getAdminUpdateStatus() {
+    return getJson<AdminUpdateState>('/api/admin/update/status');
+  },
+  async startAdminUpdate() {
+    // Like startLoop: 202 (started) and 409 (already running) both carry
+    // the current state as their body, not just an error to throw. Any
+    // other non-ok status (404 disabled, 403 unauthenticated, 500) is a
+    // real error and goes through the same message extraction as
+    // postJson/patchJson.
+    const url = new URL('/api/admin/update', SERVER_URL);
+    const res = await fetch(url.toString(), { method: 'POST' });
+    if (res.status === 202 || res.status === 409) {
+      return (await res.json()) as AdminUpdateState;
+    }
+    let message = `${res.status} ${res.statusText}`;
+    try {
+      const body = await res.json();
+      if (typeof body?.message === 'string') message = body.message;
+    } catch {
+      // response body wasn't JSON -- fall back to the status text above
+    }
+    throw new GahApiError(message, res.status, '/api/admin/update');
   }
 };
