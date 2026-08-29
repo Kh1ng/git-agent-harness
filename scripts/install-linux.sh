@@ -54,24 +54,23 @@ fi
 # different GAH_GATEWAY_* values updates just those keys and leaves
 # everything else alone.
 #
-# Target file depends on role: gah-server.service (central) reads
+# Targets depend on role: gah-server.service (central only) reads
 # /etc/gah/server.env via its EnvironmentFile= directive; gah-loop@.service
-# (worker, and central's own loop if it runs one) reads
-# ~/.config/gah/gah-loop.env instead -- writing gateway vars to server.env
-# on a worker node put them somewhere nothing ever read them (bug found
-# 2026-08-08 while debugging why a remote worker's `gah loop` never reached
-# the configured gateway).
-# Named distinctly from the colocated branch's own $gateway_env_file below
-# (that one holds the gateway process's own secrets; this one is where a
-# *consumer* of the gateway -- gah-server.service or gah-loop@.service --
-# is told the URL/key to reach it at) so the two don't collide as plain
-# script-global bash variables.
+# (worker, and central's own loop -- a central node runs its own dispatch
+# loop in addition to gah-server.service) reads ~/.config/gah/gah-loop.env.
+# A central install must therefore upsert into *both* files; a worker only
+# has the second. Getting this wrong left a worker's gateway vars in a file
+# nothing read (bug found 2026-08-08), and separately left a central node's
+# own loop with zero gateway creds (issue #919, found 2026-08-09).
+# gateway-target-mapping:start -- extracted verbatim by
+# tests/fixtures/install_linux_gateway_mapping_test.sh, keep this block
+# self-contained (only $role/$server_env_file/$HOME as inputs).
 if [ "$role" = "central" ]; then
-  role_gateway_env_file="$server_env_file"
-  role_gateway_sudo="sudo"
+  gateway_env_files=("$server_env_file" "$HOME/.config/gah/gah-loop.env")
+  gateway_env_sudo=("sudo" "")
 else
-  role_gateway_env_file="$HOME/.config/gah/gah-loop.env"
-  role_gateway_sudo=""
+  gateway_env_files=("$HOME/.config/gah/gah-loop.env")
+  gateway_env_sudo=("")
 fi
 
 upsert_env_line() {
@@ -86,6 +85,16 @@ upsert_env_line() {
     printf '%s=%s\n' "$key" "$value" | $as tee -a "$file" >/dev/null
   fi
 }
+
+# Used by both the remote and colocated branches below so they can't drift
+# apart on which files get written.
+upsert_gateway_env_line() {
+  local key="$1" value="$2" i
+  for i in "${!gateway_env_files[@]}"; do
+    upsert_env_line "${gateway_env_files[$i]}" "$key" "$value" "${gateway_env_sudo[$i]}"
+  done
+}
+# gateway-target-mapping:end
 
 case "${GAH_GATEWAY_MODE:-}" in
   remote)
@@ -104,11 +113,11 @@ case "${GAH_GATEWAY_MODE:-}" in
       echo "ERROR: remote gateway at $GAH_GATEWAY_URL is not reachable (or rejected the API key). Aborting install -- fix reachability/credentials and re-run." >&2
       exit 1
     fi
-    upsert_env_line "$role_gateway_env_file" TDAI_GATEWAY_URL "$GAH_GATEWAY_URL" "$role_gateway_sudo"
+    upsert_gateway_env_line TDAI_GATEWAY_URL "$GAH_GATEWAY_URL"
     if [ -n "${GAH_GATEWAY_API_KEY:-}" ]; then
-      upsert_env_line "$role_gateway_env_file" TDAI_GATEWAY_API_KEY "$GAH_GATEWAY_API_KEY" "$role_gateway_sudo"
+      upsert_gateway_env_line TDAI_GATEWAY_API_KEY "$GAH_GATEWAY_API_KEY"
     fi
-    echo "Remote gateway confirmed reachable; wired into $role_gateway_env_file"
+    echo "Remote gateway confirmed reachable; wired into: ${gateway_env_files[*]}"
     ;;
   colocated)
     : "${GAH_GATEWAY_MEMORYCORE_PATH:?GAH_GATEWAY_MODE=colocated requires GAH_GATEWAY_MEMORYCORE_PATH (path to a TencentDB-Agent-Memory/MemoryCore checkout)}"
@@ -167,9 +176,9 @@ case "${GAH_GATEWAY_MODE:-}" in
       exit 1
     fi
 
-    upsert_env_line "$role_gateway_env_file" TDAI_GATEWAY_URL "http://127.0.0.1:8420" "$role_gateway_sudo"
-    upsert_env_line "$role_gateway_env_file" TDAI_GATEWAY_API_KEY "$gateway_api_key" "$role_gateway_sudo"
-    echo "Co-located gateway is healthy; wired into $role_gateway_env_file"
+    upsert_gateway_env_line TDAI_GATEWAY_URL "http://127.0.0.1:8420"
+    upsert_gateway_env_line TDAI_GATEWAY_API_KEY "$gateway_api_key"
+    echo "Co-located gateway is healthy; wired into: ${gateway_env_files[*]}"
     ;;
   "")
     ;;
