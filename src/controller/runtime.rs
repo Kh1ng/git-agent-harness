@@ -812,8 +812,6 @@ fn run_parallel_once(
         }
     }
 
-    // Clean up any stale claims if we encountered errors
-    // (This is a safety net - normally individual claims should be released)
     let failed_results: Vec<&LoopOnceResult> = results
         .iter()
         .filter(|result| parallel_outcome_is_failure(&result.outcome))
@@ -839,8 +837,10 @@ fn update_parallel_refill_budget(
     let error = outcome.starts_with("Error:");
     let failed = parallel_outcome_is_failure(outcome);
     let capacity_deferred = outcome.starts_with("Deferred ");
-    if error || capacity_deferred {
+    if error {
         *refill_suppressed = true;
+        *fill_attempts_remaining = 0;
+    } else if capacity_deferred {
         *fill_attempts_remaining = 0;
     } else if !*refill_suppressed {
         *fill_attempts_remaining = parallel_limit;

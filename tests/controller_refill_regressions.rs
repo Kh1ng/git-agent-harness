@@ -415,6 +415,142 @@ fn parallel_loop_refills_immediately_after_a_fast_completion() {
 }
 
 #[test]
+fn parallel_loop_selects_new_review_after_capacity_deferred_sibling() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let tmp = test_tempdir();
+    let (repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");
+    let config = fs::read_to_string(&cfg).unwrap().replace(
+        "improve_backend = \"codex\"",
+        "improve_backend = \"codex\"\nimprove_candidates = [{ backend = \"codex\", model = \"local/test\" }]",
+    );
+    fs::write(
+        &cfg,
+        config.replace(
+            "[profiles.real.routing]",
+            "[profiles.real.max_concurrent_per_model]\n\"codex/local/test\" = 1\n\n[profiles.real.routing]",
+        ),
+    )
+    .unwrap();
+
+    fs::create_dir_all(repo.join("docs/tickets")).unwrap();
+    for id in 701..=702 {
+        fs::write(
+            repo.join(format!("docs/tickets/TICKET-{id}-capacity.md")),
+            format!(
+                "# TICKET-{id}: Capacity sibling\n\nGoal: exercise refill after route capacity clears.\nRecommended backend: codex\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    ProcessCommand::new("git")
+        .args(["switch", "-c", "gah/real-review"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    fs::write(repo.join("review-change.txt"), "review me\n").unwrap();
+    ProcessCommand::new("git")
+        .args(["add", "review-change.txt"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["commit", "-m", "review fixture"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["push", "-u", "origin", "gah/real-review"])
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    ProcessCommand::new("git")
+        .args(["switch", "main"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+
+    let fake_bin = tmp.path().join("bin");
+    let events_path = tmp.path().join("events.jsonl");
+    let review_started = tmp.path().join("review-started");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let pr_updated_at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\n\
+             case \"$4\" in\n\
+               */pulls\\?*)\n\
+                 if grep -q deferred_capacity '{events_path}' 2>/dev/null; then echo '[{{\"title\":\"[GAH] Fix: TICKET-703\",\"body\":\"Review fixture\",\"head\":{{\"ref\":\"gah/real-review\",\"sha\":\"source-sha\"}},\"html_url\":\"https://github.com/owner/real/pull/7\",\"labels\":[],\"number\":7,\"state\":\"open\",\"draft\":true,\"updated_at\":\"{pr_updated_at}\"}}]'; else echo '[]'; fi\n\
+                 exit 0 ;;\n\
+               */pulls) echo '[{{\"number\":7}}]'; exit 0 ;;\n\
+               */check-runs\\?*) echo '{{\"total_count\":1,\"check_runs\":[{{\"status\":\"completed\",\"conclusion\":\"success\"}}]}}'; exit 0 ;;\n\
+             esac\n\
+             if [ \"$1\" = \"api\" ]; then echo '[]'; exit 0; fi\n\
+             if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then echo '{{\"number\":7,\"url\":\"https://github.com/owner/real/pull/7\",\"title\":\"[GAH] Fix: TICKET-703\",\"body\":\"Review fixture\",\"headRefName\":\"gah/real-review\",\"baseRefName\":\"main\",\"headRefOid\":\"source-sha\",\"statusCheckRollup\":[{{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}]}}'; exit 0; fi\n\
+             if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then echo 'https://github.com/owner/real/pull/1'; exit 0; fi\n\
+             if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then exit 0; fi\n\
+             exit 0\n",
+            events_path = events_path.display(),
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nsleep 1\nprintf 'implementation complete\n' > implementation.txt\n",
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "claude",
+        &format!(
+            "#!/bin/sh\necho started > '{}'\ncat <<'EOF'\nReview notes\n{{\"verdict\":\"APPROVE\",\"confidence\":\"high\",\"human_required\":false,\"blocking_findings\":[],\"non_blocking_findings\":[],\"risk_notes\":[],\"evidence\":[\"file:review-change.txt\"]}}\nEOF\n",
+            review_started.display()
+        ),
+    );
+
+    let output = spawn_bin(tmp.path())
+        .args([
+            "loop",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--once",
+            "--parallel",
+            "2",
+        ])
+        .env(
+            "PATH",
+            format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_EVENTS_PATH", &events_path)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("because configured route capacity is busy"),
+        "one initial sibling must be capacity-deferred"
+    );
+    assert!(
+        review_started.exists(),
+        "newly eligible higher-priority review must launch after the successful sibling"
+    );
+}
+
+#[test]
 fn parallel_worker_error_stops_refill_after_running_sibling_finishes() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let tmp = test_tempdir();
