@@ -1,0 +1,13 @@
+{
+  "number": 13,
+  "title": "Review the issue branch",
+  "body": "Reviews the changes developed in the existing issue chat.",
+  "state": "OPEN",
+  "url": "https://github.com/owner/repo/pull/13",
+  "headRefName": "gah/issue/repo-42",
+  "isDraft": false,
+  "author": {
+    "login": "octocat"
+  },
+  "reviewDecision": null
+}

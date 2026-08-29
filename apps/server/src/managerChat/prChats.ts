@@ -7,8 +7,8 @@
  * the session branch, so the maintenance settle-by-branch sweep sees it
  * when the PR merges or closes.
  *
- * Starting is idempotent per (profile, PR): a live session on the PR's
- * head branch is returned as-is instead of creating a second one.
+ * Starting is idempotent per (profile, PR): a live session tagged with the
+ * PR number is returned as-is instead of creating a second one.
  */
 
 import { execFile } from 'node:child_process';
@@ -125,13 +125,15 @@ export async function startPrChat(input: StartPrChatInput): Promise<StartPrChatR
   const { profile, profileInfo, prNumber, backend } = input;
   const storeOptions = input.storeOptions ?? chatSessionStoreOptions;
   const pr = await fetchPr(profileInfo, prNumber);
-  // The PR's own head branch is the session identity -- no branch is
-  // created, so the name never collides with one gah would cut.
+  // Record the PR's head branch for maintenance settlement; PR identity is
+  // persisted separately because issue/general chats may use the same branch.
   const canonicalBranch = pr.headRefName ?? `gah/pr/${profileInfo.repo_id}-${prNumber}`;
 
-  // Idempotent open: one live session per (profile, PR).
+  // Idempotent open: one explicitly tagged live session per (profile, PR).
+  // Issue and general chats may share the head branch but have no PR identity.
   const live = listSessions(profile, storeOptions).find(
-    (session) => session.archivedAt === null && session.branch === canonicalBranch
+    (session) => session.archivedAt === null
+      && session.prNumber === prNumber
   );
   if (live) return { session: live, existing: true };
 
@@ -146,6 +148,7 @@ export async function startPrChat(input: StartPrChatInput): Promise<StartPrChatR
     {
       profile,
       profileInfo,
+      prNumber,
       backend,
       model: input.model ?? null,
       title: `#${prNumber} ${pr.title}`,
