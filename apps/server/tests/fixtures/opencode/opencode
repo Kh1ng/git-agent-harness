@@ -1,0 +1,90 @@
+#!/usr/bin/env node
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { Readable, Writable } from 'node:stream';
+import * as acp from '@agentclientprotocol/sdk';
+
+class MockOpenCode {
+  constructor(connection) {
+    this.connection = connection;
+    this.sessionCwds = new Map();
+  }
+
+  async initialize() {
+    return {
+      protocolVersion: acp.PROTOCOL_VERSION,
+      agentCapabilities: { loadSession: false }
+    };
+  }
+
+  async newSession(params) {
+    this.sessionCwds.set('mock-opencode', params.cwd);
+    return { sessionId: 'mock-opencode' };
+  }
+
+  async authenticate() {
+    return {};
+  }
+
+  async prompt({ sessionId }) {
+    const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT ?? '{}');
+    const cwd = this.sessionCwds.get(sessionId);
+    const agent = config.default_agent ?? process.env.GAH_TEST_OPENCODE_DEFAULT_AGENT ?? 'build';
+    if (agent !== 'gah-implementer') {
+      const repeated = [
+        'I need to stop loading skills and actually explore the repository.\n',
+        'Let me actually explore the repository now.\n'
+      ].join('');
+      await this.message(sessionId, repeated + repeated);
+      setTimeout(() => process.exit(0), 25);
+      return { stopReason: 'end_turn' };
+    }
+    if (config.model !== 'provider/preserved-model') {
+      throw new Error('Manager Chat discarded inherited OpenCode config');
+    }
+
+    const readPath = join(cwd, 'README.md');
+    await this.tool(sessionId, 'read-1', 'read', 'Reading README.md', readPath, () => readFileSync(readPath, 'utf8'));
+    const editPath = join(cwd, 'manager-chat-edit.txt');
+    await this.tool(sessionId, 'edit-1', 'edit', 'Editing manager-chat-edit.txt', editPath, () => {
+      writeFileSync(editPath, 'edited by gah-implementer\n');
+      return 'created manager-chat-edit.txt';
+    });
+    await this.message(sessionId, 'Read and edited the bound worktree.');
+    setTimeout(() => process.exit(0), 25);
+    return { stopReason: 'end_turn' };
+  }
+
+  async tool(sessionId, toolCallId, name, title, path, action) {
+    await this.connection.sessionUpdate({
+      sessionId,
+      update: { sessionUpdate: 'tool_call', toolCallId, name, title, status: 'pending', locations: [{ path }] }
+    });
+    const output = action();
+    await this.connection.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId,
+        name,
+        title,
+        status: 'completed',
+        locations: [{ path }],
+        content: [{ type: 'content', content: { type: 'text', text: output } }]
+      }
+    });
+  }
+
+  async message(sessionId, text) {
+    await this.connection.sessionUpdate({
+      sessionId,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } }
+    });
+  }
+}
+
+const stream = acp.ndJsonStream(
+  Writable.toWeb(process.stdout),
+  Readable.toWeb(process.stdin)
+);
+new acp.AgentSideConnection((connection) => new MockOpenCode(connection), stream);

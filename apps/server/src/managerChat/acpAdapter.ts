@@ -42,6 +42,7 @@ export interface ManagerReasoningEffortInfo {
 export interface SpawnSpec {
   command: string;
   args: string[];
+  env?: Record<string, string>;
 }
 
 const COMPACTION_COMMAND_NAMES = new Set(['compact', 'compress', 'clear', 'reset']);
@@ -331,7 +332,23 @@ export function claudeSpawnSpec(): SpawnSpec {
 /** opencode ships a native ACP server (`opencode acp`) — Tier A like
  * Hermes, no bridge needed. */
 export function opencodeSpawnSpec(): SpawnSpec {
-  return { command: 'opencode', args: ['acp'] };
+  const inherited = process.env.OPENCODE_CONFIG_CONTENT;
+  let config: Record<string, unknown> = {};
+  if (inherited !== undefined) {
+    try {
+      const parsed: unknown = JSON.parse(inherited);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('expected a JSON object');
+      config = parsed as Record<string, unknown>;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Cannot start OpenCode Manager Chat: OPENCODE_CONFIG_CONTENT must be a JSON object (${detail}).`);
+    }
+  }
+  return {
+    command: 'opencode',
+    args: ['acp'],
+    env: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...config, default_agent: 'gah-implementer' }) }
+  };
 }
 
 /** Builds the runTurn/listCommands/listModels/setModel surface for one
@@ -406,7 +423,10 @@ export function createAcpBackend(
 
     const client = new AcpClient(label);
     const spec = spawnSpec();
-    const child = spawn(spec.command, spec.args, { stdio: ['pipe', 'pipe', 'inherit'] });
+    const child = spawn(spec.command, spec.args, {
+      stdio: ['pipe', 'pipe', 'inherit'],
+      env: spec.env ? { ...process.env, ...spec.env } : undefined
+    });
 
     const stream = acp.ndJsonStream(
       Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
