@@ -719,6 +719,137 @@ fn loop_once_prune_skips_full_provider_history_and_retains_fresh_worktree() {
 }
 
 #[test]
+fn loop_once_prunes_terminal_and_abandoned_open_worktrees_but_retains_live_claim() {
+    use git_agent_harness::{config, ledger};
+
+    let tmp = test_tempdir();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg_path = write_real_repo_config(&tmp, &repo, "github");
+
+    let worktree_root = tmp.path().join("worktrees");
+    fs::create_dir_all(&worktree_root).unwrap();
+    let terminal_branch = "gah/real-913";
+    let abandoned_branch = "gah/real-914";
+    let active_branch = "gah/real-915";
+    let terminal_worktree = worktree_root.join("gah-real-913");
+    let abandoned_worktree = worktree_root.join("gah-real-914");
+    let active_worktree = worktree_root.join("gah-real-915");
+    for (branch, worktree) in [
+        (terminal_branch, &terminal_worktree),
+        (abandoned_branch, &abandoned_worktree),
+        (active_branch, &active_worktree),
+    ] {
+        ProcessCommand::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+    }
+    for worktree in [&abandoned_worktree, &active_worktree] {
+        ProcessCommand::new("touch")
+            .args(["-t", "202401010000", worktree.to_str().unwrap()])
+            .output()
+            .unwrap();
+    }
+
+    let cfg = config::load(Some(cfg_path.to_str().unwrap())).unwrap();
+    let profile = config::get_profile(&cfg, "real").unwrap();
+    for (work_id, branch, mr_url) in [
+        (
+            "TICKET-913",
+            terminal_branch,
+            "https://github.com/owner/real/pull/1",
+        ),
+        (
+            "TICKET-914",
+            abandoned_branch,
+            "https://github.com/owner/real/pull/2",
+        ),
+        (
+            "TICKET-915",
+            active_branch,
+            "https://github.com/owner/real/pull/3",
+        ),
+    ] {
+        let mut entry =
+            ledger::LedgerEntry::new("real", profile, "codex", "improve", work_id, None, None);
+        entry.work_id = Some(work_id.to_string());
+        entry.branch = Some(branch.to_string());
+        entry.push_attempted = true;
+        entry.push_succeeded = true;
+        entry.mr_attempted = true;
+        entry.mr_created = true;
+        entry.mr_url = Some(mr_url.to_string());
+        ledger::append(&cfg, &entry).unwrap();
+    }
+
+    let claim_state = tmp.path().join("work-claims.json");
+    fs::write(
+        &claim_state,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 2,
+            "claims": {
+                "real@real": [{
+                    "work_id": "#915",
+                    "pid": std::process::id(),
+                    "hostname": "controller-regression",
+                    "claimed_at": time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap()
+                }]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        "#!/bin/sh\ncase \"$4\" in\n  */pulls?*) echo '[{\"title\":\"[GAH] Fix: TICKET-914\",\"body\":\"\",\"head\":{\"ref\":\"gah/real-914\",\"sha\":\"abandoned-sha\"},\"html_url\":\"https://github.com/owner/real/pull/2\",\"labels\":[{\"name\":\"gah-ready-for-human\"}],\"number\":2,\"state\":\"open\",\"draft\":false,\"updated_at\":\"2099-01-01T00:00:00Z\"},{\"title\":\"[GAH] Fix: TICKET-915\",\"body\":\"\",\"head\":{\"ref\":\"gah/real-915\",\"sha\":\"active-sha\"},\"html_url\":\"https://github.com/owner/real/pull/3\",\"labels\":[{\"name\":\"gah-ready-for-human\"}],\"number\":3,\"state\":\"open\",\"draft\":false,\"updated_at\":\"2099-01-01T00:00:00Z\"}]'; exit 0;;\n  */check-runs?*) echo '{\"total_count\":0,\"check_runs\":[]}'; exit 0;;\n  */issues?*) echo '[]'; exit 0;;\nesac\necho \"unexpected gh invocation: $@\" >&2\nexit 1\n",
+    );
+
+    bin()
+        .args([
+            "loop",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg_path.to_str().unwrap(),
+            "--once",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_CLAIM_STATE_PATH", &claim_state)
+        .assert()
+        .success();
+
+    assert!(
+        !terminal_worktree.exists(),
+        "a clean published worktree absent from the complete active-MR snapshot is terminal upstream"
+    );
+    assert!(
+        !abandoned_worktree.exists(),
+        "a clean old open-MR worktree without a live claim should not block repair forever"
+    );
+    assert!(
+        active_worktree.exists(),
+        "a clean old worktree with an exact live PID-backed claim must be retained"
+    );
+}
+
+#[test]
 fn loop_once_dispatches_an_eligible_ticket() {
     let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
