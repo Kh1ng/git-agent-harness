@@ -17,6 +17,8 @@ import express, { type Response } from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import type {
   ChatNodeInfo,
+  ChatPrStartResult,
+  ChatPrSummary,
   ChatPreviewInfo,
   ChatReclaimResult,
   ChatSessionSummary,
@@ -175,6 +177,29 @@ const BACKENDS = [
 ] satisfies ManagerBackendInfo[];
 
 const MOCK_PROFILES = PROFILE_FIXTURE satisfies ProfileSummary[];
+
+const MOCK_PRS = [
+  {
+    number: 12,
+    title: 'Ship the PR chat mode',
+    url: 'https://github.com/fixture/repo/pull/12',
+    author: 'octocat',
+    headRefName: 'feat/pr-chat',
+    isDraft: false,
+    reviewState: 'APPROVED',
+    updatedAt: '2026-08-28T12:00:00Z'
+  },
+  {
+    number: 11,
+    title: 'Draft the changelog',
+    url: 'https://github.com/fixture/repo/pull/11',
+    author: 'hubot',
+    headRefName: 'docs/changelog',
+    isDraft: true,
+    reviewState: 'REVIEW_REQUIRED',
+    updatedAt: '2026-08-27T12:00:00Z'
+  }
+] satisfies ChatPrSummary[];
 
 const MOCK_PROFILE_CONFIG = {
   profile: 'fixture',
@@ -720,6 +745,36 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     return archived;
   }
 
+  /** PR → chat: a read-only session seeded with the PR -- worktree-less,
+   * riding the PR's head branch, with the PR as the opening message. */
+  function createPrSession(profile: string, backend: string | undefined, model: string | null, pr: ChatPrSummary): ChatSessionSummary {
+    const id = `mock-session-${state.sessions.size + 1}`;
+    const created = {
+      id,
+      profile,
+      worktreePath: null,
+      branch: pr.headRefName ?? `gah/pr/${id}`,
+      backend: backend ?? state.settings.defaultBackend,
+      model,
+      title: `#${pr.number} ${pr.title}`,
+      createdAt: FIXED_NOW + state.sessions.size,
+      lastActiveAt: FIXED_NOW + state.sessions.size,
+      archivedAt: null,
+      outcome: 'live',
+      settledAt: null,
+      settledReason: null
+    } satisfies ChatSessionSummary;
+    state.sessions.set(id, created);
+    const conversation = getConversation(profile, id);
+    conversation.cursor += 2;
+    conversation.turns.push({
+      role: 'user',
+      text: `#${pr.number} ${pr.title}\n\nHead branch: ${pr.headRefName}\n(${pr.url})`,
+      timestamp: FIXED_NOW + conversation.cursor
+    } satisfies ChatTranscriptTurn);
+    return created;
+  }
+
   app.get('/health', (_req, res) => res.json({ status: 'ok', mode: 'mock', scenario: state.scenario }));
 
   app.get('/api/mock/scenarios', (_req, res) => {
@@ -832,6 +887,25 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     res.json({ nodes });
   });
   app.get('/api/manager-chat/issues', (_req, res) => res.json({ issues: [] }));
+  app.get('/api/manager-chat/prs', (_req, res) => res.json({ prs: MOCK_PRS }));
+  app.post('/api/manager-chat/prs/start', (req, res) => {
+    const profile = bodyString(req.body?.profile) ?? 'fixture';
+    const prNumber = Number(req.body?.prNumber);
+    if (!Number.isInteger(prNumber)) {
+      return jsonError(res, 400, 'Missing required field: prNumber', 'prNumber is required');
+    }
+    const pr = MOCK_PRS.find((candidate) => candidate.number === prNumber);
+    if (!pr) {
+      return jsonError(res, 502, 'Failed to start chat from pull request', `PR #${prNumber} is not open`);
+    }
+    const created = createPrSession(
+      profile,
+      bodyString(req.body?.backend),
+      bodyString(req.body?.model) ?? null,
+      pr
+    );
+    res.status(201).json({ session: created, existing: false } satisfies ChatPrStartResult);
+  });
 
   app.get('/api/manager-chat/sessions', (req, res) => {
     if (state.scenario === 'rest-error') return jsonError(res, 503, 'Mock REST failure', 'Mock session list unavailable');

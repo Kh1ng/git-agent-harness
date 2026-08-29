@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { FolderGit2, Server, Cpu, X, CircleDot } from 'lucide-react';
-import type { ChatIssueSummary, ChatNodeInfo, ManagerModelInfo, ProfileSummary } from '@git-agent-harness/contracts';
+import { FolderGit2, Server, Cpu, X, CircleDot, GitPullRequest } from 'lucide-react';
+import type { ChatIssueSummary, ChatNodeInfo, ChatPrSummary, ManagerModelInfo, ProfileSummary } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
 import type { ManagerBackendInfo } from '@git-agent-harness/contracts';
 
@@ -10,7 +10,7 @@ interface NewChatModalProps {
   profiles: ProfileSummary[];
   backends: ManagerBackendInfo[];
   onClose: () => void;
-  /** Blank chat: (profile, sessionId). Issue chat: same shape — the
+  /** Blank chat: (profile, sessionId). Issue/PR chat: same shape — the
    * session is opened the same way either way. */
   onCreated: (profile: string, sessionId: string) => void;
 }
@@ -24,6 +24,9 @@ interface NewChatModalProps {
  * "From issue" grabs a provider issue instead: the session branches for the
  * issue (`gah/issue/<repo>-<n>`), the issue is marked in progress, and the
  * conversation opens seeded with the issue body.
+ *
+ * "From PR" opens a read-only chat seeded with a pull request — no branch,
+ * no worktree, nothing at the provider is touched.
  */
 export function NewChatModal({ open, currentProfile, profiles, backends, onClose, onCreated }: NewChatModalProps) {
   const [project, setProject] = useState(currentProfile);
@@ -35,10 +38,13 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [mode, setMode] = useState<'blank' | 'issue'>('blank');
+  const [mode, setMode] = useState<'blank' | 'issue' | 'pr'>('blank');
   const [issues, setIssues] = useState<ChatIssueSummary[]>([]);
   const [issuesLoading, setIssuesLoading] = useState(false);
   const [issue, setIssue] = useState<ChatIssueSummary | null>(null);
+  const [prs, setPrs] = useState<ChatPrSummary[]>([]);
+  const [prsLoading, setPrsLoading] = useState(false);
+  const [pr, setPr] = useState<ChatPrSummary | null>(null);
 
   const implementedBackends = backends.filter((b) => b.implemented);
 
@@ -51,6 +57,8 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
     setMode('blank');
     setIssue(null);
     setIssues([]);
+    setPr(null);
+    setPrs([]);
     gahApi
       .getChatNodes()
       .then(({ nodes }) => setNodes(nodes))
@@ -70,6 +78,22 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
       .then(({ issues }) => { if (!cancelled) setIssues(issues); })
       .catch(() => { if (!cancelled) setIssues([]); })
       .finally(() => { if (!cancelled) setIssuesLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, mode, project]);
+
+  // PR list follows the selected project in PR mode.
+  useEffect(() => {
+    if (!open || mode !== 'pr') return;
+    let cancelled = false;
+    setPrs([]);
+    setPr(null);
+    setPrsLoading(true);
+    gahApi
+      .getChatPrs(project)
+      .then(({ prs }) => { if (!cancelled) setPrs(prs); })
+      .catch(() => { if (!cancelled) setPrs([]); })
+      .finally(() => { if (!cancelled) setPrsLoading(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, mode, project]);
@@ -127,6 +151,10 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
         if (!issue) return;
         const { session } = await gahApi.startChatFromIssue(project, issue.number, backend, model);
         onCreated(project, session.id);
+      } else if (mode === 'pr') {
+        if (!pr) return;
+        const { session } = await gahApi.startChatFromPr(project, pr.number, backend, model);
+        onCreated(project, session.id);
       } else {
         const session = await gahApi.createChatSession(project, backend, model, title.trim() || undefined);
         onCreated(project, session.id);
@@ -149,8 +177,9 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
           </button>
         </div>
 
-        {/* Mode: a blank session, or grab an issue into a chat (branch for
-            it, mark it in progress, seed the conversation with its body). */}
+        {/* Mode: a blank session, grab an issue into a chat (branch for
+            it, mark it in progress, seed the conversation with its body),
+            or open a read-only chat seeded with a PR. */}
         <div className="flex gap-1.5" role="tablist" aria-label="Chat source">
           <button
             type="button"
@@ -169,6 +198,15 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
             className={`flex-1 rounded-md px-2 py-1.5 text-xs inline-flex items-center justify-center gap-1.5 ${mode === 'issue' ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-white/5'}`}
           >
             <CircleDot size={12} aria-hidden="true" /> From issue
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'pr'}
+            onClick={() => setMode('pr')}
+            className={`flex-1 rounded-md px-2 py-1.5 text-xs inline-flex items-center justify-center gap-1.5 ${mode === 'pr' ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-white/5'}`}
+          >
+            <GitPullRequest size={12} aria-hidden="true" /> From PR
           </button>
         </div>
 
@@ -199,6 +237,42 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
             {issue && (
               <p className="text-[11px] text-muted">
                 Branches <span className="font-mono">gah/issue/…-{issue.number}</span>, marks #{issue.number} in progress, opens the chat seeded with the issue.
+              </p>
+            )}
+          </section>
+        )}
+
+        {mode === 'pr' && (
+          <section className="space-y-2">
+            <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
+              <GitPullRequest size={13} aria-hidden="true" /> Pull request
+            </h3>
+            {prsLoading && <p className="text-xs text-muted">Loading pull requests…</p>}
+            {!prsLoading && prs.length === 0 && (
+              <p className="text-xs text-muted">No open pull requests for this project.</p>
+            )}
+            <div className="grid gap-1 max-h-40 overflow-y-auto">
+              {prs.map((candidate) => (
+                <button
+                  key={candidate.number}
+                  type="button"
+                  onClick={() => setPr(candidate)}
+                  className={`rounded-md px-3 py-2 text-left ${pr?.number === candidate.number ? 'bg-accent/15 border border-accent/40' : 'border border-transparent hover:bg-white/5'}`}
+                >
+                  <span className="block text-sm font-medium text-primary truncate">#{candidate.number} {candidate.title}</span>
+                  <span className="block text-[11px] text-muted truncate">
+                    {[
+                      candidate.author,
+                      candidate.isDraft ? 'draft' : null,
+                      candidate.reviewState ? candidate.reviewState.toLowerCase().replaceAll('_', ' ') : null
+                    ].filter((part) => part !== null && part.length > 0).join(' · ')}
+                  </span>
+                </button>
+              ))}
+            </div>
+            {pr && (
+              <p className="text-[11px] text-muted">
+                Opens the chat seeded with PR #{pr.number} — read-only: no branch is created and the PR is not modified.
               </p>
             )}
           </section>
@@ -302,7 +376,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
           <button
             type="button"
             onClick={create}
-            disabled={creating || !backend || profiles.length === 0 || (mode === 'issue' && !issue)}
+            disabled={creating || !backend || profiles.length === 0 || (mode === 'issue' && !issue) || (mode === 'pr' && !pr)}
             className="btn-primary text-xs"
           >
             {creating ? 'Creating…' : 'Start chat'}

@@ -1,0 +1,13 @@
+{
+  "number": 12,
+  "title": "Ship the PR chat mode",
+  "body": "Adds the PR tab to the new-chat modal and opens read-only chats seeded with a pull request.",
+  "state": "OPEN",
+  "url": "https://github.com/owner/repo/pull/12",
+  "headRefName": "feat/pr-chat",
+  "isDraft": false,
+  "author": {
+    "login": "octocat"
+  },
+  "reviewDecision": "APPROVED"
+}

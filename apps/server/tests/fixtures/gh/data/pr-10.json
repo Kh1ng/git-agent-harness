@@ -1,0 +1,13 @@
+{
+  "number": 10,
+  "title": "Merged thing",
+  "body": "Already merged.",
+  "state": "MERGED",
+  "url": "https://github.com/owner/repo/pull/10",
+  "headRefName": "old/merged",
+  "isDraft": false,
+  "author": {
+    "login": "octocat"
+  },
+  "reviewDecision": null
+}

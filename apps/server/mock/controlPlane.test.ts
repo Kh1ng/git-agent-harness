@@ -143,3 +143,45 @@ test('failure scenarios are explicit REST and WS failures with no state writes',
     await running.close();
   }
 });
+
+test('PR start opens a worktree-less session whose history is seeded with the PR', async () => {
+  const running = await createMockControlPlane().listen(0);
+  try {
+    const prs = await fetch(`${running.baseUrl}/api/manager-chat/prs?profile=fixture`).then((response) => response.json()) as {
+      prs: { number: number; title: string; author: string; isDraft: boolean; reviewState: string | null }[];
+    };
+    assert.deepEqual(prs.prs.map((pr) => pr.number), [12, 11]);
+    assert.equal(prs.prs[0].author, 'octocat');
+    assert.equal(prs.prs[1].isDraft, true);
+
+    const missing = await post(running.baseUrl, '/api/manager-chat/prs/start', { profile: 'fixture' });
+    assert.equal(missing.status, 400);
+
+    const started = await post(running.baseUrl, '/api/manager-chat/prs/start', { profile: 'fixture', prNumber: 12 });
+    assert.equal(started.status, 201);
+    const { session } = await started.json() as { session: { id: string; worktreePath: string | null; branch: string; title: string } };
+    assert.equal(session.worktreePath, null, 'read-only: no worktree');
+    assert.equal(session.branch, 'feat/pr-chat');
+    assert.equal(session.title, '#12 Ship the PR chat mode');
+
+    const ws = new WebSocket(running.wsUrl);
+    const welcomePromise = nextMessage(ws, 'server.welcome');
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', resolve);
+      ws.once('error', reject);
+    });
+    await welcomePromise;
+    ws.send(JSON.stringify({
+      type: 'manager.chat.historyRequest',
+      requestId: 'pr-history',
+      profile: 'fixture',
+      sessionId: session.id
+    } satisfies ClientMessage));
+    const history = await nextMessage(ws, 'manager.chat.history');
+    assert.equal(history.type === 'manager.chat.history' && history.turns[0]?.role, 'user');
+    assert.equal(history.type === 'manager.chat.history' && history.turns[0]?.text.includes('#12 Ship the PR chat mode'), true);
+    ws.close();
+  } finally {
+    await running.close();
+  }
+});
