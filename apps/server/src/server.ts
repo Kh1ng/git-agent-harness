@@ -72,7 +72,9 @@ import {
   getChatPreview as getManagerChatPreview,
   setChatPreview as setManagerChatPreview,
   listChatIssuesForProfile as listManagerChatIssues,
-  startChatFromIssue as startManagerChatFromIssue
+  startChatFromIssue as startManagerChatFromIssue,
+  listChatPrsForProfile as listManagerChatPrs,
+  startChatFromPr as startManagerChatFromPr
 } from './managerChat/ManagerChatManager.js';
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
@@ -1412,6 +1414,40 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to start chat from issue',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // PR → chat: open PRs for the project's repo, and open a read-only chat
+  // seeded with one -- no worktree, no branch, nothing at the provider is
+  // touched (browsing a PR must never mutate it).
+  app.get('/api/manager-chat/prs', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    try {
+      res.json({ prs: await listManagerChatPrs(profile) });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to list pull requests',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/manager-chat/prs/start', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const prNumber = typeof req.body?.prNumber === 'number' ? req.body.prNumber : undefined;
+    const backend = typeof req.body?.backend === 'string' ? req.body.backend : undefined;
+    const model = typeof req.body?.model === 'string' ? req.body.model : null;
+    if (prNumber === undefined) {
+      res.status(400).json({ error: 'Missing required field: prNumber' });
+      return;
+    }
+    try {
+      res.status(201).json(await startManagerChatFromPr(profile, prNumber, backend, model));
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to start chat from pull request',
         message: error instanceof Error ? error.message : String(error)
       });
     }

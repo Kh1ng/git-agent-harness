@@ -309,6 +309,34 @@ export async function startChatFromIssue(
   });
 }
 
+/** PR → chat: open PRs for the profile's repo. */
+export async function listChatPrsForProfile(profile: string) {
+  const profileInfo = await findProfileInfo(profile);
+  if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
+  const { listChatPrs } = await import('./prChats.js');
+  return listChatPrs(profileInfo);
+}
+
+/** PR → chat: open a read-only session seeded with the PR (idempotent) --
+ * no worktree, no branch, nothing at the provider is touched. */
+export async function startChatFromPr(
+  profile: string,
+  prNumber: number,
+  backend?: string,
+  model?: string | null
+) {
+  const profileInfo = await findProfileInfo(profile);
+  if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
+  const { startPrChat } = await import('./prChats.js');
+  return startPrChat({
+    profile,
+    profileInfo,
+    prNumber,
+    backend: backend ?? backendForProfile(profile),
+    model: model ?? null
+  });
+}
+
 export function listCommandsForProfile(profile: string): Promise<ManagerCommandInfo[]> {
   const backendId = backendForProfile(profile);
   return resolveAdapter(backendId).listCommands(profile);

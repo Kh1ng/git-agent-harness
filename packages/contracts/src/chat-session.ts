@@ -378,3 +378,24 @@ export interface ChatIssueStartResult {
    * returned as-is (idempotent grab). */
   existing: boolean;
 }
+
+/** An open provider pull request offered by the PR → chat flow. */
+export interface ChatPrSummary {
+  number: number;
+  title: string;
+  url: string | null;
+  author: string | null;
+  headRefName: string | null;
+  isDraft: boolean;
+  /** Provider review state (e.g. APPROVED, CHANGES_REQUESTED) when reported. */
+  reviewState: string | null;
+  updatedAt: string | null;
+}
+
+/** Result of opening a chat seeded from a pull request. */
+export interface ChatPrStartResult {
+  session: ChatSessionSummary;
+  /** True when a live session for this PR already existed and was
+   * returned as-is (idempotent open). */
+  existing: boolean;
+}

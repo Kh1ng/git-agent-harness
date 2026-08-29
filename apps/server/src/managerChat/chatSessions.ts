@@ -137,6 +137,9 @@ export interface CreateSessionInput {
    * worktree keeps the gah-chat-<repo_id>-<session> dir name so prune
    * still sees it; only the branch differs. */
   branch?: string;
+  /** Worktree-less session (PR chats): no branch is created and no
+   * worktree materialized; turns run in the profile checkout. */
+  worktree?: boolean;
 }
 
 /**
@@ -167,7 +170,7 @@ export async function createSession(input: CreateSessionInput, opts?: ChatSessio
     settledReason: null
   };
 
-  if (profileInfo.worktree_base.trim().length > 0) {
+  if (input.worktree !== false && profileInfo.worktree_base.trim().length > 0) {
     const dir = join(profileInfo.worktree_base, worktreeDirName(profileInfo.repo_id, sessionId));
     mkdirSync(profileInfo.worktree_base, { recursive: true });
     await git(profileInfo.local_path, 'worktree', 'add', '-b', record.branch, dir);

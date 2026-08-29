@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 // Fake `gh` for apps/server tests: a GitHub-shaped provider stub for the
-// issue → chat flow (issueChats.ts). Emits recorded JSON for the subcommands
-// the service shells out to, and RECORDS issue-edit invocations to a state
-// file so tests can assert the "mark in progress" step happened.
+// issue → chat flow (issueChats.ts) and the PR → chat flow (prChats.ts).
+// Emits recorded JSON for the subcommands the service shells out to, and
+// RECORDS issue-edit invocations to a state file so tests can assert the
+// "mark in progress" step happened.
 //
 //   issue list --json number,title,url,labels,updatedAt --limit=N   → issues.json
 //   issue view <n> --json number,title,body,state,url,labels       → issue-<n>.json
 //   issue edit <n> --add-assignee @me [--add-label L]              → appends to $GAH_FAKE_GH_STATE
 //   label list --json name                                         → labels.json
+//   pr list --json number,title,url,headRefName,isDraft,...        → prs.json
+//   pr view <n> --json number,title,body,state,url,headRefName,... → pr-<n>.json
 //
 // Point GAH_FAKE_GH_FIXTURE at the fixture data dir and GAH_FAKE_GH_STATE
 // at a writable scratch file. Unknown invocations fail loudly (exit 127)
@@ -43,6 +46,11 @@ if (command === 'issue' && sub === 'list') {
   process.exit(0);
 } else if (command === 'label' && sub === 'list') {
   respond('labels');
+} else if (command === 'pr' && sub === 'list') {
+  respond('prs');
+} else if (command === 'pr' && sub === 'view') {
+  const number = args[2];
+  respond(`pr-${number}`);
 } else {
   process.stderr.write(`fake-gh fixture: unrecognized invocation: ${args.join(' ')}\n`);
   process.exit(127);

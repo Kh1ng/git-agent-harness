@@ -1,0 +1,13 @@
+{
+  "number": 11,
+  "title": "Draft the changelog",
+  "body": "Draft PR: still collecting notes.",
+  "state": "OPEN",
+  "url": "https://github.com/owner/repo/pull/11",
+  "headRefName": "docs/changelog",
+  "isDraft": true,
+  "author": {
+    "login": "hubot"
+  },
+  "reviewDecision": "REVIEW_REQUIRED"
+}

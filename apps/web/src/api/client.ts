@@ -45,6 +45,8 @@ import type {
   ChatPreviewInfo,
   ChatIssueSummary,
   ChatIssueStartResult,
+  ChatPrSummary,
+  ChatPrStartResult,
   ChatReclaimResult,
   AdminUpdatePendingInfo,
   AdminUpdateState
@@ -238,6 +240,8 @@ export interface GahDataSource {
   setChatPreview(profile: string, sessionId: string, port: number | null): Promise<{ preview: ChatPreviewInfo | null }>;
   getChatIssues(profile: string): Promise<{ issues: ChatIssueSummary[] }>;
   startChatFromIssue(profile: string, issueNumber: number, backend?: string, model?: string | null): Promise<ChatIssueStartResult>;
+  getChatPrs(profile: string): Promise<{ prs: ChatPrSummary[] }>;
+  startChatFromPr(profile: string, prNumber: number, backend?: string, model?: string | null): Promise<ChatPrStartResult>;
   getAdminUpdatePending(): Promise<AdminUpdatePendingInfo>;
   getAdminUpdateStatus(): Promise<AdminUpdateState>;
   startAdminUpdate(): Promise<AdminUpdateState>;
@@ -511,6 +515,12 @@ export const gahApi: GahDataSource = {
   },
   startChatFromIssue(profile, issueNumber, backend, model) {
     return postJson<ChatIssueStartResult, { profile: string; issueNumber: number; backend?: string; model?: string | null }>('/api/manager-chat/issues/start', { profile, issueNumber, backend, model });
+  },
+  getChatPrs(profile) {
+    return getJson<{ prs: ChatPrSummary[] }>('/api/manager-chat/prs', { profile });
+  },
+  startChatFromPr(profile, prNumber, backend, model) {
+    return postJson<ChatPrStartResult, { profile: string; prNumber: number; backend?: string; model?: string | null }>('/api/manager-chat/prs/start', { profile, prNumber, backend, model });
   },
   getAdminUpdatePending() {
     return getJson<AdminUpdatePendingInfo>('/api/admin/update');
