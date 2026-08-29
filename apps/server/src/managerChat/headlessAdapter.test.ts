@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { agyBackendSpec, createHeadlessBackend, type HeadlessBackendSpec } from './headlessAdapter.js';
+import { agyBackendSpec, createHeadlessBackend, vibeBackendSpec, type HeadlessBackendSpec } from './headlessAdapter.js';
 
 /** A fake one-shot CLI: echoes its cwd marker file's content so the test
  * proves the turn ran in the session cwd, and echoes the prompt tail. */
@@ -90,12 +90,42 @@ test('headless backends advertise no config options and refuse config changes', 
   await assert.rejects(backend.setReasoningEffort('p', 'high'), /headless mode/);
 });
 
-test('AGY receives the prompt as the value of --print before other flags', () => {
+test('AGY receives the prompt as the value of --print plus non-interactive permission flags', () => {
   assert.deepEqual(agyBackendSpec().turnArgs('three-turn remembered fact'), [
     'agy',
     '--print',
     'three-turn remembered fact',
     '--output-format',
-    'text'
+    'text',
+    '--dangerously-skip-permissions',
+    '--sandbox'
   ]);
+});
+
+test('Vibe argv is unaffected by the AGY permission-flag fix', () => {
+  assert.deepEqual(vibeBackendSpec().turnArgs('hello'), ['vibe', '-p', 'hello', '--output', 'text']);
+});
+
+test('a successful exit with empty trimmed stdout surfaces as an explicit error, not a silent empty reply', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-headless-empty-'));
+  try {
+    const cli = join(dir, 'empty-output');
+    writeFileSync(cli, '#!/bin/sh\necho "   "\nexit 0\n', { mode: 0o755 });
+    const backend = createHeadlessBackend({
+      id: 'fake',
+      displayName: 'Fake',
+      turnArgs: (prompt) => [cli, prompt]
+    });
+    await assert.rejects(
+      backend.runTurn('p#s3', {
+        prompt: 'hi',
+        history: [],
+        onChunk: () => {},
+        onToolResult: () => {}
+      }),
+      /no output/
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
