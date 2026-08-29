@@ -112,6 +112,9 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
           throw new Error(`${spec.displayName} turn failed: ${detail}`);
         }
         const reply = (spec.parseReply ?? ((out: string) => out.trim()))(stdout);
+        if (reply.trim().length === 0) {
+          throw new Error(`${spec.displayName} turn exited 0 but produced no output.`);
+        }
         state.knownHistory = [
           ...input.history,
           { role: 'user', text: input.prompt, timestamp: Date.now() },
@@ -168,11 +171,24 @@ export function vibeBackendSpec(): HeadlessBackendSpec {
   };
 }
 
-/** agy: print mode with JSON output for a clean reply parse. */
+/** agy: print mode with text output for a clean reply parse.
+ *
+ * Headless has no permission round-trip (stdin is ignored), so without
+ * --dangerously-skip-permissions agy auto-denies every tool call and the
+ * turn silently degrades to a no-tool reply. --sandbox is kept alongside
+ * it so the auto-approved tools still run confined to the session cwd. */
 export function agyBackendSpec(): HeadlessBackendSpec {
   return {
     id: 'agy',
     displayName: 'Agy',
-    turnArgs: (prompt) => ['agy', '--print', prompt, '--output-format', 'text']
+    turnArgs: (prompt) => [
+      'agy',
+      '--print',
+      prompt,
+      '--output-format',
+      'text',
+      '--dangerously-skip-permissions',
+      '--sandbox'
+    ]
   };
 }
