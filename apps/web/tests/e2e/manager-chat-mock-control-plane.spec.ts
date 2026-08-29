@@ -140,7 +140,16 @@ test('archive and preview states mutate through the same REST control plane', as
   await openChat(page);
   await selectSeededSession(page);
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
-  await expect(page.getByLabel('Chat session').locator('optgroup[label^="Archived"]')).toContainText('Mock session');
+  const archived = await request.get(`${MOCK_BASE_URL}/api/manager-chat/sessions?profile=fixture`);
+  expect(archived.ok(), await archived.text()).toBe(true);
+  const archivedSessions = (await archived.json() as { sessions: { id: string; archivedAt: number | null }[] }).sessions;
+  expect(archivedSessions.find((session) => session.id === 'mock-session-1')?.archivedAt).not.toBeNull();
+  await expect(page.getByLabel('Chat session').locator('option', { hasText: 'Mock session' })).toHaveCount(0);
+
+  await page.reload();
+  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible();
+  await expect(page.getByLabel('Chat session').locator('option', { hasText: 'Mock session' })).toHaveCount(0);
 
   await selectScenario(request, 'archive-failure');
   await openChat(page);
@@ -162,7 +171,7 @@ test('storage dry run selects idle sessions and bulk archives them safely', asyn
   await storage.getByRole('button', { name: 'Select idle (1)' }).click();
   await expect(storage.getByLabel('Select Mock session')).toBeChecked();
   await storage.getByRole('button', { name: 'Archive selected (1)' }).click();
-  await expect(page.getByLabel('Chat session').locator('optgroup[label^="Archived"]')).toContainText('Mock session');
+  await expect(page.getByLabel('Chat session').locator('option', { hasText: 'Mock session' })).toHaveCount(0);
   await expect(storage).toContainText('No live chat sessions.');
 });
 
