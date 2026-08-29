@@ -25,7 +25,11 @@ class MockHermes {
   }
 
   async initialize() {
-    return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: false } };
+    return {
+      protocolVersion: acp.PROTOCOL_VERSION,
+      agentCapabilities: { loadSession: false },
+      _meta: { steering: { supported: true } }
+    };
   }
 
   async newSession(params) {
@@ -149,7 +153,7 @@ class MockHermes {
         }
       });
       return new Promise((resolve) => {
-        this.pendingPrompt = resolve;
+        this.pendingPrompt = { resolve, sessionId };
       });
     } else if (text.trim() === '/reset') {
       remembered.set(sessionId, null);
@@ -188,9 +192,30 @@ class MockHermes {
 
   async cancel() {
     if (this.pendingPrompt) {
-      this.pendingPrompt({ stopReason: 'cancelled' });
+      this.pendingPrompt.resolve({ stopReason: 'cancelled' });
       this.pendingPrompt = null;
     }
+  }
+
+  async extMethod(method, params) {
+    if (method !== '_session/steering') throw new Error(`Unsupported extension: ${method}`);
+    if (!this.pendingPrompt || this.pendingPrompt.sessionId !== params.sessionId) {
+      return { outcome: 'promptRequired', reason: 'noRunningTurn' };
+    }
+    const text = params.prompt.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n');
+    const pending = this.pendingPrompt;
+    setImmediate(async () => {
+      await this.connection.sessionUpdate({
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `Steered: ${text}` }
+        }
+      });
+      pending.resolve({ stopReason: 'end_turn' });
+      if (this.pendingPrompt === pending) this.pendingPrompt = null;
+    });
+    return { outcome: 'injected' };
   }
 }
 

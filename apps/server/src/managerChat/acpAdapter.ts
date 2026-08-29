@@ -205,6 +205,7 @@ interface ProfileConnection {
   models: ManagerModelInfo[];
   currentModelId: string | null;
   modelConfigId: string | null;
+  steeringSupported: boolean;
   knownHistory: ChatTranscriptTurn[];
   ready: Promise<void>;
 }
@@ -307,7 +308,11 @@ export function opencodeSpawnSpec(): SpawnSpec {
 /** Builds the runTurn/listCommands/listModels/setModel surface for one
  * backend, each backend keeping its own per-profile connection map --
  * connections are never shared across backends. */
-export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
+export function createAcpBackend(
+  label: string,
+  spawnSpec: () => SpawnSpec,
+  options: { nativeSteering?: boolean } = {}
+) {
   const connections = new Map<string, ProfileConnection>();
 
   function updateModels(state: ProfileConnection, options: acp.SessionConfigOption[]): void {
@@ -368,14 +373,17 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
       models: [],
       currentModelId: null,
       modelConfigId: null,
+      steeringSupported: false,
       knownHistory: [],
       ready: Promise.resolve()
     };
     state.ready = (async () => {
-      await connection.initialize({
+      const initialized = await connection.initialize({
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } }
       });
+      const steering = initialized._meta?.steering as { supported?: unknown } | undefined;
+      state.steeringSupported = options.nativeSteering !== false && steering?.supported === true;
       await startSession(state);
     })();
 
@@ -522,6 +530,27 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     await selectModel(state, modelId);
   }
 
+  async function steerTurn(gahProfile: string, message: string): Promise<{ outcome: 'injected' }> {
+    const state = connections.get(gahProfile);
+    if (!state || !state.sessionId) throw new Error(`No active ${label} session to steer.`);
+    if (!state.steeringSupported) throw new Error(`${label} does not support mid-turn steering.`);
+    const result = await state.connection.extMethod('_session/steering', {
+      sessionId: state.sessionId,
+      prompt: [{ type: 'text', text: message }],
+      _meta: { steering: { idleBehavior: 'promptRequired' } }
+    });
+    if (result.outcome !== 'injected') {
+      // The Codex ACP extension may race the original turn ending and start
+      // the steer as a new turn. GAH only supports true mid-turn injection:
+      // stop that untracked turn before reporting the failed steer.
+      if (result.outcome === 'startedNewTurn') {
+        await state.connection.cancel({ sessionId: state.sessionId });
+      }
+      throw new Error(`The ${label} turn ended before the steering message could be injected.`);
+    }
+    return { outcome: 'injected' };
+  }
+
   /** Stops the in-flight prompt turn for a profile by sending session/cancel
    * (#960). The ACP session itself survives -- only the current turn is
    * aborted, and the same connection is reused for the next turn. */
@@ -531,5 +560,5 @@ export function createAcpBackend(label: string, spawnSpec: () => SpawnSpec) {
     await state.connection.cancel({ sessionId: state.sessionId });
   }
 
-  return { runTurn, listCommands, listModels, setModel, cancelTurn };
+  return { runTurn, listCommands, listModels, setModel, steerTurn, cancelTurn };
 }

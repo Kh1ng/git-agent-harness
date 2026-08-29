@@ -12,7 +12,7 @@ import { createFleetDispatchCoordinator } from './fleetDispatch.js';
 import { RegistryService } from './registryService.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import * as gahCli from './gahCli.js';
-import { sendManagerChatMessage, cancelManagerChatTurn, getSessionView as getManagerChatSessionView, setChunkPublisher, setChatEventPublishers, setPreviewPublisher, listChatSessions, createChatSession, archiveChatSession, updateChatSession, respondManagerChatPermission } from './managerChat/ManagerChatManager.js';
+import { sendManagerChatMessage, steerManagerChatTurn, cancelManagerChatTurn, getSessionView as getManagerChatSessionView, setChunkPublisher, setChatEventPublishers, setPreviewPublisher, listChatSessions, createChatSession, archiveChatSession, updateChatSession, respondManagerChatPermission } from './managerChat/ManagerChatManager.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
 import type {
   ServerMessage,
@@ -146,7 +146,13 @@ export function createWebSocketHandler(
   // Set up push bus to broadcast to all connected clients. Chat messages are
   // scoped to the profile they concern; everything else fans out everywhere.
   pushBus.subscribe((message: ServerMessage) => {
-    if (message.type === 'manager.chat.chunk' || message.type === 'manager.chat.updated') {
+    if (
+      message.type === 'manager.chat.chunk'
+      || message.type === 'manager.chat.toolCall'
+      || message.type === 'manager.chat.permission'
+      || message.type === 'manager.chat.preview'
+      || message.type === 'manager.chat.updated'
+    ) {
       sessionStore.broadcast(message, undefined, message.profile);
     } else {
       sessionStore.broadcast(message);
@@ -160,7 +166,8 @@ export function createWebSocketHandler(
   // same profile-scoped broadcast as chunks.
   setChatEventPublishers({
     toolCall: (event) => pushBus.publish(event),
-    permission: (event) => pushBus.publish(event)
+    permission: (event) => pushBus.publish(event),
+    updated: (event) => pushBus.publish(event)
   });
   // WP3: preview-port detection pushes the same way.
   setPreviewPublisher((event) => pushBus.publish(event));
@@ -204,6 +211,10 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
       
     case 'manager.chat.send':
       await handleManagerChatSend(ws, message, requestId);
+      break;
+
+    case 'manager.chat.steer':
+      await handleManagerChatSteer(ws, message, requestId);
       break;
 
     case 'manager.chat.cancel':
@@ -349,6 +360,27 @@ async function handleManagerChatCancel(ws: WebSocket, message: Extract<ClientMes
   }
 }
 
+async function handleManagerChatSteer(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.steer' }>, requestId: string) {
+  try {
+    const result = await steerManagerChatTurn(message.profile, message.message, message.sessionId);
+    ws.send(JSON.stringify({
+      type: 'manager.chat.steered',
+      requestId,
+      profile: message.profile,
+      ...(message.sessionId ? { sessionId: message.sessionId } : {}),
+      outcome: result.outcome
+    } satisfies ServerMessage));
+    pushBus.publish({
+      type: 'manager.chat.updated',
+      requestId,
+      profile: message.profile,
+      ...(message.sessionId ? { sessionId: message.sessionId } : {})
+    });
+  } catch (error) {
+    ws.send(JSON.stringify(createErrorResponse(requestId, error instanceof Error ? error : new Error(String(error)))));
+  }
+}
+
 async function handleManagerChatHistoryRequest(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.historyRequest' }>, requestId: string) {
   const view = getManagerChatSessionView(message.profile, message.sessionId);
   const payload: ServerMessage = {
@@ -358,7 +390,8 @@ async function handleManagerChatHistoryRequest(ws: WebSocket, message: Extract<C
     ...(message.sessionId ? { sessionId: message.sessionId } : {}),
     turns: view.turns,
     cursor: view.cursor,
-    streaming: view.streaming
+    streaming: view.streaming,
+    permission: view.permission
   };
   ws.send(JSON.stringify(payload));
 }

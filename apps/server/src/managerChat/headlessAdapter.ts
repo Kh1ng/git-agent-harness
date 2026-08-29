@@ -138,6 +138,10 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
       throw new Error(`${spec.displayName} doesn't support model selection in headless mode.`);
     },
 
+    async steerTurn(): Promise<{ outcome: 'injected' }> {
+      throw new Error(`${spec.displayName} doesn't support mid-turn steering in headless mode.`);
+    },
+
     async cancelTurn(gahProfile): Promise<void> {
       const state = states.get(gahProfile);
       if (state?.child) {

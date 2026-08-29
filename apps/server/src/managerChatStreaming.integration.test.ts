@@ -161,6 +161,17 @@ test('assistant chunks stream to every client subscribed to the profile, in orde
   await withChatHarness(async ({ wsUrl, profile }) => {
     const sender = await connect(wsUrl, profile);
     const observer = await connect(wsUrl, profile);
+    const observerLiveTypes: string[] = [];
+    observer.on('message', (raw) => {
+      const message = JSON.parse(raw.toString()) as ServerMessage;
+      if (
+        'requestId' in message
+        && message.requestId === 'stream-req-1'
+        && (message.type === 'manager.chat.updated' || message.type === 'manager.chat.chunk')
+      ) {
+        observerLiveTypes.push(message.type);
+      }
+    });
 
     // Both sockets subscribe to the same profile; each should receive the
     // same chunks in the same order as the backend emits them.
@@ -207,9 +218,91 @@ test('assistant chunks stream to every client subscribed to the profile, in orde
     // The live tee is scoped to the profile's subscribed clients.
     assert.ok(chunksA.every((c) => c.profile === profile));
     assert.ok(chunksA.every((c) => c.turn === 1));
+    assert.equal(observerLiveTypes[0], 'manager.chat.updated', 'observers see the busy turn before its first chunk');
 
     await closeSocket(sender);
     await closeSocket(observer);
+  });
+});
+
+test('live tool and permission state stays profile-scoped and an actionable permission survives reconnect', { timeout: 30_000 }, async () => {
+  await withChatHarness(async ({ wsUrl, profile }) => {
+    const sender = await connect(wsUrl, profile);
+    const observer = await connect(wsUrl, profile);
+    const foreign = await connect(wsUrl, `${profile}-other`);
+    const foreignChatEvents: ServerMessage[] = [];
+    foreign.on('message', (raw) => {
+      const message = JSON.parse(raw.toString()) as ServerMessage;
+      if (
+        message.type === 'manager.chat.toolCall'
+        || message.type === 'manager.chat.permission'
+        || message.type === 'manager.chat.updated'
+      ) {
+        foreignChatEvents.push(message);
+      }
+    });
+
+    const senderTools = collectUntil(sender, 'manager.chat.toolCall', (events) => events.some((event) => event.status === 'completed'));
+    const observerTools = collectUntil(observer, 'manager.chat.toolCall', (events) => events.some((event) => event.status === 'completed'));
+    const toolReply = nextMessage(sender, 'manager.chat.reply', (message) => message.requestId === 'tool-turn');
+    sender.send(JSON.stringify({
+      type: 'manager.chat.send', requestId: 'tool-turn', profile, message: 'use a tool'
+    } satisfies ClientMessage));
+
+    const [senderToolEvents, observerToolEvents] = await Promise.all([senderTools, observerTools, toolReply]);
+    assert.deepEqual(
+      observerToolEvents.map((event) => event.status),
+      senderToolEvents.map((event) => event.status),
+      'both clients observe the same tool lifecycle'
+    );
+    assert.equal(senderToolEvents.at(-1)?.status, 'completed');
+
+    const senderPermission = nextMessage(sender, 'manager.chat.permission');
+    const observerPermission = nextMessage(observer, 'manager.chat.permission');
+    const permissionReply = nextMessage(sender, 'manager.chat.reply', (message) => message.requestId === 'permission-turn');
+    sender.send(JSON.stringify({
+      type: 'manager.chat.send', requestId: 'permission-turn', profile, message: 'do a dangerous thing'
+    } satisfies ClientMessage));
+    const [permissionA, permissionB] = await Promise.all([senderPermission, observerPermission]);
+    assert.equal(permissionB.permissionId, permissionA.permissionId, 'both clients observe the same pending permission');
+
+    await closeSocket(observer);
+    const reconnected = await connect(wsUrl, profile);
+    const history = nextMessage(reconnected, 'manager.chat.history', (message) => message.requestId === 'reconnect-history');
+    reconnected.send(JSON.stringify({
+      type: 'manager.chat.historyRequest', requestId: 'reconnect-history', profile
+    } satisfies ClientMessage));
+    const restored = await history;
+    assert.equal(restored.streaming?.turn, permissionA.turn);
+    assert.deepEqual(restored.permission, {
+      turn: permissionA.turn,
+      permissionId: permissionA.permissionId,
+      title: permissionA.title,
+      options: permissionA.options,
+      locations: permissionA.locations
+    });
+
+    const permissionCleared = nextMessage(
+      reconnected,
+      'manager.chat.updated',
+      (message) => message.requestId === 'permission-turn'
+    );
+    reconnected.send(JSON.stringify({
+      type: 'manager.chat.permission.respond',
+      requestId: 'permission-answer',
+      profile,
+      permissionId: restored.permission!.permissionId,
+      optionId: 'allow-once'
+    } satisfies ClientMessage));
+    await permissionCleared;
+    assert.equal((await permissionReply).reply, 'permission allow-once');
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(foreignChatEvents, [], 'another profile receives no live chat state events');
+
+    await closeSocket(sender);
+    await closeSocket(reconnected);
+    await closeSocket(foreign);
   });
 });
 
@@ -292,6 +385,34 @@ test('cancelling a mid-turn reply closes the turn as cancelled and keeps the par
       2,
       'no spurious turn/end from cancelling a completed turn'
     );
+
+    await closeSocket(ws);
+  });
+});
+
+test('a steering message is injected into the active backend session and logged in the same turn', { timeout: 30_000 }, async () => {
+  await withChatHarness(async ({ wsUrl, profile, stateDir }) => {
+    const ws = await connect(wsUrl, profile);
+    const firstChunk = nextMessage(ws, 'manager.chat.chunk', (message) => message.text === 'Partial answer ');
+    const reply = nextMessage(ws, 'manager.chat.reply', (message) => message.requestId === 'steer-turn');
+    ws.send(JSON.stringify({
+      type: 'manager.chat.send', requestId: 'steer-turn', profile, message: 'SLOW-REPLY please'
+    } satisfies ClientMessage));
+    await firstChunk;
+
+    const steered = nextMessage(ws, 'manager.chat.steered', (message) => message.requestId === 'steer-message');
+    ws.send(JSON.stringify({
+      type: 'manager.chat.steer', requestId: 'steer-message', profile, message: 'change direction now'
+    } satisfies ClientMessage));
+
+    assert.equal((await steered).outcome, 'injected');
+    assert.match((await reply).reply, /change direction now/);
+
+    const events = readLog(profile, { stateDir: join(stateDir, 'chat') });
+    const steeringEvent = events.find((event) => event.type === 'user/message' && event.source === 'steer');
+    assert.ok(steeringEvent, 'the accepted steering message is durable');
+    assert.equal(steeringEvent.turn, 1, 'steering stays inside the active turn');
+    assert.equal(events.filter((event) => event.type === 'turn/start').length, 1, 'steering does not queue a second turn');
 
     await closeSocket(ws);
   });

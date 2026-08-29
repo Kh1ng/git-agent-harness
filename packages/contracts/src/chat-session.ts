@@ -54,9 +54,9 @@ export interface ChatTurnEnd {
   timestamp: number;
 }
 
-export type ChatUserMessageSource = 'prompt' | 'inject';
+export type ChatUserMessageSource = 'prompt' | 'inject' | 'steer';
 
-/** A user-role message: a human prompt or injected context. */
+/** A user-role message: a turn prompt, injected context, or mid-turn steer. */
 export interface ChatUserMessage {
   type: 'user/message';
   seq: number;
@@ -262,6 +262,15 @@ export interface ChatSessionView {
     partialText: string;
     backend?: string;
     model?: string | null;
+  } | null;
+  /** Actionable permission still blocking the live turn. Durable so a
+   * reconnect can render the same choices and answer by permissionId. */
+  permission?: {
+    turn: number;
+    permissionId: string;
+    title: string;
+    options: { optionId: string; name: string; kind: string }[];
+    locations: string[];
   } | null;
 }
 

@@ -54,6 +54,7 @@ export interface ManagerAdapter extends ManagerBackendInfo {
   listCommands(gahProfile: string): Promise<ManagerCommandInfo[]>;
   listModels(gahProfile: string): Promise<{ models: ManagerModelInfo[]; currentModelId: string | null }>;
   setModel(gahProfile: string, modelId: string): Promise<void>;
+  steerTurn(gahProfile: string, message: string): Promise<{ outcome: 'injected' }>;
   cancelTurn(gahProfile: string): Promise<void>;
 }
 
@@ -86,17 +87,29 @@ class NotImplementedAdapter implements ManagerAdapter {
   async cancelTurn(): Promise<void> {
     throw new Error(`${this.displayName} isn't wired up as a manager chat backend yet (${this.trackingIssue}).`);
   }
+
+  async steerTurn(): Promise<{ outcome: 'injected' }> {
+    throw new Error(`${this.displayName} isn't wired up as a manager chat backend yet (${this.trackingIssue}).`);
+  }
 }
 
-function acpManagerAdapter(id: string, displayName: string, spawnSpec: () => import('./acpAdapter.js').SpawnSpec): ManagerAdapter {
-  const backend = createAcpBackend(displayName, spawnSpec);
+function acpManagerAdapter(
+  id: string,
+  displayName: string,
+  spawnSpec: () => import('./acpAdapter.js').SpawnSpec,
+  options?: { nativeSteering?: boolean }
+): ManagerAdapter {
+  const backend = createAcpBackend(displayName, spawnSpec, options);
   return { id, displayName, implemented: true, ...backend };
 }
 
 const REGISTRY: Record<string, ManagerAdapter> = {
   hermes: acpManagerAdapter('hermes', 'Hermes', hermesSpawnSpec),
   codex: acpManagerAdapter('codex', 'Codex', codexSpawnSpec),
-  claude: acpManagerAdapter('claude', 'Claude', claudeSpawnSpec),
+  // claude-agent-acp currently lets an injected steer outlive and detach
+  // from the owning session/prompt (agentclientprotocol/claude-agent-acp#934).
+  // Do not advertise that unsafe path until the adapter preserves lifecycle.
+  claude: acpManagerAdapter('claude', 'Claude', claudeSpawnSpec, { nativeSteering: false }),
   opencode: acpManagerAdapter('opencode', 'OpenCode', opencodeSpawnSpec),
   vibe: { ...createHeadlessBackend(vibeBackendSpec()) } as ManagerAdapter,
   agy: { ...createHeadlessBackend(agyBackendSpec()) } as ManagerAdapter
