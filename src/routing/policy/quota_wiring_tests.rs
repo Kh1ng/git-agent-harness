@@ -33,6 +33,8 @@ fn cost_aware_ordering_uses_live_quota_store_data_when_config_does_not_hardcode_
             quota_remaining_percent: None,
             quota_reset_at: (now + time::Duration::days(5)).format(&Rfc3339).ok(),
             observed_at: now.format(&Rfc3339).ok(),
+            checked_at: None,
+            check_error: None,
             usage_source: Some("codex_status_json".to_string()),
             mistral_admin: None,
         },

@@ -41,6 +41,10 @@ pub struct QuotaObservationRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mistral_admin: Option<MistralAdminObservationRecord>,
@@ -257,6 +261,8 @@ pub fn refresh_codex_and_store(
                 quota_remaining_percent: obs.quota_remaining_percent,
                 quota_reset_at: obs.quota_reset_at.clone(),
                 observed_at: obs.observed_at.clone(),
+                checked_at: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
+                check_error: None,
                 usage_source: obs.usage_source.clone(),
                 mistral_admin: None,
             };
@@ -307,6 +313,8 @@ pub fn refresh_vibe_admin_and_store(
                 observed_at: time::OffsetDateTime::now_utc()
                     .format(&time::format_description::well_known::Rfc3339)
                     .ok(),
+                checked_at: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
+                check_error: None,
                 usage_source: Some("mistral_admin_refresh".to_string()),
                 mistral_admin: Some(admin_refresh),
             };
@@ -325,6 +333,8 @@ pub fn refresh_vibe_admin_and_store(
         quota_remaining_percent: obs.quota_remaining_percent,
         quota_reset_at: obs.quota_reset_at,
         observed_at: obs.observed_at,
+        checked_at: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
+        check_error: None,
         usage_source: obs.usage_source,
         mistral_admin: admin_refresh,
     };
@@ -354,6 +364,8 @@ pub fn refresh_codex_and_store_for_identity(
         quota_remaining_percent: observation.quota_remaining_percent,
         quota_reset_at: observation.quota_reset_at,
         observed_at: observation.observed_at,
+        checked_at: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
+        check_error: None,
         usage_source: observation.usage_source,
         mistral_admin: None,
     };
@@ -463,7 +475,12 @@ fn maybe_refresh_backend(
     let last_checked = records
         .iter()
         .filter(|record| record.backend == backend)
-        .filter_map(|record| record.observed_at.as_deref())
+        .filter_map(|record| {
+            record
+                .checked_at
+                .as_deref()
+                .or(record.observed_at.as_deref())
+        })
         .filter_map(|observed_at| OffsetDateTime::parse(observed_at, &Rfc3339).ok())
         .max();
     let due = match last_checked {
@@ -492,7 +509,8 @@ fn maybe_refresh_backend(
         // marker purely so the next tick's `last_checked` sees a fresh
         // attempt and stops retrying every tick against a backend that
         // isn't configured here at all.
-        if !matches!(refresh(), Ok(Some(_))) {
+        let refresh = refresh();
+        if !matches!(&refresh, Ok(Some(_))) {
             let marker = QuotaObservationRecord {
                 backend: backend.clone(),
                 backend_instance: None,
@@ -502,7 +520,11 @@ fn maybe_refresh_backend(
                 quota_used_percent: None,
                 quota_remaining_percent: None,
                 quota_reset_at: None,
-                observed_at: now.format(&Rfc3339).ok(),
+                observed_at: None,
+                checked_at: now.format(&Rfc3339).ok(),
+                check_error: refresh
+                    .err()
+                    .map(|error| crate::redact::redact(&error.to_string())),
                 usage_source: None,
                 mistral_admin: None,
             };
@@ -677,15 +699,31 @@ mod tests {
     }
 
     #[test]
-    fn maybe_refresh_backend_does_not_throttle_a_different_backend() {
+    fn one_backend_failure_is_recorded_without_blocking_another_backend() {
         let (_dir, path) = tmp_store();
         let now = OffsetDateTime::now_utc();
 
-        maybe_refresh_backend(&path, "test-independent-codex", now, || Ok(None));
+        maybe_refresh_backend(&path, "test-independent-codex", now, || {
+            anyhow::bail!("codex status failed with ghp_abcdefghijklmnopqrstuvwxyz")
+        });
         maybe_refresh_backend(&path, "test-independent-vibe", now, || Ok(None));
 
         assert!(wait_for_backend_record(&path, "test-independent-codex"));
         assert!(wait_for_backend_record(&path, "test-independent-vibe"));
+        let records = load(&path).unwrap();
+        let codex = records
+            .iter()
+            .find(|record| record.backend == "test-independent-codex")
+            .unwrap();
+        let vibe = records
+            .iter()
+            .find(|record| record.backend == "test-independent-vibe")
+            .unwrap();
+        assert_eq!(
+            codex.check_error.as_deref(),
+            Some("codex status failed with [REDACTED:GITHUB_TOKEN]")
+        );
+        assert_eq!(vibe.check_error, None);
     }
 
     #[test]
@@ -874,6 +912,8 @@ mod tests {
                 quota_remaining_percent: Some(75.0),
                 quota_reset_at: Some("2026-04-29T12:00:00Z".into()),
                 observed_at: Some("2026-04-28T10:00:00Z".into()),
+                checked_at: None,
+                check_error: None,
                 usage_source: Some("codex_status_json".into()),
                 mistral_admin: None,
             },
@@ -906,6 +946,8 @@ mod tests {
                     quota_remaining_percent: Some(100.0 - pct),
                     quota_reset_at: None,
                     observed_at: Some(ts.into()),
+                    checked_at: None,
+                    check_error: None,
                     usage_source: Some("codex_status_json".into()),
                     mistral_admin: None,
                 },
@@ -925,6 +967,8 @@ mod tests {
                 quota_remaining_percent: None,
                 quota_reset_at: Some("in 16m44s".into()),
                 observed_at: Some("2026-04-29T11:00:00Z".into()),
+                checked_at: None,
+                check_error: None,
                 usage_source: Some("agy_cli_log_delta".into()),
                 mistral_admin: None,
             },
@@ -952,6 +996,8 @@ mod tests {
             quota_remaining_percent: Some(90.0),
             quota_reset_at: None,
             observed_at: Some("2026-04-28T10:00:00Z".into()),
+            checked_at: None,
+            check_error: None,
             usage_source: Some("codex_status_json".into()),
             mistral_admin: None,
         };
@@ -993,6 +1039,8 @@ mod tests {
                 quota_remaining_percent: None,
                 quota_reset_at: None,
                 observed_at: Some("2026-04-29T10:00:00Z".into()),
+                checked_at: None,
+                check_error: None,
                 usage_source: Some("codex_status_json".into()),
                 mistral_admin: None,
             },
@@ -1016,6 +1064,8 @@ mod tests {
             quota_remaining_percent: Some(100.0 - percent),
             quota_reset_at: None,
             observed_at: Some(observed_at.into()),
+            checked_at: None,
+            check_error: None,
             usage_source: Some("test".into()),
             mistral_admin: None,
         }

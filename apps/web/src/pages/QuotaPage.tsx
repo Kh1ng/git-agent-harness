@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import type { QuotaCheck, QuotaSnapshot } from '@git-agent-harness/contracts';
 import { Gauge, Clock, ListChecks, CheckCircle2, Coins, Timer } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
@@ -45,6 +46,77 @@ function formatQuotaUsage(q: {
 
   const source = q.usage_source ? ` · source: ${q.usage_source}` : '';
   return `${limit}${reset ? ` · resets ${reset}` : ''}${source}`;
+}
+
+export function QuotaFreshnessPanel({
+  generatedAt,
+  freshness,
+  quotaChecks
+}: {
+  generatedAt?: string | null;
+  freshness?: QuotaSnapshot['freshness'];
+  quotaChecks: QuotaCheck[];
+}) {
+  return (
+    <section className="card-padded">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <h3 className="text-sm font-semibold text-primary">Data freshness</h3>
+        <span className="text-xs text-muted">
+          Snapshot {formatAge(generatedAt) ?? 'not generated'}
+        </span>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+        {([
+          ['Ledger activity', freshness?.ledger_observed_at],
+          ['Availability check', freshness?.availability_observed_at],
+          ['Account quota check', freshness?.quota_checked_at],
+          ['Quota data', freshness?.quota_observed_at]
+        ] as const).map(([label, observedAt]) => (
+          <div key={label} className="flex items-center justify-between gap-2">
+            <span className="text-secondary">{label}</span>
+            <span className="inline-flex items-center gap-2 text-muted">
+              {formatAge(observedAt) ?? 'Never observed'}
+              {isStale(observedAt) && <StatusBadge tone="serious" label="Stale" />}
+            </span>
+          </div>
+        ))}
+      </div>
+      {quotaChecks.length > 0 && (
+        <div className="mt-3 pt-3 border-t border-subtle">
+          <p className="text-[11px] uppercase tracking-wide text-muted mb-2">
+            Account quota checks · shared across profiles
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {quotaChecks.map((check) => {
+              const label = check.status === 'failed'
+                ? 'Check failed'
+                : check.status === 'no_data'
+                  ? 'No quota data recorded'
+                  : 'Quota data received';
+              const tone = check.status === 'failed'
+                ? 'critical'
+                : check.status === 'no_data'
+                  ? 'unknown'
+                  : 'good';
+              return (
+                <div key={check.backend} data-testid={`quota-check-${check.backend}`} className="text-xs text-secondary">
+                  <div className="flex items-center justify-between gap-2">
+                    <span>{check.backend}</span>
+                    <span className="inline-flex items-center gap-2">
+                      {isStale(check.checked_at) && <StatusBadge tone="serious" label="Stale" />}
+                      <StatusBadge tone={tone} label={label} />
+                    </span>
+                  </div>
+                  <p className="text-muted mt-1">Checked {formatAge(check.checked_at) ?? check.checked_at}</p>
+                  {check.error && <p className="text-critical mt-1">{check.error}</p>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </section>
+  );
 }
 
 export function QuotaPage() {
@@ -104,29 +176,11 @@ export function QuotaPage() {
     <div className="space-y-6">
       {header}
 
-      <section className="card-padded">
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-          <h3 className="text-sm font-semibold text-primary">Data freshness</h3>
-          <span className="text-xs text-muted">
-            Snapshot {formatAge(snapshot?.generated_at) ?? 'not generated'}
-          </span>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-          {([
-            ['Ledger activity', freshness?.ledger_observed_at],
-            ['Availability check', freshness?.availability_observed_at],
-            ['Quota observation', freshness?.quota_observed_at]
-          ] as const).map(([label, observedAt]) => (
-            <div key={label} className="flex items-center justify-between gap-2">
-              <span className="text-secondary">{label}</span>
-              <span className="inline-flex items-center gap-2 text-muted">
-                {formatAge(observedAt) ?? 'Never observed'}
-                {isStale(observedAt) && <StatusBadge tone="serious" label="Stale" />}
-              </span>
-            </div>
-          ))}
-        </div>
-      </section>
+      <QuotaFreshnessPanel
+        generatedAt={snapshot?.generated_at}
+        freshness={freshness}
+        quotaChecks={snapshot?.quota_checks ?? []}
+      />
 
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatTile
