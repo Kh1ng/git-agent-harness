@@ -716,6 +716,20 @@ export interface ConfigProfileSummary {
   notifications: NotificationSummary;
 }
 
+/** Browser-safe notification projection returned by the control-plane
+ * Settings API. Environment values are reduced to presence booleans before
+ * serialization so command contents and credentials cannot reach the DOM. */
+export type SettingsNotificationSummary = Omit<NotificationSummary, 'env_file' | 'env_file_prod'> & {
+  env_file_configured: boolean;
+  env_file_prod_configured: boolean;
+};
+
+/** GET /api/config/effective response. The CLI's raw environment-source
+ * fields are deliberately replaced at the server boundary. */
+export type SettingsConfigProfileSummary = Omit<ConfigProfileSummary, 'notifications'> & {
+  notifications: SettingsNotificationSummary;
+};
+
 /** Versioned allowlisted response from `gah config show --json --full`. */
 export interface ConfigShowFull {
   schema_version: number;

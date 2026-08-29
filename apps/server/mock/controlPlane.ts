@@ -23,7 +23,7 @@ import type {
   ChatSessionView,
   ChatTranscriptTurn,
   ClientMessage,
-  ConfigProfileSummary,
+  SettingsConfigProfileSummary,
   DoctorSnapshot,
   ManagerBackendInfo,
   ManagerChatSettingsSummary,
@@ -210,10 +210,10 @@ const MOCK_PROFILE_CONFIG = {
     configured: false,
     transport: null,
     manager_wake_autonomy: 'off',
-    env_file: null,
-    env_file_prod: null
+    env_file_configured: false,
+    env_file_prod_configured: false
   }
-} satisfies ConfigProfileSummary;
+} satisfies SettingsConfigProfileSummary;
 
 function sessionKey(profile: string, sessionId: string): string {
   return `${profile}#${sessionId}`;

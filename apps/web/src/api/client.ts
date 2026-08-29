@@ -28,7 +28,7 @@ import type {
   ProfileSummary,
   WakeAutonomyValue,
   ConfigSummary,
-  ConfigProfileSummary,
+  SettingsConfigProfileSummary,
   DoctorSnapshot,
   ConfigSetData,
   ManagerChatSettingsSummary,
@@ -207,7 +207,7 @@ export interface GahDataSource {
   startLoop(profile: string): Promise<StartLoopResult>;
   stopLoop(profile: string): Promise<StopLoopResult>;
   getConfig(): Promise<ConfigSummary>;
-  getProfileConfig(profile: string): Promise<ConfigProfileSummary>;
+  getProfileConfig(profile: string): Promise<SettingsConfigProfileSummary>;
   setConfig(data: ConfigSetData): Promise<{ success: boolean; message: string }>;
   getManagerChatSettings(): Promise<ManagerChatSettingsSummary>;
   setManagerChatSettings(data: ManagerChatSettingsUpdate): Promise<{ success: boolean }>;
@@ -415,7 +415,7 @@ export const gahApi: GahDataSource = {
     return getJson<ConfigSummary>('/api/config');
   },
   getProfileConfig(profile) {
-    return getJson<ConfigProfileSummary>('/api/config/effective', { profile });
+    return getJson<SettingsConfigProfileSummary>('/api/config/effective', { profile });
   },
   async setConfig(data) {
     return postJson<{ success: boolean; message: string }, ConfigSetData>('/api/config', data);

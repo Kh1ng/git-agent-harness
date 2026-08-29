@@ -40,6 +40,7 @@ import type {
   ReportGroupBy,
   ReportSeriesData,
   ConfigProfileSummary,
+  SettingsConfigProfileSummary,
   DoctorSnapshot,
   ProfileSummary,
   ProjectImportData,
@@ -117,6 +118,18 @@ const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
 /** Same hardcoded default as wsServer.ts's welcome message, until Settings
  * gains real profile switching (see apps/web Settings page). */
 const DEFAULT_PROFILE = 'gah';
+
+function toSettingsConfigProfileSummary(config: ConfigProfileSummary): SettingsConfigProfileSummary {
+  const { env_file, env_file_prod, ...notifications } = config.notifications;
+  return {
+    ...config,
+    notifications: {
+      ...notifications,
+      env_file_configured: env_file != null,
+      env_file_prod_configured: env_file_prod != null
+    }
+  };
+}
 
 function getLocalResourcePressure() {
   const cpus = os.cpus().length || 0;
@@ -1045,7 +1058,7 @@ export function createServer(
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     try {
       const config = await configEffectiveDeps.runConfigShowProfile(profile);
-      res.json(config);
+      res.json(toSettingsConfigProfileSummary(config));
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load effective config',
