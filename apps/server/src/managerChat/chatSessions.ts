@@ -41,7 +41,7 @@ export function setChatSessionStoreOptions(opts: ChatSessionStoreOptions): void 
 export { chatSessionStoreOptions };
 
 /** Shared state base with sessionLog.ts's chatLogPath resolution. */
-function stateBase(opts?: ChatSessionStoreOptions): string {
+export function stateBase(opts?: ChatSessionStoreOptions): string {
   const base =
     (opts ?? chatSessionStoreOptions).stateDir
     ?? process.env.GAH_CHAT_STATE_DIR
