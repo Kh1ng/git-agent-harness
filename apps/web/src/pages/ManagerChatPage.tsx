@@ -979,32 +979,6 @@ export function ManagerChatPage() {
               {s.title ?? s.branch}
             </option>
           ))}
-          {(() => {
-            const archived = sessions.filter((s) => s.outcome === 'archived');
-            if (archived.length === 0) return null;
-            return [
-              <optgroup key="archived" label={`Archived (${archived.length})`}>
-                {archived.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.title ?? s.branch}
-                  </option>
-                ))}
-              </optgroup>
-            ];
-          })()}
-          {(() => {
-            const settled = sessions.filter((s) => s.outcome === 'settled');
-            if (settled.length === 0) return null;
-            return [
-              <optgroup key="settled" label={`Settled (${settled.length})`}>
-                {settled.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.title ?? s.branch} · {s.settledReason ?? 'delivered'}
-                  </option>
-                ))}
-              </optgroup>
-            ];
-          })()}
         </select>
         {sessionsError && (
           <button
