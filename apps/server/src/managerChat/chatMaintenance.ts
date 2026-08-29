@@ -11,7 +11,7 @@ import {
   isChatSessionActive,
   listChatSessions
 } from './ManagerChatManager.js';
-import { profileStorage } from './chatSessions.js';
+import { profileStorage, type SettleDetails } from './chatSessions.js';
 import { fetchChatIssueState } from './issueChats.js';
 
 const DAY_MS = 86_400_000;
@@ -21,7 +21,7 @@ export interface ChatMaintenanceDeps {
   sync(profile: string): Promise<MergeRequest[]>;
   issueState(profile: ProfileSummary, issueNumber: number): Promise<string>;
   listSessions(profile: string): ChatSessionSummary[];
-  archive(profile: string, sessionId: string, settlement?: { reason: 'merged' | 'closed' | 'delivered' }): Promise<ChatSessionSummary>;
+  archive(profile: string, sessionId: string, settlement?: { reason: 'merged' | 'closed' | 'delivered' }, details?: SettleDetails): Promise<ChatSessionSummary>;
   isActive(profile: string, sessionId: string): boolean;
   now(): number;
 }
@@ -31,7 +31,7 @@ const defaultDeps: ChatMaintenanceDeps = {
   sync: (profile) => runSync({ profile }),
   issueState: fetchChatIssueState,
   listSessions: listChatSessions,
-  archive: async (profile, sessionId, settlement) => archiveChatSession(profile, sessionId, settlement),
+  archive: async (profile, sessionId, settlement, details) => archiveChatSession(profile, sessionId, settlement, details),
   isActive: isChatSessionActive,
   now: Date.now
 };
@@ -155,17 +155,94 @@ export async function reclaimChatSessions(
     storage.push(profileStorageSummary);
 
     if (!options.dryRun) {
+      // Branch → terminal MR, so the settled event can record WHICH PR
+      // proved the work done (#1036).
+      const mrByBranch = new Map(mergeRequests.map((mr) => [mr.branch, mr] as const));
       for (const candidate of profileCandidates) {
+        const settledSession = sessions.find((session) => session.id === candidate.sessionId);
+        let details: SettleDetails | undefined;
+        if (candidate.outcome === 'settled' && settledSession) {
+          const mr = mrByBranch.get(settledSession.branch);
+          if (mr && (candidate.reason === 'merged' || candidate.reason === 'closed')) {
+            details = { pullRequest: { id: mr.id, url: mr.url, sourceSha: mr.source_sha ?? null } };
+          } else if (candidate.reason === 'closed') {
+            const issueNumber = issueNumberForBranch(settledSession.branch, profile.repo_id);
+            if (issueNumber !== null) details = { issue: { number: issueNumber } };
+          }
+        }
         archived.push(await deps.archive(
           profile.name,
           candidate.sessionId,
           candidate.outcome === 'settled'
             ? { reason: candidate.reason === 'idle' ? 'delivered' : candidate.reason }
-            : undefined
+            : undefined,
+          details
         ));
       }
     }
   }
 
   return { dryRun: options.dryRun, profiles: storage, candidates, sessions: archived, warnings };
+}
+
+// ---------------------------------------------------------------------------
+// Bounded-interval settle sweep (#1036)
+//
+// The sweep above ran only through the daily gah-prune timer and the
+// dashboard's Reclaim button, so a chat whose PR merged at noon sat `live`
+// until the next day. gah-server now runs the same sweep on a bounded
+// interval: only profiles with live sessions are synced, overlapping runs
+// are dropped, and failures are logged not thrown (fail-open, like the rest
+// of maintenance).
+
+const DEFAULT_MAINTENANCE_INTERVAL_MS = 15 * 60_000;
+const FIRST_TICK_DELAY_MS = 30_000;
+
+function maintenanceIntervalMs(): number {
+  const raw = Number.parseInt(process.env.GAH_CHAT_MAINTENANCE_INTERVAL_MS ?? '', 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MAINTENANCE_INTERVAL_MS;
+}
+
+/** One scheduler pass: sweep only profiles that still have live sessions.
+ * Returns the profiles that were swept (for tests/logs). */
+export async function runChatMaintenanceTick(
+  deps: ChatMaintenanceDeps = defaultDeps
+): Promise<string[]> {
+  const profiles = await deps.listProfiles();
+  const swept: string[] = [];
+  for (const profile of profiles) {
+    const hasLive = deps.listSessions(profile.name).some((session) => session.outcome === 'live');
+    if (!hasLive) continue;
+    swept.push(profile.name);
+    const result = await reclaimChatSessions({ profile: profile.name, dryRun: false }, deps);
+    for (const session of result.sessions) {
+      const reason = session.settledReason ?? 'archived';
+      console.log(`[chat-maintenance] ${session.outcome} session ${session.id} (${reason}) for profile ${profile.name}`);
+    }
+  }
+  return swept;
+}
+
+let maintenanceTimer: ReturnType<typeof setInterval> | null = null;
+let maintenanceRunning = false;
+
+export function startChatMaintenanceScheduler(deps: ChatMaintenanceDeps = defaultDeps): void {
+  if (maintenanceTimer) return;
+  const tick = () => {
+    if (maintenanceRunning) return;
+    maintenanceRunning = true;
+    runChatMaintenanceTick(deps)
+      .catch((error) => console.warn(`[chat-maintenance] sweep failed: ${error instanceof Error ? error.message : String(error)}`))
+      .finally(() => { maintenanceRunning = false; });
+  };
+  maintenanceTimer = setInterval(tick, maintenanceIntervalMs());
+  maintenanceTimer.unref?.();
+  setTimeout(tick, FIRST_TICK_DELAY_MS).unref?.();
+}
+
+export function stopChatMaintenanceScheduler(): void {
+  if (maintenanceTimer) {
+    clearInterval(maintenanceTimer);
+    maintenanceTimer = null;
+  }
 }

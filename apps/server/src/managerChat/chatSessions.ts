@@ -22,6 +22,7 @@ import { randomBytes } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { ChatProfileStorage, ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
+import { appendEvents, readLog } from './sessionLog.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -250,12 +251,20 @@ export function touchSession(profile: string, sessionId: string, opts?: ChatSess
  * directory first (intent-to-add so untracked files are captured), then the
  * worktree is removed. The branch and event log always survive for resume.
  */
+/** Provider context recorded on the session/settled log event (#1036):
+ * which PR or issue proved the work terminal. */
+export interface SettleDetails {
+  pullRequest?: { id: string | null; url: string | null; sourceSha?: string | null } | null;
+  issue?: { number: number } | null;
+}
+
 export async function archiveSession(
   profile: string,
   sessionId: string,
   profileInfo: Pick<ProfileSummary, 'local_path'>,
   opts?: ChatSessionStoreOptions,
-  settlement?: { reason: 'merged' | 'closed' | 'delivered'; at?: number }
+  settlement?: { reason: 'merged' | 'closed' | 'delivered'; at?: number },
+  details?: SettleDetails
 ): Promise<ChatSessionSummary> {
   const sessions = readIndex(profile, opts);
   const session = sessions.find((s) => s.id === sessionId);
@@ -284,6 +293,23 @@ export async function archiveSession(
   session.settledAt = settlement ? completedAt : null;
   session.settledReason = settlement?.reason ?? null;
   writeIndex(profile, sessions, opts);
+  if (settlement) {
+    // #1036: the durable log records WHY the session settled, not just the
+    // outcome bit -- an audit trail for "the work shipped" beyond the
+    // picker state. The worktree was removed above, so this runs after the
+    // patch save to keep the settled event off the discarded tree's hands.
+    const logOpts = { stateDir: stateBase(opts), sessionId };
+    const nextSeq = readLog(profile, logOpts).reduce((highest, event) => Math.max(highest, event.seq), 0) + 1;
+    appendEvents(profile, [{
+      type: 'session/settled',
+      seq: nextSeq,
+      turn: 0,
+      reason: settlement.reason,
+      pullRequest: details?.pullRequest ?? null,
+      issue: details?.issue ?? null,
+      timestamp: completedAt
+    }], logOpts);
+  }
   return session;
 }
 

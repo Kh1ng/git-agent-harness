@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ChatSessionSummary, MergeRequest, ProfileSummary } from '@git-agent-harness/contracts';
+import type { SettleDetails } from './chatSessions.js';
 import {
   issueNumberForBranch,
   reclaimChatSessions,
+  runChatMaintenanceTick,
   selectReclaimCandidates,
   type ChatMaintenanceDeps
 } from './chatMaintenance.js';
@@ -118,4 +120,53 @@ test('dry run is non-mutating and reclaim uses the shared archive callback with 
   const reclaimed = await reclaimChatSessions({ profile: 'repo', dryRun: false }, deps);
   assert.equal(reclaimed.sessions.length, 2);
   assert.deepEqual(calls, [{ id: 'merged', reason: 'merged' }, { id: 'idle', reason: undefined }]);
+});
+
+test('the sweep threads provider details so the settled event records the PR or issue (#1036)', async () => {
+  const sessions = [
+    session('merged', 'gah/chat/my-repo-merged', 1),
+    session('issue', 'gah/issue/my-repo-990', 1),
+    session('idle', 'gah/chat/my-repo-idle', 20)
+  ];
+  const details: { id: string; details?: SettleDetails }[] = [];
+  const deps: ChatMaintenanceDeps = {
+    listProfiles: async () => [profile()],
+    sync: async () => [mergeRequest(sessions[0].branch, 'MERGED')],
+    issueState: async () => 'closed',
+    listSessions: () => sessions,
+    archive: async (_profile, id, settlement, settleDetails) => {
+      details.push({ id, details: settleDetails });
+      return { ...sessions.find((candidate) => candidate.id === id)!, outcome: settlement ? 'settled' : 'archived' };
+    },
+    isActive: () => false,
+    now: () => NOW
+  };
+
+  await reclaimChatSessions({ profile: 'repo', dryRun: false }, deps);
+  assert.deepEqual(details, [
+    { id: 'merged', details: { pullRequest: { id: '1', url: null, sourceSha: null } } },
+    { id: 'issue', details: { issue: { number: 990 } } },
+    { id: 'idle', details: undefined }
+  ]);
+});
+
+test('the maintenance tick sweeps only profiles with live sessions', async () => {
+  const live = profile();
+  const quiet: ProfileSummary = { ...profile(), name: 'quiet' };
+  const swept: (string | undefined)[] = [];
+  const deps: ChatMaintenanceDeps = {
+    listProfiles: async () => [live, quiet],
+    sync: async () => [],
+    issueState: async () => 'open',
+    listSessions: (name) => name === 'repo' ? [session('live-one', 'gah/chat/my-repo-live', 0)] : [],
+    archive: async (name, id) => {
+      swept.push(name);
+      return { ...session(id, 'gah/chat/my-repo-live', 0), outcome: 'settled', settledReason: 'delivered', settledAt: NOW };
+    },
+    isActive: () => false,
+    now: () => NOW
+  };
+
+  const sweptProfiles = await runChatMaintenanceTick(deps);
+  assert.deepEqual(sweptProfiles, ['repo'], 'the profile without live sessions is not swept');
 });

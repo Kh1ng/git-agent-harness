@@ -38,6 +38,7 @@ import {
   resolveSessionCwd,
   touchSession,
   updateSession,
+  type SettleDetails,
   type ChatSessionStoreOptions
 } from './chatSessions.js';
 import { previewProxy, detectDevPort } from './previewProxy.js';
@@ -256,12 +257,13 @@ export function updateChatSession(
 export async function archiveChatSession(
   profile: string,
   sessionId: string,
-  settlement?: { reason: 'merged' | 'closed' | 'delivered' }
+  settlement?: { reason: 'merged' | 'closed' | 'delivered' },
+  details?: SettleDetails
 ) {
   const profileInfo = await findProfileInfo(profile);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   try {
-    return await archiveSession(profile, sessionId, profileInfo, chatSessionStoreOptions, settlement);
+    return await archiveSession(profile, sessionId, profileInfo, chatSessionStoreOptions, settlement, details);
   } finally {
     // The worktree goes away; its preview can't be valid anymore.
     await previewProxy.clear(profile, sessionId);

@@ -15,6 +15,7 @@ import {
   unauthenticatedExposureWarning,
   validateBindHost
 } from './bindHost.js';
+import { startChatMaintenanceScheduler, stopChatMaintenanceScheduler } from './managerChat/chatMaintenance.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
 const HOST = resolveBindHost();
@@ -81,6 +82,12 @@ async function main() {
   // goes dark. No-op when no nodes are registered.
   registryService.startLivenessScheduler();
 
+  // Chat maintenance scheduler (#1036): settles chat sessions whose branch's
+  // PR merged/closed (or whose issue closed) on a bounded interval instead
+  // of only at the daily prune, so "the work shipped" is visible while it
+  // still matters.
+  startChatMaintenanceScheduler();
+
   // Start HTTP server
   server.listen(PORT, HOST, () => {
     console.log(`Git Agent Harness server listening on ${HOST}:${PORT}`);
@@ -96,6 +103,7 @@ async function main() {
   process.on('SIGINT', () => {
     console.log('Shutting down...');
     registryService.stopLivenessScheduler();
+    stopChatMaintenanceScheduler();
     server.close();
     process.exit(0);
   });
@@ -103,6 +111,7 @@ async function main() {
   process.on('SIGTERM', () => {
     console.log('Shutting down...');
     registryService.stopLivenessScheduler();
+    stopChatMaintenanceScheduler();
     server.close();
     process.exit(0);
   });

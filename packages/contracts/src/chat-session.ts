@@ -27,6 +27,7 @@ export type ChatSessionEvent =
   | ChatHarnessError
   | ChatHumanCommand
   | ChatHandoff
+  | ChatSessionSettled
   | ChatCompactionStart
   | ChatCompactionSummary
   | ChatCompactionEnd;
@@ -202,6 +203,23 @@ export interface ChatHandoff {
   to: string;
   toModel: string | null;
   reason: string;
+  timestamp: number;
+}
+
+/** Terminal lifecycle event (#1036): the session's work is provably done --
+ * its branch's PR merged or closed, its issue closed, or the work was
+ * delivered another way. Written when the session settles, not per turn,
+ * so it carries no turn number (turn: 0 = outside any conversation turn). */
+export interface ChatSessionSettled {
+  type: 'session/settled';
+  seq: number;
+  turn: 0;
+  reason: 'merged' | 'closed' | 'delivered';
+  /** The provider PR whose merge/closure triggered the settle, when one
+   * matched the session's branch. */
+  pullRequest?: { id: string | null; url: string | null; sourceSha?: string | null } | null;
+  /** The provider issue whose closure triggered the settle. */
+  issue?: { number: number } | null;
   timestamp: number;
 }
 

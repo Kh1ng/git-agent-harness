@@ -17,6 +17,7 @@ import {
   touchSession,
   updateSession
 } from './chatSessions.js';
+import { readLog } from './sessionLog.js';
 
 function initRepo(path: string): void {
   execFileSync('git', ['init', '--quiet', '--initial-branch=main'], { cwd: path });
@@ -137,6 +138,36 @@ test('settled archive keeps the same patch and branch safety while recording a d
   assert.ok(execFileSync('git', ['branch', '--list', session.branch], { cwd: env.checkout, encoding: 'utf8' }).includes(session.branch));
   const sessionDir = join(env.stateDir, 'project-p', `session-${session.id}`);
   assert.equal(readdirSync(sessionDir).filter((file) => file.endsWith('.patch')).length, 1);
+}));
+
+test('settled archive appends a session/settled event recording why (#1036)', withEnv(async (env) => {
+  const merged = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'codex' });
+  await archiveSession('p', merged.id, env.profileInfo, { stateDir: env.stateDir }, { reason: 'merged' }, {
+    pullRequest: { id: '1049', url: 'https://github.com/owner/repo/pull/1049', sourceSha: 'abc123' }
+  });
+
+  const closed = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'codex' });
+  await archiveSession('p', closed.id, env.profileInfo, { stateDir: env.stateDir }, { reason: 'closed' }, {
+    issue: { number: 1036 }
+  });
+
+  const plain = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'codex' });
+  await archiveSession('p', plain.id, env.profileInfo);
+
+  const events = readLog('p', { stateDir: env.stateDir, sessionId: merged.id });
+  const settledEvent = events.find((event) => event.type === 'session/settled');
+  assert.ok(settledEvent, 'settled event in the log');
+  assert.equal(settledEvent.reason, 'merged');
+  assert.deepEqual(settledEvent.pullRequest, { id: '1049', url: 'https://github.com/owner/repo/pull/1049', sourceSha: 'abc123' });
+
+  const closedEvents = readLog('p', { stateDir: env.stateDir, sessionId: closed.id });
+  const closedEvent = closedEvents.find((event) => event.type === 'session/settled');
+  assert.ok(closedEvent, 'closed settle records the issue');
+  assert.deepEqual(closedEvent.issue, { number: 1036 });
+
+  // A plain archive (no settlement) writes no settled event.
+  const plainEvents = readLog('p', { stateDir: env.stateDir, sessionId: plain.id });
+  assert.equal(plainEvents.find((event) => event.type === 'session/settled'), undefined);
 }));
 
 test('archiveSession of a clean worktree writes no patch', withEnv(async (env) => {
