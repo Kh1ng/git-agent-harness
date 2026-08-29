@@ -8,9 +8,27 @@ use crate::runner::process::{spawn_with_worktree_progress_watch, write_redacted_
 use crate::runner::resolve::filtered_backend_args;
 use crate::runner::{log_delta, RunResult};
 
-/// Run OpenCode CLI non-interactively via `opencode run --model <model> --dir <path> --auto `<prompt>`.
-/// Worker/fix backend and review backend support.
-/// extra_args come from profile.opencode_args (e.g. `--format json`).
+pub(crate) const IMPLEMENTER_AGENT: &str = "gah-implementer";
+pub(crate) const REVIEWER_AGENT: &str = "gah-reviewer";
+
+#[derive(Clone, Copy)]
+pub(crate) enum AgentRole {
+    Implementer,
+    Reviewer,
+}
+
+pub(crate) fn select_agent(cmd: &mut Command, role: AgentRole) {
+    let agent = match role {
+        AgentRole::Implementer => IMPLEMENTER_AGENT,
+        AgentRole::Reviewer => REVIEWER_AGENT,
+    };
+    cmd.args(["--agent", agent]);
+}
+
+/// Run OpenCode CLI non-interactively via `opencode run --agent gah-implementer
+/// --model <model> --dir <path> --auto <prompt>`.
+/// `extra_args` come from `profile.opencode_args` (e.g. `--format json`), but
+/// cannot override the role-selected agent or route-selected model.
 /// Unlike vibe, opencode DOES take --model, so we pass effective_model through.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn run_opencode(
@@ -66,8 +84,10 @@ pub fn run_opencode_with_executable(
         .unwrap_or(0);
 
     let mut cmd = Command::new(executable);
-    // opencode run --model <model> --dir <path> --auto "<prompt>"
-    cmd.arg("run").arg("--dir").arg(worktree).arg("--auto");
+    // opencode run --agent gah-implementer --model <model> --dir <path> --auto "<prompt>"
+    cmd.arg("run");
+    select_agent(&mut cmd, AgentRole::Implementer);
+    cmd.arg("--dir").arg(worktree).arg("--auto");
 
     // Add model if specified
     if let Some(model) = model {
@@ -261,7 +281,12 @@ mod tests {
             "the opencode task",
             &f.session_dir,
             Some("provider/test-model"),
-            &["--format".to_string(), "json".to_string()],
+            &[
+                "--agent".to_string(),
+                "gah-reviewer".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+            ],
             &envs,
             300,
         )
@@ -274,6 +299,10 @@ mod tests {
         assert!(argv.contains(&"--auto".to_string()));
         assert!(argv.contains(&"--model".to_string()));
         assert!(argv.contains(&"provider/test-model".to_string()));
+        assert!(argv
+            .windows(2)
+            .any(|args| args == ["--agent", "gah-implementer"]));
+        assert!(!argv.contains(&"gah-reviewer".to_string()));
         assert!(argv.contains(&"--format".to_string()));
         assert!(argv.contains(&"json".to_string()));
         assert!(argv.contains(&"the opencode task".to_string()));

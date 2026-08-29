@@ -129,11 +129,13 @@ pub fn filtered_backend_args(backend: &str, extra_args: &[String]) -> Vec<String
                 }
             }
             "opencode" | "claude" => {
-                if arg == "--model" {
+                if arg == "--model" || (backend == "opencode" && arg == "--agent") {
                     i += 2;
                     continue;
                 }
-                if arg.starts_with("--model=") {
+                if arg.starts_with("--model=")
+                    || (backend == "opencode" && arg.starts_with("--agent="))
+                {
                     i += 1;
                     continue;
                 }

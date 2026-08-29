@@ -204,6 +204,10 @@ pub fn run_review_backend_for_identity(
         }
         Some(BackendKind::Opencode) => {
             cmd.arg("run");
+            crate::runner::backends::opencode::select_agent(
+                &mut cmd,
+                crate::runner::backends::opencode::AgentRole::Reviewer,
+            );
             if let Some(model) = effective_model {
                 cmd.args(["--model", model]);
             }
@@ -646,6 +650,32 @@ mod tests {
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("FROM_ENV_FILE=vibe-review-env"));
         assert!(env.contains("VIBE_ACTIVE_MODEL=mistral-medium-3.5"));
+    }
+
+    #[test]
+    fn run_review_backend_uses_tool_disabled_opencode_agent() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "opencode", &f.record_dir, 0);
+        let profile = test_profile();
+        let _guard = PathGuard::set(f.bin_dir.display().to_string());
+
+        let result = run_review_backend(
+            &profile,
+            "opencode",
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            Some("provider/review-model"),
+            &[],
+        );
+
+        assert_eq!(result.outcome, ReviewProcessOutcome::Success);
+        let argv = recorded_argv(&f.record_dir);
+        assert!(argv
+            .windows(2)
+            .any(|args| args == ["--agent", "gah-reviewer"]));
+        assert!(!argv.contains(&"gah-implementer".to_string()));
     }
 
     #[test]
