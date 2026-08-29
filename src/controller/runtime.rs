@@ -196,10 +196,6 @@ pub fn run_once(
     skip_validation_gate: bool,
     run_periodic_probes: bool,
 ) -> Result<()> {
-    // Housekeeping is part of controller lifecycle, not an operator chore.
-    // It only removes clean GAH-owned worktrees that are terminal upstream or
-    // past retention; an uncommitted fresh worktree is never inferred stale.
-    crate::prune::run_automatic(cfg, profile_name)?;
     let mut ledger_entries = crate::ledger::read_entries(cfg)?;
     reconcile_abandoned_dispatches(cfg, profile_name, &mut ledger_entries)?;
     let profile = crate::config::get_profile(cfg, profile_name)?;
@@ -211,6 +207,7 @@ pub fn run_once(
     }
     let mut snapshot =
         crate::status::build_snapshot_from_entries(cfg, profile_name, now, &ledger_entries)?;
+    crate::prune::run_automatic(cfg, profile_name, &ledger_entries, &snapshot)?;
     crate::events::record(
         cfg,
         crate::events::EventType::ObservationCompleted,

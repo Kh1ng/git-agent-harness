@@ -17,18 +17,125 @@ pub fn run(
     let profiles = selected_profiles(&cfg, profile_name)?;
 
     for (name, profile) in profiles {
-        prune_profile(&cfg, &name, profile, older_than_days, dry_run, true)?;
+        prune_profile(&cfg, &name, profile, older_than_days, dry_run, true, None)?;
     }
     Ok(())
 }
 
 /// Run the same conservative maintenance used by `gah prune` for one
-/// controller profile. The controller calls this before each observation so
-/// merged/closed worktrees cannot accumulate until an operator remembers to
-/// run a separate command.
-pub fn run_automatic(cfg: &GahConfig, profile_name: &str) -> Result<()> {
+/// controller profile. The controller supplies its bounded active-MR and
+/// live-claim observations so this never needs full provider history.
+pub fn run_automatic(
+    cfg: &GahConfig,
+    profile_name: &str,
+    ledger_entries: &[crate::ledger::LedgerEntry],
+    snapshot: &crate::status::StatusSnapshot,
+) -> Result<()> {
     let profile = config::get_profile(cfg, profile_name)?;
-    prune_profile(cfg, profile_name, profile, None, false, false)
+    let active_mrs =
+        (snapshot.observations.sync.status == "ok").then_some(snapshot.merge_requests.as_slice());
+    let active_claims = (!snapshot
+        .errors
+        .iter()
+        .any(|error| error.subsystem == "claims" && error.incomplete_snapshot))
+    .then_some(snapshot.active_claims.as_slice());
+    let observed = automatic_worktree_sets(
+        ledger_entries,
+        profile_name,
+        &profile.repo_id,
+        active_mrs,
+        active_claims,
+    );
+    prune_profile(
+        cfg,
+        profile_name,
+        profile,
+        None,
+        false,
+        false,
+        Some(&observed),
+    )
+}
+
+#[derive(Default)]
+struct AutomaticWorktreeSets {
+    done: HashSet<String>,
+    abandoned_open: HashSet<String>,
+    protected: HashSet<String>,
+}
+
+fn automatic_worktree_sets(
+    ledger_entries: &[crate::ledger::LedgerEntry],
+    profile_name: &str,
+    repo_id: &str,
+    active_mrs: Option<&[crate::sync::SyncMrJson]>,
+    active_claims: Option<&[crate::status::ActiveClaimSnapshot]>,
+) -> AutomaticWorktreeSets {
+    let dispatch_prefixes = [format!("gah/{repo_id}-"), format!("gah/exp/{repo_id}-")];
+    let published = ledger_entries
+        .iter()
+        .filter(|entry| entry.profile == profile_name && entry.repo_id == repo_id)
+        .filter(|entry| entry.mr_created)
+        .filter_map(|entry| Some((entry.branch.as_deref()?, entry.work_id.as_deref()?)))
+        .filter(|(branch, _)| {
+            dispatch_prefixes
+                .iter()
+                .any(|prefix| branch.starts_with(prefix))
+        })
+        .collect::<Vec<_>>();
+    let active_branches = active_mrs.map(|mrs| {
+        mrs.iter()
+            .map(|mr| mr.branch.as_str())
+            .collect::<HashSet<_>>()
+    });
+
+    let mut sets = AutomaticWorktreeSets::default();
+    match active_claims {
+        Some(claims) => {
+            let live_work_ids = claims
+                .iter()
+                .map(|claim| crate::work_claim::normalize_work_identity(&claim.work_id))
+                .collect::<HashSet<_>>();
+            sets.protected.extend(
+                published
+                    .iter()
+                    .filter(|(_, work_id)| {
+                        live_work_ids.contains(&crate::work_claim::normalize_work_identity(work_id))
+                    })
+                    .map(|(branch, _)| worktree_name_for_branch(branch)),
+            );
+        }
+        None => {
+            // Claim state is part of the same snapshot. If it was unreadable,
+            // retain every published dispatch worktree rather than guessing
+            // that none has a live owner.
+            sets.protected.extend(
+                published
+                    .iter()
+                    .map(|(branch, _)| worktree_name_for_branch(branch)),
+            );
+        }
+    }
+
+    let Some(active_branches) = active_branches else {
+        // Absence is terminal evidence only when the active-MR observation
+        // completed successfully.
+        return sets;
+    };
+    sets.done.extend(
+        published
+            .iter()
+            .filter(|(branch, _)| !active_branches.contains(branch))
+            .map(|(branch, _)| worktree_name_for_branch(branch)),
+    );
+    sets.abandoned_open.extend(
+        published
+            .iter()
+            .filter(|(branch, _)| active_branches.contains(branch))
+            .map(|(branch, _)| worktree_name_for_branch(branch))
+            .filter(|name| !sets.protected.contains(name)),
+    );
+    sets
 }
 
 fn prune_profile(
@@ -38,6 +145,7 @@ fn prune_profile(
     older_than_days: Option<u64>,
     dry_run: bool,
     announce: bool,
+    observed: Option<&AutomaticWorktreeSets>,
 ) -> Result<()> {
     // CLI --older-than overrides the per-profile retention window.
     let retention = older_than_days.unwrap_or_else(|| profile.effective_prune_older_than_days());
@@ -49,11 +157,31 @@ fn prune_profile(
     }
     prune_sessions(profile, cutoff, dry_run)?;
     crate::build_cache::prune_inactive(&profile.artifact_root, dry_run)?;
-    prune_worktrees(cfg, profile, cutoff, dry_run, announce)?;
-    // Same GraphQL-cost boundary as prune_worktrees's own terminal-state
-    // check above: only the explicit/scheduled `gah prune` path (announce
-    // == include_terminal_provider_state == true), never the recurring
-    // per-observation automatic maintenance.
+    let provider_done;
+    let empty = HashSet::new();
+    let (done, abandoned_open, protected) = if let Some(observed) = observed {
+        (
+            &observed.done,
+            &observed.abandoned_open,
+            &observed.protected,
+        )
+    } else if announce {
+        provider_done = done_worktree_names(profile);
+        (&provider_done, &empty, &empty)
+    } else {
+        (&empty, &empty, &empty)
+    };
+    prune_worktrees(
+        cfg,
+        profile,
+        cutoff,
+        dry_run,
+        done,
+        abandoned_open,
+        protected,
+    )?;
+    // Remote branch deletion still requires explicit full provider history;
+    // recurring maintenance only reuses the controller observation above.
     if announce {
         prune_remote_gah_branches(profile, dry_run)?;
     }
@@ -184,7 +312,9 @@ fn prune_worktrees(
     profile: &Profile,
     cutoff: SystemTime,
     dry_run: bool,
-    include_terminal_provider_state: bool,
+    done: &HashSet<String>,
+    abandoned_open: &HashSet<String>,
+    protected: &HashSet<String>,
 ) -> Result<()> {
     if cfg.defaults.worktree_base.trim().is_empty() {
         println!("  worktrees: skipped (no defaults.worktree_base)");
@@ -205,20 +335,14 @@ fn prune_worktrees(
         // for the session's own archive-with-patch step, never force-removed.
         format!("gah-chat-{}-", profile.repo_id),
     ];
-    // Full GitHub history is GraphQL-backed in the compatibility sync path.
-    // It is acceptable for an explicit operator prune, but never for the
-    // recurring controller's automatic maintenance. Age + cleanliness still
-    // bounds unattended disk use without consuming shared GraphQL quota.
-    let done = if include_terminal_provider_state {
-        done_worktree_names(profile)
-    } else {
-        HashSet::new()
-    };
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if !prefixes.iter().any(|prefix| name.starts_with(prefix)) {
+            continue;
+        }
+        if protected.contains(name.as_str()) {
             continue;
         }
         // A worktree tied to a merged/closed PR/MR is safe to prune
@@ -227,8 +351,9 @@ fn prune_worktrees(
         // default-branch tip until its agent makes the first commit, so using
         // that signal would race an in-flight manual dispatch.
         let is_done = done.contains(name.as_str());
+        let is_abandoned_open = abandoned_open.contains(name.as_str());
         let is_old = is_older_than(&path, cutoff);
-        if !is_done && !is_old {
+        if !is_done && !is_abandoned_open && !is_old {
             continue;
         }
         // Never force-remove a dirty worktree. A terminal PR can still have
@@ -244,6 +369,8 @@ fn prune_worktrees(
                 "  would remove worktree {}",
                 if is_done {
                     format!("{} (MERGED/CLOSED)", path.display())
+                } else if is_abandoned_open {
+                    format!("{} (OPEN/ABANDONED)", path.display())
                 } else {
                     path.display().to_string()
                 }
@@ -280,6 +407,8 @@ fn prune_worktrees(
                 "  removed worktree {}",
                 if is_done {
                     format!("{} (MERGED/CLOSED)", path.display())
+                } else if is_abandoned_open {
+                    format!("{} (OPEN/ABANDONED)", path.display())
                 } else {
                     path.display().to_string()
                 }
@@ -311,12 +440,12 @@ fn is_older_than(path: &PathBuf, cutoff: SystemTime) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        done_worktree_names_from_mrs, is_older_than, prune_worktrees,
+        automatic_worktree_sets, done_worktree_names_from_mrs, is_older_than, prune_worktrees,
         remote_gah_branches_to_delete, worktree_name_for_branch,
     };
     use crate::config::{tests::test_profile_for_notifications, Defaults, GahConfig};
     use crate::sync::SyncMr;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
@@ -367,7 +496,16 @@ mod tests {
         let cutoff = SystemTime::now()
             .checked_sub(Duration::from_secs(86_400))
             .unwrap();
-        prune_worktrees(&cfg, &profile, cutoff, false, false).unwrap();
+        prune_worktrees(
+            &cfg,
+            &profile,
+            cutoff,
+            false,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .unwrap();
 
         assert!(
             !stale.exists(),
@@ -439,7 +577,16 @@ mod tests {
         let cutoff = SystemTime::now()
             .checked_sub(Duration::from_secs(86_400))
             .unwrap();
-        prune_worktrees(&cfg, &profile, cutoff, false, false).unwrap();
+        prune_worktrees(
+            &cfg,
+            &profile,
+            cutoff,
+            false,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .unwrap();
 
         assert!(!chat.exists(), "idle chat worktree should be reclaimed");
         assert!(
@@ -452,6 +599,83 @@ mod tests {
     fn worktree_name_mirrors_branch_slash_replacement() {
         assert_eq!(worktree_name_for_branch("gah/real-123"), "gah-real-123");
         assert_eq!(worktree_name_for_branch("feature/fix"), "feature-fix");
+    }
+
+    fn published_entry(branch: &str, work_id: &str) -> crate::ledger::LedgerEntry {
+        let mut profile = test_profile_for_notifications();
+        profile.repo_id = "real".into();
+        let mut entry = crate::ledger::LedgerEntry::new(
+            "real", &profile, "codex", "improve", work_id, None, None,
+        );
+        entry.work_id = Some(work_id.into());
+        entry.branch = Some(branch.into());
+        entry.mr_created = true;
+        entry
+    }
+
+    fn active_mr(branch: &str, work_id: &str) -> crate::sync::SyncMrJson {
+        let mut mr = mr(branch, false, Some("open"));
+        mr.work_id = Some(work_id.into());
+        crate::sync::sync_mr_to_json(&mr, None, &Default::default())
+    }
+
+    #[test]
+    fn automatic_sets_protect_every_published_worktree_for_a_live_claim() {
+        let entries = vec![
+            published_entry("gah/real-prior", "#915"),
+            published_entry("gah/real-active", "TICKET-915"),
+        ];
+        let mrs = vec![active_mr("gah/real-active", "#915")];
+        let claims = vec![crate::status::ActiveClaimSnapshot {
+            work_id: "#915".into(),
+            pid: std::process::id(),
+            scope: "real@real".into(),
+            hostname: "test".into(),
+            claimed_at: "2099-01-01T00:00:00Z".into(),
+            age_seconds: 0,
+        }];
+
+        let sets = automatic_worktree_sets(&entries, "real", "real", Some(&mrs), Some(&claims));
+
+        assert_eq!(
+            sets.protected,
+            HashSet::from(["gah-real-active".into(), "gah-real-prior".into()])
+        );
+        assert!(sets.done.contains("gah-real-prior"));
+        assert!(sets.abandoned_open.is_empty());
+    }
+
+    #[test]
+    fn automatic_sets_do_not_infer_state_from_an_incomplete_mr_observation() {
+        let entries = vec![published_entry("gah/real-915", "#915")];
+
+        let sets = automatic_worktree_sets(&entries, "real", "real", None, Some(&[]));
+
+        assert!(sets.done.is_empty());
+        assert!(sets.abandoned_open.is_empty());
+    }
+
+    #[test]
+    fn automatic_sets_fail_closed_when_claim_observation_is_incomplete() {
+        let entries = vec![published_entry("gah/real-915", "#915")];
+        let mrs = vec![active_mr("gah/real-915", "#915")];
+
+        let sets = automatic_worktree_sets(&entries, "real", "real", Some(&mrs), None);
+
+        assert_eq!(sets.protected, HashSet::from(["gah-real-915".into()]));
+        assert!(sets.abandoned_open.is_empty());
+    }
+
+    #[test]
+    fn automatic_sets_never_classify_the_manager_chat_namespace() {
+        let entries = vec![published_entry("gah/chat/real-session", "#915")];
+        let mrs = vec![active_mr("gah/chat/real-session", "#915")];
+
+        let sets = automatic_worktree_sets(&entries, "real", "real", Some(&mrs), None);
+
+        assert!(sets.done.is_empty());
+        assert!(sets.abandoned_open.is_empty());
+        assert!(sets.protected.is_empty());
     }
 
     fn mr(branch: &str, merged: bool, state: Option<&str>) -> SyncMr {
