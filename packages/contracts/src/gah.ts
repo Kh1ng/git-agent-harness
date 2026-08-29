@@ -1048,12 +1048,11 @@ export interface ManagerChatSettingsSummary {
   availableBackends: ManagerBackendInfo[];
 }
 
-/** GET /api/settings/gateway (issue #880 follow-up): this node's memory
- * gateway location, for copying into a second node's remote-mode install. */
+/** Secret-safe GET /api/settings/gateway summary. Credential bytes are
+ * available only from the explicit bootstrap-command reveal endpoint. */
 export interface GatewaySettingsSummary {
   url: string;
   apiKeyConfigured: boolean;
-  apiKey: string | null;
   enabled: boolean;
   disabledProfiles: string[];
   /** This host's own Tailscale IPv4, best-effort detected -- null if the
@@ -1063,6 +1062,11 @@ export interface GatewaySettingsSummary {
    * loopback-optimized for this server's own calls, not reachable by
    * anyone else. */
   tailscaleIPv4: string | null;
+}
+
+/** Sensitive response returned only after an explicit authenticated reveal. */
+export interface GatewayBootstrapCommand {
+  command: string;
 }
 
 export interface GatewaySettingsUpdate {
