@@ -94,11 +94,12 @@ export function effectiveGatewayApiKey(): string | undefined {
   return stored || process.env.TDAI_GATEWAY_API_KEY || undefined;
 }
 
-/** Returns true if the gateway should be used for this profile. */
+/** Returns true if the gateway should be used for this profile -- requires an explicitly configured URL (#878), not just an API key. */
 export function gatewayEnabledForProfile(profile?: string): boolean {
   const s = readGatewaySettings();
   if (!s.enabled) return false;
   if (profile && s.disabledProfiles.includes(profile)) return false;
+  if (!s.url && !process.env.TDAI_GATEWAY_URL) return false;
   return true;
 }
 

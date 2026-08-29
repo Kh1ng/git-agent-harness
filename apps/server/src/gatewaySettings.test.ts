@@ -178,7 +178,7 @@ test('gatewaySettingsStore: per-profile opt-out respects disabledProfiles', () =
   const path = join(tmpdir(), `gah-test-settings-${Date.now()}.json`);
   process.env.GAH_GATEWAY_SETTINGS_PATH = path;
   try {
-    writeGatewaySettings({ url: null, apiKey: null, enabled: true, disabledProfiles: ['staging'] });
+    writeGatewaySettings({ url: 'http://configured-host:8420', apiKey: null, enabled: true, disabledProfiles: ['staging'] });
     assert.equal(gatewayEnabledForProfile('prod'), true);
     assert.equal(gatewayEnabledForProfile('staging'), false);
   } finally {
