@@ -300,6 +300,42 @@ export interface ChatSessionSummary {
   createdAt: number;
   lastActiveAt: number;
   archivedAt: number | null;
+  /** Live sessions are resumable; archived is an operator/idle outcome;
+   * settled means provider state proved the work terminal. */
+  outcome: 'live' | 'archived' | 'settled';
+  settledAt: number | null;
+  settledReason: 'merged' | 'closed' | 'delivered' | null;
+}
+
+export interface ChatSessionStorage {
+  sessionId: string;
+  worktreeBytes: number;
+  projectedReclaimBytes: number;
+  idle: boolean;
+}
+
+export interface ChatProfileStorage {
+  profile: string;
+  idleDays: number;
+  worktreeBytes: number;
+  projectedReclaimBytes: number;
+  sessions: ChatSessionStorage[];
+}
+
+export interface ChatReclaimCandidate {
+  profile: string;
+  sessionId: string;
+  outcome: 'archived' | 'settled';
+  reason: 'idle' | 'merged' | 'closed' | 'delivered';
+  reclaimBytes: number;
+}
+
+export interface ChatReclaimResult {
+  dryRun: boolean;
+  profiles: ChatProfileStorage[];
+  candidates: ChatReclaimCandidate[];
+  sessions: ChatSessionSummary[];
+  warnings: string[];
 }
 
 /** A node offered by the new-chat flow's node step. Chat runs on the

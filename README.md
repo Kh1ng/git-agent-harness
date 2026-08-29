@@ -680,6 +680,14 @@ Prune only touches:
 - `artifact_root/sessions/*`
 - worktrees under `defaults.worktree_base` with GAH-owned naming prefixes
 
+On a central node, the same daily `gah-prune.timer` also runs chat
+maintenance. Terminal provider branches settle, and live sessions with no
+completed turn for `chat_session_idle_days` (per profile, default `14`) are
+archived. Both paths use the normal archive safety behavior: dirty tracked and
+untracked work is saved as a patch and the local branch always survives. The
+Chat storage card previews per-session usage and the exact reclaim plan before
+an operator applies it.
+
 ## Operating GAH Unattended
 
 For running and repairing GAH as an unattended service (systemd units, token

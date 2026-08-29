@@ -15,4 +15,8 @@ impl Profile {
     pub fn effective_prune_older_than_days(&self) -> u64 {
         self.prune_older_than_days.unwrap_or(30)
     }
+
+    pub fn effective_chat_session_idle_days(&self) -> u64 {
+        self.chat_session_idle_days.unwrap_or(14)
+    }
 }

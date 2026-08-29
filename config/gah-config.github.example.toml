@@ -19,6 +19,7 @@ repo = "owner/repo"
 local_path = "/path/to/local/clone"
 artifact_root = "/home/you/.local/share/gah/artifacts/github-repo"
 default_target_branch = "main"
+chat_session_idle_days = 14
 oh_profile = "cloud-coder"
 validation_commands = []
 

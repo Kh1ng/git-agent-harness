@@ -63,6 +63,7 @@ pub(super) fn profile() -> Profile {
         delivery_mode: crate::config::DeliveryMode::default(),
         manager_wake_autonomy: crate::config::WakeAutonomy::default(),
         prune_older_than_days: None,
+        chat_session_idle_days: None,
         display_name: "Repo".into(),
         repo_id: "repo".into(),
         provider: "github".into(),

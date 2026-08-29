@@ -45,6 +45,7 @@ fn github_profile() -> Profile {
         delivery_mode: crate::config::DeliveryMode::default(),
         manager_wake_autonomy: crate::config::WakeAutonomy::default(),
         prune_older_than_days: None,
+        chat_session_idle_days: None,
         display_name: "Repo".into(),
         repo_id: "repo".into(),
         provider: "github".into(),
@@ -104,6 +105,7 @@ fn github_profile() -> Profile {
 fn gitlab_profile() -> Profile {
     Profile {
         prune_older_than_days: None,
+        chat_session_idle_days: None,
         provider: "gitlab".into(),
         provider_api_base: Some("https://gitlab.example.com/api/v4".into()),
         provider_project_id: Some("42".into()),

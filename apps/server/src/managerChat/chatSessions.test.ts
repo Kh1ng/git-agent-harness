@@ -11,6 +11,7 @@ import {
   createSession,
   getSession,
   listSessions,
+  profileStorage,
   resolveSessionCwd,
   setChatSessionStoreOptions,
   touchSession,
@@ -74,12 +75,27 @@ test('createSession without a worktree_base still works (checkout mode)', withEn
   assert.ok(session.branch, 'branch still named for later promotion');
 }));
 
+test('legacy indexes derive live/archive outcomes without a migration command', withEnv(async (env) => {
+  const projectDir = join(env.stateDir, 'project-p');
+  execFileSync('mkdir', ['-p', projectDir]);
+  writeFileSync(join(projectDir, 'sessions.json'), JSON.stringify({ sessions: [{
+    id: 'legacy', profile: 'p', worktreePath: null, branch: 'gah/chat/repo-legacy', backend: 'codex', model: null,
+    title: null, createdAt: 1, lastActiveAt: 2, archivedAt: null
+  }] }));
+  const legacy = listSessions('p')[0];
+  assert.equal(legacy.outcome, 'live');
+  assert.equal(legacy.settledAt, null);
+  assert.equal(legacy.settledReason, null);
+}));
+
 test('archiveSession saves a dirty worktree as a patch and keeps the branch', withEnv(async (env) => {
   const session = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'hermes' });
   writeFileSync(join(session.worktreePath!, 'dirty.txt'), 'uncommitted work\n');
   const archived = await archiveSession('p', session.id, env.profileInfo);
 
   assert.ok(archived.archivedAt !== null, 'marked archived');
+  assert.equal(archived.outcome, 'archived');
+  assert.equal(archived.settledAt, null);
   assert.equal(archived.worktreePath, null);
   assert.ok(!existsSync(session.worktreePath!), 'worktree removed');
   const branches = execFileSync('git', ['branch', '--list', session.branch], { cwd: env.checkout, encoding: 'utf8' });
@@ -92,11 +108,36 @@ test('archiveSession saves a dirty worktree as a patch and keeps the branch', wi
   assert.match(patch, /dirty\.txt/, 'patch captures the uncommitted file');
 }));
 
+test('settled archive keeps the same patch and branch safety while recording a distinct outcome', withEnv(async (env) => {
+  const session = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'codex' });
+  writeFileSync(join(session.worktreePath!, 'delivered-but-local.txt'), 'recovery work\n');
+  const settled = await archiveSession('p', session.id, env.profileInfo, undefined, { reason: 'merged' });
+
+  assert.equal(settled.outcome, 'settled');
+  assert.equal(settled.settledReason, 'merged');
+  assert.ok(settled.settledAt !== null);
+  assert.ok(!existsSync(session.worktreePath!));
+  assert.ok(execFileSync('git', ['branch', '--list', session.branch], { cwd: env.checkout, encoding: 'utf8' }).includes(session.branch));
+  const sessionDir = join(env.stateDir, 'project-p', `session-${session.id}`);
+  assert.equal(readdirSync(sessionDir).filter((file) => file.endsWith('.patch')).length, 1);
+}));
+
 test('archiveSession of a clean worktree writes no patch', withEnv(async (env) => {
   const session = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'hermes' });
   await archiveSession('p', session.id, env.profileInfo);
   const sessionDir = join(env.stateDir, 'project-p', `session-${session.id}`);
   assert.ok(!existsSync(sessionDir) || readdirSync(sessionDir).every((f) => !f.endsWith('.patch')));
+}));
+
+test('profileStorage measures per-session allocation and projected reclaim', withEnv(async (env) => {
+  const session = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'codex' });
+  writeFileSync(join(session.worktreePath!, 'storage.bin'), Buffer.alloc(8 * 1024));
+  const storage = await profileStorage('p', 14, new Set([session.id]), undefined, session.lastActiveAt + 15 * 86_400_000);
+  assert.equal(storage.sessions.length, 1);
+  assert.ok(storage.sessions[0].worktreeBytes >= 8 * 1024);
+  assert.equal(storage.sessions[0].projectedReclaimBytes, storage.sessions[0].worktreeBytes);
+  assert.equal(storage.sessions[0].idle, true);
+  assert.equal(storage.projectedReclaimBytes, storage.worktreeBytes);
 }));
 
 test('resolveSessionCwd rematerializes a reclaimed worktree from the branch', withEnv(async (env) => {

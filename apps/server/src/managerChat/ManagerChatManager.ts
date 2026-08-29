@@ -52,6 +52,10 @@ import type { ProfileSummary } from '@git-agent-harness/contracts';
 const turnQueueByProfile = new Map<string, Promise<unknown>>();
 const activeProfiles = new Set<string>();
 
+export function isChatSessionActive(profile: string, sessionId: string): boolean {
+  return activeProfiles.has(chatKey(profile, sessionId));
+}
+
 // Live tee of assistant/chunk log writes (#959): the session log is the
 // record, and the WebSocket layer pushes a copy of each chunk to every
 // subscribed client so a turn renders progressively. Registered by
@@ -248,11 +252,15 @@ export function updateChatSession(
 }
 
 /** Archives a chat session: dirty worktree patched first, branch survives (WP2). */
-export async function archiveChatSession(profile: string, sessionId: string) {
+export async function archiveChatSession(
+  profile: string,
+  sessionId: string,
+  settlement?: { reason: 'merged' | 'closed' | 'delivered' }
+) {
   const profileInfo = await findProfileInfo(profile);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   try {
-    return await archiveSession(profile, sessionId, profileInfo, chatSessionStoreOptions);
+    return await archiveSession(profile, sessionId, profileInfo, chatSessionStoreOptions, settlement);
   } finally {
     // The worktree goes away; its preview can't be valid anymore.
     await previewProxy.clear(profile, sessionId);

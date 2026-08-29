@@ -53,6 +53,19 @@ test('named scenarios are discoverable, switchable, and resettable in memory', a
       sessions: { archivedAt: number | null }[];
     };
     assert.equal(sessions.sessions[0]?.archivedAt, null);
+
+    const storage = await fetch(`${running.baseUrl}/api/manager-chat/storage?profile=fixture`).then((response) => response.json()) as {
+      dryRun: boolean;
+      candidates: { sessionId: string; reclaimBytes: number }[];
+    };
+    assert.equal(storage.dryRun, true);
+    assert.deepEqual(storage.candidates, [{ profile: 'fixture', sessionId: 'mock-session-1', outcome: 'archived', reason: 'idle', reclaimBytes: 12_582_912 }]);
+
+    const bulk = await post(running.baseUrl, '/api/manager-chat/sessions/archive', {
+      profile: 'fixture', sessionIds: ['mock-session-1']
+    });
+    assert.equal(bulk.status, 200);
+    assert.equal((await bulk.json() as { sessions: { outcome: string }[] }).sessions[0]?.outcome, 'archived');
   } finally {
     await running.close();
   }

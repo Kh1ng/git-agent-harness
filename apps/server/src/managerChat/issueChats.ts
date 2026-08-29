@@ -107,6 +107,14 @@ async function fetchIssue(
   return normalizeIssue(JSON.parse(stdout) as ProviderIssue);
 }
 
+/** Provider state lookup shared by issue-chat creation and maintenance. */
+export async function fetchChatIssueState(
+  profileInfo: Pick<ProfileSummary, 'provider' | 'local_path'>,
+  issueNumber: number
+): Promise<string> {
+  return (await fetchIssue(profileInfo, issueNumber)).state;
+}
+
 async function labelExists(
   profileInfo: Pick<ProfileSummary, 'provider' | 'local_path'>,
   label: string

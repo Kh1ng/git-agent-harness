@@ -63,6 +63,9 @@ repo = "owner/repo"
 local_path = "/path/to/local/clone"
 artifact_root = "/home/you/.local/share/gah/artifacts/my-repo"
 default_target_branch = "main"
+# Daily gah-prune maintenance archives chats after this many idle days.
+# Dirty work is patched first and the branch always survives. Default: 14.
+chat_session_idle_days = 14
 validation_commands = []
 
 [profiles.my-repo.routing]

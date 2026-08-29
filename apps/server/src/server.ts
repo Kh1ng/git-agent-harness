@@ -73,6 +73,7 @@ import {
   listChatIssuesForProfile as listManagerChatIssues,
   startChatFromIssue as startManagerChatFromIssue
 } from './managerChat/ManagerChatManager.js';
+import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
 import {
   deleteSkill,
@@ -1225,6 +1226,31 @@ export function createServer(
     res.json({ sessions: listChatSessions(profile) });
   });
 
+  app.get('/api/manager-chat/storage', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    try {
+      res.json(await reclaimChatSessions({ profile, dryRun: true }));
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to inspect chat storage',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/manager-chat/reclaim', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : undefined;
+    const dryRun = req.body?.dryRun !== false;
+    try {
+      res.json(await reclaimChatSessions({ profile, dryRun }));
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to reclaim chat sessions',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
   app.post('/api/manager-chat/sessions', async (req, res) => {
     const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
     const backend = typeof req.body?.backend === 'string' ? req.body.backend : undefined;
@@ -1266,13 +1292,18 @@ export function createServer(
   app.post('/api/manager-chat/sessions/archive', async (req, res) => {
     const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
     const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : undefined;
-    if (!sessionId) {
-      res.status(400).json({ error: 'Missing required field: sessionId' });
+    const sessionIds: string[] = Array.isArray(req.body?.sessionIds)
+      ? req.body.sessionIds.filter((id: unknown): id is string => typeof id === 'string')
+      : [];
+    const requested = [...new Set(sessionId ? [sessionId] : sessionIds)].slice(0, 200);
+    if (requested.length === 0) {
+      res.status(400).json({ error: 'Missing required field: sessionId or sessionIds' });
       return;
     }
     try {
-      const session = await archiveChatSession(profile, sessionId);
-      res.json(session);
+      const sessions = [];
+      for (const id of requested) sessions.push(await archiveChatSession(profile, id));
+      res.json(sessionId ? sessions[0] : { sessions });
     } catch (error) {
       res.status(502).json({
         error: 'Failed to archive chat session',

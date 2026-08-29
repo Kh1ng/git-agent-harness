@@ -109,6 +109,18 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             }
         }
 
+        match install_prune_unit_template(&repo)? {
+            Some(units) => {
+                for unit in &units {
+                    println!("Installed prune unit: {}", unit.display());
+                }
+                println!("Daily prune and chat maintenance timer is installed and enabled.");
+            }
+            None => {
+                println!("systemd not available on this host: skipping gah-prune.timer install.")
+            }
+        }
+
         // Issue #896: build the web dashboard and deploy it to the host's
         // web-server root (configurable via GAH_WEB_DEPLOY_ROOT; unset
         // defaults to /var/www/gah). The deploy root is a convention, not
@@ -592,6 +604,27 @@ fn install_quota_refresh_unit_template(repo: &Path) -> Result<Option<[PathBuf; 2
     Ok(Some([service, timer]))
 }
 
+/// Central-node daily storage maintenance. The existing timer owns both the
+/// Rust prune and server chat sweep; workers never install this control-plane
+/// entrypoint and no second scheduler is introduced.
+fn install_prune_unit_template(repo: &Path) -> Result<Option<[PathBuf; 2]>> {
+    if !systemd_available() {
+        return Ok(None);
+    }
+    let config_home = systemd_user_config_home()?;
+    let service = copy_systemd_unit(repo, &config_home, "gah-prune.service")?;
+    let timer = copy_systemd_unit(repo, &config_home, "gah-prune.timer")?;
+    reload_user_systemd("installing gah-prune.service/.timer")?;
+    let status = Command::new("systemctl")
+        .args(["--user", "enable", "--now", "gah-prune.timer"])
+        .status()
+        .with_context(|| "enabling gah-prune.timer")?;
+    if !status.success() {
+        bail!("systemctl --user enable --now gah-prune.timer exited with {status}");
+    }
+    Ok(Some([service, timer]))
+}
+
 fn ensure_clean(repo: &Path) -> Result<()> {
     let status = captured(repo, "git", &["status", "--porcelain"])?;
     if !status.is_empty() {
@@ -647,9 +680,10 @@ fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_clean, ensure_default_branch_checkout, install_quota_refresh_unit_template,
-        install_server_unit_template, install_watchdog_unit_template, installed_binary_path,
-        resolve_web_deploy_root, run, stale_asset_names, HostRole, UpdateArgs,
+        ensure_clean, ensure_default_branch_checkout, install_prune_unit_template,
+        install_quota_refresh_unit_template, install_server_unit_template,
+        install_watchdog_unit_template, installed_binary_path, resolve_web_deploy_root, run,
+        stale_asset_names, HostRole, UpdateArgs,
     };
     use crate::test_support::PathGuard;
     use std::collections::HashSet;
@@ -866,6 +900,36 @@ mod tests {
             record.contains("enable") && record.contains("gah-quota-refresh.timer"),
             "timer must be enabled: {record}"
         );
+    }
+
+    #[test]
+    fn prune_units_keep_chat_maintenance_on_the_existing_daily_timer() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config_tmp = TempDir::new().unwrap();
+        let _xdg_guard = XdgConfigHomeGuard::set(config_tmp.path());
+        let bin_tmp = TempDir::new().unwrap();
+        let record_path = bin_tmp.path().join("argv.log");
+        let script = format!("#!/bin/sh\necho \"$@\" >> '{}'\n", record_path.display());
+        let systemctl = bin_tmp.path().join("systemctl");
+        std::fs::write(&systemctl, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&systemctl).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&systemctl, perms).unwrap();
+        }
+        let _path_guard = PathGuard::set(bin_tmp.path().to_str().unwrap());
+
+        let [service, timer] = install_prune_unit_template(repo).unwrap().unwrap();
+        let service_text = std::fs::read_to_string(service).unwrap();
+        assert!(service_text.contains("gah prune"));
+        assert!(service_text.contains("chatMaintenanceCli.js"));
+        assert!(std::fs::read_to_string(timer)
+            .unwrap()
+            .contains("OnCalendar="));
+        let record = std::fs::read_to_string(record_path).unwrap();
+        assert!(record.contains("enable --now gah-prune.timer"), "{record}");
     }
 
     #[test]

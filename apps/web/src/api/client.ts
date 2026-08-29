@@ -43,7 +43,8 @@ import type {
   ChatNodeInfo,
   ChatPreviewInfo,
   ChatIssueSummary,
-  ChatIssueStartResult
+  ChatIssueStartResult,
+  ChatReclaimResult
 } from '@git-agent-harness/contracts';
 
 const SERVER_URL =
@@ -224,6 +225,9 @@ export interface GahDataSource {
   createChatSession(profile: string, backend?: string, model?: string | null, title?: string): Promise<ChatSessionSummary>;
   updateChatSession(profile: string, sessionId: string, patch: { backend?: string; model?: string | null; title?: string }): Promise<ChatSessionSummary>;
   archiveChatSession(profile: string, sessionId: string): Promise<ChatSessionSummary>;
+  bulkArchiveChatSessions(profile: string, sessionIds: string[]): Promise<{ sessions: ChatSessionSummary[] }>;
+  getChatStorage(profile: string): Promise<ChatReclaimResult>;
+  reclaimChatSessions(profile: string, dryRun: boolean): Promise<ChatReclaimResult>;
   getChatNodes(): Promise<{ nodes: ChatNodeInfo[] }>;
   getManagerChatModelsForBackend(profile: string, backend: string): Promise<ManagerModelsSummary>;
   getChatPreview(profile: string, sessionId: string): Promise<{ preview: ChatPreviewInfo | null }>;
@@ -470,6 +474,15 @@ export const gahApi: GahDataSource = {
   },
   archiveChatSession(profile, sessionId) {
     return postJson<ChatSessionSummary, { profile: string; sessionId: string }>('/api/manager-chat/sessions/archive', { profile, sessionId });
+  },
+  bulkArchiveChatSessions(profile, sessionIds) {
+    return postJson<{ sessions: ChatSessionSummary[] }, { profile: string; sessionIds: string[] }>('/api/manager-chat/sessions/archive', { profile, sessionIds });
+  },
+  getChatStorage(profile) {
+    return getJson<ChatReclaimResult>('/api/manager-chat/storage', { profile });
+  },
+  reclaimChatSessions(profile, dryRun) {
+    return postJson<ChatReclaimResult, { profile: string; dryRun: boolean }>('/api/manager-chat/reclaim', { profile, dryRun });
   },
   getChatNodes() {
     return getJson<{ nodes: ChatNodeInfo[] }>('/api/manager-chat/nodes');

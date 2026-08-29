@@ -5,6 +5,9 @@
 # own per-profile `prune_older_than_days` retention window (falling back to the
 # 30-day default when unset). Merged/closed PR/MR worktrees are always pruned,
 # regardless of the retention window.
+# The second command settles terminal chat sessions and archives idle ones by
+# calling the server package's shared maintenance path. Both commands remain
+# on this one existing daily timer; no chat-specific scheduler is created.
 #
 # Install:
 #   mkdir -p ~/.config/systemd/user
@@ -20,7 +23,13 @@ Wants=network-online.target
 Type=oneshot
 User=khing
 Group=khing
+WorkingDirectory=/home/khing/workspace/agent-lab/repos/github/Kh1ng/git-agent-harness
+Environment=GAH_CONFIG_PATH=/home/khing/.config/gah/config.toml
+Environment=PATH=/home/khing/.cargo/bin:/home/khing/.nvm/versions/node/v22.23.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PORT=3773
+EnvironmentFile=-/etc/gah/server.env
 ExecStart=/usr/local/bin/gah prune
+ExecStart=/usr/bin/env node apps/server/dist/chatMaintenanceCli.js
 TimeoutStartSec=300
 StandardOutput=journal
 StandardError=journal
