@@ -19,16 +19,11 @@ const baseURL = `http://localhost:${port}`;
  */
 export default defineConfig({
   testDir: './tests/e2e',
-  // Cap workers + disable intra-file parallelism: the e2e suite shares one
-  // fixture-backed apps/server and one vite dev server, and 6 parallel
-  // browsers running all tests in a file simultaneously (fullyParallel)
-  // saturates them on a 2-core CI runner -- the Settings page's serial
-  // fetch chain intermittently failed to render its heading under that load.
-  // Tests within a file now run sequentially; different files still
-  // parallelize up to the worker cap.
-  workers: process.env.CI ? 4 : undefined,
+  // All specs share one intentionally global, stateful mock control plane.
+  // Keep scenario selection/reset deterministic across files as well as CI.
+  workers: 1,
   fullyParallel: false,
-  // One retry on CI only: the shared fixture+vite servers run on a 2-core
+  // One retry on CI only: the shared mock+vite servers run on a 2-core
   // runner and Settings is the heaviest page; a single retry absorbs the
   // residual load-induced flake without masking real regressions.
   retries: process.env.CI ? 1 : 0,
