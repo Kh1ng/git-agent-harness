@@ -585,7 +585,19 @@ export async function cancelManagerChatTurn(profile: string, sessionId?: string)
   // turn is going away, so the backend must not proceed on it.
   active.pendingPermission?.resolve('cancelled');
   try {
-    await resolveAdapter(active.backend).cancelTurn(key);
+    // #1025: cancelTurn() is a round trip to the active adapter's own
+    // process (possibly a just-handed-off fallback) -- a wedged backend
+    // must not hang the Stop request itself. Bounded by the same deadline
+    // the turn's own settle race uses, so "Stop" always returns to the
+    // caller within CANCEL_SETTLE_TIMEOUT_MS regardless of whether the
+    // adapter ever acknowledges.
+    await Promise.race([
+      resolveAdapter(active.backend).cancelTurn(key),
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, CANCEL_SETTLE_TIMEOUT_MS);
+        timer.unref?.();
+      })
+    ]);
   } catch (error) {
     console.error(`[managerChat] cancel failed for ${key}:`, error);
   }
@@ -939,6 +951,22 @@ export function sendManagerChatMessage(profile: string, message: string, request
       return { turn: assistant, cancelled: active.cancelled };
     } catch (error) {
       await active.chunkWriter?.close().catch(() => undefined);
+      // #1025: once a cancel has been requested, whatever error follows --
+      // including the cancel-settle deadline firing because the active
+      // (possibly just-handed-off) adapter never acknowledged -- is the
+      // cancel's own outcome, not a fresh failure. Resolving as cancelled
+      // here (instead of rethrowing "cancel timed out...") is what lets the
+      // turn actually settle within the existing deadline: the caller never
+      // sees a connection error, and the next turn is free to run.
+      if (active.cancelled) {
+        appendEvents(profile, [
+          { type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'cancelled' }, timestamp: Date.now() }
+        ], sessionOpts);
+        return {
+          turn: { role: 'assistant', text: '', backend: active.backend, model: null, usage: null, timestamp: Date.now() },
+          cancelled: true
+        };
+      }
       const text = error instanceof Error ? error.message : String(error);
       const done: ChatSessionEvent[] = [
         { type: 'harness/error', seq: ++active.seq, turn: turnNo, text, timestamp: Date.now() },
