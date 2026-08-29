@@ -1119,7 +1119,10 @@ fn install_linux_gateway_mapping_writes_both_targets_for_central() {
                 "/tmp/gah-src-test/home/.config/gah/gah-loop.env",
             ],
         ),
-        ("worker", vec!["/tmp/gah-src-test/home/.config/gah/gah-loop.env"]),
+        (
+            "worker",
+            vec!["/tmp/gah-src-test/home/.config/gah/gah-loop.env"],
+        ),
     ] {
         let probe = format!(
             "role={role}\nserver_env_file=/tmp/gah-src-test/server.env\nHOME=/tmp/gah-src-test/home\n{block}\nprintf '%s\\n' \"${{gateway_env_files[@]}}\"\n"
@@ -1139,6 +1142,9 @@ fn install_linux_gateway_mapping_writes_both_targets_for_central() {
             .trim_end()
             .lines()
             .collect();
-        assert_eq!(got, want, "role={role} gateway target mapping regressed (issue #919)");
+        assert_eq!(
+            got, want,
+            "role={role} gateway target mapping regressed (issue #919)"
+        );
     }
 }
