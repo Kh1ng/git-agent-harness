@@ -831,7 +831,7 @@ function GatewaySettingsSection() {
       .then((data) => {
         setSettings(data);
         setUrlDraft(data.url);
-        setKeyDraft(data.apiKey ?? '');
+        setKeyDraft('');
         setEnabledDraft(data.enabled);
         setError(null);
       })
@@ -844,10 +844,11 @@ function GatewaySettingsSection() {
     try {
       const updated = await gahApi.updateGatewaySettings({
         url: urlDraft || null,
-        apiKey: keyDraft || null,
-        enabled: enabledDraft
+        enabled: enabledDraft,
+        ...(keyDraft ? { apiKey: keyDraft } : {})
       });
       setSettings(updated);
+      setKeyDraft('');
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
@@ -894,20 +895,20 @@ function GatewaySettingsSection() {
       </div>
 
       <div>
-        <label className="block text-xs font-medium text-secondary mb-1">API Key</label>
+        <label className="block text-xs font-medium text-secondary mb-1">New API Key</label>
         <div className="flex items-center gap-2">
           <input
             type={revealKey ? 'text' : 'password'}
             value={keyDraft}
             onChange={(e) => setKeyDraft(e.target.value)}
-            placeholder="Leave blank to use env var"
+            placeholder={settings.apiKeyConfigured ? 'Leave blank to keep current key' : 'Enter an API key'}
             className="flex-1 bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
           />
           <button onClick={() => setRevealKey((v) => !v)} className="text-muted hover:text-primary" title={revealKey ? 'Hide' : 'Reveal'}>
             {revealKey ? <EyeOff size={14} /> : <Eye size={14} />}
           </button>
         </div>
-        <p className="text-xs text-muted mt-1">Leave blank to use <code className="font-mono">TDAI_GATEWAY_API_KEY</code> env var.</p>
+        <p className="text-xs text-muted mt-1">Leave blank to keep the current configured key source.</p>
       </div>
 
       <div className="flex items-center gap-3">
@@ -933,9 +934,11 @@ function GatewaySettingsSection() {
  * node to be reachable over HTTPS (registerNode() rejects a non-loopback
  * `authenticated_remote` URL that isn't https/wss), which this host isn't
  * set up for yet. */
-function AddNodeSection() {
+export function AddNodeSection() {
   const [settings, setSettings] = useState<GatewaySettingsSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [command, setCommand] = useState<string | null>(null);
+  const [revealing, setRevealing] = useState(false);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -965,10 +968,18 @@ function AddNodeSection() {
     }
   })();
 
-  const command =
-    settings.tailscaleIPv4 && settings.apiKeyConfigured
-      ? `curl -fsSL https://raw.githubusercontent.com/Kh1ng/git-agent-harness/main/scripts/bootstrap.sh | GAH_GATEWAY_MODE=remote GAH_GATEWAY_URL=http://${settings.tailscaleIPv4}:${gatewayPort} GAH_GATEWAY_API_KEY=${settings.apiKey} bash`
-      : null;
+  const revealCommand = async () => {
+    setRevealing(true);
+    setError(null);
+    try {
+      const revealed = await gahApi.revealGatewayBootstrapCommand();
+      setCommand(revealed.command);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRevealing(false);
+    }
+  };
 
   const copyCommand = () => {
     if (!command) return;
@@ -986,7 +997,15 @@ function AddNodeSection() {
         compaction db over Tailscale. Installs Rust/Node if missing, clones the repo, and validates the key
         against this gateway before completing — it fails loudly instead of silently succeeding with a bad key.
       </p>
-      {command ? (
+      {!settings.apiKeyConfigured ? (
+        <p className="text-xs text-muted">Configure a gateway API key above first.</p>
+      ) : !settings.tailscaleIPv4 ? (
+        <p className="text-xs text-muted">
+          Couldn't detect this host's Tailscale address (is <code className="font-mono">tailscale</code> installed and
+          logged in?). Fill in the host yourself:{' '}
+          <code className="font-mono">GAH_GATEWAY_URL=http://&lt;this-host&gt;:{gatewayPort}</code>.
+        </p>
+      ) : command ? (
         <div className="flex items-start gap-2">
           <pre className="flex-1 bg-raised border border-subtle rounded-md px-3 py-2 text-xs text-primary font-mono whitespace-pre-wrap break-all">
             {command}
@@ -995,14 +1014,15 @@ function AddNodeSection() {
             {copied ? <Check size={14} /> : <Copy size={14} />}
           </button>
         </div>
-      ) : !settings.apiKeyConfigured ? (
-        <p className="text-xs text-muted">Configure a gateway API key above first.</p>
       ) : (
-        <p className="text-xs text-muted">
-          Couldn't detect this host's Tailscale address (is <code className="font-mono">tailscale</code> installed and
-          logged in?). Fill in the host yourself:{' '}
-          <code className="font-mono">GAH_GATEWAY_URL=http://&lt;this-host&gt;:{gatewayPort}</code>.
-        </p>
+        <button
+          type="button"
+          onClick={revealCommand}
+          disabled={revealing}
+          className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50"
+        >
+          {revealing ? 'Revealing…' : 'Reveal setup command'}
+        </button>
       )}
       {error && <p className="mt-3 text-xs text-critical">Error: {error}</p>}
     </section>

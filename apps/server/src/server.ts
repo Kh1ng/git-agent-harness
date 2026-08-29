@@ -108,6 +108,7 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   getPendingCommits?: typeof getPendingCommits;
   startAdminUpdate?: typeof startAdminUpdate;
   readAdminUpdateState?: typeof readAdminUpdateState;
+  detectTailscaleIPv4?: typeof detectTailscaleIPv4;
 };
 
 const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
@@ -118,6 +119,18 @@ const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
 /** Same hardcoded default as wsServer.ts's welcome message, until Settings
  * gains real profile switching (see apps/web Settings page). */
 const DEFAULT_PROFILE = 'gah';
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function gatewayPort(url: string): string {
+  try {
+    return new URL(url).port || '8420';
+  } catch {
+    return '8420';
+  }
+}
 
 function toSettingsConfigProfileSummary(config: ConfigProfileSummary): SettingsConfigProfileSummary {
   const { env_file, env_file_prod, ...notifications } = config.notifications;
@@ -165,6 +178,21 @@ export function createServer(
   const getPendingCommitsFn = configDeps.getPendingCommits ?? getPendingCommits;
   const startAdminUpdateFn = configDeps.startAdminUpdate ?? startAdminUpdate;
   const readAdminUpdateStateFn = configDeps.readAdminUpdateState ?? readAdminUpdateState;
+  const detectTailscaleIPv4Fn = configDeps.detectTailscaleIPv4 ?? detectTailscaleIPv4;
+  const gatewaySettingsSummary = async () => {
+    const apiKey = gatewayApiKey();
+    const stored = readGatewaySettings();
+    return {
+      url: gatewayBaseUrl(),
+      apiKeyConfigured: !!apiKey,
+      enabled: stored.enabled,
+      disabledProfiles: stored.disabledProfiles,
+      contextPolicy: stored.contextPolicy,
+      contextPolicies: stored.contextPolicies,
+      degraded: gatewayHealth(),
+      tailscaleIPv4: await detectTailscaleIPv4Fn()
+    };
+  };
 
   const registryService =
     configDeps.registryService ||
@@ -187,10 +215,9 @@ export function createServer(
   // that pre-existing contract.
   app.use('/api/registry', authMiddleware);
   app.use('/api/claims', authMiddleware);
-  // /api/settings/gateway reveals the TDAI gateway's own API key (issue
-  // #880 follow-up: an operator setting up a second node needs to copy it
-  // somewhere), so it gets the same narrow gate as registry/claims rather
-  // than riding the unauthenticated default the rest of the API still has.
+  // /api/settings/gateway includes an explicit endpoint that reveals a
+  // credential-bearing bootstrap command, so the whole narrow surface gets
+  // the same gate as registry/claims rather than the unauthenticated default.
   app.use('/api/settings', authMiddleware);
   app.use('/api/projects', authMiddleware);
   // /api/skills (issue #963/#964): the central skill bank mutates the
@@ -1100,31 +1127,34 @@ export function createServer(
     }
   });
 
-  // Lets an operator copy this node's memory gateway URL + API key out of
-  // the dashboard instead of SSHing in to cat an env file -- needed to
-  // point a second node's `scripts/install.sh GAH_GATEWAY_MODE=remote` at
-  // this one. Gated by the /api/settings authMiddleware above, not the
-  // app's unauthenticated default.
+  // Ordinary Settings reads are credential-free. An operator setting up a
+  // second node must explicitly request the sensitive bootstrap command via
+  // the authenticated POST below.
   app.get('/api/settings/gateway', async (_req, res) => {
-    const apiKey = gatewayApiKey();
-    const tailscaleIPv4 = await detectTailscaleIPv4();
-    const stored = readGatewaySettings();
-    res.json({
-      url: gatewayBaseUrl(),
-      apiKeyConfigured: !!apiKey,
-      apiKey: apiKey ?? null,
-      enabled: stored.enabled,
-      disabledProfiles: stored.disabledProfiles,
-      contextPolicy: stored.contextPolicy,
-      contextPolicies: stored.contextPolicies,
-      // #878: last-known gateway health so a configured-but-failing gateway
-      // is noticeable from the dashboard, not just mid-chat.
-      degraded: gatewayHealth(),
-      tailscaleIPv4
-    });
+    res.json(await gatewaySettingsSummary());
   });
 
-  app.put('/api/settings/gateway', (req, res) => {
+  app.post('/api/settings/gateway/bootstrap-command', async (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const apiKey = gatewayApiKey();
+    if (!apiKey) {
+      res.status(409).json({ message: 'Configure a gateway API key before revealing the setup command.' });
+      return;
+    }
+    const tailscaleIPv4 = await detectTailscaleIPv4Fn();
+    if (!tailscaleIPv4) {
+      res.status(409).json({ message: "Couldn't detect this host's Tailscale address." });
+      return;
+    }
+    const remoteGatewayUrl = `http://${tailscaleIPv4}:${gatewayPort(gatewayBaseUrl())}`;
+    const command =
+      'curl -fsSL https://raw.githubusercontent.com/Kh1ng/git-agent-harness/main/scripts/bootstrap.sh' +
+      ` | GAH_GATEWAY_MODE=remote GAH_GATEWAY_URL=${shellQuote(remoteGatewayUrl)}` +
+      ` GAH_GATEWAY_API_KEY=${shellQuote(apiKey)} bash`;
+    res.json({ command });
+  });
+
+  app.put('/api/settings/gateway', async (req, res) => {
     const { url, apiKey, enabled, disabledProfiles, contextPolicy, contextPolicies } = req.body as {
       url?: string | null;
       apiKey?: string | null;
@@ -1141,7 +1171,7 @@ export function createServer(
     if (contextPolicy && typeof contextPolicy === 'object') patch.contextPolicy = contextPolicy;
     if (contextPolicies && typeof contextPolicies === 'object') patch.contextPolicies = contextPolicies;
     writeGatewaySettings(patch);
-    res.json(readGatewaySettings());
+    res.json(await gatewaySettingsSummary());
   });
 
   app.post('/api/context/recall', async (req, res) => {

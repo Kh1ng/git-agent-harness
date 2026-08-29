@@ -321,12 +321,13 @@ file `GAH_SERVER_HOST` above uses, `EnvironmentFile=-`'d by
 `gah-server.service`).
 
 Two things make this easier to actually do:
-- **Getting the key**: `GET /api/settings/gateway` (gated by the same
-  `authMiddleware` as `/api/registry`/`/api/claims`, not the app's
-  unauthenticated default) reports the central node's gateway URL and API
-  key. The dashboard's Settings page has a "Compaction DB (Memory Gateway)"
-  section with a reveal/copy button for it — no need to SSH in and cat an
-  env file on the central node.
+- **Getting the setup command**: `GET /api/settings/gateway` reports only
+  the central node's gateway location and configured status. The Settings
+  page's "Add a Node" section calls the authenticated
+  `POST /api/settings/gateway/bootstrap-command` only after an operator
+  clicks **Reveal setup command**, then offers the returned command for
+  copying. Credential bytes are absent from ordinary Settings JSON and the
+  initial page DOM.
 - **A machine with nothing installed yet**: `scripts/bootstrap.sh` installs
   missing prerequisites via their own official installers (rustup, nvm),
   clones this repo, and execs `scripts/install.sh` — same `GAH_GATEWAY_*`

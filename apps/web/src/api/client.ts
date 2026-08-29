@@ -35,6 +35,7 @@ import type {
   ManagerCommandInfo,
   ManagerModelsSummary,
   ManagerChatSettingsUpdate,
+  GatewayBootstrapCommand,
   GatewaySettingsSummary,
   GatewaySettingsUpdate,
   ProjectImportData,
@@ -212,6 +213,7 @@ export interface GahDataSource {
   getManagerChatSettings(): Promise<ManagerChatSettingsSummary>;
   setManagerChatSettings(data: ManagerChatSettingsUpdate): Promise<{ success: boolean }>;
   getGatewaySettings(): Promise<GatewaySettingsSummary>;
+  revealGatewayBootstrapCommand(): Promise<GatewayBootstrapCommand>;
   updateGatewaySettings(data: GatewaySettingsUpdate): Promise<GatewaySettingsSummary>;
   recallContext(profile: string, query: string): Promise<{ context: string; memoryCount: number }>;
   getGitStatus(profile: string): Promise<{ branch: string; changes: { status: string; path: string }[]; cwd: string }>;
@@ -428,6 +430,9 @@ export const gahApi: GahDataSource = {
   },
   getGatewaySettings() {
     return getJson<GatewaySettingsSummary>('/api/settings/gateway');
+  },
+  revealGatewayBootstrapCommand() {
+    return postJson<GatewayBootstrapCommand, Record<string, never>>('/api/settings/gateway/bootstrap-command', {});
   },
   updateGatewaySettings(data) {
     return putJson<GatewaySettingsSummary, GatewaySettingsUpdate>('/api/settings/gateway', data);

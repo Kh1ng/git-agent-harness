@@ -1,7 +1,6 @@
-// Issue #880 follow-up: GET /api/settings/gateway lets an operator copy
-// this node's memory gateway URL + API key out of the dashboard. Real
-// fake HTTP calls against a real createServer() instance. Extended to
-// cover PUT /api/settings/gateway and gatewaySettingsStore unit tests.
+// Gateway Settings HTTP behavior through a real createServer() instance,
+// including the credential-free summary and explicit bootstrap reveal.
+// Also covers PUT and gatewaySettingsStore unit behavior.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import http from 'node:http';
@@ -13,8 +12,11 @@ import type { AddressInfo } from 'node:net';
 import { createServer } from './server.js';
 import { readGatewaySettings, writeGatewaySettings, effectiveGatewayUrl, gatewayEnabledForProfile, effectiveContextPolicy, applyContextBudget } from './gatewaySettingsStore.js';
 
-async function withServer(testFn: (url: string) => Promise<void>) {
-  const app = createServer({});
+async function withServer(
+  testFn: (url: string) => Promise<void>,
+  options: Parameters<typeof createServer>[0] = {}
+) {
+  const app = createServer(options);
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const { port } = server.address() as AddressInfo;
@@ -34,10 +36,10 @@ test('reports the configured gateway URL and whether an API key is set, without 
     await withServer(async (url) => {
       const res = await fetch(`${url}/api/settings/gateway`);
       assert.equal(res.status, 200);
-      const body = (await res.json()) as { url: string; apiKeyConfigured: boolean; apiKey: string | null };
+      const body = (await res.json()) as { url: string; apiKeyConfigured: boolean; apiKey?: string | null };
       assert.equal(body.url, 'http://127.0.0.1:8420');
       assert.equal(body.apiKeyConfigured, false);
-      assert.equal(body.apiKey, null);
+      assert.equal(Object.hasOwn(body, 'apiKey'), false);
     });
   } finally {
     if (savedUrl !== undefined) process.env.TDAI_GATEWAY_URL = savedUrl;
@@ -46,17 +48,47 @@ test('reports the configured gateway URL and whether an API key is set, without 
   }
 });
 
-test('reveals the actual key value when one is configured', async () => {
+test('GET /api/settings/gateway omits a configured API key from serialized output', async () => {
+  const canary = 'GAH_TEST_CANARY_1014_GATEWAY_GET';
   const savedKey = process.env.TDAI_GATEWAY_API_KEY;
-  process.env.TDAI_GATEWAY_API_KEY = 'test-secret-key';
+  process.env.TDAI_GATEWAY_API_KEY = canary;
   try {
     await withServer(async (url) => {
       const res = await fetch(`${url}/api/settings/gateway`);
-      const body = (await res.json()) as { apiKeyConfigured: boolean; apiKey: string | null };
+      const serialized = await res.text();
+      const body = JSON.parse(serialized) as { apiKeyConfigured: boolean; apiKey?: string | null };
+      assert.equal(res.status, 200);
       assert.equal(body.apiKeyConfigured, true);
-      assert.equal(body.apiKey, 'test-secret-key');
+      assert.equal(serialized.includes(canary), false);
+      assert.equal(Object.hasOwn(body, 'apiKey'), false);
     });
   } finally {
+    if (savedKey !== undefined) process.env.TDAI_GATEWAY_API_KEY = savedKey;
+    else delete process.env.TDAI_GATEWAY_API_KEY;
+  }
+});
+
+test('POST /api/settings/gateway/bootstrap-command explicitly returns the remote setup command', async () => {
+  const canary = 'GAH_TEST_CANARY_1014_GATEWAY_REVEAL';
+  const savedUrl = process.env.TDAI_GATEWAY_URL;
+  const savedKey = process.env.TDAI_GATEWAY_API_KEY;
+  process.env.TDAI_GATEWAY_URL = 'http://127.0.0.1:8420';
+  process.env.TDAI_GATEWAY_API_KEY = canary;
+  try {
+    await withServer(async (url) => {
+      const res = await fetch(`${url}/api/settings/gateway/bootstrap-command`, { method: 'POST' });
+      const serialized = await res.text();
+      const body = JSON.parse(serialized) as { command?: string };
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('cache-control'), 'no-store');
+      assert.equal(typeof body.command, 'string');
+      assert.equal(serialized.includes(canary), true);
+      assert.equal(body.command?.includes('GAH_GATEWAY_MODE=remote'), true);
+      assert.equal(body.command?.includes('100.64.0.42:8420'), true);
+    }, { detectTailscaleIPv4: async () => '100.64.0.42' });
+  } finally {
+    if (savedUrl !== undefined) process.env.TDAI_GATEWAY_URL = savedUrl;
+    else delete process.env.TDAI_GATEWAY_URL;
     if (savedKey !== undefined) process.env.TDAI_GATEWAY_API_KEY = savedKey;
     else delete process.env.TDAI_GATEWAY_API_KEY;
   }
