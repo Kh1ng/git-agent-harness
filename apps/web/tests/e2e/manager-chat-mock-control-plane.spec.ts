@@ -234,3 +234,22 @@ test('backend/model controls cover success, delayed, empty, failed, and AGY shap
   await expect(page.getByText('Default model · AGY', { exact: true })).toBeVisible();
   await expect(page.getByLabel('Reasoning effort')).toHaveCount(0);
 });
+
+test('session controls pin and switch the session reasoning effort', async ({ page, request }) => {
+  await selectScenario(request, 'normal');
+  await openChat(page);
+  await selectSeededSession(page);
+
+  // The mock codex advertises low/medium/xhigh, so the session-level picker
+  // renders next to the session model picker.
+  const effort = page.getByLabel('Session reasoning effort');
+  await expect(effort).toBeVisible();
+  await expect(effort).toHaveValue('');
+
+  await effort.selectOption('xhigh');
+  await expect(effort).toHaveValue('xhigh');
+  const state = await (await request.get(`${MOCK_BASE_URL}/api/mock/state`)).json() as {
+    sessions: { id: string; reasoningEffort: string | null }[];
+  };
+  expect(state.sessions.find((s) => s.id === 'mock-session-1')?.reasoningEffort).toBe('xhigh');
+});

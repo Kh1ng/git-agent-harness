@@ -397,14 +397,23 @@ export function ManagerChatPage() {
   const [sessionModels, setSessionModels] = useState<ManagerModelInfo[]>([]);
   const [sessionModelsLoaded, setSessionModelsLoaded] = useState(false);
   const [sessionModelChanging, setSessionModelChanging] = useState(false);
+  const [sessionEfforts, setSessionEfforts] = useState<ManagerReasoningEffortInfo[]>([]);
+  const [sessionEffortChanging, setSessionEffortChanging] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setSessionModels([]);
     setSessionModelsLoaded(false);
+    setSessionEfforts([]);
     if (!activeSession || !isConnected) return;
     gahApi
       .getManagerChatModelsForBackend(profile, activeSession.backend)
-      .then(({ models }) => { if (!cancelled) { setSessionModels(models); setSessionModelsLoaded(true); } })
+      .then(({ models, reasoningEfforts: advertisedEfforts }) => {
+        if (!cancelled) {
+          setSessionModels(models);
+          setSessionModelsLoaded(true);
+          setSessionEfforts(advertisedEfforts ?? []);
+        }
+      })
       .catch(() => { if (!cancelled) { setSessionModels([]); setSessionModelsLoaded(true); } });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -423,12 +432,26 @@ export function ManagerChatPage() {
     }
   };
 
+  const handleSessionEffortChange = async (effortId: string) => {
+    if (!activeSession) return;
+    setSessionEffortChanging(true);
+    try {
+      await gahApi.updateChatSession(profile, activeSession.id, { reasoningEffort: effortId });
+      refreshSessions(profile);
+    } catch (err) {
+      setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch session reasoning effort: ${err instanceof Error ? err.message : String(err)}` }]);
+    } finally {
+      setSessionEffortChanging(false);
+    }
+  };
+
   const handleSessionBackendChange = async (backendId: string) => {
     if (!activeSession || backendId === activeSession.backend) return;
-    // Backend switch: same worktree, new provider. The model reset matches
-    // the new backend's default (model ids are backend-specific).
+    // Backend switch: same worktree, new provider. The model and reasoning
+    // effort reset matches the new backend's default (ids are backend-
+    // specific).
     try {
-      await gahApi.updateChatSession(profile, activeSession.id, { backend: backendId, model: null });
+      await gahApi.updateChatSession(profile, activeSession.id, { backend: backendId, model: null, reasoningEffort: null });
       refreshSessions(profile);
     } catch (err) {
       setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch session backend: ${err instanceof Error ? err.message : String(err)}` }]);
@@ -1047,6 +1070,21 @@ export function ManagerChatPage() {
                 {!activeSession.model && <option value="">Default model</option>}
                 {sessionModels.map((m) => (
                   <option key={m.id} value={m.id}>{m.name}</option>
+                ))}
+              </select>
+            )}
+            {sessionEfforts.length > 0 && (
+              <select
+                value={activeSession.reasoningEffort ?? ''}
+                onChange={(e) => handleSessionEffortChange(e.target.value)}
+                disabled={turnBusy || sessionEffortChanging}
+                className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary"
+                aria-label="Session reasoning effort"
+                title="Reasoning effort for this session — applied on this session's backend before each turn"
+              >
+                {!activeSession.reasoningEffort && <option value="">Default effort</option>}
+                {sessionEfforts.map((effort) => (
+                  <option key={effort.id} value={effort.id}>{effort.name}</option>
                 ))}
               </select>
             )}

@@ -1345,9 +1345,10 @@ export function createServer(
       res.status(400).json({ error: 'Missing required field: sessionId' });
       return;
     }
-    const patch: { backend?: string; model?: string | null; title?: string } = {};
+    const patch: { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string } = {};
     if (typeof req.body?.backend === 'string') patch.backend = req.body.backend;
     if (typeof req.body?.model === 'string' || req.body?.model === null) patch.model = req.body.model;
+    if (typeof req.body?.reasoningEffort === 'string' || req.body?.reasoningEffort === null) patch.reasoningEffort = req.body.reasoningEffort;
     if (typeof req.body?.title === 'string') patch.title = req.body.title;
     try {
       const session = await updateChatSession(profile, sessionId, patch);

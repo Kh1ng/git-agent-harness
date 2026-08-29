@@ -132,6 +132,8 @@ export interface CreateSessionInput {
   backend: string;
   /** Model override for the backend; null = backend default. */
   model?: string | null;
+  /** Per-session reasoning effort; null/omitted = backend default. */
+  reasoningEffort?: string | null;
   title?: string;
   /** Branch override (issue chats): e.g. `gah/issue/<repo>-42`. The
    * worktree keeps the gah-chat-<repo_id>-<session> dir name so prune
@@ -158,6 +160,7 @@ export async function createSession(input: CreateSessionInput, opts?: ChatSessio
     branch: input.branch ?? sessionBranchName(profileInfo.repo_id, sessionId),
     backend,
     model: input.model ?? null,
+    reasoningEffort: input.reasoningEffort ?? null,
     title: input.title ?? null,
     createdAt: now,
     lastActiveAt: now,
@@ -190,13 +193,14 @@ export function getSession(profile: string, sessionId: string, opts?: ChatSessio
   return readIndex(profile, opts).find((s) => s.id === sessionId) ?? null;
 }
 
-/** Changes a live session's backend and/or model and/or title. The worktree
- * is untouched: the next turn runs on the new backend/model in the same
- * directory -- the manual form of backend interchange. */
+/** Changes a live session's backend and/or model and/or reasoning effort
+ * and/or title. The worktree is untouched: the next turn runs on the new
+ * backend/model in the same directory -- the manual form of backend
+ * interchange. */
 export function updateSession(
   profile: string,
   sessionId: string,
-  patch: { backend?: string; model?: string | null; title?: string },
+  patch: { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string },
   opts?: ChatSessionStoreOptions
 ): ChatSessionSummary {
   const sessions = readIndex(profile, opts);
@@ -205,6 +209,7 @@ export function updateSession(
   if (session.archivedAt !== null) throw new Error(`Chat session '${sessionId}' is archived`);
   if (patch.backend !== undefined) session.backend = patch.backend;
   if (patch.model !== undefined) session.model = patch.model;
+  if (patch.reasoningEffort !== undefined) session.reasoningEffort = patch.reasoningEffort;
   if (patch.title !== undefined) session.title = patch.title;
   writeIndex(profile, sessions, opts);
   return session;

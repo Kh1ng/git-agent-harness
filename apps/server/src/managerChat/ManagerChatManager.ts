@@ -232,21 +232,22 @@ export function listChatSessions(profile: string) {
 
 /** Creates a chat session bound to a fresh worktree (WP2). The backend
  * resolves at create time: explicit request, else the profile default. */
-export async function createChatSession(profile: string, backend?: string, model?: string | null, title?: string) {
+export async function createChatSession(profile: string, backend?: string, model?: string | null, title?: string, reasoningEffort?: string | null) {
   const profileInfo = await findProfileInfo(profile);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   return createSession(
-    { profile, profileInfo, backend: backend ?? backendForProfile(profile), model: model ?? null, title },
+    { profile, profileInfo, backend: backend ?? backendForProfile(profile), model: model ?? null, reasoningEffort: reasoningEffort ?? null, title },
     chatSessionStoreOptions
   );
 }
 
-/** Changes a live session's backend/model/title; the worktree is untouched
- * so the next turn runs in the same directory on the new backend/model. */
+/** Changes a live session's backend/model/reasoning effort/title; the
+ * worktree is untouched so the next turn runs in the same directory on the
+ * new backend/model. */
 export function updateChatSession(
   profile: string,
   sessionId: string,
-  patch: { backend?: string; model?: string | null; title?: string }
+  patch: { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string }
 ) {
   return updateSession(profile, sessionId, patch, chatSessionStoreOptions);
 }
@@ -452,6 +453,9 @@ export interface RunTurnContext {
   cwd?: string;
   /** Per-conversation model override (WP2 sessions); undefined = none. */
   model?: string | null;
+  /** Per-conversation reasoning effort (WP2 sessions); undefined = none.
+   * Same scoping rule as model: applies to the session's own backend only. */
+  reasoningEffort?: string | null;
 }
 
 export async function runTurn(
@@ -488,8 +492,11 @@ export async function runTurn(
       const attempt = async () => {
         // Model override applies to the session's own backend only -- a
         // handoff fallback backend uses its own default (the override is
-        // for a different backend's model id space).
-        const model = backendId === context.backend ? context.model : undefined;
+        // for a different backend's model id space). Reasoning effort
+        // follows the same rule.
+        const ownBackend = backendId === context.backend;
+        const model = ownBackend ? context.model : undefined;
+        const reasoningEffort = ownBackend ? context.reasoningEffort : undefined;
         const r = await adapter.runTurn(context.key, {
           prompt,
           history,
@@ -497,6 +504,7 @@ export async function runTurn(
           onToolResult,
           cwd: context.cwd,
           model,
+          reasoningEffort,
           onToolCall,
           requestPermission: (request) => new Promise<string>((resolve) => {
             // One live permission at a time per turn: the backend blocks
@@ -663,7 +671,7 @@ export function sendManagerChatMessage(profile: string, message: string, request
   // materializing it from the branch if prune reclaimed the idle worktree)
   // and serve the turn from the session's own backend. Unknown or archived
   // sessions fail loudly rather than silently landing in the default log.
-  const prepareSession = async (): Promise<{ cwd?: string; backend: string; model?: string | null }> => {
+  const prepareSession = async (): Promise<{ cwd?: string; backend: string; model?: string | null; reasoningEffort?: string | null }> => {
     if (!sessionId || sessionId === 'default') {
       return { backend: backendForProfile(profile) };
     }
@@ -675,7 +683,7 @@ export function sendManagerChatMessage(profile: string, message: string, request
     if (!resolved) {
       throw new Error(`No active chat session '${sessionId}' for profile '${profile}'`);
     }
-    return { cwd: resolved.cwd, backend: resolved.session.backend, model: resolved.session.model };
+    return { cwd: resolved.cwd, backend: resolved.session.backend, model: resolved.session.model, reasoningEffort: resolved.session.reasoningEffort };
   };
 
   const key = chatKey(profile, sessionId);
@@ -894,7 +902,7 @@ export function sendManagerChatMessage(profile: string, message: string, request
           detectPreview(text);
         },
         active,
-        { key, backend: sessionContext.backend, cwd: sessionContext.cwd, model: sessionContext.model },
+        { key, backend: sessionContext.backend, cwd: sessionContext.cwd, model: sessionContext.model, reasoningEffort: sessionContext.reasoningEffort },
         onToolCall
       );
       // A cancel is a barrier for the queue: once we've sent session/cancel

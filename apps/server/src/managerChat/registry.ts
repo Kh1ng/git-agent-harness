@@ -40,6 +40,9 @@ export interface ManagerAdapter extends ManagerBackendInfo {
       cwd?: string;
       /** Model override for this conversation (WP2 sessions). */
       model?: string | null;
+      /** Per-session reasoning effort (WP2 sessions); backends without the
+       * control ignore it rather than failing the turn. */
+      reasoningEffort?: string | null;
       /** Structured tool-call stream (slice 3). */
       onToolCall?: (tool: {
         toolCallId: string;

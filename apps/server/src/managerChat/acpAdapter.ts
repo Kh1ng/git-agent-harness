@@ -554,11 +554,22 @@ export function createAcpBackend(
         options: { optionId: string; name: string; kind: string }[];
         locations: string[];
       }) => Promise<string>;
+      /** Per-session reasoning effort (WP2 sessions); undefined = none.
+       * Applied like model: only when the backend advertises the
+       * thought_level control and the value differs from current. */
+      reasoningEffort?: string | null;
     }
   ): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }> {
     const state = await connect(gahProfile, input.cwd);
     if (input.model && input.model !== state.currentModelId && state.models.some((m) => m.id === input.model)) {
       await selectModel(state, input.model);
+    }
+    if (
+      input.reasoningEffort
+      && input.reasoningEffort !== state.currentReasoningEffortId
+      && state.reasoningEfforts.some((effort) => effort.id === input.reasoningEffort)
+    ) {
+      await selectReasoningEffort(state, input.reasoningEffort);
     }
     state.client.replyChunks = [];
     state.client.toolCalls.clear();

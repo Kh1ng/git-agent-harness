@@ -297,6 +297,120 @@ test('a session serves turns on its pinned model and switches model/backend in p
   }
 });
 
+test('a session pins its reasoning effort, serves turns on it, and switches it in place', { timeout: 30_000 }, async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'gah-chat-effort-e2e-'));
+
+  const checkout = join(stateDir, 'checkout');
+  const worktreeBase = join(stateDir, 'worktrees');
+  execFileSync('mkdir', ['-p', checkout]);
+  execFileSync('git', ['init', '--quiet', '--initial-branch=main'], { cwd: checkout });
+  execFileSync('git', ['config', 'user.email', 'test@gah'], { cwd: checkout });
+  execFileSync('git', ['config', 'user.name', 'gah test'], { cwd: checkout });
+  writeFileSync(join(checkout, 'README.md'), '# repo\n');
+  execFileSync('git', ['add', '.'], { cwd: checkout });
+  execFileSync('git', ['commit', '--quiet', '-m', 'init'], { cwd: checkout });
+
+  const profile = 'effort-e2e';
+  const profileListPath = join(stateDir, 'profile-list.json');
+  writeFileSync(profileListPath, JSON.stringify([{
+    name: profile,
+    display_name: 'Effort E2E',
+    provider: 'github',
+    repo: 'owner/repo',
+    repo_id: 'repo',
+    local_path: checkout,
+    worktree_base: worktreeBase,
+    web_url: 'https://github.com/owner/repo',
+    max_parallel_workers: null,
+    max_open_managed_mrs: 1,
+    manager_wake_autonomy: null,
+    validation_timeout_seconds: 300
+  }]));
+
+  const gateway = http.createServer((req, res) => {
+    if (req.url === '/recall') {
+      res.end(JSON.stringify({ context: '', memory_count: 0, code: 0, message: 'ok' }));
+    } else if (req.url === '/capture') {
+      res.end(JSON.stringify({ l0_recorded: 1, scheduler_notified: false }));
+    } else if (req.url === '/session/end') {
+      res.end(JSON.stringify({ flushed: true }));
+    } else {
+      res.writeHead(404).end();
+    }
+  });
+  await new Promise<void>((done) => gateway.listen(0, '127.0.0.1', done));
+
+  const savedEnv = { ...process.env };
+  process.env.PATH = `${join(fixtures, 'hermes')}:${process.env.PATH}`;
+  process.env.GAH_BINARY = join(fixtures, 'gah', 'gah');
+  process.env.GAH_FIXTURE_PROFILE_LIST = profileListPath;
+  process.env.GAH_CHAT_STATE_DIR = join(stateDir, 'chat');
+  process.env.GAH_GATEWAY_SETTINGS_PATH = join(stateDir, 'gateway.json');
+  process.env.GAH_MANAGER_CHAT_SETTINGS_PATH = join(stateDir, 'manager-chat.json');
+  process.env.TDAI_GATEWAY_URL = `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`;
+
+  const server = http.createServer();
+  const wss = new WebSocketServer({ server });
+  createWebSocketHandler(wss);
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const wsUrl = `ws://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const ws = await connect(wsUrl, profile);
+
+    // Create with a pinned effort (mock hermes advertises mock-low /
+    // mock-high on the thought_level config option and echoes the current
+    // effort on "report effort").
+    const created = await request(ws, 'manager.chat.sessionCreated', 'create', {
+      type: 'manager.chat.sessionCreate', requestId: 'create', profile, backend: 'hermes', reasoningEffort: 'mock-high'
+    } satisfies ClientMessage);
+    assert.equal(created.session.reasoningEffort, 'mock-high');
+
+    const first = await request(ws, 'manager.chat.reply', 'turn1', {
+      type: 'manager.chat.send', requestId: 'turn1', profile, message: 'report effort', sessionId: created.session.id
+    } satisfies ClientMessage);
+    assert.equal(first.reply, 'mock-high', 'the pinned effort served the turn');
+
+    // A session created without an effort pin uses the backend default.
+    const plain = await request(ws, 'manager.chat.sessionCreated', 'create2', {
+      type: 'manager.chat.sessionCreate', requestId: 'create2', profile, backend: 'hermes'
+    } satisfies ClientMessage);
+    assert.equal(plain.session.reasoningEffort, null);
+    const plainTurn = await request(ws, 'manager.chat.reply', 'turn2', {
+      type: 'manager.chat.send', requestId: 'turn2', profile, message: 'report effort', sessionId: plain.session.id
+    } satisfies ClientMessage);
+    assert.equal(plainTurn.reply, 'mock-low', 'unpinned session served the backend default effort');
+
+    // Switch in place: same session, next turn on the new effort.
+    const updated = await request(ws, 'manager.chat.sessionUpdated', 'update', {
+      type: 'manager.chat.sessionUpdate', requestId: 'update', profile, sessionId: created.session.id, reasoningEffort: 'mock-low'
+    } satisfies ClientMessage);
+    assert.equal(updated.session.reasoningEffort, 'mock-low');
+    assert.equal(updated.session.worktreePath, created.session.worktreePath, 'worktree unchanged by the switch');
+
+    const third = await request(ws, 'manager.chat.reply', 'turn3', {
+      type: 'manager.chat.send', requestId: 'turn3', profile, message: 'report effort', sessionId: created.session.id
+    } satisfies ClientMessage);
+    assert.equal(third.reply, 'mock-low', 'the switched effort served the next turn in the same worktree');
+
+    // Clearing the pin returns the session to the backend default.
+    const cleared = await request(ws, 'manager.chat.sessionUpdated', 'clear', {
+      type: 'manager.chat.sessionUpdate', requestId: 'clear', profile, sessionId: created.session.id, reasoningEffort: null
+    } satisfies ClientMessage);
+    assert.equal(cleared.session.reasoningEffort, null);
+
+    ws.close();
+    await once(ws, 'close');
+  } finally {
+    wss.close();
+    await new Promise<void>((done) => server.close(() => done()));
+    await new Promise<void>((done) => gateway.close(() => done()));
+    execFileSync('git', ['worktree', 'prune'], { cwd: checkout });
+    process.env = savedEnv;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test('tool calls stream as structured events and permissions round-trip through the client', { timeout: 30_000 }, async () => {
   const stateDir = mkdtempSync(join(tmpdir(), 'gah-chat-agent-surface-'));
 

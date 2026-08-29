@@ -243,6 +243,7 @@ function seededSession(): ChatSessionSummary {
     branch: 'gah/mock-session-1',
     backend: 'codex',
     model: 'gpt-5.3-codex',
+    reasoningEffort: null,
     title: 'Mock session',
     createdAt: FIXED_NOW,
     lastActiveAt: FIXED_NOW,
@@ -677,6 +678,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       branch: `gah/${id}`,
       backend: backend ?? state.settings.defaultBackend,
       model,
+      reasoningEffort: null,
       title: title ?? null,
       createdAt: FIXED_NOW + state.sessions.size,
       lastActiveAt: FIXED_NOW + state.sessions.size,
@@ -689,13 +691,14 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     return created;
   }
 
-  function updateSession(profile: string, id: string, patch: { backend?: string; model?: string | null; title?: string }): ChatSessionSummary | null {
+  function updateSession(profile: string, id: string, patch: { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string }): ChatSessionSummary | null {
     const current = state.sessions.get(id);
     if (!current || current.profile !== profile || current.archivedAt !== null) return null;
     const updated = {
       ...current,
       ...(patch.backend !== undefined ? { backend: patch.backend } : {}),
       ...(patch.model !== undefined ? { model: patch.model } : {}),
+      ...(patch.reasoningEffort !== undefined ? { reasoningEffort: patch.reasoningEffort } : {}),
       ...(patch.title !== undefined ? { title: patch.title } : {}),
       lastActiveAt: FIXED_NOW + state.reset
     } satisfies ChatSessionSummary;
@@ -896,6 +899,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     const updated = updateSession(profile, id, {
       ...(bodyString(req.body?.backend) ? { backend: req.body.backend as string } : {}),
       ...(typeof req.body?.model === 'string' || req.body?.model === null ? { model: req.body.model as string | null } : {}),
+      ...(typeof req.body?.reasoningEffort === 'string' || req.body?.reasoningEffort === null ? { reasoningEffort: req.body.reasoningEffort as string | null } : {}),
       ...(bodyString(req.body?.title) ? { title: req.body.title as string } : {})
     });
     if (!updated) return jsonError(res, 404, 'Mock session not found', id);
