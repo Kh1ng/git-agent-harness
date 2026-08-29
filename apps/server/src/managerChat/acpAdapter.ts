@@ -220,7 +220,7 @@ export function readReasoningConfig(options: acp.SessionConfigOption[]): {
 }
 
 interface ProfileConnection {
-  process: ChildProcessByStdio<NodeWritable, NodeReadable, null>;
+  process: ChildProcessByStdio<NodeWritable, NodeReadable, NodeReadable>;
   connection: acp.ClientSideConnection;
   client: AcpClient;
   sessionId: string;
@@ -237,6 +237,9 @@ interface ProfileConnection {
   reasoningConfigId: string | null;
   steeringSupported: boolean;
   knownHistory: ChatTranscriptTurn[];
+  consecutiveFailures: number;
+  stderrTail: Buffer;
+  exit: { code: number | null; signal: NodeJS.Signals | null } | null;
   ready: Promise<void>;
 }
 
@@ -272,18 +275,53 @@ function resolveBinScript(packageName: string): string {
   return path.resolve(path.dirname(pkgJsonPath), binRelative);
 }
 
-/** ACP RPC failures reject with a plain `{ code, message, data? }` object,
- * not an `Error` instance -- and the useful detail (e.g. "You've hit your
- * usage limit...") is nested in `data.message`, while the top-level
- * `message` is often a generic "Internal error". Unwrap it into a real
- * Error with the actual detail, so it doesn't get lost by the time it
- * reaches the chat UI. */
-function unwrapAcpError(error: unknown): Error {
-  if (error instanceof Error) return error;
+/** ACP RPC failures carry `{ code, message, data? }` fields, either as a
+ * plain object or an Error materialized by the SDK. The useful detail (e.g.
+ * "You've hit your usage limit...") is nested in `data.message`, while the
+ * top-level `message` is often a generic "Internal error". */
+const ACP_STDERR_TAIL_BYTES = 4_096;
+const ACP_STDERR_RENDER_CHARS = 2_000;
+
+function appendStderrTail(current: Buffer, chunk: Buffer | string): Buffer {
+  const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+  if (incoming.length >= ACP_STDERR_TAIL_BYTES) return incoming.subarray(incoming.length - ACP_STDERR_TAIL_BYTES);
+  const combined = Buffer.concat([current, incoming]);
+  return combined.length > ACP_STDERR_TAIL_BYTES
+    ? combined.subarray(combined.length - ACP_STDERR_TAIL_BYTES)
+    : combined;
+}
+
+function childDiagnostics(state: ProfileConnection): string {
+  const stderr = state.stderrTail
+    .toString('utf8')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(-ACP_STDERR_RENDER_CHARS);
+  const observedExit = state.exit ?? (
+    state.process.exitCode !== null || state.process.signalCode !== null
+      ? { code: state.process.exitCode, signal: state.process.signalCode }
+      : null
+  );
+  const exit = observedExit
+    ? `child exit=${observedExit.code ?? 'null'} signal=${observedExit.signal ?? 'none'}`
+    : 'child=running';
+  return `${exit}; stderr tail=${stderr ? JSON.stringify(stderr) : '<empty>'}`;
+}
+
+function nestedAcpErrorDetail(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || !('data' in error)) return undefined;
+  const data = (error as { data?: unknown }).data;
+  return data && typeof data === 'object' && 'message' in data
+    ? String((data as { message: unknown }).message)
+    : undefined;
+}
+
+function unwrapAcpError(error: unknown, state: ProfileConnection): Error {
   if (error && typeof error === 'object' && 'message' in error) {
-    const data = 'data' in error ? (error as { data?: unknown }).data : undefined;
-    const detail = data && typeof data === 'object' && 'message' in data ? String((data as { message: unknown }).message) : undefined;
-    return new Error(detail ?? String((error as { message: unknown }).message));
+    const detail = nestedAcpErrorDetail(error);
+    if (detail !== undefined) return new Error(detail);
+    const code = 'code' in error ? String((error as { code?: unknown }).code ?? 'unknown') : 'unknown';
+    return new Error(`${String((error as { message: unknown }).message)} [ACP code=${code}; ${childDiagnostics(state)}]`);
   }
   return new Error(String(error));
 }
@@ -357,7 +395,7 @@ export function opencodeSpawnSpec(): SpawnSpec {
 export function createAcpBackend(
   label: string,
   spawnSpec: () => SpawnSpec,
-  options: { nativeSteering?: boolean } = {}
+  options: { nativeSteering?: boolean; consecutiveFailureReconnectThreshold?: number } = {}
 ) {
   const connections = new Map<string, ProfileConnection>();
 
@@ -424,7 +462,7 @@ export function createAcpBackend(
     const client = new AcpClient(label);
     const spec = spawnSpec();
     const child = spawn(spec.command, spec.args, {
-      stdio: ['pipe', 'pipe', 'inherit'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: spec.env ? { ...process.env, ...spec.env } : undefined
     });
 
@@ -448,8 +486,15 @@ export function createAcpBackend(
       reasoningConfigId: null,
       steeringSupported: false,
       knownHistory: [],
+      consecutiveFailures: 0,
+      stderrTail: Buffer.alloc(0),
+      exit: null,
       ready: Promise.resolve()
     };
+    child.stderr.on('data', (chunk: Buffer | string) => {
+      state.stderrTail = appendStderrTail(state.stderrTail, chunk);
+      process.stderr.write(chunk);
+    });
     state.ready = (async () => {
       const initialized = await connection.initialize({
         protocolVersion: acp.PROTOCOL_VERSION,
@@ -460,7 +505,8 @@ export function createAcpBackend(
       await startSession(state);
     })();
 
-    child.on('exit', () => {
+    child.on('exit', (code, signal) => {
+      state.exit = { code, signal };
       if (connections.get(gahProfile) === state) {
         connections.delete(gahProfile);
       }
@@ -546,8 +592,24 @@ export function createAcpBackend(
         sessionId: state.sessionId,
         prompt: [{ type: 'text', text: prompt }]
       });
+      state.consecutiveFailures = 0;
     } catch (error) {
-      throw unwrapAcpError(error);
+      state.consecutiveFailures += 1;
+      const threshold = options.consecutiveFailureReconnectThreshold;
+      const evicted = threshold !== undefined && state.consecutiveFailures >= threshold;
+      if (evicted && connections.get(gahProfile) === state) {
+        connections.delete(gahProfile);
+        state.process.kill();
+      }
+      // stdout and stderr are separate pipes. Give stderr already emitted by
+      // the child one event-loop turn to reach its bounded tail before the
+      // rejection is formatted for the durable harness/error event.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const failure = unwrapAcpError(error, state);
+      if (threshold !== undefined && nestedAcpErrorDetail(error) === undefined) {
+        failure.message += ` [consecutive failures=${state.consecutiveFailures}/${threshold}${evicted ? '; connection evicted' : ''}]`;
+      }
+      throw failure;
     } finally {
       state.client.onReplyChunk = undefined;
       state.client.onToolResult = undefined;
