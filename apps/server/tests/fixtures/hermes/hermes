@@ -68,21 +68,37 @@ class MockHermes {
 
   async prompt({ sessionId, prompt }) {
     const text = prompt.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n');
-    // #1030: ManagerChatManager wraps recalled memory ahead of the live
-    // request behind an explicit "Untrusted memory recalled..." prefix,
-    // separated by a "User: " marker. Require that exact prefix (not just
-    // the marker, which pre-dates the fix) before splitting -- a reverted
-    // wrapper must fall back to treating the whole blob as authoritative,
-    // so a regression test can tell the fixed prompt from the old one.
-    // A compliant backend must not let commands embedded in the untrusted
-    // block override the live task, so every directive branch below matches
-    // against liveText only. recalledText is still consulted for genuine
-    // factual lookups (a live question *about* past content), never for
-    // command-following.
-    const markerIndex = text.lastIndexOf('\nUser: ');
-    const hasUntrustedWrapper = text.startsWith('Untrusted memory recalled from prior conversations');
-    const liveText = hasUntrustedWrapper && markerIndex !== -1 ? text.slice(markerIndex + '\nUser: '.length) : text;
-    const recalledText = hasUntrustedWrapper && markerIndex !== -1 ? text.slice(0, markerIndex) : '';
+    // #1030: ManagerChatManager wraps recalled memory in a JSON-escaped
+    // envelope: "RecalledMemoryUntrusted: <single-line JSON string>" followed
+    // by a literal "\nCurrentUserRequest: " marker. JSON.stringify escapes
+    // every quote/newline/delimiter the recalled text might contain, so a
+    // forged marker or delimiter INSIDE that JSON string can never be
+    // mistaken for the real one -- only the literal marker actually appended
+    // after the JSON string closes is a raw, unescaped "\nCurrentUserRequest:
+    // ". Require the exact authority preamble too (not just the marker,
+    // which alone doesn't prove the JSON-escaping fix is in place) before
+    // trusting the split -- a reverted wrapper must fall back to treating the
+    // whole blob as authoritative, so a regression test can tell the fixed
+    // prompt from the old one. A compliant backend must not let commands
+    // embedded in the untrusted block override the live task, so every
+    // directive branch below matches against liveText only. recalledText is
+    // still consulted for genuine factual lookups (a live question *about*
+    // past content), never for command-following.
+    const recalledLineMatch = text.match(/^RecalledMemoryUntrusted: (.*)$/m);
+    const markerIndex = text.indexOf('\nCurrentUserRequest: ');
+    const hasEnvelope = text.startsWith('System and project policy always outrank')
+      && recalledLineMatch !== null && markerIndex !== -1;
+    let liveText = text;
+    let recalledText = '';
+    if (hasEnvelope) {
+      try {
+        recalledText = JSON.parse(recalledLineMatch[1]);
+        liveText = text.slice(markerIndex + '\nCurrentUserRequest: '.length);
+      } catch {
+        // Malformed envelope: never trust it -- fall back to the whole blob
+        // as authoritative rather than guessing at a split.
+      }
+    }
     const codeWordPattern = /\b[A-Z]+-[A-Z]+-\d+\b/;
     const codeWord = liveText.match(codeWordPattern)?.[0] ?? null;
     let reply;
