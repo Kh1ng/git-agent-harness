@@ -211,6 +211,8 @@ class MockHermes {
       return new Promise((resolve) => {
         this.pendingPrompt = { resolve, sessionId };
       });
+    } else if (/return an empty reply/i.test(liveText)) {
+      reply = '';
     } else if (liveText.trim() === '/reset') {
       remembered.set(sessionId, null);
       reply = 'Conversation history cleared.';

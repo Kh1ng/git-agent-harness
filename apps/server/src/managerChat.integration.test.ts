@@ -181,3 +181,88 @@ test('a configured-but-unreachable gateway completes the turn and shows the degr
     process.env = savedEnv;
   }
 });
+
+test('an empty backend reply preserves the user turn in an accepted gateway capture without degradation', { timeout: 15_000 }, async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'gah-chat-empty-capture-'));
+  const captures: Array<Record<string, string>> = [];
+  const gateway = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}') as Record<string, string>;
+      if (req.url === '/capture') {
+        // Match the real gateway's handleCapture truthiness validation.
+        if (!body.user_content || !body.assistant_content || !body.session_key) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Missing required fields: user_content, assistant_content, session_key' }));
+          return;
+        }
+        captures.push(body);
+        res.end(JSON.stringify({ l0_recorded: 1, scheduler_notified: false }));
+      } else if (req.url === '/recall') {
+        res.end(JSON.stringify({ context: '', memory_count: 0, code: 0, message: 'ok' }));
+      } else {
+        res.writeHead(404).end();
+      }
+    });
+  });
+  await new Promise<void>((done) => gateway.listen(0, '127.0.0.1', done));
+  const gatewayPort = (gateway.address() as AddressInfo).port;
+
+  const savedEnv = { ...process.env };
+  process.env.PATH = `${join(fixtures, 'hermes')}:${process.env.PATH}`;
+  process.env.GAH_BINARY = join(fixtures, 'gah', 'gah');
+  process.env.GAH_CHAT_STATE_DIR = join(stateDir, 'chat');
+  process.env.GAH_GATEWAY_SETTINGS_PATH = join(stateDir, 'gateway.json');
+  process.env.GAH_MANAGER_CHAT_SETTINGS_PATH = join(stateDir, 'manager-chat.json');
+  process.env.TDAI_GATEWAY_URL = `http://127.0.0.1:${gatewayPort}`;
+
+  const server = http.createServer();
+  const wss = new WebSocketServer({ server });
+  createWebSocketHandler(wss);
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const wsUrl = `ws://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const profile = `empty-capture-e2e-${Date.now()}`;
+  const normalMessage = 'Remember code word STABLE-CAPTURE-1034. Reply only OK.';
+  const emptyMessage = 'Return an empty reply.';
+  let ws: WebSocket | undefined;
+
+  try {
+    ws = await connect(wsUrl, profile);
+    assert.equal((await sendChat(ws, profile, normalMessage, 'normal')).reply, 'OK');
+    assert.equal((await sendChat(ws, profile, emptyMessage, 'empty')).reply, '');
+
+    assert.deepEqual(
+      captures.map(({ user_content, assistant_content }) => ({ user_content, assistant_content })),
+      [
+        { user_content: normalMessage, assistant_content: 'OK' },
+        { user_content: emptyMessage, assistant_content: '[No assistant reply]' }
+      ]
+    );
+
+    const historyPromise = nextMessage(ws, 'manager.chat.history', 'empty-history');
+    ws.send(JSON.stringify({
+      type: 'manager.chat.historyRequest', requestId: 'empty-history', profile
+    } satisfies ClientMessage));
+    const history = await historyPromise;
+    assert.doesNotMatch(
+      history.turns.map((turn) => turn.text).join('\n'),
+      /memory gateway degraded/,
+      'an accepted empty-reply capture does not emit a degraded harness error'
+    );
+
+    ws.close();
+    await once(ws, 'close');
+    ws = undefined;
+  } finally {
+    if (ws) {
+      ws.close();
+      await once(ws, 'close');
+    }
+    wss.close();
+    await new Promise<void>((done) => server.close(() => done()));
+    await new Promise<void>((done) => gateway.close(() => done()));
+    rmSync(stateDir, { recursive: true, force: true });
+    process.env = savedEnv;
+  }
+});
