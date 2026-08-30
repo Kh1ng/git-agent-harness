@@ -15,6 +15,9 @@ mod platform {
         ino: u64,
     }
 
+    #[derive(Clone, Copy)]
+    pub(crate) struct HolderBoundary(u64);
+
     #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
     struct ProcessIdentity {
         pid: u32,
@@ -29,6 +32,14 @@ mod platform {
                     ino: metadata.ino(),
                 })
                 .map_err(|error| format!("identifying helper pipe fd {fd}: {error}"))
+        }
+    }
+
+    impl HolderBoundary {
+        pub(crate) fn from_pid(pid: u32) -> Result<Self, String> {
+            process_identity(pid)?
+                .map(|identity| Self(identity.start_ticks))
+                .ok_or_else(|| format!("helper process {pid} disappeared before supervision"))
         }
     }
 
@@ -63,6 +74,7 @@ mod platform {
 
     fn holders(
         pipes: &HashSet<PipeIdentity>,
+        boundary: HolderBoundary,
         deadline_at: Instant,
     ) -> Result<Vec<ProcessIdentity>, String> {
         let own_pid = std::process::id();
@@ -90,6 +102,9 @@ mod platform {
             let Some(identity) = process_identity(pid)? else {
                 continue;
             };
+            if identity.start_ticks < boundary.0 {
+                continue;
+            }
             let fd_path = proc_path.join("fd");
             let fds = match fs::read_dir(&fd_path) {
                 Ok(fds) => fds,
@@ -147,12 +162,13 @@ mod platform {
 
     pub(crate) fn terminate_pipe_holders(
         pipes: &[PipeIdentity],
+        boundary: HolderBoundary,
         deadline_at: Instant,
     ) -> Result<(), String> {
         let pipes = pipes.iter().copied().collect::<HashSet<_>>();
         loop {
             deadline(deadline_at)?;
-            let holders = holders(&pipes, deadline_at)?;
+            let holders = holders(&pipes, boundary, deadline_at)?;
             if holders.is_empty() {
                 return Ok(());
             }
@@ -212,6 +228,9 @@ mod platform {
     #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
     pub(crate) struct PipeIdentity(u64, u64);
 
+    #[derive(Clone, Copy)]
+    pub(crate) struct HolderBoundary(u64, u64);
+
     #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
     struct ProcessIdentity {
         pid: i32,
@@ -231,6 +250,14 @@ mod platform {
 
         fn new(first: u64, second: u64) -> Self {
             Self(first.min(second), first.max(second))
+        }
+    }
+
+    impl HolderBoundary {
+        pub(crate) fn from_pid(pid: u32) -> Result<Self, String> {
+            process_info(pid as i32)?
+                .map(|(identity, _, _)| Self(identity.start_sec, identity.start_usec))
+                .ok_or_else(|| format!("helper process {pid} disappeared before supervision"))
         }
     }
 
@@ -336,6 +363,7 @@ mod platform {
 
     fn holders(
         pipes: &HashSet<PipeIdentity>,
+        boundary: HolderBoundary,
         deadline: Instant,
     ) -> Result<Vec<ProcessIdentity>, String> {
         let own_pid = std::process::id() as i32;
@@ -352,6 +380,9 @@ mod platform {
                 continue;
             };
             if uid != own_uid {
+                continue;
+            }
+            if (identity.start_sec, identity.start_usec) < (boundary.0, boundary.1) {
                 continue;
             }
             if fd_count > MAX_FDS_PER_PROCESS {
@@ -428,6 +459,7 @@ mod platform {
 
     pub(crate) fn terminate_pipe_holders(
         pipes: &[PipeIdentity],
+        boundary: HolderBoundary,
         deadline: Instant,
     ) -> Result<(), String> {
         let pipes = pipes.iter().copied().collect::<HashSet<_>>();
@@ -435,7 +467,7 @@ mod platform {
             if Instant::now() >= deadline {
                 return Err("helper pipe-holder cleanup deadline elapsed".into());
             }
-            let holders = holders(&pipes, deadline)?;
+            let holders = holders(&pipes, boundary, deadline)?;
             if holders.is_empty() {
                 return Ok(());
             }
@@ -450,4 +482,4 @@ mod platform {
     }
 }
 
-pub(super) use platform::{terminate_pipe_holders, PipeIdentity};
+pub(super) use platform::{terminate_pipe_holders, HolderBoundary, PipeIdentity};

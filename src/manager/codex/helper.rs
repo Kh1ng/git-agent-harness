@@ -151,6 +151,13 @@ pub(super) fn bounded_command_output(
     let mut failure: Option<(bool, anyhow::Error)> = None;
     let mut pipes = Vec::new();
     let mut setup_failures = Vec::new();
+    let boundary = match holders::HolderBoundary::from_pid(child.id()) {
+        Ok(boundary) => Some(boundary),
+        Err(error) => {
+            setup_failures.push(error);
+            None
+        }
+    };
 
     for (stream, fd) in [
         (
@@ -246,8 +253,8 @@ pub(super) fn bounded_command_output(
             overflow_reported = true;
         }
     }
-    if (!stdout.eof || !stderr.eof) && !pipes.is_empty() {
-        if let Err(error) = holders::terminate_pipe_holders(&pipes, cleanup_deadline) {
+    if let Some(boundary) = boundary.filter(|_| (!stdout.eof || !stderr.eof) && !pipes.is_empty()) {
+        if let Err(error) = holders::terminate_pipe_holders(&pipes, boundary, cleanup_deadline) {
             cleanup_failures.push(error);
         }
     }
