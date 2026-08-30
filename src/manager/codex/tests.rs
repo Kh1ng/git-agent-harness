@@ -51,6 +51,30 @@ fn drain_all_pending(session: &mut CodexManagerSession, id: &GahSessionId) -> Ve
     all
 }
 
+fn assert_failed_session_is_observable(session: &mut dyn ManagerSession, id: &GahSessionId) {
+    let terminal = session
+        .terminal_status(id)
+        .expect("terminal status must remain readable after transport teardown")
+        .expect("ambiguous turn start must terminate the local session");
+    assert!(matches!(terminal, TerminalStatus::Failed(_)));
+    assert_eq!(
+        session.inspect(id).unwrap(),
+        SessionStatus::Terminated(terminal)
+    );
+    let _ = session.stream(id).unwrap();
+}
+
+fn assert_restart_resumes_mapping(executable: &Path, session_dir: &Path, id: &GahSessionId) {
+    let mut restarted = CodexManagerSession::new_with_session_dir(executable, session_dir).unwrap();
+    restarted.resume(id).unwrap();
+    restarted.send(id, "after transport restart").unwrap();
+    assert!(
+        wait_for_updates(&mut restarted, id).contains(&SessionUpdate::MessageChunk(
+            "reply: after transport restart".into()
+        ))
+    );
+}
+
 /// Shell fragment answering `codex app-server generate-json-schema
 /// --out DIR` the same way `detect_stable_methods` expects the real
 /// binary to: writing a `ClientRequest.json` whose `oneOf[].method`
@@ -143,6 +167,14 @@ turn_counter = 0
 interrupted_turns = set()
 
 def run_turn(thread_id, turn_id, text):
+    if text == "malformed-output":
+        with lock:
+            print("{{not-json", flush=True)
+        emit({{
+            "method": "turn/completed",
+            "params": {{"threadId": thread_id, "turn": {{"id": turn_id, "status": "completed", "error": None}}}},
+        }})
+        return
     emit({{
         "method": "item/agentMessage/delta",
         "params": {{"threadId": thread_id, "turnId": turn_id, "delta": "reply: " + text}},
@@ -222,6 +254,8 @@ with open(record, "a", encoding="utf-8") as fh:
                 threading.Thread(target=mark_survival, args=(lost_response_sentinel,), daemon=True).start()
                 emit({{"jsonrpc": "2.0", "id": req_id, "result": {{"turn": {{"status": "inProgress"}}}}}})
                 time.sleep(3)
+            elif text == "reject-turn-start":
+                emit({{"jsonrpc": "2.0", "id": req_id, "error": {{"code": -32000, "message": "turn rejected"}}}})
             else:
                 emit({{"jsonrpc": "2.0", "id": req_id, "result": {{"turn": {{"id": turn_id, "status": "inProgress"}}}}}})
                 threading.Thread(target=run_turn, args=(thread_id, turn_id, text), daemon=True).start()
@@ -233,7 +267,11 @@ with open(record, "a", encoding="utf-8") as fh:
             # (verified live) and errors "no active turn to steer" once the
             # turn has ended -- the magic "steer-ok" text is this fake's
             # stand-in for "the turn is still genuinely active".
-            if text == "steer-ok":
+            if text == "lost-steer-response":
+                threading.Thread(target=mark_survival, args=(lost_response_sentinel,), daemon=True).start()
+                os.close(1)
+                time.sleep(3)
+            elif text == "steer-ok":
                 emit({{"jsonrpc": "2.0", "id": req_id, "result": {{"turnId": expected_turn_id}}}})
                 emit({{
                     "method": "item/agentMessage/delta",
@@ -420,6 +458,34 @@ fn turn_failure_becomes_terminal_failure() {
 }
 
 #[test]
+fn malformed_transport_output_is_a_sticky_terminal_failure() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let mut session = CodexManagerSession::new_with_session_dir(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions"),
+    )
+    .unwrap();
+    let id = session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "malformed-output".into(),
+        })
+        .unwrap();
+
+    let TerminalStatus::Failed(message) = wait_for_terminal(&mut session, &id) else {
+        panic!("malformed provider output must terminate the session as failed");
+    };
+    assert!(message.contains("parsing Codex app-server line"));
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(matches!(
+        session.terminal_status(&id).unwrap(),
+        Some(TerminalStatus::Failed(_))
+    ));
+}
+
+#[test]
 fn failed_mapping_commit_starts_no_remote_turn() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let f = fixture();
@@ -515,6 +581,31 @@ fn lost_initial_turn_response_stops_remote_work_before_rollback() {
 }
 
 #[test]
+fn failed_initial_turn_cleanup_retains_recovery_mapping_and_state() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let session_dir = f.record_dir.join("sessions");
+    let mut session =
+        CodexManagerSession::new_with_session_dir(f.bin_dir.join("codex"), &session_dir).unwrap();
+    session.transport.fail_terminate = true;
+
+    let error = session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "lost-response".into(),
+        })
+        .unwrap_err();
+    let error = format!("{error:#}");
+    assert!(error.contains("recovery mapping retained"));
+    assert!(error.contains("termination failure"));
+    let (id, state) = session.sessions.iter().next().unwrap();
+    assert_eq!(state.status, SessionStatus::Idle);
+    assert!(state.active_turn_id.is_none());
+    assert!(mapping_path(&session_dir, id).exists());
+}
+
+#[test]
 fn missing_turn_id_stops_remote_work_before_rollback() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let f = fixture();
@@ -544,11 +635,9 @@ fn lost_idle_follow_up_response_stops_remote_work() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let f = fixture();
     make_json_rpc_codex(&f.bin_dir, &f.record_dir);
-    let mut session = CodexManagerSession::new_with_session_dir(
-        f.bin_dir.join("codex"),
-        f.record_dir.join("sessions"),
-    )
-    .unwrap();
+    let executable = f.bin_dir.join("codex");
+    let session_dir = f.record_dir.join("sessions");
+    let mut session = CodexManagerSession::new_with_session_dir(&executable, &session_dir).unwrap();
     let id = session
         .start(StartRequest {
             profile: "profile-a".into(),
@@ -566,6 +655,9 @@ fn lost_idle_follow_up_response_stops_remote_work() {
         !f.record_dir.join("lost-response-completed.marker").exists(),
         "an ambiguously accepted follow-up must be stopped before send returns"
     );
+    assert_failed_session_is_observable(&mut session, &id);
+    drop(session);
+    assert_restart_resumes_mapping(&executable, &session_dir, &id);
 }
 
 #[test]
@@ -573,11 +665,9 @@ fn lost_fallback_follow_up_response_stops_remote_work() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let f = fixture();
     make_json_rpc_codex(&f.bin_dir, &f.record_dir);
-    let mut session = CodexManagerSession::new_with_session_dir(
-        f.bin_dir.join("codex"),
-        f.record_dir.join("sessions"),
-    )
-    .unwrap();
+    let executable = f.bin_dir.join("codex");
+    let session_dir = f.record_dir.join("sessions");
+    let mut session = CodexManagerSession::new_with_session_dir(&executable, &session_dir).unwrap();
     let id = session
         .start(StartRequest {
             profile: "profile-a".into(),
@@ -592,6 +682,9 @@ fn lost_fallback_follow_up_response_stops_remote_work() {
         !f.record_dir.join("lost-response-completed.marker").exists(),
         "an ambiguously accepted fallback turn must be stopped before send returns"
     );
+    assert_failed_session_is_observable(&mut session, &id);
+    drop(session);
+    assert_restart_resumes_mapping(&executable, &session_dir, &id);
 }
 
 #[test]
@@ -714,6 +807,83 @@ fn send_steers_an_active_turn_instead_of_starting_a_new_one() {
 }
 
 #[test]
+fn lost_steer_response_stops_remote_work_and_preserves_resume_mapping() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let executable = f.bin_dir.join("codex");
+    let session_dir = f.record_dir.join("sessions");
+    let mut session = CodexManagerSession::new_with_session_dir(&executable, &session_dir).unwrap();
+    let id = session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "slow".into(),
+        })
+        .unwrap();
+    drain_all_pending(&mut session, &id);
+
+    assert!(session.send(&id, "lost-steer-response").is_err());
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(
+        !f.record_dir.join("lost-response-completed.marker").exists(),
+        "an ambiguously accepted steer must be stopped before send returns"
+    );
+    assert_failed_session_is_observable(&mut session, &id);
+    drop(session);
+    assert_restart_resumes_mapping(&executable, &session_dir, &id);
+}
+
+#[test]
+fn failed_steer_cleanup_preserves_recovery_state_and_mapping() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let session_dir = f.record_dir.join("sessions");
+    let mut session =
+        CodexManagerSession::new_with_session_dir(f.bin_dir.join("codex"), &session_dir).unwrap();
+    let id = session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "slow".into(),
+        })
+        .unwrap();
+    drain_all_pending(&mut session, &id);
+    let active_turn = session.sessions[&id].active_turn_id.clone();
+    session.transport.fail_terminate = true;
+
+    let error = session.send(&id, "lost-steer-response").unwrap_err();
+    assert!(error.to_string().contains("termination failure"));
+    assert_eq!(session.sessions[&id].status, SessionStatus::Working);
+    assert_eq!(session.sessions[&id].active_turn_id, active_turn);
+    assert!(mapping_path(&session_dir, &id).exists());
+}
+
+#[test]
+fn failed_steer_enqueue_preserves_the_active_turn() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let mut session = CodexManagerSession::new_with_session_dir(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions"),
+    )
+    .unwrap();
+    let id = session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "slow".into(),
+        })
+        .unwrap();
+    drain_all_pending(&mut session, &id);
+    let active_turn = session.sessions[&id].active_turn_id.clone();
+    session.transport.fail_request = Some("turn/steer");
+
+    assert!(session.send(&id, "steer-ok").is_err());
+    assert_eq!(session.inspect(&id).unwrap(), SessionStatus::Working);
+    assert_eq!(session.sessions[&id].active_turn_id, active_turn);
+}
+
+#[test]
 fn send_falls_back_to_turn_start_when_steer_races_against_turn_completion() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let f = fixture();
@@ -754,6 +924,53 @@ fn send_falls_back_to_turn_start_when_steer_races_against_turn_completion() {
         requests.contains("turn/steer"),
         "the race-triggering turn/steer attempt must still have been sent"
     );
+}
+
+#[test]
+fn failed_fallback_enqueue_clears_the_stale_turn() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let mut session = CodexManagerSession::new_with_session_dir(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions"),
+    )
+    .unwrap();
+    let id = session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "slow".into(),
+        })
+        .unwrap();
+    drain_all_pending(&mut session, &id);
+    session.transport.fail_request = Some("turn/start");
+
+    assert!(session.send(&id, "replacement").is_err());
+    assert_eq!(session.inspect(&id).unwrap(), SessionStatus::Idle);
+    assert!(session.sessions[&id].active_turn_id.is_none());
+}
+
+#[test]
+fn rejected_fallback_start_clears_the_stale_turn() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let mut session = CodexManagerSession::new_with_session_dir(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions"),
+    )
+    .unwrap();
+    let id = session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "slow".into(),
+        })
+        .unwrap();
+    drain_all_pending(&mut session, &id);
+
+    assert!(session.send(&id, "reject-turn-start").is_err());
+    assert_eq!(session.inspect(&id).unwrap(), SessionStatus::Idle);
+    assert!(session.sessions[&id].active_turn_id.is_none());
 }
 
 #[test]

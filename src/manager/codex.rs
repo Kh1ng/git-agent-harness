@@ -229,6 +229,8 @@ struct CodexTransport {
     terminated: bool,
     #[cfg(test)]
     fail_request: Option<&'static str>,
+    #[cfg(test)]
+    fail_terminate: bool,
 }
 
 impl CodexTransport {
@@ -260,6 +262,8 @@ impl CodexTransport {
             terminated: false,
             #[cfg(test)]
             fail_request: None,
+            #[cfg(test)]
+            fail_terminate: false,
         })
     }
 
@@ -319,6 +323,11 @@ impl CodexTransport {
         if self.terminated {
             return Ok(());
         }
+        #[cfg(test)]
+        if self.fail_terminate {
+            self.fail_terminate = false;
+            return Err(anyhow!("injected Codex transport termination failure"));
+        }
         let cleanup_error = crate::runner::process::kill_process_group(&mut self.child);
         let wait_result = self.child.wait();
         if wait_result.is_ok() {
@@ -372,7 +381,8 @@ fn read_messages(stdout: ChildStdout, sender: mpsc::Sender<std::result::Result<V
                 .map_err(|error| format!("parsing Codex app-server line: {error}")),
             Err(error) => Err(format!("reading Codex app-server output: {error}")),
         };
-        if sender.send(message).is_err() {
+        let failed = message.is_err();
+        if sender.send(message).is_err() || failed {
             return;
         }
     }
@@ -520,20 +530,28 @@ fn is_no_active_turn_error(error: &anyhow::Error) -> bool {
 }
 
 #[derive(Debug)]
-enum TurnStartFailure {
+enum RpcDeliveryFailure {
     BeforeSend(anyhow::Error),
     Rejected(anyhow::Error),
+    Reconciled(anyhow::Error),
     Ambiguous(anyhow::Error),
 }
 
-impl TurnStartFailure {
+impl RpcDeliveryFailure {
     fn may_have_started(&self) -> bool {
         matches!(self, Self::Ambiguous(_))
     }
 
+    fn is_no_active_turn(&self) -> bool {
+        matches!(self, Self::Rejected(error) if is_no_active_turn_error(error))
+    }
+
     fn into_error(self) -> anyhow::Error {
         match self {
-            Self::BeforeSend(error) | Self::Rejected(error) | Self::Ambiguous(error) => error,
+            Self::BeforeSend(error)
+            | Self::Rejected(error)
+            | Self::Reconciled(error)
+            | Self::Ambiguous(error) => error,
         }
     }
 }
@@ -758,10 +776,31 @@ impl CodexManagerSession {
     }
 
     fn pump(&mut self) -> Result<()> {
-        while let Some(message) = self.transport.try_recv()? {
-            self.handle_message(message)?;
+        if self.transport.terminated {
+            return Ok(());
         }
-        Ok(())
+        loop {
+            match self.transport.try_recv() {
+                Ok(Some(message)) => self.handle_message(message)?,
+                Ok(None) => return Ok(()),
+                Err(error) => {
+                    let failure = match self.transport.terminate() {
+                        Ok(()) => error.to_string(),
+                        Err(cleanup) => format!(
+                            "{error:#}; additionally failed to stop the corrupt Codex transport: {cleanup:#}"
+                        ),
+                    };
+                    for state in self.sessions.values_mut() {
+                        if !matches!(state.status, SessionStatus::Terminated(_)) {
+                            state.status =
+                                SessionStatus::Terminated(TerminalStatus::Failed(failure.clone()));
+                            state.active_turn_id = None;
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+        }
     }
 
     fn request(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -775,54 +814,65 @@ impl CodexManagerSession {
         }
     }
 
+    fn request_with_delivery(
+        &mut self,
+        method: &str,
+        params: Value,
+    ) -> std::result::Result<Value, RpcDeliveryFailure> {
+        #[cfg(test)]
+        if self.transport.fail_request == Some(method) {
+            self.transport.fail_request = None;
+            return Err(RpcDeliveryFailure::BeforeSend(anyhow!(
+                "injected {method} enqueue failure"
+            )));
+        }
+        let request_id = self
+            .transport
+            .send_request(method, params)
+            .map_err(RpcDeliveryFailure::Ambiguous)?;
+        loop {
+            let message = self
+                .transport
+                .recv()
+                .map_err(RpcDeliveryFailure::Ambiguous)?;
+            if is_response_for(&message, request_id) {
+                return decode_json_rpc_response(message).map_err(RpcDeliveryFailure::Rejected);
+            }
+            self.handle_message(message)
+                .map_err(RpcDeliveryFailure::Ambiguous)?;
+        }
+    }
+
     /// Starts a turn while preserving whether failure happened before delivery
     /// or after Codex may already have accepted remote work.
     fn start_turn(
         &mut self,
         session: &GahSessionId,
         message: &str,
-    ) -> std::result::Result<(), TurnStartFailure> {
+    ) -> std::result::Result<(), RpcDeliveryFailure> {
         let thread_id = self
             .sessions
             .get(session)
             .map(|state| state.thread_id.clone())
             .ok_or_else(|| {
-                TurnStartFailure::BeforeSend(anyhow!(
+                RpcDeliveryFailure::BeforeSend(anyhow!(
                     "Codex session {session} must be resumed before sending"
                 ))
             })?;
-        #[cfg(test)]
-        if self.transport.fail_request == Some("turn/start") {
-            self.transport.fail_request = None;
-            return Err(TurnStartFailure::BeforeSend(anyhow!(
-                "injected turn/start enqueue failure"
-            )));
-        }
-        let request_id = self
-            .transport
-            .send_request(
-                "turn/start",
-                json!({
-                    "threadId": thread_id,
-                    "input": [{"type": "text", "text": message}],
-                }),
-            )
-            .map_err(TurnStartFailure::Ambiguous)?;
-        let response = loop {
-            let response = self.transport.recv().map_err(TurnStartFailure::Ambiguous)?;
-            if is_response_for(&response, request_id) {
-                break decode_json_rpc_response(response).map_err(TurnStartFailure::Rejected)?;
-            }
-            self.handle_message(response)
-                .map_err(TurnStartFailure::Ambiguous)?;
-        };
+        let response = self.request_with_delivery(
+            "turn/start",
+            json!({
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": message}],
+            }),
+        )?;
         let turn_id = response
             .get("turn")
             .and_then(|turn| turn.get("id"))
             .and_then(Value::as_str)
             .map(str::to_owned)
             .ok_or_else(|| {
-                TurnStartFailure::Ambiguous(anyhow!(
+                RpcDeliveryFailure::Ambiguous(anyhow!(
                     "Codex turn/start response did not include a turn id"
                 ))
             })?;
@@ -833,27 +883,40 @@ impl CodexManagerSession {
         Ok(())
     }
 
-    /// Starts a turn, stopping the transport before returning any failure whose
-    /// delivery outcome is unknown so callers cannot duplicate remote work.
-    fn start_turn_or_stop(&mut self, session: &GahSessionId, message: &str) -> Result<()> {
-        match self.start_turn(session, message) {
-            Ok(()) => Ok(()),
-            Err(failure) if failure.may_have_started() => {
-                let error = failure.into_error();
-                let cleanup = self.stop_ambiguous_turn(session);
+    /// Stops a possibly delivered request before exposing failure to its caller.
+    /// Local and durable recovery state stays intact if transport shutdown fails.
+    fn reconcile_delivery_failure(
+        &mut self,
+        session: &GahSessionId,
+        failure: RpcDeliveryFailure,
+    ) -> RpcDeliveryFailure {
+        if !failure.may_have_started() {
+            return failure;
+        }
+        let error = failure.into_error();
+        match self.stop_ambiguous_turn(session) {
+            Ok(()) => {
                 if let Some(state) = self.sessions.get_mut(session) {
                     state.status =
                         SessionStatus::Terminated(TerminalStatus::Failed(error.to_string()));
                     state.active_turn_id = None;
                 }
-                match cleanup {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => Err(anyhow!(
-                        "{error:#}; additionally failed to stop ambiguous remote work: {cleanup:#}"
-                    )),
-                }
+                RpcDeliveryFailure::Reconciled(error)
             }
-            Err(failure) => Err(failure.into_error()),
+            Err(cleanup) => RpcDeliveryFailure::Ambiguous(anyhow!(
+                "{error:#}; additionally failed to stop ambiguous remote work: {cleanup:#}"
+            )),
+        }
+    }
+
+    fn start_turn_or_stop(
+        &mut self,
+        session: &GahSessionId,
+        message: &str,
+    ) -> std::result::Result<(), RpcDeliveryFailure> {
+        match self.start_turn(session, message) {
+            Ok(()) => Ok(()),
+            Err(failure) => Err(self.reconcile_delivery_failure(session, failure)),
         }
     }
 
@@ -862,9 +925,18 @@ impl CodexManagerSession {
     /// module doc comment); it requires `expectedTurnId` as a precondition
     /// and errors with "no active turn to steer" if the turn has already
     /// ended, which `send` treats as a race and falls back on.
-    fn steer_turn(&mut self, session: &GahSessionId, turn_id: &str, message: &str) -> Result<()> {
-        let thread_id = self.state_mut(session)?.thread_id.clone();
-        self.request(
+    fn steer_turn(
+        &mut self,
+        session: &GahSessionId,
+        turn_id: &str,
+        message: &str,
+    ) -> std::result::Result<(), RpcDeliveryFailure> {
+        let thread_id = self
+            .state_mut(session)
+            .map_err(RpcDeliveryFailure::BeforeSend)?
+            .thread_id
+            .clone();
+        self.request_with_delivery(
             "turn/steer",
             json!({
                 "threadId": thread_id,
@@ -937,7 +1009,16 @@ impl ManagerSession for CodexManagerSession {
             self.sessions.remove(&gah_session_id);
             return Err(error);
         }
-        if let Err(error) = self.start_turn_or_stop(&gah_session_id, &request.instruction) {
+        if let Err(failure) = self.start_turn_or_stop(&gah_session_id, &request.instruction) {
+            let preserve_recovery = failure.may_have_started();
+            let error = failure.into_error();
+            if preserve_recovery {
+                return Err(error).with_context(|| {
+                    format!(
+                        "starting Codex turn on thread {thread_id}; recovery mapping retained as {gah_session_id}"
+                    )
+                });
+            }
             let rollback = remove_mapping(&self.session_dir, &gah_session_id);
             self.sessions.remove(&gah_session_id);
             return match rollback {
@@ -998,7 +1079,7 @@ impl ManagerSession for CodexManagerSession {
         if let Some(turn_id) = active_turn_id {
             match self.steer_turn(session, &turn_id, message) {
                 Ok(()) => return Ok(()),
-                Err(error) if is_no_active_turn_error(&error) => {
+                Err(failure) if failure.is_no_active_turn() => {
                     // ponytail: Codex activates a turn a moment after
                     // turn/start's response returns its id (and, symmetrically,
                     // can finish it before its turn/completed notification
@@ -1006,11 +1087,20 @@ impl ManagerSession for CodexManagerSession {
                     // server's own "no active turn" check even though our
                     // local state still shows it active. Treat this exactly
                     // like the idle case below: start a fresh turn instead.
+                    if let Some(state) = self.sessions.get_mut(session) {
+                        state.status = SessionStatus::Idle;
+                        state.active_turn_id = None;
+                    }
                 }
-                Err(error) => return Err(error),
+                Err(failure) => {
+                    return Err(self
+                        .reconcile_delivery_failure(session, failure)
+                        .into_error())
+                }
             }
         }
         self.start_turn_or_stop(session, message)
+            .map_err(RpcDeliveryFailure::into_error)
     }
 
     fn stream(&mut self, session: &GahSessionId) -> Result<Vec<SessionUpdate>> {
