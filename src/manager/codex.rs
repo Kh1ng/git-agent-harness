@@ -1275,7 +1275,11 @@ impl ManagerSession for CodexManagerSession {
             return Err(error);
         }
         if let Some(state) = self.sessions.get_mut(session) {
-            state.status = SessionStatus::Idle;
+            state.status = if state.active_turn_id.is_some() {
+                SessionStatus::Working
+            } else {
+                SessionStatus::Idle
+            };
         }
         Ok(())
     }

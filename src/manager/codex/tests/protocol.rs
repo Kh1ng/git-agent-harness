@@ -50,26 +50,32 @@ fn successful_helper_exit_reaps_its_background_descendants() {
 
 #[cfg(unix)]
 #[test]
-fn detached_capture_holder_is_terminated_by_production_cleanup() {
+fn detached_capture_holder_fails_closed_before_app_server_start() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let f = fixture();
     make_json_rpc_codex(&f.bin_dir, &f.record_dir);
     fs::write(f.record_dir.join("exit-version-with-detached-child"), "").unwrap();
 
-    let discovery = discover_with_timeout(f.bin_dir.join("codex"), Duration::from_millis(500))
-        .expect("escaped capture holder should be cleaned up");
+    let result = CodexManagerSession::new_with_session_dir_and_timeout(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions"),
+        Duration::from_millis(500),
+    );
     let pid: libc::pid_t = fs::read_to_string(f.record_dir.join("detached-helper.pid"))
         .unwrap()
         .trim()
         .parse()
         .unwrap();
-    assert_eq!(discovery.version.as_deref(), Some("codex-cli 1.2.3"));
-    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ESRCH)
-    );
-    assert!(!f.record_dir.join("version-helper-survived.marker").exists());
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+    // This deliberately adversarial fixture escaped the trusted helper's
+    // process group; production fails closed, and the test owns its teardown.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    let error = result
+        .err()
+        .expect("an escaped capture holder must fail construction");
+
+    assert!(format!("{error:#}").contains("capture pipe remained open"));
+    assert!(!f.record_dir.join("requests.jsonl").exists());
 }
 
 #[test]

@@ -8,8 +8,6 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
 
-mod holders;
-
 const CAPTURE_MAX_BYTES: usize = 64 * 1024;
 const CLEANUP_GRACE: Duration = Duration::from_millis(250);
 #[cfg(test)]
@@ -149,31 +147,7 @@ pub(super) fn bounded_command_output(
     let mut stderr = Capture::default();
     let mut status = None;
     let mut failure: Option<(bool, anyhow::Error)> = None;
-    let mut pipes = Vec::new();
     let mut setup_failures = Vec::new();
-    let boundary = match holders::HolderBoundary::from_pid(child.id()) {
-        Ok(boundary) => Some(boundary),
-        Err(error) => {
-            setup_failures.push(error);
-            None
-        }
-    };
-
-    for (stream, fd) in [
-        (
-            "stdout",
-            stdout_reader.as_ref().expect("stdout reader").as_raw_fd(),
-        ),
-        (
-            "stderr",
-            stderr_reader.as_ref().expect("stderr reader").as_raw_fd(),
-        ),
-    ] {
-        match holders::PipeIdentity::from_fd(fd) {
-            Ok(pipe) => pipes.push(pipe),
-            Err(error) => setup_failures.push(format!("identifying {context} {stream}: {error}")),
-        }
-    }
     if let Some(reader) = stdout_reader.as_ref() {
         if let Err(error) = make_helper_pipe_nonblocking(reader.as_raw_fd()) {
             setup_failures.push(format!("making {context} stdout nonblocking: {error}"));
@@ -253,11 +227,9 @@ pub(super) fn bounded_command_output(
             overflow_reported = true;
         }
     }
-    if let Some(boundary) = boundary.filter(|_| (!stdout.eof || !stderr.eof) && !pipes.is_empty()) {
-        if let Err(error) = holders::terminate_pipe_holders(&pipes, boundary, cleanup_deadline) {
-            cleanup_failures.push(error);
-        }
-    }
+    // ponytail: A configured Codex executable is trusted. If untrusted helper
+    // containment becomes a requirement, use a per-invocation cgroup or a
+    // dedicated supervisor instead of process-wide subreaping or PID scans.
     loop {
         if let Err(error) = drain_reader(&mut stdout, &mut stdout_reader) {
             cleanup_failures.push(format!("reading stdout during cleanup: {error}"));
