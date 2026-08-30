@@ -241,6 +241,7 @@ interface ProfileConnection {
   stderrTail: Buffer;
   exit: { code: number | null; signal: NodeJS.Signals | null } | null;
   ready: Promise<void>;
+  activePrompt: Promise<unknown> | null;
 }
 
 /** Rehydrate a fresh ACP session from the durable transcript. */
@@ -489,7 +490,8 @@ export function createAcpBackend(
       consecutiveFailures: 0,
       stderrTail: Buffer.alloc(0),
       exit: null,
-      ready: Promise.resolve()
+      ready: Promise.resolve(),
+      activePrompt: null
     };
     child.stderr.on('data', (chunk: Buffer | string) => {
       state.stderrTail = appendStderrTail(state.stderrTail, chunk);
@@ -598,11 +600,13 @@ export function createAcpBackend(
     const costBeforeUsd = state.client.sessionCostUsd;
     const startedAt = Date.now();
     let result;
+    const activePrompt = state.connection.prompt({
+      sessionId: state.sessionId,
+      prompt: [{ type: 'text', text: prompt }]
+    });
+    state.activePrompt = activePrompt;
     try {
-      result = await state.connection.prompt({
-        sessionId: state.sessionId,
-        prompt: [{ type: 'text', text: prompt }]
-      });
+      result = await activePrompt;
       state.consecutiveFailures = 0;
     } catch (error) {
       state.consecutiveFailures += 1;
@@ -622,6 +626,7 @@ export function createAcpBackend(
       }
       throw failure;
     } finally {
+      if (state.activePrompt === activePrompt) state.activePrompt = null;
       state.client.onReplyChunk = undefined;
       state.client.onToolResult = undefined;
       state.client.onToolCall = undefined;
@@ -715,8 +720,23 @@ export function createAcpBackend(
    * aborted, and the same connection is reused for the next turn. */
   async function cancelTurn(gahProfile: string): Promise<void> {
     const state = connections.get(gahProfile);
-    if (!state || !state.sessionId) return;
-    await state.connection.cancel({ sessionId: state.sessionId });
+    const activePrompt = state?.activePrompt;
+    if (!state || !state.sessionId || !activePrompt) return;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const settled = await Promise.race([
+      Promise.all([
+        state.connection.cancel({ sessionId: state.sessionId }).then(() => true, () => false),
+        activePrompt.then(() => undefined, () => undefined)
+      ]).then(([cancelSent]) => cancelSent),
+      new Promise<false>((resolve) => {
+        timeout = setTimeout(() => resolve(false), 1_000);
+        timeout.unref?.();
+      })
+    ]);
+    if (timeout) clearTimeout(timeout);
+    if (settled) return;
+    if (connections.get(gahProfile) === state) connections.delete(gahProfile);
+    state.process.kill();
   }
 
   return { runTurn, listCommands, listModels, setModel, setReasoningEffort, steerTurn, cancelTurn };
