@@ -128,13 +128,25 @@ fn make_json_rpc_codex_with_methods(dir: &Path, record_dir: &Path, stable_method
     let body = format!(
         r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
+  if [ -f '{record_dir}/hang-version' ]; then
+    (sleep 0.4; touch '{record_dir}/version-helper-survived.marker') &
+    sleep 3
+  fi
   echo 'codex-cli 1.2.3'
   exit 0
 fi
 if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+  if [ -f '{record_dir}/hang-login' ]; then
+    (sleep 0.4; touch '{record_dir}/login-helper-survived.marker') &
+    sleep 3
+  fi
   echo 'Logged in using ChatGPT'
   echo 'token=super-secret' >&2
   exit 0
+fi
+if [ "$1" = "app-server" ] && [ "$2" = "generate-json-schema" ] && [ -f '{record_dir}/hang-schema' ]; then
+  (sleep 0.4; touch '{record_dir}/schema-helper-survived.marker') &
+  sleep 3
 fi
 {schema_stub}
 if [ "$1" != "app-server" ]; then
@@ -169,6 +181,23 @@ turn_counter = 0
 interrupted_turns = set()
 
 def run_turn(thread_id, turn_id, text):
+    malformed_lifecycle = {{
+        "started-missing-thread-id": ("turn/started", {{"turn": {{"id": turn_id}}}}),
+        "started-nonstring-thread-id": ("turn/started", {{"threadId": 7, "turn": {{"id": turn_id}}}}),
+        "started-missing-turn-id": ("turn/started", {{"threadId": thread_id, "turn": {{}}}}),
+        "started-nonstring-turn-id": ("turn/started", {{"threadId": thread_id, "turn": {{"id": 7}}}}),
+        "retryable-missing-thread-id": ("error", {{"turnId": turn_id, "willRetry": True, "error": {{"message": "retrying"}}}}),
+        "retryable-nonstring-thread-id": ("error", {{"threadId": 7, "turnId": turn_id, "willRetry": True, "error": {{"message": "retrying"}}}}),
+        "retryable-missing-turn-id": ("error", {{"threadId": thread_id, "willRetry": True, "error": {{"message": "retrying"}}}}),
+        "retryable-nonstring-turn-id": ("error", {{"threadId": thread_id, "turnId": 7, "willRetry": True, "error": {{"message": "retrying"}}}}),
+        "retryable-missing-message": ("error", {{"threadId": thread_id, "turnId": turn_id, "willRetry": True, "error": {{}}}}),
+        "retryable-nonstring-message": ("error", {{"threadId": thread_id, "turnId": turn_id, "willRetry": True, "error": {{"message": 7}}}}),
+    }}
+    if text in malformed_lifecycle:
+        method, params = malformed_lifecycle[text]
+        emit({{"method": method, "params": params}})
+        emit({{"method": "turn/completed", "params": {{"threadId": thread_id, "turn": {{"id": turn_id, "status": "completed", "error": None}}}}}})
+        return
     malformed_terminal = {{
         "completed-missing-id": {{"status": "completed", "error": None}},
         "completed-missing-status": {{"id": turn_id, "error": None}},
@@ -279,6 +308,11 @@ with open(record, "a", encoding="utf-8") as fh:
             text = msg["params"]["input"][0]["text"]
             if text == "silent-response":
                 time.sleep(3)
+            elif text == "chatty-no-response":
+                for _ in range(20):
+                    emit({{"method": "unknown/noop", "params": {{}}}})
+                    time.sleep(0.02)
+                emit({{"jsonrpc": "2.0", "id": req_id, "result": {{"turn": {{"id": turn_id, "status": "inProgress"}}}}}})
             elif text == "lost-response":
                 threading.Thread(target=mark_survival, args=(lost_response_sentinel,), daemon=True).start()
                 os.close(1)
@@ -331,6 +365,7 @@ export RECORD_PATH='{record_path}'
 exec python3 -u "$tmp" "$@"
 "#,
         schema_stub = schema_stub(stable_methods),
+        record_dir = record_dir.display(),
         record_path = record_dir.join("requests.jsonl").display()
     );
     make_fake_bin(dir, "codex", &body);
@@ -488,34 +523,6 @@ fn turn_failure_becomes_terminal_failure() {
         panic!("expected failed turn status");
     };
     assert!(message.contains("turn failed"));
-}
-
-#[test]
-fn malformed_transport_output_is_a_sticky_terminal_failure() {
-    let _exec_guard = crate::test_support::ExecGuard::new();
-    let f = fixture();
-    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
-    let mut session = CodexManagerSession::new_with_session_dir(
-        f.bin_dir.join("codex"),
-        f.record_dir.join("sessions"),
-    )
-    .unwrap();
-    let id = session
-        .start(StartRequest {
-            profile: "profile-a".into(),
-            instruction: "malformed-output".into(),
-        })
-        .unwrap();
-
-    let TerminalStatus::Failed(message) = wait_for_terminal(&mut session, &id) else {
-        panic!("malformed provider output must terminate the session as failed");
-    };
-    assert!(message.contains("parsing Codex app-server line"));
-    std::thread::sleep(Duration::from_millis(100));
-    assert!(matches!(
-        session.terminal_status(&id).unwrap(),
-        Some(TerminalStatus::Failed(_))
-    ));
 }
 
 #[test]

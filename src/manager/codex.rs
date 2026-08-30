@@ -46,13 +46,13 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CLIENT_NAME: &str = "git-agent-harness";
 const RPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -307,8 +307,15 @@ impl CodexTransport {
         Ok(id)
     }
 
-    fn recv(&self) -> Result<Value> {
-        match self.messages.recv_timeout(self.response_timeout) {
+    fn recv_until(&self, deadline: Instant) -> Result<Value> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow!(
+                "timed out waiting for Codex app-server response after {:?}",
+                self.response_timeout
+            ));
+        }
+        match self.messages.recv_timeout(remaining) {
             Ok(Ok(message)) => Ok(message),
             Ok(Err(error)) => Err(anyhow!(error)),
             Err(RecvTimeoutError::Timeout) => Err(anyhow!(
@@ -411,8 +418,9 @@ fn read_messages(stdout: ChildStdout, sender: mpsc::Sender<std::result::Result<V
 
 fn rpc_request(transport: &mut CodexTransport, method: &str, params: Value) -> Result<Value> {
     let id = transport.send_request(method, params)?;
+    let deadline = Instant::now() + transport.response_timeout;
     loop {
-        let message = transport.recv()?;
+        let message = transport.recv_until(deadline)?;
         if is_response_for(&message, id) {
             return decode_json_rpc_response(message);
         }
@@ -472,16 +480,126 @@ fn classify_auth_state(output: &std::process::Output) -> CodexAuthState {
     }
 }
 
-fn discover(executable: impl AsRef<Path>) -> Result<CodexDiscovery> {
-    let executable = executable.as_ref().to_path_buf();
-    let version = Command::new(&executable)
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|output| output.status.success().then_some(output))
-        .and_then(|output| parse_version_from_output(&output));
+struct CommandCapture {
+    file: File,
+    path: PathBuf,
+}
 
-    let auth_state = match Command::new(&executable).args(["login", "status"]).output() {
+impl CommandCapture {
+    fn new(stream: &str) -> Result<Self> {
+        let path = std::env::temp_dir().join(format!(
+            "gah-codex-helper-{}-{}-{stream}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("creating Codex helper capture {}", path.display()))?;
+        Ok(Self { file, path })
+    }
+
+    fn stdio(&self) -> Result<Stdio> {
+        Ok(Stdio::from(self.file.try_clone()?))
+    }
+
+    fn read(&mut self) -> Result<Vec<u8>> {
+        self.file.rewind()?;
+        let mut bytes = Vec::new();
+        self.file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+impl Drop for CommandCapture {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn bounded_command_output(
+    command: &mut Command,
+    context: &str,
+    timeout: Duration,
+) -> Result<Output> {
+    let mut stdout = CommandCapture::new("stdout")?;
+    let mut stderr = CommandCapture::new("stderr")?;
+    command
+        .stdin(Stdio::null())
+        .stdout(stdout.stdio()?)
+        .stderr(stderr.stdio()?);
+    crate::runner::process::prepare_process_group(command);
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("starting {context}"))?;
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let cleanup = crate::runner::process::kill_process_group(&mut child);
+                let wait = child.wait();
+                let failure = anyhow!("{context} timed out after {timeout:?}");
+                return match (cleanup, wait) {
+                    (None, Ok(_)) => Err(failure),
+                    (Some(cleanup), Ok(_)) => Err(anyhow!("{failure:#}; {cleanup}")),
+                    (None, Err(wait)) => {
+                        Err(failure.context(format!("waiting for timed-out {context}: {wait}")))
+                    }
+                    (Some(cleanup), Err(wait)) => Err(anyhow!(
+                        "{failure:#}; {cleanup}; waiting for timed-out {context}: {wait}"
+                    )),
+                };
+            }
+            Err(error) => {
+                let cleanup = crate::runner::process::kill_process_group(&mut child);
+                let wait = child.wait();
+                return Err(anyhow!(
+                    "waiting for {context}: {error}; cleanup: {cleanup:?}; reap: {wait:?}"
+                ));
+            }
+        }
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.read()?,
+        stderr: stderr.read()?,
+    })
+}
+
+fn discover(executable: impl AsRef<Path>) -> Result<CodexDiscovery> {
+    discover_with_timeout(executable, RPC_RESPONSE_TIMEOUT)
+}
+
+fn discover_with_timeout(
+    executable: impl AsRef<Path>,
+    command_timeout: Duration,
+) -> Result<CodexDiscovery> {
+    let executable = executable.as_ref().to_path_buf();
+    let mut version_command = Command::new(&executable);
+    version_command.arg("--version");
+    let version = bounded_command_output(
+        &mut version_command,
+        "Codex version command",
+        command_timeout,
+    )
+    .ok()
+    .and_then(|output| output.status.success().then_some(output))
+    .and_then(|output| parse_version_from_output(&output));
+
+    let mut login_command = Command::new(&executable);
+    login_command.args(["login", "status"]);
+    let auth_state = match bounded_command_output(
+        &mut login_command,
+        "Codex login status command",
+        command_timeout,
+    ) {
         Ok(output) => classify_auth_state(&output),
         Err(_) => CodexAuthState::Error("login status command could not be started".to_string()),
     };
@@ -502,7 +620,10 @@ fn discover(executable: impl AsRef<Path>) -> Result<CodexDiscovery> {
 /// installed instead of a hardcoded assumption. Empty set (including "the
 /// binary is old enough this subcommand doesn't exist") fails closed --
 /// every dependent capability comes back false rather than guessed true.
-fn detect_stable_methods(executable: &Path) -> std::collections::HashSet<String> {
+fn detect_stable_methods(
+    executable: &Path,
+    command_timeout: Duration,
+) -> std::collections::HashSet<String> {
     let dir = std::env::temp_dir().join(format!(
         "gah-codex-schema-{}-{}",
         std::process::id(),
@@ -513,11 +634,16 @@ fn detect_stable_methods(executable: &Path) -> std::collections::HashSet<String>
     ));
     let methods = (|| -> Result<std::collections::HashSet<String>> {
         fs::create_dir_all(&dir)?;
-        let output = Command::new(executable)
+        let mut command = Command::new(executable);
+        command
             .args(["app-server", "generate-json-schema", "--out"])
-            .arg(&dir)
-            .output()
-            .context("running codex app-server generate-json-schema")?;
+            .arg(&dir);
+        let output = bounded_command_output(
+            &mut command,
+            "Codex app-server schema command",
+            command_timeout,
+        )
+        .context("running codex app-server generate-json-schema")?;
         if !output.status.success() {
             anyhow::bail!(
                 "codex app-server generate-json-schema exited with {}",
@@ -606,7 +732,16 @@ impl CodexManagerSession {
         session_dir: impl Into<PathBuf>,
         response_timeout: Duration,
     ) -> Result<Self> {
-        let discovery = discover(executable.as_ref())?;
+        let discovery = discover_with_timeout(executable.as_ref(), response_timeout)?;
+        // Capabilities come from the installed binary's generated schema.
+        // Detect them before starting the long-lived app-server so a broken
+        // helper cannot strand a live transport during construction.
+        let methods = detect_stable_methods(&discovery.executable, response_timeout);
+        let capabilities = SessionCapabilities {
+            resume: methods.contains("thread/resume"),
+            interrupt: methods.contains("turn/interrupt"),
+            inspect: true,
+        };
         let mut transport = CodexTransport::spawn(&discovery.executable)?;
         transport.response_timeout = response_timeout;
         rpc_request(
@@ -620,20 +755,6 @@ impl CodexManagerSession {
             }),
         )?;
         transport.send_notification("initialized", json!({}))?;
-        // thread/resume and turn/interrupt are detected from the installed
-        // binary's own generated schema (see `detect_stable_methods`)
-        // instead of assumed -- an older/incompatible app-server that
-        // doesn't advertise one of these methods gets an honest `false`
-        // here instead of a generic RPC error the first time it's called.
-        // `inspect` never touches the wire (it only reads locally-tracked
-        // state updated by `pump`), so it has no real-provider dependency
-        // and is always supported.
-        let methods = detect_stable_methods(&discovery.executable);
-        let capabilities = SessionCapabilities {
-            resume: methods.contains("thread/resume"),
-            interrupt: methods.contains("turn/interrupt"),
-            inspect: true,
-        };
         Ok(Self {
             discovery,
             transport,
@@ -677,7 +798,7 @@ impl CodexManagerSession {
         };
         let params = match message.get("params") {
             Some(params) => params,
-            None if matches!(method, "turn/completed" | "error") => {
+            None if matches!(method, "turn/started" | "turn/completed" | "error") => {
                 return Err(anyhow!(
                     "Codex {method} notification did not include params"
                 ));
@@ -722,17 +843,22 @@ impl CodexManagerSession {
                 }
             }
             "turn/started" => {
-                let Some(thread_id) = params.get("threadId").and_then(Value::as_str) else {
-                    return Ok(());
-                };
+                let thread_id =
+                    params
+                        .get("threadId")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            anyhow!("Codex turn/started notification did not include threadId")
+                        })?;
                 let turn_id = params
                     .get("turn")
                     .and_then(|turn| turn.get("id"))
                     .and_then(Value::as_str)
-                    .map(str::to_owned);
-                if let (Some(turn_id), Some(state)) =
-                    (turn_id, self.session_by_thread_mut(thread_id))
-                {
+                    .ok_or_else(|| {
+                        anyhow!("Codex turn/started notification did not include turn.id")
+                    })?
+                    .to_owned();
+                if let Some(state) = self.session_by_thread_mut(thread_id) {
                     // A notification for an older turn may arrive after a
                     // replacement turn has already been acknowledged. Never
                     // let it steal lifecycle ownership from the current turn.
@@ -793,9 +919,6 @@ impl CodexManagerSession {
                     .get("willRetry")
                     .and_then(Value::as_bool)
                     .ok_or_else(|| anyhow!("Codex error notification did not include willRetry"))?;
-                if will_retry {
-                    return Ok(());
-                }
                 let thread_id = params
                     .get("threadId")
                     .and_then(Value::as_str)
@@ -809,10 +932,11 @@ impl CodexManagerSession {
                     .and_then(|error| error.get("message"))
                     .and_then(Value::as_str)
                     .ok_or_else(|| {
-                        anyhow!(
-                            "non-retryable Codex error notification did not include error.message"
-                        )
+                        anyhow!("Codex error notification did not include error.message")
                     })?;
+                if will_retry {
+                    return Ok(());
+                }
                 if let Some(state) = self.session_by_thread_mut(thread_id) {
                     if state.active_turn_id.as_deref() != Some(turn_id) {
                         return Ok(());
@@ -914,10 +1038,11 @@ impl CodexManagerSession {
             .transport
             .send_request(method, params)
             .map_err(RpcDeliveryFailure::Ambiguous)?;
+        let deadline = Instant::now() + self.transport.response_timeout;
         loop {
             let message = self
                 .transport
-                .recv()
+                .recv_until(deadline)
                 .map_err(RpcDeliveryFailure::Ambiguous)?;
             if is_response_for(&message, request_id) {
                 return decode_json_rpc_response(message).map_err(RpcDeliveryFailure::Rejected);
