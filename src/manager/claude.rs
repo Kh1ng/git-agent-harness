@@ -175,7 +175,8 @@ fn persist_mapping(
         },
     )
     .context("serializing Claude session map")?;
-    file.sync_all().ok();
+    file.sync_all()
+        .with_context(|| format!("syncing Claude session map {}", temp.display()))?;
     fs::rename(&temp, &path)
         .with_context(|| format!("committing Claude session map {}", path.display()))?;
     Ok(())
@@ -355,6 +356,8 @@ impl ClaudeManagerSession {
                 Ok(Ok(message)) => handle_message(state, message)?,
                 Ok(Err(error)) => {
                     state.status = SessionStatus::Terminated(TerminalStatus::Failed(error.clone()));
+                    state.outstanding_turns = 0;
+                    Self::terminate_process(&mut state.process);
                     return Err(anyhow!(error));
                 }
                 Err(TryRecvError::Empty) => break,
@@ -385,10 +388,25 @@ fn read_messages(stdout: ChildStdout, sender: mpsc::Sender<std::result::Result<V
                 .map_err(|error| format!("parsing Claude stream-json event: {error}")),
             Err(error) => Err(format!("reading Claude stream-json output: {error}")),
         };
-        if sender.send(message).is_err() {
+        // A malformed/unreadable line means the wire protocol is no longer
+        // trustworthy: stop relaying further output rather than risk
+        // resurrecting a dead session with a later well-formed message.
+        let stop = message.is_err();
+        if sender.send(message).is_err() || stop {
             return;
         }
     }
+}
+
+/// Once a session has failed or been interrupted, no later event may move it
+/// back to `Working`/`Completed` -- mirrors Hermes's identical precedence
+/// rule in `manager::hermes::handle_message`.
+fn is_sticky_terminal(status: &SessionStatus) -> bool {
+    matches!(
+        status,
+        SessionStatus::Terminated(TerminalStatus::Failed(_))
+            | SessionStatus::Terminated(TerminalStatus::Interrupted)
+    )
 }
 
 fn handle_message(state: &mut ClaudeSessionState, message: Value) -> Result<()> {
@@ -480,11 +498,23 @@ fn finish_turn(state: &mut ClaudeSessionState, result: &Value) {
     } else {
         TerminalStatus::Failed(structured_error(result, subtype))
     };
-    state.status = if state.outstanding_turns == 0 {
-        SessionStatus::Terminated(terminal)
-    } else {
-        SessionStatus::Working
-    };
+    let still_working = state.outstanding_turns > 0;
+    match (&state.status, terminal, still_working) {
+        (SessionStatus::Terminated(TerminalStatus::Interrupted), _, _) => {}
+        (SessionStatus::Terminated(TerminalStatus::Failed(_)), _, _) => {}
+        (_, TerminalStatus::Failed(error), _) => {
+            state.status = SessionStatus::Terminated(TerminalStatus::Failed(error));
+        }
+        (_, TerminalStatus::Completed, false) => {
+            state.status = SessionStatus::Terminated(TerminalStatus::Completed);
+        }
+        (_, TerminalStatus::Completed, true) => {
+            state.status = SessionStatus::Working;
+        }
+        // Claude's own result JSON never reports `Interrupted` -- only
+        // `interrupt()` produces that variant, directly, outside this match.
+        (_, TerminalStatus::Interrupted, _) => {}
+    }
     state.saw_text_delta = false;
 }
 
@@ -543,7 +573,7 @@ impl ManagerSession for ClaudeManagerSession {
     fn capabilities(&self) -> SessionCapabilities {
         SessionCapabilities {
             resume: true,
-            interrupt: false,
+            interrupt: true,
             inspect: false,
         }
     }
@@ -615,7 +645,9 @@ impl ManagerSession for ClaudeManagerSession {
             .write_user_message(&state.provider_session_id, message)
             .with_context(|| format!("sending structured input to Claude session {session}"))?;
         state.outstanding_turns += 1;
-        state.status = SessionStatus::Working;
+        if !is_sticky_terminal(&state.status) {
+            state.status = SessionStatus::Working;
+        }
         Ok(())
     }
 
@@ -628,11 +660,21 @@ impl ManagerSession for ClaudeManagerSession {
         Ok(std::mem::take(&mut state.pending_updates))
     }
 
-    fn interrupt(&mut self, _session: &GahSessionId) -> Result<()> {
-        Err(UnsupportedCapability {
-            capability: "interrupt",
-        }
-        .into())
+    fn interrupt(&mut self, session: &GahSessionId) -> Result<()> {
+        // Claude's stream-json input protocol has no interrupt control
+        // message today: `{"type": "interrupt"}` is a still-open feature
+        // request (anthropics/claude-code#41665), and probing the installed
+        // CLI confirms it is silently ignored -- a turn runs to completion
+        // regardless. The only real, verifiable way to stop an in-progress
+        // turn is to terminate the child process; the durable session
+        // mapping is untouched, so a later `resume` still reconnects.
+        let state = self.sessions.get_mut(session).ok_or_else(|| {
+            anyhow!("Claude session {session} must be resumed before interrupting")
+        })?;
+        Self::terminate_process(&mut state.process);
+        state.outstanding_turns = 0;
+        state.status = SessionStatus::Terminated(TerminalStatus::Interrupted);
+        Ok(())
     }
 
     fn inspect(&mut self, _session: &GahSessionId) -> Result<SessionStatus> {
@@ -732,8 +774,10 @@ exit 1
             r#"#!/usr/bin/env python3
 import json
 import sys
+import time
 
 record_path = {record_path:?}
+sentinel_path = {sentinel_path:?}
 args = sys.argv[1:]
 if args == ["--version"]:
     print("2.1.197 (Claude Code)")
@@ -769,6 +813,36 @@ print(json.dumps({{
 for raw in sys.stdin:
     message = json.loads(raw)
     prompt = message["message"]["content"]
+    if prompt == "malformed":
+        print("not-valid-json-garbage", flush=True)
+        print(json.dumps({{
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "session_id": session_id,
+            "result": "must never be observed",
+            "usage": {{"input_tokens": 1, "output_tokens": 1,
+                       "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}},
+            "modelUsage": {{"claude-test": {{"contextWindow": 200000}}}},
+            "terminal_reason": "completed",
+        }}), flush=True)
+        continue
+    if prompt == "slow":
+        time.sleep(3)
+        with open(sentinel_path, "w", encoding="utf-8") as fh:
+            fh.write("completed")
+        print(json.dumps({{
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "session_id": session_id,
+            "result": "slow turn completed",
+            "usage": {{"input_tokens": 1, "output_tokens": 1,
+                       "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}},
+            "modelUsage": {{"claude-test": {{"contextWindow": 200000}}}},
+            "terminal_reason": "completed",
+        }}), flush=True)
+        continue
     if prompt == "fail":
         print(json.dumps({{
             "type": "assistant",
@@ -812,6 +886,10 @@ for raw in sys.stdin:
     }}), flush=True)
 "#,
             record_path = record_dir.join("argv.jsonl").display().to_string(),
+            sentinel_path = record_dir
+                .join("slow-completed.marker")
+                .display()
+                .to_string(),
         );
         make_fake_bin(dir, "claude", &script);
     }
@@ -951,7 +1029,7 @@ for raw in sys.stdin:
     }
 
     #[test]
-    fn unsupported_inspect_and_interrupt_fail_with_the_typed_error() {
+    fn unsupported_inspect_fails_with_the_typed_error() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_streaming_claude(&f.bin_dir, &f.record_dir);
@@ -967,8 +1045,150 @@ for raw in sys.stdin:
             })
             .unwrap();
 
-        assert!(unsupported_capability(&adapter.interrupt(&id).unwrap_err()).is_some());
         assert!(unsupported_capability(&adapter.inspect(&id).unwrap_err()).is_some());
+    }
+
+    fn wait_for_terminal_status(
+        adapter: &mut ClaudeManagerSession,
+        id: &GahSessionId,
+    ) -> TerminalStatus {
+        for _ in 0..300 {
+            let _ = adapter.stream(id);
+            if let Ok(Some(status)) = adapter.terminal_status(id) {
+                return status;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for a terminal status");
+    }
+
+    #[test]
+    fn capabilities_advertise_real_interrupt_support() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_streaming_claude(&f.bin_dir, &f.record_dir);
+        let adapter = ClaudeManagerSession::new_with_session_dir(
+            f.bin_dir.join("claude"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+        assert!(adapter.capabilities().interrupt);
+    }
+
+    #[test]
+    fn interrupt_kills_the_child_process_and_sticks_terminated_interrupted() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_streaming_claude(&f.bin_dir, &f.record_dir);
+        let sentinel = f.record_dir.join("slow-completed.marker");
+        let mut adapter = ClaudeManagerSession::new_with_session_dir(
+            f.bin_dir.join("claude"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+        let id = adapter
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "slow".into(),
+            })
+            .unwrap();
+
+        // Give the fake backend a moment to actually enter its sleep before
+        // interrupting, so this proves a real in-progress turn was killed
+        // rather than racing a turn that never started.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(adapter.terminal_status(&id).unwrap(), None);
+
+        adapter.interrupt(&id).unwrap();
+        assert_eq!(
+            adapter.terminal_status(&id).unwrap(),
+            Some(TerminalStatus::Interrupted)
+        );
+
+        // The fake backend only writes this sentinel after its multi-second
+        // sleep completes. If interrupt merely flipped a status flag without
+        // killing the process, the sentinel would still appear once that
+        // sleep elapses.
+        std::thread::sleep(Duration::from_millis(3_200));
+        assert!(
+            !sentinel.exists(),
+            "interrupt must terminate the real child process, not just relabel status"
+        );
+    }
+
+    #[test]
+    fn queued_turn_failure_remains_sticky_after_a_later_successful_turn() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_streaming_claude(&f.bin_dir, &f.record_dir);
+        let mut adapter = ClaudeManagerSession::new_with_session_dir(
+            f.bin_dir.join("claude"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+        let id = adapter
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "fail".into(),
+            })
+            .unwrap();
+        // Steer/queue a second turn before the first turn's failure has
+        // necessarily been observed -- this must not let the second turn's
+        // later success overwrite the first turn's failure.
+        adapter.send(&id, "should still be sticky failed").unwrap();
+
+        let TerminalStatus::Failed(message) = wait_for_terminal_status(&mut adapter, &id) else {
+            panic!("expected the queued turn's failure to remain the sticky terminal status");
+        };
+        assert!(message.contains("structured protocol failure"));
+
+        // Draining further updates and re-polling must not flip this back
+        // to Completed once the second (successful) turn's result arrives.
+        for _ in 0..20 {
+            let _ = adapter.stream(&id);
+            assert_eq!(
+                adapter.terminal_status(&id).unwrap(),
+                Some(TerminalStatus::Failed(message.clone()))
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn malformed_protocol_line_terminates_the_child_and_stays_sticky_failed() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_streaming_claude(&f.bin_dir, &f.record_dir);
+        let mut adapter = ClaudeManagerSession::new_with_session_dir(
+            f.bin_dir.join("claude"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+        let id = adapter
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "malformed".into(),
+            })
+            .unwrap();
+
+        let TerminalStatus::Failed(message) = wait_for_terminal_status(&mut adapter, &id) else {
+            panic!("expected the malformed protocol line to fail the session");
+        };
+        assert!(message.contains("parsing Claude stream-json event"));
+
+        // A well-formed success result was queued right behind the
+        // malformed line on the wire; it must never be allowed to surface,
+        // whether because the reader stopped forwarding after the bad line
+        // or because a sticky-failed session ignores later terminal events.
+        for _ in 0..20 {
+            let _ = adapter.stream(&id);
+            assert_eq!(
+                adapter.terminal_status(&id).unwrap(),
+                Some(TerminalStatus::Failed(message.clone())),
+                "must never observe the trailing well-formed success result"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
