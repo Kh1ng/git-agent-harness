@@ -59,8 +59,12 @@ fn detached_capture_holder_fails_closed_before_app_server_start() {
     let result = CodexManagerSession::new_with_session_dir_and_timeout(
         f.bin_dir.join("codex"),
         f.record_dir.join("sessions"),
-        Duration::from_millis(500),
+        Duration::from_secs(2),
     );
+    let error = result
+        .err()
+        .expect("an escaped capture holder must fail construction");
+    assert!(format!("{error:#}").contains("capture pipe remained open"));
     let pid: libc::pid_t = fs::read_to_string(f.record_dir.join("detached-helper.pid"))
         .unwrap()
         .trim()
@@ -70,11 +74,7 @@ fn detached_capture_holder_fails_closed_before_app_server_start() {
     // This deliberately adversarial fixture escaped the trusted helper's
     // process group; production fails closed, and the test owns its teardown.
     unsafe { libc::kill(pid, libc::SIGKILL) };
-    let error = result
-        .err()
-        .expect("an escaped capture holder must fail construction");
 
-    assert!(format!("{error:#}").contains("capture pipe remained open"));
     assert!(!f.record_dir.join("requests.jsonl").exists());
 }
 
