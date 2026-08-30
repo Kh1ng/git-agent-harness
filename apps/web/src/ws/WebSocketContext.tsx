@@ -263,9 +263,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
             case 'server.ping':
               break;
 
-            case 'error':
-              setError(message.error);
-              break;
           }
         } catch (error) {
           console.error('Failed to parse WebSocket message:', error);

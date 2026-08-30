@@ -240,6 +240,8 @@ test('the composer steers the active turn while Stop remains available, then can
   await composer.press('Enter');
   await expect(page.getByText('Steering failed: backend cannot steer')).toBeVisible();
   await expect(page.getByText('rejected direction', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('status').filter({ hasText: /^Live/ })).toBeVisible();
+  await expect(page.getByText(/Connection error:/)).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Stop' }).click();
   await expect.poll(() => cancelMessage?.profile).toBe('alpha');
