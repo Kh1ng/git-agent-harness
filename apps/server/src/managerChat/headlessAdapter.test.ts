@@ -174,6 +174,7 @@ test('AGY advertises its live model catalog and native reasoning efforts', async
   const originalPath = process.env.PATH;
   try {
     writeFileSync(join(dir, 'agy'), `#!/bin/sh
+cat >/dev/null
 printf 'Fetching available models...\\ngemini-3.7-flash-high\\tGemini 3.7 Flash (High)\\nclaude-sonnet-4-6\\tClaude Sonnet 4.6 (Thinking)\\n'
 `, { mode: 0o755 });
     process.env.PATH = `${dir}:${originalPath}`;
