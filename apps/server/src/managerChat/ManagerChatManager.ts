@@ -702,8 +702,10 @@ export function enqueueManagerWake(profile: string, backend: string, message: st
   // queue below owns ordering; each adapter owns its stable provider session
   // for this profile, so a second wake cannot start a competing process.
   resolveAdapter(backend);
-  void sendManagerChatMessage(profile, message, `wake-${randomUUID()}`, undefined, backend)
-    .catch((error) => console.error('[managerChat] wake failed:', profile, backend, error));
+  const requestId = `wake-${randomUUID()}`;
+  void sendManagerChatMessage(profile, message, requestId, undefined, backend)
+    .catch((error) => console.error('[managerChat] wake failed:', profile, backend, error))
+    .finally(() => updatedPublisher?.({ type: 'manager.chat.updated', requestId, profile }));
 }
 
 export function sendManagerChatMessage(
