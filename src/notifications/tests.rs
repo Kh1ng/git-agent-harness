@@ -684,43 +684,32 @@ fn wake_instruction_human_required_includes_reason_and_reference() {
     assert!(instruction.contains("[code=merge_policy]"));
 }
 
-// ── manager wake integration (real spawn via a fake `claude` binary) ──
+// ── manager wake integration (issue #819: durable session dispatch) ───
 
-fn make_fake_wake_bin(dir: &std::path::Path, name: &str, capture: &std::path::Path) {
-    std::fs::create_dir_all(dir).unwrap();
-    let path = dir.join(name);
-    std::fs::write(
-        &path,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$2\" > '{}'\n",
-            capture.display()
-        ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
-    }
+#[test]
+fn manager_wake_url_targets_the_central_chat_api() {
+    assert_eq!(
+        manager_wake_url("http://127.0.0.1:3773").unwrap(),
+        "http://127.0.0.1:3773/api/manager-chat/wake"
+    );
+    assert_eq!(
+        manager_wake_url("https://central.example/base/").unwrap(),
+        "https://central.example/base/api/manager-chat/wake"
+    );
 }
 
 #[test]
 fn notify_event_wakes_configured_manager_when_autonomy_set() {
-    let _exec_guard = crate::test_support::ExecGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    let bin_dir = tmp.path().join("bin");
-    let capture = tmp.path().join("captured-instruction.txt");
-    make_fake_wake_bin(&bin_dir, "claude", &capture);
-    let _path_guard = crate::test_support::PathGuard::set(&bin_dir);
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let mut profile = crate::config::tests::test_profile_for_notifications();
     profile.manager_wake_autonomy = WakeAutonomy::Full;
     let mut cfg = test_gah_config(Some("claude"));
     cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
 
-    notify_event(
+    let captured = calls.clone();
+    notify_event_with_enqueue(
         &cfg,
         &profile,
         NotifyEvent::MrCreated {
@@ -729,23 +718,23 @@ fn notify_event_wakes_configured_manager_when_autonomy_set() {
             backend: "codex",
             model: "gpt",
         },
+        move |manager, repo_id, instruction, log_path| {
+            captured.lock().unwrap().push((
+                manager.to_string(),
+                repo_id.to_string(),
+                instruction.to_string(),
+                log_path.to_path_buf(),
+            ));
+            Ok(())
+        },
     );
 
-    // Fire-and-forget: give the fake binary a moment to write its capture.
-    for _ in 0..50 {
-        if capture.exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let got = std::fs::read_to_string(&capture).unwrap_or_default();
-    assert!(
-        got.contains("https://example.com/mr/9"),
-        "expected woken claude to receive the instruction, got: {got:?}"
-    );
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "claude");
+    assert_eq!(calls[0].1, profile.repo_id);
+    assert!(calls[0].2.contains("https://example.com/mr/9"));
 
-    // The audit log (this fix's whole point) must exist and contain the
-    // instruction -- a wake must never again be unobservable.
     let log_dir = cfg.defaults.manager_wake_log_dir();
     let log_entries: Vec<_> = std::fs::read_dir(&log_dir)
         .unwrap_or_else(|err| panic!("expected log dir {log_dir:?} to exist: {err:#}"))
@@ -758,41 +747,29 @@ fn notify_event_wakes_configured_manager_when_autonomy_set() {
     let log_contents = std::fs::read_to_string(log_entries[0].as_ref().unwrap().path())
         .expect("read wake log file");
     assert!(
+        log_contents.contains("claude"),
+        "expected wake log to record the manager, got: {log_contents:?}"
+    );
+    assert!(
+        log_contents.contains(&profile.display_name),
+        "expected wake log to record the display name, got: {log_contents:?}"
+    );
+    assert!(
+        log_contents.contains(&profile.repo_id),
+        "expected wake log to record the stable repo id, got: {log_contents:?}"
+    );
+    assert!(
         log_contents.contains("https://example.com/mr/9"),
         "expected wake log to record the instruction, got: {log_contents:?}"
     );
 }
 
-/// Regression: the spawned manager-wake child must actually be reaped,
-/// not left as a `[claude] <defunct>` zombie under the still-running
-/// caller. The fake binary reports its own pid before exiting; once it
-/// has exited we poll `/proc/<pid>` -- a reaped process's entry
-/// disappears entirely, while an un-waited zombie keeps a `Z` (zombie)
-/// stat entry around indefinitely (until *this test process* exits).
 #[test]
-#[cfg(target_os = "linux")]
-fn notify_event_manager_wake_does_not_leave_a_zombie() {
-    let _exec_guard = crate::test_support::ExecGuard::new();
+fn notify_event_does_not_wake_when_autonomy_off() {
     let tmp = tempfile::tempdir().unwrap();
-    let bin_dir = tmp.path().join("bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
-    let pid_file = tmp.path().join("child.pid");
-    let bin_path = bin_dir.join("claude");
-    std::fs::write(
-        &bin_path,
-        format!("#!/bin/sh\necho $$ > '{}'\nexit 0\n", pid_file.display()),
-    )
-    .unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&bin_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&bin_path, perms).unwrap();
-    }
-    let _path_guard = crate::test_support::PathGuard::set(&bin_dir);
 
-    let mut profile = crate::config::tests::test_profile_for_notifications();
-    profile.manager_wake_autonomy = WakeAutonomy::Full;
+    // Default profile has manager_wake_autonomy == Off.
+    let profile = crate::config::tests::test_profile_for_notifications();
     let mut cfg = test_gah_config(Some("claude"));
     cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
 
@@ -807,92 +784,24 @@ fn notify_event_manager_wake_does_not_leave_a_zombie() {
         },
     );
 
-    // Wait for the fake binary to report its pid and exit.
-    let mut pid = None;
-    for _ in 0..100 {
-        if let Ok(text) = std::fs::read_to_string(&pid_file) {
-            if let Ok(p) = text.trim().parse::<i32>() {
-                pid = Some(p);
-                break;
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let pid = pid.expect("fake claude binary never reported its pid");
-
-    // Give the background reaper thread a moment to call wait() after
-    // the child exits, then confirm the process is fully gone -- not
-    // lingering as a zombie (stat state 'Z').
-    let proc_path = format!("/proc/{pid}");
-    let mut reaped = false;
-    for _ in 0..100 {
-        match std::fs::read_to_string(format!("{proc_path}/stat")) {
-            Ok(stat) if stat.contains(") Z ") => {
-                // still a zombie, keep polling
-            }
-            Ok(_) => {
-                // Unlikely (would mean the pid got reused already), but
-                // not a zombie either way -- treat as reaped.
-                reaped = true;
-                break;
-            }
-            Err(_) => {
-                reaped = true; // /proc entry gone entirely: fully reaped
-                break;
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    let log_dir = cfg.defaults.manager_wake_log_dir();
     assert!(
-        reaped,
-        "expected child pid {pid} to be reaped (no zombie), but {proc_path} is still a zombie"
-    );
-}
-
-#[test]
-fn notify_event_does_not_wake_when_autonomy_off() {
-    let _exec_guard = crate::test_support::ExecGuard::new();
-    let tmp = tempfile::tempdir().unwrap();
-    let bin_dir = tmp.path().join("bin");
-    let capture = tmp.path().join("captured-instruction.txt");
-    make_fake_wake_bin(&bin_dir, "claude", &capture);
-    let _path_guard = crate::test_support::PathGuard::set(&bin_dir);
-
-    // Default profile has manager_wake_autonomy == Off.
-    let profile = crate::config::tests::test_profile_for_notifications();
-    let cfg = test_gah_config(Some("claude"));
-
-    notify_event(
-        &cfg,
-        &profile,
-        NotifyEvent::MrCreated {
-            url: "https://example.com/mr/9",
-            work_id: "WORK-9",
-            backend: "codex",
-            model: "gpt",
-        },
-    );
-
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    assert!(
-        !capture.exists(),
-        "autonomy Off must never spawn the manager wake"
+        std::fs::read_dir(&log_dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true),
+        "autonomy Off must never attempt a manager wake"
     );
 }
 
 #[test]
 fn notify_event_does_not_wake_when_current_manager_unset() {
-    let _exec_guard = crate::test_support::ExecGuard::new();
     let tmp = tempfile::tempdir().unwrap();
-    let bin_dir = tmp.path().join("bin");
-    let capture = tmp.path().join("captured-instruction.txt");
-    make_fake_wake_bin(&bin_dir, "claude", &capture);
-    let _path_guard = crate::test_support::PathGuard::set(&bin_dir);
 
     let mut profile = crate::config::tests::test_profile_for_notifications();
     profile.manager_wake_autonomy = WakeAutonomy::Full;
     // No current_manager configured at all.
-    let cfg = test_gah_config(None);
+    let mut cfg = test_gah_config(None);
+    cfg.defaults.artifact_root = tmp.path().to_string_lossy().to_string();
 
     notify_event(
         &cfg,
@@ -905,9 +814,11 @@ fn notify_event_does_not_wake_when_current_manager_unset() {
         },
     );
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let log_dir = cfg.defaults.manager_wake_log_dir();
     assert!(
-        !capture.exists(),
-        "autonomy set but no current_manager configured must not spawn a wake"
+        std::fs::read_dir(&log_dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true),
+        "autonomy set but no current_manager configured must not attempt a wake"
     );
 }

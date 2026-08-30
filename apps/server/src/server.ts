@@ -75,7 +75,8 @@ import {
   listChatIssuesForProfile as listManagerChatIssues,
   startChatFromIssue as startManagerChatFromIssue,
   listChatPrsForProfile as listManagerChatPrs,
-  startChatFromPr as startManagerChatFromPr
+  startChatFromPr as startManagerChatFromPr,
+  enqueueManagerWake as enqueueManagerChatWake
 } from './managerChat/ManagerChatManager.js';
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
@@ -252,6 +253,7 @@ export function createServer(
   // same auth gate as registry/claims/settings, plus an explicit opt-in env
   // flag so this surface doesn't exist at all unless an operator enables it.
   app.use('/api/admin', authMiddleware);
+  app.use('/api/manager-chat/wake', authMiddleware);
   app.use('/api/admin', (req, res, next) => {
     if (process.env.GAH_ENABLE_ADMIN_UPDATE !== '1') {
       return res.status(404).json({
@@ -1100,10 +1102,8 @@ export function createServer(
 
   // Manager Chat backend selection: a default backend plus optional
   // per-profile overrides. Deliberately separate from `current_manager`
-  // above -- that field drives the autonomous manager-wake notification
-  // path (fire-and-forget, no session continuity, free-text with no
-  // validation against a known backend list) and could reasonably diverge
-  // from which backend answers the interactive chat page.
+  // above -- that field selects the backend for autonomous wakes, while this
+  // setting selects the backend for ordinary interactive chat turns.
   app.get('/api/manager-chat/settings', (_req, res) => {
     res.json({ ...readManagerChatSettings(), availableBackends: listManagerBackends() });
   });
@@ -1126,6 +1126,33 @@ export function createServer(
     } catch (error) {
       res.status(400).json({
         error: 'Failed to update manager chat settings',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/manager-chat/wake', async (req, res) => {
+    const manager = typeof req.body?.manager === 'string' ? req.body.manager : '';
+    const repoId = typeof req.body?.repoId === 'string' ? req.body.repoId : '';
+    const instruction = typeof req.body?.instruction === 'string' ? req.body.instruction : '';
+    if (!manager || !repoId || !instruction) {
+      res.status(400).json({ error: 'Missing required fields: manager, repoId, instruction' });
+      return;
+    }
+    try {
+      const matches = (await listProfiles()).filter((profile) => profile.repo_id === repoId);
+      if (matches.length !== 1) {
+        res.status(matches.length === 0 ? 404 : 409).json({
+          error: matches.length === 0 ? 'Profile not found' : 'Ambiguous repoId',
+          message: `Expected one profile for repoId '${repoId}', found ${matches.length}`
+        });
+        return;
+      }
+      enqueueManagerChatWake(matches[0].name, manager, instruction);
+      res.status(202).json({ accepted: true, profile: matches[0].name });
+    } catch (error) {
+      res.status(400).json({
+        error: 'Failed to enqueue manager wake',
         message: error instanceof Error ? error.message : String(error)
       });
     }

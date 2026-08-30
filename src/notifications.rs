@@ -22,8 +22,8 @@
 //! requires a human to notice it and go start/resume a manager agent
 //! session. When a profile explicitly opts in via `manager_wake_autonomy`
 //! and `Defaults::current_manager` names a known agent CLI, GAH
-//! additionally spawns that CLI headlessly (fire-and-forget, background)
-//! with an instruction built from the same event -- so the next actionable
+//! additionally queues an instruction on that profile's durable manager
+//! session -- so the next actionable
 //! event (MR ready, human required, etc.) can get picked up without the
 //! operator being the one to trigger it. `WakeAutonomy::Full` (unsupervised
 //! merge authority) requires the operator to explicitly opt a specific
@@ -33,6 +33,7 @@
 
 use crate::config::{GahConfig, Profile, WakeAutonomy};
 use crate::events;
+use anyhow::Context;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -383,144 +384,111 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
     Some(format!("[gah manager wake] {context} {action}"))
 }
 
-/// Spawn the configured manager CLI headlessly (fire-and-forget, background)
-/// with `instruction` passed as a single argv argument -- never shell-
-/// interpolated, so there is no quoting/injection concern. stdout/stderr are
-/// captured to a timestamped audit log under `log_dir` (see
-/// `Defaults::manager_wake_log_dir`), not discarded, so a wake is always
-/// inspectable after the fact. Live-hit: the first real wake (autonomy Full)
-/// ran completely unobserved -- stdout/stderr both went to `/dev/null`, so
-/// there was no way to see what an unsupervised headless agent instance
-/// actually did or why it might be making network connections, right when
-/// an operator was specifically asking about unexpected outbound traffic.
-/// Any failure to spawn is logged to stderr and swallowed, exactly like
-/// `run_notify_command`: this must never fail the caller's dispatch/loop.
-fn spawn_manager_wake(manager: &str, instruction: &str, log_dir: &std::path::Path) {
-    use std::io::{Read, Write};
-    use std::process::{Command, Stdio};
-    use std::sync::{Arc, Mutex};
-
-    fn copy_redacted_manager_output<R: Read>(mut reader: R, log: Arc<Mutex<std::fs::File>>) {
-        let mut buf = [0_u8; 8192];
-        let mut pending = Vec::new();
-        while let Ok(read) = reader.read(&mut buf) {
-            if read == 0 {
-                break;
-            }
-            pending.extend_from_slice(&buf[..read]);
-            while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
-                let line: Vec<_> = pending.drain(..=newline).collect();
-                if let Ok(mut file) = log.lock() {
-                    let _ = file.write_all(
-                        crate::redact::redact(&String::from_utf8_lossy(&line)).as_bytes(),
-                    );
-                }
-            }
-        }
-        if !pending.is_empty() {
-            if let Ok(mut file) = log.lock() {
-                let _ = file.write_all(
-                    crate::redact::redact(&String::from_utf8_lossy(&pending)).as_bytes(),
-                );
-            }
-        }
-    }
-
-    let mut cmd = match manager {
-        "claude" => {
-            let mut c = Command::new("claude");
-            c.arg("-p").arg(instruction);
-            c
-        }
-        "codex" => {
-            let mut c = Command::new("codex");
-            c.arg("exec").arg(instruction);
-            c
-        }
-        "hermes" => {
-            let mut c = Command::new("hermes");
-            c.args([
-                "-p",
-                "gah-manager",
-                "chat",
-                "--worktree",
-                "-Q",
-                "-q",
-                instruction,
-            ]);
-            c
-        }
-        other => {
-            eprintln!("[gah] manager_wake: unknown current_manager '{other}', skipping wake");
-            return;
-        }
-    };
+/// Enqueue `instruction` onto the control-plane server's durable project
+/// chat (issue #819), replacing the old one-shot `spawn_manager_wake` that
+/// spawned a competing process on every wake. Delivery is a bounded local or
+/// central HTTP request; failures are swallowed so they never fail dispatch.
+///
+/// The instruction is still recorded to a timestamped file under `log_dir`
+/// (see `Defaults::manager_wake_log_dir`) before dispatch, regardless of
+/// whether the server accepts the wake -- preserving this
+/// file's whole reason for existing (see the incident noted below): a wake
+/// must never again be unobservable.
+///
+/// Live-hit (2026-07): the first real wake (autonomy Full) ran completely
+/// unobserved -- stdout/stderr both went to `/dev/null`, so there was no way
+/// to see what an unsupervised headless agent instance actually did or why
+/// it might be making network connections, right when an operator was
+/// specifically asking about unexpected outbound traffic.
+fn wake_manager_session_with<F>(
+    manager: &str,
+    display_name: &str,
+    repo_id: &str,
+    instruction: &str,
+    log_dir: &std::path::Path,
+    enqueue: F,
+) where
+    F: FnOnce(&str, &str, &str, &std::path::Path) -> anyhow::Result<()>,
+{
+    use std::io::Write;
 
     if let Err(err) = std::fs::create_dir_all(log_dir) {
         eprintln!("[gah] manager_wake: failed to create log dir (swallowed): {err:#}");
     }
     let ts = time::OffsetDateTime::now_utc().unix_timestamp();
-    let log_path = log_dir.join(format!("{ts}-{}-{manager}.log", std::process::id()));
-
-    let log_file = match std::fs::File::create(&log_path) {
-        Ok(mut log_file) => {
-            let _ = writeln!(log_file, "instruction: {instruction}\n---");
-            Some(Arc::new(Mutex::new(log_file)))
-        }
-        Err(err) => {
-            eprintln!(
-                "[gah] manager_wake: failed to open log file {} (swallowed, output will be discarded): {err:#}",
-                log_path.display()
-            );
-            None
-        }
-    };
-    cmd.stdin(Stdio::null());
-    if log_file.is_some() {
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    } else {
-        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    let log_path = log_dir.join(format!(
+        "{ts}-{}-{}.log",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let audit = options.open(&log_path).and_then(|mut file| {
+        writeln!(
+            file,
+            "manager: {manager}\nrepo_id: {repo_id}\ndisplay_name: {display_name}\ninstruction: {instruction}"
+        )
+    });
+    if let Err(err) = audit {
+        eprintln!(
+            "[gah] manager_wake: failed to write audit log {} (swallowed): {err:#}",
+            log_path.display()
+        );
     }
 
-    // Deliberately fire-and-forget: this must not block the dispatch/loop
-    // that triggered it. But `gah loop` (unlike a one-shot `--once` call) is
-    // a long-running daemon that can keep running for hours after this --
-    // it does NOT exit soon after, so the child is never reparented to init
-    // for reaping. Dropping the `Child` handle without ever waiting on it
-    // left it as a `[claude] <defunct>` zombie, owned by the still-running
-    // gah loop process, until that process itself eventually exited. A
-    // background thread that just waits on it keeps this non-blocking for
-    // the caller while still reaping the child whenever it finishes.
-    match cmd.spawn() {
-        Ok(mut child) => {
-            let stdout = child.stdout.take();
-            let stderr = child.stderr.take();
-            std::thread::spawn(move || {
-                let stdout_thread = stdout.and_then(|stream| {
-                    log_file.as_ref().map(|log| {
-                        let log = Arc::clone(log);
-                        std::thread::spawn(move || copy_redacted_manager_output(stream, log))
-                    })
-                });
-                let stderr_thread = stderr.and_then(|stream| {
-                    log_file.as_ref().map(|log| {
-                        let log = Arc::clone(log);
-                        std::thread::spawn(move || copy_redacted_manager_output(stream, log))
-                    })
-                });
-                let _ = child.wait();
-                if let Some(thread) = stdout_thread {
-                    let _ = thread.join();
-                }
-                if let Some(thread) = stderr_thread {
-                    let _ = thread.join();
-                }
-            });
-        }
-        Err(err) => {
-            eprintln!("[gah] manager_wake: failed to spawn '{manager}' (swallowed): {err:#}");
-        }
+    if let Err(err) = enqueue(manager, repo_id, instruction, &log_path) {
+        eprintln!("[gah] manager_wake failed (swallowed): {err:#}");
     }
+}
+
+fn manager_wake_url(central_url: &str) -> anyhow::Result<String> {
+    let mut url = url::Url::parse(central_url).context("parsing registry_central_url")?;
+    url.set_path(&format!(
+        "{}/api/manager-chat/wake",
+        url.path().trim_end_matches('/')
+    ));
+    url.set_query(None);
+    Ok(url.to_string())
+}
+
+fn enqueue_manager_wake(
+    cfg: &GahConfig,
+    manager: &str,
+    repo_id: &str,
+    instruction: &str,
+) -> anyhow::Result<()> {
+    let central_url = cfg
+        .defaults
+        .registry_central_url
+        .as_deref()
+        .unwrap_or("http://127.0.0.1:3773");
+    let body = json!({
+        "manager": manager,
+        "repoId": repo_id,
+        "instruction": instruction,
+    })
+    .to_string();
+    let token = std::env::var("COORDINATOR_TOKEN").ok();
+    let response = crate::curl_http::request(
+        "POST",
+        &manager_wake_url(central_url)?,
+        Some(&body),
+        token.as_deref(),
+        5,
+    )?;
+    if response.status != 202 {
+        anyhow::bail!(
+            "manager chat wake API returned {}: {}",
+            response.status,
+            crate::redact::redact(&String::from_utf8_lossy(&response.body))
+        );
+    }
+    Ok(())
 }
 
 fn format_attempt_count(attempt_count: Option<u32>) -> String {
@@ -1000,6 +968,20 @@ pub(crate) fn notify_terminal_failure_resolved_with_run_id(
 /// error from either path is logged to stderr and swallowed so the
 /// caller's flow continues exactly as if no hook existed.
 pub fn notify_event(cfg: &GahConfig, profile: &Profile, event: NotifyEvent) {
+    notify_event_with_enqueue(
+        cfg,
+        profile,
+        event,
+        |manager, repo_id, instruction, _log_path| {
+            enqueue_manager_wake(cfg, manager, repo_id, instruction)
+        },
+    );
+}
+
+fn notify_event_with_enqueue<F>(cfg: &GahConfig, profile: &Profile, event: NotifyEvent, enqueue: F)
+where
+    F: FnOnce(&str, &str, &str, &std::path::Path) -> anyhow::Result<()>,
+{
     if let Some(command) = &profile.notify_command {
         let message = crate::redact::redact(&format_message(&event));
         if let Err(err) = run_notify_command(command, &message) {
@@ -1027,7 +1009,14 @@ pub fn notify_event(cfg: &GahConfig, profile: &Profile, event: NotifyEvent) {
     if let Some(instruction) = format_wake_instruction(&event, profile.manager_wake_autonomy) {
         let instruction = crate::redact::redact(&instruction);
         if let Some(manager) = cfg.defaults.current_manager.as_deref() {
-            spawn_manager_wake(manager, &instruction, &cfg.defaults.manager_wake_log_dir());
+            wake_manager_session_with(
+                manager,
+                &profile.display_name,
+                &profile.repo_id,
+                &instruction,
+                &cfg.defaults.manager_wake_log_dir(),
+                enqueue,
+            );
         }
     }
 }

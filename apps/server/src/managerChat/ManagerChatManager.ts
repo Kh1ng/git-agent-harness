@@ -43,6 +43,7 @@ import {
 } from './chatSessions.js';
 import { previewProxy, detectDevPort } from './previewProxy.js';
 import { runProfileList } from '../gahCli.js';
+import { randomUUID } from 'node:crypto';
 import type { ChatSessionEvent, ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
 
@@ -696,14 +697,29 @@ export async function respondManagerChatPermission(
   return true;
 }
 
-export function sendManagerChatMessage(profile: string, message: string, requestId?: string, sessionId?: string): Promise<ManagerChatTurnResult> {
+export function enqueueManagerWake(profile: string, backend: string, message: string): void {
+  // Validate before acknowledging the HTTP request. The durable project
+  // queue below owns ordering; each adapter owns its stable provider session
+  // for this profile, so a second wake cannot start a competing process.
+  resolveAdapter(backend);
+  void sendManagerChatMessage(profile, message, `wake-${randomUUID()}`, undefined, backend)
+    .catch((error) => console.error('[managerChat] wake failed:', profile, backend, error));
+}
+
+export function sendManagerChatMessage(
+  profile: string,
+  message: string,
+  requestId?: string,
+  sessionId?: string,
+  backendOverride?: string
+): Promise<ManagerChatTurnResult> {
   // Session-bound turns (WP2): resolve the session's worktree cwd (re-
   // materializing it from the branch if prune reclaimed the idle worktree)
   // and serve the turn from the session's own backend. Unknown or archived
   // sessions fail loudly rather than silently landing in the default log.
   const prepareSession = async (): Promise<{ cwd?: string; backend: string; model?: string | null; reasoningEffort?: string | null }> => {
     if (!sessionId || sessionId === 'default') {
-      return { backend: backendForProfile(profile) };
+      return { backend: backendOverride ?? backendForProfile(profile) };
     }
     const profileInfo = await findProfileInfo(profile);
     if (!profileInfo) {
