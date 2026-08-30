@@ -2,6 +2,8 @@ use super::*;
 use crate::runner::backends::test_util::{fixture, make_fake_bin};
 use std::time::{Duration, Instant};
 
+mod protocol;
+
 fn wait_for_updates(session: &mut CodexManagerSession, id: &GahSessionId) -> Vec<SessionUpdate> {
     for _ in 0..100 {
         let updates = session.stream(id).unwrap();
@@ -167,6 +169,31 @@ turn_counter = 0
 interrupted_turns = set()
 
 def run_turn(thread_id, turn_id, text):
+    malformed_terminal = {{
+        "completed-missing-id": {{"status": "completed", "error": None}},
+        "completed-missing-status": {{"id": turn_id, "error": None}},
+        "completed-unknown-status": {{"id": turn_id, "status": "mystery", "error": None}},
+    }}
+    if text in malformed_terminal:
+        emit({{
+            "method": "turn/completed",
+            "params": {{"threadId": thread_id, "turn": malformed_terminal[text]}},
+        }})
+        emit({{
+            "method": "turn/completed",
+            "params": {{"threadId": thread_id, "turn": {{"id": turn_id, "status": "completed", "error": None}}}},
+        }})
+        return
+    if text == "incomplete-error":
+        emit({{
+            "method": "error",
+            "params": {{"threadId": thread_id, "turnId": turn_id, "willRetry": False, "error": {{}}}},
+        }})
+        emit({{
+            "method": "turn/completed",
+            "params": {{"threadId": thread_id, "turn": {{"id": turn_id, "status": "completed", "error": None}}}},
+        }})
+        return
     if text == "malformed-output":
         with lock:
             print("{{not-json", flush=True)
@@ -220,7 +247,9 @@ with open(record, "a", encoding="utf-8") as fh:
         req_id = msg.get("id")
 
         if method == "initialize":
-            if os.path.exists(os.path.join(record_dir, "reject-initialize")):
+            if os.path.exists(os.path.join(record_dir, "silent-initialize")):
+                time.sleep(3)
+            elif os.path.exists(os.path.join(record_dir, "reject-initialize")):
                 emit({{"jsonrpc": "2.0", "id": req_id, "error": {{"code": -32000, "message": "initialize rejected"}}}})
             elif os.path.exists(os.path.join(record_dir, "close-stdin-after-initialize")):
                 os.close(0)
@@ -237,7 +266,9 @@ with open(record, "a", encoding="utf-8") as fh:
             emit({{"jsonrpc": "2.0", "id": req_id, "result": {{"thread": {{"id": thread_id}}}}}})
         elif method == "thread/resume":
             thread_id = msg["params"]["threadId"]
-            if thread_id == "thread-fail":
+            if os.path.exists(os.path.join(record_dir, "silent-resume")):
+                time.sleep(3)
+            elif thread_id == "thread-fail":
                 emit({{"jsonrpc": "2.0", "id": req_id, "error": {{"code": -32000, "message": "resume failed"}}}})
             else:
                 emit({{"jsonrpc": "2.0", "id": req_id, "result": {{"thread": {{"id": thread_id}}}}}})
@@ -246,7 +277,9 @@ with open(record, "a", encoding="utf-8") as fh:
             turn_id = "turn-" + str(turn_counter)
             thread_id = msg["params"]["threadId"]
             text = msg["params"]["input"][0]["text"]
-            if text == "lost-response":
+            if text == "silent-response":
+                time.sleep(3)
+            elif text == "lost-response":
                 threading.Thread(target=mark_survival, args=(lost_response_sentinel,), daemon=True).start()
                 os.close(1)
                 time.sleep(3)
@@ -600,7 +633,10 @@ fn failed_initial_turn_cleanup_retains_recovery_mapping_and_state() {
     assert!(error.contains("recovery mapping retained"));
     assert!(error.contains("termination failure"));
     let (id, state) = session.sessions.iter().next().unwrap();
-    assert_eq!(state.status, SessionStatus::Idle);
+    assert!(matches!(
+        state.status,
+        SessionStatus::Terminated(TerminalStatus::Failed(_))
+    ));
     assert!(state.active_turn_id.is_none());
     assert!(mapping_path(&session_dir, id).exists());
 }
@@ -658,6 +694,130 @@ fn lost_idle_follow_up_response_stops_remote_work() {
     assert_failed_session_is_observable(&mut session, &id);
     drop(session);
     assert_restart_resumes_mapping(&executable, &session_dir, &id);
+}
+
+#[test]
+fn failed_idle_follow_up_cleanup_marks_ambiguous_failure_and_keeps_mapping() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let executable = f.bin_dir.join("codex");
+    let session_dir = f.record_dir.join("sessions");
+    let mut session = CodexManagerSession::new_with_session_dir(&executable, &session_dir).unwrap();
+    let id = session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "hello".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&mut session, &id),
+        TerminalStatus::Completed
+    );
+    session.transport.fail_terminate = true;
+
+    let error = session.send(&id, "lost-response").unwrap_err();
+    assert!(error.to_string().contains("termination failure"));
+    assert!(matches!(
+        session.sessions[&id].status,
+        SessionStatus::Terminated(TerminalStatus::Failed(_))
+    ));
+    assert!(session.sessions[&id].active_turn_id.is_none());
+    assert!(mapping_path(&session_dir, &id).exists());
+
+    assert_failed_session_is_observable(&mut session, &id);
+    drop(session);
+    assert_restart_resumes_mapping(&executable, &session_dir, &id);
+}
+
+#[test]
+fn cleanup_error_after_transport_shutdown_fails_all_sessions() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let executable = f.bin_dir.join("codex");
+    let session_dir = f.record_dir.join("sessions");
+    let mut session = CodexManagerSession::new_with_session_dir(&executable, &session_dir).unwrap();
+    let trigger = session
+        .start(StartRequest {
+            profile: "trigger".into(),
+            instruction: "hello".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&mut session, &trigger),
+        TerminalStatus::Completed
+    );
+    let sibling = session
+        .start(StartRequest {
+            profile: "sibling".into(),
+            instruction: "slow".into(),
+        })
+        .unwrap();
+    drain_all_pending(&mut session, &sibling);
+    session.transport.fail_terminate_after_shutdown = true;
+
+    let error = session.send(&trigger, "lost-response").unwrap_err();
+    assert!(error.to_string().contains("descendant cleanup failure"));
+    assert!(session.transport.terminated);
+    assert_failed_session_is_observable(&mut session, &trigger);
+    assert_failed_session_is_observable(&mut session, &sibling);
+    assert!(mapping_path(&session_dir, &trigger).exists());
+    assert!(mapping_path(&session_dir, &sibling).exists());
+}
+
+#[test]
+fn shared_transport_teardown_fails_every_nonterminal_session() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let executable = f.bin_dir.join("codex");
+    let session_dir = f.record_dir.join("sessions");
+    let mut session = CodexManagerSession::new_with_session_dir(&executable, &session_dir).unwrap();
+
+    let trigger = session
+        .start(StartRequest {
+            profile: "trigger".into(),
+            instruction: "hello".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&mut session, &trigger),
+        TerminalStatus::Completed
+    );
+    let idle_sibling = session
+        .start(StartRequest {
+            profile: "idle-sibling".into(),
+            instruction: "hello".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&mut session, &idle_sibling),
+        TerminalStatus::Completed
+    );
+    session.resume(&idle_sibling).unwrap();
+    assert_eq!(session.inspect(&idle_sibling).unwrap(), SessionStatus::Idle);
+    let working_sibling = session
+        .start(StartRequest {
+            profile: "working-sibling".into(),
+            instruction: "slow".into(),
+        })
+        .unwrap();
+    drain_all_pending(&mut session, &working_sibling);
+    assert_eq!(
+        session.inspect(&working_sibling).unwrap(),
+        SessionStatus::Working
+    );
+
+    assert!(session.send(&trigger, "lost-response").is_err());
+    for id in [&trigger, &idle_sibling, &working_sibling] {
+        assert_failed_session_is_observable(&mut session, id);
+    }
+    drop(session);
+
+    for id in [&idle_sibling, &working_sibling] {
+        assert_restart_resumes_mapping(&executable, &session_dir, id);
+    }
 }
 
 #[test]
@@ -853,7 +1013,10 @@ fn failed_steer_cleanup_preserves_recovery_state_and_mapping() {
 
     let error = session.send(&id, "lost-steer-response").unwrap_err();
     assert!(error.to_string().contains("termination failure"));
-    assert_eq!(session.sessions[&id].status, SessionStatus::Working);
+    assert!(matches!(
+        session.sessions[&id].status,
+        SessionStatus::Terminated(TerminalStatus::Failed(_))
+    ));
     assert_eq!(session.sessions[&id].active_turn_id, active_turn);
     assert!(mapping_path(&session_dir, &id).exists());
 }
@@ -1122,6 +1285,7 @@ fn failed_restart_resume_does_not_unlock_send() {
         CodexManagerSession::new_with_session_dir(f.bin_dir.join("codex"), &session_dir).unwrap();
 
     assert!(restarted.resume(&id).is_err());
+    assert!(!restarted.transport.terminated);
     assert!(restarted
         .send(&id, "must not bypass resume")
         .unwrap_err()

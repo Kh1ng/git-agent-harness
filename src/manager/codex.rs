@@ -50,10 +50,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::thread;
+use std::time::Duration;
 
 const CLIENT_NAME: &str = "git-agent-harness";
+const RPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Serialize, Deserialize)]
 struct DurableThreadMapping {
@@ -227,10 +229,13 @@ struct CodexTransport {
     messages: Receiver<std::result::Result<Value, String>>,
     next_id: u64,
     terminated: bool,
+    response_timeout: Duration,
     #[cfg(test)]
     fail_request: Option<&'static str>,
     #[cfg(test)]
     fail_terminate: bool,
+    #[cfg(test)]
+    fail_terminate_after_shutdown: bool,
 }
 
 impl CodexTransport {
@@ -260,10 +265,13 @@ impl CodexTransport {
             messages,
             next_id: 1,
             terminated: false,
+            response_timeout: RPC_RESPONSE_TIMEOUT,
             #[cfg(test)]
             fail_request: None,
             #[cfg(test)]
             fail_terminate: false,
+            #[cfg(test)]
+            fail_terminate_after_shutdown: false,
         })
     }
 
@@ -300,10 +308,16 @@ impl CodexTransport {
     }
 
     fn recv(&self) -> Result<Value> {
-        match self.messages.recv() {
+        match self.messages.recv_timeout(self.response_timeout) {
             Ok(Ok(message)) => Ok(message),
             Ok(Err(error)) => Err(anyhow!(error)),
-            Err(_) => Err(anyhow!("Codex app-server process closed its output")),
+            Err(RecvTimeoutError::Timeout) => Err(anyhow!(
+                "timed out waiting for Codex app-server response after {:?}",
+                self.response_timeout
+            )),
+            Err(RecvTimeoutError::Disconnected) => {
+                Err(anyhow!("Codex app-server process closed its output"))
+            }
         }
     }
 
@@ -332,6 +346,13 @@ impl CodexTransport {
         let wait_result = self.child.wait();
         if wait_result.is_ok() {
             self.terminated = true;
+        }
+        #[cfg(test)]
+        if self.fail_terminate_after_shutdown && self.terminated {
+            self.fail_terminate_after_shutdown = false;
+            return Err(anyhow!(
+                "injected descendant cleanup failure after Codex transport shutdown"
+            ));
         }
         match (cleanup_error, wait_result) {
             (None, Ok(_)) => Ok(()),
@@ -577,8 +598,17 @@ impl CodexManagerSession {
         executable: impl AsRef<Path>,
         session_dir: impl Into<PathBuf>,
     ) -> Result<Self> {
+        Self::new_with_session_dir_and_timeout(executable, session_dir, RPC_RESPONSE_TIMEOUT)
+    }
+
+    fn new_with_session_dir_and_timeout(
+        executable: impl AsRef<Path>,
+        session_dir: impl Into<PathBuf>,
+        response_timeout: Duration,
+    ) -> Result<Self> {
         let discovery = discover(executable.as_ref())?;
         let mut transport = CodexTransport::spawn(&discovery.executable)?;
+        transport.response_timeout = response_timeout;
         rpc_request(
             &mut transport,
             "initialize",
@@ -645,8 +675,14 @@ impl CodexManagerSession {
             // (e.g. a late race) -- nothing to route it to.
             return Ok(());
         };
-        let Some(params) = message.get("params") else {
-            return Ok(());
+        let params = match message.get("params") {
+            Some(params) => params,
+            None if matches!(method, "turn/completed" | "error") => {
+                return Err(anyhow!(
+                    "Codex {method} notification did not include params"
+                ));
+            }
+            None => return Ok(()),
         };
         match method {
             "item/agentMessage/delta" => {
@@ -709,64 +745,80 @@ impl CodexManagerSession {
                 }
             }
             "turn/completed" => {
-                let Some(thread_id) = params.get("threadId").and_then(Value::as_str) else {
-                    return Ok(());
-                };
-                let Some(turn) = params.get("turn") else {
-                    return Ok(());
-                };
-                let Some(turn_id) = turn.get("id").and_then(Value::as_str) else {
-                    return Ok(());
-                };
-                let terminal = match turn.get("status").and_then(Value::as_str) {
-                    Some("completed") => Some(TerminalStatus::Completed),
-                    Some("interrupted") => Some(TerminalStatus::Interrupted),
-                    Some("failed") => {
+                let thread_id =
+                    params
+                        .get("threadId")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            anyhow!("Codex turn/completed notification did not include threadId")
+                        })?;
+                let turn = params.get("turn").ok_or_else(|| {
+                    anyhow!("Codex turn/completed notification did not include turn")
+                })?;
+                let turn_id = turn.get("id").and_then(Value::as_str).ok_or_else(|| {
+                    anyhow!("Codex turn/completed notification did not include turn.id")
+                })?;
+                let status = turn.get("status").and_then(Value::as_str).ok_or_else(|| {
+                    anyhow!("Codex turn/completed notification did not include turn.status")
+                })?;
+                let terminal = match status {
+                    "completed" => TerminalStatus::Completed,
+                    "interrupted" => TerminalStatus::Interrupted,
+                    "failed" => {
                         let message = turn
                             .get("error")
                             .and_then(|error| error.get("message"))
                             .and_then(Value::as_str)
-                            .unwrap_or("Codex turn failed")
-                            .to_owned();
-                        Some(TerminalStatus::Failed(message))
+                            .ok_or_else(|| {
+                                anyhow!("failed Codex turn/completed notification did not include error.message")
+                            })?;
+                        TerminalStatus::Failed(message.to_owned())
                     }
-                    _ => None,
-                };
-                if let Some(terminal) = terminal {
-                    if let Some(state) = self.session_by_thread_mut(thread_id) {
-                        if state.active_turn_id.as_deref() != Some(turn_id) {
-                            return Ok(());
-                        }
-                        state.status = SessionStatus::Terminated(terminal);
-                        state.active_turn_id = None;
+                    _ => {
+                        return Err(anyhow!(
+                            "Codex turn/completed notification reported unknown status {status:?}"
+                        ));
                     }
-                }
-            }
-            "error" => {
-                let Some(thread_id) = params.get("threadId").and_then(Value::as_str) else {
-                    return Ok(());
                 };
-                let Some(turn_id) = params.get("turnId").and_then(Value::as_str) else {
-                    return Ok(());
-                };
-                if params
-                    .get("willRetry")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    return Ok(());
-                }
-                let message = params
-                    .get("error")
-                    .and_then(|error| error.get("message"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("Codex reported an error")
-                    .to_owned();
                 if let Some(state) = self.session_by_thread_mut(thread_id) {
                     if state.active_turn_id.as_deref() != Some(turn_id) {
                         return Ok(());
                     }
-                    state.status = SessionStatus::Terminated(TerminalStatus::Failed(message));
+                    state.status = SessionStatus::Terminated(terminal);
+                    state.active_turn_id = None;
+                }
+            }
+            "error" => {
+                let will_retry = params
+                    .get("willRetry")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| anyhow!("Codex error notification did not include willRetry"))?;
+                if will_retry {
+                    return Ok(());
+                }
+                let thread_id = params
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("Codex error notification did not include threadId"))?;
+                let turn_id = params
+                    .get("turnId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("Codex error notification did not include turnId"))?;
+                let message = params
+                    .get("error")
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "non-retryable Codex error notification did not include error.message"
+                        )
+                    })?;
+                if let Some(state) = self.session_by_thread_mut(thread_id) {
+                    if state.active_turn_id.as_deref() != Some(turn_id) {
+                        return Ok(());
+                    }
+                    state.status =
+                        SessionStatus::Terminated(TerminalStatus::Failed(message.to_owned()));
                     state.active_turn_id = None;
                 }
             }
@@ -781,7 +833,12 @@ impl CodexManagerSession {
         }
         loop {
             match self.transport.try_recv() {
-                Ok(Some(message)) => self.handle_message(message)?,
+                Ok(Some(message)) => {
+                    if let Err(error) = self.handle_message(message) {
+                        let _ = self.stop_transport_after_rpc_failure(error);
+                        return Ok(());
+                    }
+                }
                 Ok(None) => return Ok(()),
                 Err(error) => {
                     let failure = match self.transport.terminate() {
@@ -790,27 +847,54 @@ impl CodexManagerSession {
                             "{error:#}; additionally failed to stop the corrupt Codex transport: {cleanup:#}"
                         ),
                     };
-                    for state in self.sessions.values_mut() {
-                        if !matches!(state.status, SessionStatus::Terminated(_)) {
-                            state.status =
-                                SessionStatus::Terminated(TerminalStatus::Failed(failure.clone()));
-                            state.active_turn_id = None;
-                        }
-                    }
+                    self.record_transport_failure(None, &failure);
                     return Ok(());
                 }
             }
         }
     }
 
-    fn request(&mut self, method: &str, params: Value) -> Result<Value> {
-        let request_id = self.transport.send_request(method, params)?;
-        loop {
-            let message = self.transport.recv()?;
-            if is_response_for(&message, request_id) {
-                return decode_json_rpc_response(message);
+    /// Records shared app-server loss. The triggering delivery can replace an
+    /// older terminal status; unrelated terminal sessions remain unchanged.
+    fn record_transport_failure(&mut self, triggering: Option<&GahSessionId>, failure: &str) {
+        for (id, state) in &mut self.sessions {
+            if triggering == Some(id) || !matches!(state.status, SessionStatus::Terminated(_)) {
+                state.status =
+                    SessionStatus::Terminated(TerminalStatus::Failed(failure.to_owned()));
             }
-            self.handle_message(message)?;
+            state.active_turn_id = None;
+        }
+    }
+
+    /// Stops an unusable app-server and records whether shutdown was confirmed.
+    fn stop_transport_after_rpc_failure(&mut self, error: anyhow::Error) -> anyhow::Error {
+        let failure = match self.transport.terminate() {
+            Ok(()) => error.to_string(),
+            Err(cleanup) => {
+                format!("{error:#}; additionally failed to stop the Codex transport: {cleanup:#}")
+            }
+        };
+        if self.transport.terminated {
+            self.record_transport_failure(None, &failure);
+        } else {
+            for state in self.sessions.values_mut() {
+                if !matches!(state.status, SessionStatus::Terminated(_)) {
+                    state.status =
+                        SessionStatus::Terminated(TerminalStatus::Failed(failure.clone()));
+                }
+            }
+        }
+        anyhow!(failure)
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        match self.request_with_delivery(method, params) {
+            Ok(response) => Ok(response),
+            Err(failure) if failure.may_have_started() => {
+                let error = failure.into_error();
+                Err(self.stop_transport_after_rpc_failure(error))
+            }
+            Err(failure) => Err(failure.into_error()),
         }
     }
 
@@ -896,16 +980,21 @@ impl CodexManagerSession {
         let error = failure.into_error();
         match self.stop_ambiguous_turn(session) {
             Ok(()) => {
-                if let Some(state) = self.sessions.get_mut(session) {
-                    state.status =
-                        SessionStatus::Terminated(TerminalStatus::Failed(error.to_string()));
-                    state.active_turn_id = None;
-                }
+                self.record_transport_failure(Some(session), &error.to_string());
                 RpcDeliveryFailure::Reconciled(error)
             }
-            Err(cleanup) => RpcDeliveryFailure::Ambiguous(anyhow!(
-                "{error:#}; additionally failed to stop ambiguous remote work: {cleanup:#}"
-            )),
+            Err(cleanup) => {
+                let failure = anyhow!(
+                    "{error:#}; additionally failed to stop ambiguous remote work: {cleanup:#}"
+                );
+                if self.transport.terminated {
+                    self.record_transport_failure(Some(session), &failure.to_string());
+                } else if let Some(state) = self.sessions.get_mut(session) {
+                    state.status =
+                        SessionStatus::Terminated(TerminalStatus::Failed(failure.to_string()));
+                }
+                RpcDeliveryFailure::Ambiguous(failure)
+            }
         }
     }
 
@@ -955,11 +1044,12 @@ impl CodexManagerSession {
                 .map(|turn_id| (state.thread_id.clone(), turn_id.clone()))
         });
         let interrupt_error = active.and_then(|(thread_id, turn_id)| {
-            self.request(
+            self.request_with_delivery(
                 "turn/interrupt",
                 json!({ "threadId": thread_id, "turnId": turn_id }),
             )
             .err()
+            .map(RpcDeliveryFailure::into_error)
         });
         match (interrupt_error, self.transport.terminate()) {
             (_, Ok(())) => Ok(()),
