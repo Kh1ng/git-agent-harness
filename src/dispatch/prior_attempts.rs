@@ -108,7 +108,7 @@ fn render_entry(context: &mut String, entry: &LedgerEntry, profile: &Profile) {
     if let Some(validation) = validation_failure_tail(entry, profile) {
         context.push_str("\nFailing validation tail:\n");
         context.push_str(&crate::dispatch::prompts::indent_untrusted_text(
-            crate::dispatch::text::utf8_safe_suffix(&validation, VALIDATION_TAIL_MAX_BYTES),
+            &redacted_suffix(&validation, VALIDATION_TAIL_MAX_BYTES),
         ));
         context.push('\n');
     }
@@ -117,10 +117,7 @@ fn render_entry(context: &mut String, entry: &LedgerEntry, profile: &Profile) {
         let mut findings = String::new();
         for finding in &entry.review_blocking_findings {
             findings.push_str("- ");
-            findings.push_str(crate::dispatch::utf8_safe_prefix(
-                finding,
-                BLOCKING_FINDING_MAX_BYTES,
-            ));
+            findings.push_str(&redacted_prefix(finding, BLOCKING_FINDING_MAX_BYTES));
             findings.push('\n');
             if findings.len() >= BLOCKING_FINDINGS_MAX_BYTES {
                 break;
@@ -136,9 +133,19 @@ fn render_entry(context: &mut String, entry: &LedgerEntry, profile: &Profile) {
 fn append_text(context: &mut String, label: &str, text: &str, max_bytes: usize) {
     context.push_str(&format!("\n{label}:\n"));
     context.push_str(&crate::dispatch::prompts::indent_untrusted_text(
-        crate::dispatch::utf8_safe_prefix(text, max_bytes),
+        &redacted_prefix(text, max_bytes),
     ));
     context.push('\n');
+}
+
+fn redacted_prefix(text: &str, max_bytes: usize) -> String {
+    let redacted = crate::redact::redact(text);
+    crate::dispatch::utf8_safe_prefix(&redacted, max_bytes).to_string()
+}
+
+fn redacted_suffix(text: &str, max_bytes: usize) -> String {
+    let redacted = crate::redact::redact(text);
+    crate::dispatch::text::utf8_safe_suffix(&redacted, max_bytes).to_string()
 }
 
 fn cap_context(context: &str) -> String {
@@ -154,23 +161,29 @@ fn cap_context(context: &str) -> String {
 }
 
 fn validation_failure_tail(entry: &LedgerEntry, profile: &Profile) -> Option<String> {
-    let attempt_number = entry
-        .attempts
-        .iter()
-        .rev()
-        .find(|attempt| attempt.validation_result.as_deref() != Some("passed"))
-        .map(|attempt| attempt.attempt_number)
-        .or(entry.attempts_started)?;
     let session_dir = Path::new(entry.session_dir.as_deref()?);
     if !session_dir.starts_with(Path::new(&profile.artifact_root)) {
         return None;
     }
-    std::fs::read_to_string(
-        session_dir
-            .join(format!("attempt-{attempt_number}"))
-            .join("validation-failure.txt"),
-    )
-    .ok()
+    let read_attempt = |attempt_number| {
+        std::fs::read_to_string(
+            session_dir
+                .join(format!("attempt-{attempt_number}"))
+                .join("validation-failure.txt"),
+        )
+        .ok()
+    };
+
+    let failed = entry
+        .attempts
+        .iter()
+        .rev()
+        .filter(|attempt| attempt.validation_result.as_deref() == Some("failed"))
+        .find_map(|attempt| read_attempt(attempt.attempt_number));
+    if failed.is_some() || !entry.attempts.is_empty() {
+        return failed;
+    }
+    read_attempt(entry.attempts_started?)
 }
 
 #[cfg(test)]
@@ -297,5 +310,104 @@ mod tests {
             "context was {} bytes",
             context.len()
         );
+    }
+
+    #[test]
+    fn redacts_evidence_before_cutoff_boundaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut profile = crate::dispatch::test_util::profile(tmp.path());
+        profile.artifact_root = tmp.path().join("artifacts").display().to_string();
+        let session_dir = tmp.path().join("artifacts/sessions/cutoff-run");
+        let attempt_dir = session_dir.join("attempt-1");
+        fs::create_dir_all(&attempt_dir).unwrap();
+        fs::write(
+            attempt_dir.join("validation-failure.txt"),
+            format!(
+                "{} {}{}",
+                "v".repeat(99),
+                "sk-abcdefghijklmnopqrstuvwxyz",
+                "z".repeat(876)
+            ),
+        )
+        .unwrap();
+
+        let mut entry = LedgerEntry::new(
+            "test",
+            &profile,
+            "codex",
+            "fix",
+            "ticket",
+            Some("cutoff-run".into()),
+            Some(&session_dir),
+        );
+        entry.work_id = Some("TICKET-243".into());
+        entry.error_summary = Some(format!(
+            "{} {}",
+            "s".repeat(694),
+            "ghp_abcdefghijklmnopqrstuvwxyz"
+        ));
+        entry.review_blocking_findings = vec![format!(
+            "{} {}",
+            "r".repeat(594),
+            "glpat-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        )];
+        entry.attempts.push(AttemptRecord {
+            attempt_number: 1,
+            validation_result: Some("failed".into()),
+            ..AttemptRecord::default()
+        });
+
+        let context = prior_attempt_context(&[entry], "test", &profile, "TICKET-243")
+            .expect("cutoff evidence should produce context");
+
+        assert!(!context.contains("ghp_a"), "summary leaked: {context}");
+        assert!(!context.contains("glpat"), "review leaked: {context}");
+        assert!(
+            !context.contains("cdefghijklmnopqrstuvwxyz"),
+            "validation leaked: {context}"
+        );
+        assert!(context.contains("[REDACTED:API_KEY]"));
+    }
+
+    #[test]
+    fn uses_latest_failed_validation_artifact_before_not_run_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut profile = crate::dispatch::test_util::profile(tmp.path());
+        profile.artifact_root = tmp.path().join("artifacts").display().to_string();
+        let session_dir = tmp.path().join("artifacts/sessions/failed-then-not-run");
+        let attempt_dir = session_dir.join("attempt-1");
+        fs::create_dir_all(&attempt_dir).unwrap();
+        fs::write(
+            attempt_dir.join("validation-failure.txt"),
+            "attempt one failed: assertion retained\n",
+        )
+        .unwrap();
+
+        let mut entry = LedgerEntry::new(
+            "test",
+            &profile,
+            "codex",
+            "fix",
+            "ticket",
+            Some("failed-then-not-run".into()),
+            Some(&session_dir),
+        );
+        entry.work_id = Some("TICKET-243".into());
+        entry.attempts_started = Some(2);
+        entry.attempts.push(AttemptRecord {
+            attempt_number: 1,
+            validation_result: Some("failed".into()),
+            ..AttemptRecord::default()
+        });
+        entry.attempts.push(AttemptRecord {
+            attempt_number: 2,
+            validation_result: Some("not_run_backend_unavailable".into()),
+            ..AttemptRecord::default()
+        });
+
+        let context = prior_attempt_context(&[entry], "test", &profile, "TICKET-243")
+            .expect("failed validation artifact should produce context");
+
+        assert!(context.contains("attempt one failed: assertion retained"));
     }
 }
