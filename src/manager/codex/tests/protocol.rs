@@ -79,6 +79,31 @@ fn detached_capture_holder_fails_closed_before_app_server_start() {
 }
 
 #[test]
+fn same_manager_resume_preserves_an_active_turn_as_working() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let mut session = CodexManagerSession::new_with_session_dir(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions"),
+    )
+    .unwrap();
+    let id = session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "slow".into(),
+        })
+        .unwrap();
+    let active_turn = session.sessions[&id].active_turn_id.clone();
+
+    session.resume(&id).unwrap();
+
+    assert_eq!(session.inspect(&id).unwrap(), SessionStatus::Working);
+    assert_eq!(session.sessions[&id].active_turn_id, active_turn);
+    session.interrupt(&id).unwrap();
+}
+
+#[test]
 fn helper_capture_overflow_fails_closed_before_app_server_start() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let f = fixture();
