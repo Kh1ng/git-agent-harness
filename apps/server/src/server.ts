@@ -5,6 +5,7 @@ import os from 'node:os';
 import { statfsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getServerReadiness } from './serverReadiness.js';
 import {
   runStatus,
@@ -82,6 +83,7 @@ import {
   deleteSkill,
   getSkill,
   listSkillSummaries,
+  listSkills,
   putSkill,
   seedSkillFromDocs
 } from './skillBank.js';
@@ -117,6 +119,26 @@ const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
   runConfigShowProfile,
   runDoctor
 };
+
+/** Validate and seed the central skill bank before the HTTP server starts. */
+export function initializeSkillBank(): void {
+  listSkills();
+  const docsPath = process.env.GAH_SKILL_DOCS_PATH
+    || fileURLToPath(new URL('../../../docs/gah-manager-skill.md', import.meta.url));
+  try {
+    seedSkillFromDocs(
+      docsPath,
+      'docs/gah-manager-skill.md',
+      'gah-manager',
+      '1.0.0',
+      'GAH Project Manager & Orchestrator',
+      'The GAH manager agent skill: sits above worker agents to break down issues, enforce policies, and dispatch isolated tasks.',
+      ['hermes', 'codex', 'claude', 'opencode']
+    );
+  } catch (error) {
+    console.error('Failed to seed skill bank from docs:', error);
+  }
+}
 
 /** Same hardcoded default as wsServer.ts's welcome message, until Settings
  * gains real profile switching (see apps/web Settings page). */
@@ -875,26 +897,6 @@ export function createServer(
   });
 
   // ── Skill bank (issue #963/#964) ───────────────────────────────────────
-
-  // Seed the bank from the repo's docs so the one skill that exists today is
-  // a first-class record on a fresh install (AC5). Best-effort: a missing
-  // docs file or a docs path that isn't resolvable skips seeding.
-  try {
-    const docsPath = process.env.GAH_SKILL_DOCS_PATH
-      || resolve(process.cwd(), 'docs', 'gah-manager-skill.md');
-    seedSkillFromDocs(
-      docsPath,
-      'docs/gah-manager-skill.md',
-      'gah-manager',
-      '1.0.0',
-      'GAH Project Manager & Orchestrator',
-      'The GAH manager agent skill: sits above worker agents to break down issues, enforce policies, and dispatch isolated tasks.',
-      ['hermes', 'codex', 'claude', 'opencode']
-    );
-  } catch (error) {
-    // Never fail startup on a seed problem; surface it in the log instead.
-    console.error('Failed to seed skill bank from docs:', error);
-  }
 
   app.get('/api/skills', (_req, res) => {
     try {
