@@ -512,6 +512,39 @@ export interface BackendModelComparison {
 
 export type ReportGroupBy = 'backend' | 'model';
 
+/**
+ * Actual token/cost burn observed by GAH itself, aggregated from the
+ * manager-chat session logs (#940): every assistant message the backends
+ * reported usage for, grouped by backend + model + UTC day. Unlike the
+ * dispatch-ledger comparison above, this covers manager-chat turns --
+ * where nearly all work happens now -- so subscription-burn questions
+ * ("how much of the codex plan did yesterday cost?") have a real answer.
+ */
+export interface UsageRollupRow {
+  backend: string;
+  /** null = the backend's default model for that turn. */
+  model: string | null;
+  /** UTC day the turn's assistant message was logged, e.g. 2026-08-30. */
+  day: string;
+  turns: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  estimated_cost_usd: number;
+}
+
+export interface UsageRollupSummary {
+  profile: string;
+  /** Inclusive window start (ms epoch) the rollup covers. */
+  since: number;
+  /** ms epoch of the aggregation. */
+  generated_at: number;
+  rows: UsageRollupRow[];
+  /** Turns whose assistant message reported no usage at all -- counted so
+   * silent gaps are visible instead of disappearing the burn. */
+  unattributed_turns: number;
+}
+
 export interface ReportData {
   ledger_path: string;
   total_entries: number;

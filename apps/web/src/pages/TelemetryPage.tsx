@@ -1,9 +1,10 @@
 import { useEffect, useState, useMemo } from 'react';
 import { ArrowUpDown, FlaskConical } from 'lucide-react';
-import type { BackendModelComparison, ExportHealth, ReportGroupBy } from '@git-agent-harness/contracts';
+import type { BackendModelComparison, ExportHealth, ReportGroupBy, UsageRollupSummary } from '@git-agent-harness/contracts';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
+import { gahApi } from '../api/client.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
@@ -53,6 +54,102 @@ type SortKey = keyof Pick<
   BackendModelComparison,
   'entries' | 'success_rate' | 'average_duration_seconds' | 'total_tokens' | 'memory_gateway_capture_l0_recorded' | 'actual_cost_usd' | 'estimated_cost_usd'
 >;
+
+/** Actual burn GAH itself observed, aggregated from manager-chat session
+ * logs (#940): the dispatch-ledger tables above only cover gah-dispatched
+ * work, while nearly all work now happens in manager chat. */
+function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
+  const [days, setDays] = useState<7 | 30>(7);
+  const [rollup, setRollup] = useState<UsageRollupSummary | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    gahApi.getUsageRollup(profile, days)
+      .then((data) => { if (!cancelled) setRollup(data); })
+      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : String(err)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [profile, days]);
+
+  const rows = rollup?.rows ?? [];
+  const byBackend = useMemo(() => {
+    const map = new Map<string, { turns: number; total_tokens: number; estimated_cost_usd: number }>();
+    for (const row of rows) {
+      const agg = map.get(row.backend) ?? { turns: 0, total_tokens: 0, estimated_cost_usd: 0 };
+      agg.turns += row.turns;
+      agg.total_tokens += row.total_tokens;
+      agg.estimated_cost_usd += row.estimated_cost_usd;
+      map.set(row.backend, agg);
+    }
+    return [...map.entries()].sort((a, b) => b[1].total_tokens - a[1].total_tokens);
+  }, [rows]);
+
+  return (
+    <section className="card-padded">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div>
+          <h3 className="text-sm font-semibold text-primary">Actual usage — manager chat</h3>
+          <p className="text-xs text-muted mt-0.5">
+            Tokens and turns as reported by each backend during chat, aggregated from GAH's own session logs.
+            {rollup && rollup.unattributed_turns > 0 && ` ${rollup.unattributed_turns} turn(s) reported no usage.`}
+          </p>
+        </div>
+        <div className="flex rounded-md border border-subtle overflow-hidden text-xs">
+          {([7, 30] as const).map((d) => (
+            <button
+              key={d}
+              onClick={() => setDays(d)}
+              className={`px-3 py-1.5 ${days === d ? 'bg-accent text-white' : 'text-secondary hover:bg-white/5'}`}
+            >
+              {d}d
+            </button>
+          ))}
+        </div>
+      </div>
+      {loading && !rollup ? (
+        <LoadingState label="Rolling up session usage…" />
+      ) : error ? (
+        <ErrorState message={`Usage rollup failed: ${error}`} onRetry={() => setDays((current) => current)} />
+      ) : rows.length === 0 ? (
+        <EmptyState icon={FlaskConical} title="No usage recorded" description={`No manager-chat usage in the last ${days} days.`} />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-muted border-b border-subtle">
+                <th className="py-2 pr-4 font-medium">Backend</th>
+                <th className="py-2 pr-4 font-medium">Turns</th>
+                <th className="py-2 pr-4 font-medium">Tokens</th>
+                <th className="py-2 pr-4 font-medium">Est. cost</th>
+                <th className="py-2 font-medium">By model</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byBackend.map(([backend, agg]) => {
+                const modelRows = rows.filter((row) => row.backend === backend).sort((a, b) => b.total_tokens - a.total_tokens);
+                return (
+                  <tr key={backend} className="border-b border-subtle/50">
+                    <td className="py-2 pr-4 text-primary">{backend}</td>
+                    <td className="py-2 pr-4">{formatCount(agg.turns)}</td>
+                    <td className="py-2 pr-4">{formatTokens(agg.total_tokens)}</td>
+                    <td className="py-2 pr-4">{agg.estimated_cost_usd > 0 ? formatCost(agg.estimated_cost_usd) : <span className="text-muted">plan</span>}</td>
+                    <td className="py-2 text-muted">
+                      {modelRows.map((row) => `${row.model ?? 'default'}: ${formatTokens(row.total_tokens)}`).join(' · ')}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
 
 /** The most recently observed quota_used_percent for a comparison row, or
  * null if the backend/model has never reported one. A row can carry
@@ -207,6 +304,8 @@ export function TelemetryPage() {
       <ExportHealthCard health={status.data?.export_health} />
 
       {sorted.length > 0 && <UsageSummary rows={sorted} />}
+
+      <ChatUsageRollupCard profile={profile ?? undefined} />
 
       <section className="card-padded">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">

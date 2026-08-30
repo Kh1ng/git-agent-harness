@@ -79,6 +79,7 @@ import {
   enqueueManagerWake as enqueueManagerChatWake
 } from './managerChat/ManagerChatManager.js';
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
+import { usageRollup } from './managerChat/usageRollup.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
 import {
   deleteSkill,
@@ -567,6 +568,24 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load gah quota snapshot',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Actual usage observed by GAH itself, aggregated from the manager-chat
+  // session logs (#940): the dispatch ledger and account-level quota checks
+  // don't cover manager-chat turns, so subscription-burn visibility comes
+  // from here.
+  app.get('/api/usage/rollup', (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const rawDays = Number.parseInt(typeof req.query.days === 'string' ? req.query.days : '', 10);
+    const days = Number.isFinite(rawDays) ? Math.min(Math.max(rawDays, 1), 90) : 7;
+    try {
+      res.json(usageRollup(profile, days));
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to roll up manager-chat usage',
         message: error instanceof Error ? error.message : String(error)
       });
     }
