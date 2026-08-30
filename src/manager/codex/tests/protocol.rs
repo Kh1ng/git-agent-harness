@@ -48,20 +48,50 @@ fn successful_helper_exit_reaps_its_background_descendants() {
     assert!(!f.record_dir.join("version-helper-survived.marker").exists());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
-fn successful_helper_exit_reaps_a_detached_descendant() {
+fn detached_capture_holder_fails_closed_before_app_server_start() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let f = fixture();
     make_json_rpc_codex(&f.bin_dir, &f.record_dir);
     fs::write(f.record_dir.join("exit-version-with-detached-child"), "").unwrap();
 
-    let discovery =
-        discover_with_timeout(f.bin_dir.join("codex"), Duration::from_millis(500)).unwrap();
-    assert_eq!(discovery.version.as_deref(), Some("codex-cli 1.2.3"));
-    std::thread::sleep(Duration::from_millis(700));
+    let result = CodexManagerSession::new_with_session_dir_and_timeout(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions"),
+        Duration::from_millis(500),
+    );
+    let pid: libc::pid_t = fs::read_to_string(f.record_dir.join("detached-helper.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    let error = result
+        .err()
+        .expect("an escaped capture holder must fail construction");
 
-    assert!(!f.record_dir.join("version-helper-survived.marker").exists());
+    assert!(format!("{error:#}").contains("capture pipe remained open"));
+    assert!(!f.record_dir.join("requests.jsonl").exists());
+}
+
+#[test]
+fn helper_capture_overflow_fails_closed_before_app_server_start() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    fs::write(f.record_dir.join("overflow-version"), "").unwrap();
+
+    let error = CodexManagerSession::new_with_session_dir_and_timeout(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions"),
+        Duration::from_millis(500),
+    )
+    .err()
+    .expect("capture overflow must fail construction");
+
+    assert!(format!("{error:#}").contains("exceeded 65536 bytes"));
+    assert!(!f.record_dir.join("requests.jsonl").exists());
 }
 
 #[test]

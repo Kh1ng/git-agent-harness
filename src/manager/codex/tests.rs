@@ -128,12 +128,15 @@ fn make_json_rpc_codex_with_methods(dir: &Path, record_dir: &Path, stable_method
     let body = format!(
         r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
+  if [ -f '{record_dir}/overflow-version' ]; then
+    dd if=/dev/zero bs=131072 count=1 2>/dev/null
+    exit 0
+  fi
   if [ -f '{record_dir}/exit-version-with-child' ]; then
     (sleep 0.4; echo late-output; touch '{record_dir}/version-helper-survived.marker') &
   fi
   if [ -f '{record_dir}/exit-version-with-detached-child' ]; then
-    setsid sh -c "touch '{record_dir}/detached-helper-started'; sleep 0.4; touch '{record_dir}/version-helper-survived.marker'" &
-    while [ ! -f '{record_dir}/detached-helper-started' ]; do sleep 0.01; done
+    exec python3 -c "import os,time; print('codex-cli 1.2.3',flush=True); r,w=os.pipe(); pid=os.fork(); pid and (os.close(w),os.read(r,1),os._exit(0)); os.close(r); os.setsid(); open('{record_dir}/detached-helper.pid','w').write(str(os.getpid())); open('{record_dir}/detached-helper-started','w').close(); os.write(w,b'x'); os.close(w); time.sleep(3); open('{record_dir}/version-helper-survived.marker','w').close()"
   fi
   if [ -f '{record_dir}/hang-version' ]; then
     (sleep 0.4; touch '{record_dir}/version-helper-survived.marker') &

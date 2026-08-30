@@ -46,13 +46,13 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -60,7 +60,10 @@ use std::time::{Duration, Instant};
 const CLIENT_NAME: &str = "git-agent-harness";
 const RPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
-static FAIL_HELPER_CLEANUP_AFTER_REAP: AtomicBool = AtomicBool::new(false);
+use helper::FAIL_HELPER_CLEANUP_AFTER_REAP;
+use helper::{bounded_command_output, HelperCommandFailure};
+
+mod helper;
 
 #[derive(Serialize, Deserialize)]
 struct DurableThreadMapping {
@@ -284,11 +287,7 @@ impl CodexTransport {
         let mut bytes = serde_json::to_vec(value)?;
         bytes.push(b'\n');
         let fd = self.stdin.as_raw_fd();
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
-        {
-            return Err(std::io::Error::last_os_error()).context("making Codex stdin nonblocking");
-        }
+        make_nonblocking(fd).context("making Codex stdin nonblocking")?;
         let mut written = 0;
         while written < bytes.len() {
             if Instant::now() >= deadline {
@@ -435,6 +434,14 @@ impl CodexTransport {
     }
 }
 
+fn make_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn wait_until_writable(fd: std::os::fd::RawFd, deadline: Instant, timeout: Duration) -> Result<()> {
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -548,138 +555,6 @@ fn classify_auth_state(output: &std::process::Output) -> CodexAuthState {
     }
 }
 
-struct CommandCapture {
-    file: File,
-}
-
-impl CommandCapture {
-    fn new(stream: &str) -> Result<Self> {
-        let path = std::env::temp_dir().join(format!(
-            "gah-codex-helper-{}-{}-{stream}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("creating Codex helper capture {}", path.display()))?;
-        if let Err(error) = fs::remove_file(&path) {
-            drop(file);
-            return match fs::remove_file(&path) {
-                Ok(()) => Err(error).context("unlinking Codex helper capture"),
-                Err(cleanup) => Err(anyhow!(
-                    "unlinking Codex helper capture failed: {error}; retry failed: {cleanup}"
-                )),
-            };
-        }
-        Ok(Self { file })
-    }
-
-    fn stdio(&self) -> Result<Stdio> {
-        Ok(Stdio::from(self.file.try_clone()?))
-    }
-
-    fn read(&mut self) -> Result<Vec<u8>> {
-        self.file.rewind()?;
-        let mut bytes = Vec::new();
-        self.file.read_to_end(&mut bytes)?;
-        Ok(bytes)
-    }
-}
-
-enum HelperCommandFailure {
-    Command,
-    Cleanup(anyhow::Error),
-}
-
-impl From<anyhow::Error> for HelperCommandFailure {
-    fn from(_: anyhow::Error) -> Self {
-        Self::Command
-    }
-}
-
-fn cleanup_helper(child: &mut Child, captures: [&CommandCapture; 2]) -> Option<String> {
-    let group = crate::runner::process::kill_process_group(child);
-    let files = [&captures[0].file, &captures[1].file];
-    let holders = crate::runner::process::kill_processes_holding_files(&files);
-    group.or(holders)
-}
-
-fn bounded_command_output(
-    command: &mut Command,
-    context: &str,
-    timeout: Duration,
-) -> std::result::Result<Output, HelperCommandFailure> {
-    let mut stdout = CommandCapture::new("stdout").map_err(HelperCommandFailure::Cleanup)?;
-    let mut stderr = CommandCapture::new("stderr").map_err(HelperCommandFailure::Cleanup)?;
-    command
-        .stdin(Stdio::null())
-        .stdout(stdout.stdio()?)
-        .stderr(stderr.stdio()?);
-    crate::runner::process::prepare_process_group(command);
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("starting {context}"))?;
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let cleanup = cleanup_helper(&mut child, [&stdout, &stderr]);
-                if let Some(cleanup) = cleanup {
-                    return Err(HelperCommandFailure::Cleanup(anyhow!(
-                        "{context} exited but its process group cleanup failed: {cleanup}"
-                    )));
-                }
-                break status;
-            }
-            Ok(None) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) => {
-                let cleanup = cleanup_helper(&mut child, [&stdout, &stderr]);
-                let wait = child.wait();
-                #[cfg(test)]
-                let cleanup = FAIL_HELPER_CLEANUP_AFTER_REAP
-                    .swap(false, Ordering::SeqCst)
-                    .then(|| "injected unconfirmed helper cleanup".into())
-                    .or(cleanup);
-                let failure = anyhow!("{context} timed out after {timeout:?}");
-                return match (cleanup, wait) {
-                    (None, Ok(_)) => Err(HelperCommandFailure::Command),
-                    (Some(cleanup), Ok(_)) => Err(HelperCommandFailure::Cleanup(anyhow!(
-                        "{failure:#}; {cleanup}"
-                    ))),
-                    (None, Err(wait)) => Err(HelperCommandFailure::Cleanup(
-                        failure.context(format!("waiting for timed-out {context}: {wait}")),
-                    )),
-                    (Some(cleanup), Err(wait)) => Err(HelperCommandFailure::Cleanup(anyhow!(
-                        "{failure:#}; {cleanup}; waiting for timed-out {context}: {wait}"
-                    ))),
-                };
-            }
-            Err(error) => {
-                let cleanup = cleanup_helper(&mut child, [&stdout, &stderr]);
-                let wait = child.wait();
-                let failure = anyhow!("waiting for {context}: {error}");
-                return match (cleanup, wait) {
-                    (None, Ok(_)) => Err(HelperCommandFailure::Command),
-                    (cleanup, wait) => Err(HelperCommandFailure::Cleanup(anyhow!(
-                        "{failure:#}; cleanup: {cleanup:?}; reap: {wait:?}"
-                    ))),
-                };
-            }
-        }
-    };
-    Ok(Output {
-        status,
-        stdout: stdout.read()?,
-        stderr: stderr.read()?,
-    })
-}
-
 fn discover(executable: impl AsRef<Path>) -> Result<CodexDiscovery> {
     discover_with_timeout(executable, RPC_RESPONSE_TIMEOUT)
 }
@@ -698,7 +573,7 @@ fn discover_with_timeout(
     ) {
         Ok(output) if output.status.success() => parse_version_from_output(&output),
         Ok(_) | Err(HelperCommandFailure::Command) => None,
-        Err(HelperCommandFailure::Cleanup(error)) => return Err(error),
+        Err(HelperCommandFailure::Fatal(error)) => return Err(error),
     };
 
     let mut login_command = Command::new(&executable);
@@ -712,7 +587,7 @@ fn discover_with_timeout(
         Err(HelperCommandFailure::Command) => {
             CodexAuthState::Error("login status command could not be started".to_string())
         }
-        Err(HelperCommandFailure::Cleanup(error)) => return Err(error),
+        Err(HelperCommandFailure::Fatal(error)) => return Err(error),
     };
 
     Ok(CodexDiscovery {
@@ -783,7 +658,7 @@ fn detect_stable_methods(
     match methods {
         Ok(methods) => Ok(methods),
         Err(HelperCommandFailure::Command) => Ok(Default::default()),
-        Err(HelperCommandFailure::Cleanup(error)) => Err(error),
+        Err(HelperCommandFailure::Fatal(error)) => Err(error),
     }
 }
 
