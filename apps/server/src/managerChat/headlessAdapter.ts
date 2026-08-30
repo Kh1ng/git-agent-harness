@@ -477,6 +477,12 @@ interface AgyStreamResult {
   error?: string;
 }
 
+function runAgyModels() {
+  const result = execFile('agy', ['models'], { encoding: 'utf8', timeout: 10_000 });
+  result.child.stdin?.end();
+  return result;
+}
+
 /** agy: print mode with NDJSON stdin/stdout so the prompt never touches
  * argv (issue #1009). `--input-format stream-json` reads one `{"event":
  * "user", "message": {"content": [{"type": "text", "text": "..."}]}}`
@@ -504,7 +510,7 @@ export function agyBackendSpec(): HeadlessBackendSpec {
     id: 'agy',
     displayName: 'Agy',
     modelOptions: async () => ({
-      models: String((await execFile('agy', ['models'], { encoding: 'utf8', timeout: 10_000 })).stdout)
+      models: String((await runAgyModels()).stdout)
         .split('\n')
         .flatMap((line) => {
           const [id, name] = line.trim().split('\t');
