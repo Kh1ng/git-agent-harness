@@ -59,9 +59,9 @@ use std::time::{Duration, Instant};
 
 const CLIENT_NAME: &str = "git-agent-harness";
 const RPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(test)]
-use helper::FAIL_HELPER_CLEANUP_AFTER_REAP;
 use helper::{bounded_command_output, HelperCommandFailure};
+#[cfg(test)]
+use helper::{FAIL_HELPER_CLEANUP_AFTER_REAP, FAIL_HELPER_NONBLOCKING};
 
 mod helper;
 

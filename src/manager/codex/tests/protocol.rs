@@ -50,29 +50,26 @@ fn successful_helper_exit_reaps_its_background_descendants() {
 
 #[cfg(unix)]
 #[test]
-fn detached_capture_holder_fails_closed_before_app_server_start() {
+fn detached_capture_holder_is_terminated_by_production_cleanup() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let f = fixture();
     make_json_rpc_codex(&f.bin_dir, &f.record_dir);
     fs::write(f.record_dir.join("exit-version-with-detached-child"), "").unwrap();
 
-    let result = CodexManagerSession::new_with_session_dir_and_timeout(
-        f.bin_dir.join("codex"),
-        f.record_dir.join("sessions"),
-        Duration::from_millis(500),
-    );
+    let discovery = discover_with_timeout(f.bin_dir.join("codex"), Duration::from_millis(500))
+        .expect("escaped capture holder should be cleaned up");
     let pid: libc::pid_t = fs::read_to_string(f.record_dir.join("detached-helper.pid"))
         .unwrap()
         .trim()
         .parse()
         .unwrap();
-    unsafe { libc::kill(pid, libc::SIGKILL) };
-    let error = result
-        .err()
-        .expect("an escaped capture holder must fail construction");
-
-    assert!(format!("{error:#}").contains("capture pipe remained open"));
-    assert!(!f.record_dir.join("requests.jsonl").exists());
+    assert_eq!(discovery.version.as_deref(), Some("codex-cli 1.2.3"));
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+    assert!(!f.record_dir.join("version-helper-survived.marker").exists());
 }
 
 #[test]
@@ -91,6 +88,27 @@ fn helper_capture_overflow_fails_closed_before_app_server_start() {
     .expect("capture overflow must fail construction");
 
     assert!(format!("{error:#}").contains("exceeded 65536 bytes"));
+    assert!(!f.record_dir.join("requests.jsonl").exists());
+}
+
+#[test]
+fn nonblocking_setup_failure_closes_capture_and_starts_no_app_server() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    FAIL_HELPER_NONBLOCKING.store(true, Ordering::SeqCst);
+    let started = Instant::now();
+
+    let error = CodexManagerSession::new_with_session_dir_and_timeout(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions"),
+        Duration::from_millis(500),
+    )
+    .err()
+    .expect("nonblocking setup failure must fail construction");
+
+    assert!(format!("{error:#}").contains("injected helper nonblocking failure"));
+    assert!(started.elapsed() < Duration::from_secs(1));
     assert!(!f.record_dir.join("requests.jsonl").exists());
 }
 
