@@ -3,8 +3,8 @@
  *
  * Hermes and OpenCode speak ACP natively; Codex and Claude use their
  * official ACP bridge packages. Vibe and AGY use the headless adapter,
- * which preserves transcript replay but does not advertise live config
- * options such as model or reasoning-effort selection.
+ * which preserves transcript replay; AGY also advertises its CLI-native
+ * model and reasoning-effort options.
  */
 
 import {
