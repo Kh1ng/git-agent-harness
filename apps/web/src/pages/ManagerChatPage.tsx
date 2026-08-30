@@ -6,6 +6,7 @@ import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { NewChatModal } from '../components/NewChatModal.js';
 import { ChatSessionPicker } from '../components/ChatSessionPicker.js';
+import { ProviderPicker, type ProviderSelection, type ProviderPickerProps } from '../components/ProviderPicker.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
@@ -430,14 +431,13 @@ export function ManagerChatPage() {
     return () => { cancelled = true; };
   }, [profile]);
 
-  // Session-scoped model list: when a session is active, the picker needs
-  // that session's backend models, and changes go to the session record
-  // (not the profile-wide default).
+  // Session-scoped model list: when a session is active, the composer's
+  // provider picker needs that session's backend models, and changes go to
+  // the session record (not the profile-wide default).
   const [sessionModels, setSessionModels] = useState<ManagerModelInfo[]>([]);
   const [sessionModelsLoaded, setSessionModelsLoaded] = useState(false);
-  const [sessionModelChanging, setSessionModelChanging] = useState(false);
   const [sessionEfforts, setSessionEfforts] = useState<ManagerReasoningEffortInfo[]>([]);
-  const [sessionEffortChanging, setSessionEffortChanging] = useState(false);
+  const [sessionSelectionChanging, setSessionSelectionChanging] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setSessionModels([]);
@@ -458,42 +458,28 @@ export function ManagerChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile, sessionId, activeSession?.backend]);
 
-  const handleSessionModelChange = async (modelId: string) => {
+  /** Composer provider picker, session variant: one PATCH carries the full
+   *  desired selection. A backend switch resets model + effort (the picker
+   *  sends null for them), matching the old select semantics — same
+   *  worktree, next turn on the new provider's defaults. */
+  const applySessionSelection = async (next: ProviderSelection) => {
     if (!activeSession) return;
-    setSessionModelChanging(true);
+    const backendChanged = next.backendId !== activeSession.backend;
+    const modelChanged = (next.modelId ?? null) !== (activeSession.model ?? null);
+    const effortChanged = (next.reasoningEffortId ?? null) !== (activeSession.reasoningEffort ?? null);
+    if (!backendChanged && !modelChanged && !effortChanged) return;
+    setSessionSelectionChanging(true);
     try {
-      await gahApi.updateChatSession(profile, activeSession.id, { model: modelId });
+      await gahApi.updateChatSession(profile, activeSession.id, {
+        ...(backendChanged ? { backend: next.backendId } : {}),
+        model: next.modelId,
+        reasoningEffort: next.reasoningEffortId
+      });
       refreshSessions(profile);
     } catch (err) {
-      setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch session model: ${err instanceof Error ? err.message : String(err)}` }]);
+      setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch session provider: ${err instanceof Error ? err.message : String(err)}` }]);
     } finally {
-      setSessionModelChanging(false);
-    }
-  };
-
-  const handleSessionEffortChange = async (effortId: string) => {
-    if (!activeSession) return;
-    setSessionEffortChanging(true);
-    try {
-      await gahApi.updateChatSession(profile, activeSession.id, { reasoningEffort: effortId });
-      refreshSessions(profile);
-    } catch (err) {
-      setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch session reasoning effort: ${err instanceof Error ? err.message : String(err)}` }]);
-    } finally {
-      setSessionEffortChanging(false);
-    }
-  };
-
-  const handleSessionBackendChange = async (backendId: string) => {
-    if (!activeSession || backendId === activeSession.backend) return;
-    // Backend switch: same worktree, new provider. The model and reasoning
-    // effort reset matches the new backend's default (ids are backend-
-    // specific).
-    try {
-      await gahApi.updateChatSession(profile, activeSession.id, { backend: backendId, model: null, reasoningEffort: null });
-      refreshSessions(profile);
-    } catch (err) {
-      setTurns((prev) => [...prev, { role: 'error', text: `Failed to switch session backend: ${err instanceof Error ? err.message : String(err)}` }]);
+      setSessionSelectionChanging(false);
     }
   };
 
@@ -776,6 +762,60 @@ export function ManagerChatPage() {
   useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [turns, turnBusy]);
+
+  /** Composer provider picker, profile variant: drives the same
+   *  profile-level settings the header selects do. A favorite can carry
+   *  backend + model + effort, so a backend switch is followed by the
+   *  pinned model/effort when the favorite specified them. */
+  const applyProfileSelection = async (next: ProviderSelection) => {
+    if (turnBusy) return;
+    const backendChanged = next.backendId !== activeBackendId;
+    if (backendChanged) {
+      await handleBackendChange(next.backendId);
+      if (next.modelId) await handleModelChange(next.modelId);
+      if (next.reasoningEffortId) await handleReasoningEffortChange(next.reasoningEffortId);
+      return;
+    }
+    if (next.modelId && next.modelId !== currentModelId) await handleModelChange(next.modelId);
+    if (next.reasoningEffortId && next.reasoningEffortId !== currentReasoningEffortId) {
+      await handleReasoningEffortChange(next.reasoningEffortId);
+    }
+  };
+
+  /** Which conversation the composer's pill controls: the active session
+   *  carries its own backend/model/effort; the default conversation drives
+   *  the profile-level settings (same state the header selects show). */
+  const composerPicker: ProviderPickerProps | null = (() => {
+    if (availableBackends.length === 0) return null;
+    if (activeSession) {
+      if (activeSession.archivedAt !== null) return null;
+      return {
+        variant: 'session',
+        backends: availableBackends,
+        selectedBackendId: activeSession.backend,
+        models: sessionModels,
+        currentModelId: activeSession.model,
+        reasoningEfforts: sessionEfforts,
+        currentReasoningEffortId: activeSession.reasoningEffort,
+        modelsLoaded: sessionModelsLoaded,
+        busy: turnBusy || sessionSelectionChanging,
+        onSelect: applySessionSelection
+      };
+    }
+    if (!activeBackendId) return null;
+    return {
+      variant: 'profile',
+      backends: availableBackends,
+      selectedBackendId: activeBackendId,
+      models,
+      currentModelId,
+      reasoningEfforts,
+      currentReasoningEffortId,
+      modelsLoaded,
+      busy: turnBusy || backendChanging || modelChanging || reasoningEffortChanging,
+      onSelect: applyProfileSelection
+    };
+  })();
 
   // "/" palette: matches commands by prefix against whatever's typed after
   // the leading slash, only while the draft is exactly a slash-command in
@@ -1085,60 +1125,8 @@ export function ManagerChatPage() {
         </button>
         {activeSession && activeSession.archivedAt === null && (
           <>
-            {/* Session backend/model quick-switch: the "interchangeable
-                worktree" control. Same worktree, next turn on the new
-                provider/model. */}
-            <select
-              value={activeSession.backend}
-              onChange={(e) => handleSessionBackendChange(e.target.value)}
-              disabled={turnBusy || sessionModelChanging}
-              className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary"
-              aria-label="Session provider"
-              title="Switch provider for this session — same worktree, same branch"
-            >
-              {availableBackends.map((b) => (
-                <option key={b.id} value={b.id} disabled={!b.implemented}>
-                  {b.displayName}{b.implemented ? '' : ' (unavailable)'}
-                </option>
-              ))}
-            </select>
-            {sessionModels.length > 0 && (
-              <select
-                value={activeSession.model ?? ''}
-                onChange={(e) => handleSessionModelChange(e.target.value)}
-                disabled={turnBusy || sessionModelChanging}
-                className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary max-w-[200px]"
-                aria-label="Session model"
-              >
-                {!activeSession.model && <option value="">Default model</option>}
-                {sessionModels.map((m) => (
-                  <option key={m.id} value={m.id}>{m.name}</option>
-                ))}
-              </select>
-            )}
-            {sessionEfforts.length > 0 && (
-              <select
-                value={activeSession.reasoningEffort ?? ''}
-                onChange={(e) => handleSessionEffortChange(e.target.value)}
-                disabled={turnBusy || sessionEffortChanging}
-                className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary"
-                aria-label="Session reasoning effort"
-                title="Reasoning effort for this session — applied on this session's backend before each turn"
-              >
-                {!activeSession.reasoningEffort && <option value="">Default effort</option>}
-                {sessionEfforts.map((effort) => (
-                  <option key={effort.id} value={effort.id}>{effort.name}</option>
-                ))}
-              </select>
-            )}
-            {sessionModelsLoaded && sessionModels.length === 0 && (
-              <span
-                className="rounded-md border border-subtle bg-raised px-2 py-1.5 text-[11px] text-muted"
-                title="This provider uses its configured default model and doesn't expose a picker. Switch the session provider to pick a model."
-              >
-                Default model
-              </span>
-            )}
+            {/* Session provider/model/effort switching moved into the
+                composer's provider pill (t3-style picker with favorites). */}
             <button
               onClick={() => setPreviewOpen((v) => !v)}
               disabled={turnBusy && !preview}
@@ -1476,6 +1464,9 @@ export function ManagerChatPage() {
         </div>
 
         <div className="relative flex items-end gap-2 pt-3 mt-3 border-t border-subtle">
+          {composerPicker && (
+            <ProviderPicker {...composerPicker} />
+          )}
           {paletteOpen && (
             <div className="absolute bottom-full left-0 mb-1 w-full max-w-sm bg-card border border-subtle rounded-md shadow-lg overflow-hidden z-10">
               {paletteMatches.map((cmd, i) => (
