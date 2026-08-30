@@ -331,6 +331,15 @@ export interface ChatSessionSummary {
   settledReason: 'merged' | 'closed' | 'delivered' | null;
 }
 
+/** One project's chat sessions for the cross-project picker: the profile
+ * id, its config display name when the profile list resolved (else the id
+ * itself), and that profile's sessions sorted by last activity. */
+export interface ChatSessionProjectGroup {
+  profile: string;
+  profileName: string;
+  sessions: ChatSessionSummary[];
+}
+
 export interface ChatSessionStorage {
   sessionId: string;
   worktreeBytes: number;

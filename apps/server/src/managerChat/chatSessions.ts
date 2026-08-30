@@ -196,6 +196,31 @@ export function listSessions(profile: string, opts?: ChatSessionStoreOptions): C
     .sort((a, b) => b.lastActiveAt - a.lastActiveAt);
 }
 
+/** Cross-project listing for the chat picker: every project's sessions,
+ * scanned from the state dir's project-* directories (the same layout the
+ * seed watchdog scans). Sessions come back sorted by last activity within
+ * each project; projects with no readable index are skipped rather than
+ * failing the whole listing. */
+export function listAllChatSessions(opts?: ChatSessionStoreOptions): { profile: string; sessions: ChatSessionSummary[] }[] {
+  let dirs: string[] = [];
+  try {
+    dirs = readdirSync(stateBase(opts)).filter((entry) => entry.startsWith('project-'));
+  } catch {
+    return [];
+  }
+  const projects: { profile: string; sessions: ChatSessionSummary[] }[] = [];
+  for (const dir of dirs) {
+    const profile = decodeURIComponent(dir.slice('project-'.length));
+    try {
+      const sessions = listSessions(profile, opts);
+      if (sessions.length > 0) projects.push({ profile, sessions });
+    } catch {
+      continue;
+    }
+  }
+  return projects.sort((a, b) => a.profile.localeCompare(b.profile));
+}
+
 export function getSession(profile: string, sessionId: string, opts?: ChatSessionStoreOptions): ChatSessionSummary | null {
   return readIndex(profile, opts).find((s) => s.id === sessionId) ?? null;
 }

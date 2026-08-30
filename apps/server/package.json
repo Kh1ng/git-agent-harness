@@ -14,7 +14,7 @@
     "dev": "tsx --watch src/bin.ts",
     "dev:mock": "tsx mock/bin.ts",
     "build": "tsc",
-    "test": "tsx --test src/*.test.ts src/managerChat/sessionLog.test.ts src/managerChat/chatMaintenance.test.ts src/managerChat/issueChats.test.ts src/managerChat/prChats.test.ts src/managerChat/seedWatchdog.test.ts src/managerChat/usageRollup.test.ts",
+    "test": "tsx --test src/*.test.ts src/managerChat/sessionLog.test.ts src/managerChat/chatMaintenance.test.ts src/managerChat/issueChats.test.ts src/managerChat/prChats.test.ts src/managerChat/seedWatchdog.test.ts src/managerChat/sessionsAll.test.ts src/managerChat/usageRollup.test.ts",
     "test:mock": "tsx --test mock/*.test.ts",
     "start": "node dist/bin.js",
     "typecheck": "tsc --noEmit",

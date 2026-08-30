@@ -21,6 +21,7 @@ import type {
   ChatPrSummary,
   ChatPreviewInfo,
   ChatReclaimResult,
+  ChatSessionProjectGroup,
   ChatSessionSummary,
   ChatSessionView,
   ChatTranscriptTurn,
@@ -279,14 +280,70 @@ function seededSession(): ChatSessionSummary {
   } satisfies ChatSessionSummary;
 }
 
+/** A second project plus settled/archived sessions, so the session picker's
+ * cross-project groups and its Archive section have data in every scenario.
+ * 'fixture-two' is deliberately absent from /api/profiles: the picker must
+ * fall back to the raw profile id for its group name. */
+function seededCrossProjectSessions(): ChatSessionSummary[] {
+  return [
+    {
+      id: 'mock-settled-1',
+      profile: 'fixture',
+      worktreePath: null,
+      branch: 'gah/mock-settled-1',
+      backend: 'codex',
+      model: null,
+      reasoningEffort: null,
+      title: 'Settled mock session',
+      createdAt: FIXED_NOW - 4_000,
+      lastActiveAt: FIXED_NOW - 3_000,
+      archivedAt: FIXED_NOW - 3_000,
+      outcome: 'settled',
+      settledAt: FIXED_NOW - 3_000,
+      settledReason: 'merged'
+    } satisfies ChatSessionSummary,
+    {
+      id: 'mock-second-1',
+      profile: 'fixture-two',
+      worktreePath: '/mock/in-memory-only',
+      branch: 'gah/mock-second-1',
+      backend: 'codex',
+      model: null,
+      reasoningEffort: null,
+      title: 'Second project session',
+      createdAt: FIXED_NOW - 2_000,
+      lastActiveAt: FIXED_NOW - 1_000,
+      archivedAt: null,
+      outcome: 'live',
+      settledAt: null,
+      settledReason: null
+    } satisfies ChatSessionSummary,
+    {
+      id: 'mock-second-2',
+      profile: 'fixture-two',
+      worktreePath: null,
+      branch: 'gah/mock-second-2',
+      backend: 'codex',
+      model: null,
+      reasoningEffort: null,
+      title: 'Archived second session',
+      createdAt: FIXED_NOW - 6_000,
+      lastActiveAt: FIXED_NOW - 5_000,
+      archivedAt: FIXED_NOW - 5_000,
+      outcome: 'archived',
+      settledAt: null,
+      settledReason: null
+    } satisfies ChatSessionSummary
+  ];
+}
+
 function defaultBackendFor(scenario: MockScenarioName): string {
   return scenario === 'models-agy' ? 'agy' : scenario.startsWith('models-') ? 'codex' : 'codex';
 }
 
 function createState(scenario: MockScenarioName, reset: number, previewOrigin?: string): MockState {
   const session = seededSession();
-  const previews = new Map<string, ChatPreviewInfo>();
-  if (scenario === 'preview-available') {
+  const previews = new Map<string, ChatPreviewInfo>();  if (scenario === 'preview-available') {
     previews.set(sessionKey(session.profile, session.id), {
       profile: session.profile,
       sessionId: session.id,
@@ -316,7 +373,10 @@ function createState(scenario: MockScenarioName, reset: number, previewOrigin?: 
     } satisfies ManagerChatSettingsSummary,
     selectedModels: { codex: 'gpt-5.3-codex', claude: 'claude-sonnet-4-5', opencode: 'openai/gpt-5.2', agy: null },
     selectedEfforts: { codex: 'medium', claude: 'standard', opencode: 'high', agy: null },
-    sessions: new Map([[session.id, session]]),
+    sessions: new Map([
+      [session.id, session],
+      ...seededCrossProjectSessions().map((seeded) => [seeded.id, seeded] as const)
+    ]),
     conversations: new Map(),
     previews,
     timers: new Set()
@@ -915,6 +975,22 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     if (state.scenario === 'rest-error') return jsonError(res, 503, 'Mock REST failure', 'Mock session list unavailable');
     const profile = bodyString(req.query.profile) ?? 'fixture';
     res.json({ sessions: [...state.sessions.values()].filter((session) => session.profile === profile) } satisfies { sessions: ChatSessionSummary[] });
+  });
+  app.get('/api/manager-chat/sessions/all', (_req, res) => {
+    if (state.scenario === 'rest-error') return jsonError(res, 503, 'Mock REST failure', 'Mock session list unavailable');
+    const profileNames = new Map(MOCK_PROFILES.map((profile) => [profile.name, profile.display_name]));
+    const byProfile = new Map<string, ChatSessionSummary[]>();
+    for (const session of state.sessions.values()) {
+      const sessions = byProfile.get(session.profile) ?? [];
+      sessions.push(session);
+      byProfile.set(session.profile, sessions);
+    }
+    const projects = [...byProfile.entries()].map(([profile, sessions]) => ({
+      profile,
+      profileName: profileNames.get(profile) ?? profile,
+      sessions: sessions.slice().sort((a, b) => b.lastActiveAt - a.lastActiveAt)
+    } satisfies ChatSessionProjectGroup));
+    res.json({ projects });
   });
   function storagePayload(profile: string, dryRun: boolean): ChatReclaimResult {
     const sessions = [...state.sessions.values()].filter((session) => session.profile === profile);

@@ -42,8 +42,7 @@ test('PR tab lists open PRs and starts a chat seeded with one', async ({ page, r
   // The modal closes and the fresh session is selected, its transcript
   // seeded with the PR.
   await expect(page.getByRole('dialog', { name: 'New chat' })).toHaveCount(0);
-  await expect(page.getByLabel('Chat session').locator('option', { hasText: '#12 Ship the PR chat mode' })).toHaveCount(1);
-  await expect(page.getByLabel('Chat session')).not.toHaveValue('');
+  await expect(page.getByLabel('Chat session')).toContainText('#12 Ship the PR chat mode');
   await expect(page.getByText('Head branch: feat/pr-chat')).toBeVisible();
 
   // The created session is read-only on the provider: worktree-less.

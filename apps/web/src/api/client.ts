@@ -42,6 +42,7 @@ import type {
   ProjectImportData,
   ProjectImportResult,
   ChatSessionSummary,
+  ChatSessionProjectGroup,
   ChatNodeInfo,
   ChatPreviewInfo,
   ChatIssueSummary,
@@ -230,6 +231,7 @@ export interface GahDataSource {
   setManagerChatModel(profile: string, modelId: string): Promise<{ success: boolean }>;
   setManagerChatReasoningEffort(profile: string, effortId: string): Promise<{ success: boolean }>;
   getChatSessions(profile: string): Promise<{ sessions: ChatSessionSummary[] }>;
+  getAllChatSessions(): Promise<{ projects: ChatSessionProjectGroup[] }>;
   createChatSession(profile: string, backend?: string, model?: string | null, title?: string): Promise<ChatSessionSummary>;
   updateChatSession(profile: string, sessionId: string, patch: { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string }): Promise<ChatSessionSummary>;
   archiveChatSession(profile: string, sessionId: string): Promise<ChatSessionSummary>;
@@ -484,6 +486,9 @@ export const gahApi: GahDataSource = {
   },
   getChatSessions(profile) {
     return getJson<{ sessions: ChatSessionSummary[] }>('/api/manager-chat/sessions', { profile });
+  },
+  getAllChatSessions() {
+    return getJson<{ projects: ChatSessionProjectGroup[] }>('/api/manager-chat/sessions/all');
   },
   createChatSession(profile, backend, model, title) {
     return postJson<ChatSessionSummary, { profile: string; backend?: string; model?: string | null; title?: string }>('/api/manager-chat/sessions', { profile, backend, model, title });

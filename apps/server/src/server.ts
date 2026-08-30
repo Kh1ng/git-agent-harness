@@ -79,6 +79,7 @@ import {
   enqueueManagerWake as enqueueManagerChatWake
 } from './managerChat/ManagerChatManager.js';
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
+import { listAllChatSessions } from './managerChat/chatSessions.js';
 import { usageRollup } from './managerChat/usageRollup.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
 import {
@@ -1345,6 +1346,28 @@ export function createServer(
   app.get('/api/manager-chat/sessions', (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     res.json({ sessions: listChatSessions(profile) });
+  });
+
+  // Cross-project listing for the chat picker: every project's sessions,
+  // grouped and named from the profile list when it resolves (the picker
+  // falls back to the raw profile id for projects the list doesn't cover).
+  app.get('/api/manager-chat/sessions/all', async (_req, res) => {
+    try {
+      const profiles = await listProfiles().catch(() => []);
+      const displayNames = new Map(profiles.map((p) => [p.name, p.display_name || p.name]));
+      res.json({
+        projects: listAllChatSessions().map((group) => ({
+          profile: group.profile,
+          profileName: displayNames.get(group.profile) ?? group.profile,
+          sessions: group.sessions
+        }))
+      });
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to list chat sessions',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
   });
 
   app.get('/api/manager-chat/storage', async (req, res) => {
