@@ -131,6 +131,10 @@ if [ "$1" = "--version" ]; then
   if [ -f '{record_dir}/exit-version-with-child' ]; then
     (sleep 0.4; echo late-output; touch '{record_dir}/version-helper-survived.marker') &
   fi
+  if [ -f '{record_dir}/exit-version-with-detached-child' ]; then
+    setsid sh -c "touch '{record_dir}/detached-helper-started'; sleep 0.4; touch '{record_dir}/version-helper-survived.marker'" &
+    while [ ! -f '{record_dir}/detached-helper-started' ]; do sleep 0.01; done
+  fi
   if [ -f '{record_dir}/hang-version' ]; then
     (sleep 0.4; touch '{record_dir}/version-helper-survived.marker') &
     sleep 3

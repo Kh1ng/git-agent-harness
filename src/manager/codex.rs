@@ -601,6 +601,13 @@ impl From<anyhow::Error> for HelperCommandFailure {
     }
 }
 
+fn cleanup_helper(child: &mut Child, captures: [&CommandCapture; 2]) -> Option<String> {
+    let group = crate::runner::process::kill_process_group(child);
+    let files = [&captures[0].file, &captures[1].file];
+    let holders = crate::runner::process::kill_processes_holding_files(&files);
+    group.or(holders)
+}
+
 fn bounded_command_output(
     command: &mut Command,
     context: &str,
@@ -620,7 +627,7 @@ fn bounded_command_output(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let cleanup = crate::runner::process::kill_process_group(&mut child);
+                let cleanup = cleanup_helper(&mut child, [&stdout, &stderr]);
                 if let Some(cleanup) = cleanup {
                     return Err(HelperCommandFailure::Cleanup(anyhow!(
                         "{context} exited but its process group cleanup failed: {cleanup}"
@@ -632,7 +639,7 @@ fn bounded_command_output(
                 thread::sleep(Duration::from_millis(10));
             }
             Ok(None) => {
-                let cleanup = crate::runner::process::kill_process_group(&mut child);
+                let cleanup = cleanup_helper(&mut child, [&stdout, &stderr]);
                 let wait = child.wait();
                 #[cfg(test)]
                 let cleanup = FAIL_HELPER_CLEANUP_AFTER_REAP
@@ -654,7 +661,7 @@ fn bounded_command_output(
                 };
             }
             Err(error) => {
-                let cleanup = crate::runner::process::kill_process_group(&mut child);
+                let cleanup = cleanup_helper(&mut child, [&stdout, &stderr]);
                 let wait = child.wait();
                 let failure = anyhow!("waiting for {context}: {error}");
                 return match (cleanup, wait) {
