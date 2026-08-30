@@ -84,14 +84,43 @@ fn needs_review_mr_takes_priority() {
 }
 
 #[test]
-fn ci_failed_mr_trigger_fix_action() {
+fn ci_failed_mr_with_stale_review_triggers_review() {
     let mut snapshot = empty_snapshot();
-    snapshot.merge_requests.push(mr("gah/real-1", "CI_FAILED"));
+    let mut failed = mr("gah/real-1", "CI_FAILED");
+    failed.review_generation = Some("review-v1:current-head:sha256:current-metadata".into());
+    failed.review_verdict = Some("NEEDS_FIX".into());
+    failed.review_generation_status =
+        Some("superseded review because source or provider metadata changed".into());
+    snapshot.merge_requests.push(failed);
     let action = decide_next_action(&snapshot);
     match action {
-        NextAction::FixMr { branch, reason, .. } => {
+        NextAction::ReviewMr { branch, reason, .. } => {
             assert_eq!(branch, "gah/real-1");
-            assert!(reason.contains("reusing existing branch"));
+            assert!(reason.contains("no completed current review"));
+        }
+        other => panic!("expected ReviewMr, got {other:?}"),
+    }
+}
+
+#[test]
+fn ci_failed_mr_with_current_review_triggers_fix() {
+    let mut snapshot = empty_snapshot();
+    let mut failed = mr("gah/real-1", "CI_FAILED");
+    failed.review_generation = Some("review-v1:current-head:sha256:current-metadata".into());
+    failed.review_verdict = Some("NEEDS_FIX".into());
+    snapshot.merge_requests.push(failed);
+
+    match decide_next_action(&snapshot) {
+        NextAction::FixMr {
+            branch,
+            review_generation,
+            ..
+        } => {
+            assert_eq!(branch, "gah/real-1");
+            assert_eq!(
+                review_generation.as_deref(),
+                Some("review-v1:current-head:sha256:current-metadata")
+            );
         }
         other => panic!("expected FixMr, got {other:?}"),
     }
@@ -118,7 +147,10 @@ fn ci_failed_mr_retries_until_cap() {
     let mut fix_attempts = std::collections::HashMap::new();
     fix_attempts.insert("gah/real-1".to_string(), 2); // AUTO_RETRY_CAP = 2
     snapshot.fix_attempt_counts = fix_attempts;
-    snapshot.merge_requests.push(mr("gah/real-1", "CI_FAILED"));
+    let mut failed = mr("gah/real-1", "CI_FAILED");
+    failed.review_generation = Some("review-v1:current-head:sha256:current-metadata".into());
+    failed.review_verdict = Some("NEEDS_FIX".into());
+    snapshot.merge_requests.push(failed);
     let action = decide_next_action(&snapshot);
     // With no unrelated work to continue, report the actual gate instead of
     // emitting a misleading idle/backpressure no-op forever.
@@ -1445,9 +1477,10 @@ fn every_human_required_constructor_has_a_reason_code() {
         "gah/fix".into(),
         fix_retry_exhausted.profile.max_fix_attempts_per_mr as usize,
     );
-    fix_retry_exhausted
-        .merge_requests
-        .push(mr("gah/fix", "CI_FAILED"));
+    let mut failed = mr("gah/fix", "CI_FAILED");
+    failed.review_generation = Some("review-v1:current-head:sha256:current-metadata".into());
+    failed.review_verdict = Some("NEEDS_FIX".into());
+    fix_retry_exhausted.merge_requests.push(failed);
     cases.push((
         HumanRequiredReason::FixRetryCapExceeded,
         fix_retry_exhausted,
