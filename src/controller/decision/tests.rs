@@ -72,7 +72,10 @@ fn blocker_forces_human_required() {
 #[test]
 fn needs_review_mr_takes_priority() {
     let mut snapshot = empty_snapshot();
-    snapshot.merge_requests.push(mr("gah/real-1", "NEEDS_FIX"));
+    let mut needs_fix = mr("gah/real-1", "NEEDS_FIX");
+    needs_fix.review_generation = Some("review-v1:current-head:sha256:current-metadata".into());
+    needs_fix.review_verdict = Some("NEEDS_FIX".into());
+    snapshot.merge_requests.push(needs_fix);
     snapshot
         .merge_requests
         .push(mr("gah/real-2", "NEEDS_REVIEW"));
@@ -127,15 +130,28 @@ fn ci_failed_mr_with_current_review_triggers_fix() {
 }
 
 #[test]
-fn needs_fix_mr_trigger_fix_action() {
+fn needs_fix_mr_without_current_review_triggers_review() {
     let mut snapshot = empty_snapshot();
     snapshot.merge_requests.push(mr("gah/real-1", "NEEDS_FIX"));
-    let action = decide_next_action(&snapshot);
-    match action {
-        NextAction::FixMr { branch, reason, .. } => {
+    match decide_next_action(&snapshot) {
+        NextAction::ReviewMr { branch, reason, .. } => {
             assert_eq!(branch, "gah/real-1");
-            assert!(reason.contains("reusing existing branch"));
+            assert!(reason.contains("no completed current review"));
         }
+        other => panic!("expected ReviewMr, got {other:?}"),
+    }
+}
+
+#[test]
+fn needs_fix_mr_with_current_review_triggers_fix() {
+    let mut snapshot = empty_snapshot();
+    let mut needs_fix = mr("gah/real-1", "NEEDS_FIX");
+    needs_fix.review_generation = Some("review-v1:current-head:sha256:current-metadata".into());
+    needs_fix.review_verdict = Some("REJECT".into());
+    snapshot.merge_requests.push(needs_fix);
+
+    match decide_next_action(&snapshot) {
+        NextAction::FixMr { branch, .. } => assert_eq!(branch, "gah/real-1"),
         other => panic!("expected FixMr, got {other:?}"),
     }
 }
@@ -818,7 +834,9 @@ fn exhausted_mr_does_not_block_others() {
     snapshot
         .fix_attempt_counts
         .insert("gah/stuck-1".into(), AUTO_RETRY_CAP);
-    snapshot.merge_requests.push(mr("gah/stuck-1", "NEEDS_FIX"));
+    snapshot
+        .merge_requests
+        .push(needs_fix_mr("gah/stuck-1", "TICKET-gah/stuck-1"));
     // An unrelated eligible ticket exists.
     snapshot.available_tickets.push(ticket(
         "docs/tickets/TICKET-128-x.md",
@@ -845,7 +863,9 @@ fn exhausted_mr_alone_is_human_required() {
     snapshot
         .fix_attempt_counts
         .insert("gah/stuck-1".into(), AUTO_RETRY_CAP);
-    snapshot.merge_requests.push(mr("gah/stuck-1", "NEEDS_FIX"));
+    snapshot
+        .merge_requests
+        .push(needs_fix_mr("gah/stuck-1", "TICKET-gah/stuck-1"));
     let action = decide_next_action(&snapshot);
     assert!(matches!(
         action,
@@ -1092,12 +1112,12 @@ fn needs_fix_mr(branch: &str, work_id: &str) -> crate::sync::SyncMrJson {
         title: None,
         effective_backend: None,
         effective_model: None,
-        review_verdict: None,
+        review_verdict: Some("NEEDS_FIX".into()),
         review_gate_reason: None,
         source_sha: None,
         merge_commit_sha: None,
         review_contract_version: crate::ledger::REVIEW_CONTRACT_VERSION,
-        review_generation: None,
+        review_generation: Some("review-v1:current-head:sha256:current-metadata".into()),
         review_generation_status: None,
         classification: "NEEDS_FIX".into(),
         recommended_action: crate::sync::RecommendedAction::ReuseBranch,

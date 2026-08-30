@@ -128,8 +128,8 @@ fn ticket_order(
 /// 4. an MR classified READY_FOR_HUMAN with draft=false and conclusively-green
 ///    CI -> MergeMr (or HumanRequired if merge policy forbids auto-merge)
 /// 5. an MR classified NEEDS_REVIEW -> ReviewMr
-/// 6. an MR classified CI_FAILED with no current repair review -> ReviewMr;
-///    otherwise CI_FAILED/NEEDS_FIX -> FixMr (if retry cap not exceeded)
+/// 6. an MR classified CI_FAILED/NEEDS_FIX with no current repair review ->
+///    ReviewMr; otherwise -> FixMr (if retry cap not exceeded)
 /// 7. an MR classified CI_FAILED/NEEDS_FIX -> HumanRequired (if retry cap exceeded)
 /// 8. an MR classified READY_FOR_HUMAN -> HumanRequired ONLY when the merge
 ///    policy forbids auto-merge (StopForHuman) or CI isn't conclusively green
@@ -238,7 +238,9 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
 
         match mr.classification.as_str() {
             "NEEDS_REVIEW" => review_candidates.push(mr),
-            "CI_FAILED" if !has_current_repair_review(mr) => review_candidates.push(mr),
+            "CI_FAILED" | "NEEDS_FIX" if !has_current_repair_review(mr) => {
+                review_candidates.push(mr)
+            }
             "CI_FAILED" | "NEEDS_FIX" => {
                 let fix_attempts = snapshot
                     .fix_attempt_counts
@@ -374,10 +376,10 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             work_id: mr.work_id.clone(),
             branch: mr.branch.clone(),
             mr_url: mr.url.clone(),
-            reason: if mr.classification == "CI_FAILED" {
+            reason: if matches!(mr.classification.as_str(), "CI_FAILED" | "NEEDS_FIX") {
                 format!(
-                    "MR on branch '{}' has failed CI but no completed current review for this generation",
-                    mr.branch
+                    "MR on branch '{}' classified {} but has no completed current review authorizing repair for this generation",
+                    mr.branch, mr.classification
                 )
             } else {
                 format!("MR on branch '{}' classified NEEDS_REVIEW", mr.branch)
