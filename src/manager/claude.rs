@@ -223,6 +223,8 @@ struct ClaudeProcess {
     child: Child,
     stdin: ChildStdin,
     messages: Receiver<std::result::Result<Value, String>>,
+    #[cfg(test)]
+    injected_cleanup_error: Option<String>,
 }
 
 impl ClaudeProcess {
@@ -258,6 +260,8 @@ pub struct ClaudeManagerSession {
     session_dir: PathBuf,
     sessions: HashMap<GahSessionId, ClaudeSessionState>,
     extra_args: Vec<OsString>,
+    #[cfg(test)]
+    next_cleanup_error: Option<String>,
 }
 
 impl ClaudeManagerSession {
@@ -299,11 +303,13 @@ impl ClaudeManagerSession {
             session_dir: session_dir.into(),
             sessions: HashMap::new(),
             extra_args,
+            #[cfg(test)]
+            next_cleanup_error: None,
         })
     }
 
     fn spawn_process(
-        &self,
+        &mut self,
         provider_session_id: &str,
         cwd: &Path,
         resume: bool,
@@ -352,6 +358,8 @@ impl ClaudeManagerSession {
             child,
             stdin,
             messages,
+            #[cfg(test)]
+            injected_cleanup_error: self.next_cleanup_error.take(),
         })
     }
 
@@ -360,6 +368,8 @@ impl ClaudeManagerSession {
             return Ok(());
         };
         let cleanup_error = crate::runner::process::kill_process_group(&mut process.child);
+        #[cfg(test)]
+        let cleanup_error = cleanup_error.or(process.injected_cleanup_error.take());
         let wait_result = process.child.wait();
         if let Some(error) = cleanup_error {
             return Err(anyhow!(error));
@@ -368,15 +378,21 @@ impl ClaudeManagerSession {
         Ok(())
     }
 
-    fn fail_session(state: &mut ClaudeSessionState, error: String) -> Result<()> {
-        state.status = SessionStatus::Terminated(TerminalStatus::Failed(error.clone()));
-        state.outstanding_turns = 0;
-        match Self::terminate_process(&mut state.process) {
-            Ok(()) => Err(anyhow!(error)),
-            Err(cleanup) => Err(anyhow!(
-                "{error}; Claude process cleanup also failed: {cleanup:#}"
-            )),
+    fn with_cleanup_error(error: anyhow::Error, cleanup: Result<()>) -> anyhow::Error {
+        match cleanup {
+            Ok(()) => error,
+            Err(cleanup) => {
+                anyhow!("{error:#}; Claude process cleanup also failed: {cleanup:#}")
+            }
         }
+    }
+
+    fn fail_session(state: &mut ClaudeSessionState, error: String) -> Result<()> {
+        let failure =
+            Self::with_cleanup_error(anyhow!(error), Self::terminate_process(&mut state.process));
+        state.status = SessionStatus::Terminated(TerminalStatus::Failed(failure.to_string()));
+        state.outstanding_turns = 0;
+        Err(failure)
     }
 
     fn pump(&mut self, session: &GahSessionId) -> Result<()> {
@@ -401,20 +417,10 @@ impl ClaudeManagerSession {
             }
         }
         if disconnected && state.outstanding_turns > 0 {
-            let exit = state
-                .process
-                .as_mut()
-                .expect("a disconnected receiver still owns its Claude child")
-                .child
-                .try_wait()?;
-            if let Some(status) = exit {
-                let message =
-                    format!("Claude Code exited with {status} before a structured result event");
-                state.status = SessionStatus::Terminated(TerminalStatus::Failed(message.clone()));
-                state.outstanding_turns = 0;
-                state.process.take();
-                return Err(anyhow!(message));
-            }
+            return Self::fail_session(
+                state,
+                "Claude Code closed its structured output before a result event".into(),
+            );
         }
         Ok(())
     }
@@ -636,10 +642,15 @@ impl ManagerSession for ClaudeManagerSession {
             persist_mapping(&self.session_dir, &session, &provider_session_id, &cwd)
         })();
         if let Err(error) = started {
-            if let Some(mut state) = self.sessions.remove(&session) {
-                let _ = Self::terminate_process(&mut state.process);
-            }
-            return Err(error);
+            let cleanup = Self::terminate_process(
+                &mut self
+                    .sessions
+                    .get_mut(&session)
+                    .expect("just inserted")
+                    .process,
+            );
+            self.sessions.remove(&session);
+            return Err(Self::with_cleanup_error(error, cleanup));
         }
         Ok(session)
     }
@@ -816,11 +827,13 @@ exit 1
         let script = format!(
             r#"#!/usr/bin/env python3
 import json
+import os
 import sys
 import time
 
 record_path = {record_path:?}
 sentinel_path = {sentinel_path:?}
+eof_alive_path = {eof_alive_path:?}
 args = sys.argv[1:]
 if args == ["--version"]:
     print("2.1.197 (Claude Code)")
@@ -888,6 +901,12 @@ for raw in sys.stdin:
             "terminal_reason": "completed",
         }}), flush=True)
         continue
+    if prompt == "close-output":
+        with open(eof_alive_path, "w", encoding="utf-8") as fh:
+            fh.write("stdout closed while child remains alive")
+        os.close(sys.stdout.fileno())
+        time.sleep(10)
+        continue
     if prompt == "slow":
         time.sleep(3)
         with open(sentinel_path, "w", encoding="utf-8") as fh:
@@ -951,6 +970,10 @@ for raw in sys.stdin:
             record_path = record_dir.join("argv.jsonl").display().to_string(),
             sentinel_path = record_dir
                 .join("slow-completed.marker")
+                .display()
+                .to_string(),
+            eof_alive_path = record_dir
+                .join("eof-child-alive.marker")
                 .display()
                 .to_string(),
         );
@@ -1139,6 +1162,74 @@ for raw in sys.stdin:
     }
 
     #[test]
+    fn eof_with_outstanding_work_fails_and_kills_a_live_child() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_streaming_claude(&f.bin_dir, &f.record_dir);
+        let alive = f.record_dir.join("eof-child-alive.marker");
+        let mut adapter = ClaudeManagerSession::new_with_session_dir(
+            f.bin_dir.join("claude"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+        let id = adapter
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "close-output".into(),
+            })
+            .unwrap();
+        for _ in 0..100 {
+            if alive.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            alive.exists(),
+            "fake child must still be alive after closing stdout"
+        );
+
+        let TerminalStatus::Failed(message) = wait_for_terminal_status(&mut adapter, &id) else {
+            panic!("expected EOF with outstanding work to fail the session");
+        };
+        assert!(message.contains("closed its structured output"));
+        assert!(adapter
+            .send(&id, "must not reach the killed child")
+            .is_err());
+    }
+
+    #[test]
+    fn failed_mapping_persistence_reports_cleanup_failure_and_kills_child() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_streaming_claude(&f.bin_dir, &f.record_dir);
+        let session_dir = f.record_dir.join("not-a-directory");
+        fs::write(&session_dir, "occupied").unwrap();
+        let sentinel = f.record_dir.join("slow-completed.marker");
+        let mut adapter =
+            ClaudeManagerSession::new_with_session_dir(f.bin_dir.join("claude"), &session_dir)
+                .unwrap();
+        adapter.next_cleanup_error = Some("injected surviving descendant".into());
+
+        let error = adapter
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "slow".into(),
+            })
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("creating Claude session map"));
+        assert!(message.contains("Claude process cleanup also failed"));
+        assert!(message.contains("injected surviving descendant"));
+        assert!(adapter.sessions.is_empty());
+        std::thread::sleep(Duration::from_millis(3_200));
+        assert!(
+            !sentinel.exists(),
+            "persistence failure must kill the child"
+        );
+    }
+
+    #[test]
     fn interrupt_kills_the_child_process_and_sticks_terminated_interrupted() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
@@ -1298,11 +1389,30 @@ for raw in sys.stdin:
                 instruction: "mismatched-session".into(),
             })
             .unwrap();
+        adapter
+            .sessions
+            .get_mut(&id)
+            .unwrap()
+            .process
+            .as_mut()
+            .unwrap()
+            .injected_cleanup_error = Some("injected mismatch survivor".into());
 
-        let TerminalStatus::Failed(message) = wait_for_terminal_status(&mut adapter, &id) else {
-            panic!("expected the mismatched session event to fail the session");
+        let returned = (0..300)
+            .find_map(|_| match adapter.stream(&id) {
+                Err(error) => Some(error.to_string()),
+                Ok(_) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    None
+                }
+            })
+            .expect("expected the mismatched session event to fail the session");
+        let Some(TerminalStatus::Failed(message)) = adapter.terminal_status(&id).unwrap() else {
+            panic!("expected the combined failure to be stored");
         };
         assert!(message.contains("returned session ID"));
+        assert!(message.contains("injected mismatch survivor"));
+        assert_eq!(message, returned);
         assert!(adapter.send(&id, "must not reach a dead child").is_err());
         assert_eq!(
             adapter.terminal_status(&id).unwrap(),
