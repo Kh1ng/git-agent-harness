@@ -619,7 +619,15 @@ fn bounded_command_output(
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => {
+                let cleanup = crate::runner::process::kill_process_group(&mut child);
+                if let Some(cleanup) = cleanup {
+                    return Err(HelperCommandFailure::Cleanup(anyhow!(
+                        "{context} exited but its process group cleanup failed: {cleanup}"
+                    )));
+                }
+                break status;
+            }
             Ok(None) if Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(10));
             }

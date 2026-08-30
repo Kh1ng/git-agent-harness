@@ -33,7 +33,23 @@ fn helper_output_has_no_named_capture_while_the_command_runs() {
 }
 
 #[test]
-fn constructor_helper_commands_are_bounded_and_reap_descendants() {
+fn successful_helper_exit_reaps_its_background_descendants() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    fs::write(f.record_dir.join("exit-version-with-child"), "").unwrap();
+
+    let started = Instant::now();
+    let discovery =
+        discover_with_timeout(f.bin_dir.join("codex"), Duration::from_millis(500)).unwrap();
+    assert_eq!(discovery.version.as_deref(), Some("codex-cli 1.2.3"));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(!f.record_dir.join("version-helper-survived.marker").exists());
+}
+
+#[test]
+fn helper_commands_are_bounded_and_reap_descendants() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let mut outcomes = Vec::new();
     for (flag, survivor) in [
@@ -45,14 +61,15 @@ fn constructor_helper_commands_are_bounded_and_reap_descendants() {
         make_json_rpc_codex(&f.bin_dir, &f.record_dir);
         fs::write(f.record_dir.join(flag), "").unwrap();
         let started = Instant::now();
-        let session = CodexManagerSession::new_with_session_dir_and_timeout(
-            f.bin_dir.join("codex"),
-            f.record_dir.join("sessions"),
-            Duration::from_millis(50),
-        )
-        .unwrap();
+        match flag {
+            "hang-schema" => {
+                detect_stable_methods(&f.bin_dir.join("codex"), Duration::from_millis(50)).unwrap();
+            }
+            _ => {
+                discover_with_timeout(f.bin_dir.join("codex"), Duration::from_millis(50)).unwrap();
+            }
+        }
         outcomes.push((flag, survivor, started.elapsed(), f.record_dir.clone()));
-        drop(session);
     }
     std::thread::sleep(Duration::from_millis(700));
     for (flag, survivor, elapsed, record_dir) in outcomes {
@@ -180,12 +197,9 @@ fn request_deadline_includes_delivery_to_a_non_reading_server() {
     make_json_rpc_codex(&f.bin_dir, &f.record_dir);
     fs::write(f.record_dir.join("stop-reading-after-thread-start"), "").unwrap();
     let session_dir = f.record_dir.join("sessions");
-    let mut session = CodexManagerSession::new_with_session_dir_and_timeout(
-        f.bin_dir.join("codex"),
-        &session_dir,
-        Duration::from_millis(50),
-    )
-    .unwrap();
+    let mut session =
+        CodexManagerSession::new_with_session_dir(f.bin_dir.join("codex"), &session_dir).unwrap();
+    session.transport.response_timeout = Duration::from_millis(50);
 
     let started = Instant::now();
     let error = session

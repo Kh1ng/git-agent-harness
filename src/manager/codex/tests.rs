@@ -128,6 +128,9 @@ fn make_json_rpc_codex_with_methods(dir: &Path, record_dir: &Path, stable_method
     let body = format!(
         r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
+  if [ -f '{record_dir}/exit-version-with-child' ]; then
+    (sleep 0.4; echo late-output; touch '{record_dir}/version-helper-survived.marker') &
+  fi
   if [ -f '{record_dir}/hang-version' ]; then
     (sleep 0.4; touch '{record_dir}/version-helper-survived.marker') &
     sleep 3
