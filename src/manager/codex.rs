@@ -125,14 +125,42 @@ fn persist_mapping(session_dir: &Path, session: &GahSessionId, thread_id: &str) 
         Ok(())
     })();
 
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-        if renamed {
-            let _ = fs::remove_file(&path);
-            let _ = sync_directory(session_dir);
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => match cleanup_failed_mapping(session_dir, &temp, &path, renamed) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(anyhow!(
+                "{error:#}; additionally failed to clean up the Codex session map: {cleanup:#}"
+            )),
+        },
+    }
+}
+
+fn cleanup_failed_mapping(
+    session_dir: &Path,
+    temp: &Path,
+    path: &Path,
+    renamed: bool,
+) -> Result<()> {
+    let mut errors = Vec::new();
+    let mut removed = false;
+    for candidate in [temp, path].into_iter().take(if renamed { 2 } else { 1 }) {
+        match fs::remove_file(candidate) {
+            Ok(()) => removed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => errors.push(format!("removing {}: {error}", candidate.display())),
         }
     }
-    result
+    if removed {
+        if let Err(error) = sync_directory(session_dir) {
+            errors.push(error.to_string());
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(errors.join("; ")))
+    }
 }
 
 fn remove_mapping(session_dir: &Path, session: &GahSessionId) -> Result<()> {
@@ -198,6 +226,7 @@ struct CodexTransport {
     stdin: ChildStdin,
     messages: Receiver<std::result::Result<Value, String>>,
     next_id: u64,
+    terminated: bool,
     #[cfg(test)]
     fail_request: Option<&'static str>,
 }
@@ -228,6 +257,7 @@ impl CodexTransport {
             stdin,
             messages,
             next_id: 1,
+            terminated: false,
             #[cfg(test)]
             fail_request: None,
         })
@@ -284,6 +314,26 @@ impl CodexTransport {
         }
     }
 
+    /// Stops and reaps the app-server exactly once, including constructor rollback.
+    fn terminate(&mut self) -> Result<()> {
+        if self.terminated {
+            return Ok(());
+        }
+        let cleanup_error = crate::runner::process::kill_process_group(&mut self.child);
+        let wait_result = self.child.wait();
+        if wait_result.is_ok() {
+            self.terminated = true;
+        }
+        match (cleanup_error, wait_result) {
+            (None, Ok(_)) => Ok(()),
+            (Some(cleanup), Ok(_)) => Err(anyhow!(cleanup)),
+            (None, Err(wait)) => Err(wait).context("waiting for terminated Codex app-server"),
+            (Some(cleanup), Err(wait)) => Err(anyhow!(
+                "{cleanup}; waiting for terminated Codex app-server also failed: {wait}"
+            )),
+        }
+    }
+
     /// Any inbound message with both `method` and `id` is a server->client
     /// request (e.g. an approval ask). We always start threads with
     /// `approvalPolicy: "never"` so none of these are expected in normal
@@ -305,6 +355,12 @@ impl CodexTransport {
             }
         }))?;
         Ok(true)
+    }
+}
+
+impl Drop for CodexTransport {
+    fn drop(&mut self) {
+        let _ = self.terminate();
     }
 }
 
@@ -461,6 +517,25 @@ fn detect_stable_methods(executable: &Path) -> std::collections::HashSet<String>
 
 fn is_no_active_turn_error(error: &anyhow::Error) -> bool {
     error.to_string().contains("no active turn")
+}
+
+#[derive(Debug)]
+enum TurnStartFailure {
+    BeforeSend(anyhow::Error),
+    Rejected(anyhow::Error),
+    Ambiguous(anyhow::Error),
+}
+
+impl TurnStartFailure {
+    fn may_have_started(&self) -> bool {
+        matches!(self, Self::Ambiguous(_))
+    }
+
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::BeforeSend(error) | Self::Rejected(error) | Self::Ambiguous(error) => error,
+        }
+    }
 }
 
 pub struct CodexManagerSession {
@@ -700,19 +775,47 @@ impl CodexManagerSession {
         }
     }
 
-    fn start_turn(&mut self, session: &GahSessionId, message: &str) -> Result<()> {
+    /// Starts a turn while preserving whether failure happened before delivery
+    /// or after Codex may already have accepted remote work.
+    fn start_turn(
+        &mut self,
+        session: &GahSessionId,
+        message: &str,
+    ) -> std::result::Result<(), TurnStartFailure> {
         let thread_id = self
             .sessions
             .get(session)
             .map(|state| state.thread_id.clone())
-            .ok_or_else(|| anyhow!("Codex session {session} must be resumed before sending"))?;
-        let response = self.request(
-            "turn/start",
-            json!({
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": message}],
-            }),
-        )?;
+            .ok_or_else(|| {
+                TurnStartFailure::BeforeSend(anyhow!(
+                    "Codex session {session} must be resumed before sending"
+                ))
+            })?;
+        #[cfg(test)]
+        if self.transport.fail_request == Some("turn/start") {
+            self.transport.fail_request = None;
+            return Err(TurnStartFailure::BeforeSend(anyhow!(
+                "injected turn/start enqueue failure"
+            )));
+        }
+        let request_id = self
+            .transport
+            .send_request(
+                "turn/start",
+                json!({
+                    "threadId": thread_id,
+                    "input": [{"type": "text", "text": message}],
+                }),
+            )
+            .map_err(TurnStartFailure::Ambiguous)?;
+        let response = loop {
+            let response = self.transport.recv().map_err(TurnStartFailure::Ambiguous)?;
+            if is_response_for(&response, request_id) {
+                break decode_json_rpc_response(response).map_err(TurnStartFailure::Rejected)?;
+            }
+            self.handle_message(response)
+                .map_err(TurnStartFailure::Ambiguous)?;
+        };
         let turn_id = response
             .get("turn")
             .and_then(|turn| turn.get("id"))
@@ -741,6 +844,29 @@ impl CodexManagerSession {
             }),
         )?;
         Ok(())
+    }
+
+    fn stop_ambiguous_turn(&mut self, session: &GahSessionId) -> Result<()> {
+        let active = self.sessions.get(session).and_then(|state| {
+            state
+                .active_turn_id
+                .as_ref()
+                .map(|turn_id| (state.thread_id.clone(), turn_id.clone()))
+        });
+        let interrupt_error = active.and_then(|(thread_id, turn_id)| {
+            self.request(
+                "turn/interrupt",
+                json!({ "threadId": thread_id, "turnId": turn_id }),
+            )
+            .err()
+        });
+        match (interrupt_error, self.transport.terminate()) {
+            (_, Ok(())) => Ok(()),
+            (None, Err(terminate)) => Err(terminate),
+            (Some(interrupt), Err(terminate)) => Err(anyhow!(
+                "interrupting an ambiguously accepted Codex turn failed: {interrupt:#}; transport shutdown also failed: {terminate:#}"
+            )),
+        }
     }
 }
 
@@ -782,16 +908,28 @@ impl ManagerSession for CodexManagerSession {
             self.sessions.remove(&gah_session_id);
             return Err(error);
         }
-        if let Err(error) = self.start_turn(&gah_session_id, &request.instruction) {
+        if let Err(failure) = self.start_turn(&gah_session_id, &request.instruction) {
+            let remote_cleanup = if failure.may_have_started() {
+                self.stop_ambiguous_turn(&gah_session_id)
+            } else {
+                Ok(())
+            };
             let rollback = remove_mapping(&self.session_dir, &gah_session_id);
             self.sessions.remove(&gah_session_id);
-            if let Err(rollback_error) = rollback {
-                return Err(anyhow!(
-                    "starting Codex turn on thread {thread_id}: {error:#}; additionally failed to remove its session mapping: {rollback_error:#}"
-                ));
-            }
-            return Err(error)
-                .with_context(|| format!("starting Codex turn on thread {thread_id}"));
+            let error = failure.into_error();
+            return match (remote_cleanup, rollback) {
+                (Ok(()), Ok(())) => Err(error)
+                    .with_context(|| format!("starting Codex turn on thread {thread_id}")),
+                (Err(cleanup), Ok(())) => Err(anyhow!(
+                    "starting Codex turn on thread {thread_id}: {error:#}; additionally failed to stop ambiguous remote work: {cleanup:#}"
+                )),
+                (Ok(()), Err(rollback)) => Err(anyhow!(
+                    "starting Codex turn on thread {thread_id}: {error:#}; additionally failed to remove its session mapping: {rollback:#}"
+                )),
+                (Err(cleanup), Err(rollback)) => Err(anyhow!(
+                    "starting Codex turn on thread {thread_id}: {error:#}; additionally failed to stop ambiguous remote work: {cleanup:#}; mapping rollback also failed: {rollback:#}"
+                )),
+            };
         }
         Ok(gah_session_id)
     }
@@ -856,6 +994,7 @@ impl ManagerSession for CodexManagerSession {
             }
         }
         self.start_turn(session, message)
+            .map_err(TurnStartFailure::into_error)
     }
 
     fn stream(&mut self, session: &GahSessionId) -> Result<Vec<SessionUpdate>> {
@@ -908,13 +1047,6 @@ impl ManagerSession for CodexManagerSession {
             SessionStatus::Terminated(status) => Some(status.clone()),
             _ => None,
         })
-    }
-}
-
-impl Drop for CodexManagerSession {
-    fn drop(&mut self) {
-        let _ = crate::runner::process::kill_process_group(&mut self.transport.child);
-        let _ = self.transport.child.wait();
     }
 }
 

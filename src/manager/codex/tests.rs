@@ -125,10 +125,18 @@ import time
 
 record = os.environ["RECORD_PATH"]
 lock = threading.Lock()
+record_dir = os.path.dirname(record)
+survival_sentinel = os.path.join(record_dir, "app-server-survived.marker")
+lost_response_sentinel = os.path.join(record_dir, "lost-response-completed.marker")
 
 def emit(obj):
     with lock:
         print(json.dumps(obj), flush=True)
+
+def mark_survival(path):
+    time.sleep(0.4)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("survived")
 
 thread_counter = 0
 turn_counter = 0
@@ -180,7 +188,15 @@ with open(record, "a", encoding="utf-8") as fh:
         req_id = msg.get("id")
 
         if method == "initialize":
-            emit({{"jsonrpc": "2.0", "id": req_id, "result": {{}}}})
+            if os.path.exists(os.path.join(record_dir, "reject-initialize")):
+                emit({{"jsonrpc": "2.0", "id": req_id, "error": {{"code": -32000, "message": "initialize rejected"}}}})
+            elif os.path.exists(os.path.join(record_dir, "close-stdin-after-initialize")):
+                os.close(0)
+                emit({{"jsonrpc": "2.0", "id": req_id, "result": {{}}}})
+                mark_survival(survival_sentinel)
+                time.sleep(3)
+            else:
+                emit({{"jsonrpc": "2.0", "id": req_id, "result": {{}}}})
         elif method == "initialized":
             pass
         elif method == "thread/start":
@@ -198,8 +214,13 @@ with open(record, "a", encoding="utf-8") as fh:
             turn_id = "turn-" + str(turn_counter)
             thread_id = msg["params"]["threadId"]
             text = msg["params"]["input"][0]["text"]
-            emit({{"jsonrpc": "2.0", "id": req_id, "result": {{"turn": {{"id": turn_id, "status": "inProgress"}}}}}})
-            threading.Thread(target=run_turn, args=(thread_id, turn_id, text), daemon=True).start()
+            if text == "lost-response":
+                threading.Thread(target=mark_survival, args=(lost_response_sentinel,), daemon=True).start()
+                os.close(1)
+                time.sleep(3)
+            else:
+                emit({{"jsonrpc": "2.0", "id": req_id, "result": {{"turn": {{"id": turn_id, "status": "inProgress"}}}}}})
+                threading.Thread(target=run_turn, args=(thread_id, turn_id, text), daemon=True).start()
         elif method == "turn/steer":
             thread_id = msg["params"]["threadId"]
             expected_turn_id = msg["params"]["expectedTurnId"]
@@ -228,6 +249,8 @@ with open(record, "a", encoding="utf-8") as fh:
             }})
         else:
             emit({{"jsonrpc": "2.0", "id": req_id, "error": {{"code": -32601, "message": "unknown method"}}}})
+
+mark_survival(survival_sentinel)
 PY
 export RECORD_PATH='{record_path}'
 exec python3 -u "$tmp" "$@"
@@ -448,6 +471,82 @@ fn failed_initial_turn_start_does_not_leave_an_orphaned_local_session() {
     assert!(
         entries.is_empty(),
         "failed turn/start must roll back the already-durable mapping"
+    );
+
+    let retry = session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "hello".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&mut session, &retry),
+        TerminalStatus::Completed
+    );
+}
+
+#[test]
+fn lost_initial_turn_response_stops_remote_work_before_rollback() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let session_dir = f.record_dir.join("sessions");
+    let mut session =
+        CodexManagerSession::new_with_session_dir(f.bin_dir.join("codex"), &session_dir).unwrap();
+
+    assert!(session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "lost-response".into(),
+        })
+        .is_err());
+    assert!(session.sessions.is_empty());
+    assert!(fs::read_dir(&session_dir).unwrap().next().is_none());
+
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(
+        !f.record_dir.join("lost-response-completed.marker").exists(),
+        "an ambiguously accepted turn must be stopped before its mapping is removed"
+    );
+}
+
+#[test]
+fn constructor_rejection_terminates_its_transport() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    fs::write(f.record_dir.join("reject-initialize"), "").unwrap();
+
+    assert!(CodexManagerSession::new_with_session_dir(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions")
+    )
+    .is_err());
+
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(
+        !f.record_dir.join("app-server-survived.marker").exists(),
+        "a rejected initialize must not leave its app-server alive"
+    );
+}
+
+#[test]
+fn initialized_write_failure_terminates_its_transport() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    fs::write(f.record_dir.join("close-stdin-after-initialize"), "").unwrap();
+
+    assert!(CodexManagerSession::new_with_session_dir(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions")
+    )
+    .is_err());
+
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(
+        !f.record_dir.join("app-server-survived.marker").exists(),
+        "an initialized write failure must not leave its app-server alive"
     );
 }
 
@@ -783,8 +882,7 @@ fn installed_codex_passes_handshake_smoke_when_requested() {
         "real Codex app-server must return a thread id from thread/start"
     );
 
-    let _ = crate::runner::process::kill_process_group(&mut transport.child);
-    let _ = transport.child.wait();
+    transport.terminate().unwrap();
 }
 
 /// Drains `stream()` until `terminal_status()` reports terminal,
