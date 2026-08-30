@@ -70,6 +70,20 @@ lines.on('line', (line) => {
     });
     respond({ jsonrpc: '2.0', id: request.id, result: { stopReason: 'end_turn' } });
     if (spawnNumber > 1) setTimeout(() => process.exit(0), 25);
+    return;
+  }
+  if (request.method === 'session/prompt' && mode === 'stuck-cancel') {
+    if (spawnNumber === 1) return;
+    respond({
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: 'fake-session',
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'recovered-after-cancel' } }
+      }
+    });
+    respond({ jsonrpc: '2.0', id: request.id, result: { stopReason: 'end_turn' } });
+    setTimeout(() => process.exit(0), 25);
   }
 });
 `;
@@ -175,6 +189,29 @@ test('Codex evicts after two consecutive ACP failures and rehydrates on the next
       history: currentHistory
     });
     assert.equal(rehydrated.reply, 'rehydrated-on-new-child');
+    assert.equal(Number(readFileSync(spawnCountPath, 'utf8')), 2);
+  } finally {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    rmSync(fake.dir, { recursive: true, force: true });
+  }
+});
+
+test('cancel evicts a child only when its prompt ignores cancellation', { timeout: 5_000 }, async () => {
+  const fake = fakeAcpScript();
+  const spawnCountPath = join(fake.dir, 'spawn-count');
+  try {
+    const backend = createAcpBackend('Claude', () => ({
+      command: process.execPath,
+      args: [fake.path, 'stuck-cancel', spawnCountPath]
+    }));
+
+    const stuck = backend.runTurn('profile', emptyTurnInput);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await backend.cancelTurn('profile');
+    await assert.rejects(stuck);
+
+    const recovered = await backend.runTurn('profile', emptyTurnInput);
+    assert.equal(recovered.reply, 'recovered-after-cancel');
     assert.equal(Number(readFileSync(spawnCountPath, 'utf8')), 2);
   } finally {
     await new Promise((resolve) => setTimeout(resolve, 50));
