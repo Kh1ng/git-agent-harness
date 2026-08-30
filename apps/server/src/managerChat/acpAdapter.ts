@@ -396,7 +396,7 @@ export function opencodeSpawnSpec(): SpawnSpec {
 export function createAcpBackend(
   label: string,
   spawnSpec: () => SpawnSpec,
-  options: { nativeSteering?: boolean; consecutiveFailureReconnectThreshold?: number } = {}
+  options: { consecutiveFailureReconnectThreshold?: number } = {}
 ) {
   const connections = new Map<string, ProfileConnection>();
 
@@ -503,7 +503,7 @@ export function createAcpBackend(
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } }
       });
       const steering = initialized._meta?.steering as { supported?: unknown } | undefined;
-      state.steeringSupported = options.nativeSteering !== false && steering?.supported === true;
+      state.steeringSupported = steering?.supported === true;
       await startSession(state);
     })();
 
