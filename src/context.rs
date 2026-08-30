@@ -281,6 +281,7 @@ fn split_sections(prompt: &str) -> Vec<Section> {
                 "Safety",
                 "Acceptance Criteria",
                 "Verification Commands",
+                "Prior attempts",
                 "Repair Findings",
                 "Source Issue Contract",
                 "Source Issue Lookup",
@@ -391,6 +392,22 @@ mod tests {
         assert!(result.compacted);
         assert!(result.prompt.contains("ACCEPTANCE MUST REMAIN"));
         assert!(!result.prompt.contains("old output old output old output"));
+    }
+
+    #[test]
+    fn preserves_prior_attempt_evidence_during_compaction() {
+        let cfg = ContextConfig {
+            soft_limit_tokens: 1,
+            hard_limit_tokens: 200,
+            ..Default::default()
+        };
+        let prompt = "## Focus\nFix the retry.\n## Prior attempts\nFailing validation tail:\n> cargo test failed\nReview blocking findings:\n> src/lib.rs: retry is broken\n";
+
+        let result = enforce(prompt, &cfg).unwrap();
+
+        assert!(result.compacted);
+        assert!(result.prompt.contains("cargo test failed"));
+        assert!(result.prompt.contains("src/lib.rs: retry is broken"));
     }
 
     #[test]

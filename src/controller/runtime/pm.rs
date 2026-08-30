@@ -174,6 +174,7 @@ pub(super) fn execute(
             expected_review_generation: None,
             skip_validation_gate,
             dispatch_reason: Some("pm_decomposition".to_string()),
+            prior_attempt_context: None,
             work_id: Some(work_id.to_string()),
             run_id: Some(run_id.clone()),
             route_admission,

@@ -650,9 +650,10 @@ pub struct LedgerEntry {
     #[serde(skip, default)]
     pub routing_runtime: RoutingRuntimeState,
     /// Distinguishes the *kind* of dispatch that produced this ledger entry:
-    /// `initial` (first DispatchTicket), `post_review_repair` (FixMr after a
-    /// NEEDS_FIX review), `review` (ReviewMr), or `stuck_loop_gate` (a
-    /// synthetic human-required gate written by the stuck-loop detector).
+    /// `initial` (first DispatchTicket), `retry`/`escalate` (controller
+    /// re-dispatch), `post_review_repair` (FixMr after a NEEDS_FIX review),
+    /// `review` (ReviewMr), or `stuck_loop_gate` (a synthetic human-required
+    /// gate written by the stuck-loop detector).
     /// The retry cap (`count_fix_attempts_per_branch`) counts ONLY
     /// `post_review_repair` entries — internal OpenHands retries within a
     /// single dispatch (attempts_started) do NOT consume retry budget.

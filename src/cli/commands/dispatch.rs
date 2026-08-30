@@ -52,6 +52,7 @@ impl From<Args> for CliDispatchArgs {
             expected_review_generation: None,
             skip_validation_gate: args.skip_validation_gate,
             dispatch_reason: None,
+            prior_attempt_context: None,
             work_id: None,
             run_id: None,
             route_admission: None,

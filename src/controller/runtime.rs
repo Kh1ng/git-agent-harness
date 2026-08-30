@@ -22,8 +22,11 @@ mod probe;
 #[path = "runtime/route_state.rs"]
 mod route_state;
 use route_state::{record_capacity_deferral, route_state_fingerprint};
+#[path = "runtime/action_execution.rs"]
+mod action_execution;
 #[path = "runtime/dispatch_policy.rs"]
 mod dispatch_policy;
+pub(crate) use action_execution::execute_action;
 #[path = "runtime/dispatch_state.rs"]
 mod dispatch_state;
 use dispatch_state::{
@@ -337,7 +340,14 @@ pub fn run_once(
             if !crate::work_claim::try_claim_work(&claim_scope, &work_id)? {
                 format!("Skipped already-claimed work '{work_id}'")
             } else {
-                match execute_action(cfg, profile_name, &action, skip_validation_gate, None) {
+                match execute_action(
+                    cfg,
+                    profile_name,
+                    &action,
+                    &ledger_entries,
+                    skip_validation_gate,
+                    None,
+                ) {
                     Ok(outcome) => {
                         crate::work_claim::release_work(&claim_scope, &work_id)?;
                         outcome
@@ -349,7 +359,14 @@ pub fn run_once(
                 }
             }
         } else {
-            execute_action(cfg, profile_name, &action, skip_validation_gate, None)?
+            execute_action(
+                cfg,
+                profile_name,
+                &action,
+                &ledger_entries,
+                skip_validation_gate,
+                None,
+            )?
         };
 
         let stop_event_type = match &action {
@@ -395,7 +412,7 @@ fn run_parallel_once(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
     _snapshot: &crate::status::StatusSnapshot,
-    _ledger_entries: &[crate::ledger::LedgerEntry],
+    ledger_entries: &[crate::ledger::LedgerEntry],
     json: bool,
     max_parallel: usize,
     skip_validation_gate: bool,
@@ -651,6 +668,7 @@ fn run_parallel_once(
                             admission_coordinator.register_lifecycle_worker(sequence);
                         }
                         let done_tx = done_tx.clone();
+                        let ledger_entries_for_thread = ledger_entries;
                         active += 1;
                         scope.spawn(move || {
                             let _node_capacity_lease = node_capacity_lease;
@@ -660,6 +678,7 @@ fn run_parallel_once(
                                         cfg,
                                         &profile_for_thread,
                                         &action_for_thread,
+                                        &ledger_entries_for_thread,
                                         skip_validation_gate,
                                         route_admission,
                                     )
@@ -715,8 +734,14 @@ fn run_parallel_once(
                             &action,
                             review_generation.as_deref(),
                         )?;
-                        let outcome =
-                            execute_action(cfg, profile_name, &action, skip_validation_gate, None)?;
+                        let outcome = execute_action(
+                            cfg,
+                            profile_name,
+                            &action,
+                            ledger_entries,
+                            skip_validation_gate,
+                            None,
+                        )?;
 
                         let stop_event_type = match &action {
                             NextAction::WaitUntil { .. } => crate::events::EventType::WaitSelected,
@@ -847,154 +872,6 @@ fn update_parallel_refill_budget(
 
 fn parallel_outcome_is_failure(outcome: &str) -> bool {
     outcome.starts_with("Error:") && !outcome.contains("shutdown requested")
-}
-
-/// Executes at most one action. `FixMr` dispatches a fix operation
-/// reusing an existing branch (TICKET-118).
-pub(crate) fn execute_action(
-    cfg: &crate::config::GahConfig,
-    profile_name: &str,
-    action: &NextAction,
-    skip_validation_gate: bool,
-    route_admission: Option<RouteNodeAdmission>,
-) -> Result<String> {
-    let base_args = || crate::dispatch::DispatchArgs {
-        profile: profile_name.to_string(),
-        mode: "fix".to_string(),
-        backend: "auto".to_string(),
-        target: String::new(),
-        branch: None,
-        mr: None,
-        current_branch: false,
-        dry_run: false,
-        oh_profile: None,
-        model: None,
-        retries: 2,
-        allow_draft_fail: false,
-        prod: false,
-        issue_intake_override: false,
-        allow_unknown_red_baseline: dispatch_policy::allow_unknown_red_baseline(action),
-        escalate: false,
-        existing_branch: None,
-        expected_review_generation: None,
-        skip_validation_gate,
-        dispatch_reason: None,
-        work_id: action.work_id().map(str::to_string),
-        run_id: Some(uuid::Uuid::new_v4().to_string()),
-        route_admission: route_admission.clone(),
-    };
-
-    match action {
-        NextAction::ReviewMr { branch, .. } => {
-            let args = crate::dispatch::DispatchArgs {
-                mode: "review".to_string(),
-                branch: Some(branch.clone()),
-                dispatch_reason: Some("review".to_string()),
-                ..base_args()
-            };
-            let deferred = run_dispatch_and_record(cfg, "review", action.work_id(), &args)?;
-            Ok(deferred.unwrap_or_else(|| format!("Dispatched review for branch '{branch}'")))
-        }
-        NextAction::MarkReadyForReview { branch, .. } => {
-            let profile = crate::config::get_profile(cfg, profile_name)?;
-            crate::provider::mark_ready_for_review(profile, branch)?;
-            Ok(format!("Marked MR on branch '{branch}' ready for review"))
-        }
-        NextAction::FixMr {
-            branch,
-            review_generation,
-            ..
-        } => {
-            let args = crate::dispatch::DispatchArgs {
-                target: branch.clone(),
-                existing_branch: Some(branch.clone()),
-                expected_review_generation: review_generation.clone(),
-                dispatch_reason: Some("post_review_repair".to_string()),
-                ..base_args()
-            };
-            let deferred = run_dispatch_and_record(cfg, "fix_existing", action.work_id(), &args)?;
-            Ok(
-                deferred
-                    .unwrap_or_else(|| format!("Dispatched fix for existing branch '{branch}'")),
-            )
-        }
-        NextAction::MergeMr { .. } => merge::execute(cfg, profile_name, action),
-        NextAction::DispatchTicket { ticket_path, .. } => {
-            let args = crate::dispatch::DispatchArgs {
-                target: ticket_path.clone(),
-                dispatch_reason: Some("initial".to_string()),
-                ..base_args()
-            };
-            let deferred =
-                run_dispatch_and_record(cfg, "dispatch_ticket", action.work_id(), &args)?;
-            Ok(deferred.unwrap_or_else(|| format!("Dispatched ticket '{ticket_path}'")))
-        }
-        NextAction::DecomposeIssue {
-            ticket_path,
-            work_id,
-            title,
-            ..
-        } => pm::execute(
-            cfg,
-            profile_name,
-            ticket_path,
-            work_id,
-            title.as_deref(),
-            skip_validation_gate,
-            route_admission.clone(),
-        ),
-        NextAction::ReconcilePmParent {
-            work_id,
-            source_issue_number,
-            plan_fingerprint,
-            child_issue_numbers,
-            ..
-        } => pm::reconcile_parent(
-            cfg,
-            profile_name,
-            work_id,
-            source_issue_number,
-            plan_fingerprint,
-            child_issue_numbers,
-        ),
-        NextAction::Retry { ticket_path, .. } => {
-            let args = crate::dispatch::DispatchArgs {
-                target: ticket_path.clone(),
-                dispatch_reason: Some("initial".to_string()),
-                ..base_args()
-            };
-            let deferred = run_dispatch_and_record(cfg, "retry", action.work_id(), &args)?;
-            Ok(deferred.unwrap_or_else(|| format!("Retried ticket '{ticket_path}'")))
-        }
-        NextAction::Escalate { ticket_path, .. } => {
-            let args = crate::dispatch::DispatchArgs {
-                target: ticket_path.clone(),
-                escalate: true,
-                dispatch_reason: Some("initial".to_string()),
-                ..base_args()
-            };
-            let deferred = run_dispatch_and_record(cfg, "escalate", action.work_id(), &args)?;
-            Ok(deferred.unwrap_or_else(|| format!("Escalated ticket '{ticket_path}'")))
-        }
-        NextAction::WaitUntil { until, reason } => Ok(format!("Waiting until {until} ({reason})")),
-        NextAction::HumanRequired {
-            work_id: _,
-            reason,
-            reference,
-            reason_code,
-        } => Ok(format!(
-            "Human required: {reason}{}{}",
-            reference
-                .as_deref()
-                .map(|r| format!(" ({r})"))
-                .unwrap_or_default(),
-            reason_code
-                .as_deref()
-                .map(|c| format!(" [code={c}]"))
-                .unwrap_or_default()
-        )),
-        NextAction::NoOp { reason } => Ok(format!("No action: {reason}")),
-    }
 }
 
 /// Records `DispatchStarted`, runs `dispatch::run`, then records either
