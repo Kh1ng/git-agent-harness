@@ -12,18 +12,27 @@
 //! against the installed `codex-cli 0.145.0` binary before writing this
 //! adapter: `codex app-server generate-json-schema --out DIR` (no
 //! `--experimental` flag) already includes `thread/start`, `thread/resume`,
-//! `turn/start`, `turn/interrupt`, `item/agentMessage/delta`,
+//! `turn/start`, `turn/steer`, `turn/interrupt`, `item/agentMessage/delta`,
 //! `thread/tokenUsage/updated`, and `turn/completed` in the *stable*
 //! schema bundle, and a live handshake (`initialize` -> `thread/start` ->
-//! `turn/start` -> `turn/interrupt` -> restart -> `thread/resume`) round
-//! -tripped exactly as documented. `installed_codex_passes_handshake_smoke_when_requested`
-//! below re-verifies the handshake against whatever `codex` is on `PATH` at
-//! test time; it does not run a real model turn (no `turn/start`), so it
-//! doesn't burn API budget on every CI run of a real Codex installation.
-//! Issue #527 (the "versioned app-server transport and generated schemas"
-//! ticket this issue's scope note points at) was closed without a merged
-//! implementation, so there is no generated-bindings package to build on;
-//! this adapter talks the wire protocol directly instead.
+//! `turn/start` -> `turn/steer`/`turn/interrupt` -> restart ->
+//! `thread/resume` -> `turn/start`) round-tripped exactly as documented,
+//! including a real `turn/steer` while a turn was genuinely active (it
+//! returns the same `turnId`, and the turn keeps streaming under it).
+//! `detect_stable_methods` re-runs that same schema command at construction
+//! time so `resume`/`interrupt` capability detection tracks the actual
+//! installed binary instead of a hardcoded assumption -- an older
+//! app-server missing one of these methods gets an honest `false` instead
+//! of a generic RPC error the first time it's called.
+//! `installed_codex_passes_handshake_smoke_when_requested` and
+//! `installed_codex_adapter_completes_a_real_turn_and_resumes_after_restart_when_requested`
+//! below re-verify this against whatever `codex` is on `PATH` at test time,
+//! gated behind an env var so they don't run (or burn API budget) on every
+//! CI run of a real Codex installation. Issue #527 (the "versioned
+//! app-server transport and generated schemas" ticket this issue's scope
+//! note points at) was closed without a merged implementation, so there is
+//! no generated-bindings package to build on; this adapter talks the wire
+//! protocol directly instead.
 
 use super::{
     GahSessionId, ManagerSession, SessionCapabilities, SessionStatus, SessionUpdate, StartRequest,
@@ -356,6 +365,63 @@ fn discover(executable: impl AsRef<Path>) -> Result<CodexDiscovery> {
     })
 }
 
+/// Real provider signal for capability detection: `codex app-server
+/// generate-json-schema` (no `--experimental`) emits the installed binary's
+/// actual *stable* method set as `ClientRequest.json`'s `oneOf[].method`
+/// enum -- this is the same command used to verify this module's protocol
+/// against 0.145.0 (see module doc comment), so reusing it at construction
+/// time means capability detection tracks whatever binary is actually
+/// installed instead of a hardcoded assumption. Empty set (including "the
+/// binary is old enough this subcommand doesn't exist") fails closed --
+/// every dependent capability comes back false rather than guessed true.
+fn detect_stable_methods(executable: &Path) -> std::collections::HashSet<String> {
+    let dir = std::env::temp_dir().join(format!(
+        "gah-codex-schema-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    let methods = (|| -> Result<std::collections::HashSet<String>> {
+        fs::create_dir_all(&dir)?;
+        let output = Command::new(executable)
+            .args(["app-server", "generate-json-schema", "--out"])
+            .arg(&dir)
+            .output()
+            .context("running codex app-server generate-json-schema")?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "codex app-server generate-json-schema exited with {}",
+                output.status
+            );
+        }
+        let contents = fs::read_to_string(dir.join("ClientRequest.json"))
+            .context("reading generated ClientRequest.json")?;
+        let schema: Value = serde_json::from_str(&contents)?;
+        Ok(schema
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                item.get("properties")?
+                    .get("method")?
+                    .get("enum")?
+                    .get(0)?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect())
+    })();
+    let _ = fs::remove_dir_all(&dir);
+    methods.unwrap_or_default()
+}
+
+fn is_no_active_turn_error(error: &anyhow::Error) -> bool {
+    error.to_string().contains("no active turn")
+}
+
 pub struct CodexManagerSession {
     discovery: CodexDiscovery,
     transport: CodexTransport,
@@ -390,22 +456,25 @@ impl CodexManagerSession {
             }),
         )?;
         transport.send_notification("initialized", json!({}))?;
+        // thread/resume and turn/interrupt are detected from the installed
+        // binary's own generated schema (see `detect_stable_methods`)
+        // instead of assumed -- an older/incompatible app-server that
+        // doesn't advertise one of these methods gets an honest `false`
+        // here instead of a generic RPC error the first time it's called.
+        // `inspect` never touches the wire (it only reads locally-tracked
+        // state updated by `pump`), so it has no real-provider dependency
+        // and is always supported.
+        let methods = detect_stable_methods(&discovery.executable);
+        let capabilities = SessionCapabilities {
+            resume: methods.contains("thread/resume"),
+            interrupt: methods.contains("turn/interrupt"),
+            inspect: true,
+        };
         Ok(Self {
             discovery,
             transport,
             sessions: HashMap::new(),
-            // Evidenced against the installed 0.145.0 binary's stable schema
-            // and a live handshake (see module doc comment): thread/resume
-            // and turn/interrupt are unconditional, not capability-negotiated
-            // the way Hermes's ACP surface is. If a future Codex version
-            // drops one of these, the corresponding request simply errors
-            // and that error propagates -- fail loud on version drift rather
-            // than silently degrading.
-            capabilities: SessionCapabilities {
-                resume: true,
-                interrupt: true,
-                inspect: true,
-            },
+            capabilities,
             session_dir: session_dir.into(),
         })
     }
@@ -595,6 +664,46 @@ impl CodexManagerSession {
         }
         Ok(())
     }
+
+    /// Steers the thread's currently in-progress turn instead of starting a
+    /// new one. `turn/steer` is the stable app-server method for this (see
+    /// module doc comment); it requires `expectedTurnId` as a precondition
+    /// and errors with "no active turn to steer" if the turn has already
+    /// ended, which `send` treats as a race and falls back on.
+    fn steer_turn(&mut self, session: &GahSessionId, turn_id: &str, message: &str) -> Result<()> {
+        let thread_id = self.state_mut(session)?.thread_id.clone();
+        self.request(
+            "turn/steer",
+            json!({
+                "threadId": thread_id,
+                "expectedTurnId": turn_id,
+                "input": [{"type": "text", "text": message}],
+            }),
+        )?;
+        Ok(())
+    }
+
+    /// Best-effort cleanup for a thread/turn GAH has already started
+    /// remotely but cannot keep local state for (mirrors
+    /// `manager::hermes::HermesManagerSession::discard_started_session`).
+    /// The interrupt result is ignored the same way Hermes ignores its
+    /// `session/cancel` result: this is cleanup, not the operation the
+    /// caller asked for, so a failure here must not shadow the real error
+    /// that triggered the rollback.
+    fn discard_started_session(
+        &mut self,
+        session: &GahSessionId,
+        thread_id: &str,
+        turn_id: Option<&str>,
+    ) {
+        if let Some(turn_id) = turn_id {
+            let _ = self.request(
+                "turn/interrupt",
+                json!({ "threadId": thread_id, "turnId": turn_id }),
+            );
+        }
+        self.sessions.remove(session);
+    }
 }
 
 impl ManagerSession for CodexManagerSession {
@@ -629,8 +738,9 @@ impl ManagerSession for CodexManagerSession {
             },
         );
         if let Err(error) = self.start_turn(&gah_session_id, &request.instruction) {
-            // ponytail: no cleanup call exists for an abandoned thread with
-            // no turn on it; it sits idle on Codex's side at no cost until
+            // ponytail: turn/start itself failed, so no turn is running on
+            // Codex's side -- nothing to interrupt, just drop the thread
+            // locally. It sits idle on Codex's side at no cost until
             // Codex's own retention/GC reclaims it. Add explicit
             // `thread/delete` here if that ever proves to matter.
             self.sessions.remove(&gah_session_id);
@@ -638,7 +748,15 @@ impl ManagerSession for CodexManagerSession {
                 .with_context(|| format!("starting Codex turn on thread {thread_id}"));
         }
         if let Err(error) = persist_mapping(&self.session_dir, &gah_session_id, &thread_id) {
-            self.sessions.remove(&gah_session_id);
+            // The turn *did* start successfully this time, so it's actually
+            // running remotely -- unlike the turn/start failure above,
+            // dropping local state here would abandon a live turn. Ask
+            // Codex to stop it before discarding our only handle to it.
+            let turn_id = self
+                .sessions
+                .get(&gah_session_id)
+                .and_then(|state| state.active_turn_id.clone());
+            self.discard_started_session(&gah_session_id, &thread_id, turn_id.as_deref());
             return Err(error);
         }
         Ok(gah_session_id)
@@ -680,6 +798,29 @@ impl ManagerSession for CodexManagerSession {
     }
 
     fn send(&mut self, session: &GahSessionId, message: &str) -> Result<()> {
+        // Drain any pending turn/completed notification first so a turn
+        // that just finished (but whose notification hasn't been pumped
+        // yet) doesn't look active below.
+        self.pump()?;
+        let active_turn_id = self
+            .sessions
+            .get(session)
+            .and_then(|state| state.active_turn_id.clone());
+        if let Some(turn_id) = active_turn_id {
+            match self.steer_turn(session, &turn_id, message) {
+                Ok(()) => return Ok(()),
+                Err(error) if is_no_active_turn_error(&error) => {
+                    // ponytail: Codex activates a turn a moment after
+                    // turn/start's response returns its id (and, symmetrically,
+                    // can finish it before its turn/completed notification
+                    // reaches us) -- steering in that window races the
+                    // server's own "no active turn" check even though our
+                    // local state still shows it active. Treat this exactly
+                    // like the idle case below: start a fresh turn instead.
+                }
+                Err(error) => return Err(error),
+            }
+        }
         self.start_turn(session, message)
     }
 
@@ -773,13 +914,85 @@ mod tests {
         panic!("timed out waiting for Codex terminal status");
     }
 
+    /// Unlike `wait_for_updates` (which returns as soon as a single
+    /// `stream()` call is non-empty), this waits out a short quiet window
+    /// after the last update seen -- a burst like "delta then usage" is
+    /// emitted via two separate notifications a moment apart, and under
+    /// full-suite parallel load those can land in two different `stream()`
+    /// polls. Tests that need *all* of a burst (not just proof that
+    /// something arrived) should use this instead.
+    fn drain_all_pending(
+        session: &mut CodexManagerSession,
+        id: &GahSessionId,
+    ) -> Vec<SessionUpdate> {
+        let mut all = Vec::new();
+        let mut idle_polls = 0;
+        for _ in 0..200 {
+            let updates = session.stream(id).unwrap();
+            if updates.is_empty() {
+                if !all.is_empty() {
+                    idle_polls += 1;
+                    if idle_polls >= 3 {
+                        break;
+                    }
+                }
+            } else {
+                idle_polls = 0;
+                all.extend(updates);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        all
+    }
+
+    /// Shell fragment answering `codex app-server generate-json-schema
+    /// --out DIR` the same way `detect_stable_methods` expects the real
+    /// binary to: writing a `ClientRequest.json` whose `oneOf[].method`
+    /// enums list the given method names. Kept as its own (non-`format!`)
+    /// string so its literal JSON braces don't need doubling for the outer
+    /// `format!` this gets spliced into.
+    fn schema_stub(methods: &[&str]) -> String {
+        if methods.is_empty() {
+            // Simulates schema generation itself failing (older binary
+            // without the subcommand, or any other error) without falling
+            // through into the RPC loop below and hanging on stdin.
+            return r#"if [ "$1" = "app-server" ] && [ "$2" = "generate-json-schema" ]; then
+  exit 1
+fi
+"#
+            .to_string();
+        }
+        let entries: Vec<String> = methods
+            .iter()
+            .map(|m| format!(r#"{{"properties":{{"method":{{"enum":["{m}"]}}}}}}"#))
+            .collect();
+        format!(
+            r#"if [ "$1" = "app-server" ] && [ "$2" = "generate-json-schema" ]; then
+  shift 2
+  outdir=""
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "--out" ]; then outdir="$2"; shift 2; else shift; fi
+  done
+  mkdir -p "$outdir"
+  cat > "$outdir/ClientRequest.json" <<'JSON'
+{{"oneOf":[{entries}]}}
+JSON
+  exit 0
+fi
+"#,
+            entries = entries.join(",")
+        )
+    }
+
     /// A protocol-faithful fake `codex app-server`: real NDJSON framing,
     /// real method names, real response/notification shapes -- verified
     /// against the installed 0.145.0 binary's actual wire behavior (module
     /// doc comment). `turn/start` acks immediately with the turn `inProgress`
     /// and completes asynchronously via notifications on a background
-    /// thread, exactly like the real app-server.
-    fn make_json_rpc_codex(dir: &Path, record_dir: &Path) {
+    /// thread, exactly like the real app-server. `stable_methods` controls
+    /// what `generate-json-schema` reports, which is what
+    /// `detect_stable_methods` uses to set `resume`/`interrupt` capabilities.
+    fn make_json_rpc_codex_with_methods(dir: &Path, record_dir: &Path, stable_methods: &[&str]) {
         let body = format!(
             r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
@@ -791,6 +1004,7 @@ if [ "$1" = "login" ] && [ "$2" = "status" ]; then
   echo 'token=super-secret' >&2
   exit 0
 fi
+{schema_stub}
 if [ "$1" != "app-server" ]; then
   exit 1
 fi
@@ -878,6 +1092,22 @@ with open(record, "a", encoding="utf-8") as fh:
             text = msg["params"]["input"][0]["text"]
             emit({{"jsonrpc": "2.0", "id": req_id, "result": {{"turn": {{"id": turn_id, "status": "inProgress"}}}}}})
             threading.Thread(target=run_turn, args=(thread_id, turn_id, text), daemon=True).start()
+        elif method == "turn/steer":
+            thread_id = msg["params"]["threadId"]
+            expected_turn_id = msg["params"]["expectedTurnId"]
+            text = msg["params"]["input"][0]["text"]
+            # Real Codex returns the *same* turnId from a successful steer
+            # (verified live) and errors "no active turn to steer" once the
+            # turn has ended -- the magic "steer-ok" text is this fake's
+            # stand-in for "the turn is still genuinely active".
+            if text == "steer-ok":
+                emit({{"jsonrpc": "2.0", "id": req_id, "result": {{"turnId": expected_turn_id}}}})
+                emit({{
+                    "method": "item/agentMessage/delta",
+                    "params": {{"threadId": thread_id, "turnId": expected_turn_id, "delta": "steered: " + text}},
+                }})
+            else:
+                emit({{"jsonrpc": "2.0", "id": req_id, "error": {{"code": -32600, "message": "no active turn to steer"}}}})
         elif method == "turn/interrupt":
             thread_id = msg["params"]["threadId"]
             turn_id = msg["params"]["turnId"]
@@ -894,9 +1124,27 @@ PY
 export RECORD_PATH='{record_path}'
 exec python3 -u "$tmp" "$@"
 "#,
+            schema_stub = schema_stub(stable_methods),
             record_path = record_dir.join("requests.jsonl").display()
         );
         make_fake_bin(dir, "codex", &body);
+    }
+
+    /// Default fake: reports every stable method this adapter uses, so
+    /// existing tests keep exercising the "fully capable" path unless they
+    /// opt into a narrower method set via `make_json_rpc_codex_with_methods`.
+    fn make_json_rpc_codex(dir: &Path, record_dir: &Path) {
+        make_json_rpc_codex_with_methods(
+            dir,
+            record_dir,
+            &[
+                "thread/start",
+                "thread/resume",
+                "turn/start",
+                "turn/steer",
+                "turn/interrupt",
+            ],
+        );
     }
 
     #[test]
@@ -1038,7 +1286,7 @@ exec python3 -u "$tmp" "$@"
     }
 
     #[test]
-    fn failed_mapping_commit_removes_the_started_session() {
+    fn failed_mapping_commit_interrupts_the_remote_turn_before_discarding_the_session() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_json_rpc_codex(&f.bin_dir, &f.record_dir);
@@ -1051,10 +1299,23 @@ exec python3 -u "$tmp" "$@"
         assert!(session
             .start(StartRequest {
                 profile: "profile-a".into(),
-                instruction: "hello".into(),
+                instruction: "slow".into(),
             })
             .is_err());
         assert!(session.sessions.is_empty());
+
+        // The turn/start on Codex's side genuinely succeeded (that's the
+        // whole problem persist_mapping's failure creates) -- the adapter
+        // must have followed up with a real turn/interrupt request rather
+        // than just dropping local state and abandoning it.
+        for _ in 0..100 {
+            let requests = fs::read_to_string(f.record_dir.join("requests.jsonl")).unwrap();
+            if requests.contains("turn/interrupt") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("Codex did not receive turn/interrupt after mapping-commit failure");
     }
 
     #[test]
@@ -1100,6 +1361,155 @@ exec python3 -u "$tmp" "$@"
         assert_eq!(
             session.terminal_status(&id).unwrap(),
             Some(TerminalStatus::Interrupted)
+        );
+    }
+
+    #[test]
+    fn send_steers_an_active_turn_instead_of_starting_a_new_one() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+        let mut session = CodexManagerSession::new_with_session_dir(
+            f.bin_dir.join("codex"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+        let id = session
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "slow".into(),
+            })
+            .unwrap();
+        drain_all_pending(&mut session, &id); // drain the initial turn's own reply/usage
+
+        session.send(&id, "steer-ok").unwrap();
+        let updates = drain_all_pending(&mut session, &id);
+        assert_eq!(
+            updates,
+            vec![SessionUpdate::MessageChunk("steered: steer-ok".into())]
+        );
+
+        let requests = fs::read_to_string(f.record_dir.join("requests.jsonl")).unwrap();
+        assert_eq!(
+            requests.matches("\"turn/steer\"").count(),
+            1,
+            "send against an active turn must use turn/steer exactly once"
+        );
+        assert_eq!(
+            requests.matches("\"turn/start\"").count(),
+            1,
+            "the steered message must not additionally start a fresh turn -- only the \
+             initial start() call's turn/start should appear"
+        );
+    }
+
+    #[test]
+    fn send_falls_back_to_turn_start_when_steer_races_against_turn_completion() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+        let mut session = CodexManagerSession::new_with_session_dir(
+            f.bin_dir.join("codex"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+        let id = session
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "slow".into(),
+            })
+            .unwrap();
+        drain_all_pending(&mut session, &id);
+
+        // Any text other than the fake's "steer-ok" magic value makes the
+        // fake respond to turn/steer the way the real app-server does once
+        // a turn has already ended: "no active turn to steer". `send` must
+        // recover from that by starting a fresh turn, not by propagating
+        // the error.
+        session.send(&id, "not-active-anymore").unwrap();
+        let updates = drain_all_pending(&mut session, &id);
+        assert_eq!(
+            updates,
+            vec![
+                SessionUpdate::MessageChunk("reply: not-active-anymore".into()),
+                SessionUpdate::Usage {
+                    used: 12,
+                    size: 4096
+                }
+            ]
+        );
+
+        let requests = fs::read_to_string(f.record_dir.join("requests.jsonl")).unwrap();
+        assert!(
+            requests.contains("turn/steer"),
+            "the race-triggering turn/steer attempt must still have been sent"
+        );
+    }
+
+    #[test]
+    fn capabilities_reflect_methods_the_installed_binary_actually_reports() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        // No thread/resume, no turn/interrupt in the fake's schema output --
+        // an older/narrower app-server than the one this module was
+        // verified against.
+        make_json_rpc_codex_with_methods(
+            &f.bin_dir,
+            &f.record_dir,
+            &["thread/start", "turn/start", "turn/steer"],
+        );
+        let mut session = CodexManagerSession::new_with_session_dir(
+            f.bin_dir.join("codex"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.capabilities(),
+            SessionCapabilities {
+                resume: false,
+                interrupt: false,
+                inspect: true,
+            }
+        );
+
+        let id = session
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "hello".into(),
+            })
+            .unwrap();
+        assert!(
+            crate::manager::unsupported_capability(&session.resume(&id).unwrap_err()).is_some()
+        );
+        assert!(
+            crate::manager::unsupported_capability(&session.interrupt(&id).unwrap_err()).is_some()
+        );
+    }
+
+    #[test]
+    fn capabilities_fail_closed_when_schema_detection_itself_fails() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        // `generate-json-schema` exits nonzero (e.g. a Codex old enough the
+        // subcommand doesn't behave as expected) while the app-server RPC
+        // loop itself still works fine -- construction must still succeed,
+        // but with every schema-dependent capability honestly false rather
+        // than guessed true.
+        make_json_rpc_codex_with_methods(&f.bin_dir, &f.record_dir, &[]);
+        let session = CodexManagerSession::new_with_session_dir(
+            f.bin_dir.join("codex"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.capabilities(),
+            SessionCapabilities {
+                resume: false,
+                interrupt: false,
+                inspect: true,
+            }
         );
     }
 
@@ -1221,5 +1631,133 @@ exec python3 -u "$tmp" "$@"
 
         let _ = crate::runner::process::kill_process_group(&mut transport.child);
         let _ = transport.child.wait();
+    }
+
+    /// Drains `stream()` until `terminal_status()` reports terminal,
+    /// accumulating every update seen along the way. Bounded by `timeout`
+    /// rather than the fake-server tests' fixed 100x10ms budget, since a
+    /// real model turn's latency is real network+inference time, not a
+    /// background thread we control.
+    fn drain_until_terminal(
+        session: &mut CodexManagerSession,
+        id: &GahSessionId,
+        timeout: Duration,
+    ) -> (Vec<SessionUpdate>, TerminalStatus) {
+        let deadline = Instant::now() + timeout;
+        let mut updates = Vec::new();
+        loop {
+            updates.extend(session.stream(id).unwrap());
+            if let Some(status) = session.terminal_status(id).unwrap() {
+                updates.extend(session.stream(id).unwrap());
+                return (updates, status);
+            }
+            if Instant::now() >= deadline {
+                panic!("timed out waiting for real Codex turn to reach a terminal status");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Bounded real-Codex lifecycle smoke test, gated the same way as
+    /// `installed_codex_passes_handshake_smoke_when_requested` above but
+    /// going through `CodexManagerSession` itself (not raw transport) for a
+    /// real `turn/start`: structured message-chunk and token-usage
+    /// streaming, a `Completed` terminal status, a full process restart
+    /// resuming purely from the durable on-disk thread mapping, a second
+    /// real turn after that resume, and a real `turn/interrupt` against a
+    /// turn proven active by already having streamed real content (the
+    /// module doc comment's live handshake found interrupting *before* any
+    /// content streams back can race Codex's own turn-activation and
+    /// return "no active turn to interrupt" -- waiting for the first delta
+    /// is the same margin that trace needed).
+    ///
+    /// `turn/steer` is deliberately not exercised here: doing so
+    /// deterministically needs the same wait-for-first-token pattern
+    /// layered on top of a *second* concurrently in-flight turn, which
+    /// risks turning this bounded, budget-conscious smoke test into a flaky
+    /// and budget-unbounded one. It was instead verified directly against
+    /// the wire during development: a real `turn/steer` sent after the
+    /// turn had streamed content succeeded, returning the same `turnId`
+    /// (not a new one) with the turn continuing to stream under it, and a
+    /// `turn/steer` sent before any content streamed back reproducibly hit
+    /// the same "no active turn to steer" race `send`'s fallback handles.
+    #[test]
+    fn installed_codex_adapter_completes_a_real_turn_and_resumes_after_restart_when_requested() {
+        let Some(executable) = std::env::var_os("GAH_TEST_REAL_CODEX") else {
+            return;
+        };
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let state = tempfile::TempDir::new().unwrap();
+        let session_dir = state.path().join("manager-sessions");
+        let turn_timeout = Duration::from_secs(30);
+
+        let id = {
+            let mut session =
+                CodexManagerSession::new_with_session_dir(&executable, &session_dir).unwrap();
+            let id = session
+                .start(StartRequest {
+                    profile: "gah-test-real-codex".into(),
+                    instruction: "Reply with exactly: pong".into(),
+                })
+                .unwrap();
+            let (updates, status) = drain_until_terminal(&mut session, &id, turn_timeout);
+            assert_eq!(status, TerminalStatus::Completed);
+            assert!(
+                updates.iter().any(
+                    |u| matches!(u, SessionUpdate::MessageChunk(text) if text.contains("pong"))
+                ),
+                "expected a real agent-message delta containing 'pong', got {updates:?}"
+            );
+            assert!(
+                updates
+                    .iter()
+                    .any(|u| matches!(u, SessionUpdate::Usage { .. })),
+                "expected a real token-usage update, got {updates:?}"
+            );
+            id
+        };
+
+        // Restart: drop the adapter/process entirely, resume purely from
+        // the durable GAH-session-id -> Codex-thread-id mapping on disk.
+        let mut restarted =
+            CodexManagerSession::new_with_session_dir(&executable, &session_dir).unwrap();
+        restarted.resume(&id).unwrap();
+        restarted.send(&id, "Reply with exactly: ping").unwrap();
+        let (updates, status) = drain_until_terminal(&mut restarted, &id, turn_timeout);
+        assert_eq!(status, TerminalStatus::Completed);
+        assert!(
+            updates
+                .iter()
+                .any(|u| matches!(u, SessionUpdate::MessageChunk(text) if text.contains("ping"))),
+            "expected a real agent-message delta containing 'ping' after restart+resume, got {updates:?}"
+        );
+
+        // Interrupt: only sent once real content has streamed back, so the
+        // turn is unambiguously active server-side (see doc comment above).
+        let interrupt_id = restarted
+            .start(StartRequest {
+                profile: "gah-test-real-codex".into(),
+                instruction: "Count slowly from 1 to 500, one number per line, no other text."
+                    .into(),
+            })
+            .unwrap();
+        let deadline = Instant::now() + turn_timeout;
+        loop {
+            let updates = restarted.stream(&interrupt_id).unwrap();
+            if updates
+                .iter()
+                .any(|u| matches!(u, SessionUpdate::MessageChunk(_)))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for real Codex to stream before interrupting"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        restarted.interrupt(&interrupt_id).unwrap();
+        let (_, status) = drain_until_terminal(&mut restarted, &interrupt_id, turn_timeout);
+        assert_eq!(status, TerminalStatus::Interrupted);
     }
 }
