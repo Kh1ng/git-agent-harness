@@ -44,6 +44,15 @@ fn ticket_consumes_worker_slot(ticket: &crate::models::AvailableTicket) -> bool 
     ticket.execution_policy.dispatchable_now
 }
 
+/// A failed-CI repair may reuse review findings only when sync proved they
+/// belong to the currently observed source/metadata generation and carry a
+/// verdict that repair preflight can consume.
+fn has_current_repair_review(mr: &crate::sync::SyncMrJson) -> bool {
+    mr.review_generation.is_some()
+        && mr.review_generation_status.is_none()
+        && matches!(mr.review_verdict.as_deref(), Some("NEEDS_FIX" | "REJECT"))
+}
+
 /// Issue #156: produce an RFC3339 timestamp `offset` from "now" for a
 /// `WaitUntil` re-check. Used when a READY_FOR_HUMAN MR's CI is pending so the
 /// controller records a visible, observable deferral instead of a silent no-op.
@@ -119,7 +128,8 @@ fn ticket_order(
 /// 4. an MR classified READY_FOR_HUMAN with draft=false and conclusively-green
 ///    CI -> MergeMr (or HumanRequired if merge policy forbids auto-merge)
 /// 5. an MR classified NEEDS_REVIEW -> ReviewMr
-/// 6. an MR classified CI_FAILED/NEEDS_FIX -> FixMr (if retry cap not exceeded)
+/// 6. an MR classified CI_FAILED/NEEDS_FIX with no current repair review ->
+///    ReviewMr; otherwise -> FixMr (if retry cap not exceeded)
 /// 7. an MR classified CI_FAILED/NEEDS_FIX -> HumanRequired (if retry cap exceeded)
 /// 8. an MR classified READY_FOR_HUMAN -> HumanRequired ONLY when the merge
 ///    policy forbids auto-merge (StopForHuman) or CI isn't conclusively green
@@ -228,6 +238,9 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
 
         match mr.classification.as_str() {
             "NEEDS_REVIEW" => review_candidates.push(mr),
+            "CI_FAILED" | "NEEDS_FIX" if !has_current_repair_review(mr) => {
+                review_candidates.push(mr)
+            }
             "CI_FAILED" | "NEEDS_FIX" => {
                 let fix_attempts = snapshot
                     .fix_attempt_counts
@@ -363,7 +376,14 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
             work_id: mr.work_id.clone(),
             branch: mr.branch.clone(),
             mr_url: mr.url.clone(),
-            reason: format!("MR on branch '{}' classified NEEDS_REVIEW", mr.branch),
+            reason: if matches!(mr.classification.as_str(), "CI_FAILED" | "NEEDS_FIX") {
+                format!(
+                    "MR on branch '{}' classified {} but has no completed current review authorizing repair for this generation",
+                    mr.branch, mr.classification
+                )
+            } else {
+                format!("MR on branch '{}' classified NEEDS_REVIEW", mr.branch)
+            },
         };
     }
     if let Some(mr) = fix_candidates.first() {

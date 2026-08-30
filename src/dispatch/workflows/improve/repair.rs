@@ -42,6 +42,11 @@ impl<'a> LoadContext<'a> {
     }
 }
 
+fn may_proceed_without_review(error: &anyhow::Error) -> bool {
+    repair_context::no_review_found_error(error)
+        .is_some_and(|missing| missing.expected_review_generation.is_none())
+}
+
 pub(super) fn load_context(
     request: LoadContext<'_>,
     ledger: &mut LedgerEntry,
@@ -80,19 +85,13 @@ pub(super) fn load_context(
                     "FixMr requires structured findings from the latest applicable review",
                 ));
             }
-            // Issue #931: a CI_FAILED-classified repair (decision.rs rule 6)
-            // goes straight to FixMr without ever routing through ReviewMr,
-            // so "no review has ever run at this generation" is an expected
-            // outcome for that path, not a harness bug -- treating it as a
-            // hard failure wedged the controller into retrying `fix_mr`
-            // against a generation that could never be satisfied, forever
-            // (confirmed: #818 retried identically for 2+ hours before the
-            // stuck-loop gate finally caught it). Proceed without repair
-            // context instead; the worker still has the branch's actual
-            // state and CI/validation output to work from.
-            if repair_context::no_review_found_error(&error).is_some() {
+            // Direct/manual repairs have no controller-selected generation
+            // and may proceed from branch and CI state alone. A controller
+            // repair names the exact review it selected, so losing that
+            // evidence between decision and dispatch must fail closed.
+            if may_proceed_without_review(&error) {
                 println!(
-                    "No structured review found for this repair generation (expected for a CI_FAILED-triggered fix that never went through review) -- proceeding without review findings."
+                    "No structured review found for this manual repair -- proceeding without review findings."
                 );
                 return Ok(None);
             }
@@ -101,5 +100,29 @@ pub(super) fn load_context(
             Err(error
                 .context("FixMr requires structured findings from the latest applicable review"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_manual_repairs_may_proceed_without_a_review() {
+        let manual = anyhow::Error::new(repair_context::NoReviewFoundError {
+            branch: "gah/fix".into(),
+            work_id: Some("#905".into()),
+            expected_review_generation: None,
+        });
+        let controller = anyhow::Error::new(repair_context::NoReviewFoundError {
+            branch: "gah/fix".into(),
+            work_id: Some("#905".into()),
+            expected_review_generation: Some(
+                "review-v1:current-head:sha256:current-metadata".into(),
+            ),
+        });
+
+        assert!(may_proceed_without_review(&manual));
+        assert!(!may_proceed_without_review(&controller));
     }
 }

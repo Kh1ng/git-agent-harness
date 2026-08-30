@@ -10,6 +10,8 @@ mod lifecycle_priority;
 mod pm;
 #[path = "tests/priority.rs"]
 mod priority;
+#[path = "tests/review_gate.rs"]
+mod review_gate;
 #[path = "tests/review_handoff.rs"]
 mod review_handoff;
 #[path = "tests/support.rs"]
@@ -70,55 +72,16 @@ fn blocker_forces_human_required() {
 }
 
 #[test]
-fn needs_review_mr_takes_priority() {
-    let mut snapshot = empty_snapshot();
-    snapshot.merge_requests.push(mr("gah/real-1", "NEEDS_FIX"));
-    snapshot
-        .merge_requests
-        .push(mr("gah/real-2", "NEEDS_REVIEW"));
-    let action = decide_next_action(&snapshot);
-    match action {
-        NextAction::ReviewMr { branch, .. } => assert_eq!(branch, "gah/real-2"),
-        other => panic!("expected ReviewMr, got {other:?}"),
-    }
-}
-
-#[test]
-fn ci_failed_mr_trigger_fix_action() {
-    let mut snapshot = empty_snapshot();
-    snapshot.merge_requests.push(mr("gah/real-1", "CI_FAILED"));
-    let action = decide_next_action(&snapshot);
-    match action {
-        NextAction::FixMr { branch, reason, .. } => {
-            assert_eq!(branch, "gah/real-1");
-            assert!(reason.contains("reusing existing branch"));
-        }
-        other => panic!("expected FixMr, got {other:?}"),
-    }
-}
-
-#[test]
-fn needs_fix_mr_trigger_fix_action() {
-    let mut snapshot = empty_snapshot();
-    snapshot.merge_requests.push(mr("gah/real-1", "NEEDS_FIX"));
-    let action = decide_next_action(&snapshot);
-    match action {
-        NextAction::FixMr { branch, reason, .. } => {
-            assert_eq!(branch, "gah/real-1");
-            assert!(reason.contains("reusing existing branch"));
-        }
-        other => panic!("expected FixMr, got {other:?}"),
-    }
-}
-
-#[test]
 fn ci_failed_mr_retries_until_cap() {
     let mut snapshot = empty_snapshot();
     // Simulate 2 prior fix attempts (at the cap)
     let mut fix_attempts = std::collections::HashMap::new();
     fix_attempts.insert("gah/real-1".to_string(), 2); // AUTO_RETRY_CAP = 2
     snapshot.fix_attempt_counts = fix_attempts;
-    snapshot.merge_requests.push(mr("gah/real-1", "CI_FAILED"));
+    let mut failed = mr("gah/real-1", "CI_FAILED");
+    failed.review_generation = Some("review-v1:current-head:sha256:current-metadata".into());
+    failed.review_verdict = Some("NEEDS_FIX".into());
+    snapshot.merge_requests.push(failed);
     let action = decide_next_action(&snapshot);
     // With no unrelated work to continue, report the actual gate instead of
     // emitting a misleading idle/backpressure no-op forever.
@@ -786,7 +749,9 @@ fn exhausted_mr_does_not_block_others() {
     snapshot
         .fix_attempt_counts
         .insert("gah/stuck-1".into(), AUTO_RETRY_CAP);
-    snapshot.merge_requests.push(mr("gah/stuck-1", "NEEDS_FIX"));
+    snapshot
+        .merge_requests
+        .push(needs_fix_mr("gah/stuck-1", "TICKET-gah/stuck-1"));
     // An unrelated eligible ticket exists.
     snapshot.available_tickets.push(ticket(
         "docs/tickets/TICKET-128-x.md",
@@ -813,7 +778,9 @@ fn exhausted_mr_alone_is_human_required() {
     snapshot
         .fix_attempt_counts
         .insert("gah/stuck-1".into(), AUTO_RETRY_CAP);
-    snapshot.merge_requests.push(mr("gah/stuck-1", "NEEDS_FIX"));
+    snapshot
+        .merge_requests
+        .push(needs_fix_mr("gah/stuck-1", "TICKET-gah/stuck-1"));
     let action = decide_next_action(&snapshot);
     assert!(matches!(
         action,
@@ -1060,12 +1027,12 @@ fn needs_fix_mr(branch: &str, work_id: &str) -> crate::sync::SyncMrJson {
         title: None,
         effective_backend: None,
         effective_model: None,
-        review_verdict: None,
+        review_verdict: Some("NEEDS_FIX".into()),
         review_gate_reason: None,
         source_sha: None,
         merge_commit_sha: None,
         review_contract_version: crate::ledger::REVIEW_CONTRACT_VERSION,
-        review_generation: None,
+        review_generation: Some("review-v1:current-head:sha256:current-metadata".into()),
         review_generation_status: None,
         classification: "NEEDS_FIX".into(),
         recommended_action: crate::sync::RecommendedAction::ReuseBranch,
@@ -1445,9 +1412,10 @@ fn every_human_required_constructor_has_a_reason_code() {
         "gah/fix".into(),
         fix_retry_exhausted.profile.max_fix_attempts_per_mr as usize,
     );
-    fix_retry_exhausted
-        .merge_requests
-        .push(mr("gah/fix", "CI_FAILED"));
+    let mut failed = mr("gah/fix", "CI_FAILED");
+    failed.review_generation = Some("review-v1:current-head:sha256:current-metadata".into());
+    failed.review_verdict = Some("NEEDS_FIX".into());
+    fix_retry_exhausted.merge_requests.push(failed);
     cases.push((
         HumanRequiredReason::FixRetryCapExceeded,
         fix_retry_exhausted,
