@@ -56,7 +56,9 @@ fn successful_helper_exit_reaps_a_detached_descendant() {
     make_json_rpc_codex(&f.bin_dir, &f.record_dir);
     fs::write(f.record_dir.join("exit-version-with-detached-child"), "").unwrap();
 
-    discover_with_timeout(f.bin_dir.join("codex"), Duration::from_millis(500)).unwrap();
+    let discovery =
+        discover_with_timeout(f.bin_dir.join("codex"), Duration::from_millis(500)).unwrap();
+    assert_eq!(discovery.version.as_deref(), Some("codex-cli 1.2.3"));
     std::thread::sleep(Duration::from_millis(700));
 
     assert!(!f.record_dir.join("version-helper-survived.marker").exists());
