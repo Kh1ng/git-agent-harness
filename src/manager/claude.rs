@@ -119,6 +119,37 @@ struct DurableSessionMapping {
     cwd: PathBuf,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MappingFaultStage {
+    Serialize,
+    FileSync,
+    Rename,
+    DirectorySync,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct MappingFault {
+    stage: MappingFaultStage,
+    cleanup_error: Option<String>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriteFaultStage {
+    Json,
+    Newline,
+    Flush,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpawnFault {
+    MissingStdin,
+    MissingStdout,
+}
+
 fn resolve_session_dir(xdg_state_home: Option<&OsStr>, home: Option<&OsStr>) -> Result<PathBuf> {
     if let Some(dir) = xdg_state_home
         .map(Path::new)
@@ -146,39 +177,14 @@ fn mapping_path(session_dir: &Path, session: &GahSessionId) -> PathBuf {
     session_dir.join(format!("{digest:x}.json"))
 }
 
-fn persist_mapping(
-    session_dir: &Path,
-    session: &GahSessionId,
-    provider_session_id: &str,
-    cwd: &Path,
-) -> Result<()> {
-    fs::create_dir_all(session_dir)
-        .with_context(|| format!("creating Claude session map {}", session_dir.display()))?;
-    let path = mapping_path(session_dir, session);
-    let temp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+fn with_secondary_error(error: anyhow::Error, label: &str, secondary: Result<()>) -> anyhow::Error {
+    match secondary {
+        Ok(()) => error,
+        Err(secondary) => anyhow!("{error:#}; {label} also failed: {secondary:#}"),
     }
-    let mut file = options
-        .open(&temp)
-        .with_context(|| format!("creating Claude session map {}", temp.display()))?;
-    serde_json::to_writer(
-        &mut file,
-        &DurableSessionMapping {
-            gah_session_id: session.as_str().to_string(),
-            provider_session_id: provider_session_id.to_string(),
-            cwd: cwd.to_path_buf(),
-        },
-    )
-    .context("serializing Claude session map")?;
-    file.sync_all()
-        .with_context(|| format!("syncing Claude session map {}", temp.display()))?;
-    fs::rename(&temp, &path)
-        .with_context(|| format!("committing Claude session map {}", path.display()))?;
+}
+
+fn sync_mapping_dir(session_dir: &Path) -> Result<()> {
     #[cfg(unix)]
     File::open(session_dir)
         .with_context(|| {
@@ -194,6 +200,124 @@ fn persist_mapping(
                 session_dir.display()
             )
         })?;
+    Ok(())
+}
+
+fn remove_mapping_files(session_dir: &Path, paths: &[&Path]) -> Result<()> {
+    let mut failure = None;
+    for path in paths {
+        if let Err(error) = fs::remove_file(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                let error = anyhow!(error)
+                    .context(format!("removing Claude session map {}", path.display()));
+                failure = Some(match failure {
+                    None => error,
+                    Some(primary) => {
+                        with_secondary_error(primary, "another map removal", Err(error))
+                    }
+                });
+            }
+        }
+    }
+    if let Err(error) = sync_mapping_dir(session_dir) {
+        failure = Some(match failure {
+            None => error,
+            Some(primary) => with_secondary_error(primary, "map directory sync", Err(error)),
+        });
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+fn remove_mapping(session_dir: &Path, session: &GahSessionId) -> Result<()> {
+    let path = mapping_path(session_dir, session);
+    let temp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    remove_mapping_files(session_dir, &[&temp, &path])
+}
+
+#[cfg(test)]
+fn inject_mapping_fault(fault: Option<&MappingFault>, stage: MappingFaultStage) -> Result<()> {
+    if fault.is_some_and(|fault| fault.stage == stage) {
+        anyhow::bail!("injected {stage:?} failure");
+    }
+    Ok(())
+}
+
+fn persist_mapping(
+    session_dir: &Path,
+    session: &GahSessionId,
+    provider_session_id: &str,
+    cwd: &Path,
+    #[cfg(test)] fault: Option<&MappingFault>,
+) -> Result<()> {
+    fs::create_dir_all(session_dir)
+        .with_context(|| format!("creating Claude session map {}", session_dir.display()))?;
+    let path = mapping_path(session_dir, session);
+    let temp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut final_committed = false;
+    let stored = (|| {
+        let mut file = options
+            .open(&temp)
+            .with_context(|| format!("creating Claude session map {}", temp.display()))?;
+        #[cfg(test)]
+        inject_mapping_fault(fault, MappingFaultStage::Serialize)
+            .context("serializing Claude session map")?;
+        serde_json::to_writer(
+            &mut file,
+            &DurableSessionMapping {
+                gah_session_id: session.as_str().to_string(),
+                provider_session_id: provider_session_id.to_string(),
+                cwd: cwd.to_path_buf(),
+            },
+        )
+        .context("serializing Claude session map")?;
+        #[cfg(test)]
+        inject_mapping_fault(fault, MappingFaultStage::FileSync)
+            .with_context(|| format!("syncing Claude session map {}", temp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("syncing Claude session map {}", temp.display()))?;
+        #[cfg(test)]
+        inject_mapping_fault(fault, MappingFaultStage::Rename)
+            .with_context(|| format!("committing Claude session map {}", path.display()))?;
+        fs::rename(&temp, &path)
+            .with_context(|| format!("committing Claude session map {}", path.display()))?;
+        final_committed = true;
+        #[cfg(test)]
+        inject_mapping_fault(fault, MappingFaultStage::DirectorySync).with_context(|| {
+            format!(
+                "syncing Claude session map directory {}",
+                session_dir.display()
+            )
+        })?;
+        sync_mapping_dir(session_dir)
+    })();
+    if let Err(error) = stored {
+        let cleanup = if final_committed {
+            remove_mapping_files(session_dir, &[&path])
+        } else {
+            remove_mapping_files(session_dir, &[&temp])
+        };
+        #[cfg(test)]
+        let cleanup = match fault.and_then(|fault| fault.cleanup_error.as_deref()) {
+            Some(message) => Err(with_secondary_error(
+                anyhow!("{message}"),
+                "actual map rollback",
+                cleanup,
+            )),
+            None => cleanup,
+        };
+        return Err(with_secondary_error(
+            error,
+            "Claude session map rollback",
+            cleanup,
+        ));
+    }
     Ok(())
 }
 
@@ -219,26 +343,118 @@ fn load_mapping(session_dir: &Path, session: &GahSessionId) -> Result<DurableSes
 }
 
 #[derive(Debug)]
+struct OwnedChild {
+    child: Option<Child>,
+    #[cfg(test)]
+    injected_cleanup_error: Option<String>,
+    #[cfg(test)]
+    injected_wait_error: Option<String>,
+}
+
+impl OwnedChild {
+    fn new(
+        child: Child,
+        #[cfg(test)] injected_cleanup_error: Option<String>,
+        #[cfg(test)] injected_wait_error: Option<String>,
+    ) -> Self {
+        Self {
+            child: Some(child),
+            #[cfg(test)]
+            injected_cleanup_error,
+            #[cfg(test)]
+            injected_wait_error,
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("owned Claude child is present")
+    }
+
+    fn terminate(&mut self) -> Result<()> {
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+        let cleanup = terminate_child(&mut child);
+        #[cfg(test)]
+        let cleanup = match self.injected_cleanup_error.take() {
+            Some(error) => Err(with_secondary_error(
+                anyhow!(error),
+                "actual process cleanup",
+                cleanup,
+            )),
+            None => cleanup,
+        };
+        #[cfg(test)]
+        let cleanup = match self.injected_wait_error.take() {
+            Some(error) => match cleanup {
+                Ok(()) => Err(anyhow!(error)),
+                Err(primary) => Err(with_secondary_error(
+                    primary,
+                    "Claude child wait",
+                    Err(anyhow!(error)),
+                )),
+            },
+            None => cleanup,
+        };
+        cleanup
+    }
+}
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let _ = self.terminate();
+    }
+}
+
+fn terminate_child(child: &mut Child) -> Result<()> {
+    let group_cleanup = crate::runner::process::kill_process_group(child).map(anyhow::Error::msg);
+    let wait = child
+        .wait()
+        .context("waiting for terminated Claude Code child");
+    match group_cleanup {
+        Some(error) => Err(with_secondary_error(
+            error,
+            "Claude child wait",
+            wait.map(|_| ()),
+        )),
+        None => wait.map(|_| ()),
+    }
+}
+
+#[derive(Debug)]
 struct ClaudeProcess {
-    child: Child,
+    child: OwnedChild,
     stdin: ChildStdin,
     messages: Receiver<std::result::Result<Value, String>>,
     #[cfg(test)]
-    injected_cleanup_error: Option<String>,
+    write_fault: Option<WriteFaultStage>,
 }
 
 impl ClaudeProcess {
     fn write_user_message(&mut self, session_id: &str, message: &str) -> Result<()> {
-        serde_json::to_writer(
-            &mut self.stdin,
-            &json!({
-                "type": "user",
-                "message": {"role": "user", "content": message},
-                "parent_tool_use_id": null,
-                "session_id": session_id,
-            }),
-        )?;
+        let payload = serde_json::to_vec(&json!({
+            "type": "user",
+            "message": {"role": "user", "content": message},
+            "parent_tool_use_id": null,
+            "session_id": session_id,
+        }))?;
+        #[cfg(test)]
+        let fault = self.write_fault.take();
+        #[cfg(test)]
+        if fault == Some(WriteFaultStage::Json) {
+            self.stdin.write_all(&payload[..1])?;
+            anyhow::bail!("injected Json write failure");
+        }
+        self.stdin.write_all(&payload)?;
+        #[cfg(test)]
+        if fault == Some(WriteFaultStage::Newline) {
+            anyhow::bail!("injected Newline write failure");
+        }
         self.stdin.write_all(b"\n")?;
+        #[cfg(test)]
+        if fault == Some(WriteFaultStage::Flush) {
+            anyhow::bail!("injected Flush write failure");
+        }
         self.stdin.flush()?;
         Ok(())
     }
@@ -262,6 +478,14 @@ pub struct ClaudeManagerSession {
     extra_args: Vec<OsString>,
     #[cfg(test)]
     next_cleanup_error: Option<String>,
+    #[cfg(test)]
+    next_wait_error: Option<String>,
+    #[cfg(test)]
+    next_mapping_fault: Option<MappingFault>,
+    #[cfg(test)]
+    next_spawn_fault: Option<SpawnFault>,
+    #[cfg(test)]
+    next_write_fault: Option<WriteFaultStage>,
 }
 
 impl ClaudeManagerSession {
@@ -305,6 +529,14 @@ impl ClaudeManagerSession {
             extra_args,
             #[cfg(test)]
             next_cleanup_error: None,
+            #[cfg(test)]
+            next_wait_error: None,
+            #[cfg(test)]
+            next_mapping_fault: None,
+            #[cfg(test)]
+            next_spawn_fault: None,
+            #[cfg(test)]
+            next_write_fault: None,
         })
     }
 
@@ -338,20 +570,43 @@ impl ClaudeManagerSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         crate::runner::process::prepare_process_group(&mut command);
-        let mut child = command.spawn().with_context(|| {
+        let child = command.spawn().with_context(|| {
             format!(
                 "launching Claude Code from {}",
                 self.discovery.executable.display()
             )
         })?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("Claude Code child did not provide stdin"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("Claude Code child did not provide stdout"))?;
+        let mut child = OwnedChild::new(
+            child,
+            #[cfg(test)]
+            self.next_cleanup_error.take(),
+            #[cfg(test)]
+            self.next_wait_error.take(),
+        );
+        #[cfg(test)]
+        match self.next_spawn_fault.take() {
+            Some(SpawnFault::MissingStdin) => drop(child.child_mut().stdin.take()),
+            Some(SpawnFault::MissingStdout) => drop(child.child_mut().stdout.take()),
+            None => {}
+        }
+        let stdin = match child.child_mut().stdin.take() {
+            Some(stdin) => stdin,
+            None => {
+                return Err(Self::with_cleanup_error(
+                    anyhow!("Claude Code child did not provide stdin"),
+                    child.terminate(),
+                ));
+            }
+        };
+        let stdout = match child.child_mut().stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                return Err(Self::with_cleanup_error(
+                    anyhow!("Claude Code child did not provide stdout"),
+                    child.terminate(),
+                ));
+            }
+        };
         let (sender, messages) = mpsc::channel();
         thread::spawn(move || read_messages(stdout, sender));
         Ok(ClaudeProcess {
@@ -359,7 +614,7 @@ impl ClaudeManagerSession {
             stdin,
             messages,
             #[cfg(test)]
-            injected_cleanup_error: self.next_cleanup_error.take(),
+            write_fault: self.next_write_fault.take(),
         })
     }
 
@@ -367,24 +622,11 @@ impl ClaudeManagerSession {
         let Some(mut process) = process.take() else {
             return Ok(());
         };
-        let cleanup_error = crate::runner::process::kill_process_group(&mut process.child);
-        #[cfg(test)]
-        let cleanup_error = cleanup_error.or(process.injected_cleanup_error.take());
-        let wait_result = process.child.wait();
-        if let Some(error) = cleanup_error {
-            return Err(anyhow!(error));
-        }
-        wait_result.context("waiting for terminated Claude Code child")?;
-        Ok(())
+        process.child.terminate()
     }
 
     fn with_cleanup_error(error: anyhow::Error, cleanup: Result<()>) -> anyhow::Error {
-        match cleanup {
-            Ok(()) => error,
-            Err(cleanup) => {
-                anyhow!("{error:#}; Claude process cleanup also failed: {cleanup:#}")
-            }
-        }
+        with_secondary_error(error, "Claude process cleanup", cleanup)
     }
 
     fn fail_session(state: &mut ClaudeSessionState, error: String) -> Result<()> {
@@ -416,11 +658,19 @@ impl ClaudeManagerSession {
                 }
             }
         }
-        if disconnected && state.outstanding_turns > 0 {
-            return Self::fail_session(
-                state,
-                "Claude Code closed its structured output before a result event".into(),
-            );
+        if disconnected {
+            if state.outstanding_turns > 0 {
+                return Self::fail_session(
+                    state,
+                    "Claude Code closed its structured output before a result event".into(),
+                );
+            }
+            if let Err(error) = Self::terminate_process(&mut state.process) {
+                return Self::fail_session(
+                    state,
+                    format!("retiring closed Claude Code transport: {error:#}"),
+                );
+            }
         }
         Ok(())
     }
@@ -445,49 +695,84 @@ fn read_messages(stdout: ChildStdout, sender: mpsc::Sender<std::result::Result<V
 }
 
 fn handle_message(state: &mut ClaudeSessionState, message: Value) -> Result<()> {
-    if let Some(returned_session_id) = message.get("session_id").and_then(Value::as_str) {
-        if returned_session_id != state.provider_session_id {
-            return Err(anyhow!(
-                "Claude returned session ID {returned_session_id} for expected session {}",
-                state.provider_session_id
-            ));
-        }
-    }
-    if message
-        .get("parent_tool_use_id")
-        .is_some_and(|id| !id.is_null())
-    {
+    let kind = message
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Claude message is missing string type"))?;
+    if kind == "rate_limit_event" {
         return Ok(());
     }
-    match message.get("type").and_then(Value::as_str) {
-        Some("stream_event") => {
-            let event = message.get("event").unwrap_or(&Value::Null);
-            if event.get("type").and_then(Value::as_str) == Some("content_block_delta")
-                && event
+    if !matches!(
+        kind,
+        "system" | "user" | "stream_event" | "assistant" | "result"
+    ) {
+        return Err(anyhow!("unknown Claude message type {kind}"));
+    }
+    let returned_session_id = message
+        .get("session_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Claude {kind} message is missing session_id"))?;
+    if returned_session_id != state.provider_session_id {
+        return Err(anyhow!(
+            "Claude returned session ID {returned_session_id} for expected session {}",
+            state.provider_session_id
+        ));
+    }
+    let nested = message
+        .get("parent_tool_use_id")
+        .is_some_and(|id| !id.is_null());
+    match kind {
+        "system" => {
+            message
+                .get("subtype")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Claude system message is missing subtype"))?;
+        }
+        "user" => {
+            message
+                .get("message")
+                .and_then(Value::as_object)
+                .ok_or_else(|| anyhow!("Claude user message is missing message object"))?;
+        }
+        "stream_event" => {
+            let event = message
+                .get("event")
+                .and_then(Value::as_object)
+                .ok_or_else(|| anyhow!("Claude stream event is missing event object"))?;
+            let event_kind = event
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Claude stream event is missing event type"))?;
+            if event_kind == "content_block_delta" {
+                let delta = event
                     .get("delta")
-                    .and_then(|delta| delta.get("type"))
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| anyhow!("Claude stream event delta is missing"))?;
+                let delta_kind = delta
+                    .get("type")
                     .and_then(Value::as_str)
-                    == Some("text_delta")
-            {
-                if let Some(text) = event
-                    .get("delta")
-                    .and_then(|delta| delta.get("text"))
-                    .and_then(Value::as_str)
-                    .filter(|text| !text.is_empty())
-                {
-                    state
-                        .pending_updates
-                        .push(SessionUpdate::MessageChunk(text.to_string()));
-                    state.saw_text_delta = true;
+                    .ok_or_else(|| anyhow!("Claude stream event delta is missing type"))?;
+                if delta_kind == "text_delta" {
+                    let text = delta
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| anyhow!("Claude text delta is missing text"))?;
+                    if !nested && !text.is_empty() {
+                        state
+                            .pending_updates
+                            .push(SessionUpdate::MessageChunk(text.to_string()));
+                        state.saw_text_delta = true;
+                    }
                 }
             }
         }
-        Some("assistant") => {
-            if let Some(content) = message
+        "assistant" => {
+            let content = message
                 .get("message")
                 .and_then(|assistant| assistant.get("content"))
                 .and_then(Value::as_array)
-            {
+                .ok_or_else(|| anyhow!("Claude assistant message.content is missing"))?;
+            if !nested {
                 state
                     .assistant_fallback
                     .extend(content.iter().filter_map(|block| {
@@ -499,8 +784,20 @@ fn handle_message(state: &mut ClaudeSessionState, message: Value) -> Result<()> 
                     }));
             }
         }
-        Some("result") => finish_turn(state, &message),
-        _ => {}
+        "result" => {
+            message
+                .get("subtype")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Claude result is missing subtype"))?;
+            message
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| anyhow!("Claude result is_error is missing"))?;
+            if !nested {
+                finish_turn(state, &message);
+            }
+        }
+        _ => unreachable!("validated Claude message kind"),
     }
     Ok(())
 }
@@ -617,7 +914,26 @@ impl ManagerSession for ClaudeManagerSession {
         let cwd = std::env::current_dir().context("resolving cwd for Claude session")?;
         let session = GahSessionId::new(&request.profile);
         let provider_session_id = uuid::Uuid::new_v4().to_string();
-        let process = self.spawn_process(&provider_session_id, &cwd, false)?;
+        #[cfg(test)]
+        let mapping_fault = self.next_mapping_fault.take();
+        persist_mapping(
+            &self.session_dir,
+            &session,
+            &provider_session_id,
+            &cwd,
+            #[cfg(test)]
+            mapping_fault.as_ref(),
+        )?;
+        let process = match self.spawn_process(&provider_session_id, &cwd, false) {
+            Ok(process) => process,
+            Err(error) => {
+                return Err(with_secondary_error(
+                    error,
+                    "Claude session map rollback",
+                    remove_mapping(&self.session_dir, &session),
+                ));
+            }
+        };
         self.sessions.insert(
             session.clone(),
             ClaudeSessionState {
@@ -630,18 +946,16 @@ impl ManagerSession for ClaudeManagerSession {
                 assistant_fallback: Vec::new(),
             },
         );
-        let started = (|| {
-            self.sessions
-                .get_mut(&session)
-                .expect("just inserted")
-                .process
-                .as_mut()
-                .expect("just inserted a running Claude process")
-                .write_user_message(&provider_session_id, &request.instruction)
-                .context("sending Claude's initial structured user message")?;
-            persist_mapping(&self.session_dir, &session, &provider_session_id, &cwd)
-        })();
-        if let Err(error) = started {
+        let delivered = self
+            .sessions
+            .get_mut(&session)
+            .expect("just inserted")
+            .process
+            .as_mut()
+            .expect("just inserted a running Claude process")
+            .write_user_message(&provider_session_id, &request.instruction)
+            .context("sending Claude's initial structured user message");
+        if let Err(error) = delivered {
             let cleanup = Self::terminate_process(
                 &mut self
                     .sessions
@@ -650,7 +964,12 @@ impl ManagerSession for ClaudeManagerSession {
                     .process,
             );
             self.sessions.remove(&session);
-            return Err(Self::with_cleanup_error(error, cleanup));
+            let error = Self::with_cleanup_error(error, cleanup);
+            return Err(with_secondary_error(
+                error,
+                "Claude session map rollback",
+                remove_mapping(&self.session_dir, &session),
+            ));
         }
         Ok(session)
     }
@@ -683,14 +1002,23 @@ impl ManagerSession for ClaudeManagerSession {
             .sessions
             .get_mut(session)
             .ok_or_else(|| anyhow!("Claude session {session} must be resumed before sending"))?;
-        state
-            .process
-            .as_mut()
-            .ok_or_else(|| {
-                anyhow!("Claude session {session} has no running process; resume it before sending")
-            })?
-            .write_user_message(&state.provider_session_id, message)
-            .with_context(|| format!("sending structured input to Claude session {session}"))?;
+        let delivered = match state.process.as_mut() {
+            Some(process) => process.write_user_message(&state.provider_session_id, message),
+            None => Err(anyhow!(
+                "Claude session {session} has no running process; resume it before sending"
+            )),
+        }
+        .with_context(|| format!("sending structured input to Claude session {session}"));
+        if let Err(error) = delivered {
+            if matches!(
+                &state.status,
+                SessionStatus::Terminated(TerminalStatus::Failed(_))
+                    | SessionStatus::Terminated(TerminalStatus::Interrupted)
+            ) {
+                return Err(error);
+            }
+            return Self::fail_session(state, format!("{error:#}"));
+        }
         state.outstanding_turns += 1;
         state.status = SessionStatus::Working;
         Ok(())
@@ -760,741 +1088,5 @@ impl Drop for ClaudeManagerSession {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::manager::{
-        unsupported_capability, GahSessionId, ManagerSession, SessionUpdate, StartRequest,
-        TerminalStatus,
-    };
-    use crate::runner::backends::test_util::{fixture, make_fake_bin};
-    use std::fs;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn discovery_records_only_whitelisted_version_and_auth_fields() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_fake_bin(
-            &f.bin_dir,
-            "claude",
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo '2.1.197 (Claude Code)'
-  exit 0
-fi
-if [ "$1" = "auth" ] && [ "$2" = "status" ] && [ "$3" = "--json" ]; then
-  echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"pro","accessToken":"super-secret"}'
-  echo 'Authorization: Bearer super-secret' >&2
-  exit 0
-fi
-exit 1
-"#,
-        );
-
-        let discovery = discover(f.bin_dir.join("claude")).unwrap();
-        assert_eq!(discovery.executable, f.bin_dir.join("claude"));
-        assert_eq!(discovery.version.as_deref(), Some("2.1.197 (Claude Code)"));
-        assert_eq!(
-            discovery.auth_state,
-            ClaudeAuthState::LoggedIn {
-                auth_method: Some("claude.ai".into()),
-                api_provider: Some("firstParty".into()),
-                subscription_type: Some("pro".into()),
-            }
-        );
-        assert!(!format!("{discovery:?}").contains("super-secret"));
-    }
-
-    #[test]
-    fn failed_auth_discovery_does_not_retain_command_output() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_fake_bin(
-            &f.bin_dir,
-            "claude",
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\necho 'token=super-secret' >&2\nexit 7\n",
-        );
-
-        let discovery = discover(f.bin_dir.join("claude")).unwrap();
-        let ClaudeAuthState::Error(message) = discovery.auth_state else {
-            panic!("expected a redacted discovery failure");
-        };
-        assert!(message.contains("status 7"));
-        assert!(!message.contains("super-secret"));
-    }
-
-    fn make_streaming_claude(dir: &Path, record_dir: &Path) {
-        let script = format!(
-            r#"#!/usr/bin/env python3
-import json
-import os
-import sys
-import time
-
-record_path = {record_path:?}
-sentinel_path = {sentinel_path:?}
-eof_alive_path = {eof_alive_path:?}
-args = sys.argv[1:]
-if args == ["--version"]:
-    print("2.1.197 (Claude Code)")
-    raise SystemExit(0)
-if args == ["auth", "status", "--json"]:
-    print(json.dumps({{
-        "loggedIn": True,
-        "authMethod": "claude.ai",
-        "apiProvider": "firstParty",
-        "subscriptionType": "pro",
-        "accessToken": "must-not-be-retained",
-    }}))
-    raise SystemExit(0)
-
-with open(record_path, "a", encoding="utf-8") as record:
-    record.write(json.dumps(args) + "\n")
-    record.flush()
-
-def arg_value(flag):
-    try:
-        return args[args.index(flag) + 1]
-    except (ValueError, IndexError):
-        return None
-
-session_id = arg_value("--session-id") or arg_value("--resume")
-print(json.dumps({{
-    "type": "system",
-    "subtype": "init",
-    "session_id": session_id,
-    "claude_code_version": "2.1.197",
-}}), flush=True)
-
-for raw in sys.stdin:
-    message = json.loads(raw)
-    prompt = message["message"]["content"]
-    if prompt == "malformed":
-        print("not-valid-json-garbage", flush=True)
-        print(json.dumps({{
-            "type": "result",
-            "subtype": "success",
-            "is_error": False,
-            "session_id": session_id,
-            "result": "must never be observed",
-            "usage": {{"input_tokens": 1, "output_tokens": 1,
-                       "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}},
-            "modelUsage": {{"claude-test": {{"contextWindow": 200000}}}},
-            "terminal_reason": "completed",
-        }}), flush=True)
-        continue
-    if prompt == "mismatched-session":
-        print(json.dumps({{
-            "type": "assistant",
-            "session_id": "00000000-0000-0000-0000-000000000000",
-            "message": {{"content": [{{"type": "text", "text": "must never be observed"}}]}},
-        }}), flush=True)
-        print(json.dumps({{
-            "type": "result",
-            "subtype": "success",
-            "is_error": False,
-            "session_id": session_id,
-            "result": "must never complete",
-            "usage": {{"input_tokens": 1, "output_tokens": 1,
-                       "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}},
-            "modelUsage": {{"claude-test": {{"contextWindow": 200000}}}},
-            "terminal_reason": "completed",
-        }}), flush=True)
-        continue
-    if prompt == "close-output":
-        with open(eof_alive_path, "w", encoding="utf-8") as fh:
-            fh.write("stdout closed while child remains alive")
-        os.close(sys.stdout.fileno())
-        time.sleep(10)
-        continue
-    if prompt == "slow":
-        time.sleep(3)
-        with open(sentinel_path, "w", encoding="utf-8") as fh:
-            fh.write("completed")
-        print(json.dumps({{
-            "type": "result",
-            "subtype": "success",
-            "is_error": False,
-            "session_id": session_id,
-            "result": "slow turn completed",
-            "usage": {{"input_tokens": 1, "output_tokens": 1,
-                       "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}},
-            "modelUsage": {{"claude-test": {{"contextWindow": 200000}}}},
-            "terminal_reason": "completed",
-        }}), flush=True)
-        continue
-    if prompt == "delayed-fail":
-        time.sleep(0.2)
-    if prompt == "fail" or prompt == "delayed-fail":
-        print(json.dumps({{
-            "type": "assistant",
-            "session_id": session_id,
-            "message": {{"content": [{{"type": "text", "text": "presentation failure prose"}}]}},
-        }}), flush=True)
-        print(json.dumps({{
-            "type": "result",
-            "subtype": "error_during_execution",
-            "is_error": True,
-            "session_id": session_id,
-            "errors": ["structured protocol failure"],
-            "usage": {{"input_tokens": 10, "output_tokens": 2,
-                       "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4}},
-            "modelUsage": {{"claude-test": {{"contextWindow": 200000}}}},
-            "terminal_reason": "model_error",
-        }}), flush=True)
-        continue
-    reply = "reply: " + prompt
-    print(json.dumps({{
-        "type": "stream_event",
-        "session_id": session_id,
-        "event": {{"type": "content_block_delta",
-                  "delta": {{"type": "text_delta", "text": reply}}}},
-    }}), flush=True)
-    print(json.dumps({{
-        "type": "assistant",
-        "session_id": session_id,
-        "message": {{"content": [{{"type": "text", "text": reply}}]}},
-    }}), flush=True)
-    print(json.dumps({{
-        "type": "result",
-        "subtype": "success",
-        "is_error": False,
-        "session_id": session_id,
-        "result": reply,
-        "usage": {{"input_tokens": 10, "output_tokens": 2,
-                   "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4}},
-        "modelUsage": {{"claude-test": {{"contextWindow": 200000}}}},
-        "terminal_reason": "completed",
-    }}), flush=True)
-"#,
-            record_path = record_dir.join("argv.jsonl").display().to_string(),
-            sentinel_path = record_dir
-                .join("slow-completed.marker")
-                .display()
-                .to_string(),
-            eof_alive_path = record_dir
-                .join("eof-child-alive.marker")
-                .display()
-                .to_string(),
-        );
-        make_fake_bin(dir, "claude", &script);
-    }
-
-    fn wait_for_turn(
-        session: &mut ClaudeManagerSession,
-        id: &GahSessionId,
-    ) -> (Vec<SessionUpdate>, TerminalStatus) {
-        let mut updates = Vec::new();
-        for _ in 0..200 {
-            updates.extend(session.stream(id).unwrap());
-            if let Some(status) = session.terminal_status(id).unwrap() {
-                updates.extend(session.stream(id).unwrap());
-                return (updates, status);
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        panic!("timed out waiting for Claude's structured result event");
-    }
-
-    #[test]
-    fn structured_stream_drives_output_usage_and_completed_lifecycle() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_streaming_claude(&f.bin_dir, &f.record_dir);
-        let session_dir = f.record_dir.join("sessions");
-        let mut adapter =
-            ClaudeManagerSession::new_with_session_dir(f.bin_dir.join("claude"), &session_dir)
-                .unwrap();
-
-        let id = adapter
-            .start(StartRequest {
-                profile: "profile-a".into(),
-                instruction: "hello".into(),
-            })
-            .unwrap();
-        let (updates, status) = wait_for_turn(&mut adapter, &id);
-
-        assert_eq!(status, TerminalStatus::Completed);
-        assert_eq!(
-            updates,
-            vec![
-                SessionUpdate::MessageChunk("reply: hello".into()),
-                SessionUpdate::Usage {
-                    used: 19,
-                    size: 200_000,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn structured_result_error_becomes_terminal_failure() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_streaming_claude(&f.bin_dir, &f.record_dir);
-        let mut adapter = ClaudeManagerSession::new_with_session_dir(
-            f.bin_dir.join("claude"),
-            f.record_dir.join("sessions"),
-        )
-        .unwrap();
-        let id = adapter
-            .start(StartRequest {
-                profile: "profile-a".into(),
-                instruction: "fail".into(),
-            })
-            .unwrap();
-
-        let (_, TerminalStatus::Failed(message)) = wait_for_turn(&mut adapter, &id) else {
-            panic!("expected Claude's structured error result to fail the turn");
-        };
-        assert!(message.contains("error_during_execution"));
-        assert!(message.contains("structured protocol failure"));
-        assert!(!message.contains("presentation failure prose"));
-    }
-
-    #[test]
-    fn restart_resumes_with_the_durable_provider_session_id() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_streaming_claude(&f.bin_dir, &f.record_dir);
-        let session_dir = f.record_dir.join("sessions");
-        let id = {
-            let mut adapter =
-                ClaudeManagerSession::new_with_session_dir(f.bin_dir.join("claude"), &session_dir)
-                    .unwrap();
-            let id = adapter
-                .start(StartRequest {
-                    profile: "profile-a".into(),
-                    instruction: "hello".into(),
-                })
-                .unwrap();
-            let _ = wait_for_turn(&mut adapter, &id);
-            id
-        };
-
-        let mut restarted =
-            ClaudeManagerSession::new_with_session_dir(f.bin_dir.join("claude"), &session_dir)
-                .unwrap();
-        restarted.resume(&id).unwrap();
-        restarted.send(&id, "after restart").unwrap();
-        let (updates, status) = wait_for_turn(&mut restarted, &id);
-        assert_eq!(status, TerminalStatus::Completed);
-        assert!(updates.contains(&SessionUpdate::MessageChunk("reply: after restart".into())));
-
-        let invocations: Vec<Vec<String>> = fs::read_to_string(f.record_dir.join("argv.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        let started_provider_id = invocations[0]
-            .windows(2)
-            .find(|pair| pair[0] == "--session-id")
-            .unwrap()[1]
-            .clone();
-        let resumed_provider_id = invocations[1]
-            .windows(2)
-            .find(|pair| pair[0] == "--resume")
-            .unwrap()[1]
-            .clone();
-        assert_eq!(resumed_provider_id, started_provider_id);
-        assert_ne!(resumed_provider_id, id.as_str());
-    }
-
-    #[test]
-    fn adapter_passes_the_shared_contract_suite() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_streaming_claude(&f.bin_dir, &f.record_dir);
-        let mut adapter = ClaudeManagerSession::new_with_session_dir(
-            f.bin_dir.join("claude"),
-            f.record_dir.join("sessions"),
-        )
-        .unwrap();
-
-        crate::manager::contract::run_contract_suite(&mut adapter);
-    }
-
-    #[test]
-    fn unsupported_inspect_fails_with_the_typed_error() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_streaming_claude(&f.bin_dir, &f.record_dir);
-        let mut adapter = ClaudeManagerSession::new_with_session_dir(
-            f.bin_dir.join("claude"),
-            f.record_dir.join("sessions"),
-        )
-        .unwrap();
-        let id = adapter
-            .start(StartRequest {
-                profile: "profile-a".into(),
-                instruction: "hello".into(),
-            })
-            .unwrap();
-
-        assert!(unsupported_capability(&adapter.inspect(&id).unwrap_err()).is_some());
-    }
-
-    fn wait_for_terminal_status(
-        adapter: &mut ClaudeManagerSession,
-        id: &GahSessionId,
-    ) -> TerminalStatus {
-        for _ in 0..300 {
-            let _ = adapter.stream(id);
-            if let Ok(Some(status)) = adapter.terminal_status(id) {
-                return status;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        panic!("timed out waiting for a terminal status");
-    }
-
-    #[test]
-    fn capabilities_advertise_real_interrupt_support() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_streaming_claude(&f.bin_dir, &f.record_dir);
-        let adapter = ClaudeManagerSession::new_with_session_dir(
-            f.bin_dir.join("claude"),
-            f.record_dir.join("sessions"),
-        )
-        .unwrap();
-        assert!(adapter.capabilities().interrupt);
-    }
-
-    #[test]
-    fn eof_with_outstanding_work_fails_and_kills_a_live_child() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_streaming_claude(&f.bin_dir, &f.record_dir);
-        let alive = f.record_dir.join("eof-child-alive.marker");
-        let mut adapter = ClaudeManagerSession::new_with_session_dir(
-            f.bin_dir.join("claude"),
-            f.record_dir.join("sessions"),
-        )
-        .unwrap();
-        let id = adapter
-            .start(StartRequest {
-                profile: "profile-a".into(),
-                instruction: "close-output".into(),
-            })
-            .unwrap();
-        for _ in 0..100 {
-            if alive.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(
-            alive.exists(),
-            "fake child must still be alive after closing stdout"
-        );
-
-        let TerminalStatus::Failed(message) = wait_for_terminal_status(&mut adapter, &id) else {
-            panic!("expected EOF with outstanding work to fail the session");
-        };
-        assert!(message.contains("closed its structured output"));
-        assert!(adapter
-            .send(&id, "must not reach the killed child")
-            .is_err());
-    }
-
-    #[test]
-    fn failed_mapping_persistence_reports_cleanup_failure_and_kills_child() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_streaming_claude(&f.bin_dir, &f.record_dir);
-        let session_dir = f.record_dir.join("not-a-directory");
-        fs::write(&session_dir, "occupied").unwrap();
-        let sentinel = f.record_dir.join("slow-completed.marker");
-        let mut adapter =
-            ClaudeManagerSession::new_with_session_dir(f.bin_dir.join("claude"), &session_dir)
-                .unwrap();
-        adapter.next_cleanup_error = Some("injected surviving descendant".into());
-
-        let error = adapter
-            .start(StartRequest {
-                profile: "profile-a".into(),
-                instruction: "slow".into(),
-            })
-            .unwrap_err();
-        let message = format!("{error:#}");
-        assert!(message.contains("creating Claude session map"));
-        assert!(message.contains("Claude process cleanup also failed"));
-        assert!(message.contains("injected surviving descendant"));
-        assert!(adapter.sessions.is_empty());
-        std::thread::sleep(Duration::from_millis(3_200));
-        assert!(
-            !sentinel.exists(),
-            "persistence failure must kill the child"
-        );
-    }
-
-    #[test]
-    fn interrupt_kills_the_child_process_and_sticks_terminated_interrupted() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_streaming_claude(&f.bin_dir, &f.record_dir);
-        let sentinel = f.record_dir.join("slow-completed.marker");
-        let mut adapter = ClaudeManagerSession::new_with_session_dir(
-            f.bin_dir.join("claude"),
-            f.record_dir.join("sessions"),
-        )
-        .unwrap();
-        let id = adapter
-            .start(StartRequest {
-                profile: "profile-a".into(),
-                instruction: "slow".into(),
-            })
-            .unwrap();
-
-        // Give the fake backend a moment to actually enter its sleep before
-        // interrupting, so this proves a real in-progress turn was killed
-        // rather than racing a turn that never started.
-        std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(adapter.terminal_status(&id).unwrap(), None);
-
-        adapter.interrupt(&id).unwrap();
-        assert_eq!(
-            adapter.terminal_status(&id).unwrap(),
-            Some(TerminalStatus::Interrupted)
-        );
-
-        // The fake backend only writes this sentinel after its multi-second
-        // sleep completes. If interrupt merely flipped a status flag without
-        // killing the process, the sentinel would still appear once that
-        // sleep elapses.
-        std::thread::sleep(Duration::from_millis(3_200));
-        assert!(
-            !sentinel.exists(),
-            "interrupt must terminate the real child process, not just relabel status"
-        );
-    }
-
-    #[test]
-    fn queued_turn_failure_remains_sticky_after_a_later_successful_turn() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_streaming_claude(&f.bin_dir, &f.record_dir);
-        let mut adapter = ClaudeManagerSession::new_with_session_dir(
-            f.bin_dir.join("claude"),
-            f.record_dir.join("sessions"),
-        )
-        .unwrap();
-        let id = adapter
-            .start(StartRequest {
-                profile: "profile-a".into(),
-                instruction: "delayed-fail".into(),
-            })
-            .unwrap();
-        // Steer/queue a second turn before the first turn's failure has
-        // necessarily been observed -- this must not let the second turn's
-        // later success overwrite the first turn's failure.
-        adapter.send(&id, "should still be sticky failed").unwrap();
-
-        let TerminalStatus::Failed(message) = wait_for_terminal_status(&mut adapter, &id) else {
-            panic!("expected the queued turn's failure to remain the sticky terminal status");
-        };
-        assert!(message.contains("structured protocol failure"));
-
-        // Draining further updates and re-polling must not flip this back
-        // to Completed once the second (successful) turn's result arrives.
-        for _ in 0..20 {
-            let _ = adapter.stream(&id);
-            assert_eq!(
-                adapter.terminal_status(&id).unwrap(),
-                Some(TerminalStatus::Failed(message.clone()))
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    #[test]
-    fn explicit_send_after_observed_failure_starts_a_new_working_lifecycle() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_streaming_claude(&f.bin_dir, &f.record_dir);
-        let mut adapter = ClaudeManagerSession::new_with_session_dir(
-            f.bin_dir.join("claude"),
-            f.record_dir.join("sessions"),
-        )
-        .unwrap();
-        let id = adapter
-            .start(StartRequest {
-                profile: "profile-a".into(),
-                instruction: "fail".into(),
-            })
-            .unwrap();
-        assert!(matches!(
-            wait_for_terminal_status(&mut adapter, &id),
-            TerminalStatus::Failed(_)
-        ));
-
-        adapter.send(&id, "recovered").unwrap();
-        assert_eq!(adapter.terminal_status(&id).unwrap(), None);
-        let (updates, status) = wait_for_turn(&mut adapter, &id);
-        assert_eq!(status, TerminalStatus::Completed);
-        assert!(updates.contains(&SessionUpdate::MessageChunk("reply: recovered".into())));
-    }
-
-    #[test]
-    fn malformed_protocol_line_terminates_the_child_and_stays_sticky_failed() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_streaming_claude(&f.bin_dir, &f.record_dir);
-        let mut adapter = ClaudeManagerSession::new_with_session_dir(
-            f.bin_dir.join("claude"),
-            f.record_dir.join("sessions"),
-        )
-        .unwrap();
-        let id = adapter
-            .start(StartRequest {
-                profile: "profile-a".into(),
-                instruction: "malformed".into(),
-            })
-            .unwrap();
-
-        let TerminalStatus::Failed(message) = wait_for_terminal_status(&mut adapter, &id) else {
-            panic!("expected the malformed protocol line to fail the session");
-        };
-        assert!(message.contains("parsing Claude stream-json event"));
-
-        // A well-formed success result was queued right behind the
-        // malformed line on the wire; it must never be allowed to surface,
-        // whether because the reader stopped forwarding after the bad line
-        // or because a sticky-failed session ignores later terminal events.
-        for _ in 0..20 {
-            let _ = adapter.stream(&id);
-            assert_eq!(
-                adapter.terminal_status(&id).unwrap(),
-                Some(TerminalStatus::Failed(message.clone())),
-                "must never observe the trailing well-formed success result"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    #[test]
-    fn mismatched_session_event_terminates_the_child_and_stays_failed() {
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let f = fixture();
-        make_streaming_claude(&f.bin_dir, &f.record_dir);
-        let mut adapter = ClaudeManagerSession::new_with_session_dir(
-            f.bin_dir.join("claude"),
-            f.record_dir.join("sessions"),
-        )
-        .unwrap();
-        let id = adapter
-            .start(StartRequest {
-                profile: "profile-a".into(),
-                instruction: "mismatched-session".into(),
-            })
-            .unwrap();
-        adapter
-            .sessions
-            .get_mut(&id)
-            .unwrap()
-            .process
-            .as_mut()
-            .unwrap()
-            .injected_cleanup_error = Some("injected mismatch survivor".into());
-
-        let returned = (0..300)
-            .find_map(|_| match adapter.stream(&id) {
-                Err(error) => Some(error.to_string()),
-                Ok(_) => {
-                    std::thread::sleep(Duration::from_millis(10));
-                    None
-                }
-            })
-            .expect("expected the mismatched session event to fail the session");
-        let Some(TerminalStatus::Failed(message)) = adapter.terminal_status(&id).unwrap() else {
-            panic!("expected the combined failure to be stored");
-        };
-        assert!(message.contains("returned session ID"));
-        assert!(message.contains("injected mismatch survivor"));
-        assert_eq!(message, returned);
-        assert!(adapter.send(&id, "must not reach a dead child").is_err());
-        assert_eq!(
-            adapter.terminal_status(&id).unwrap(),
-            Some(TerminalStatus::Failed(message))
-        );
-    }
-
-    #[test]
-    fn installed_claude_start_and_restart_resume_smoke_when_requested() {
-        let Some(executable) = std::env::var_os("GAH_TEST_REAL_CLAUDE") else {
-            return;
-        };
-        let _exec_guard = crate::test_support::ExecGuard::new();
-        let state = tempfile::TempDir::new().unwrap();
-        let session_dir = state.path().join("manager-sessions");
-        let smoke_args = vec![
-            OsString::from("--safe-mode"),
-            OsString::from("--tools"),
-            OsString::new(),
-            OsString::from("--max-budget-usd"),
-            OsString::from("0.02"),
-        ];
-        let id = {
-            let mut adapter = ClaudeManagerSession::new_with_session_dir_and_args(
-                &executable,
-                &session_dir,
-                smoke_args.clone(),
-            )
-            .unwrap();
-            let id = adapter
-                .start(StartRequest {
-                    profile: "installed-smoke".into(),
-                    instruction: "Reply with exactly GAH_CLAUDE_START_OK".into(),
-                })
-                .unwrap();
-            assert_bounded_real_turn(&mut adapter, &id, "GAH_CLAUDE_START_OK");
-            id
-        };
-
-        let mut restarted = ClaudeManagerSession::new_with_session_dir_and_args(
-            executable,
-            session_dir,
-            smoke_args,
-        )
-        .unwrap();
-        restarted.resume(&id).unwrap();
-        restarted
-            .send(&id, "Reply with exactly GAH_CLAUDE_RESUME_OK")
-            .unwrap();
-        assert_bounded_real_turn(&mut restarted, &id, "GAH_CLAUDE_RESUME_OK");
-    }
-
-    fn assert_bounded_real_turn(
-        adapter: &mut ClaudeManagerSession,
-        id: &GahSessionId,
-        expected_reply: &str,
-    ) {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let mut updates = Vec::new();
-        while Instant::now() < deadline {
-            updates.extend(adapter.stream(id).unwrap());
-            if let Some(status) = adapter.terminal_status(id).unwrap() {
-                updates.extend(adapter.stream(id).unwrap());
-                assert_eq!(status, TerminalStatus::Completed);
-                let reply = updates
-                    .iter()
-                    .filter_map(|update| match update {
-                        SessionUpdate::MessageChunk(text) => Some(text.as_str()),
-                        SessionUpdate::Usage { .. } => None,
-                    })
-                    .collect::<String>();
-                assert_eq!(reply.trim(), expected_reply);
-                assert!(
-                    updates
-                        .iter()
-                        .any(|update| matches!(update, SessionUpdate::Usage { .. })),
-                    "installed Claude success omitted structured usage"
-                );
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        panic!("installed Claude protocol smoke exceeded its 30-second bound");
-    }
-}
+#[path = "claude/tests.rs"]
+mod tests;
