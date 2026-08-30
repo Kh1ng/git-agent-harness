@@ -11,7 +11,8 @@ use super::super::issues::{
     parse_ticket_metadata, parse_ticket_metadata_from_issue, resolve_target_to_issue_or_string,
 };
 use super::super::mutation_policy::enforce_policy;
-use super::super::prompts::{build_task, enforce_context_budget};
+use super::super::prior_attempts::build_redispatch_task;
+use super::super::prompts::enforce_context_budget;
 use super::super::repair_context;
 use super::super::text::utf8_safe_prefix;
 use super::super::validation::{
@@ -177,7 +178,6 @@ pub(crate) fn improve(
         ledger.work_id.as_deref(),
     )?;
 
-    // TICKET-118: Handle existing branch for FixMr action
     let (branch, wt) = if let Some(ref existing_branch) = manual_fix.existing_branch {
         println!(
             "Creating worktree from existing branch '{}'...",
@@ -281,7 +281,7 @@ pub(crate) fn improve(
         crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
     let validation_environment = validation_env(profile, session_dir);
 
-    let mut base_task = build_task(profile, &wt, &args.mode, &target, issue_details.as_ref());
+    let mut base_task = build_redispatch_task(profile, &wt, args, &target, issue_details.as_ref());
     if let Some(repair_context) = repair_context.as_ref() {
         repair_context::append_to_prompt(&mut base_task, repair_context);
     }

@@ -22,6 +22,7 @@ mod identity;
 mod issues;
 mod metrics;
 mod mutation_policy;
+mod prior_attempts;
 mod prompts;
 mod publish;
 mod repair_context;
@@ -70,6 +71,7 @@ pub(crate) use self::attempts::{
 pub(crate) use self::claims::duplicate_work_error;
 pub(crate) use self::claims::scan_available_tickets_with_dependencies;
 pub use self::claims::{merge_branch, MergeExecution};
+pub(crate) use self::prior_attempts::prior_attempt_context;
 pub use self::validation::{self_check_validation_gate, ValidationGateError};
 
 fn should_notify_dispatch_failure(error: &anyhow::Error) -> bool {
@@ -135,9 +137,13 @@ pub struct DispatchArgs {
     /// known-broken config after the operator has acknowledged the failure.
     pub skip_validation_gate: bool,
     /// Distinguishes dispatch purpose for ledger persistence: `initial`,
-    /// `post_review_repair`, `review`, or `stuck_loop_gate`.  The retry cap
-    /// counts only `post_review_repair` entries.
+    /// `retry`, `escalate`, `post_review_repair`, `review`, or
+    /// `stuck_loop_gate`. The retry cap counts only `post_review_repair`
+    /// entries.
     pub dispatch_reason: Option<String>,
+    /// Bounded, redacted evidence from prior controller dispatches. Populated
+    /// only for Retry/Escalate; direct and initial dispatches leave it absent.
+    pub prior_attempt_context: Option<String>,
     /// Controller-provided work identity, especially important for reviews
     /// that do not resolve a ticket file during dispatch.
     pub work_id: Option<String>,

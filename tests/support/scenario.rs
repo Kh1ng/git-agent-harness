@@ -695,6 +695,13 @@ impl ScenarioHarness {
             .unwrap_or_default()
     }
 
+    pub fn worker_argv_for_call(&self, worker: &str, call: u32) -> Vec<String> {
+        self.fake_workers
+            .get(worker)
+            .map(|fake| fake.argv_for_call(call))
+            .unwrap_or_default()
+    }
+
     fn install_fakes(&self) {
         // gh/glab scripts need to be in the bin_dir since the gah
         // subprocess resolves them from PATH, not from the thread-local
