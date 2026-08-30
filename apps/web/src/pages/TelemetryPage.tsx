@@ -117,35 +117,70 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
       ) : rows.length === 0 ? (
         <EmptyState icon={FlaskConical} title="No usage recorded" description={`No manager-chat usage in the last ${days} days.`} />
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-left text-muted border-b border-subtle">
-                <th className="py-2 pr-4 font-medium">Backend</th>
-                <th className="py-2 pr-4 font-medium">Turns</th>
-                <th className="py-2 pr-4 font-medium">Tokens</th>
-                <th className="py-2 pr-4 font-medium">Est. cost</th>
-                <th className="py-2 font-medium">By model</th>
-              </tr>
-            </thead>
-            <tbody>
-              {byBackend.map(([backend, agg]) => {
-                const modelRows = rows.filter((row) => row.backend === backend).sort((a, b) => b.total_tokens - a.total_tokens);
-                return (
-                  <tr key={backend} className="border-b border-subtle/50">
-                    <td className="py-2 pr-4 text-primary">{backend}</td>
-                    <td className="py-2 pr-4">{formatCount(agg.turns)}</td>
-                    <td className="py-2 pr-4">{formatTokens(agg.total_tokens)}</td>
-                    <td className="py-2 pr-4">{agg.estimated_cost_usd > 0 ? formatCost(agg.estimated_cost_usd) : <span className="text-muted">plan</span>}</td>
-                    <td className="py-2 text-muted">
-                      {modelRows.map((row) => `${row.model ?? 'default'}: ${formatTokens(row.total_tokens)}`).join(' · ')}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-muted border-b border-subtle">
+                  <th className="py-2 pr-4 font-medium">Backend</th>
+                  <th className="py-2 pr-4 font-medium">Turns</th>
+                  <th className="py-2 pr-4 font-medium">Tokens</th>
+                  <th className="py-2 pr-4 font-medium">Est. cost</th>
+                  <th className="py-2 font-medium">By model</th>
+                </tr>
+              </thead>
+              <tbody>
+                {byBackend.map(([backend, agg]) => {
+                  const modelRows = rows.filter((row) => row.backend === backend).sort((a, b) => b.total_tokens - a.total_tokens);
+                  return (
+                    <tr key={backend} className="border-b border-subtle/50">
+                      <td className="py-2 pr-4 text-primary">{backend}</td>
+                      <td className="py-2 pr-4">{formatCount(agg.turns)}</td>
+                      <td className="py-2 pr-4">{formatTokens(agg.total_tokens)}</td>
+                      <td className="py-2 pr-4">{agg.estimated_cost_usd > 0 ? formatCost(agg.estimated_cost_usd) : <span className="text-muted">plan</span>}</td>
+                      <td className="py-2 text-muted">
+                        {modelRows.map((row) => `${row.model ?? 'default'}: ${formatTokens(row.total_tokens)}`).join(' · ')}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {rollup && rollup.tickets.length > 0 && (
+            <div className="mt-4">
+              <h4 className="text-xs font-semibold text-secondary mb-2">Cost per ticket</h4>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-muted border-b border-subtle">
+                      <th className="py-2 pr-4 font-medium">Ticket</th>
+                      <th className="py-2 pr-4 font-medium">Session</th>
+                      <th className="py-2 pr-4 font-medium">Turns</th>
+                      <th className="py-2 pr-4 font-medium">Tokens</th>
+                      <th className="py-2 pr-4 font-medium">Est. cost</th>
+                      <th className="py-2 font-medium">Backends</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rollup.tickets.map((ticket) => (
+                      <tr key={ticket.ticket} className="border-b border-subtle/50">
+                        <td className="py-2 pr-4 text-primary">{ticket.ticket}</td>
+                        <td className="py-2 pr-4 text-muted">{ticket.title ?? '—'}</td>
+                        <td className="py-2 pr-4">{formatCount(ticket.turns)}</td>
+                        <td className="py-2 pr-4">{formatTokens(ticket.total_tokens)}</td>
+                        <td className="py-2 pr-4">{ticket.estimated_cost_usd > 0 ? formatCost(ticket.estimated_cost_usd) : <span className="text-muted">plan</span>}</td>
+                        <td className="py-2 text-muted">
+                          {Object.entries(ticket.backends).sort((a, b) => b[1] - a[1]).map(([backend, tokens]) => `${backend}: ${formatTokens(tokens)}`).join(' · ')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </>
       )}
     </section>
   );

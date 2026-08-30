@@ -543,6 +543,21 @@ export interface UsageRollupSummary {
   /** Turns whose assistant message reported no usage at all -- counted so
    * silent gaps are visible instead of disappearing the burn. */
   unattributed_turns: number;
+  /** Same burn grouped per ticket: issue chats roll up under their issue
+   * number, other sessions under their branch, the profile default
+   * conversation under a shared bucket. Sorted by tokens desc. */
+  tickets: UsageRollupTicketRow[];
+}
+
+export interface UsageRollupTicketRow {
+  ticket: string;
+  /** The session's title, when one was set. */
+  title: string | null;
+  turns: number;
+  total_tokens: number;
+  estimated_cost_usd: number;
+  /** tokens per backend, e.g. { codex: 1500 }. */
+  backends: Record<string, number>;
 }
 
 export interface ReportData {
