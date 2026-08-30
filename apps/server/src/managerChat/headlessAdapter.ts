@@ -17,18 +17,21 @@
  *
  * What this buys: every backend in the unified chat surface, session
  * worktree binding (cwd per conversation), backend interchange, quota
- * handoff, and the event-sourced log — everything except streaming,
- * native slash commands, per-backend config options, and the permission
- * round-trip, which need a structured protocol.
+ * handoff, and the event-sourced log — everything except streaming, native
+ * slash commands, and the permission round-trip, which need a structured
+ * protocol. AGY's CLI-native model/effort options are exposed.
  */
 
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFile as execFileCallback, execFileSync } from 'node:child_process';
 import { readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import type { ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
-import type { ManagerAdapter, ManagerCommandInfo, ManagerModelInfo } from './registry.js';
+import type { ManagerAdapter, ManagerCommandInfo, ManagerModelInfo, ManagerReasoningEffortInfo } from './registry.js';
 
 export type { ManagerCommandInfo, ManagerModelInfo };
+
+const execFile = promisify(execFileCallback);
 
 export interface HeadlessSpawnSpec {
   command: string;
@@ -71,6 +74,8 @@ export interface HeadlessBackendSpec {
    * descriptive error. Default: trimmed stdout on exit 0, else an error
    * built from stderr. */
   parseReply?: (result: HeadlessProcessResult) => string;
+  /** Selectable CLI-native options for headless backends that expose them. */
+  modelOptions?: () => Promise<{ models: ManagerModelInfo[]; reasoningEfforts: ManagerReasoningEffortInfo[] }>;
   /** Detect a tool request the backend leaked into the reply text instead
    * of executing (#1041). Returns null for an ordinary reply; throws when
    * tool-request-shaped text cannot be decoded, so the turn ends with an
@@ -82,6 +87,8 @@ interface ConversationState {
   knownHistory: ChatTranscriptTurn[];
   /** Process handle for the in-flight turn (cancel support). */
   child: ReturnType<typeof spawn> | null;
+  currentModelId: string | null;
+  currentReasoningEffortId: string | null;
 }
 
 /** Mirrors acpAdapter's resumePrompt: fresh process => replay the whole
@@ -120,7 +127,7 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
   function stateFor(key: string): ConversationState {
     let state = states.get(key);
     if (!state) {
-      state = { knownHistory: [], child: null };
+      state = { knownHistory: [], child: null, currentModelId: null, currentReasoningEffortId: null };
       states.set(key, state);
     }
     return state;
@@ -137,7 +144,10 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
 
       // One non-interactive invocation: fixed argv, prompt over stdin.
       const invoke = async (prompt: string): Promise<string> => {
-        const args = spec.turnArgs({ model: input.model, reasoningEffort: input.reasoningEffort });
+        const args = spec.turnArgs({
+          model: input.model === undefined ? state.currentModelId : input.model,
+          reasoningEffort: input.reasoningEffort === undefined ? state.currentReasoningEffortId : input.reasoningEffort
+        });
         const child = spawn(args[0], args.slice(1), {
           cwd,
           env: { ...process.env },
@@ -264,21 +274,29 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
       return []; // no native slash commands over a one-shot pipe
     },
 
-    async listModels() {
+    async listModels(gahProfile) {
+      const options = await spec.modelOptions?.();
+      const state = stateFor(gahProfile);
       return {
-        models: [],
-        currentModelId: null,
-        reasoningEfforts: [],
-        currentReasoningEffortId: null
-      }; // no config-option protocol
+        models: options?.models ?? [],
+        currentModelId: state.currentModelId,
+        reasoningEfforts: options?.reasoningEfforts ?? [],
+        currentReasoningEffortId: state.currentReasoningEffortId
+      };
     },
 
-    async setModel(): Promise<void> {
-      throw new Error(`${spec.displayName} doesn't support model selection in headless mode.`);
+    async setModel(gahProfile, modelId): Promise<void> {
+      const options = await spec.modelOptions?.();
+      if (!options) throw new Error(`${spec.displayName} doesn't support model selection in headless mode.`);
+      if (!options.models.some((model) => model.id === modelId)) throw new Error(`Unknown model "${modelId}" for ${spec.displayName}`);
+      stateFor(gahProfile).currentModelId = modelId;
     },
 
-    async setReasoningEffort(): Promise<void> {
-      throw new Error(`${spec.displayName} doesn't support reasoning-effort selection in headless mode.`);
+    async setReasoningEffort(gahProfile, effortId): Promise<void> {
+      const options = await spec.modelOptions?.();
+      if (!options) throw new Error(`${spec.displayName} doesn't support reasoning-effort selection in headless mode.`);
+      if (!options.reasoningEfforts.some((effort) => effort.id === effortId)) throw new Error(`Unknown reasoning effort "${effortId}" for ${spec.displayName}`);
+      stateFor(gahProfile).currentReasoningEffortId = effortId;
     },
 
     async steerTurn(): Promise<{ outcome: 'injected' }> {
@@ -485,6 +503,18 @@ export function agyBackendSpec(): HeadlessBackendSpec {
   return {
     id: 'agy',
     displayName: 'Agy',
+    modelOptions: async () => ({
+      models: String((await execFile('agy', ['models'], { encoding: 'utf8', timeout: 10_000 })).stdout)
+        .split('\n')
+        .flatMap((line) => {
+          const [id, name] = line.trim().split('\t');
+          return id && name ? [{ id, name }] : [];
+        }),
+      reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({
+        id,
+        name: id[0].toUpperCase() + id.slice(1)
+      }))
+    }),
     turnArgs: (opts = {}) => {
       const args = [
         'agy',
