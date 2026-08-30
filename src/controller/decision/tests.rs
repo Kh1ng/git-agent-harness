@@ -10,6 +10,8 @@ mod lifecycle_priority;
 mod pm;
 #[path = "tests/priority.rs"]
 mod priority;
+#[path = "tests/review_gate.rs"]
+mod review_gate;
 #[path = "tests/review_handoff.rs"]
 mod review_handoff;
 #[path = "tests/support.rs"]
@@ -67,93 +69,6 @@ fn blocker_forces_human_required() {
     });
     let action = decide_next_action(&snapshot);
     assert_eq!(action.kind(), "human_required");
-}
-
-#[test]
-fn needs_review_mr_takes_priority() {
-    let mut snapshot = empty_snapshot();
-    let mut needs_fix = mr("gah/real-1", "NEEDS_FIX");
-    needs_fix.review_generation = Some("review-v1:current-head:sha256:current-metadata".into());
-    needs_fix.review_verdict = Some("NEEDS_FIX".into());
-    snapshot.merge_requests.push(needs_fix);
-    snapshot
-        .merge_requests
-        .push(mr("gah/real-2", "NEEDS_REVIEW"));
-    let action = decide_next_action(&snapshot);
-    match action {
-        NextAction::ReviewMr { branch, .. } => assert_eq!(branch, "gah/real-2"),
-        other => panic!("expected ReviewMr, got {other:?}"),
-    }
-}
-
-#[test]
-fn ci_failed_mr_with_stale_review_triggers_review() {
-    let mut snapshot = empty_snapshot();
-    let mut failed = mr("gah/real-1", "CI_FAILED");
-    failed.review_generation = Some("review-v1:current-head:sha256:current-metadata".into());
-    failed.review_verdict = Some("NEEDS_FIX".into());
-    failed.review_generation_status =
-        Some("superseded review because source or provider metadata changed".into());
-    snapshot.merge_requests.push(failed);
-    let action = decide_next_action(&snapshot);
-    match action {
-        NextAction::ReviewMr { branch, reason, .. } => {
-            assert_eq!(branch, "gah/real-1");
-            assert!(reason.contains("no completed current review"));
-        }
-        other => panic!("expected ReviewMr, got {other:?}"),
-    }
-}
-
-#[test]
-fn ci_failed_mr_with_current_review_triggers_fix() {
-    let mut snapshot = empty_snapshot();
-    let mut failed = mr("gah/real-1", "CI_FAILED");
-    failed.review_generation = Some("review-v1:current-head:sha256:current-metadata".into());
-    failed.review_verdict = Some("NEEDS_FIX".into());
-    snapshot.merge_requests.push(failed);
-
-    match decide_next_action(&snapshot) {
-        NextAction::FixMr {
-            branch,
-            review_generation,
-            ..
-        } => {
-            assert_eq!(branch, "gah/real-1");
-            assert_eq!(
-                review_generation.as_deref(),
-                Some("review-v1:current-head:sha256:current-metadata")
-            );
-        }
-        other => panic!("expected FixMr, got {other:?}"),
-    }
-}
-
-#[test]
-fn needs_fix_mr_without_current_review_triggers_review() {
-    let mut snapshot = empty_snapshot();
-    snapshot.merge_requests.push(mr("gah/real-1", "NEEDS_FIX"));
-    match decide_next_action(&snapshot) {
-        NextAction::ReviewMr { branch, reason, .. } => {
-            assert_eq!(branch, "gah/real-1");
-            assert!(reason.contains("no completed current review"));
-        }
-        other => panic!("expected ReviewMr, got {other:?}"),
-    }
-}
-
-#[test]
-fn needs_fix_mr_with_current_review_triggers_fix() {
-    let mut snapshot = empty_snapshot();
-    let mut needs_fix = mr("gah/real-1", "NEEDS_FIX");
-    needs_fix.review_generation = Some("review-v1:current-head:sha256:current-metadata".into());
-    needs_fix.review_verdict = Some("REJECT".into());
-    snapshot.merge_requests.push(needs_fix);
-
-    match decide_next_action(&snapshot) {
-        NextAction::FixMr { branch, .. } => assert_eq!(branch, "gah/real-1"),
-        other => panic!("expected FixMr, got {other:?}"),
-    }
 }
 
 #[test]
