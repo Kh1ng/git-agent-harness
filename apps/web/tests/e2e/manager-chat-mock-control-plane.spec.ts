@@ -35,10 +35,14 @@ async function openChat(page: Page): Promise<void> {
 }
 
 async function selectSeededSession(page: Page): Promise<void> {
-  const sessions = page.getByLabel('Chat session');
-  await sessions.selectOption('mock-session-1');
-  await expect(sessions).toHaveValue('mock-session-1');
+  await page.getByLabel('Chat session').click();
+  await page.getByRole('option', { name: 'Mock session', exact: true }).click();
   await expect(page.getByLabel('Session provider')).toHaveValue('codex');
+}
+
+/** The picker's two top-level sections, for asserting where a session lives. */
+function pickerSection(page: Page, name: 'Active' | 'Archive') {
+  return page.getByRole('listbox', { name: 'All sessions' }).getByRole('group', { name });
 }
 
 // The mock is one shared stateful process. Keep scenario mutations ordered.
@@ -53,7 +57,8 @@ test('active picker discovers sessions created through REST', async ({ page, req
   });
   expect(response.ok(), await response.text()).toBe(true);
 
-  await expect(page.getByLabel('Chat session').locator('option', { hasText: 'Externally created session' })).toHaveCount(1, { timeout: 10_000 });
+  await page.getByLabel('Chat session').click();
+  await expect(page.getByRole('option', { name: 'Externally created session' })).toBeVisible({ timeout: 10_000 });
 });
 
 test('shared mock streams multiple chunks, tool activity, and completion', async ({ page, request }) => {
@@ -159,18 +164,24 @@ test('archive and preview states mutate through the same REST control plane', as
     await route.continue();
   });
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
-  const picker = page.getByLabel('Chat session');
-  const archivedOption = picker.locator('option', { hasText: 'Mock session' });
-  await expect(picker).toHaveValue('', { timeout: 750 });
-  await expect(archivedOption).toHaveCount(0, { timeout: 750 });
+  const trigger = page.getByLabel('Chat session');
+  // The selection resets optimistically, before any refresh lands.
+  await expect(trigger).toContainText('Default conversation', { timeout: 750 });
 
   const archived = await request.get(`${MOCK_BASE_URL}/api/manager-chat/sessions?profile=fixture`);
   expect(archived.ok(), await archived.text()).toBe(true);
   const archivedSessions = (await archived.json() as { sessions: { id: string; archivedAt: number | null }[] }).sessions;
   expect(archivedSessions.find((session) => session.id === 'mock-session-1')?.archivedAt).not.toBeNull();
 
+  // The picker now lists the archived session under Archive — and only there.
+  await trigger.click();
+  await expect(pickerSection(page, 'Archive').getByRole('option', { name: 'Mock session', exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(pickerSection(page, 'Active').getByRole('option', { name: 'Mock session', exact: true })).toHaveCount(0);
+
+  // The 5s auto-refresh keeps it archived: it never resurfaces as active.
   await page.waitForTimeout(5_500);
-  await expect(archivedOption).toHaveCount(0);
+  await expect(pickerSection(page, 'Archive').getByRole('option', { name: 'Mock session', exact: true })).toBeVisible();
+  await expect(pickerSection(page, 'Active').getByRole('option', { name: 'Mock session', exact: true })).toHaveCount(0);
 
   await selectScenario(request, 'archive-success');
   const connectionsBeforeReconnect = await connectionCount(request);
@@ -179,16 +190,15 @@ test('archive and preview states mutate through the same REST control plane', as
   });
   expect(rearchived.ok(), await rearchived.text()).toBe(true);
   await expect.poll(() => connectionCount(request), { timeout: 15_000 }).toBeGreaterThan(connectionsBeforeReconnect);
-  await expect(archivedOption).toHaveCount(0);
-  await expect(picker).toHaveValue('');
+  await expect(trigger).toContainText('Default conversation');
+  await expect(pickerSection(page, 'Active').getByRole('option', { name: 'Mock session', exact: true })).toHaveCount(0);
 
   await selectScenario(request, 'archive-failure');
   await openChat(page);
   await selectSeededSession(page);
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
   await expect(page.getByText('Failed to archive session: Mock archive failed')).toBeVisible();
-  await expect(page.getByLabel('Chat session')).toHaveValue('mock-session-1');
-  await expect(page.getByLabel('Chat session').locator('option', { hasText: 'Mock session' })).toHaveCount(1);
+  await expect(page.getByLabel('Chat session')).toContainText('Mock session');
 });
 
 test('storage dry run selects idle sessions and bulk archives them safely', async ({ page, request }) => {
@@ -204,7 +214,8 @@ test('storage dry run selects idle sessions and bulk archives them safely', asyn
   await storage.getByRole('button', { name: 'Select idle (1)' }).click();
   await expect(storage.getByLabel('Select Mock session')).toBeChecked();
   await storage.getByRole('button', { name: 'Archive selected (1)' }).click();
-  await expect(page.getByLabel('Chat session').locator('option', { hasText: 'Mock session' })).toHaveCount(0);
+  await page.getByLabel('Chat session').click();
+  await expect(pickerSection(page, 'Archive').getByRole('option', { name: 'Mock session', exact: true })).toBeVisible({ timeout: 10_000 });
   await expect(storage).toContainText('No live chat sessions.');
 });
 

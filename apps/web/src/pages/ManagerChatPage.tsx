@@ -5,6 +5,7 @@ import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { NewChatModal } from '../components/NewChatModal.js';
+import { ChatSessionPicker } from '../components/ChatSessionPicker.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
@@ -18,6 +19,7 @@ import type {
   ProfileSummary,
   ManagerBackendInfo,
   ChatSessionSummary,
+  ChatSessionProjectGroup,
   ChatPreviewInfo,
   ChatReclaimResult
 } from '@git-agent-harness/contracts';
@@ -236,6 +238,14 @@ export function ManagerChatPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const [sessionsError, setSessionsError] = useState(false);
+  /** Cross-project picker data: every project's sessions (live + archived),
+   * independent of the profile this page is currently viewing. */
+  const [allSessions, setAllSessions] = useState<ChatSessionProjectGroup[]>([]);
+  const [allSessionsError, setAllSessionsError] = useState(false);
+  /** A cross-project picker selection (or new-chat creation) lands in the
+   * same render batch as the profile switch; the [profile] effect's cleanup
+   * would wipe the session id, so the effect restores it after the reset. */
+  const pendingSessionRef = useRef<string | null>(null);
   const [storageOpen, setStorageOpen] = useState(false);
   const [storage, setStorage] = useState<ChatReclaimResult | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
@@ -267,11 +277,29 @@ export function ManagerChatPage() {
       });
   };
 
-  useAutoRefresh(() => refreshSessions(profile), 5_000);
-  useWsReconnectRefresh(() => refreshSessions(profile));
+  const refreshAllSessions = () => {
+    gahApi
+      .getAllChatSessions()
+      .then(({ projects }) => {
+        setAllSessions(projects);
+        setAllSessionsError(false);
+      })
+      .catch(() => {
+        // Same resilience rule as refreshSessions: keep the last known
+        // groups and let the retry affordance surface the failure.
+        setAllSessionsError(true);
+      });
+  };
+
+  useAutoRefresh(() => { refreshSessions(profile); refreshAllSessions(); }, 5_000);
+  useWsReconnectRefresh(() => { refreshSessions(profile); refreshAllSessions(); });
 
   useEffect(() => {
+    const pendingSession = pendingSessionRef.current;
+    pendingSessionRef.current = null;
     refreshSessions(profile);
+    refreshAllSessions();
+    if (pendingSession !== null) setSessionId(pendingSession);
     return () => {
       setSessions([]);
       setSessionId(null);
@@ -280,6 +308,17 @@ export function ManagerChatPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile]);
+
+  /** Picker selection: a session of another project first switches the chat
+   * page to that project (the WebSocket reconnects with it), then opens the
+   * session via the regular session-open path. */
+  const handlePickerSelect = (sessionProfile: string, pickedSessionId: string | null) => {
+    if (sessionProfile !== profile) {
+      pendingSessionRef.current = pickedSessionId;
+      setProfileOverride(sessionProfile);
+    }
+    setSessionId(pickedSessionId);
+  };
 
   const refreshStorage = async (forProfile = profile) => {
     setStorageLoading(true);
@@ -824,6 +863,7 @@ export function ManagerChatPage() {
       const archived = await gahApi.archiveChatSession(profile, activeSession.id);
       setSessions((current) => activeChatSessions(current.filter((session) => session.id !== archived.id)));
       refreshSessions(profile);
+      refreshAllSessions();
       setSessionId(null);
     } catch (err) {
       setTurns((prev) => [...prev, { role: 'error', text: `Failed to archive session: ${err instanceof Error ? err.message : String(err)}` }]);
@@ -839,6 +879,7 @@ export function ManagerChatPage() {
       if (sessionId && selectedSessionIds.has(sessionId)) setSessionId(null);
       setSelectedSessionIds(new Set());
       refreshSessions(profile);
+      refreshAllSessions();
       await refreshStorage(profile);
     } catch (error) {
       setStorageError(error instanceof Error ? error.message : String(error));
@@ -856,6 +897,7 @@ export function ManagerChatPage() {
       setStorageError(result.warnings[0] ?? null);
       setSelectedSessionIds(new Set());
       refreshSessions(profile);
+      refreshAllSessions();
       await refreshStorage(profile);
     } catch (error) {
       setStorageError(error instanceof Error ? error.message : String(error));
@@ -912,10 +954,18 @@ export function ManagerChatPage() {
   };
 
   /** New-chat completion: switch project if the modal picked another one,
-   * then select the fresh session (its history effect clears the view). */
+   * then select the fresh session (its history effect clears the view).
+   * The pending ref keeps the id alive through the profile-switch effect,
+   * same as a cross-project picker selection. */
   const handleChatCreated = (createdProfile: string, createdSessionId: string) => {
-    if (createdProfile !== profile) setProfileOverride(createdProfile);
+    if (createdProfile !== profile) {
+      pendingSessionRef.current = createdSessionId;
+      setProfileOverride(createdProfile);
+    }
     refreshSessions(createdProfile);
+    // The picker's trigger label resolves against the cross-project groups,
+    // so the fresh session must land there too before it can be shown.
+    refreshAllSessions();
     setSessionId(createdSessionId);
   };
 
@@ -1000,23 +1050,16 @@ export function ManagerChatPage() {
           resume). "New chat" is the T3 flow: project → node → provider. */}
       <div className="flex items-center gap-2 flex-wrap">
         <GitBranch size={14} className="text-muted shrink-0" aria-hidden="true" />
-        <select
-          value={sessionId ?? ''}
-          onChange={(e) => setSessionId(e.target.value || null)}
-          className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary min-w-[12rem]"
-          aria-label="Chat session"
-        >
-          <option value="">Default conversation</option>
-          {sessions.filter((s) => s.outcome === 'live').map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.title ?? s.branch}
-            </option>
-          ))}
-        </select>
-        {sessionsError && (
+        <ChatSessionPicker
+          groups={allSessions}
+          selectedProfile={profile}
+          selectedSessionId={sessionId}
+          onSelect={handlePickerSelect}
+        />
+        {(sessionsError || allSessionsError) && (
           <button
             type="button"
-            onClick={() => refreshSessions(profile)}
+            onClick={() => { refreshSessions(profile); refreshAllSessions(); }}
             className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300 hover:bg-amber-500/20"
             title="Session list failed to load — showing the last known sessions. Click to retry."
           >
