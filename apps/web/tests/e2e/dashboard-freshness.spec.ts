@@ -128,15 +128,17 @@ test.describe('WS reconnect re-triggers REST refetch', () => {
     let connectionCount = 0;
 
     await page.routeWebSocket('**/ws**', (ws) => {
-      connectionCount += 1;
-      const isFirstConnection = connectionCount === 1;
       ws.send(JSON.stringify(WELCOME_MESSAGE));
-      if (isFirstConnection) {
-        // Simulate a dropped connection shortly after connecting -- the
-        // client's own reconnect timer (WebSocketContext.tsx) picks this
-        // up and re-opens a new socket, which this route re-intercepts.
-        setTimeout(() => ws.close(), 300);
-      }
+      ws.onMessage((raw) => {
+        const message = JSON.parse(String(raw)) as { type?: string };
+        if (message.type !== 'client.hello') return;
+        connectionCount += 1;
+        if (connectionCount === 1) {
+          // Count an opened client handshake, not React StrictMode's
+          // intentionally aborted setup connection.
+          setTimeout(() => ws.close(), 300);
+        }
+      });
     });
 
     await page.goto('/');
