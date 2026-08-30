@@ -179,6 +179,21 @@ fn persist_mapping(
         .with_context(|| format!("syncing Claude session map {}", temp.display()))?;
     fs::rename(&temp, &path)
         .with_context(|| format!("committing Claude session map {}", path.display()))?;
+    #[cfg(unix)]
+    File::open(session_dir)
+        .with_context(|| {
+            format!(
+                "opening Claude session map directory {}",
+                session_dir.display()
+            )
+        })?
+        .sync_all()
+        .with_context(|| {
+            format!(
+                "syncing Claude session map directory {}",
+                session_dir.display()
+            )
+        })?;
     Ok(())
 }
 
@@ -230,7 +245,7 @@ impl ClaudeProcess {
 #[derive(Debug)]
 struct ClaudeSessionState {
     provider_session_id: String,
-    process: ClaudeProcess,
+    process: Option<ClaudeProcess>,
     pending_updates: Vec<SessionUpdate>,
     status: SessionStatus,
     outstanding_turns: usize,
@@ -340,9 +355,28 @@ impl ClaudeManagerSession {
         })
     }
 
-    fn terminate_process(process: &mut ClaudeProcess) {
-        let _ = crate::runner::process::kill_process_group(&mut process.child);
-        let _ = process.child.wait();
+    fn terminate_process(process: &mut Option<ClaudeProcess>) -> Result<()> {
+        let Some(mut process) = process.take() else {
+            return Ok(());
+        };
+        let cleanup_error = crate::runner::process::kill_process_group(&mut process.child);
+        let wait_result = process.child.wait();
+        if let Some(error) = cleanup_error {
+            return Err(anyhow!(error));
+        }
+        wait_result.context("waiting for terminated Claude Code child")?;
+        Ok(())
+    }
+
+    fn fail_session(state: &mut ClaudeSessionState, error: String) -> Result<()> {
+        state.status = SessionStatus::Terminated(TerminalStatus::Failed(error.clone()));
+        state.outstanding_turns = 0;
+        match Self::terminate_process(&mut state.process) {
+            Ok(()) => Err(anyhow!(error)),
+            Err(cleanup) => Err(anyhow!(
+                "{error}; Claude process cleanup also failed: {cleanup:#}"
+            )),
+        }
     }
 
     fn pump(&mut self, session: &GahSessionId) -> Result<()> {
@@ -351,15 +385,14 @@ impl ClaudeManagerSession {
             .get_mut(session)
             .ok_or_else(|| anyhow!("Claude session {session} must be resumed before use"))?;
         let mut disconnected = false;
-        loop {
-            match state.process.messages.try_recv() {
-                Ok(Ok(message)) => handle_message(state, message)?,
-                Ok(Err(error)) => {
-                    state.status = SessionStatus::Terminated(TerminalStatus::Failed(error.clone()));
-                    state.outstanding_turns = 0;
-                    Self::terminate_process(&mut state.process);
-                    return Err(anyhow!(error));
+        while let Some(process) = state.process.as_ref() {
+            match process.messages.try_recv() {
+                Ok(Ok(message)) => {
+                    if let Err(error) = handle_message(state, message) {
+                        return Self::fail_session(state, error.to_string());
+                    }
                 }
+                Ok(Err(error)) => return Self::fail_session(state, error),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     disconnected = true;
@@ -368,11 +401,18 @@ impl ClaudeManagerSession {
             }
         }
         if disconnected && state.outstanding_turns > 0 {
-            let exit = state.process.child.try_wait()?;
+            let exit = state
+                .process
+                .as_mut()
+                .expect("a disconnected receiver still owns its Claude child")
+                .child
+                .try_wait()?;
             if let Some(status) = exit {
                 let message =
                     format!("Claude Code exited with {status} before a structured result event");
                 state.status = SessionStatus::Terminated(TerminalStatus::Failed(message.clone()));
+                state.outstanding_turns = 0;
+                state.process.take();
                 return Err(anyhow!(message));
             }
         }
@@ -396,17 +436,6 @@ fn read_messages(stdout: ChildStdout, sender: mpsc::Sender<std::result::Result<V
             return;
         }
     }
-}
-
-/// Once a session has failed or been interrupted, no later event may move it
-/// back to `Working`/`Completed` -- mirrors Hermes's identical precedence
-/// rule in `manager::hermes::handle_message`.
-fn is_sticky_terminal(status: &SessionStatus) -> bool {
-    matches!(
-        status,
-        SessionStatus::Terminated(TerminalStatus::Failed(_))
-            | SessionStatus::Terminated(TerminalStatus::Interrupted)
-    )
 }
 
 fn handle_message(state: &mut ClaudeSessionState, message: Value) -> Result<()> {
@@ -587,7 +616,7 @@ impl ManagerSession for ClaudeManagerSession {
             session.clone(),
             ClaudeSessionState {
                 provider_session_id: provider_session_id.clone(),
-                process,
+                process: Some(process),
                 pending_updates: Vec::new(),
                 status: SessionStatus::Working,
                 outstanding_turns: 1,
@@ -600,13 +629,15 @@ impl ManagerSession for ClaudeManagerSession {
                 .get_mut(&session)
                 .expect("just inserted")
                 .process
+                .as_mut()
+                .expect("just inserted a running Claude process")
                 .write_user_message(&provider_session_id, &request.instruction)
                 .context("sending Claude's initial structured user message")?;
             persist_mapping(&self.session_dir, &session, &provider_session_id, &cwd)
         })();
         if let Err(error) = started {
             if let Some(mut state) = self.sessions.remove(&session) {
-                Self::terminate_process(&mut state.process);
+                let _ = Self::terminate_process(&mut state.process);
             }
             return Err(error);
         }
@@ -616,14 +647,15 @@ impl ManagerSession for ClaudeManagerSession {
     fn resume(&mut self, session: &GahSessionId) -> Result<()> {
         let mapping = load_mapping(&self.session_dir, session)?;
         if let Some(mut old) = self.sessions.remove(session) {
-            Self::terminate_process(&mut old.process);
+            Self::terminate_process(&mut old.process)
+                .with_context(|| format!("stopping existing Claude session {session}"))?;
         }
         let process = self.spawn_process(&mapping.provider_session_id, &mapping.cwd, true)?;
         self.sessions.insert(
             session.clone(),
             ClaudeSessionState {
                 provider_session_id: mapping.provider_session_id,
-                process,
+                process: Some(process),
                 pending_updates: Vec::new(),
                 status: SessionStatus::Idle,
                 outstanding_turns: 0,
@@ -642,12 +674,14 @@ impl ManagerSession for ClaudeManagerSession {
             .ok_or_else(|| anyhow!("Claude session {session} must be resumed before sending"))?;
         state
             .process
+            .as_mut()
+            .ok_or_else(|| {
+                anyhow!("Claude session {session} has no running process; resume it before sending")
+            })?
             .write_user_message(&state.provider_session_id, message)
             .with_context(|| format!("sending structured input to Claude session {session}"))?;
         state.outstanding_turns += 1;
-        if !is_sticky_terminal(&state.status) {
-            state.status = SessionStatus::Working;
-        }
+        state.status = SessionStatus::Working;
         Ok(())
     }
 
@@ -671,10 +705,19 @@ impl ManagerSession for ClaudeManagerSession {
         let state = self.sessions.get_mut(session).ok_or_else(|| {
             anyhow!("Claude session {session} must be resumed before interrupting")
         })?;
-        Self::terminate_process(&mut state.process);
+        let result = Self::terminate_process(&mut state.process)
+            .with_context(|| format!("interrupting Claude session {session}"));
         state.outstanding_turns = 0;
-        state.status = SessionStatus::Terminated(TerminalStatus::Interrupted);
-        Ok(())
+        match result {
+            Ok(()) => {
+                state.status = SessionStatus::Terminated(TerminalStatus::Interrupted);
+                Ok(())
+            }
+            Err(error) => {
+                state.status = SessionStatus::Terminated(TerminalStatus::Failed(error.to_string()));
+                Err(error)
+            }
+        }
     }
 
     fn inspect(&mut self, _session: &GahSessionId) -> Result<SessionStatus> {
@@ -700,7 +743,7 @@ impl ManagerSession for ClaudeManagerSession {
 impl Drop for ClaudeManagerSession {
     fn drop(&mut self) {
         for state in self.sessions.values_mut() {
-            Self::terminate_process(&mut state.process);
+            let _ = Self::terminate_process(&mut state.process);
         }
     }
 }
@@ -827,6 +870,24 @@ for raw in sys.stdin:
             "terminal_reason": "completed",
         }}), flush=True)
         continue
+    if prompt == "mismatched-session":
+        print(json.dumps({{
+            "type": "assistant",
+            "session_id": "00000000-0000-0000-0000-000000000000",
+            "message": {{"content": [{{"type": "text", "text": "must never be observed"}}]}},
+        }}), flush=True)
+        print(json.dumps({{
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "session_id": session_id,
+            "result": "must never complete",
+            "usage": {{"input_tokens": 1, "output_tokens": 1,
+                       "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}},
+            "modelUsage": {{"claude-test": {{"contextWindow": 200000}}}},
+            "terminal_reason": "completed",
+        }}), flush=True)
+        continue
     if prompt == "slow":
         time.sleep(3)
         with open(sentinel_path, "w", encoding="utf-8") as fh:
@@ -843,7 +904,9 @@ for raw in sys.stdin:
             "terminal_reason": "completed",
         }}), flush=True)
         continue
-    if prompt == "fail":
+    if prompt == "delayed-fail":
+        time.sleep(0.2)
+    if prompt == "fail" or prompt == "delayed-fail":
         print(json.dumps({{
             "type": "assistant",
             "session_id": session_id,
@@ -1129,7 +1192,7 @@ for raw in sys.stdin:
         let id = adapter
             .start(StartRequest {
                 profile: "profile-a".into(),
-                instruction: "fail".into(),
+                instruction: "delayed-fail".into(),
             })
             .unwrap();
         // Steer/queue a second turn before the first turn's failure has
@@ -1152,6 +1215,34 @@ for raw in sys.stdin:
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn explicit_send_after_observed_failure_starts_a_new_working_lifecycle() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_streaming_claude(&f.bin_dir, &f.record_dir);
+        let mut adapter = ClaudeManagerSession::new_with_session_dir(
+            f.bin_dir.join("claude"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+        let id = adapter
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "fail".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            wait_for_terminal_status(&mut adapter, &id),
+            TerminalStatus::Failed(_)
+        ));
+
+        adapter.send(&id, "recovered").unwrap();
+        assert_eq!(adapter.terminal_status(&id).unwrap(), None);
+        let (updates, status) = wait_for_turn(&mut adapter, &id);
+        assert_eq!(status, TerminalStatus::Completed);
+        assert!(updates.contains(&SessionUpdate::MessageChunk("reply: recovered".into())));
     }
 
     #[test]
@@ -1189,6 +1280,34 @@ for raw in sys.stdin:
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn mismatched_session_event_terminates_the_child_and_stays_failed() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_streaming_claude(&f.bin_dir, &f.record_dir);
+        let mut adapter = ClaudeManagerSession::new_with_session_dir(
+            f.bin_dir.join("claude"),
+            f.record_dir.join("sessions"),
+        )
+        .unwrap();
+        let id = adapter
+            .start(StartRequest {
+                profile: "profile-a".into(),
+                instruction: "mismatched-session".into(),
+            })
+            .unwrap();
+
+        let TerminalStatus::Failed(message) = wait_for_terminal_status(&mut adapter, &id) else {
+            panic!("expected the mismatched session event to fail the session");
+        };
+        assert!(message.contains("returned session ID"));
+        assert!(adapter.send(&id, "must not reach a dead child").is_err());
+        assert_eq!(
+            adapter.terminal_status(&id).unwrap(),
+            Some(TerminalStatus::Failed(message))
+        );
     }
 
     #[test]
