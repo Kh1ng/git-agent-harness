@@ -820,12 +820,41 @@ impl CodexManagerSession {
             .get("turn")
             .and_then(|turn| turn.get("id"))
             .and_then(Value::as_str)
-            .map(str::to_owned);
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                TurnStartFailure::Ambiguous(anyhow!(
+                    "Codex turn/start response did not include a turn id"
+                ))
+            })?;
         if let Some(state) = self.sessions.get_mut(session) {
             state.status = SessionStatus::Working;
-            state.active_turn_id = turn_id;
+            state.active_turn_id = Some(turn_id);
         }
         Ok(())
+    }
+
+    /// Starts a turn, stopping the transport before returning any failure whose
+    /// delivery outcome is unknown so callers cannot duplicate remote work.
+    fn start_turn_or_stop(&mut self, session: &GahSessionId, message: &str) -> Result<()> {
+        match self.start_turn(session, message) {
+            Ok(()) => Ok(()),
+            Err(failure) if failure.may_have_started() => {
+                let error = failure.into_error();
+                let cleanup = self.stop_ambiguous_turn(session);
+                if let Some(state) = self.sessions.get_mut(session) {
+                    state.status =
+                        SessionStatus::Terminated(TerminalStatus::Failed(error.to_string()));
+                    state.active_turn_id = None;
+                }
+                match cleanup {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(anyhow!(
+                        "{error:#}; additionally failed to stop ambiguous remote work: {cleanup:#}"
+                    )),
+                }
+            }
+            Err(failure) => Err(failure.into_error()),
+        }
     }
 
     /// Steers the thread's currently in-progress turn instead of starting a
@@ -908,26 +937,14 @@ impl ManagerSession for CodexManagerSession {
             self.sessions.remove(&gah_session_id);
             return Err(error);
         }
-        if let Err(failure) = self.start_turn(&gah_session_id, &request.instruction) {
-            let remote_cleanup = if failure.may_have_started() {
-                self.stop_ambiguous_turn(&gah_session_id)
-            } else {
-                Ok(())
-            };
+        if let Err(error) = self.start_turn_or_stop(&gah_session_id, &request.instruction) {
             let rollback = remove_mapping(&self.session_dir, &gah_session_id);
             self.sessions.remove(&gah_session_id);
-            let error = failure.into_error();
-            return match (remote_cleanup, rollback) {
-                (Ok(()), Ok(())) => Err(error)
+            return match rollback {
+                Ok(()) => Err(error)
                     .with_context(|| format!("starting Codex turn on thread {thread_id}")),
-                (Err(cleanup), Ok(())) => Err(anyhow!(
-                    "starting Codex turn on thread {thread_id}: {error:#}; additionally failed to stop ambiguous remote work: {cleanup:#}"
-                )),
-                (Ok(()), Err(rollback)) => Err(anyhow!(
+                Err(rollback) => Err(anyhow!(
                     "starting Codex turn on thread {thread_id}: {error:#}; additionally failed to remove its session mapping: {rollback:#}"
-                )),
-                (Err(cleanup), Err(rollback)) => Err(anyhow!(
-                    "starting Codex turn on thread {thread_id}: {error:#}; additionally failed to stop ambiguous remote work: {cleanup:#}; mapping rollback also failed: {rollback:#}"
                 )),
             };
         }
@@ -993,8 +1010,7 @@ impl ManagerSession for CodexManagerSession {
                 Err(error) => return Err(error),
             }
         }
-        self.start_turn(session, message)
-            .map_err(TurnStartFailure::into_error)
+        self.start_turn_or_stop(session, message)
     }
 
     fn stream(&mut self, session: &GahSessionId) -> Result<Vec<SessionUpdate>> {

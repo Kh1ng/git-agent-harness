@@ -218,6 +218,10 @@ with open(record, "a", encoding="utf-8") as fh:
                 threading.Thread(target=mark_survival, args=(lost_response_sentinel,), daemon=True).start()
                 os.close(1)
                 time.sleep(3)
+            elif text == "missing-turn-id":
+                threading.Thread(target=mark_survival, args=(lost_response_sentinel,), daemon=True).start()
+                emit({{"jsonrpc": "2.0", "id": req_id, "result": {{"turn": {{"status": "inProgress"}}}}}})
+                time.sleep(3)
             else:
                 emit({{"jsonrpc": "2.0", "id": req_id, "result": {{"turn": {{"id": turn_id, "status": "inProgress"}}}}}})
                 threading.Thread(target=run_turn, args=(thread_id, turn_id, text), daemon=True).start()
@@ -507,6 +511,86 @@ fn lost_initial_turn_response_stops_remote_work_before_rollback() {
     assert!(
         !f.record_dir.join("lost-response-completed.marker").exists(),
         "an ambiguously accepted turn must be stopped before its mapping is removed"
+    );
+}
+
+#[test]
+fn missing_turn_id_stops_remote_work_before_rollback() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let session_dir = f.record_dir.join("sessions");
+    let mut session =
+        CodexManagerSession::new_with_session_dir(f.bin_dir.join("codex"), &session_dir).unwrap();
+
+    assert!(session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "missing-turn-id".into(),
+        })
+        .is_err());
+    assert!(session.sessions.is_empty());
+    assert!(fs::read_dir(&session_dir).unwrap().next().is_none());
+
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(
+        !f.record_dir.join("lost-response-completed.marker").exists(),
+        "a turn without a correlatable id must be stopped before its mapping is removed"
+    );
+}
+
+#[test]
+fn lost_idle_follow_up_response_stops_remote_work() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let mut session = CodexManagerSession::new_with_session_dir(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions"),
+    )
+    .unwrap();
+    let id = session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "hello".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        wait_for_terminal(&mut session, &id),
+        TerminalStatus::Completed
+    );
+
+    assert!(session.send(&id, "lost-response").is_err());
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(
+        !f.record_dir.join("lost-response-completed.marker").exists(),
+        "an ambiguously accepted follow-up must be stopped before send returns"
+    );
+}
+
+#[test]
+fn lost_fallback_follow_up_response_stops_remote_work() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let mut session = CodexManagerSession::new_with_session_dir(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions"),
+    )
+    .unwrap();
+    let id = session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "slow".into(),
+        })
+        .unwrap();
+    drain_all_pending(&mut session, &id);
+
+    assert!(session.send(&id, "lost-response").is_err());
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(
+        !f.record_dir.join("lost-response-completed.marker").exists(),
+        "an ambiguously accepted fallback turn must be stopped before send returns"
     );
 }
 
