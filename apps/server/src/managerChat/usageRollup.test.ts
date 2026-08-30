@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { usageRollup } from './usageRollup.js';
+import { usageRollup, ticketLabelForBranch } from './usageRollup.js';
 import { setChatSessionStoreOptions } from './chatSessions.js';
 import { appendEvents } from './sessionLog.js';
 
@@ -69,6 +69,46 @@ test('rollup counts usage-less turns as unattributed and honors the window', () 
     const month = usageRollup('repo', 30, { stateDir, now: () => NOW });
     assert.equal(month.rows.length, 1);
     assert.equal(month.unattributed_turns, 1);
+  } finally {
+    setChatSessionStoreOptions({ stateDir: undefined });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('usage rolls up per ticket via the session index branch (#940 cost-per-ticket)', () => {
+  const stateDir = fixture();
+  try {
+    // A session index so the rollup can join usage -> ticket.
+    const profileDir = join(stateDir, 'project-repo');
+    mkdirSync(join(profileDir, 'session-issue1'), { recursive: true });
+    mkdirSync(join(profileDir, 'session-pr9'), { recursive: true });
+    writeFileSync(join(profileDir, 'sessions.json'), JSON.stringify({ sessions: [
+      { id: 'issue1', profile: 'repo', worktreePath: null, branch: 'gah/issue/repo-1014-abc', backend: 'codex', model: null, reasoningEffort: null, title: 'Fix the thing', createdAt: NOW, lastActiveAt: NOW, archivedAt: null, outcome: 'live', settledAt: null, settledReason: null },
+      { id: 'pr9', profile: 'repo', worktreePath: null, branch: 'feat/my-pr-branch', backend: 'claude', model: null, reasoningEffort: null, title: 'PR chat', createdAt: NOW, lastActiveAt: NOW, archivedAt: null, outcome: 'live', settledAt: null, settledReason: null }
+    ] }));
+    appendEvents('repo', [
+      { type: 'assistant/message', seq: 1, turn: 1, text: 'a', backend: 'codex', model: 'gpt-5.3', usage: { input_tokens: 100, output_tokens: 100, total_tokens: 200, estimated_cost_usd: 0.02, duration_seconds: 1 }, timestamp: NOW },
+      { type: 'assistant/message', seq: 2, turn: 2, text: 'b', backend: 'codex', model: 'gpt-5.3', usage: { input_tokens: 50, output_tokens: 50, total_tokens: 100, estimated_cost_usd: 0.01, duration_seconds: 1 }, timestamp: NOW }
+    ], { stateDir, sessionId: 'issue1' });
+    appendEvents('repo', [
+      { type: 'assistant/message', seq: 1, turn: 1, text: 'c', backend: 'claude', model: null, usage: { input_tokens: 10, output_tokens: 10, total_tokens: 20, estimated_cost_usd: 0, duration_seconds: 1 }, timestamp: NOW }
+    ], { stateDir, sessionId: 'pr9' });
+
+    const rollup = usageRollup('repo', 7, { stateDir, now: () => NOW });
+    assert.equal(rollup.tickets.length, 2);
+    const issue = rollup.tickets.find((row) => row.ticket === '#1014');
+    assert.ok(issue, 'issue branch maps to #1014');
+    assert.equal(issue.title, 'Fix the thing');
+    assert.equal(issue.turns, 2);
+    assert.equal(issue.total_tokens, 300);
+    assert.deepEqual(issue.backends, { codex: 300 });
+    const pr = rollup.tickets.find((row) => row.ticket === 'feat/my-pr-branch');
+    assert.ok(pr, 'PR chats roll up under their head branch');
+    assert.equal(pr.total_tokens, 20);
+
+    assert.equal(ticketLabelForBranch('gah/issue/repo-42'), '#42');
+    assert.equal(ticketLabelForBranch('gah/issue/repo-42-mfrgg'), '#42');
+    assert.equal(ticketLabelForBranch(null), null);
   } finally {
     setChatSessionStoreOptions({ stateDir: undefined });
     rmSync(stateDir, { recursive: true, force: true });
