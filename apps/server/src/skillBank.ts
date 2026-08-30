@@ -49,20 +49,52 @@ function readBank(): SkillBankFile {
   ) {
     throw new Error(`Invalid skill bank at ${path}: expected an object with a "skills" array`);
   }
-  const file = parsed as SkillBankFile;
-  for (const skill of file.skills) {
-    if (
-      typeof skill?.id !== 'string'
-      || typeof skill?.version !== 'string'
-      || typeof skill?.content !== 'string'
-    ) {
-      throw new Error(`Invalid skill bank at ${path}: a skill record is missing id/version/content`);
+  const skills = (parsed as { skills: unknown[] }).skills;
+  for (const [index, skill] of skills.entries()) {
+    if (typeof skill !== 'object' || skill === null || Array.isArray(skill)) {
+      throw new Error(`Invalid skill bank at ${path}: skills[${index}] must be an object`);
+    }
+    const record = skill as Record<string, unknown>;
+    for (const field of ['id', 'version', 'displayName', 'description', 'content', 'source'] as const) {
+      if (typeof record[field] !== 'string') {
+        throw new Error(`Invalid skill bank at ${path}: skills[${index}].${field} must be a string`);
+      }
+    }
+    if (!Array.isArray(record.backends)) {
+      throw new Error(`Invalid skill bank at ${path}: skills[${index}].backends must be an array`);
+    }
+    for (const [backendIndex, backend] of record.backends.entries()) {
+      if (typeof backend !== 'string') {
+        throw new Error(
+          `Invalid skill bank at ${path}: skills[${index}].backends[${backendIndex}] must be a string`
+        );
+      }
+    }
+    for (const field of ['createdAt', 'updatedAt'] as const) {
+      if (typeof record[field] !== 'number' || !Number.isFinite(record[field])) {
+        throw new Error(`Invalid skill bank at ${path}: skills[${index}].${field} must be a finite number`);
+      }
     }
   }
-  return {
-    skills: file.skills,
-    bindings: typeof file.bindings === 'object' && file.bindings ? file.bindings : {}
-  };
+
+  const bindings = (parsed as { bindings?: unknown }).bindings;
+  if (typeof bindings !== 'object' || bindings === null || Array.isArray(bindings)) {
+    throw new Error(`Invalid skill bank at ${path}: bindings must be an object`);
+  }
+  for (const [skillId, labels] of Object.entries(bindings)) {
+    if (!Array.isArray(labels)) {
+      throw new Error(`Invalid skill bank at ${path}: bindings.${skillId} must be an array`);
+    }
+    for (const [labelIndex, label] of labels.entries()) {
+      if (typeof label !== 'string') {
+        throw new Error(
+          `Invalid skill bank at ${path}: bindings.${skillId}[${labelIndex}] must be a string`
+        );
+      }
+    }
+  }
+
+  return { skills: skills as Skill[], bindings: bindings as Record<string, string[]> };
 }
 
 function writeBank(file: SkillBankFile): void {
@@ -74,14 +106,43 @@ function writeBank(file: SkillBankFile): void {
 }
 
 function newestVersion(a: Skill, b: Skill): number {
-  // Best-effort numeric comparison for common '1.0.0' shapes, falling back to
-  // string comparison so unparseable versions still order deterministically.
-  const aParts = a.version.split('.').map((p) => Number.parseInt(p, 10));
-  const bParts = b.version.split('.').map((p) => Number.parseInt(p, 10));
-  for (let index = 0; index < Math.max(aParts.length, bParts.length); index++) {
-    const aNum = Number.isFinite(aParts[index]) ? aParts[index] : 0;
-    const bNum = Number.isFinite(bParts[index]) ? bParts[index] : 0;
+  const parse = (version: string) => {
+    const withoutBuild = version.split('+', 1)[0];
+    const separator = withoutBuild.indexOf('-');
+    const core = separator >= 0 ? withoutBuild.slice(0, separator) : withoutBuild;
+    const parts = core.split('.');
+    if (parts.some((part) => !/^\d+$/.test(part))) return null;
+    return {
+      core: parts.map((part) => Number.parseInt(part, 10)),
+      prerelease: separator >= 0 ? withoutBuild.slice(separator + 1).split('.') : null
+    };
+  };
+  const aParsed = parse(a.version);
+  const bParsed = parse(b.version);
+  if (!aParsed || !bParsed) return a.version.localeCompare(b.version);
+
+  for (let index = 0; index < Math.max(aParsed.core.length, bParsed.core.length); index++) {
+    const aNum = aParsed.core[index] ?? 0;
+    const bNum = bParsed.core[index] ?? 0;
     if (aNum !== bNum) return aNum > bNum ? 1 : -1;
+  }
+
+  if (aParsed.prerelease === null && bParsed.prerelease !== null) return 1;
+  if (aParsed.prerelease !== null && bParsed.prerelease === null) return -1;
+  if (aParsed.prerelease && bParsed.prerelease) {
+    for (let index = 0; index < Math.min(aParsed.prerelease.length, bParsed.prerelease.length); index++) {
+      const aPart = aParsed.prerelease[index];
+      const bPart = bParsed.prerelease[index];
+      if (aPart === bPart) continue;
+      const aNumeric = /^\d+$/.test(aPart);
+      const bNumeric = /^\d+$/.test(bPart);
+      if (aNumeric && bNumeric) return Number(aPart) > Number(bPart) ? 1 : -1;
+      if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+      return aPart > bPart ? 1 : -1;
+    }
+    if (aParsed.prerelease.length !== bParsed.prerelease.length) {
+      return aParsed.prerelease.length > bParsed.prerelease.length ? 1 : -1;
+    }
   }
   return a.version.localeCompare(b.version);
 }

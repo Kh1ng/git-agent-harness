@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createServer as createExpressServer } from './server.js';
+import { createServer as createExpressServer, initializeSkillBank } from './server.js';
 import { createServer as createHttpServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { createWebSocketHandler } from './wsServer.js';
@@ -32,6 +32,8 @@ async function main() {
   }
 
   console.log('Starting Git Agent Harness server...');
+
+  initializeSkillBank();
 
   const coordinatorIdentity = getCoordinatorIdentity(undefined, PORT);
   const registryService = new RegistryService(undefined, coordinatorIdentity.advertised_url, PORT);

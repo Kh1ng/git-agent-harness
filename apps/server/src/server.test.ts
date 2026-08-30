@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createServer } from './server.js';
+import { createServer, initializeSkillBank } from './server.js';
 import { resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
 import type { ConfigProfileSummary, DoctorSnapshot, ProfileSummary, SettingsConfigProfileSummary } from '@git-agent-harness/contracts';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 function profilePayload(profile: string): ConfigProfileSummary {
   return {
@@ -276,9 +277,10 @@ test('skill bank API stores versions, resolves newest, and refuses deletion of a
   const savedBank = process.env.GAH_SKILL_BANK_PATH;
   process.env.GAH_SKILL_BANK_PATH = join(dir, 'skills.json');
   try {
+    initializeSkillBank();
     await withTestServer(async () => profilePayload('alpha'), async (baseUrl) => {
-      const empty = (await (await fetch(`${baseUrl}/api/skills`)).json()) as { skills: unknown[] };
-      assert.deepEqual(empty.skills, []);
+      const initial = (await (await fetch(`${baseUrl}/api/skills`)).json()) as { skills: Array<{ id: string }> };
+      assert.deepEqual(initial.skills.map((skill) => skill.id), ['gah-manager']);
 
       const create = await fetch(`${baseUrl}/api/skills`, {
         method: 'POST',
@@ -310,6 +312,86 @@ test('skill bank API stores versions, resolves newest, and refuses deletion of a
   } finally {
     if (savedBank === undefined) delete process.env.GAH_SKILL_BANK_PATH;
     else process.env.GAH_SKILL_BANK_PATH = savedBank;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('skill bank initialization fails on a malformed bank but allows missing bank and seed files', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-skills-startup-'));
+  const bankPath = join(dir, 'skills.json');
+  const savedBank = process.env.GAH_SKILL_BANK_PATH;
+  const savedDocs = process.env.GAH_SKILL_DOCS_PATH;
+  process.env.GAH_SKILL_BANK_PATH = bankPath;
+  process.env.GAH_SKILL_DOCS_PATH = join(dir, 'missing-gah-manager-skill.md');
+  writeFileSync(bankPath, JSON.stringify({ skills: [{ id: 'alpha' }], bindings: {} }), 'utf8');
+
+  try {
+    assert.throws(
+      () => initializeSkillBank(),
+      (error: unknown) => error instanceof Error
+        && error.message.includes(`Invalid skill bank at ${bankPath}`)
+        && error.message.includes('skills[0].version')
+    );
+
+    process.env.GAH_SKILL_BANK_PATH = join(dir, 'missing-skills.json');
+    assert.doesNotThrow(() => initializeSkillBank());
+  } finally {
+    if (savedBank === undefined) delete process.env.GAH_SKILL_BANK_PATH;
+    else process.env.GAH_SKILL_BANK_PATH = savedBank;
+    if (savedDocs === undefined) delete process.env.GAH_SKILL_DOCS_PATH;
+    else process.env.GAH_SKILL_DOCS_PATH = savedDocs;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('skill bank initialization logs an unreadable seed document without aborting startup', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-skills-seed-'));
+  const savedBank = process.env.GAH_SKILL_BANK_PATH;
+  const savedDocs = process.env.GAH_SKILL_DOCS_PATH;
+  const savedConsoleError = console.error;
+  const errors: unknown[][] = [];
+  process.env.GAH_SKILL_BANK_PATH = join(dir, 'missing-skills.json');
+  process.env.GAH_SKILL_DOCS_PATH = dir;
+  console.error = (...args: unknown[]) => errors.push(args);
+
+  try {
+    assert.doesNotThrow(() => initializeSkillBank());
+    assert.equal(errors[0]?.[0], 'Failed to seed skill bank from docs:');
+    assert.match(String(errors[0]?.[1]), /EISDIR|directory/i);
+  } finally {
+    console.error = savedConsoleError;
+    if (savedBank === undefined) delete process.env.GAH_SKILL_BANK_PATH;
+    else process.env.GAH_SKILL_BANK_PATH = savedBank;
+    if (savedDocs === undefined) delete process.env.GAH_SKILL_DOCS_PATH;
+    else process.env.GAH_SKILL_DOCS_PATH = savedDocs;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('server startup from apps/server seeds the repo manager skill content intact', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-skills-default-seed-'));
+  const bankPath = join(dir, 'skills.json');
+  const savedBank = process.env.GAH_SKILL_BANK_PATH;
+  const savedDocs = process.env.GAH_SKILL_DOCS_PATH;
+  const savedCwd = process.cwd();
+  process.env.GAH_SKILL_BANK_PATH = bankPath;
+  delete process.env.GAH_SKILL_DOCS_PATH;
+
+  try {
+    process.chdir(fileURLToPath(new URL('..', import.meta.url)));
+    initializeSkillBank();
+    const bank = JSON.parse(readFileSync(bankPath, 'utf8')) as { skills: Array<{ id: string; content: string }> };
+    const expected = readFileSync(
+      fileURLToPath(new URL('../../../docs/gah-manager-skill.md', import.meta.url)),
+      'utf8'
+    );
+    assert.equal(bank.skills.find((skill) => skill.id === 'gah-manager')?.content, expected);
+  } finally {
+    process.chdir(savedCwd);
+    if (savedBank === undefined) delete process.env.GAH_SKILL_BANK_PATH;
+    else process.env.GAH_SKILL_BANK_PATH = savedBank;
+    if (savedDocs === undefined) delete process.env.GAH_SKILL_DOCS_PATH;
+    else process.env.GAH_SKILL_DOCS_PATH = savedDocs;
     rmSync(dir, { recursive: true, force: true });
   }
 });
