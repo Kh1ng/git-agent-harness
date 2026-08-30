@@ -77,15 +77,9 @@ pub(in crate::dispatch) fn stale_source_error(err: &anyhow::Error) -> Option<&St
     err.downcast_ref::<StaleSourceError>()
 }
 
-/// Issue #931: a repair branch classified CI_FAILED (build/test failure,
-/// never routed through review) can have an `expected_review_generation`
-/// computed purely from its current source state -- nothing guarantees a
-/// review ever ran at that generation, or ever will, since CI_FAILED goes
-/// straight to FixMr (decision.rs rule 6) without an intervening ReviewMr.
-/// Kept distinct from a generic harness error so callers can treat "no
-/// review ever existed" as expected-and-recoverable (proceed without
-/// structured findings) instead of retrying forever against a generation
-/// that can never be satisfied.
+/// Kept distinct from a generic harness error so direct/manual repairs can
+/// proceed without structured findings. Controller repairs carry an expected
+/// generation and must treat its disappearance as a failed preflight.
 #[derive(Debug)]
 pub(in crate::dispatch) struct NoReviewFoundError {
     pub(in crate::dispatch) branch: String,
