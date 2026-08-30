@@ -704,7 +704,13 @@ fn handle_message(state: &mut ClaudeSessionState, message: Value) -> Result<()> 
     }
     if !matches!(
         kind,
-        "system" | "user" | "stream_event" | "assistant" | "result"
+        "system"
+            | "user"
+            | "stream_event"
+            | "assistant"
+            | "result"
+            | "tool_progress"
+            | "tool_use_summary"
     ) {
         return Err(anyhow!("unknown Claude message type {kind}"));
     }
@@ -794,7 +800,43 @@ fn handle_message(state: &mut ClaudeSessionState, message: Value) -> Result<()> 
                 .and_then(Value::as_bool)
                 .ok_or_else(|| anyhow!("Claude result is_error is missing"))?;
             if !nested {
+                if state.outstanding_turns == 0 {
+                    return Err(anyhow!(
+                        "Claude returned a result without an outstanding turn"
+                    ));
+                }
                 finish_turn(state, &message);
+            }
+        }
+        "tool_progress" => {
+            message
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Claude tool_progress is missing tool_use_id"))?;
+            message
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Claude tool_progress is missing tool_name"))?;
+            message
+                .get("elapsed_time_seconds")
+                .and_then(Value::as_f64)
+                .ok_or_else(|| anyhow!("Claude tool_progress is missing elapsed_time_seconds"))?;
+        }
+        "tool_use_summary" => {
+            message
+                .get("summary")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Claude tool_use_summary is missing summary"))?;
+            let tool_use_ids = message
+                .get("preceding_tool_use_ids")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    anyhow!("Claude tool_use_summary is missing preceding_tool_use_ids")
+                })?;
+            if !tool_use_ids.iter().all(Value::is_string) {
+                return Err(anyhow!(
+                    "Claude tool_use_summary preceding_tool_use_ids must contain strings"
+                ));
             }
         }
         _ => unreachable!("validated Claude message kind"),
@@ -816,7 +858,7 @@ fn finish_turn(state: &mut ClaudeSessionState, result: &Value) {
     if let Some(usage) = extract_usage(result) {
         state.pending_updates.push(usage);
     }
-    state.outstanding_turns = state.outstanding_turns.saturating_sub(1);
+    state.outstanding_turns -= 1;
     let subtype = result
         .get("subtype")
         .and_then(Value::as_str)
@@ -1002,6 +1044,7 @@ impl ManagerSession for ClaudeManagerSession {
             .sessions
             .get_mut(session)
             .ok_or_else(|| anyhow!("Claude session {session} must be resumed before sending"))?;
+        let write_attempted = state.process.is_some();
         let delivered = match state.process.as_mut() {
             Some(process) => process.write_user_message(&state.provider_session_id, message),
             None => Err(anyhow!(
@@ -1010,11 +1053,13 @@ impl ManagerSession for ClaudeManagerSession {
         }
         .with_context(|| format!("sending structured input to Claude session {session}"));
         if let Err(error) = delivered {
-            if matches!(
-                &state.status,
-                SessionStatus::Terminated(TerminalStatus::Failed(_))
-                    | SessionStatus::Terminated(TerminalStatus::Interrupted)
-            ) {
+            if !write_attempted
+                && matches!(
+                    &state.status,
+                    SessionStatus::Terminated(TerminalStatus::Failed(_))
+                        | SessionStatus::Terminated(TerminalStatus::Interrupted)
+                )
+            {
                 return Err(error);
             }
             return Self::fail_session(state, format!("{error:#}"));

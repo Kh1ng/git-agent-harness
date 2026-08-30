@@ -162,6 +162,18 @@ for raw in sys.stdin:
             "session_id": session_id,
             "event": {{"type": "content_block_delta"}},
         }},
+        "malformed-tool-progress": {{
+            "type": "tool_progress",
+            "session_id": session_id,
+            "tool_use_id": "toolu_test",
+            "tool_name": "Read",
+        }},
+        "malformed-tool-summary": {{
+            "type": "tool_use_summary",
+            "session_id": session_id,
+            "summary": "Read one file",
+            "preceding_tool_use_ids": [42],
+        }},
         "unknown-event": {{
             "type": "reslt",
             "session_id": session_id,
@@ -212,6 +224,39 @@ for raw in sys.stdin:
             "modelUsage": {{"claude-test": {{"contextWindow": 200000}}}},
             "terminal_reason": "model_error",
         }}), flush=True)
+        continue
+    if prompt == "tool-events":
+        print(json.dumps({{
+            "type": "tool_progress",
+            "tool_use_id": "toolu_test",
+            "tool_name": "Read",
+            "parent_tool_use_id": None,
+            "elapsed_time_seconds": 1.5,
+            "uuid": "11111111-1111-4111-8111-111111111111",
+            "session_id": session_id,
+        }}), flush=True)
+        print(json.dumps({{
+            "type": "tool_use_summary",
+            "summary": "Read one file",
+            "preceding_tool_use_ids": ["toolu_test"],
+            "uuid": "22222222-2222-4222-8222-222222222222",
+            "session_id": session_id,
+        }}), flush=True)
+    if prompt == "duplicate-result":
+        result = {{
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "session_id": session_id,
+            "result": "duplicate result",
+            "usage": {{"input_tokens": 1, "output_tokens": 1,
+                       "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}},
+            "modelUsage": {{"claude-test": {{"contextWindow": 200000}}}},
+            "terminal_reason": "completed",
+        }}
+        print(json.dumps(result), flush=True)
+        print(json.dumps(result), flush=True)
+        time.sleep(10)
         continue
     reply = "reply: " + prompt
     print(json.dumps({{
@@ -610,6 +655,55 @@ fn send_write_failures_are_terminal_and_retire_the_transport() {
 }
 
 #[test]
+fn failed_recovery_write_replaces_the_stored_failure_and_retires_the_transport() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_streaming_claude(&f.bin_dir, &f.record_dir);
+    for stage in [
+        WriteFaultStage::Json,
+        WriteFaultStage::Newline,
+        WriteFaultStage::Flush,
+    ] {
+        let mut adapter = ClaudeManagerSession::new_with_session_dir(
+            f.bin_dir.join("claude"),
+            f.record_dir.join(format!("failed-recovery-{stage:?}")),
+        )
+        .unwrap();
+        let id = adapter
+            .start(StartRequest {
+                profile: format!("failed-recovery-{stage:?}"),
+                instruction: "fail".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            wait_for_terminal_status(&mut adapter, &id),
+            TerminalStatus::Failed(_)
+        ));
+        let process = adapter
+            .sessions
+            .get_mut(&id)
+            .unwrap()
+            .process
+            .as_mut()
+            .unwrap();
+        process.write_fault = Some(stage);
+        process.child.injected_cleanup_error = Some("injected recovery survivor".into());
+
+        let returned = adapter
+            .send(&id, "attempt recovery")
+            .unwrap_err()
+            .to_string();
+        let Some(TerminalStatus::Failed(stored)) = adapter.terminal_status(&id).unwrap() else {
+            panic!("failed recovery write must remain terminal");
+        };
+        assert_eq!(stored, returned);
+        assert!(stored.contains(&format!("injected {stage:?} write failure")));
+        assert!(stored.contains("injected recovery survivor"));
+        assert!(adapter.sessions.get(&id).unwrap().process.is_none());
+    }
+}
+
+#[test]
 fn completed_transport_eof_is_retired_before_a_later_send() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let f = fixture();
@@ -750,6 +844,105 @@ fn explicit_send_after_observed_failure_starts_a_new_working_lifecycle() {
     let (updates, status) = wait_for_turn(&mut adapter, &id);
     assert_eq!(status, TerminalStatus::Completed);
     assert!(updates.contains(&SessionUpdate::MessageChunk("reply: recovered".into())));
+}
+
+#[test]
+fn legitimate_tool_events_are_ignored_without_changing_the_turn() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_streaming_claude(&f.bin_dir, &f.record_dir);
+    let mut adapter = ClaudeManagerSession::new_with_session_dir(
+        f.bin_dir.join("claude"),
+        f.record_dir.join("sessions"),
+    )
+    .unwrap();
+    let id = adapter
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "tool-events".into(),
+        })
+        .unwrap();
+
+    let (updates, status) = wait_for_turn(&mut adapter, &id);
+    assert_eq!(status, TerminalStatus::Completed);
+    assert_eq!(
+        updates,
+        vec![
+            SessionUpdate::MessageChunk("reply: tool-events".into()),
+            SessionUpdate::Usage {
+                used: 19,
+                size: 200_000,
+            },
+        ]
+    );
+}
+
+#[test]
+fn malformed_tool_events_fail_instead_of_being_silently_ignored() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_streaming_claude(&f.bin_dir, &f.record_dir);
+    for (prompt, expected) in [
+        ("malformed-tool-progress", "elapsed_time_seconds"),
+        ("malformed-tool-summary", "preceding_tool_use_ids"),
+    ] {
+        let mut adapter = ClaudeManagerSession::new_with_session_dir(
+            f.bin_dir.join("claude"),
+            f.record_dir.join(format!("sessions-{prompt}")),
+        )
+        .unwrap();
+        let id = adapter
+            .start(StartRequest {
+                profile: format!("profile-{prompt}"),
+                instruction: prompt.into(),
+            })
+            .unwrap();
+        let TerminalStatus::Failed(message) = wait_for_terminal_status(&mut adapter, &id) else {
+            panic!("malformed {prompt} event must fail the session");
+        };
+        assert!(message.contains(expected), "unexpected failure: {message}");
+        assert!(adapter.sessions.get(&id).unwrap().process.is_none());
+    }
+}
+
+#[test]
+fn duplicate_result_without_an_outstanding_turn_fails_and_retires_the_transport() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_streaming_claude(&f.bin_dir, &f.record_dir);
+    let mut adapter = ClaudeManagerSession::new_with_session_dir(
+        f.bin_dir.join("claude"),
+        f.record_dir.join("sessions"),
+    )
+    .unwrap();
+    let id = adapter
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "duplicate-result".into(),
+        })
+        .unwrap();
+
+    let returned = (0..300)
+        .find_map(|_| match adapter.stream(&id) {
+            Err(error) => Some(error.to_string()),
+            Ok(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                None
+            }
+        })
+        .expect("the duplicate result must fail the session");
+    assert!(returned.contains("without an outstanding turn"));
+    let Some(TerminalStatus::Failed(stored)) = adapter.terminal_status(&id).unwrap() else {
+        panic!("the duplicate result failure must be stored");
+    };
+    assert_eq!(stored, returned);
+    assert!(adapter.sessions.get(&id).unwrap().process.is_none());
+
+    assert!(adapter.send(&id, "must require resume").is_err());
+    assert_eq!(
+        adapter.terminal_status(&id).unwrap(),
+        Some(TerminalStatus::Failed(stored))
+    );
 }
 
 #[test]
