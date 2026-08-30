@@ -317,8 +317,8 @@ test('composer favorites persist across reload and apply all three selections at
   await expect(pill).toContainText('Claude · Default model');
   await page.reload();
   await openChat(page);
-  const sessions = page.getByLabel('Chat session');
-  await sessions.selectOption('mock-session-1');
+  await page.getByLabel('Chat session').click();
+  await page.getByRole('option', { name: 'Mock session', exact: true }).click();
   await expect(pill).toContainText('Claude · Default model');
 
   await pill.click();
