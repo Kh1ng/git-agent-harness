@@ -168,7 +168,8 @@ async function postJsonBestEffort<T>(path: string, body: unknown): Promise<T | n
     const res = await fetch(`${gatewayBaseUrl()}${path}`, {
       method: 'POST',
       headers,
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5_000)
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');

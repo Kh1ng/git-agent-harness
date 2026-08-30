@@ -164,6 +164,25 @@ test('an unreachable gateway makes flushSession report false, not throw', async 
   });
 });
 
+test('a gateway that accepts but never responds cannot block a turn indefinitely', async () => {
+  const server = http.createServer(() => undefined);
+  await new Promise<void>((resolvePromise) => server.listen(0, resolvePromise));
+  const { port } = server.address() as AddressInfo;
+  const saved = process.env.TDAI_GATEWAY_URL;
+  process.env.TDAI_GATEWAY_URL = `http://127.0.0.1:${port}`;
+
+  try {
+    const startedAt = Date.now();
+    assert.equal(await flushSession('does-not-exist'), false);
+    assert.ok(Date.now() - startedAt < 6_000, 'gateway request should time out within five seconds');
+  } finally {
+    if (saved === undefined) delete process.env.TDAI_GATEWAY_URL;
+    else process.env.TDAI_GATEWAY_URL = saved;
+    server.closeAllConnections();
+    await new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
+  }
+});
+
 test('a profile that opted out of the gateway skips it entirely: no calls, no degradation', async () => {
   const settingsPath = join(tmpdir(), `gah-gateway-settings-${Date.now()}.json`);
   process.env.GAH_GATEWAY_SETTINGS_PATH = settingsPath;
