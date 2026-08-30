@@ -196,6 +196,33 @@ test('a profile that opted out of the gateway skips it entirely: no calls, no de
   }
 });
 
+test('a genuinely unconfigured install (no stored URL, no TDAI_GATEWAY_URL, API key alone doesn\'t count) skips the gateway entirely: no calls, no degradation', async () => {
+  const settingsPath = join(tmpdir(), `gah-gateway-settings-unconfigured-${Date.now()}.json`);
+  process.env.GAH_GATEWAY_SETTINGS_PATH = settingsPath; // file does not exist -> readGatewaySettings() defaults to url: null
+  const savedUrl = process.env.TDAI_GATEWAY_URL;
+  delete process.env.TDAI_GATEWAY_URL;
+  try {
+    const { writeGatewaySettings, gatewayEnabledForProfile } = await import('./gatewaySettingsStore.js');
+    writeGatewaySettings({ apiKey: 'some-key-with-no-url' });
+    assert.equal(gatewayEnabledForProfile('unconfigured-profile'), false, 'an API key with no URL anywhere is not "configured"');
+
+    const recalled = await recall('unconfigured-profile', 'anything');
+    assert.deepEqual(recalled, { context: '', memoryCount: 0 }, 'unconfigured recall is a clean empty result');
+    assert.equal(recalled.degraded, undefined, 'no degradation flag: no URL configured means the gateway is never called');
+
+    const captured = await capture('unconfigured-profile', 'u', 'a');
+    assert.deepEqual(captured, { l0Recorded: 0 });
+    assert.equal(captured.degraded, undefined);
+
+    assert.equal(await flushSession('unconfigured-profile'), false);
+  } finally {
+    delete process.env.GAH_GATEWAY_SETTINGS_PATH;
+    if (savedUrl === undefined) delete process.env.TDAI_GATEWAY_URL;
+    else process.env.TDAI_GATEWAY_URL = savedUrl;
+    if (existsSync(settingsPath)) rmSync(settingsPath);
+  }
+});
+
 test('a working gateway clears the degraded health snapshot', async () => {
   await withFakeGateway(async () => {
     await captureForTicket('does-not-exist', '#1', 'a', 'b');
