@@ -32,6 +32,7 @@ use std::str::FromStr;
 // `super::contract::run_contract_suite` too, and both compile together
 // under the same `cfg(test)` build exactly like `crate::test_support` does
 // for the rest of this crate.
+pub mod claude;
 pub mod codex;
 #[cfg(test)]
 mod contract;
