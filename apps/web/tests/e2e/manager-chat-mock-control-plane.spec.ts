@@ -37,7 +37,11 @@ async function openChat(page: Page): Promise<void> {
 async function selectSeededSession(page: Page): Promise<void> {
   await page.getByLabel('Chat session').click();
   await page.getByRole('option', { name: 'Mock session', exact: true }).click();
-  await expect(page.getByLabel('Session provider')).toHaveValue('codex');
+  // The composer pill renders the session's provider once its model list
+  // has loaded (the seeded session is codex / gpt-5.3-codex).
+  const pill = page.getByRole('button', { name: 'Provider picker' });
+  await expect(pill).toContainText('Codex');
+  await expect(pill).toContainText('GPT-5.3 Codex');
 }
 
 /** The picker's two top-level sections, for asserting where a session lives. */
@@ -246,21 +250,99 @@ test('backend/model controls cover success, delayed, empty, failed, and AGY shap
   await expect(page.getByLabel('Reasoning effort')).toHaveCount(0);
 });
 
-test('session controls pin and switch the session reasoning effort', async ({ page, request }) => {
+test('the composer picker switches session backend, model, and effort', async ({ page, request }) => {
   await selectScenario(request, 'normal');
   await openChat(page);
   await selectSeededSession(page);
 
-  // The mock codex advertises low/medium/xhigh, so the session-level picker
-  // renders next to the session model picker.
-  const effort = page.getByLabel('Session reasoning effort');
-  await expect(effort).toBeVisible();
-  await expect(effort).toHaveValue('');
+  const pill = page.getByRole('button', { name: 'Provider picker' });
+  await pill.click();
+  const popover = page.getByRole('dialog', { name: 'Provider picker' });
+  await expect(popover).toBeVisible();
 
-  await effort.selectOption('xhigh');
-  await expect(effort).toHaveValue('xhigh');
-  const state = await (await request.get(`${MOCK_BASE_URL}/api/mock/state`)).json() as {
+  // The mock codex advertises low/medium/xhigh; pin xhigh on the session,
+  // then switch the session model -- each lands as a session PATCH.
+  await popover.getByRole('button', { name: 'Extra high', exact: true }).click();
+  const effortState = await (await request.get(`${MOCK_BASE_URL}/api/mock/state`)).json() as {
     sessions: { id: string; reasoningEffort: string | null }[];
   };
-  expect(state.sessions.find((s) => s.id === 'mock-session-1')?.reasoningEffort).toBe('xhigh');
+  expect(effortState.sessions.find((s) => s.id === 'mock-session-1')?.reasoningEffort).toBe('xhigh');
+
+  await popover.getByRole('button', { name: 'GPT-5.3 Codex Spark', exact: true }).click();
+  const modelState = await (await request.get(`${MOCK_BASE_URL}/api/mock/state`)).json() as {
+    sessions: { id: string; model: string | null }[];
+  };
+  expect(modelState.sessions.find((s) => s.id === 'mock-session-1')?.model).toBe('gpt-5.3-codex-spark');
+  await expect(pill).toContainText('GPT-5.3 Codex Spark');
+
+  // A backend switch resets model + effort to the new backend's defaults.
+  await popover.getByRole('button', { name: 'Claude', exact: true }).click();
+  const backendState = await (await request.get(`${MOCK_BASE_URL}/api/mock/state`)).json() as {
+    sessions: { id: string; backend: string; model: string | null; reasoningEffort: string | null }[];
+  };
+  expect(backendState.sessions.find((s) => s.id === 'mock-session-1')).toMatchObject({
+    backend: 'claude',
+    model: null,
+    reasoningEffort: null
+  });
+  await expect(pill).toContainText('Claude');
+
+  // Escape closes the popover.
+  await page.keyboard.press('Escape');
+  await expect(popover).toHaveCount(0);
+});
+
+test('composer favorites persist across reload and apply all three selections at once', async ({ page, request }) => {
+  await selectScenario(request, 'normal');
+  await openChat(page);
+  await selectSeededSession(page);
+
+  const pill = page.getByRole('button', { name: 'Provider picker' });
+  await pill.click();
+  const popover = page.getByRole('dialog', { name: 'Provider picker' });
+
+  // Build a full selection (model + effort), then star it as a favorite.
+  await popover.getByRole('button', { name: 'GPT-5.3 Codex Spark', exact: true }).click();
+  await popover.getByRole('button', { name: 'Extra high', exact: true }).click();
+  await expect(pill).toContainText('GPT-5.3 Codex Spark');
+  await popover.getByRole('button', { name: 'Save current' }).click();
+  const stored = await page.evaluate(() => window.localStorage.getItem('gah.composer.favorites'));
+  expect(JSON.parse(stored ?? '[]')).toEqual([
+    { backend: 'codex', model: 'gpt-5.3-codex-spark', reasoningEffort: 'xhigh' }
+  ]);
+
+  // Switch away to Claude (model/effort reset), then reload: the favorite
+  // survives in localStorage and one click restores all three selections.
+  await popover.getByRole('button', { name: 'Claude', exact: true }).click();
+  await expect(pill).toContainText('Claude · Default model');
+  await page.reload();
+  await openChat(page);
+  await page.getByLabel('Chat session').click();
+  await page.getByRole('option', { name: 'Mock session', exact: true }).click();
+  await expect(pill).toContainText('Claude · Default model');
+
+  await pill.click();
+  const reopened = page.getByRole('dialog', { name: 'Provider picker' });
+  // The session is on Claude, so the codex favorite's model/effort names
+  // can't resolve from the current lists and fall back to their raw ids.
+  const favorite = reopened.getByRole('button', { name: 'Apply Codex · gpt-5.3-codex-spark · xhigh' });
+  await expect(favorite).toBeVisible();
+  await favorite.click();
+
+  await expect(pill).toContainText('Codex · GPT-5.3 Codex Spark · Extra high');
+  const state = await (await request.get(`${MOCK_BASE_URL}/api/mock/state`)).json() as {
+    sessions: { id: string; backend: string; model: string | null; reasoningEffort: string | null }[];
+  };
+  expect(state.sessions.find((s) => s.id === 'mock-session-1')).toMatchObject({
+    backend: 'codex',
+    model: 'gpt-5.3-codex-spark',
+    reasoningEffort: 'xhigh'
+  });
+
+  // A session turn still works after switching.
+  const composer = page.getByPlaceholder(/Message the manager/);
+  await composer.fill('after favorite switch');
+  await page.getByRole('button', { name: 'Send' }).click();
+  await expect(page.getByText('Mock turn', { exact: false })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0);
 });

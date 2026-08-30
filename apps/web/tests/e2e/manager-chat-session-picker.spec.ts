@@ -85,10 +85,11 @@ test('selecting a cross-project session switches the chat page to that project',
 
   // The picker closes and shows the picked session; the page header now
   // describes the second project (its raw profile id — the mock's profile
-  // list doesn't cover it), and the session bar renders that session's own
-  // provider controls once its data loads.
+  // list doesn't cover it), and the composer pill reflects that session's
+  // own provider once its model list loads (the mock advertises codex for
+  // every project).
   const trigger = page.getByLabel('Chat session');
   await expect(trigger).toContainText('Second project session');
   await expect(page.getByText('fixture-two', { exact: false })).toBeVisible();
-  await expect(page.getByLabel('Session provider')).toHaveValue('codex', { timeout: 10_000 });
+  await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex', { timeout: 10_000 });
 });
