@@ -73,7 +73,17 @@ lines.on('line', (line) => {
     return;
   }
   if (request.method === 'session/prompt' && mode === 'stuck-cancel') {
-    if (spawnNumber === 1) return;
+    if (spawnNumber === 1) {
+      respond({
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: {
+          sessionId: 'fake-session',
+          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'stuck-prompt-started' } }
+        }
+      });
+      return;
+    }
     respond({
       jsonrpc: '2.0',
       method: 'session/update',
@@ -205,8 +215,13 @@ test('cancel evicts a child only when its prompt ignores cancellation', { timeou
       args: [fake.path, 'stuck-cancel', spawnCountPath]
     }));
 
-    const stuck = backend.runTurn('profile', emptyTurnInput);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    let markPromptStarted!: () => void;
+    const promptStarted = new Promise<void>((resolve) => { markPromptStarted = resolve; });
+    const stuck = backend.runTurn('profile', {
+      ...emptyTurnInput,
+      onChunk: (text) => { if (text === 'stuck-prompt-started') markPromptStarted(); }
+    });
+    await promptStarted;
     await backend.cancelTurn('profile');
     await assert.rejects(stuck);
 
