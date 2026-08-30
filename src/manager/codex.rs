@@ -47,15 +47,20 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const CLIENT_NAME: &str = "git-agent-harness";
 const RPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+static FAIL_HELPER_CLEANUP_AFTER_REAP: AtomicBool = AtomicBool::new(false);
 
 #[derive(Serialize, Deserialize)]
 struct DurableThreadMapping {
@@ -275,22 +280,54 @@ impl CodexTransport {
         })
     }
 
-    fn write_json(&mut self, value: &Value) -> Result<()> {
-        serde_json::to_writer(&mut self.stdin, value)?;
-        self.stdin.write_all(b"\n")?;
-        self.stdin.flush()?;
+    fn write_json_until(&mut self, value: &Value, deadline: Instant) -> Result<()> {
+        let mut bytes = serde_json::to_vec(value)?;
+        bytes.push(b'\n');
+        let fd = self.stdin.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+        {
+            return Err(std::io::Error::last_os_error()).context("making Codex stdin nonblocking");
+        }
+        let mut written = 0;
+        while written < bytes.len() {
+            if Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "timed out writing Codex app-server request after {:?}",
+                    self.response_timeout
+                ));
+            }
+            match self.stdin.write(&bytes[written..]) {
+                Ok(0) => return Err(anyhow!("Codex app-server closed its input")),
+                Ok(count) => written += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    wait_until_writable(fd, deadline, self.response_timeout)?;
+                }
+                Err(error) => return Err(error).context("writing Codex app-server request"),
+            }
+        }
         Ok(())
     }
 
     fn send_notification(&mut self, method: &str, params: Value) -> Result<()> {
-        self.write_json(&json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        }))
+        let deadline = Instant::now() + self.response_timeout;
+        self.write_json_until(
+            &json!({
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params,
+            }),
+            deadline,
+        )
     }
 
-    fn send_request(&mut self, method: &str, params: Value) -> Result<u64> {
+    fn send_request_until(
+        &mut self,
+        method: &str,
+        params: Value,
+        deadline: Instant,
+    ) -> Result<u64> {
         #[cfg(test)]
         if self.fail_request == Some(method) {
             self.fail_request = None;
@@ -298,12 +335,15 @@ impl CodexTransport {
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.write_json(&json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        }))?;
+        self.write_json_until(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params,
+            }),
+            deadline,
+        )?;
         Ok(id)
     }
 
@@ -376,22 +416,50 @@ impl CodexTransport {
     /// `approvalPolicy: "never"` so none of these are expected in normal
     /// operation, but an unattended manager loop must never hang waiting to
     /// answer one it doesn't recognize -- decline it instead.
-    fn respond_to_server_request(&mut self, message: &Value) -> Result<bool> {
+    fn respond_to_server_request(&mut self, message: &Value, deadline: Instant) -> Result<bool> {
         let Some(method) = message.get("method").and_then(Value::as_str) else {
             return Ok(false);
         };
         let Some(id) = message.get("id") else {
             return Ok(false);
         };
-        self.write_json(&json!({
+        self.write_json_until(&json!({
             "jsonrpc": "2.0",
             "id": id,
             "error": {
                 "code": -32601,
                 "message": format!("git-agent-harness's Codex manager adapter does not support server request '{method}'"),
             }
-        }))?;
+        }), deadline)?;
         Ok(true)
+    }
+}
+
+fn wait_until_writable(fd: std::os::fd::RawFd, deadline: Instant, timeout: Duration) -> Result<()> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow!(
+                "timed out writing Codex app-server request after {timeout:?}"
+            ));
+        }
+        let wait_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+        let mut descriptor = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut descriptor, 1, wait_ms) };
+        if result > 0 && descriptor.revents & libc::POLLOUT != 0 {
+            return Ok(());
+        }
+        if result == 0 {
+            continue;
+        }
+        if result < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(anyhow!("Codex app-server input became unavailable"));
     }
 }
 
@@ -417,14 +485,14 @@ fn read_messages(stdout: ChildStdout, sender: mpsc::Sender<std::result::Result<V
 }
 
 fn rpc_request(transport: &mut CodexTransport, method: &str, params: Value) -> Result<Value> {
-    let id = transport.send_request(method, params)?;
     let deadline = Instant::now() + transport.response_timeout;
+    let id = transport.send_request_until(method, params, deadline)?;
     loop {
         let message = transport.recv_until(deadline)?;
         if is_response_for(&message, id) {
             return decode_json_rpc_response(message);
         }
-        transport.respond_to_server_request(&message)?;
+        transport.respond_to_server_request(&message, deadline)?;
     }
 }
 
@@ -482,7 +550,6 @@ fn classify_auth_state(output: &std::process::Output) -> CodexAuthState {
 
 struct CommandCapture {
     file: File,
-    path: PathBuf,
 }
 
 impl CommandCapture {
@@ -499,7 +566,16 @@ impl CommandCapture {
             .mode(0o600)
             .open(&path)
             .with_context(|| format!("creating Codex helper capture {}", path.display()))?;
-        Ok(Self { file, path })
+        if let Err(error) = fs::remove_file(&path) {
+            drop(file);
+            return match fs::remove_file(&path) {
+                Ok(()) => Err(error).context("unlinking Codex helper capture"),
+                Err(cleanup) => Err(anyhow!(
+                    "unlinking Codex helper capture failed: {error}; retry failed: {cleanup}"
+                )),
+            };
+        }
+        Ok(Self { file })
     }
 
     fn stdio(&self) -> Result<Stdio> {
@@ -514,9 +590,14 @@ impl CommandCapture {
     }
 }
 
-impl Drop for CommandCapture {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+enum HelperCommandFailure {
+    Command,
+    Cleanup(anyhow::Error),
+}
+
+impl From<anyhow::Error> for HelperCommandFailure {
+    fn from(_: anyhow::Error) -> Self {
+        Self::Command
     }
 }
 
@@ -524,9 +605,9 @@ fn bounded_command_output(
     command: &mut Command,
     context: &str,
     timeout: Duration,
-) -> Result<Output> {
-    let mut stdout = CommandCapture::new("stdout")?;
-    let mut stderr = CommandCapture::new("stderr")?;
+) -> std::result::Result<Output, HelperCommandFailure> {
+    let mut stdout = CommandCapture::new("stdout").map_err(HelperCommandFailure::Cleanup)?;
+    let mut stderr = CommandCapture::new("stderr").map_err(HelperCommandFailure::Cleanup)?;
     command
         .stdin(Stdio::null())
         .stdout(stdout.stdio()?)
@@ -545,24 +626,35 @@ fn bounded_command_output(
             Ok(None) => {
                 let cleanup = crate::runner::process::kill_process_group(&mut child);
                 let wait = child.wait();
+                #[cfg(test)]
+                let cleanup = FAIL_HELPER_CLEANUP_AFTER_REAP
+                    .swap(false, Ordering::SeqCst)
+                    .then(|| "injected unconfirmed helper cleanup".into())
+                    .or(cleanup);
                 let failure = anyhow!("{context} timed out after {timeout:?}");
                 return match (cleanup, wait) {
-                    (None, Ok(_)) => Err(failure),
-                    (Some(cleanup), Ok(_)) => Err(anyhow!("{failure:#}; {cleanup}")),
-                    (None, Err(wait)) => {
-                        Err(failure.context(format!("waiting for timed-out {context}: {wait}")))
-                    }
-                    (Some(cleanup), Err(wait)) => Err(anyhow!(
-                        "{failure:#}; {cleanup}; waiting for timed-out {context}: {wait}"
+                    (None, Ok(_)) => Err(HelperCommandFailure::Command),
+                    (Some(cleanup), Ok(_)) => Err(HelperCommandFailure::Cleanup(anyhow!(
+                        "{failure:#}; {cleanup}"
+                    ))),
+                    (None, Err(wait)) => Err(HelperCommandFailure::Cleanup(
+                        failure.context(format!("waiting for timed-out {context}: {wait}")),
                     )),
+                    (Some(cleanup), Err(wait)) => Err(HelperCommandFailure::Cleanup(anyhow!(
+                        "{failure:#}; {cleanup}; waiting for timed-out {context}: {wait}"
+                    ))),
                 };
             }
             Err(error) => {
                 let cleanup = crate::runner::process::kill_process_group(&mut child);
                 let wait = child.wait();
-                return Err(anyhow!(
-                    "waiting for {context}: {error}; cleanup: {cleanup:?}; reap: {wait:?}"
-                ));
+                let failure = anyhow!("waiting for {context}: {error}");
+                return match (cleanup, wait) {
+                    (None, Ok(_)) => Err(HelperCommandFailure::Command),
+                    (cleanup, wait) => Err(HelperCommandFailure::Cleanup(anyhow!(
+                        "{failure:#}; cleanup: {cleanup:?}; reap: {wait:?}"
+                    ))),
+                };
             }
         }
     };
@@ -584,14 +676,15 @@ fn discover_with_timeout(
     let executable = executable.as_ref().to_path_buf();
     let mut version_command = Command::new(&executable);
     version_command.arg("--version");
-    let version = bounded_command_output(
+    let version = match bounded_command_output(
         &mut version_command,
         "Codex version command",
         command_timeout,
-    )
-    .ok()
-    .and_then(|output| output.status.success().then_some(output))
-    .and_then(|output| parse_version_from_output(&output));
+    ) {
+        Ok(output) if output.status.success() => parse_version_from_output(&output),
+        Ok(_) | Err(HelperCommandFailure::Command) => None,
+        Err(HelperCommandFailure::Cleanup(error)) => return Err(error),
+    };
 
     let mut login_command = Command::new(&executable);
     login_command.args(["login", "status"]);
@@ -601,7 +694,10 @@ fn discover_with_timeout(
         command_timeout,
     ) {
         Ok(output) => classify_auth_state(&output),
-        Err(_) => CodexAuthState::Error("login status command could not be started".to_string()),
+        Err(HelperCommandFailure::Command) => {
+            CodexAuthState::Error("login status command could not be started".to_string())
+        }
+        Err(HelperCommandFailure::Cleanup(error)) => return Err(error),
     };
 
     Ok(CodexDiscovery {
@@ -623,7 +719,7 @@ fn discover_with_timeout(
 fn detect_stable_methods(
     executable: &Path,
     command_timeout: Duration,
-) -> std::collections::HashSet<String> {
+) -> Result<std::collections::HashSet<String>> {
     let dir = std::env::temp_dir().join(format!(
         "gah-codex-schema-{}-{}",
         std::process::id(),
@@ -632,8 +728,8 @@ fn detect_stable_methods(
             .map(|d| d.as_nanos())
             .unwrap_or_default()
     ));
-    let methods = (|| -> Result<std::collections::HashSet<String>> {
-        fs::create_dir_all(&dir)?;
+    let methods = (|| -> std::result::Result<_, HelperCommandFailure> {
+        fs::create_dir_all(&dir).context("creating Codex schema directory")?;
         let mut command = Command::new(executable);
         command
             .args(["app-server", "generate-json-schema", "--out"])
@@ -642,17 +738,17 @@ fn detect_stable_methods(
             &mut command,
             "Codex app-server schema command",
             command_timeout,
-        )
-        .context("running codex app-server generate-json-schema")?;
+        )?;
         if !output.status.success() {
-            anyhow::bail!(
+            return Err(anyhow!(
                 "codex app-server generate-json-schema exited with {}",
                 output.status
-            );
+            )
+            .into());
         }
         let contents = fs::read_to_string(dir.join("ClientRequest.json"))
             .context("reading generated ClientRequest.json")?;
-        let schema: Value = serde_json::from_str(&contents)?;
+        let schema: Value = serde_json::from_str(&contents).context("parsing Codex schema")?;
         Ok(schema
             .get("oneOf")
             .and_then(Value::as_array)
@@ -669,7 +765,11 @@ fn detect_stable_methods(
             .collect())
     })();
     let _ = fs::remove_dir_all(&dir);
-    methods.unwrap_or_default()
+    match methods {
+        Ok(methods) => Ok(methods),
+        Err(HelperCommandFailure::Command) => Ok(Default::default()),
+        Err(HelperCommandFailure::Cleanup(error)) => Err(error),
+    }
 }
 
 fn is_no_active_turn_error(error: &anyhow::Error) -> bool {
@@ -736,7 +836,7 @@ impl CodexManagerSession {
         // Capabilities come from the installed binary's generated schema.
         // Detect them before starting the long-lived app-server so a broken
         // helper cannot strand a live transport during construction.
-        let methods = detect_stable_methods(&discovery.executable, response_timeout);
+        let methods = detect_stable_methods(&discovery.executable, response_timeout)?;
         let capabilities = SessionCapabilities {
             resume: methods.contains("thread/resume"),
             interrupt: methods.contains("turn/interrupt"),
@@ -788,7 +888,15 @@ impl CodexManagerSession {
     }
 
     fn handle_message(&mut self, message: Value) -> Result<()> {
-        if self.transport.respond_to_server_request(&message)? {
+        let deadline = Instant::now() + self.transport.response_timeout;
+        self.handle_message_until(message, deadline)
+    }
+
+    fn handle_message_until(&mut self, message: Value, deadline: Instant) -> Result<()> {
+        if self
+            .transport
+            .respond_to_server_request(&message, deadline)?
+        {
             return Ok(());
         }
         let Some(method) = message.get("method").and_then(Value::as_str) else {
@@ -1034,11 +1142,11 @@ impl CodexManagerSession {
                 "injected {method} enqueue failure"
             )));
         }
+        let deadline = Instant::now() + self.transport.response_timeout;
         let request_id = self
             .transport
-            .send_request(method, params)
+            .send_request_until(method, params, deadline)
             .map_err(RpcDeliveryFailure::Ambiguous)?;
-        let deadline = Instant::now() + self.transport.response_timeout;
         loop {
             let message = self
                 .transport
@@ -1047,7 +1155,7 @@ impl CodexManagerSession {
             if is_response_for(&message, request_id) {
                 return decode_json_rpc_response(message).map_err(RpcDeliveryFailure::Rejected);
             }
-            self.handle_message(message)
+            self.handle_message_until(message, deadline)
                 .map_err(RpcDeliveryFailure::Ambiguous)?;
         }
     }

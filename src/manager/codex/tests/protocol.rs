@@ -1,5 +1,37 @@
 use super::*;
 
+fn named_helper_captures() -> Vec<std::ffi::OsString> {
+    let prefix = format!("gah-codex-helper-{}-", std::process::id());
+    fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+        .filter(|name| name.to_string_lossy().starts_with(&prefix))
+        .collect()
+}
+
+#[test]
+fn helper_output_has_no_named_capture_while_the_command_runs() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    fs::write(f.record_dir.join("hang-version"), "").unwrap();
+    let before = named_helper_captures();
+    let executable = f.bin_dir.join("codex");
+    let session_dir = f.record_dir.join("sessions");
+    let constructor = std::thread::spawn(move || {
+        CodexManagerSession::new_with_session_dir_and_timeout(
+            executable,
+            session_dir,
+            Duration::from_millis(500),
+        )
+    });
+    std::thread::sleep(Duration::from_millis(100));
+
+    assert_eq!(named_helper_captures(), before);
+    drop(constructor.join().unwrap().unwrap());
+    assert_eq!(named_helper_captures(), before);
+}
+
 #[test]
 fn constructor_helper_commands_are_bounded_and_reap_descendants() {
     let _exec_guard = crate::test_support::ExecGuard::new();
@@ -26,6 +58,39 @@ fn constructor_helper_commands_are_bounded_and_reap_descendants() {
     for (flag, survivor, elapsed, record_dir) in outcomes {
         assert!(elapsed < Duration::from_secs(1), "{flag} took {elapsed:?}");
         assert!(!record_dir.join(survivor).exists(), "{flag} leaked a child");
+    }
+}
+
+#[test]
+fn unconfirmed_helper_cleanup_prevents_app_server_start() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let mut outcomes = Vec::new();
+    for flag in ["hang-version", "hang-login", "hang-schema"] {
+        let f = fixture();
+        make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+        fs::write(f.record_dir.join(flag), "").unwrap();
+        FAIL_HELPER_CLEANUP_AFTER_REAP.store(true, Ordering::SeqCst);
+        let result = CodexManagerSession::new_with_session_dir_and_timeout(
+            f.bin_dir.join("codex"),
+            f.record_dir.join("sessions"),
+            Duration::from_millis(50),
+        );
+        let failure = match result {
+            Ok(session) => {
+                drop(session);
+                "constructor started the app-server".to_string()
+            }
+            Err(error) => format!("{error:#}"),
+        };
+        outcomes.push((flag, failure, f.record_dir.join("requests.jsonl")));
+    }
+
+    for (flag, failure, requests) in outcomes {
+        assert!(
+            failure.contains("injected unconfirmed helper cleanup"),
+            "{flag}: {failure}"
+        );
+        assert!(!requests.exists(), "{flag} started the app-server");
     }
 }
 
@@ -106,6 +171,35 @@ fn unrelated_messages_cannot_extend_a_request_deadline() {
     assert!(format!("{error:#}").contains("timed out waiting for Codex app-server response"));
     assert_failed_session_is_observable(&mut session, &id);
     assert!(mapping_path(&session_dir, &id).exists());
+}
+
+#[test]
+fn request_deadline_includes_delivery_to_a_non_reading_server() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    fs::write(f.record_dir.join("stop-reading-after-thread-start"), "").unwrap();
+    let session_dir = f.record_dir.join("sessions");
+    let mut session = CodexManagerSession::new_with_session_dir_and_timeout(
+        f.bin_dir.join("codex"),
+        &session_dir,
+        Duration::from_millis(50),
+    )
+    .unwrap();
+
+    let started = Instant::now();
+    let error = session
+        .start(StartRequest {
+            profile: "profile-a".into(),
+            instruction: "x".repeat(2 * 1024 * 1024),
+        })
+        .unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(format!("{error:#}").contains("timed out writing Codex app-server request"));
+    assert!(session.sessions.is_empty());
+    assert!(fs::read_dir(&session_dir).unwrap().next().is_none());
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(!f.record_dir.join("app-server-survived.marker").exists());
 }
 
 #[test]

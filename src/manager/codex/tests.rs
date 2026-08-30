@@ -293,6 +293,8 @@ with open(record, "a", encoding="utf-8") as fh:
             thread_counter += 1
             thread_id = "thread-" + str(thread_counter)
             emit({{"jsonrpc": "2.0", "id": req_id, "result": {{"thread": {{"id": thread_id}}}}}})
+            if os.path.exists(os.path.join(record_dir, "stop-reading-after-thread-start")):
+                time.sleep(3)
         elif method == "thread/resume":
             thread_id = msg["params"]["threadId"]
             if os.path.exists(os.path.join(record_dir, "silent-resume")):
