@@ -112,6 +112,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [controllerActivity, setControllerActivity] = useState<ControllerActivity[]>([]);
   const [reconnectSeq, setReconnectSeq] = useState(0);
   const socketRef = useRef<WebSocket | null>(null);
+  const connectionCleanupRef = useRef<(() => void) | null>(null);
   const hasConnectedOnceRef = useRef(false);
   const nextMessageIdRef = useRef(0);
 
@@ -135,6 +136,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   }, [activityProfile]);
 
   const connect = useCallback(() => {
+    connectionCleanupRef.current?.();
+    connectionCleanupRef.current = null;
+    socketRef.current = null;
+    setSocket(null);
+    setIsConnected(false);
     setIsConnecting(true);
     setError(null);
 
@@ -144,6 +150,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       newSocket.onopen = () => {
         setIsConnected(true);
         setIsConnecting(false);
+        setError(null);
         setSocket(newSocket);
         socketRef.current = newSocket;
 
@@ -275,9 +282,13 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
       }, 30000);
 
-      return () => {
+      connectionCleanupRef.current = () => {
         clearInterval(keepaliveInterval);
-        if (newSocket.readyState === WebSocket.OPEN) {
+        newSocket.onopen = null;
+        newSocket.onclose = null;
+        newSocket.onerror = null;
+        newSocket.onmessage = null;
+        if (newSocket.readyState === WebSocket.OPEN || newSocket.readyState === WebSocket.CONNECTING) {
           newSocket.close();
         }
       };
@@ -322,14 +333,15 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const cleanup = connect();
+    connect();
     return () => {
-      cleanup?.();
+      connectionCleanupRef.current?.();
+      connectionCleanupRef.current = null;
     };
   }, [connect]);
 
   useEffect(() => {
-    if (!isConnected && !isConnecting && !error && socket === null) {
+    if (!isConnected && !isConnecting && socket === null) {
       const timer = setTimeout(() => {
         reconnect();
       }, 5000);
