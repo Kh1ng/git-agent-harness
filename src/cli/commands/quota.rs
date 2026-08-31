@@ -55,16 +55,7 @@ pub fn run(command: QuotaCommands) -> Result<()> {
                             "Recorded Mistral Admin account data without a spend-limit reading (workspace/billing/rate-limit data saved; nothing fabricated)."
                         );
                     } else {
-                        println!(
-                            "Refreshed {} {} quota: used={:?}% remaining={:?}% window={:?} reset={:?} (source={})",
-                            rec.backend,
-                            rec.model.as_deref().unwrap_or(""),
-                            rec.quota_used_percent,
-                            rec.quota_remaining_percent,
-                            rec.quota_window,
-                            rec.quota_reset_at,
-                            rec.usage_source.as_deref().unwrap_or(""),
-                        );
+                        println!("Refreshed account-level quota data.");
                     }
                 }
                 Ok(None) if is_vibe_admin => {

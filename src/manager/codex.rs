@@ -247,13 +247,14 @@ struct CodexTransport {
 }
 
 impl CodexTransport {
-    fn spawn(executable: &Path) -> Result<Self> {
+    fn spawn(executable: &Path, stderr: Stdio) -> Result<Self> {
         let mut cmd = Command::new(executable);
         cmd.arg("app-server");
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(stderr);
         crate::runner::process::prepare_process_group(&mut cmd);
+        crate::runner::process::arm_child_pdeathsig(&mut cmd);
         let mut child = cmd
             .spawn()
             .with_context(|| format!("launching Codex app-server from {}", executable.display()))?;
@@ -503,6 +504,29 @@ fn rpc_request(transport: &mut CodexTransport, method: &str, params: Value) -> R
     }
 }
 
+pub(crate) fn read_account_rate_limits(executable: &Path, timeout: Duration) -> Result<Value> {
+    let mut transport = CodexTransport::spawn(executable, Stdio::null())?;
+    transport.response_timeout = timeout;
+    let pid = transport.child.id();
+    crate::runner::process::register_supervised_child(pid);
+    let result = (|| {
+        rpc_request(
+            &mut transport,
+            "initialize",
+            json!({
+                "clientInfo": {
+                    "name": CLIENT_NAME,
+                    "version": env!("CARGO_PKG_VERSION"),
+                }
+            }),
+        )?;
+        transport.send_notification("initialized", json!({}))?;
+        rpc_request(&mut transport, "account/rateLimits/read", Value::Null)
+    })();
+    crate::runner::process::unregister_supervised_child(pid);
+    result
+}
+
 fn is_response_for(message: &Value, id: u64) -> bool {
     message.get("id").and_then(Value::as_u64) == Some(id)
         && (message.get("result").is_some() || message.get("error").is_some())
@@ -732,7 +756,7 @@ impl CodexManagerSession {
             interrupt: methods.contains("turn/interrupt"),
             inspect: true,
         };
-        let mut transport = CodexTransport::spawn(&discovery.executable)?;
+        let mut transport = CodexTransport::spawn(&discovery.executable, Stdio::inherit())?;
         transport.response_timeout = response_timeout;
         rpc_request(
             &mut transport,

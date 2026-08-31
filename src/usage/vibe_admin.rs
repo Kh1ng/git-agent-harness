@@ -44,9 +44,8 @@ pub fn admin_api_key() -> Option<String> {
 /// Fetch one Mistral Admin API endpoint via `curl`. The key is handed to
 /// curl through its stdin config (`-K -`), never as a command-line
 /// argument, so it never appears in `ps`/`/proc/<pid>/cmdline` on a shared
-/// host. Any transport, auth, or non-2xx failure returns `Ok(None)` -- a
-/// failed fetch means "no observation this cycle", never a fabricated
-/// reading.
+/// host. Transport, auth, and non-2xx failures carry a stable failure class
+/// so the quota snapshot does not collapse them into bare `no_data`.
 pub fn fetch_admin_endpoint(path: &str, api_key: &str) -> std::io::Result<Option<String>> {
     // Issue #761: this is now reachable from an unattended background probe
     // (quota_store::refresh_stale_quota_observations), not just the manual
@@ -58,7 +57,7 @@ pub fn fetch_admin_endpoint(path: &str, api_key: &str) -> std::io::Result<Option
     cmd.args(["-sS", "--max-time", "15", "-K", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     crate::runner::process::arm_child_pdeathsig(&mut cmd);
     let mut child = cmd.spawn()?;
 
@@ -72,7 +71,19 @@ pub fn fetch_admin_endpoint(path: &str, api_key: &str) -> std::io::Result<Option
 
     let output = child.wait_with_output()?;
     if !output.status.success() {
-        return Ok(None);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = if stderr.contains("401") || stderr.contains("403") {
+            "auth_required: Mistral Admin API rejected the configured credentials".to_string()
+        } else if output.status.code() == Some(28) {
+            "timeout: Mistral Admin API request timed out".to_string()
+        } else {
+            let code = output
+                .status
+                .code()
+                .map_or_else(|| "unknown".to_string(), |code| code.to_string());
+            format!("cli_error: Mistral Admin API curl exited with status {code}")
+        };
+        return Err(std::io::Error::other(message));
     }
     Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
 }
@@ -87,6 +98,7 @@ pub struct AdminRefresh {
     pub billing: LedgerUsage,
     pub rate_limits: AdminRateLimits,
     pub spend_limit: Option<GroupQuotaObservation>,
+    pub spend_limit_error: Option<String>,
 }
 
 /// The real caller for every parser in this module: fetch all four Admin
@@ -124,16 +136,31 @@ pub fn refresh_admin_data(
         .map(|body| parse_admin_rate_limit(&body))
         .unwrap_or_default();
 
-    let spend_limit = fetch_admin_endpoint("/api/admin/spend-limit", api_key)
-        .ok()
-        .flatten()
-        .and_then(|body| admin_spend_limit_to_quota_observation(&body, backend, model));
+    let (spend_limit, spend_limit_error) =
+        match fetch_admin_endpoint("/api/admin/spend-limit", api_key) {
+            Ok(Some(body)) => match admin_spend_limit_to_quota_observation(&body, backend, model) {
+                Some(observation) => (Some(observation), None),
+                None => (
+                    None,
+                    Some(
+                        "unsupported: Mistral Admin spend-limit response contained no usable quota fields"
+                            .to_string(),
+                    ),
+                ),
+            },
+            Ok(None) => (
+                None,
+                Some("unsupported: Mistral Admin spend-limit response was empty".to_string()),
+            ),
+            Err(error) => (None, Some(error.to_string())),
+        };
 
     AdminRefresh {
         workspace_usage,
         billing,
         rate_limits,
         spend_limit,
+        spend_limit_error,
     }
 }
 
@@ -353,7 +380,7 @@ fn admin_spend_limit_quota_used_percent(
     }
 }
 
-/// Same shape as `usage::codex_status_to_quota_observation`: turn a raw
+/// Same shape as `usage::codex_rate_limits_to_quota_observation`: turn a raw
 /// Admin API spend-limit response into an account-level
 /// `GroupQuotaObservation`, timestamped with the observation time (the
 /// response body carries no observation timestamp of its own).
@@ -596,14 +623,36 @@ mod tests {
     }
 
     #[test]
-    fn fetch_admin_endpoint_returns_none_on_curl_failure() {
+    fn fetch_admin_endpoint_classifies_curl_failure() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let dir = tempfile::tempdir().unwrap();
         write_fake_curl(dir.path(), "#!/bin/sh\ncat > /dev/null\nexit 22\n");
         let _path_guard = crate::test_support::PathGuard::set(dir.path());
 
-        let body = fetch_admin_endpoint("/api/admin/spend-limit", "sk-test").unwrap();
-        assert!(body.is_none());
+        assert_eq!(
+            fetch_admin_endpoint("/api/admin/spend-limit", "sk-test")
+                .unwrap_err()
+                .to_string(),
+            "cli_error: Mistral Admin API curl exited with status 22"
+        );
+    }
+
+    #[test]
+    fn fetch_admin_endpoint_classifies_rejected_credentials() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_curl(
+            dir.path(),
+            "#!/bin/sh\ncat > /dev/null\nprintf '%s' 'curl: (22) The requested URL returned error: 401' >&2\nexit 22\n",
+        );
+        let _path_guard = crate::test_support::PathGuard::set(dir.path());
+
+        assert_eq!(
+            fetch_admin_endpoint("/api/admin/spend-limit", "sk-test")
+                .unwrap_err()
+                .to_string(),
+            "auth_required: Mistral Admin API rejected the configured credentials"
+        );
     }
 
     // The Admin API key must never be observable via `ps`/`/proc/<pid>/cmdline`
@@ -688,5 +737,38 @@ mod tests {
         assert!(refresh.billing.usage_source.is_none());
         assert_eq!(refresh.rate_limits, AdminRateLimits::default());
         assert!(refresh.spend_limit.is_some(), "spend limit still succeeds");
+        assert!(refresh.spend_limit_error.is_none());
+    }
+
+    #[test]
+    fn refresh_admin_data_preserves_spend_limit_failure_class() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_curl(dir.path(), "#!/bin/sh\ncat > /dev/null\nexit 22\n");
+        let _path_guard = crate::test_support::PathGuard::set(dir.path());
+
+        let refresh = refresh_admin_data("sk-test", (1_000, 2_000), "vibe", None);
+
+        assert_eq!(
+            refresh.spend_limit_error.as_deref(),
+            Some("cli_error: Mistral Admin API curl exited with status 22")
+        );
+    }
+
+    #[test]
+    fn refresh_admin_data_classifies_unsupported_spend_limit_payload() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_curl(dir.path(), "#!/bin/sh\ncat > /dev/null\nprintf '{}'\n");
+        let _path_guard = crate::test_support::PathGuard::set(dir.path());
+
+        let refresh = refresh_admin_data("sk-test", (1_000, 2_000), "vibe", None);
+
+        assert_eq!(
+            refresh.spend_limit_error.as_deref(),
+            Some(
+                "unsupported: Mistral Admin spend-limit response contained no usable quota fields"
+            )
+        );
     }
 }

@@ -746,7 +746,7 @@ where
 
     let mut summaries = Vec::new();
     // #166 / #151 cross-cutting: durable account-level quota observations
-    // (e.g. from `codex status --json`) are kept in a separate store
+    // (e.g. from Codex app-server) are kept in a separate store
     // from per-attempt usage. They are injected by the caller; merging
     // into each group is scoped so it can never fabricate data where none
     // exists.
@@ -945,7 +945,7 @@ where
         }
 
         // #166 / #151 cross-cutting: merge in any durable account-level
-        // quota observation (e.g. from `codex status --json`) so the
+        // quota observation (e.g. from Codex app-server) so the
         // Quota/Telemetry pages show real backend quota data, not just
         // per-attempt tokens. Account observations are backend-scoped
         // (model = None), so `group_key` is the record's backend only when

@@ -299,6 +299,11 @@ with open(record, "a", encoding="utf-8") as fh:
                 emit({{"jsonrpc": "2.0", "id": req_id, "result": {{}}}})
         elif method == "initialized":
             pass
+        elif method == "account/rateLimits/read":
+            emit({{"jsonrpc": "2.0", "id": req_id, "result": {{
+                "rateLimits": {{"primary": {{"usedPercent": 7, "windowDurationMins": 10080}}}},
+                "rateLimitsByLimitId": {{"codex": {{"primary": {{"usedPercent": 7, "windowDurationMins": 10080}}}}}}
+            }}}})
         elif method == "thread/start":
             thread_counter += 1
             thread_id = "thread-" + str(thread_counter)
@@ -867,26 +872,6 @@ fn lost_fallback_follow_up_response_stops_remote_work() {
 }
 
 #[test]
-fn constructor_rejection_terminates_its_transport() {
-    let _exec_guard = crate::test_support::ExecGuard::new();
-    let f = fixture();
-    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
-    fs::write(f.record_dir.join("reject-initialize"), "").unwrap();
-
-    assert!(CodexManagerSession::new_with_session_dir(
-        f.bin_dir.join("codex"),
-        f.record_dir.join("sessions")
-    )
-    .is_err());
-
-    std::thread::sleep(Duration::from_millis(700));
-    assert!(
-        !f.record_dir.join("app-server-survived.marker").exists(),
-        "a rejected initialize must not leave its app-server alive"
-    );
-}
-
-#[test]
 fn initialized_write_failure_terminates_its_transport() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let f = fixture();
@@ -1332,7 +1317,8 @@ fn installed_codex_passes_handshake_smoke_when_requested() {
         "installed Codex must report a version"
     );
 
-    let mut transport = CodexTransport::spawn(Path::new(&executable)).unwrap();
+    let mut transport =
+        CodexTransport::spawn(Path::new(&executable), std::process::Stdio::inherit()).unwrap();
     rpc_request(
         &mut transport,
         "initialize",

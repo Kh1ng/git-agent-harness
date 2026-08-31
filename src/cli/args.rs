@@ -996,7 +996,7 @@ pub enum TelemetryCommands {
 /// Quota/usage observation management (issue #151 / #166).
 #[derive(Subcommand)]
 pub enum QuotaCommands {
-    /// Refresh account-level quota (e.g. `codex status --json`, or the
+    /// Refresh account-level quota (e.g. Codex app-server, or the
     /// Mistral Admin API for `--backend vibe`) and persist the observation
     /// so the Quota/Telemetry pages show real data.
     Refresh {

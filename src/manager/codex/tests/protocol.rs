@@ -1,5 +1,40 @@
 use super::*;
 
+#[test]
+fn account_rate_limits_read_round_trips_over_app_server() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+
+    let response = read_account_rate_limits(&f.bin_dir.join("codex"), Duration::from_secs(1))
+        .expect("quota request must use the app-server RPC");
+
+    assert_eq!(
+        response.pointer("/rateLimitsByLimitId/codex/primary/usedPercent"),
+        Some(&json!(7))
+    );
+}
+
+#[test]
+fn constructor_rejection_terminates_its_transport() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    fs::write(f.record_dir.join("reject-initialize"), "").unwrap();
+
+    assert!(CodexManagerSession::new_with_session_dir(
+        f.bin_dir.join("codex"),
+        f.record_dir.join("sessions")
+    )
+    .is_err());
+
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(
+        !f.record_dir.join("app-server-survived.marker").exists(),
+        "a rejected initialize must not leave its app-server alive"
+    );
+}
+
 fn named_helper_captures() -> Vec<std::ffi::OsString> {
     let prefix = format!("gah-codex-helper-{}-", std::process::id());
     fs::read_dir(std::env::temp_dir())
