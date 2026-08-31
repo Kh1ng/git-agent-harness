@@ -1195,6 +1195,11 @@ export interface ManagerModelsSummary {
   currentModelId: string | null;
   reasoningEfforts: ManagerReasoningEffortInfo[];
   currentReasoningEffortId: string | null;
+  /** Context-window occupancy from ACP's usage_update notification
+   * (issue #865) -- only Hermes emits this today. Null for any backend
+   * that doesn't, so the UI hides the indicator rather than showing a
+   * fake 0/0. */
+  contextUsage: { size: number; used: number } | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -281,7 +281,8 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
         models: options?.models ?? [],
         currentModelId: state.currentModelId,
         reasoningEfforts: options?.reasoningEfforts ?? [],
-        currentReasoningEffortId: state.currentReasoningEffortId
+        currentReasoningEffortId: state.currentReasoningEffortId,
+        contextUsage: null
       };
     },
 

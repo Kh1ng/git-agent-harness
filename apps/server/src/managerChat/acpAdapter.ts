@@ -184,6 +184,16 @@ function counterDelta(current: number, previous: number | undefined): number {
   return previous === undefined || current < previous ? current : current - previous;
 }
 
+/** Validates the raw usage_update payload before it reaches the UI
+ * (issue #865): a backend sending a non-finite or negative size/used would
+ * otherwise render a nonsensical context meter. */
+export function toContextUsage(update: acp.UsageUpdate | null): { size: number; used: number } | null {
+  if (!update) return null;
+  const { size, used } = update;
+  if (!Number.isFinite(size) || !Number.isFinite(used) || size <= 0 || used < 0) return null;
+  return { size, used };
+}
+
 export function readModelConfig(options: acp.SessionConfigOption[]): {
   models: ManagerModelInfo[];
   currentModelId: string | null;
@@ -674,7 +684,8 @@ export function createAcpBackend(
       models: state.models,
       currentModelId: state.currentModelId,
       reasoningEfforts: state.reasoningEfforts,
-      currentReasoningEffortId: state.currentReasoningEffortId
+      currentReasoningEffortId: state.currentReasoningEffortId,
+      contextUsage: toContextUsage(state.client.usageUpdate)
     };
   }
 
