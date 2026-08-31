@@ -28,7 +28,7 @@ function utcDay(timestamp: number): string {
  * PR's head branch; plain chats carry their own chat branch). */
 export function ticketLabelForBranch(branch: string | null): string | null {
   if (!branch) return null;
-  const match = /^gah\/issue\/[^-]+-(\d+)/.exec(branch);
+  const match = /^gah\/issue\/.+-(\d+)(?:-|$)/.exec(branch);
   return match ? `#${match[1]}` : branch;
 }
 
@@ -70,7 +70,7 @@ export function usageRollup(profile: string, days: number, opts?: { stateDir?: s
     const label = ticketLabelForBranch(meta?.branch ?? null) ?? 'default conversation';
     let ticketRow = ticketTotals.get(label);
     if (!ticketRow) {
-      ticketRow = { ticket: label, title: meta?.title ?? null, turns: 0, total_tokens: 0, estimated_cost_usd: 0, backends: {} };
+      ticketRow = { ticket: label, title: meta?.title ?? null, turns: 0, total_tokens: 0, estimated_cost_usd: null, backends: {} };
       ticketTotals.set(label, ticketRow);
     }
     if (!ticketRow.title && meta?.title) ticketRow.title = meta.title;
@@ -102,19 +102,26 @@ export function usageRollup(profile: string, days: number, opts?: { stateDir?: s
           input_tokens: 0,
           output_tokens: 0,
           total_tokens: 0,
-          estimated_cost_usd: 0
+          estimated_cost_usd: usage.estimated_cost_usd
         };
         totals.set(key, row);
+      } else {
+        row.estimated_cost_usd = row.estimated_cost_usd === null || usage.estimated_cost_usd === null
+          ? null
+          : row.estimated_cost_usd + usage.estimated_cost_usd;
       }
       row.turns += 1;
       row.input_tokens += usage.input_tokens ?? 0;
       row.output_tokens += usage.output_tokens ?? 0;
       row.total_tokens += tokens;
-      row.estimated_cost_usd += usage.estimated_cost_usd ?? 0;
 
+      ticketRow.estimated_cost_usd = ticketRow.turns === 0
+        ? usage.estimated_cost_usd
+        : ticketRow.estimated_cost_usd === null || usage.estimated_cost_usd === null
+          ? null
+          : ticketRow.estimated_cost_usd + usage.estimated_cost_usd;
       ticketRow.turns += 1;
       ticketRow.total_tokens += tokens;
-      ticketRow.estimated_cost_usd += usage.estimated_cost_usd ?? 0;
       ticketRow.backends[event.backend] = (ticketRow.backends[event.backend] ?? 0) + tokens;
     }
   }

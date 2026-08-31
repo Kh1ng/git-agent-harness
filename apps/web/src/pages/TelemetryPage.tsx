@@ -63,6 +63,7 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
   const [rollup, setRollup] = useState<UsageRollupSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,16 +74,18 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
       .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : String(err)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [profile, days]);
+  }, [profile, days, retry]);
 
   const rows = rollup?.rows ?? [];
   const byBackend = useMemo(() => {
-    const map = new Map<string, { turns: number; total_tokens: number; estimated_cost_usd: number }>();
+    const map = new Map<string, { turns: number; total_tokens: number; estimated_cost_usd: number | null }>();
     for (const row of rows) {
       const agg = map.get(row.backend) ?? { turns: 0, total_tokens: 0, estimated_cost_usd: 0 };
       agg.turns += row.turns;
       agg.total_tokens += row.total_tokens;
-      agg.estimated_cost_usd += row.estimated_cost_usd;
+      agg.estimated_cost_usd = agg.estimated_cost_usd === null || row.estimated_cost_usd === null
+        ? null
+        : agg.estimated_cost_usd + row.estimated_cost_usd;
       map.set(row.backend, agg);
     }
     return [...map.entries()].sort((a, b) => b[1].total_tokens - a[1].total_tokens);
@@ -113,7 +116,7 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
       {loading && !rollup ? (
         <LoadingState label="Rolling up session usage…" />
       ) : error ? (
-        <ErrorState message={`Usage rollup failed: ${error}`} onRetry={() => setDays((current) => current)} />
+        <ErrorState message={`Usage rollup failed: ${error}`} onRetry={() => setRetry((current) => current + 1)} />
       ) : rows.length === 0 ? (
         <EmptyState icon={FlaskConical} title="No usage recorded" description={`No manager-chat usage in the last ${days} days.`} />
       ) : (
@@ -137,7 +140,7 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
                       <td className="py-2 pr-4 text-primary">{backend}</td>
                       <td className="py-2 pr-4">{formatCount(agg.turns)}</td>
                       <td className="py-2 pr-4">{formatTokens(agg.total_tokens)}</td>
-                      <td className="py-2 pr-4">{agg.estimated_cost_usd > 0 ? formatCost(agg.estimated_cost_usd) : <span className="text-muted">plan</span>}</td>
+                      <td className="py-2 pr-4">{agg.estimated_cost_usd === null ? <span className="text-muted">unmeasured</span> : formatCost(agg.estimated_cost_usd)}</td>
                       <td className="py-2 text-muted">
                         {modelRows.map((row) => `${row.model ?? 'default'}: ${formatTokens(row.total_tokens)}`).join(' · ')}
                       </td>
@@ -169,7 +172,7 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
                         <td className="py-2 pr-4 text-muted">{ticket.title ?? '—'}</td>
                         <td className="py-2 pr-4">{formatCount(ticket.turns)}</td>
                         <td className="py-2 pr-4">{formatTokens(ticket.total_tokens)}</td>
-                        <td className="py-2 pr-4">{ticket.estimated_cost_usd > 0 ? formatCost(ticket.estimated_cost_usd) : <span className="text-muted">plan</span>}</td>
+                        <td className="py-2 pr-4">{ticket.estimated_cost_usd === null ? <span className="text-muted">unmeasured</span> : formatCost(ticket.estimated_cost_usd)}</td>
                         <td className="py-2 text-muted">
                           {Object.entries(ticket.backends).sort((a, b) => b[1] - a[1]).map(([backend, tokens]) => `${backend}: ${formatTokens(tokens)}`).join(' · ')}
                         </td>

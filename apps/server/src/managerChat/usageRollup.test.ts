@@ -46,7 +46,9 @@ test('rollup aggregates usage by backend, model, and UTC day', () => {
     assert.ok(codexToday);
     assert.equal(codexToday.turns, 2);
     assert.equal(codexToday.total_tokens, 200);
-    assert.ok(Math.abs(codexToday.estimated_cost_usd - 0.015) < 1e-9);
+    const estimatedCost = codexToday.estimated_cost_usd;
+    assert.notEqual(estimatedCost, null);
+    assert.ok(Math.abs((estimatedCost ?? 0) - 0.015) < 1e-9);
   } finally {
     setChatSessionStoreOptions({ stateDir: undefined });
     rmSync(stateDir, { recursive: true, force: true });
@@ -69,6 +71,24 @@ test('rollup counts usage-less turns as unattributed and honors the window', () 
     const month = usageRollup('repo', 30, { stateDir, now: () => NOW });
     assert.equal(month.rows.length, 1);
     assert.equal(month.unattributed_turns, 1);
+  } finally {
+    setChatSessionStoreOptions({ stateDir: undefined });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('rollup preserves unknown cost instead of presenting it as zero', () => {
+  const stateDir = fixture();
+  try {
+    sessionLog(stateDir, 'repo', 'unknown-cost');
+    appendEvents('repo', [
+      { type: 'assistant/message', seq: 1, turn: 1, text: 'known', backend: 'codex', model: null, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15, estimated_cost_usd: 0.01, duration_seconds: 1 }, timestamp: NOW },
+      { type: 'assistant/message', seq: 2, turn: 2, text: 'unknown', backend: 'codex', model: null, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15, estimated_cost_usd: null, duration_seconds: 1 }, timestamp: NOW }
+    ], { stateDir, sessionId: 'unknown-cost' });
+
+    const rollup = usageRollup('repo', 7, { stateDir, now: () => NOW });
+    assert.equal(rollup.rows[0]?.estimated_cost_usd, null);
+    assert.equal(rollup.tickets[0]?.estimated_cost_usd, null);
   } finally {
     setChatSessionStoreOptions({ stateDir: undefined });
     rmSync(stateDir, { recursive: true, force: true });
@@ -108,6 +128,7 @@ test('usage rolls up per ticket via the session index branch (#940 cost-per-tick
 
     assert.equal(ticketLabelForBranch('gah/issue/repo-42'), '#42');
     assert.equal(ticketLabelForBranch('gah/issue/repo-42-mfrgg'), '#42');
+    assert.equal(ticketLabelForBranch('gah/issue/git-agent-harness-1014-mfrgg'), '#1014');
     assert.equal(ticketLabelForBranch(null), null);
   } finally {
     setChatSessionStoreOptions({ stateDir: undefined });
