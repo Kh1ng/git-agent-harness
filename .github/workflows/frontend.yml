@@ -30,6 +30,9 @@ jobs:
       - name: Typecheck frontend
         run: npm run typecheck --workspace=apps/web
 
+      - name: Typecheck mock control plane
+        run: npm run typecheck:mock --workspace=apps/server
+
       - name: Build frontend
         run: npm run build:web
 
