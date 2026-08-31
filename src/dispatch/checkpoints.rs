@@ -268,7 +268,26 @@ pub fn create_worktree_from_checkpoint(
     checkpoint_branch: &str,
     worktree_base: &Path,
 ) -> Result<PathBuf> {
-    worktree::create_existing(repo, checkpoint_branch, worktree_base)
+    let worktree_path = worktree_base.join(checkpoint_branch.replace('/', "-"));
+    fs::create_dir_all(worktree_path.parent().unwrap_or(worktree_base))?;
+    if worktree_path.exists() {
+        anyhow::bail!(
+            "refusing to replace existing checkpoint worktree path {}",
+            worktree_path.display()
+        );
+    }
+    worktree::git(
+        &[
+            "worktree",
+            "add",
+            "-q",
+            worktree_path.to_str().unwrap(),
+            checkpoint_branch,
+        ],
+        repo,
+    )
+    .with_context(|| format!("creating worktree from local checkpoint {checkpoint_branch}"))?;
+    Ok(worktree_path)
 }
 
 /// Issue #362: validate + resume a checkpoint into a worktree, then
@@ -362,58 +381,39 @@ pub fn prune_checkpoints(
     // Save updated registry
     registry.save(state_dir)?;
 
-    // Also clean up old session directories that contain expired checkpoints
-    if sessions_base.exists() && sessions_base.is_dir() {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        for entry in fs::read_dir(sessions_base)? {
-            let entry = entry?;
-            let session_path = entry.path();
-
-            if session_path.is_dir() {
-                let recovery_file = session_path.join("shutdown-recovery.json");
-                if recovery_file.exists() {
-                    if let Ok(content) = fs::read_to_string(&recovery_file) {
-                        if let Ok(recovery_data) =
-                            serde_json::from_str::<serde_json::Value>(&content)
-                        {
-                            if let Some(timestamp) =
-                                recovery_data.get("timestamp").and_then(|v| v.as_u64())
-                            {
-                                let age = now.saturating_sub(timestamp);
-                                if age > retention_seconds {
-                                    // Issue #362 review finding: this previously checked
-                                    // whether ANY checkpoint anywhere in the registry was
-                                    // valid, not whether THIS session's own checkpoint
-                                    // branch was -- as long as one unrelated checkpoint
-                                    // was still valid, no expired session was ever
-                                    // cleaned up, making retention inoperable. Must
-                                    // check this specific session's recovery_branch.
-                                    let session_branch = recovery_data
-                                        .get("recovery_branch")
-                                        .and_then(|v| v.as_str());
-                                    let is_referenced =
-                                        session_branch.is_some_and(|branch| {
-                                            registry.checkpoints_by_work_id.values().flatten().any(
-                                                |cp| cp.checkpoint_branch == branch && cp.is_valid,
-                                            ) || registry.latest_by_dispatch_branch.values().any(
-                                                |cp| cp.checkpoint_branch == branch && cp.is_valid,
-                                            )
-                                        });
-
-                                    if !is_referenced {
-                                        // Safe to clean up this session
-                                        fs::remove_dir_all(&session_path)?;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    for (cleanup_path, recovery_file) in recovery_artifacts(sessions_base)? {
+        let Ok(content) = fs::read_to_string(recovery_file) else {
+            continue;
+        };
+        let Ok(recovery_data) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        let Some(timestamp) = recovery_data.get("timestamp").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        if now.saturating_sub(timestamp) <= retention_seconds {
+            continue;
+        }
+        let session_branch = recovery_data
+            .get("recovery_branch")
+            .and_then(|v| v.as_str());
+        let is_referenced = session_branch.is_some_and(|branch| {
+            registry
+                .checkpoints_by_work_id
+                .values()
+                .flatten()
+                .any(|cp| cp.checkpoint_branch == branch && cp.is_valid)
+                || registry
+                    .latest_by_dispatch_branch
+                    .values()
+                    .any(|cp| cp.checkpoint_branch == branch && cp.is_valid)
+        });
+        if !is_referenced && cleanup_path.exists() {
+            fs::remove_dir_all(cleanup_path)?;
         }
     }
 
@@ -422,88 +422,72 @@ pub fn prune_checkpoints(
 
 /// Issue #362: Find the latest resumable checkpoint for a work item by scanning
 /// session directories and shutdown-recovery.json files
+fn recovery_artifacts(sessions_base: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let mut artifacts = Vec::new();
+    if !sessions_base.is_dir() {
+        return Ok(artifacts);
+    }
+
+    for session in fs::read_dir(sessions_base)? {
+        let session = session?.path();
+        if !session.is_dir() {
+            continue;
+        }
+        let legacy = session.join("shutdown-recovery.json");
+        if legacy.exists() {
+            artifacts.push((session.clone(), legacy));
+        }
+        for attempt in fs::read_dir(&session)? {
+            let attempt = attempt?.path();
+            let recovery = attempt.join("shutdown-recovery.json");
+            if attempt.is_dir() && recovery.exists() {
+                artifacts.push((attempt, recovery));
+            }
+        }
+    }
+    Ok(artifacts)
+}
+
 pub fn find_latest_resumable_checkpoint(
     sessions_base: &Path,
     dispatch_branch: &str,
     work_id: Option<&str>,
 ) -> Result<Option<(String, String, String)>> {
-    // Look for session directories that might contain checkpoints
-    // The session directories are typically named like: gah-<work-id>-<timestamp>
-    // or similar patterns
-
     let mut latest_checkpoint: Option<(String, String, String)> = None; // (branch, sha, timestamp)
 
-    if sessions_base.exists() && sessions_base.is_dir() {
-        for entry in fs::read_dir(sessions_base)? {
-            let entry = entry?;
-            let session_path = entry.path();
-
-            if session_path.is_dir() {
-                let recovery_file = session_path.join("shutdown-recovery.json");
-                if recovery_file.exists() {
-                    if let Ok(content) = fs::read_to_string(&recovery_file) {
-                        if let Ok(recovery_data) =
-                            serde_json::from_str::<serde_json::Value>(&content)
-                        {
-                            // Check if this recovery is for our dispatch branch or work id
-                            let matches_work_id = match work_id {
-                                Some(wid) => {
-                                    recovery_data.get("source_work_id").and_then(|v| v.as_str())
-                                        == Some(wid)
-                                }
-                                None => true,
-                            };
-
-                            let matches_dispatch_branch = {
-                                recovery_data
-                                    .get("dispatch_branch")
-                                    .and_then(|v| v.as_str())
-                                    == Some(dispatch_branch)
-                            };
-
-                            if matches_work_id && matches_dispatch_branch {
-                                if let (Some(branch), Some(sha), Some(timestamp)) = (
-                                    recovery_data
-                                        .get("recovery_branch")
-                                        .and_then(|v| v.as_str()),
-                                    recovery_data.get("checkpoint_sha").and_then(|v| v.as_str()),
-                                    recovery_data.get("timestamp").and_then(|v| v.as_u64()),
-                                ) {
-                                    // Check if this is the latest checkpoint
-                                    latest_checkpoint = match latest_checkpoint {
-                                        None => Some((
-                                            branch.to_string(),
-                                            sha.to_string(),
-                                            timestamp.to_string(),
-                                        )),
-                                        Some((
-                                            existing_branch,
-                                            existing_sha,
-                                            existing_timestamp,
-                                        )) => {
-                                            if timestamp
-                                                > existing_timestamp.parse::<u64>().unwrap_or(0)
-                                            {
-                                                Some((
-                                                    branch.to_string(),
-                                                    sha.to_string(),
-                                                    timestamp.to_string(),
-                                                ))
-                                            } else {
-                                                Some((
-                                                    existing_branch,
-                                                    existing_sha,
-                                                    existing_timestamp,
-                                                ))
-                                            }
-                                        }
-                                    };
-                                }
-                            }
-                        }
-                    }
-                }
+    for (_, recovery_file) in recovery_artifacts(sessions_base)? {
+        let Ok(content) = fs::read_to_string(recovery_file) else {
+            continue;
+        };
+        let Ok(recovery_data) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        let matches_identity = match work_id {
+            Some(wid) => recovery_data.get("source_work_id").and_then(|v| v.as_str()) == Some(wid),
+            None => {
+                recovery_data
+                    .get("dispatch_branch")
+                    .and_then(|v| v.as_str())
+                    == Some(dispatch_branch)
             }
+        };
+        if !matches_identity {
+            continue;
+        }
+        let (Some(branch), Some(sha), Some(timestamp)) = (
+            recovery_data
+                .get("recovery_branch")
+                .and_then(|v| v.as_str()),
+            recovery_data.get("checkpoint_sha").and_then(|v| v.as_str()),
+            recovery_data.get("timestamp").and_then(|v| v.as_u64()),
+        ) else {
+            continue;
+        };
+        if latest_checkpoint
+            .as_ref()
+            .is_none_or(|(_, _, existing)| timestamp > existing.parse::<u64>().unwrap_or(0))
+        {
+            latest_checkpoint = Some((branch.to_string(), sha.to_string(), timestamp.to_string()));
         }
     }
 
@@ -595,16 +579,17 @@ mod tests {
         let dir = tempdir().unwrap();
         let sessions_base = dir.path();
 
-        // Create a fake session directory with shutdown-recovery.json
+        // Match the production session/attempt-N artifact layout.
         let session_dir = sessions_base.join("gah-test-123-20260807");
-        fs::create_dir_all(&session_dir).unwrap();
+        let attempt_dir = session_dir.join("attempt-1");
+        fs::create_dir_all(&attempt_dir).unwrap();
 
         // Create a recovery file with old timestamp
         let old_recovery = serde_json::json!({
             "run_id": "run1",
             "attempt_number": 1,
             "source_work_id": "test-123",
-            "dispatch_branch": "gah/test-123",
+            "dispatch_branch": "gah/first-run",
             "recovery_branch": "gah-wip/gah-test-123-attempt-1",
             "checkpointed": true,
             "checkpoint_sha": "abc123",
@@ -612,20 +597,21 @@ mod tests {
             "timestamp": 1000
         });
         fs::write(
-            session_dir.join("shutdown-recovery.json"),
+            attempt_dir.join("shutdown-recovery.json"),
             serde_json::to_string(&old_recovery)?,
         )
         .unwrap();
 
         // Create another session with newer timestamp
         let session_dir2 = sessions_base.join("gah-test-123-20260808");
-        fs::create_dir_all(&session_dir2).unwrap();
+        let attempt_dir2 = session_dir2.join("attempt-2");
+        fs::create_dir_all(&attempt_dir2).unwrap();
 
         let new_recovery = serde_json::json!({
             "run_id": "run2",
             "attempt_number": 2,
             "source_work_id": "test-123",
-            "dispatch_branch": "gah/test-123",
+            "dispatch_branch": "gah/second-run",
             "recovery_branch": "gah-wip/gah-test-123-attempt-2",
             "checkpointed": true,
             "checkpoint_sha": "def456",
@@ -633,14 +619,14 @@ mod tests {
             "timestamp": 2000
         });
         fs::write(
-            session_dir2.join("shutdown-recovery.json"),
+            attempt_dir2.join("shutdown-recovery.json"),
             serde_json::to_string(&new_recovery)?,
         )
         .unwrap();
 
         // Test finding the latest checkpoint
         let result =
-            find_latest_resumable_checkpoint(sessions_base, "gah/test-123", Some("test-123"))
+            find_latest_resumable_checkpoint(sessions_base, "gah/new-invocation", Some("test-123"))
                 .unwrap();
 
         assert!(result.is_some());
@@ -648,6 +634,13 @@ mod tests {
             assert_eq!(branch, "gah-wip/gah-test-123-attempt-2");
             assert_eq!(sha, "def456");
         }
+
+        let branch_fallback =
+            find_latest_resumable_checkpoint(sessions_base, "gah/first-run", None).unwrap();
+        assert_eq!(
+            branch_fallback.map(|(branch, _, _)| branch),
+            Some("gah-wip/gah-test-123-attempt-1".to_string())
+        );
         Ok(())
     }
 
@@ -657,18 +650,19 @@ mod tests {
     /// meaning an unrelated still-valid checkpoint protected every expired
     /// session from cleanup, making retention effectively inoperable.
     #[test]
-    fn prune_checkpoints_removes_expired_session_even_when_an_unrelated_checkpoint_is_valid(
+    fn prune_checkpoints_removes_only_expired_attempt_when_sibling_is_valid(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let sessions_dir = tempdir().unwrap();
         let state_dir = tempdir().unwrap();
 
-        // An expired session whose own checkpoint branch is nowhere in the
-        // registry at all (the common real case: it was already consumed/
-        // tombstoned, so the registry has no entry for it).
+        // One expired attempt is unreferenced; its newer sibling is still live.
         let expired_session = sessions_dir.path().join("gah-expired-20260101");
-        fs::create_dir_all(&expired_session).unwrap();
+        let expired_attempt = expired_session.join("attempt-1");
+        let live_attempt = expired_session.join("attempt-2");
+        fs::create_dir_all(&expired_attempt).unwrap();
+        fs::create_dir_all(&live_attempt).unwrap();
         fs::write(
-            expired_session.join("shutdown-recovery.json"),
+            expired_attempt.join("shutdown-recovery.json"),
             serde_json::to_string(&serde_json::json!({
                 "recovery_branch": "gah-wip/expired-attempt-1",
                 "checkpoint_sha": "expired123",
@@ -676,9 +670,21 @@ mod tests {
             }))?,
         )
         .unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let live_recovery = live_attempt.join("shutdown-recovery.json");
+        fs::write(
+            &live_recovery,
+            serde_json::to_string(&serde_json::json!({
+                "recovery_branch": "gah-wip/other-attempt-1",
+                "checkpoint_sha": "other456",
+                "timestamp": now,
+            }))?,
+        )
+        .unwrap();
 
-        // An unrelated, still-valid checkpoint for a completely different
-        // dispatch -- this must not protect the expired session above.
         let mut registry = CheckpointRegistry::default();
         registry.register_checkpoint(
             Some("other-work".to_string()),
@@ -692,9 +698,10 @@ mod tests {
         prune_checkpoints(sessions_dir.path(), state_dir.path(), Some(2000))?;
 
         assert!(
-            !expired_session.exists(),
-            "expired session must be cleaned up even though an unrelated checkpoint is still valid"
+            !expired_attempt.exists(),
+            "the expired attempt must be removed"
         );
+        assert!(live_recovery.exists(), "the live sibling must be preserved");
         Ok(())
     }
 }
