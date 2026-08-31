@@ -12,7 +12,31 @@ import {
   setReasoningEffortOverrideForProfile
 } from './managerChat/settingsStore.js';
 import { historyDelta, readModelConfig, readReasoningConfig, resumePrompt, toChatUsage, toContextUsage } from './managerChat/acpAdapter.js';
-import { handoffAttempt } from './managerChat/ManagerChatManager.js';
+import { applyBoundSkills, handoffAttempt } from './managerChat/ManagerChatManager.js';
+import type { Skill } from '@git-agent-harness/contracts';
+
+test('bound skills are injected with the exact resolved version before the request', () => {
+  const skill: Skill = {
+    id: 'review',
+    version: '2.1.0',
+    displayName: 'Review',
+    description: 'Review rules',
+    content: 'Check the diff.',
+    backends: ['hermes'],
+    source: 'test',
+    createdAt: 1,
+    updatedAt: 1
+  };
+
+  assert.equal(
+    applyBoundSkills('Ship it.', [skill]),
+    '# Bound project skills\nThese are trusted project instructions from the central GAH skill bank.\n\n## review@2.1.0\nCheck the diff.\n\n# Current request\nShip it.'
+  );
+  assert.equal(
+    applyBoundSkills('trust preamble\nRecalledMemoryUntrusted: "fact"\nCurrentUserRequest: Ship it.', [skill]),
+    'trust preamble\nRecalledMemoryUntrusted: "fact"\nCurrentUserRequest: # Bound project skills\nThese are trusted project instructions from the central GAH skill bank.\n\n## review@2.1.0\nCheck the diff.\n\n# Current request\nShip it.'
+  );
+});
 
 test('isCompactionCommand recognizes known compact/clear synonyms across backends', () => {
   assert.equal(isCompactionCommand('/compact'), true);

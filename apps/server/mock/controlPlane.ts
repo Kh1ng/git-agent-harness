@@ -46,6 +46,7 @@ import type {
   ReportData,
   ReportSeriesData,
   ServerMessage,
+  SkillBindingSummary,
   SkillSummary,
   StatusSnapshot,
   UsageRollupSummary
@@ -163,6 +164,8 @@ interface MockState {
   config: ConfigSummary;
   gateway: GatewaySettingsSummary;
   skills: SkillSummary[];
+  skillBindings: Record<string, string[]>;
+  skillObservations: Record<string, { id: string; version: string }[]>;
   loopRunning: boolean;
   adminUpdate: AdminUpdateState;
   gitPrs: ChatPrSummary[];
@@ -213,7 +216,7 @@ const MOCK_SKILLS = [{
   version: '1.0.0',
   displayName: 'GAH manager',
   description: 'Coordinates mock GAH work without touching a provider.',
-  backends: ['codex', 'claude'],
+  backends: ['hermes', 'codex', 'claude', 'opencode'],
   source: 'mock/in-memory',
   bound: true
 }] satisfies SkillSummary[];
@@ -519,6 +522,8 @@ function createState(scenario: MockScenarioName, reset: number, previewOrigin?: 
     config: { current_manager: null },
     gateway: structuredClone(MOCK_GATEWAY),
     skills: structuredClone(MOCK_SKILLS),
+    skillBindings: {},
+    skillObservations: { ['fixture\0codex']: [{ id: 'gah-manager', version: '1.0.0' }] },
     loopRunning: true,
     adminUpdate: structuredClone(MOCK_ADMIN_IDLE),
     gitPrs: structuredClone(MOCK_PRS),
@@ -531,6 +536,22 @@ function createState(scenario: MockScenarioName, reset: number, previewOrigin?: 
     conversations: new Map(),
     previews,
     timers: new Set()
+  };
+}
+
+function skillBindingSummary(state: MockState, profile: string, backend: string): SkillBindingSummary {
+  const key = `${profile}\0${backend}`;
+  const compatible = state.skills.filter((skill) => skill.backends.length === 0 || skill.backends.includes(backend));
+  const overridden = Object.hasOwn(state.skillBindings, key);
+  return {
+    profile,
+    backend,
+    instance: null,
+    source: overridden ? 'profile' : 'canonical',
+    supported: BACKENDS.some((candidate) => candidate.id === backend && candidate.implemented),
+    selectedIds: overridden ? state.skillBindings[key] : compatible.filter((skill) => skill.id === 'gah-manager').map((skill) => skill.id),
+    observedSkills: state.skillObservations[key] ?? null,
+    skills: compatible
   };
 }
 
@@ -1011,6 +1032,8 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       config: state.config,
       gateway: state.gateway,
       skills: state.skills,
+      skillBindings: state.skillBindings,
+      skillObservations: state.skillObservations,
       loopRunning: state.loopRunning,
       adminUpdate: state.adminUpdate,
       gitPrs: state.gitPrs,
@@ -1207,6 +1230,32 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     res.json(state.gateway);
   });
   app.get('/api/skills', (_req, res) => res.json({ skills: state.skills }));
+  app.get('/api/skills/bindings', (req, res) => {
+    const profile = bodyString(req.query.profile);
+    const backend = bodyString(req.query.backend);
+    if (!profile || !backend) return jsonError(res, 400, 'Invalid skill binding', 'profile and backend required');
+    res.json(skillBindingSummary(state, profile, backend));
+  });
+  app.put('/api/skills/bindings', (req, res) => {
+    const profile = bodyString(req.body?.profile);
+    const backend = bodyString(req.body?.backend);
+    const skillIds = req.body?.skillIds;
+    if (!profile || !backend || !Array.isArray(skillIds) || skillIds.some((id) => typeof id !== 'string')) {
+      return jsonError(res, 400, 'Invalid skill binding', 'profile, backend, and string skillIds required');
+    }
+    const compatible = new Set(skillBindingSummary(state, profile, backend).skills.map((skill) => skill.id));
+    const unsupported = skillIds.find((id) => !compatible.has(id));
+    if (unsupported) return jsonError(res, 400, 'Invalid skill binding', `Skill '${unsupported}' is unavailable for ${backend}`);
+    state.skillBindings[`${profile}\0${backend}`] = [...new Set(skillIds)];
+    res.json(skillBindingSummary(state, profile, backend));
+  });
+  app.delete('/api/skills/bindings', (req, res) => {
+    const profile = bodyString(req.query.profile);
+    const backend = bodyString(req.query.backend);
+    if (!profile || !backend) return jsonError(res, 400, 'Invalid skill binding', 'profile and backend required');
+    delete state.skillBindings[`${profile}\0${backend}`];
+    res.json(skillBindingSummary(state, profile, backend));
+  });
 
   app.get('/api/git/status', (_req, res) => {
     res.json({ branch: 'feat/mock-control-plane-1087', changes: [{ status: 'M', path: 'apps/server/mock/controlPlane.ts' }], cwd: '/mock/in-memory-only' });

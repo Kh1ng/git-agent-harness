@@ -40,6 +40,8 @@ import type {
   GatewaySettingsSummary,
   GatewaySettingsUpdate,
   SkillSummary,
+  SkillBindingSummary,
+  SkillBindingUpdate,
   ProjectImportData,
   ProjectImportResult,
   ChatSessionSummary,
@@ -222,6 +224,9 @@ export interface GahDataSource {
   revealGatewayBootstrapCommand(): Promise<GatewayBootstrapCommand>;
   updateGatewaySettings(data: GatewaySettingsUpdate): Promise<GatewaySettingsSummary>;
   getSkills(): Promise<{ skills: SkillSummary[] }>;
+  getSkillBindings(profile: string, backend: string, sessionId?: string | null): Promise<SkillBindingSummary>;
+  setSkillBindings(data: SkillBindingUpdate): Promise<SkillBindingSummary>;
+  inheritSkillBindings(profile: string, backend: string, instance?: string | null): Promise<SkillBindingSummary>;
   recallContext(profile: string, query: string): Promise<{ context: string; memoryCount: number }>;
   getGitStatus(profile: string): Promise<{ branch: string; changes: { status: string; path: string }[]; cwd: string }>;
   getGitBranches(profile: string): Promise<{ branches: string[]; current: string }>;
@@ -452,6 +457,21 @@ export const gahApi: GahDataSource = {
   },
   getSkills() {
     return getJson<{ skills: SkillSummary[] }>('/api/skills');
+  },
+  getSkillBindings(profile, backend, sessionId) {
+    return getJson<SkillBindingSummary>('/api/skills/bindings', {
+      profile,
+      backend,
+      ...(sessionId ? { sessionId } : {})
+    });
+  },
+  setSkillBindings(data) {
+    return putJson<SkillBindingSummary, SkillBindingUpdate>('/api/skills/bindings', data);
+  },
+  inheritSkillBindings(profile, backend, instance) {
+    const query = new URLSearchParams({ profile, backend });
+    if (instance) query.set('instance', instance);
+    return deleteJson<SkillBindingSummary>(`/api/skills/bindings?${query.toString()}`);
   },
   recallContext(profile, query) {
     return postJson<{ context: string; memoryCount: number }, { profile: string; query: string }>(

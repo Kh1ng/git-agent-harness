@@ -390,6 +390,13 @@ export function foldSession(
           timestamp: e.timestamp
         });
         break;
+      case 'skills/applied':
+        turns.push({
+          role: 'system',
+          text: `[skills · ${e.backend} · ${e.source}] ${e.skills.length > 0 ? e.skills.map((skill) => `${skill.id}@${skill.version}`).join(', ') : 'none'}`,
+          timestamp: e.timestamp
+        });
+        break;
       case 'compaction/start':
       case 'compaction/end':
         break;

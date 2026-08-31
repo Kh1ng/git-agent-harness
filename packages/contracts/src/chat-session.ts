@@ -27,6 +27,7 @@ export type ChatSessionEvent =
   | ChatHarnessError
   | ChatHumanCommand
   | ChatHandoff
+  | ChatSkillsApplied
   | ChatSessionSettled
   | ChatCompactionStart
   | ChatCompactionSummary
@@ -203,6 +204,19 @@ export interface ChatHandoff {
   to: string;
   toModel: string | null;
   reason: string;
+  timestamp: number;
+}
+
+/** The exact central-bank skill versions applied to one backend attempt.
+ * Empty skills are recorded too, so replay distinguishes "none" from an
+ * old session whose skill state was never observed. */
+export interface ChatSkillsApplied {
+  type: 'skills/applied';
+  seq: number;
+  turn: number;
+  backend: string;
+  source: 'canonical' | 'profile';
+  skills: { id: string; version: string }[];
   timestamp: number;
 }
 

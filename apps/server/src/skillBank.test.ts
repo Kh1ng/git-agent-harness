@@ -7,12 +7,16 @@ import { join } from 'node:path';
 import type { Skill } from '@git-agent-harness/contracts';
 import {
   addBinding,
+  addCanonicalSkillBinding,
+  clearProfileSkillBindings,
   deleteSkill,
   getSkill,
   listBindings,
   listSkills,
   putSkill,
   removeBinding,
+  resolveSkillBindings,
+  setProfileSkillBindings,
   seedSkillFromDocs
 } from './skillBank.js';
 
@@ -105,7 +109,9 @@ test('a persisted bank validates every skill field and the complete bindings sha
     ['skills[0].updatedAt', { skills: [{ ...validSkill, updatedAt: null }], bindings: {} }],
     ['bindings', { skills: [validSkill], bindings: [] }],
     ['bindings.alpha', { skills: [validSkill], bindings: { alpha: 'hermes:gah' } }],
-    ['bindings.alpha[0]', { skills: [validSkill], bindings: { alpha: [1] } }]
+    ['bindings.alpha[0]', { skills: [validSkill], bindings: { alpha: [1] } }],
+    ['bindingOverrides', { skills: [validSkill], bindings: {}, bindingOverrides: {} }],
+    ['bindingOverrides[0]', { skills: [validSkill], bindings: {}, bindingOverrides: [1] }]
   ];
 
   try {
@@ -192,6 +198,51 @@ test('a skill bound to a backend cannot be deleted; the error names the bindings
     const removed = deleteSkill('alpha');
     assert.equal(removed.length, 1);
     assert.equal(getSkill('alpha'), null);
+  });
+});
+
+test('profile skill bindings replace canonical inheritance, including an empty override', async () => {
+  await withTempBank(() => {
+    putSkill(skill('alpha', '1.0.0'));
+    putSkill(skill('alpha', '2.0.0'));
+    putSkill(skill('beta', '1.0.0'));
+    addCanonicalSkillBinding('alpha', 'hermes');
+
+    assert.deepEqual(
+      resolveSkillBindings('repo', 'hermes').skills.map(({ id, version }) => `${id}@${version}`),
+      ['alpha@2.0.0']
+    );
+
+    setProfileSkillBindings('repo', 'hermes', ['beta']);
+    const overridden = resolveSkillBindings('repo', 'hermes');
+    assert.equal(overridden.source, 'profile');
+    assert.deepEqual(overridden.skills.map(({ id }) => id), ['beta']);
+
+    setProfileSkillBindings('repo', 'hermes', []);
+    assert.deepEqual(resolveSkillBindings('repo', 'hermes').skills, []);
+
+    clearProfileSkillBindings('repo', 'hermes');
+    assert.equal(resolveSkillBindings('repo', 'hermes').source, 'canonical');
+    assert.deepEqual(resolveSkillBindings('repo', 'hermes').skills.map(({ id }) => id), ['alpha']);
+  });
+});
+
+test('profile bindings reject missing and incompatible skill ids before dispatch', async () => {
+  await withTempBank(() => {
+    putSkill(skill('alpha', '1.0.0'));
+    assert.throws(
+      () => setProfileSkillBindings('repo', 'hermes', ['missing']),
+      /Skill 'missing' does not exist/
+    );
+    assert.throws(
+      () => setProfileSkillBindings('repo', 'codex', ['alpha']),
+      /Skill 'alpha' does not support backend 'codex'/
+    );
+    addBinding('missing', 'backend:hermes');
+    assert.throws(
+      () => resolveSkillBindings('repo', 'hermes'),
+      /Bound skill 'missing' does not exist/
+    );
   });
 });
 

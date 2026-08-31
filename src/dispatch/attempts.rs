@@ -433,6 +433,14 @@ pub(super) fn run_backend_with_reserved_route(
         Ok(kind) => kind,
         Err(_) => anyhow::bail!("unsupported runner kind '{runner_kind}' for backend '{backend}'"),
     };
+    let skill_resolution = crate::skill_bindings::resolve(
+        &cfg.defaults,
+        profile_name,
+        backend,
+        identity
+            .explicit_instance
+            .then_some(identity.backend_instance.as_str()),
+    )?;
     let result = match backend_kind {
         BackendKind::Codex => runner::CodexRunner.run(&runner::RunContext {
             executable: &executable,
@@ -504,30 +512,44 @@ pub(super) fn run_backend_with_reserved_route(
                 .unwrap_or_else(|| profile.opencode_idle_timeout_seconds()),
             print_timeout_seconds: None,
         }),
-        BackendKind::Openhands => runner::OpenhandsRunner.run(&runner::RunContext {
-            executable: &executable,
-            worktree: wt,
-            task,
-            session_dir,
-            model: None,
-            llm: Some(llm),
-            extra_args: &profile.openhands_args,
-            env_vars: &env_vars,
-            idle_timeout_seconds: profile.openhands_idle_timeout_seconds(),
-            print_timeout_seconds: None,
-        }),
-        BackendKind::Hermes => runner::HermesRunner.run(&runner::RunContext {
-            executable: &executable,
-            worktree: wt,
-            task,
-            session_dir,
-            model: effective_model,
-            llm: None,
-            extra_args: &profile.hermes_args,
-            env_vars: &env_vars,
-            idle_timeout_seconds: profile.hermes_idle_timeout_seconds(),
-            print_timeout_seconds: None,
-        }),
+        BackendKind::Openhands => {
+            let args = crate::skill_bindings::materialize_args(
+                "openhands",
+                &profile.openhands_args,
+                &skill_resolution.skills,
+            );
+            runner::OpenhandsRunner.run(&runner::RunContext {
+                executable: &executable,
+                worktree: wt,
+                task,
+                session_dir,
+                model: None,
+                llm: Some(llm),
+                extra_args: &args,
+                env_vars: &env_vars,
+                idle_timeout_seconds: profile.openhands_idle_timeout_seconds(),
+                print_timeout_seconds: None,
+            })
+        }
+        BackendKind::Hermes => {
+            let args = crate::skill_bindings::materialize_args(
+                "hermes",
+                &profile.hermes_args,
+                &skill_resolution.skills,
+            );
+            runner::HermesRunner.run(&runner::RunContext {
+                executable: &executable,
+                worktree: wt,
+                task,
+                session_dir,
+                model: effective_model,
+                llm: None,
+                extra_args: &args,
+                env_vars: &env_vars,
+                idle_timeout_seconds: profile.hermes_idle_timeout_seconds(),
+                print_timeout_seconds: None,
+            })
+        }
     };
     if let Some(origin_before) = origin_before {
         let origin_after = worktree::git(&["remote", "get-url", "origin"], wt)

@@ -612,6 +612,25 @@ agent that orchestrates GAH: decomposes work via PM mode, dispatches workers,
 tracks state in the target repo's `docs/MANAGER_MEMORY.md`, and escalates
 failed tickets to stronger models.
 
+### Project skill bindings
+
+The central node stores versioned skills and their backend bindings in
+`~/.config/gah/skills.json` (`GAH_SKILL_BANK_PATH` overrides the path).
+The Chat page's **Skills** control shows the resolved set for the current
+project and backend. Projects inherit the canonical backend set until they
+save an override; **Use default** restores inheritance. The exact resolved
+versions are recorded in the chat event log and injected into every normal
+turn.
+
+Workers resolve bindings from the central `/api/skills/resolve` endpoint and
+cache the last successful response under `~/.config/gah/skill-cache`. A worker
+uses that cache when the central node is temporarily unreachable and fails the
+dispatch when neither source is usable. Resolved IDs become native `--skills`
+arguments for Hermes and OpenHands; other runners record the binding without a
+provider-specific flag. Legacy `--skills` values in
+`hermes_args` and `openhands_args` are ignored with a warning; configure the
+central binding instead.
+
 ## Review Gate
 
 Review mode now produces:
