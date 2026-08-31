@@ -22,7 +22,7 @@
     "register-node": "tsx src/registerNodeCli.ts"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "^0.65.0",
+    "@agentclientprotocol/claude-agent-acp": "^0.70.0",
     "@agentclientprotocol/codex-acp": "^1.1.9",
     "@agentclientprotocol/sdk": "^1.3.0",
     "@effect/platform": "^0.50.0",
