@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Sun, Moon, Info, ExternalLink, Save, Loader2, RefreshCw, Eye, EyeOff, Copy, Check } from 'lucide-react';
+import { Sun, Moon, Info, ExternalLink, Save, Loader2, RefreshCw, Eye, EyeOff, Copy, Check, ChevronRight } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -12,10 +12,13 @@ import { ProfileEditor } from '../components/ProfileEditor.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt } from '../lib/format.js';
 import { gahApi, GahApiError } from '../api/client.js';
-import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
+import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, SkillSummary, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
 
 const SCM_PROVIDER_KINDS = new Set(['github', 'gitlab']);
 const SETTINGS_REFRESH_MS = 60 * 1000;
+const SETTINGS_SECTIONS_KEY = 'gah.settings.openSections';
+type SettingsSectionId = 'general' | 'skills' | 'memory' | 'factory';
+const SETTINGS_SECTION_IDS: SettingsSectionId[] = ['general', 'skills', 'memory', 'factory'];
 const WAKE_AUTONOMY_OPTIONS: { value: WakeAutonomyValue; label: string }[] = [
   { value: 'off', label: 'Off' },
   { value: 'review_only', label: 'Review only' },
@@ -38,6 +41,19 @@ export function SettingsPage() {
   const configuredProfiles = profiles.data ?? [];
   const selectedName = profileOverride ?? profile ?? '';
   const selected = configuredProfiles.find((p) => p.name === selectedName);
+  const [openSections, setOpenSections] = useState<Set<SettingsSectionId>>(() => {
+    try {
+      const raw = window.localStorage.getItem(SETTINGS_SECTIONS_KEY);
+      if (raw === null) return new Set(['general']);
+      const stored = JSON.parse(raw);
+      const valid = Array.isArray(stored)
+        ? stored.filter((id): id is SettingsSectionId => SETTINGS_SECTION_IDS.includes(id as SettingsSectionId))
+        : [];
+      return new Set<SettingsSectionId>(valid.slice(0, 1));
+    } catch {
+      return new Set(['general']);
+    }
+  });
 
   useEffect(() => {
     fetchProfiles();
@@ -74,16 +90,85 @@ export function SettingsPage() {
     }
   };
 
+  const setSectionOpen = (id: SettingsSectionId, open: boolean) => {
+    setOpenSections(() => {
+      const next = new Set<SettingsSectionId>(open ? [id] : []);
+      try {
+        window.localStorage.setItem(SETTINGS_SECTIONS_KEY, JSON.stringify([...next]));
+      } catch {
+        // Storage unavailable: disclosure state simply does not survive reload.
+      }
+      return next;
+    });
+  };
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="Settings"
-        description="Appearance, profile, dispatch, and manager configuration"
+        description="Profiles, backends, skills, memory, and node operation"
         onRefresh={refreshAll}
         refreshing={profiles.loading || config.loading}
         lastUpdated={lastUpdated}
       />
 
+      <section className="card-padded max-w-4xl">
+        <h3 className="text-sm font-semibold text-primary mb-2">Profile context</h3>
+        <p className="text-xs text-muted mb-3">
+          Which configured GAH repo Overview/Work/Telemetry/Quota/Events and these settings read from.
+        </p>
+        <div className="max-w-md">
+          {profiles.loading && !profiles.data ? (
+            <p className="text-xs text-muted">Loading configured profiles…</p>
+          ) : profiles.error ? (
+            <p className="text-xs text-critical">Failed to load profiles: {profiles.error}</p>
+          ) : configuredProfiles.length === 0 ? (
+            <p className="text-xs text-muted">No profiles found in the GAH config.</p>
+          ) : (
+            <select
+              value={selectedName}
+              onChange={(e) => setProfileOverride(e.target.value || null)}
+              className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
+            >
+              {configuredProfiles.map((p) => (
+                <option key={p.name} value={p.name}>
+                  {p.display_name} ({p.name})
+                </option>
+              ))}
+            </select>
+          )}
+          {selected?.web_url && (
+            <a
+              href={selected.web_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 inline-flex items-center gap-1 text-xs text-accent hover:underline"
+            >
+              <ExternalLink size={12} aria-hidden="true" />
+              {selected.repo}
+            </a>
+          )}
+          {activeScmProvider && (
+            <div className="mt-3 pt-3 border-t border-subtle">
+              <ProviderStatusCard
+                provider={activeScmProvider}
+                status={providerStatuses[activeScmProvider.instanceId]}
+                onClick={() => handleRefreshProvider(activeScmProvider.instanceId)}
+              />
+            </div>
+          )}
+        </div>
+      </section>
+
+      <div className="max-w-4xl space-y-3">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <SettingsSectionButton id="general" title="General" description="Appearance, chat, updates, and backends." open={openSections.has('general')} onToggle={setSectionOpen} />
+          <SettingsSectionButton id="skills" title="Skill bank" description="Versioned skills available to backends." open={openSections.has('skills')} onToggle={setSectionOpen} />
+          <SettingsSectionButton id="memory" title="TDAI / memory" description="Gateway health, credentials, and recall policy." open={openSections.has('memory')} onToggle={setSectionOpen} />
+          <SettingsSectionButton id="factory" title="Factory / profile management" description="Dispatch, effective config, and profiles." open={openSections.has('factory')} onToggle={setSectionOpen} />
+        </div>
+
+        {openSections.has('general') && <SettingsSectionPanel id="general">
       <section className="card-padded max-w-md">
         <h3 className="text-sm font-semibold text-primary mb-3">Appearance</h3>
         <div className="flex rounded-md border border-subtle overflow-hidden w-fit text-sm">
@@ -102,52 +187,6 @@ export function SettingsPage() {
             Light
           </button>
         </div>
-      </section>
-
-      <section className="card-padded max-w-md">
-        <h3 className="text-sm font-semibold text-primary mb-2">Profile</h3>
-        <p className="text-xs text-muted mb-3">
-          Which configured GAH repo Overview/Work/Telemetry/Quota/Events read from.
-        </p>
-        {profiles.loading && !profiles.data ? (
-          <p className="text-xs text-muted">Loading configured profiles…</p>
-        ) : profiles.error ? (
-          <p className="text-xs text-critical">Failed to load profiles: {profiles.error}</p>
-        ) : configuredProfiles.length === 0 ? (
-          <p className="text-xs text-muted">No profiles found in the GAH config.</p>
-        ) : (
-          <select
-            value={selectedName}
-            onChange={(e) => setProfileOverride(e.target.value || null)}
-            className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
-          >
-            {configuredProfiles.map((p) => (
-              <option key={p.name} value={p.name}>
-                {p.display_name} ({p.name})
-              </option>
-            ))}
-          </select>
-        )}
-        {selected?.web_url && (
-          <a
-            href={selected.web_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="mt-2 inline-flex items-center gap-1 text-xs text-accent hover:underline"
-          >
-            <ExternalLink size={12} aria-hidden="true" />
-            {selected.repo}
-          </a>
-        )}
-        {activeScmProvider && (
-          <div className="mt-3 pt-3 border-t border-subtle">
-            <ProviderStatusCard
-              provider={activeScmProvider}
-              status={providerStatuses[activeScmProvider.instanceId]}
-              onClick={() => handleRefreshProvider(activeScmProvider.instanceId)}
-            />
-          </div>
-        )}
       </section>
 
       <section className="card-padded max-w-3xl">
@@ -203,13 +242,6 @@ export function SettingsPage() {
         )}
       </section>
 
-      <DispatchSettingsSection
-        selectedName={selectedName}
-        selected={selected}
-        profileLoading={profiles.loading}
-        profileError={profiles.error}
-      />
-
       <GlobalManagerSection
         config={config}
         setConfig={setConfig}
@@ -217,22 +249,7 @@ export function SettingsPage() {
       />
 
       <ManagerChatSettingsSection configuredProfiles={configuredProfiles} />
-
-      <GatewaySettingsSection />
-
-      <AddNodeSection />
-
       <AdminUpdateSection />
-
-      <ProfileConfigViewerSection
-        selectedName={selectedName}
-        profileConfig={profileConfig}
-      />
-
-      <section>
-        <ProfileEditor />
-      </section>
-
       <section>
         <h3 className="text-sm font-semibold text-primary mb-3">Agent backends {serverVersion && <span className="text-muted font-normal">· server v{serverVersion}</span>}</h3>
         {agentBackends.length === 0 ? (
@@ -250,6 +267,73 @@ export function SettingsPage() {
           </div>
         )}
       </section>
+        </SettingsSectionPanel>}
+
+        {openSections.has('skills') && <SettingsSectionPanel id="skills">
+          <SkillBankSettingsSection />
+        </SettingsSectionPanel>}
+
+        {openSections.has('memory') && <SettingsSectionPanel id="memory">
+          <GatewaySettingsSection configuredProfiles={configuredProfiles} />
+          <AddNodeSection />
+        </SettingsSectionPanel>}
+
+        {openSections.has('factory') && <SettingsSectionPanel id="factory">
+          <DispatchSettingsSection
+            selectedName={selectedName}
+            selected={selected}
+            profileLoading={profiles.loading}
+            profileError={profiles.error}
+          />
+          <ProfileConfigViewerSection
+            selectedName={selectedName}
+            profileConfig={profileConfig}
+          />
+          <section>
+            <ProfileEditor />
+          </section>
+        </SettingsSectionPanel>}
+      </div>
+    </div>
+  );
+}
+
+interface SettingsSectionButtonProps {
+  id: SettingsSectionId;
+  title: string;
+  description: string;
+  open: boolean;
+  onToggle: (id: SettingsSectionId, open: boolean) => void;
+}
+
+function SettingsSectionButton({ id, title, description, open, onToggle }: SettingsSectionButtonProps) {
+  return (
+    <button
+      id={`settings-${id}-button`}
+      type="button"
+      aria-expanded={open}
+      aria-controls={`settings-${id}-panel`}
+      onClick={() => onToggle(id, !open)}
+      className={`card flex min-h-20 items-center gap-3 px-4 py-3.5 text-left transition-colors sm:px-5 ${open ? 'border-accent bg-accent/5' : 'hover:border-accent/50'}`}
+    >
+      <ChevronRight size={17} className={`shrink-0 text-muted transition-transform ${open ? 'rotate-90' : ''}`} aria-hidden="true" />
+      <span className="min-w-0">
+        <span className="block text-sm font-semibold text-primary">{title}</span>
+        <span className="block text-xs text-muted mt-0.5">{description}</span>
+      </span>
+    </button>
+  );
+}
+
+function SettingsSectionPanel({ id, children }: { id: SettingsSectionId; children: React.ReactNode }) {
+  return (
+    <div
+      id={`settings-${id}-panel`}
+      role="region"
+      aria-labelledby={`settings-${id}-button`}
+      className="card space-y-6 p-4 sm:p-5"
+    >
+      {children}
     </div>
   );
 }
@@ -815,7 +899,90 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
   );
 }
 
-function GatewaySettingsSection() {
+function SkillBankSettingsSection() {
+  const [skills, setSkills] = useState<SkillSummary[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    gahApi.getSkills()
+      .then(({ skills: loaded }) => {
+        setSkills(loaded);
+        setError(null);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  return (
+    <section className="card-padded">
+      <h3 className="text-sm font-semibold text-primary mb-1">Central skill bank</h3>
+      <p className="text-xs text-muted mb-3">Read-only inventory. Bind skills to projects from Manager Chat.</p>
+      {error ? (
+        <p className="text-xs text-critical">Failed to load skills: {error}</p>
+      ) : skills === null ? (
+        <p className="text-xs text-muted">Loading…</p>
+      ) : skills.length === 0 ? (
+        <EmptyState icon={Info} title="No skills installed" description="Add a versioned skill through the central skill bank API." />
+      ) : (
+        <div className="divide-y divide-subtle border border-subtle rounded-md">
+          {skills.map((skill) => (
+            <div key={`${skill.id}@${skill.version}`} className="p-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium text-primary">{skill.displayName}</span>
+                <code className="font-mono text-muted">{skill.id}@{skill.version}</code>
+                {skill.bound && <StatusBadge tone="good" label="bound" />}
+              </div>
+              {skill.description && <p className="text-muted mt-1 break-words">{skill.description}</p>}
+              <p className="text-muted mt-1 break-all">
+                {skill.backends.length > 0 ? `Backends: ${skill.backends.join(', ')}` : 'All backends'} · {skill.source}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+const MEMORY_TIERS = ['L0', 'L1', 'L2'];
+
+interface PolicyDraft {
+  budgetChars: string;
+  tiers: string[];
+}
+
+function policyDraft(policy: MemoryContextPolicy | undefined): PolicyDraft {
+  return {
+    budgetChars: policy?.budgetChars ? String(policy.budgetChars) : '',
+    tiers: policy?.tiers ?? []
+  };
+}
+
+function policyFromDraft(draft: PolicyDraft): MemoryContextPolicy {
+  return {
+    ...(draft.budgetChars ? { budgetChars: Number(draft.budgetChars) } : {}),
+    ...(draft.tiers.length > 0 ? { tiers: draft.tiers } : {})
+  };
+}
+
+function TierPicker({ value, onChange }: { value: string[]; onChange: (value: string[]) => void }) {
+  return (
+    <div className="flex flex-wrap gap-x-3 gap-y-2">
+      {MEMORY_TIERS.map((tier) => (
+        <label key={tier} className="inline-flex min-h-9 items-center gap-1.5 text-xs text-secondary cursor-pointer">
+          <input
+            type="checkbox"
+            checked={value.includes(tier)}
+            onChange={(event) => onChange(event.target.checked ? [...value, tier] : value.filter((item) => item !== tier))}
+            className="accent-accent"
+          />
+          {tier}
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function GatewaySettingsSection({ configuredProfiles }: { configuredProfiles: ProfileSummary[] }) {
   const [settings, setSettings] = useState<GatewaySettingsSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -823,6 +990,9 @@ function GatewaySettingsSection() {
   const [urlDraft, setUrlDraft] = useState('');
   const [keyDraft, setKeyDraft] = useState('');
   const [enabledDraft, setEnabledDraft] = useState(true);
+  const [disabledProfilesDraft, setDisabledProfilesDraft] = useState<string[]>([]);
+  const [globalPolicyDraft, setGlobalPolicyDraft] = useState<PolicyDraft>(policyDraft(undefined));
+  const [profilePolicyDrafts, setProfilePolicyDrafts] = useState<Record<string, PolicyDraft>>({});
   const [revealKey, setRevealKey] = useState(false);
 
   const load = () =>
@@ -833,6 +1003,11 @@ function GatewaySettingsSection() {
         setUrlDraft(data.url);
         setKeyDraft('');
         setEnabledDraft(data.enabled);
+        setDisabledProfilesDraft(data.disabledProfiles);
+        setGlobalPolicyDraft(policyDraft(data.contextPolicy));
+        setProfilePolicyDrafts(Object.fromEntries(
+          Object.entries(data.contextPolicies).map(([name, policy]) => [name, policyDraft(policy)])
+        ));
         setError(null);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
@@ -840,11 +1015,21 @@ function GatewaySettingsSection() {
   useEffect(() => { load(); }, []);
 
   const save = async () => {
+    const drafts = [globalPolicyDraft, ...Object.values(profilePolicyDrafts)];
+    if (drafts.some((draft) => draft.budgetChars && (!Number.isInteger(Number(draft.budgetChars)) || Number(draft.budgetChars) < 1))) {
+      setError('Memory budgets must be whole numbers greater than zero, or blank for unlimited.');
+      return;
+    }
     setSaving(true);
     try {
       const updated = await gahApi.updateGatewaySettings({
         url: urlDraft || null,
         enabled: enabledDraft,
+        disabledProfiles: disabledProfilesDraft,
+        contextPolicy: policyFromDraft(globalPolicyDraft),
+        contextPolicies: Object.fromEntries(
+          Object.entries(profilePolicyDrafts).map(([name, policy]) => [name, policyFromDraft(policy)])
+        ),
         ...(keyDraft ? { apiKey: keyDraft } : {})
       });
       setSettings(updated);
@@ -860,17 +1045,20 @@ function GatewaySettingsSection() {
 
   if (!settings) {
     return (
-      <section className="card-padded max-w-md">
-        <h3 className="text-sm font-semibold text-primary mb-1">Compaction DB (Memory Gateway)</h3>
+      <section className="card-padded">
+        <h3 className="text-sm font-semibold text-primary mb-1">TDAI memory gateway</h3>
         {error ? <p className="text-xs text-critical">Failed to load: {error}</p> : <p className="text-xs text-muted">Loading…</p>}
       </section>
     );
   }
 
   return (
-    <section className="card-padded max-w-md space-y-4">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-primary">Compaction DB (Memory Gateway)</h3>
+    <section className="card-padded space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-primary">TDAI memory gateway</h3>
+          <p className="text-xs text-muted mt-1">Shared recall and capture configuration for every manager backend.</p>
+        </div>
         <label className="flex items-center gap-2 text-xs text-secondary cursor-pointer">
           <input
             type="checkbox"
@@ -882,7 +1070,26 @@ function GatewaySettingsSection() {
         </label>
       </div>
 
-      <div>
+      <div className="rounded-md border border-subtle p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-medium text-secondary">Health</span>
+          <StatusBadge
+            tone={settings.degraded.degraded ? 'critical' : 'good'}
+            label={settings.degraded.degraded ? 'degraded' : 'healthy'}
+          />
+        </div>
+        <p className="text-xs text-muted mt-2">
+          Last success: {settings.degraded.lastOkAt ? new Date(settings.degraded.lastOkAt).toLocaleString() : 'not observed'}
+        </p>
+        {settings.degraded.lastFailedAt && (
+          <p className="text-xs text-critical mt-1 break-words">
+            Last failure: {new Date(settings.degraded.lastFailedAt).toLocaleString()}
+            {settings.degraded.lastError ? ` — ${settings.degraded.lastError}` : ''}
+          </p>
+        )}
+      </div>
+
+      <div className="max-w-2xl">
         <label className="block text-xs font-medium text-secondary mb-1">Gateway URL</label>
         <input
           type="text"
@@ -904,12 +1111,105 @@ function GatewaySettingsSection() {
             placeholder={settings.apiKeyConfigured ? 'Leave blank to keep current key' : 'Enter an API key'}
             className="flex-1 bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary font-mono focus:outline-none focus:border-accent"
           />
-          <button onClick={() => setRevealKey((v) => !v)} className="text-muted hover:text-primary" title={revealKey ? 'Hide' : 'Reveal'}>
+          <button
+            type="button"
+            onClick={() => setRevealKey((v) => !v)}
+            className="btn-secondary !p-2"
+            title={revealKey ? 'Hide API key' : 'Reveal API key'}
+            aria-label={revealKey ? 'Hide API key' : 'Reveal API key'}
+          >
             {revealKey ? <EyeOff size={14} /> : <Eye size={14} />}
           </button>
         </div>
         <p className="text-xs text-muted mt-1">Leave blank to keep the current configured key source.</p>
       </div>
+
+      <fieldset>
+        <legend className="text-xs font-medium text-secondary">Profile participation</legend>
+        <p className="text-xs text-muted mt-1 mb-2">Checked profiles recall and capture memory. Changes apply on the next turn.</p>
+        {configuredProfiles.length === 0 ? (
+          <p className="text-xs text-muted">No configured profiles.</p>
+        ) : (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {configuredProfiles.map((profile) => (
+              <label key={profile.name} className="flex min-h-9 min-w-0 items-center gap-2 rounded-md border border-subtle px-3 py-2 text-xs text-secondary cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!disabledProfilesDraft.includes(profile.name)}
+                  onChange={(event) => setDisabledProfilesDraft((current) => event.target.checked
+                    ? current.filter((name) => name !== profile.name)
+                    : [...current, profile.name])}
+                  className="accent-accent"
+                />
+                <span className="min-w-0 truncate">{profile.display_name} ({profile.name})</span>
+              </label>
+            ))}
+          </div>
+        )}
+      </fieldset>
+
+      <fieldset className="space-y-3">
+        <legend className="text-xs font-medium text-secondary">Global recall policy</legend>
+        <p className="text-xs text-muted">Blank budget and no selected tiers mean unlimited characters and all tiers.</p>
+        <label className="block max-w-xs text-xs text-secondary">
+          Character budget per turn
+          <input
+            type="number"
+            min="1"
+            step="1"
+            value={globalPolicyDraft.budgetChars}
+            onChange={(event) => setGlobalPolicyDraft((current) => ({ ...current, budgetChars: event.target.value }))}
+            placeholder="Unlimited"
+            className="mt-1 w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary"
+          />
+        </label>
+        <div>
+          <span className="block text-xs text-secondary">Eligible tiers</span>
+          <TierPicker value={globalPolicyDraft.tiers} onChange={(tiers) => setGlobalPolicyDraft((current) => ({ ...current, tiers }))} />
+        </div>
+      </fieldset>
+
+      <fieldset className="space-y-3">
+        <legend className="text-xs font-medium text-secondary">Per-profile recall overrides</legend>
+        <p className="text-xs text-muted">Blank fields inherit the global policy.</p>
+        {configuredProfiles.length === 0 ? (
+          <p className="text-xs text-muted">No configured profiles.</p>
+        ) : (
+          <div className="divide-y divide-subtle rounded-md border border-subtle">
+            {configuredProfiles.map((profile) => {
+              const draft = profilePolicyDrafts[profile.name] ?? policyDraft(undefined);
+              const updateDraft = (patch: Partial<PolicyDraft>) => setProfilePolicyDrafts((current) => ({
+                ...current,
+                [profile.name]: { ...draft, ...patch }
+              }));
+              return (
+                <div key={profile.name} className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_12rem_minmax(0,1fr)] sm:items-end">
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-primary truncate">{profile.display_name}</p>
+                    <p className="text-xs text-muted truncate">{profile.name}</p>
+                  </div>
+                  <label className="block text-xs text-secondary">
+                    Character budget
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={draft.budgetChars}
+                      onChange={(event) => updateDraft({ budgetChars: event.target.value })}
+                      placeholder="Inherit"
+                      className="mt-1 w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary"
+                    />
+                  </label>
+                  <div>
+                    <span className="block text-xs text-secondary">Tier override</span>
+                    <TierPicker value={draft.tiers} onChange={(tiers) => updateDraft({ tiers })} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </fieldset>
 
       <div className="flex items-center gap-3">
         <button

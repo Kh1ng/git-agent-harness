@@ -39,6 +39,7 @@ import type {
   GatewayBootstrapCommand,
   GatewaySettingsSummary,
   GatewaySettingsUpdate,
+  SkillSummary,
   ProjectImportData,
   ProjectImportResult,
   ChatSessionSummary,
@@ -220,6 +221,7 @@ export interface GahDataSource {
   getGatewaySettings(): Promise<GatewaySettingsSummary>;
   revealGatewayBootstrapCommand(): Promise<GatewayBootstrapCommand>;
   updateGatewaySettings(data: GatewaySettingsUpdate): Promise<GatewaySettingsSummary>;
+  getSkills(): Promise<{ skills: SkillSummary[] }>;
   recallContext(profile: string, query: string): Promise<{ context: string; memoryCount: number }>;
   getGitStatus(profile: string): Promise<{ branch: string; changes: { status: string; path: string }[]; cwd: string }>;
   getGitBranches(profile: string): Promise<{ branches: string[]; current: string }>;
@@ -447,6 +449,9 @@ export const gahApi: GahDataSource = {
   },
   updateGatewaySettings(data) {
     return putJson<GatewaySettingsSummary, GatewaySettingsUpdate>('/api/settings/gateway', data);
+  },
+  getSkills() {
+    return getJson<{ skills: SkillSummary[] }>('/api/skills');
   },
   recallContext(profile, query) {
     return postJson<{ context: string; memoryCount: number }, { profile: string; query: string }>(

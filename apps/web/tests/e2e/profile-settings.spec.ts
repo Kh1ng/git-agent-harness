@@ -89,6 +89,7 @@ test('Settings exposes validation timeout and sends it to profile update API', a
   const settingsButton = page.getByRole('button', { name: 'Settings' });
   await expect(settingsButton).toBeVisible({ timeout: 60_000 });
   await settingsButton.click();
+  await page.getByText('Factory / profile management', { exact: true }).click();
 
   const validationTimeoutInput = page
     .getByText('Validation command timeout (seconds)')
@@ -138,4 +139,78 @@ test('Settings exposes validation timeout and sends it to profile update API', a
     clear: ['validation_timeout_seconds']
   });
   expect(updatePayload).not.toHaveProperty('validation_timeout_seconds');
+});
+
+test('Settings persists sections and saves the full memory gateway configuration', async ({ page }) => {
+  let gatewayPayload: Record<string, unknown> | null = null;
+  const gatewaySettings = {
+    url: 'http://127.0.0.1:8420',
+    apiKeyConfigured: true,
+    enabled: true,
+    disabledProfiles: [],
+    contextPolicy: {},
+    contextPolicies: {},
+    degraded: { degraded: false, lastError: null, lastFailedAt: null, lastOkAt: 1_700_000_000_000 },
+    tailscaleIPv4: '100.64.0.1'
+  };
+
+  await page.route('**/api/**', (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === '/api/profiles' && request.method() === 'GET') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([BASE_PROFILE]) });
+      return;
+    }
+    if (url.pathname === '/api/settings/gateway' && request.method() === 'GET') {
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(gatewaySettings) });
+      return;
+    }
+    if (url.pathname === '/api/settings/gateway' && request.method() === 'PUT') {
+      gatewayPayload = request.postDataJSON() as Record<string, unknown>;
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...gatewaySettings, ...gatewayPayload }) });
+      return;
+    }
+    if (url.pathname === '/api/skills') {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ skills: [{ id: 'test-skill', version: '1.0.0', displayName: 'Test skill', description: 'A useful test skill.', backends: ['codex'], source: 'test', bound: true }] })
+      });
+      return;
+    }
+    route.continue();
+  });
+
+  await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await page.evaluate(() => localStorage.clear());
+  await page.getByRole('button', { name: 'Settings' }).click();
+
+  const memorySection = page.getByRole('button', { name: /TDAI \/ memory/ });
+  await expect(memorySection).toHaveAttribute('aria-expanded', 'false');
+  await memorySection.click();
+  await expect(memorySection).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByText('healthy', { exact: true })).toBeVisible();
+
+  await page.getByLabel('Test Repo (test-repo)').uncheck();
+  const globalPolicy = page.locator('fieldset').filter({ hasText: 'Global recall policy' });
+  await globalPolicy.getByLabel('Character budget per turn').fill('1200');
+  await globalPolicy.getByLabel('L0').check();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+
+  await expect.poll(() => gatewayPayload).not.toBeNull();
+  expect(gatewayPayload).toMatchObject({
+    enabled: true,
+    disabledProfiles: ['test-repo'],
+    contextPolicy: { budgetChars: 1200, tiers: ['L0'] },
+    contextPolicies: {}
+  });
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const reloadedMemorySection = page.getByRole('button', { name: /TDAI \/ memory/ });
+  await expect(reloadedMemorySection).toHaveAttribute('aria-expanded', 'true');
+
+  const skillSection = page.getByRole('button', { name: /Skill bank/ });
+  await skillSection.click();
+  await expect(page.getByText('test-skill@1.0.0')).toBeVisible();
 });
