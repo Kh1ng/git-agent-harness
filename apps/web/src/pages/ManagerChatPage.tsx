@@ -219,6 +219,9 @@ export function ManagerChatPage() {
   const [currentModelId, setCurrentModelId] = useState<string | null>(null);
   const [reasoningEfforts, setReasoningEfforts] = useState<ManagerReasoningEffortInfo[]>([]);
   const [currentReasoningEffortId, setCurrentReasoningEffortId] = useState<string | null>(null);
+  /** Context-window occupancy from the active backend's own usage_update
+   * notification (issue #865, Hermes today) -- null hides the indicator. */
+  const [contextUsage, setContextUsage] = useState<{ size: number; used: number } | null>(null);
   /** True once the model list fetch completed (an empty list is "this
    * backend exposes no picker", not "still loading"). */
   const [modelsLoaded, setModelsLoaded] = useState(false);
@@ -294,6 +297,21 @@ export function ManagerChatPage() {
 
   useAutoRefresh(() => { refreshSessions(profile); refreshAllSessions(); }, 5_000);
   useWsReconnectRefresh(() => { refreshSessions(profile); refreshAllSessions(); });
+  // #865: Hermes pushes usage_update per turn, so the context meter is
+  // polled independently of the models/reasoning-effort list (which only
+  // refreshes on explicit profile/backend/model changes) to stay live
+  // through an ongoing conversation. Only the default (non-session)
+  // conversation shows the meter, so skip the request while a session owns
+  // the header.
+  useAutoRefresh(() => {
+    if (activeSession) return;
+    const requestedProfile = profile;
+    gahApi.getManagerChatModels(profile)
+      .then(({ contextUsage: usage }) => {
+        if (activeProfileRef.current === requestedProfile) setContextUsage(usage ?? null);
+      })
+      .catch(() => {});
+  }, 5_000);
 
   useEffect(() => {
     const pendingSession = pendingSessionRef.current;
@@ -386,6 +404,7 @@ export function ManagerChatPage() {
     setCurrentModelId(null);
     setReasoningEfforts([]);
     setCurrentReasoningEffortId(null);
+    setContextUsage(null);
     setModelsLoaded(false);
     setModelChanging(false);
     gahApi
@@ -410,12 +429,13 @@ export function ManagerChatPage() {
     // ACP session state. Empty means no corresponding picker renders.
     gahApi
       .getManagerChatModels(profile)
-      .then(({ models, currentModelId, reasoningEfforts: advertisedEfforts, currentReasoningEffortId: effortId }) => {
+      .then(({ models, currentModelId, reasoningEfforts: advertisedEfforts, currentReasoningEffortId: effortId, contextUsage: usage }) => {
         if (!cancelled) {
           setModels(models);
           setCurrentModelId(currentModelId);
           setReasoningEfforts(advertisedEfforts ?? []);
           setCurrentReasoningEffortId(effortId ?? null);
+          setContextUsage(usage ?? null);
           setModelsLoaded(true);
         }
       })
@@ -425,6 +445,7 @@ export function ManagerChatPage() {
           setCurrentModelId(null);
           setReasoningEfforts([]);
           setCurrentReasoningEffortId(null);
+          setContextUsage(null);
           setModelsLoaded(true);
         }
       });
@@ -494,6 +515,7 @@ export function ManagerChatPage() {
         setCurrentModelId(summary.currentModelId);
         setReasoningEfforts(summary.reasoningEfforts ?? []);
         setCurrentReasoningEffortId(summary.currentReasoningEffortId ?? null);
+        setContextUsage(summary.contextUsage ?? null);
       }
     } catch (err) {
       if (activeProfileRef.current === requestedProfile) {
@@ -735,11 +757,12 @@ export function ManagerChatPage() {
           .then(({ commands }) => setCommands(commands))
           .catch(() => setCommands([]));
         gahApi.getManagerChatModels(requestedProfile)
-          .then(({ models, currentModelId, reasoningEfforts: advertisedEfforts, currentReasoningEffortId: effortId }) => {
+          .then(({ models, currentModelId, reasoningEfforts: advertisedEfforts, currentReasoningEffortId: effortId, contextUsage: usage }) => {
             setModels(models);
             setCurrentModelId(currentModelId);
             setReasoningEfforts(advertisedEfforts ?? []);
             setCurrentReasoningEffortId(effortId ?? null);
+            setContextUsage(usage ?? null);
             setModelsLoaded(true);
           })
           .catch(() => {
@@ -747,6 +770,7 @@ export function ManagerChatPage() {
             setCurrentModelId(null);
             setReasoningEfforts([]);
             setCurrentReasoningEffortId(null);
+            setContextUsage(null);
             setModelsLoaded(true);
           });
       }
@@ -1019,7 +1043,7 @@ export function ManagerChatPage() {
             : `${activeBackendLabel}${activeBackendUnavailable ? ' (unavailable)' : ''}`
         }`}
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {/* Profile-wide pickers for the default conversation; a session
                 carries its own backend/model in the session bar below. */}
             {!activeSession && availableBackends.length > 0 && (
@@ -1068,6 +1092,19 @@ export function ManagerChatPage() {
                   </option>
                 ))}
               </select>
+            )}
+            {/* #865: context-window occupancy from the backend's own
+                usage_update push (Hermes today). Hidden entirely for a
+                backend that doesn't advertise it, the same empty-state
+                pattern as the model picker just below. */}
+            {!activeSession && contextUsage && (
+              <span
+                aria-label="Context usage"
+                className="rounded-md border border-subtle bg-raised px-2 py-1.5 text-[11px] tabular-nums text-muted"
+                title={`${contextUsage.used.toLocaleString()} / ${contextUsage.size.toLocaleString()} tokens in context`}
+              >
+                {Math.round((contextUsage.used / contextUsage.size) * 100)}% context
+              </span>
             )}
             {/* This provider doesn't expose a model picker over its protocol
                 (e.g. Hermes over ACP): say so instead of silently hiding the

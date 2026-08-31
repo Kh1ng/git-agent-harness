@@ -11,7 +11,7 @@ import {
   setModelOverrideForProfile,
   setReasoningEffortOverrideForProfile
 } from './managerChat/settingsStore.js';
-import { historyDelta, readModelConfig, readReasoningConfig, resumePrompt, toChatUsage } from './managerChat/acpAdapter.js';
+import { historyDelta, readModelConfig, readReasoningConfig, resumePrompt, toChatUsage, toContextUsage } from './managerChat/acpAdapter.js';
 import { handoffAttempt } from './managerChat/ManagerChatManager.js';
 
 test('isCompactionCommand recognizes known compact/clear synonyms across backends', () => {
@@ -134,6 +134,19 @@ test('ACP thought-level config drives reasoning effort without inventing choices
     currentEffortId: 'high',
     configId: 'reasoning_effort'
   });
+});
+
+test('toContextUsage passes through a valid usage_update payload (#865)', () => {
+  assert.deepEqual(toContextUsage({ used: 12594, size: 131072 }), { used: 12594, size: 131072 });
+});
+
+test('toContextUsage hides absent, non-finite, or out-of-range usage_update data', () => {
+  assert.equal(toContextUsage(null), null);
+  assert.equal(toContextUsage({ used: NaN, size: 131072 }), null);
+  assert.equal(toContextUsage({ used: 10, size: Infinity }), null);
+  assert.equal(toContextUsage({ used: -1, size: 131072 }), null);
+  assert.equal(toContextUsage({ used: 10, size: 0 }), null);
+  assert.equal(toContextUsage({ used: 131073, size: 131072 }), null);
 });
 
 test('normalizeRemoteUrl collapses https/ssh/scp variants of the same remote', () => {

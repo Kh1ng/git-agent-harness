@@ -360,6 +360,7 @@ export async function listModelsForProfile(
   currentModelId: string | null;
   reasoningEfforts: ManagerReasoningEffortInfo[];
   currentReasoningEffortId: string | null;
+  contextUsage: { size: number; used: number } | null;
 }> {
   const backendId = backendForProfile(profile);
   const adapter = resolveAdapter(backendId);

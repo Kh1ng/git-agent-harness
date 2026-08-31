@@ -67,6 +67,9 @@ export interface ManagerAdapter extends ManagerBackendInfo {
     currentModelId: string | null;
     reasoningEfforts: ManagerReasoningEffortInfo[];
     currentReasoningEffortId: string | null;
+    /** Context-window occupancy (issue #865); null for backends that don't
+     * advertise it (only Hermes does today, via ACP's usage_update). */
+    contextUsage: { size: number; used: number } | null;
   }>;
   setModel(gahProfile: string, modelId: string): Promise<void>;
   setReasoningEffort(gahProfile: string, effortId: string): Promise<void>;
@@ -93,7 +96,7 @@ class NotImplementedAdapter implements ManagerAdapter {
   }
 
   async listModels() {
-    return { models: [], currentModelId: null, reasoningEfforts: [], currentReasoningEffortId: null };
+    return { models: [], currentModelId: null, reasoningEfforts: [], currentReasoningEffortId: null, contextUsage: null };
   }
 
   async setModel(): Promise<void> {
