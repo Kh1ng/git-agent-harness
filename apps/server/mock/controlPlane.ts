@@ -174,7 +174,8 @@ const BACKENDS = [
   { id: 'claude', displayName: 'Claude', implemented: true },
   { id: 'opencode', displayName: 'OpenCode', implemented: true },
   { id: 'agy', displayName: 'AGY', implemented: true },
-  { id: 'vibe', displayName: 'Vibe', implemented: true }
+  { id: 'vibe', displayName: 'Vibe', implemented: true },
+  { id: 'unavailable', displayName: 'Unavailable', implemented: false }
 ] satisfies ManagerBackendInfo[];
 
 const MOCK_PROFILES = PROFILE_FIXTURE satisfies ProfileSummary[];

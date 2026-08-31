@@ -346,3 +346,18 @@ test('composer favorites persist across reload and apply all three selections at
   await expect(page.getByText('Mock turn', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0);
 });
+
+test('composer favorites cannot select unavailable providers', async ({ page, request }) => {
+  await selectScenario(request, 'normal');
+  await openChat(page);
+  await page.evaluate(() => window.localStorage.setItem('gah.composer.favorites', JSON.stringify([{ backend: 'unavailable' }])));
+  await page.reload();
+  await openChat(page);
+  await selectSeededSession(page);
+
+  await page.getByRole('button', { name: 'Provider picker' }).click();
+  const popover = page.getByRole('dialog', { name: 'Provider picker' });
+  await expect(popover.getByRole('button', { name: 'Unavailable (unavailable)', exact: true })).toBeDisabled();
+  await expect(popover.getByRole('button', { name: 'Favorite Unavailable' })).toBeDisabled();
+  await expect(popover.getByRole('button', { name: 'Apply Unavailable' })).toBeDisabled();
+});

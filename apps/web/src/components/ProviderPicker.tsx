@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronUp, Cpu, Star, X } from 'lucide-react';
 import type { ManagerBackendInfo, ManagerModelInfo, ManagerReasoningEffortInfo } from '@git-agent-harness/contracts';
 
-/** One saved composer selection. Absent model/effort fields mean "that
- * backend's default". Persisted client-side in localStorage. */
+/** One saved composer selection. Model/effort are optional snapshots;
+ * provider-only favorites keep that provider's configured selection. */
 export interface ProviderFavorite {
   backend: string;
   model?: string;
@@ -160,6 +160,7 @@ export function ProviderPicker({
   };
 
   const applyFavorite = (favorite: ProviderFavorite) => {
+    if (!backends.find((backend) => backend.id === favorite.backend)?.implemented) return;
     onSelect({
       backendId: favorite.backend,
       modelId: favorite.model ?? null,
@@ -169,6 +170,7 @@ export function ProviderPicker({
   };
 
   const currentFavorite: ProviderFavorite | null = selectedBackendId
+    && backends.find((backend) => backend.id === selectedBackendId)?.implemented
     ? {
         backend: selectedBackendId,
         ...(currentModelId ? { model: currentModelId } : {}),
@@ -223,14 +225,16 @@ export function ProviderPicker({
             </div>
             {favorites.length > 0 ? (
               <div className="mt-1 space-y-0.5">
-                {favorites.map((favorite) => (
-                  <div key={favoriteKey(favorite)} className="flex items-center gap-1">
+                {favorites.map((favorite) => {
+                  const enabled = backends.find((backend) => backend.id === favorite.backend)?.implemented === true;
+                  return <div key={favoriteKey(favorite)} className="flex items-center gap-1">
                     <button
                       type="button"
                       onClick={() => applyFavorite(favorite)}
-                      className="min-w-0 flex-1 truncate rounded px-1.5 py-1 text-left text-xs text-secondary hover:bg-white/5"
+                      disabled={!enabled}
+                      className="min-w-0 flex-1 truncate rounded px-1.5 py-1 text-left text-xs text-secondary hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
                       aria-label={`Apply ${favoriteLabel(favorite)}`}
-                      title="Apply this favorite — switches provider, model, and effort at once"
+                      title={enabled ? 'Apply this favorite' : 'This provider is unavailable'}
                     >
                       <Star size={10} className="mr-1.5 inline fill-amber-400 text-amber-400" aria-hidden="true" />
                       {favoriteLabel(favorite)}
@@ -243,8 +247,8 @@ export function ProviderPicker({
                     >
                       <X size={11} aria-hidden="true" />
                     </button>
-                  </div>
-                ))}
+                  </div>;
+                })}
               </div>
             ) : (
               <p className="mt-1 text-[11px] text-muted">No favorites yet — star a provider, model, or the current selection.</p>
@@ -272,9 +276,10 @@ export function ProviderPicker({
                       <button
                         type="button"
                         onClick={() => toggleFavorite(favorite)}
+                        disabled={!backend.implemented}
                         aria-pressed={saved}
-                        aria-label={`Favorite ${backend.displayName} (default model)`}
-                        className="shrink-0 rounded p-1 text-muted hover:bg-white/5 hover:text-primary"
+                        aria-label={`Favorite ${backend.displayName}`}
+                        className="shrink-0 rounded p-1 text-muted hover:bg-white/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
                         title="Favorite this provider"
                       >
                         <Star size={11} className={starClasses(saved)} aria-hidden="true" />
