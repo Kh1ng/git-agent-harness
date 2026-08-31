@@ -104,9 +104,9 @@ Named scenarios are `normal`, `slow-cancel-steer`, `reconnect-stream`,
 `reconnect-permission`, `archive-success`, `archive-failure`,
 `preview-unavailable`, `preview-available`, `preview-blocked`, `preview-error`,
 `models-success`, `models-empty`, `models-delayed`, `models-failure`,
-`models-agy`, `rest-error`, and `ws-error`. Scenario selection resets all
-sessions, turns, selector choices, previews, and archive mutations to fixed
-seed data. The Playwright manager-chat control-plane spec uses these same
+`models-agy`, `rest-error`, and `ws-error`. Scenario selection restores fixed
+seed data for chat, profiles, the gateway, Git, the loop, and updates. The
+Playwright manager-chat control-plane spec uses these same
 endpoints and the same real HTTP/WebSocket server; it does not install browser
 route mocks.
 

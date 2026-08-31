@@ -16,7 +16,11 @@ import cors from 'cors';
 import express, { type Response } from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import type {
+  AdminUpdatePendingInfo,
+  AdminUpdateState,
   ChatNodeInfo,
+  ChatIssueStartResult,
+  ChatIssueSummary,
   ChatPrStartResult,
   ChatPrSummary,
   ChatPreviewInfo,
@@ -26,18 +30,25 @@ import type {
   ChatSessionView,
   ChatTranscriptTurn,
   ClientMessage,
+  ConfigSummary,
+  GatewayBootstrapCommand,
+  GatewaySettingsSummary,
   SettingsConfigProfileSummary,
   DoctorSnapshot,
+  LedgerEntry,
   ManagerBackendInfo,
   ManagerChatSettingsSummary,
   ManagerCommandInfo,
   ManagerModelsSummary,
   ProfileSummary,
+  ProjectImportResult,
   QuotaSnapshot,
   ReportData,
   ReportSeriesData,
   ServerMessage,
-  StatusSnapshot
+  SkillSummary,
+  StatusSnapshot,
+  UsageRollupSummary
 } from '@git-agent-harness/contracts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -148,6 +159,13 @@ interface MockState {
   reset: number;
   connectionCount: number;
   settings: ManagerChatSettingsSummary;
+  profiles: ProfileSummary[];
+  config: ConfigSummary;
+  gateway: GatewaySettingsSummary;
+  skills: SkillSummary[];
+  loopRunning: boolean;
+  adminUpdate: AdminUpdateState;
+  gitPrs: ChatPrSummary[];
   selectedModels: Record<string, string | null>;
   selectedEfforts: Record<string, string | null>;
   sessions: Map<string, ChatSessionSummary>;
@@ -179,6 +197,124 @@ const BACKENDS = [
 
 const MOCK_PROFILES = PROFILE_FIXTURE satisfies ProfileSummary[];
 
+const MOCK_GATEWAY = {
+  url: 'http://127.0.0.1:8420',
+  apiKeyConfigured: true,
+  enabled: true,
+  disabledProfiles: [],
+  contextPolicy: { budgetChars: 4_000, tiers: ['L0', 'L1'] },
+  contextPolicies: {},
+  degraded: { degraded: false, lastError: null, lastFailedAt: null, lastOkAt: FIXED_NOW },
+  tailscaleIPv4: '100.64.0.42'
+} satisfies GatewaySettingsSummary;
+
+const MOCK_SKILLS = [{
+  id: 'gah-manager',
+  version: '1.0.0',
+  displayName: 'GAH manager',
+  description: 'Coordinates mock GAH work without touching a provider.',
+  backends: ['codex', 'claude'],
+  source: 'mock/in-memory',
+  bound: true
+}] satisfies SkillSummary[];
+
+const MOCK_ADMIN_PENDING = {
+  current: { hash: '1111111111111111111111111111111111111111', short: '1111111', subject: 'Current mock build' },
+  latest: { hash: '2222222222222222222222222222222222222222', short: '2222222', subject: 'Pending mock update' },
+  commitsBehind: 1,
+  upToDate: false
+} satisfies AdminUpdatePendingInfo;
+
+const MOCK_ADMIN_IDLE = {
+  status: 'idle',
+  startedAt: null,
+  finishedAt: null,
+  exitCode: null,
+  pid: null,
+  output: ''
+} satisfies AdminUpdateState;
+
+const MOCK_USAGE_ROLLUP = {
+  profile: 'fixture',
+  since: FIXED_NOW - 7 * 24 * 60 * 60 * 1_000,
+  generated_at: FIXED_NOW,
+  rows: [{
+    backend: 'codex',
+    model: 'gpt-5.3-codex',
+    day: '2023-11-14',
+    turns: 3,
+    input_tokens: 1_200,
+    output_tokens: 800,
+    total_tokens: 2_000,
+    estimated_cost_usd: 0.04
+  }],
+  unattributed_turns: 0,
+  tickets: [{
+    ticket: '#1087',
+    title: 'Mock control plane',
+    turns: 3,
+    total_tokens: 2_000,
+    estimated_cost_usd: 0.04,
+    backends: { codex: 2_000 }
+  }]
+} satisfies UsageRollupSummary;
+
+const MOCK_LEDGER_ENTRY = {
+  timestamp: new Date(FIXED_NOW).toISOString(),
+  session_id: 'mock-session-1',
+  profile: 'fixture',
+  display_name: 'Fixture',
+  repo_id: 'git-agent-harness',
+  repo: 'Kh1ng/git-agent-harness',
+  local_path: '/mock/in-memory-only',
+  provider: 'github',
+  backend: 'codex',
+  requested_backend: 'codex',
+  effective_backend: 'codex',
+  requested_model: 'gpt-5.3-codex',
+  effective_model: 'gpt-5.3-codex',
+  routing_reason: 'mock fixture',
+  fallback_used: false,
+  confidence_impact: null,
+  human_required: false,
+  mode: 'implement',
+  target_summary: 'Mock route coverage',
+  work_id: 'mock-work-1',
+  source_issue_number: '1087',
+  work_title: 'Mock control plane',
+  branch: 'feat/mock-control-plane-1087',
+  session_dir: '/mock/in-memory-only',
+  duration_seconds: 42,
+  backend_exit_code: 0,
+  validation_result: 'pass',
+  commit_attempted: true,
+  commit_created: true,
+  push_attempted: false,
+  push_succeeded: false,
+  mr_attempted: false,
+  mr_created: false,
+  mr_url: null,
+  files_changed: 2,
+  insertions: 20,
+  deletions: 3,
+  error_summary: null,
+  usage: {
+    usage_source: 'mock',
+    input_tokens: 1_200,
+    output_tokens: 800,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    total_tokens: 2_000,
+    requests_count: 1,
+    estimated_cost_usd: 0.04,
+    actual_cost_usd: null,
+    quota_window: null,
+    quota_used_percent: null,
+    quota_remaining_percent: null,
+    quota_reset_at: null
+  }
+} satisfies LedgerEntry;
+
 const MOCK_PRS = [
   {
     number: 12,
@@ -201,6 +337,14 @@ const MOCK_PRS = [
     updatedAt: '2026-08-27T12:00:00Z'
   }
 ] satisfies ChatPrSummary[];
+
+const MOCK_ISSUES = [{
+  number: 1087,
+  title: 'Mock control plane: cover Settings and non-chat REST surfaces',
+  url: 'https://github.com/fixture/repo/issues/1087',
+  labels: ['enhancement', 'area:testing'],
+  updatedAt: '2026-08-31T05:56:32Z'
+}] satisfies ChatIssueSummary[];
 
 const MOCK_PROFILE_CONFIG = {
   profile: 'fixture',
@@ -371,6 +515,13 @@ function createState(scenario: MockScenarioName, reset: number, previewOrigin?: 
       profileOverrides: {},
       availableBackends: BACKENDS
     } satisfies ManagerChatSettingsSummary,
+    profiles: structuredClone(MOCK_PROFILES),
+    config: { current_manager: null },
+    gateway: structuredClone(MOCK_GATEWAY),
+    skills: structuredClone(MOCK_SKILLS),
+    loopRunning: true,
+    adminUpdate: structuredClone(MOCK_ADMIN_IDLE),
+    gitPrs: structuredClone(MOCK_PRS),
     selectedModels: { codex: 'gpt-5.3-codex', claude: 'claude-sonnet-4-5', opencode: 'openai/gpt-5.2', agy: null },
     selectedEfforts: { codex: 'medium', claude: 'standard', opencode: 'high', agy: null },
     sessions: new Map([
@@ -852,6 +1003,13 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       scenario: state.scenario,
       reset: state.reset,
       connections: state.connectionCount,
+      profiles: state.profiles,
+      config: state.config,
+      gateway: state.gateway,
+      skills: state.skills,
+      loopRunning: state.loopRunning,
+      adminUpdate: state.adminUpdate,
+      gitPrs: state.gitPrs,
       sessions: [...state.sessions.values()],
       previews: [...state.previews.values()]
     });
@@ -874,10 +1032,112 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     res.type('html').send('<!doctype html><title>Mock preview</title><main><h1>Mock preview available</h1><p>No dev server or worktree was created.</p></main>');
   });
 
-  app.get('/api/profiles', (_req, res) => res.json(MOCK_PROFILES));
-  app.get('/api/projects', (_req, res) => res.json(MOCK_PROFILES));
+  // One scenario covers every frontend write without teaching each route a
+  // second failure branch. Mock-control routes stay usable because they are
+  // registered above this middleware.
+  app.use('/api', (req, res, next) => {
+    if (state.scenario === 'rest-error' && req.method !== 'GET') {
+      jsonError(res, 503, 'Mock REST failure', `Mock ${req.method} ${req.path} failed`);
+      return;
+    }
+    next();
+  });
+
+  app.get('/api/profiles', (_req, res) => res.json(state.profiles));
+  app.post('/api/profiles', (req, res) => {
+    const required = ['name', 'display_name', 'repo_id', 'provider', 'repo', 'local_path', 'artifact_root'] as const;
+    const missing = required.filter((field) => !bodyString(req.body?.[field]));
+    if (missing.length > 0) return jsonError(res, 400, 'Invalid profile', `Missing required field(s): ${missing.join(', ')}`);
+    const name = req.body.name as string;
+    if (state.profiles.some((profile) => profile.name === name)) {
+      return jsonError(res, 409, 'Invalid profile', `Profile '${name}' already exists`);
+    }
+    state.profiles.push({
+      name,
+      display_name: req.body.display_name as string,
+      repo_id: req.body.repo_id as string,
+      provider: req.body.provider as string,
+      repo: req.body.repo as string,
+      local_path: req.body.local_path as string,
+      worktree_base: '/mock/worktrees',
+      web_url: req.body.provider === 'github' ? `https://github.com/${req.body.repo as string}` : null,
+      max_parallel_workers: typeof req.body.max_parallel_workers === 'number' ? req.body.max_parallel_workers : null,
+      max_open_managed_mrs: 1,
+      manager_wake_autonomy: req.body.manager_wake_autonomy ?? 'off',
+      delivery_mode: 'pr',
+      validation_timeout_seconds: typeof req.body.validation_timeout_seconds === 'number' ? req.body.validation_timeout_seconds : 300,
+      chat_session_idle_days: 14
+    } satisfies ProfileSummary);
+    res.status(201).json({ success: true, message: `Profile '${name}' added` });
+  });
+  app.patch('/api/profiles/:name', (req, res) => {
+    const index = state.profiles.findIndex((profile) => profile.name === req.params.name);
+    if (index < 0) return jsonError(res, 404, 'Profile not found', req.params.name);
+    const current = state.profiles[index];
+    const clear = Array.isArray(req.body?.clear) ? req.body.clear : [];
+    state.profiles[index] = {
+      ...current,
+      ...(bodyString(req.body?.display_name) ? { display_name: req.body.display_name as string } : {}),
+      ...(bodyString(req.body?.repo_id) ? { repo_id: req.body.repo_id as string } : {}),
+      ...(bodyString(req.body?.provider) ? { provider: req.body.provider as string } : {}),
+      ...(bodyString(req.body?.repo) ? { repo: req.body.repo as string } : {}),
+      ...(bodyString(req.body?.local_path) ? { local_path: req.body.local_path as string } : {}),
+      ...(typeof req.body?.max_parallel_workers === 'number' ? { max_parallel_workers: req.body.max_parallel_workers } : {}),
+      ...(typeof req.body?.manager_wake_autonomy === 'string' ? { manager_wake_autonomy: req.body.manager_wake_autonomy } : {}),
+      ...(typeof req.body?.validation_timeout_seconds === 'number'
+        ? { validation_timeout_seconds: req.body.validation_timeout_seconds }
+        : clear.includes('validation_timeout_seconds') ? { validation_timeout_seconds: 300 } : {})
+    } satisfies ProfileSummary;
+    res.json({ success: true, message: `Profile '${req.params.name}' updated` });
+  });
+  app.delete('/api/profiles/:name', (req, res) => {
+    const index = state.profiles.findIndex((profile) => profile.name === req.params.name);
+    if (index < 0) return jsonError(res, 404, 'Profile not found', req.params.name);
+    state.profiles.splice(index, 1);
+    res.json({ success: true, message: `Profile '${req.params.name}' removed` });
+  });
+
+  app.get('/api/projects', (_req, res) => res.json(state.profiles));
+  app.post('/api/projects/import', (req, res) => {
+    const gitUrl = bodyString(req.body?.gitUrl)?.trim();
+    if (!gitUrl) return jsonError(res, 400, 'Invalid project import', 'gitUrl is required');
+    let parsed: URL;
+    try {
+      parsed = new URL(gitUrl);
+    } catch {
+      return jsonError(res, 400, 'Invalid project import', 'gitUrl must be an absolute URL');
+    }
+    const parts = parsed.pathname.replace(/\.git$/, '').split('/').filter(Boolean);
+    if (parts.length < 2) return jsonError(res, 400, 'Invalid project import', 'gitUrl must identify an owner and repository');
+    const repo = parts.slice(-2).join('/');
+    const baseName = parts.at(-1)!;
+    const name = state.profiles.some((profile) => profile.name === baseName)
+      ? `${baseName}-${state.profiles.length + 1}`
+      : baseName;
+    const project = {
+      ...structuredClone(MOCK_PROFILES[0]),
+      name,
+      display_name: baseName,
+      repo_id: baseName,
+      repo,
+      local_path: `/mock/imports/${name}`,
+      web_url: gitUrl.replace(/\.git$/, '')
+    } satisfies ProfileSummary;
+    state.profiles.push(project);
+    res.status(201).json({
+      project,
+      checkoutPath: project.local_path,
+      checkoutStatus: 'cloned',
+      detectedLanguages: ['TypeScript'],
+      validationCommands: ['npm test']
+    } satisfies ProjectImportResult);
+  });
+
   app.get('/api/status', (_req, res) => res.json(STATUS_FIXTURE));
   app.get('/api/quota', (_req, res) => res.json(QUOTA_FIXTURE));
+  app.get('/api/usage/rollup', (req, res) => {
+    res.json({ ...MOCK_USAGE_ROLLUP, profile: bodyString(req.query.profile) ?? 'fixture' } satisfies UsageRollupSummary);
+  });
   app.get('/api/report', (_req, res) => res.json(REPORT_FIXTURE));
   app.get('/api/report/series', (_req, res) => {
     res.json({
@@ -890,6 +1150,9 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   });
   app.get('/api/events', (_req, res) => res.json([]));
   app.get('/api/controller-activity', (_req, res) => res.json([]));
+  app.get('/api/work/:workId', (req, res) => {
+    res.json([{ ...MOCK_LEDGER_ENTRY, work_id: req.params.workId }] satisfies LedgerEntry[]);
+  });
   app.get('/api/doctor', (_req, res) => {
     res.json({
       schema_version: 1,
@@ -898,9 +1161,98 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       checks: [{ name: 'mock isolation', status: 'ok', detail: 'in-memory control plane' }]
     } satisfies DoctorSnapshot);
   });
-  app.get('/api/config', (_req, res) => res.json({ current_manager: null }));
-  app.get('/api/config/effective', (_req, res) => res.json(MOCK_PROFILE_CONFIG));
-  app.get('/api/loop/status', (_req, res) => res.json({ running: true, pid: 998 }));
+  app.get('/api/config', (_req, res) => res.json(state.config));
+  app.post('/api/config', (req, res) => {
+    if (Array.isArray(req.body?.clear) && req.body.clear.includes('current_manager')) {
+      state.config.current_manager = null;
+    } else if (typeof req.body?.current_manager === 'string' || req.body?.current_manager === null) {
+      state.config.current_manager = req.body.current_manager;
+    }
+    res.json({ success: true, message: 'Global config updated' });
+  });
+  app.get('/api/config/effective', (req, res) => {
+    res.json({ ...MOCK_PROFILE_CONFIG, profile: bodyString(req.query.profile) ?? 'fixture' } satisfies SettingsConfigProfileSummary);
+  });
+  app.get('/api/loop/status', (_req, res) => res.json({ running: state.loopRunning, ...(state.loopRunning ? { pid: 998 } : {}) }));
+  app.post('/api/loop/start', (_req, res) => {
+    if (state.loopRunning) return res.status(409).json({ started: false, alreadyRunning: true, pid: 998 });
+    state.loopRunning = true;
+    res.json({ started: true, pid: 998 });
+  });
+  app.post('/api/loop/stop', (_req, res) => {
+    if (!state.loopRunning) return res.status(409).json({ stopped: false, error: 'Mock loop is not running' });
+    state.loopRunning = false;
+    res.json({ stopped: true });
+  });
+
+  app.get('/api/settings/gateway', (_req, res) => res.json(state.gateway));
+  app.post('/api/settings/gateway/bootstrap-command', (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ command: 'GAH_GATEWAY_MODE=remote GAH_GATEWAY_API_KEY=mock-only-token bash bootstrap.sh' } satisfies GatewayBootstrapCommand);
+  });
+  app.put('/api/settings/gateway', (req, res) => {
+    state.gateway = {
+      ...state.gateway,
+      ...('url' in req.body ? { url: req.body.url ?? 'http://127.0.0.1:8420' } : {}),
+      ...(typeof req.body?.enabled === 'boolean' ? { enabled: req.body.enabled } : {}),
+      ...(Array.isArray(req.body?.disabledProfiles) ? { disabledProfiles: req.body.disabledProfiles } : {}),
+      ...(req.body?.contextPolicy && typeof req.body.contextPolicy === 'object' ? { contextPolicy: req.body.contextPolicy } : {}),
+      ...(req.body?.contextPolicies && typeof req.body.contextPolicies === 'object' ? { contextPolicies: req.body.contextPolicies } : {}),
+      ...('apiKey' in req.body ? { apiKeyConfigured: typeof req.body.apiKey === 'string' && req.body.apiKey.length > 0 } : {})
+    } satisfies GatewaySettingsSummary;
+    res.json(state.gateway);
+  });
+  app.get('/api/skills', (_req, res) => res.json({ skills: state.skills }));
+
+  app.get('/api/git/status', (_req, res) => {
+    res.json({ branch: 'feat/mock-control-plane-1087', changes: [{ status: 'M', path: 'apps/server/mock/controlPlane.ts' }], cwd: '/mock/in-memory-only' });
+  });
+  app.get('/api/git/log', (_req, res) => {
+    res.json({ commits: [{ hash: '1111111111111111111111111111111111111111', short: '1111111', subject: 'Mock commit', author: 'GAH', ago: '1 minute ago' }] });
+  });
+  app.get('/api/git/prs', (_req, res) => res.json({ prs: state.gitPrs }));
+  app.post('/api/git/pr', (req, res) => {
+    const title = bodyString(req.body?.title);
+    if (!title) return jsonError(res, 400, 'Invalid pull request', 'title required');
+    const number = Math.max(0, ...state.gitPrs.map((pr) => pr.number)) + 1;
+    const url = `https://github.com/fixture/repo/pull/${number}`;
+    state.gitPrs.unshift({
+      number,
+      title,
+      url,
+      author: 'mock-operator',
+      headRefName: 'feat/mock-control-plane-1087',
+      isDraft: req.body?.draft === true,
+      reviewState: null,
+      updatedAt: new Date(FIXED_NOW + number).toISOString()
+    });
+    res.json({ url });
+  });
+
+  app.get('/api/admin/update', (_req, res) => res.json(MOCK_ADMIN_PENDING));
+  app.get('/api/admin/update/status', (_req, res) => res.json(state.adminUpdate));
+  app.post('/api/admin/update', (_req, res) => {
+    if (state.adminUpdate.status === 'running') return res.status(409).json(state.adminUpdate);
+    state.adminUpdate = {
+      status: 'running',
+      startedAt: new Date(FIXED_NOW + state.reset).toISOString(),
+      finishedAt: null,
+      exitCode: null,
+      pid: 999,
+      output: 'Mock update started.\n'
+    };
+    schedule(() => {
+      state.adminUpdate = {
+        ...state.adminUpdate,
+        status: 'success',
+        finishedAt: new Date(FIXED_NOW + state.reset + 1_000).toISOString(),
+        exitCode: 0,
+        pid: null,
+        output: `${state.adminUpdate.output}Mock update completed.\n`
+      };
+    }, 100);
+    res.status(202).json(state.adminUpdate);
+  });
 
   app.get('/api/manager-chat/settings', (_req, res) => res.json(state.settings satisfies ManagerChatSettingsSummary));
   app.post('/api/manager-chat/settings', (req, res) => {
@@ -950,15 +1302,39 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     const nodes = [{ nodeId: 'mock-central', displayName: 'Mock central', role: 'central', chatCapable: true, lastSeenAt: null }] satisfies ChatNodeInfo[];
     res.json({ nodes });
   });
-  app.get('/api/manager-chat/issues', (_req, res) => res.json({ issues: [] }));
-  app.get('/api/manager-chat/prs', (_req, res) => res.json({ prs: MOCK_PRS }));
+  app.get('/api/manager-chat/issues', (_req, res) => res.json({ issues: MOCK_ISSUES }));
+  app.post('/api/manager-chat/issues/start', (req, res) => {
+    const profile = bodyString(req.body?.profile) ?? 'fixture';
+    const issueNumber = Number(req.body?.issueNumber);
+    if (!Number.isInteger(issueNumber)) {
+      return jsonError(res, 400, 'Missing required field: issueNumber', 'issueNumber is required');
+    }
+    const issue = MOCK_ISSUES.find((candidate) => candidate.number === issueNumber);
+    if (!issue) return jsonError(res, 502, 'Failed to start chat from issue', `Issue #${issueNumber} is not open`);
+    const created = createSession(
+      profile,
+      bodyString(req.body?.backend),
+      bodyString(req.body?.model) ?? null,
+      `#${issue.number} ${issue.title}`
+    );
+    const session = { ...created, branch: `gah/issue-${issue.number}` } satisfies ChatSessionSummary;
+    state.sessions.set(session.id, session);
+    const conversation = getConversation(profile, session.id);
+    conversation.turns.push({
+      role: 'user',
+      text: `#${issue.number} ${issue.title}\n\n${issue.url ?? ''}`,
+      timestamp: FIXED_NOW + ++conversation.cursor
+    } satisfies ChatTranscriptTurn);
+    res.status(201).json({ session, existing: false } satisfies ChatIssueStartResult);
+  });
+  app.get('/api/manager-chat/prs', (_req, res) => res.json({ prs: state.gitPrs }));
   app.post('/api/manager-chat/prs/start', (req, res) => {
     const profile = bodyString(req.body?.profile) ?? 'fixture';
     const prNumber = Number(req.body?.prNumber);
     if (!Number.isInteger(prNumber)) {
       return jsonError(res, 400, 'Missing required field: prNumber', 'prNumber is required');
     }
-    const pr = MOCK_PRS.find((candidate) => candidate.number === prNumber);
+    const pr = state.gitPrs.find((candidate) => candidate.number === prNumber);
     if (!pr) {
       return jsonError(res, 502, 'Failed to start chat from pull request', `PR #${prNumber} is not open`);
     }
@@ -978,7 +1354,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   });
   app.get('/api/manager-chat/sessions/all', (_req, res) => {
     if (state.scenario === 'rest-error') return jsonError(res, 503, 'Mock REST failure', 'Mock session list unavailable');
-    const profileNames = new Map(MOCK_PROFILES.map((profile) => [profile.name, profile.display_name]));
+    const profileNames = new Map(state.profiles.map((profile) => [profile.name, profile.display_name]));
     const byProfile = new Map<string, ChatSessionSummary[]>();
     for (const session of state.sessions.values()) {
       const sessions = byProfile.get(session.profile) ?? [];

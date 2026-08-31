@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
+import ts from 'typescript';
 import { WebSocket } from 'ws';
-import type { ClientMessage, ServerMessage } from '@git-agent-harness/contracts';
+import type { ClientMessage, ProjectImportResult, ServerMessage } from '@git-agent-harness/contracts';
 import { createMockControlPlane, MOCK_SCENARIOS } from './controlPlane.js';
 
 async function post(baseUrl: string, path: string, body: unknown = {}): Promise<Response> {
@@ -25,6 +29,47 @@ function nextMessage(ws: WebSocket, type: ServerMessage['type'], timeoutMs = 3_0
     };
     ws.on('message', listener);
   });
+}
+
+function frontendApiRoutes(): { method: string; path: string }[] {
+  const clientPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../web/src/api/client.ts');
+  const source = ts.createSourceFile(clientPath, readFileSync(clientPath, 'utf8'), ts.ScriptTarget.Latest, true);
+  const helperMethods = new Map([
+    ['getJson', 'GET'],
+    ['postJson', 'POST'],
+    ['patchJson', 'PATCH'],
+    ['putJson', 'PUT'],
+    ['deleteJson', 'DELETE']
+  ]);
+  const routes: { method: string; path: string }[] = [];
+
+  function routePath(node: ts.Expression | undefined): string | null {
+    if (!node) return null;
+    if (ts.isStringLiteralLike(node)) return node.text.startsWith('/api/') ? node.text : null;
+    if (!ts.isTemplateExpression(node) || !node.head.text.startsWith('/api/')) return null;
+    return node.head.text + node.templateSpans.map((span) => `:param${span.literal.text}`).join('');
+  }
+
+  function visit(node: ts.Node): void {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const method = helperMethods.get(node.expression.text);
+      const path = routePath(node.arguments[0]);
+      if (method && path) routes.push({ method, path: path.split('?')[0] });
+    } else if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'URL') {
+      const path = routePath(node.arguments?.[0]);
+      if (path) routes.push({ method: 'POST', path: path.split('?')[0] });
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+
+  const deadClientMethods = new Set([
+    'POST /api/projects',
+    'DELETE /api/projects/:param',
+    'POST /api/context/recall',
+    'GET /api/git/branches'
+  ]);
+  return routes.filter(({ method, path }) => !deadClientMethods.has(`${method} ${path}`));
 }
 
 test('named scenarios are discoverable, switchable, and resettable in memory', async () => {
@@ -181,6 +226,123 @@ test('PR start opens a worktree-less session whose history is seeded with the PR
     assert.equal(history.type === 'manager.chat.history' && history.turns[0]?.role, 'user');
     assert.equal(history.type === 'manager.chat.history' && history.turns[0]?.text.includes('#12 Ship the PR chat mode'), true);
     ws.close();
+  } finally {
+    await running.close();
+  }
+});
+
+test('Settings mutations persist without storing secrets and reset to defaults', async () => {
+  const running = await createMockControlPlane().listen(0);
+  try {
+    const gateway = await fetch(`${running.baseUrl}/api/settings/gateway`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: false, apiKey: 'must-not-serialize', contextPolicy: { budgetChars: 1_200, tiers: ['L0'] } })
+    });
+    assert.equal(gateway.status, 200);
+
+    const profile = await fetch(`${running.baseUrl}/api/profiles/fixture`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ validation_timeout_seconds: 900 })
+    });
+    assert.equal(profile.status, 200);
+
+    const changed = await fetch(`${running.baseUrl}/api/mock/state`).then((response) => response.json()) as {
+      gateway: { enabled: boolean; apiKeyConfigured: boolean; contextPolicy: { budgetChars?: number } };
+      profiles: { validation_timeout_seconds: number }[];
+    };
+    assert.equal(changed.gateway.enabled, false);
+    assert.equal(changed.gateway.apiKeyConfigured, true);
+    assert.equal(changed.gateway.contextPolicy.budgetChars, 1_200);
+    assert.equal(changed.profiles[0]?.validation_timeout_seconds, 900);
+    assert.equal(JSON.stringify(changed).includes('must-not-serialize'), false);
+
+    await post(running.baseUrl, '/api/mock/reset');
+    const reset = await fetch(`${running.baseUrl}/api/mock/state`).then((response) => response.json()) as typeof changed;
+    assert.equal(reset.gateway.enabled, true);
+    assert.equal(reset.gateway.contextPolicy.budgetChars, 4_000);
+    assert.equal(reset.profiles[0]?.validation_timeout_seconds, 300);
+  } finally {
+    await running.close();
+  }
+});
+
+test('new non-chat mutations return success and persist in memory', async () => {
+  const running = await createMockControlPlane().listen(0);
+  try {
+    const added = await post(running.baseUrl, '/api/profiles', {
+      name: 'added',
+      display_name: 'Added',
+      repo_id: 'added',
+      provider: 'github',
+      repo: 'fixture/added',
+      local_path: '/mock/added',
+      artifact_root: '/mock/artifacts'
+    });
+    assert.equal(added.status, 201);
+    assert.equal((await fetch(`${running.baseUrl}/api/profiles`).then((response) => response.json()) as { name: string }[]).some(({ name }) => name === 'added'), true);
+
+    const patched = await fetch(`${running.baseUrl}/api/profiles/added`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ validation_timeout_seconds: 600 })
+    });
+    assert.equal(patched.status, 200);
+    assert.equal((await fetch(`${running.baseUrl}/api/profiles/added`, { method: 'DELETE' })).status, 200);
+
+    const imported = await post(running.baseUrl, '/api/projects/import', { gitUrl: 'https://github.com/fixture/imported.git' });
+    assert.equal(imported.status, 201);
+    assert.equal((await imported.json() as ProjectImportResult).project.repo, 'fixture/imported');
+
+    assert.equal((await post(running.baseUrl, '/api/loop/stop', { profile: 'fixture' })).status, 200);
+    assert.equal((await post(running.baseUrl, '/api/loop/start', { profile: 'fixture' })).status, 200);
+    assert.equal((await post(running.baseUrl, '/api/config', { current_manager: 'claude' })).status, 200);
+
+    const pullRequest = await post(running.baseUrl, '/api/git/pr', { title: 'Mock pull request' });
+    assert.equal(pullRequest.status, 200);
+    const prs = await fetch(`${running.baseUrl}/api/git/prs`).then((response) => response.json()) as { prs: { title: string }[] };
+    assert.equal(prs.prs[0]?.title, 'Mock pull request');
+
+    assert.equal((await post(running.baseUrl, '/api/manager-chat/issues/start', { profile: 'fixture', issueNumber: 1087 })).status, 201);
+    assert.equal((await post(running.baseUrl, '/api/admin/update')).status, 202);
+  } finally {
+    await running.close();
+  }
+});
+
+test('rest-error rejects every used frontend mutation without changing state', async () => {
+  const running = await createMockControlPlane({ scenario: 'rest-error' }).listen(0);
+  try {
+    for (const { method, path } of frontendApiRoutes().filter(({ method }) => method !== 'GET')) {
+      const failed = await fetch(`${running.baseUrl}${path.replaceAll(':param', 'fixture')}`, {
+        method,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ enabled: false })
+      });
+      assert.equal(failed.status, 503, `${method} ${path}`);
+    }
+    const state = await fetch(`${running.baseUrl}/api/mock/state`).then((response) => response.json()) as {
+      gateway: { enabled: boolean };
+    };
+    assert.equal(state.gateway.enabled, true);
+  } finally {
+    await running.close();
+  }
+});
+
+test('every used frontend API call has a registered mock route', async () => {
+  const running = await createMockControlPlane().listen(0);
+  try {
+    for (const { method, path } of frontendApiRoutes()) {
+      const requestPath = path.replaceAll(':param', 'fixture');
+      const response = await fetch(`${running.baseUrl}${requestPath}`, {
+        method,
+        ...(method === 'GET' ? {} : {
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({})
+        })
+      });
+      assert.notEqual(response.status, 404, `${method} ${path}`);
+    }
   } finally {
     await running.close();
   }
