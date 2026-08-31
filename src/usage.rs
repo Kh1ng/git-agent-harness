@@ -2,7 +2,6 @@ use crate::ledger::summary::GroupQuotaObservation;
 use crate::ledger::{AttemptBehaviorMetrics, LedgerUsage};
 use regex::Regex;
 use serde_json::Value;
-use std::process::Command;
 
 mod vibe;
 pub use vibe::parse_vibe_session_metadata;
@@ -763,17 +762,22 @@ pub fn parse_codex_transcript_attribution(transcript: &str) -> LedgerUsage {
     usage
 }
 
-/// Parse JSON output from `codex status --json`.
+/// Parse the result from Codex app-server's `account/rateLimits/read`.
 /// Extracts rate-limit and quota data (primary/secondary windows, reset
 /// timestamps) into the quota fields of `LedgerUsage`. Returns an empty
 /// (all-`None`) `LedgerUsage` when the payload does not contain a
 /// `rateLimits` object.
-pub fn parse_codex_status_json(output: &str) -> LedgerUsage {
+pub fn parse_codex_rate_limits_json(output: &str) -> LedgerUsage {
     let Ok(root) = serde_json::from_str::<serde_json::Value>(output) else {
         return LedgerUsage::default();
     };
 
-    let Some(rate_limits) = root.get("rateLimits") else {
+    let Some(rate_limits) = root
+        .pointer("/rateLimitsByLimitId/codex")
+        .or_else(|| root.get("rateLimits"))
+        .or_else(|| root.pointer("/result/rateLimitsByLimitId/codex"))
+        .or_else(|| root.pointer("/result/rateLimits"))
+    else {
         return LedgerUsage::default();
     };
 
@@ -811,7 +815,7 @@ pub fn parse_codex_status_json(output: &str) -> LedgerUsage {
     }
 
     if has_data {
-        usage.usage_source = Some("codex_status_json".to_string());
+        usage.usage_source = Some("codex_app_server".to_string());
     }
 
     usage
@@ -858,10 +862,10 @@ fn find_string_after(text: &str, keys: &[&str]) -> Option<String> {
     })
 }
 
-/// #166 (within #151): convert `codex status --json` quota fields into a
+/// #166 (within #151): convert Codex app-server quota fields into a
 /// structured `GroupQuotaObservation`.
 ///
-/// This is the real caller for `parse_codex_status_json` (which previously
+/// This is the real caller for `parse_codex_rate_limits_json` (which previously
 /// had no call site outside its own unit tests). Feeding the account-level
 /// rate-limit data through here — instead of the generic regex scraper — is
 /// exactly the cross-cutting ask in #151: "JSON where the source is JSON --
@@ -869,12 +873,12 @@ fn find_string_after(text: &str, keys: &[&str]) -> Option<String> {
 ///
 /// Returns `None` when the payload carries no rate-limit/quota data (never
 /// fabricates a percentage; an absent quota reading stays unknown).
-pub fn codex_status_to_quota_observation(
+pub fn codex_rate_limits_to_quota_observation(
     output: &str,
     backend: &str,
     model: Option<&str>,
 ) -> Option<GroupQuotaObservation> {
-    let usage = parse_codex_status_json(output);
+    let usage = parse_codex_rate_limits_json(output);
     usage.usage_source.as_ref()?;
     Some(GroupQuotaObservation {
         backend: backend.to_string(),
@@ -892,83 +896,44 @@ pub fn codex_status_to_quota_observation(
     })
 }
 
-/// How long `codex status --json` gets before it's treated as hung and
+/// How long the Codex app-server quota request gets before it's treated as hung and
 /// killed. Issue #761: this call is now reachable from an unattended
 /// background probe (`quota_store::refresh_stale_quota_observations`), not
 /// just the manual `gah quota refresh` CLI command a human can Ctrl-C --
 /// confirmed live, an isolated-HOME test subprocess made this hang
 /// indefinitely with zero prior supervision. A status check is not real
 /// work; this is generous, not tight.
-const CODEX_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const CODEX_QUOTA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// #166 (within #151): run `codex status --json` as a real subprocess and
-/// parse its stdout into a `GroupQuotaObservation`.
+/// #166 (within #151): read account quota through Codex's supported
+/// `account/rateLimits/read` app-server method.
 ///
-/// Returns `Ok(None)` when `codex` is missing, exits non-zero, emits no
-/// rate-limit data, or is killed for running past `CODEX_STATUS_TIMEOUT` --
-/// callers treat all of these as "no account quota observation", never as
-/// a fabricated zero/percentage.
-///
-/// Process-supervised (`prepare_process_group` + `arm_child_pdeathsig`,
-/// same primitives every real backend invocation already uses via
-/// `runner::process::spawn_with_idle_watch`) rather than a bare blocking
-/// `Command::output()`: this now runs unattended from a background thread
-/// nothing joins, so if this process dies while the child is still
-/// running, the kernel -- not any of gah's own Rust code -- is what
-/// guarantees the child doesn't outlive it as an orphan.
+/// Provider/process failures and successful responses without rate-limit data
+/// are errors so the quota snapshot reports `failed` with a useful reason
+/// instead of a bare `no_data` marker.
 pub fn refresh_codex_quota(
     codex_cmd: &str,
     model: Option<&str>,
 ) -> std::io::Result<Option<GroupQuotaObservation>> {
-    let mut cmd = Command::new(codex_cmd);
-    cmd.arg("status")
-        .arg("--json")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    crate::runner::process::prepare_process_group(&mut cmd);
-    crate::runner::process::arm_child_pdeathsig(&mut cmd);
-    let mut child = cmd.spawn()?;
-    let pid = child.id();
-    // See kill_process_group_by_pid's doc comment: arm_child_pdeathsig
-    // above only covers this direct child, not any grandchild it spawns
-    // of its own, so gah loop's shutdown path also needs an explicit,
-    // PID-addressable way to tree-walk-and-kill this specific child --
-    // registered here, not just relied on implicitly.
-    crate::runner::process::register_supervised_child(pid);
-
-    let deadline = std::time::Instant::now() + CODEX_STATUS_TIMEOUT;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if crate::runner::process::shutdown_requested() || std::time::Instant::now() >= deadline {
-            crate::runner::process::kill_process_group(&mut child);
-            crate::runner::process::unregister_supervised_child(pid);
-            return Ok(None);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    crate::runner::process::unregister_supervised_child(pid);
-    if !status.success() {
-        return Ok(None);
-    }
-    let mut stdout = String::new();
-    if let Some(mut handle) = child.stdout.take() {
-        use std::io::Read;
-        let _ = handle.read_to_string(&mut stdout);
-    }
-    Ok(codex_status_to_quota_observation(&stdout, "codex", model))
+    let response = crate::manager::codex::read_account_rate_limits(
+        std::path::Path::new(codex_cmd),
+        CODEX_QUOTA_TIMEOUT,
+    )
+    .map_err(std::io::Error::other)?;
+    let output = serde_json::to_string(&response).map_err(std::io::Error::other)?;
+    codex_rate_limits_to_quota_observation(&output, "codex", model)
+        .map(Some)
+        .ok_or_else(|| std::io::Error::other("Codex app-server returned no rate-limit data"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::codex_status_to_quota_observation;
+    use super::codex_rate_limits_to_quota_observation;
     use super::extract_agy_output_summary;
     use super::parse_agy_cli_log_delta;
     use super::parse_agy_output_json;
     use super::parse_codex_exec_json;
-    use super::parse_codex_status_json;
+    use super::parse_codex_rate_limits_json;
     use super::parse_codex_transcript_attribution;
     use super::parse_generic_usage;
     use super::parse_opencode_session_metadata;
@@ -1076,13 +1041,13 @@ mod tests {
         assert_eq!(parse_codex_exec_json("\n\n").usage_source, None);
     }
 
-    // ── codex status --json (Issue #152) ─────────────────────────────────
+    // ── Codex app-server quota (Issue #152) ──────────────────────────────
 
-    const CODEX_STATUS_JSON: &str = include_str!("../tests/fixtures/codex-status-json.json");
+    const CODEX_RATE_LIMITS_JSON: &str = include_str!("../tests/fixtures/codex-status-json.json");
 
     #[test]
-    fn codex_status_json_extracts_quota_fields() {
-        let usage = parse_codex_status_json(CODEX_STATUS_JSON);
+    fn codex_rate_limits_json_extracts_quota_fields() {
+        let usage = parse_codex_rate_limits_json(CODEX_RATE_LIMITS_JSON);
         assert_eq!(usage.quota_used_percent, Some(25.0));
         // Must be the complement of quota_used_percent for the SAME
         // (primary) window, not a mix-in of secondary's usedPercent.
@@ -1090,38 +1055,48 @@ mod tests {
         assert_eq!(usage.quota_window.as_deref(), Some("300m"));
         // 1777534802 -> 2026-04-29-ish (UTC)
         assert!(usage.quota_reset_at.is_some());
-        assert_eq!(usage.usage_source.as_deref(), Some("codex_status_json"));
+        assert_eq!(usage.usage_source.as_deref(), Some("codex_app_server"));
     }
 
     #[test]
-    fn codex_status_json_returns_empty_for_non_json_input() {
-        let usage = parse_codex_status_json("not json at all");
+    fn codex_app_server_response_prefers_the_named_codex_limit() {
+        let usage = parse_codex_rate_limits_json(
+            r#"{"rateLimits":{"primary":{"usedPercent":80,"windowDurationMins":300}},"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":7,"windowDurationMins":10080}},"codex_bengalfox":{"primary":{"usedPercent":99,"windowDurationMins":300}}}}"#,
+        );
+        assert_eq!(usage.quota_used_percent, Some(7.0));
+        assert_eq!(usage.quota_remaining_percent, Some(93.0));
+        assert_eq!(usage.quota_window.as_deref(), Some("10080m"));
+    }
+
+    #[test]
+    fn codex_rate_limits_json_returns_empty_for_non_json_input() {
+        let usage = parse_codex_rate_limits_json("not json at all");
         assert_eq!(usage.usage_source, None);
     }
 
     #[test]
-    fn codex_status_json_returns_empty_for_missing_rate_limits() {
-        let usage = parse_codex_status_json(r#"{"some":"data"}"#);
+    fn codex_rate_limits_json_returns_empty_for_missing_rate_limits() {
+        let usage = parse_codex_rate_limits_json(r#"{"some":"data"}"#);
         assert_eq!(usage.usage_source, None);
     }
 
     #[test]
-    fn codex_status_to_quota_observation_maps_quota_fields() {
-        // Real caller for parse_codex_status_json (was #[allow(dead_code)]).
-        let obs = codex_status_to_quota_observation(CODEX_STATUS_JSON, "codex", Some("gpt-5"))
-            .expect("must produce an observation when rate-limit data exists");
+    fn codex_rate_limits_to_quota_observation_maps_quota_fields() {
+        let obs =
+            codex_rate_limits_to_quota_observation(CODEX_RATE_LIMITS_JSON, "codex", Some("gpt-5"))
+                .expect("must produce an observation when rate-limit data exists");
         assert_eq!(obs.backend, "codex");
         assert_eq!(obs.model.as_deref(), Some("gpt-5"));
         assert_eq!(obs.quota_used_percent, Some(25.0));
         assert_eq!(obs.quota_remaining_percent, Some(75.0));
         assert_eq!(obs.quota_window.as_deref(), Some("300m"));
-        assert_eq!(obs.usage_source.as_deref(), Some("codex_status_json"));
+        assert_eq!(obs.usage_source.as_deref(), Some("codex_app_server"));
         assert!(obs.observed_at.is_some());
     }
 
     #[test]
-    fn codex_status_to_quota_observation_is_none_without_data() {
-        let obs = codex_status_to_quota_observation(r#"{"some":"data"}"#, "codex", None);
+    fn codex_rate_limits_to_quota_observation_is_none_without_data() {
+        let obs = codex_rate_limits_to_quota_observation(r#"{"some":"data"}"#, "codex", None);
         assert!(obs.is_none());
     }
 

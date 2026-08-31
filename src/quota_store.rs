@@ -3,7 +3,7 @@
 //! Per-attempt usage (tokens, per-attempt cost) is already recorded in the
 //! ledger via `usage.rs`'s structured parsers. This module holds the separate
 //! *account-level* quota picture that only surfaces through a backend's own
-//! status/quota endpoint — e.g. `codex status --json` — which is not part
+//! status/quota endpoint — e.g. Codex app-server rate limits — which is not part
 //! of any single attempt's log.
 //!
 //! The store mirrors `availability.rs`'s design philosophy: append-only JSONL
@@ -238,17 +238,16 @@ fn has_quota_data(record: &QuotaObservationRecord) -> bool {
         || record.quota_reset_at.is_some()
 }
 
-/// #166: run `codex status --json`, parse its account-level quota, and append
+/// #166: read Codex app-server account-level quota and append
 /// the result to the durable store. Returns the stored record when Codex
-/// reported quota data, `Ok(None)` when it reported nothing (or `codex` is
-/// unavailable), and an error only when the subprocess itself failed to spawn.
+/// reported quota data and an error when the request fails or has no quota data.
 pub fn refresh_codex_and_store(
     codex_cmd: &str,
     model: Option<&str>,
     state_path: &Path,
 ) -> Result<Option<QuotaObservationRecord>> {
     let obs = crate::usage::refresh_codex_quota(codex_cmd, model)
-        .map_err(|e| anyhow::anyhow!("`codex status --json` failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Codex app-server quota check failed: {e}"))?;
     match obs {
         Some(obs) => {
             let rec = QuotaObservationRecord {
@@ -278,8 +277,8 @@ pub fn refresh_codex_and_store(
 /// spend-limit reading -- the only piece of that refresh that collapses
 /// into this store's (backend, model) -> quota-percent shape; aggregate
 /// token/billing figures have no durable sink of their own yet. Returns
-/// `Ok(None)` only when `MISTRAL_ADMIN_API_KEY` is unset or the Admin API
-/// yielded no persisted observation at all; partial aggregate data still
+/// Missing credentials are an `auth_required` error. `Ok(None)` means the
+/// Admin API yielded no persisted observation at all; partial aggregate data still
 /// gets stored and returned as `Some(...)` so callers can distinguish
 /// "nothing recorded" from "no spend-limit reading, but other admin data was
 /// captured."
@@ -287,9 +286,8 @@ pub fn refresh_vibe_admin_and_store(
     model: Option<&str>,
     state_path: &Path,
 ) -> Result<Option<QuotaObservationRecord>> {
-    let Some(api_key) = crate::usage::admin_api_key() else {
-        return Ok(None);
-    };
+    let api_key = crate::usage::admin_api_key()
+        .ok_or_else(|| anyhow::anyhow!("auth_required: MISTRAL_ADMIN_API_KEY is not configured"))?;
     let end_time = time::OffsetDateTime::now_utc().unix_timestamp();
     let thirty_days_secs = 30 * 24 * 60 * 60;
     let refresh = crate::usage::refresh_admin_data(
@@ -314,12 +312,15 @@ pub fn refresh_vibe_admin_and_store(
                     .format(&time::format_description::well_known::Rfc3339)
                     .ok(),
                 checked_at: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
-                check_error: None,
+                check_error: refresh.spend_limit_error,
                 usage_source: Some("mistral_admin_refresh".to_string()),
                 mistral_admin: Some(admin_refresh),
             };
             append(state_path, &rec)?;
             return Ok(Some(rec));
+        }
+        if let Some(error) = refresh.spend_limit_error {
+            anyhow::bail!(error);
         }
         return Ok(None);
     };
@@ -350,7 +351,7 @@ pub fn refresh_codex_and_store_for_identity(
 ) -> Result<Option<QuotaObservationRecord>> {
     let observation =
         crate::usage::refresh_codex_quota(codex_cmd, identity.effective_model.as_deref())
-            .map_err(|error| anyhow::anyhow!("`codex status --json` failed: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("Codex app-server quota check failed: {error}"))?;
     let Some(observation) = observation else {
         return Ok(None);
     };
@@ -378,7 +379,7 @@ pub fn refresh_codex_and_store_for_identity(
 /// went stale for days even while dispatch itself was active. Called once
 /// per `gah loop` tick (see `controller::runtime::run_once`), throttled to
 /// `QUOTA_REFRESH_INTERVAL_SECONDS` per backend so this can't hammer either
-/// endpoint: codex's own `codex status --json` is a local CLI call, but
+/// endpoint: Codex's app-server is a local CLI call, but
 /// vibe's is a real network call against the Mistral Admin API with its own
 /// rate limits. Best-effort: a refresh failure (backend not installed, no
 /// `MISTRAL_ADMIN_API_KEY`) must not fail the loop tick, so errors are
@@ -419,7 +420,7 @@ pub fn refresh_stale_quota_observations(
 /// refresh threads (same throttle/supervision as
 /// `refresh_stale_quota_observations`) and JOINS them, so the oneshot
 /// process does not exit and kill the threads mid-refresh. Each backend
-/// refresh is independently bounded (codex status timeout / curl
+/// refresh is independently bounded (Codex app-server timeout / curl
 /// `--max-time`), so joining is bounded. Returns how many backends were
 /// actually refreshed (0 = nothing was due).
 pub fn refresh_quota_observations_and_wait(
@@ -440,28 +441,10 @@ pub fn refresh_quota_observations_and_wait(
 /// doc comment on `refresh_stale_quota_observations`.
 const QUOTA_REFRESH_INTERVAL_SECONDS: i64 = 30 * 60;
 
-/// `refresh_codex_and_store`/`refresh_vibe_admin_and_store` shell out to a
-/// real CLI/HTTP endpoint with zero supervision of their own (unlike every
-/// dispatch-path backend invocation, which goes through
-/// `runner::process::spawn_with_idle_watch` for exactly this reason -- see
-/// #87/#170). That was an acceptable risk for the previous, sole caller (a
-/// human running `gah quota refresh` who can just Ctrl-C a hang); it is
-/// not acceptable on this function's *new* caller, the automatic,
-/// unattended `gah loop` tick -- confirmed live, an isolated-HOME test
-/// subprocess made `codex status --json` hang (this codebase's
-/// idle-watch precedent exists for exactly this failure class). A bounded
-/// `recv_timeout` on the calling thread was tried first and rejected: the
-/// controller tick still has to wait out the full timeout before giving
-/// up, which is just as damaging to tick latency as the hang itself.
-/// Instead this is genuinely fire-and-forget -- the refresh runs on a
-/// detached thread the tick never waits on, and `IN_FLIGHT` below is the
-/// only thing standing between a persistently-hanging backend and an
-/// unbounded pile-up of abandoned threads across ticks (at most one
-/// outstanding attempt per backend per process, however long it takes to
-/// finally return). Fixed here rather than by adding real idle-watch
-/// supervision to `usage.rs`'s refresh functions, since those are shared
-/// with the manual CLI command and changing their blocking behavior there
-/// is a separate, larger question this fix doesn't need to answer.
+/// Refreshes run on detached threads so a provider check never delays a loop
+/// tick. Each provider call is bounded, and `IN_FLIGHT` prevents overlapping
+/// checks for the same backend. Codex app-server children are also registered
+/// with the runner shutdown path so a graceful stop kills them promptly.
 static IN_FLIGHT: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
     std::sync::Mutex::new(None);
 
@@ -727,11 +710,16 @@ mod tests {
     }
 
     #[test]
-    fn refresh_vibe_admin_and_store_returns_none_without_api_key() {
+    fn refresh_vibe_admin_and_store_reports_auth_required_without_api_key() {
         let _key_guard = crate::test_support::MistralAdminKeyEnvGuard::unset();
         let (_dir, path) = tmp_store();
 
-        assert!(refresh_vibe_admin_and_store(None, &path).unwrap().is_none());
+        assert_eq!(
+            refresh_vibe_admin_and_store(None, &path)
+                .unwrap_err()
+                .to_string(),
+            "auth_required: MISTRAL_ADMIN_API_KEY is not configured"
+        );
         assert!(load(&path).unwrap().is_empty());
     }
 

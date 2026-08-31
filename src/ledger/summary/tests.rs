@@ -765,7 +765,7 @@ fn account_quota_merges_into_backend_group_only() {
         observed_at: Some("2026-07-10T00:00:00Z".to_string()),
         checked_at: None,
         check_error: None,
-        usage_source: Some("codex status --json".to_string()),
+        usage_source: Some("codex_app_server".to_string()),
         mistral_admin: None,
     };
     let observations = vec![account];

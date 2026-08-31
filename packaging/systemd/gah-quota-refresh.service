@@ -1,6 +1,6 @@
 # gah-quota-refresh.service
 #
-# Issue #761: account-level quota (codex status / Mistral Admin API) is
+# Issue #761: account-level quota (Codex app-server / Mistral Admin API) is
 # refreshed on a timer so the Quota/Telemetry pages show genuinely-recent
 # data instead of "stale N days ago" -- previously the only mechanism was a
 # human running `gah quota refresh` by hand, so quota_observations.jsonl
@@ -8,7 +8,7 @@
 #
 # Runs `gah quota auto-refresh`, which iterates every configured profile's
 # quota-tracked backends, applies the per-backend 30-minute throttle, and
-# runs each due refresh to completion (bounded by the codex status timeout
+# runs each due refresh to completion (bounded by the Codex app-server timeout
 # and curl --max-time) before exiting -- safe for a systemd oneshot unit.
 #
 # `gah update` installs this service + the paired timer and enables the
