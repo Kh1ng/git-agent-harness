@@ -1013,6 +1013,188 @@ fn dispatch_fix_shutdown_after_backend_exit_preserves_completed_worktree_and_ski
 }
 
 #[test]
+fn dispatch_fix_sigterm_checkpoint_resumes_exact_files_on_next_invocation() {
+    let tmp = test_tempdir();
+    let expected_tracked = tmp.path().join("expected-tracked");
+    let expected_untracked = tmp.path().join("expected-untracked");
+    let validation_marker = tmp.path().join("validation-passed");
+    fs::write(&expected_tracked, "tracked checkpoint content\n").unwrap();
+    fs::write(&expected_untracked, "untracked checkpoint content\n").unwrap();
+
+    let (repo, home, cfg) =
+        setup_fix_dispatch_repo(&tmp, "validation_commands = [\"validate-resume\"]\n");
+    let ledger_path = tmp.path().join("ledger.jsonl");
+    let counter = tmp.path().join("codex-call-count");
+    let ready = tmp.path().join("backend-ready");
+    let block_fifo = tmp.path().join("backend-block");
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    assert!(ProcessCommand::new("mkfifo")
+        .arg(&block_fifo)
+        .status()
+        .unwrap()
+        .success());
+
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        &format!(
+            r#"#!/bin/sh
+n=$( [ -f '{counter}' ] && cat '{counter}' || echo 0 )
+n=$((n+1))
+printf '%s\n' "$n" > '{counter}'
+if [ "$n" -eq 1 ]; then
+  cp '{expected_tracked}' README.md
+  cp '{expected_untracked}' resume.txt
+  touch '{ready}'
+  read _ < '{block_fifo}'
+  exit 97
+fi
+cmp -s README.md '{expected_tracked}' || exit 19
+cmp -s resume.txt '{expected_untracked}' || exit 20
+printf 'completed\n' > resume-completed.txt
+exit 0
+"#,
+            counter = counter.display(),
+            expected_tracked = expected_tracked.display(),
+            expected_untracked = expected_untracked.display(),
+            ready = ready.display(),
+            block_fifo = block_fifo.display(),
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "validate-resume",
+        &format!(
+            "#!/bin/sh\ncmp -s README.md '{}' && cmp -s resume.txt '{}' && [ \"$(cat resume-completed.txt 2>/dev/null)\" = completed ] && touch '{}'\n",
+            expected_tracked.display(),
+            expected_untracked.display(),
+            validation_marker.display(),
+        ),
+    );
+    make_fake_bin_with_body(
+        &fake_bin,
+        "gh",
+        r###"#!/bin/sh
+case "$1 $2 $3 $4" in
+  "api --method GET repos/owner/real/issues/909") printf '{"number":909,"title":"Resume checkpoint integration","body":"Acceptance criteria","labels":[{"name":"exec:autonomous"}],"user":{"login":"owner","type":"User"},"state":"open"}\n' ;;
+  "pr list"*) printf '[]\n' ;;
+  "pr create"*) printf 'https://github.com/owner/real/pull/1\n' ;;
+  *) exit 0 ;;
+esac
+"###,
+    );
+
+    let dispatch_args = [
+        "dispatch",
+        "--profile",
+        "real",
+        "--mode",
+        "fix",
+        "--config-path",
+        cfg.to_str().unwrap(),
+        "--target",
+        "#909",
+        "--retries",
+        "0",
+        "--skip-validation-gate",
+        "--issue-intake-override",
+        "--allow-unknown-red-baseline",
+    ];
+    let dispatch_path = prepend_path(&fake_bin);
+
+    let mut first = spawn_bin()
+        .args(dispatch_args)
+        .env("PATH", &dispatch_path)
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !ready.exists() {
+        if let Some(status) = first.try_wait().unwrap() {
+            let output = first.wait_with_output().unwrap();
+            panic!(
+                "first dispatch exited before backend readiness: {status:?}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(Instant::now() < deadline, "backend did not become ready");
+        thread::sleep(Duration::from_millis(20));
+    }
+    send_signal(first.id(), libc::SIGTERM);
+    let first_output = first.wait_with_output().unwrap();
+    assert!(!first_output.status.success());
+
+    let first_entry: Value = serde_json::from_str(
+        fs::read_to_string(&ledger_path)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(first_entry["work_id"], "#909");
+    assert!(first_entry["resumable_checkpoint_branch"].is_string());
+    assert!(first_entry["resumable_checkpoint_sha"].is_string());
+    assert!(first_entry["attempts"][0]["checkpoint_branch"].is_string());
+    assert!(first_entry["attempts"][0]["checkpoint_sha"].is_string());
+
+    let first_session = latest_child_dir(&tmp.path().join("artifacts/real/sessions"));
+    let recovery: Value = serde_json::from_str(
+        &fs::read_to_string(first_session.join("attempt-1/shutdown-recovery.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recovery["source_work_id"], "#909");
+    assert_eq!(recovery["checkpointed"], true);
+
+    let second = bin()
+        .args(dispatch_args)
+        .env("PATH", &dispatch_path)
+        .env("HOME", &home)
+        .env("GITHUB_TOKEN", "token")
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let second_stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(
+        second_stdout.contains("Resuming from checkpoint"),
+        "second dispatch did not select the checkpoint automatically:\n{second_stdout}"
+    );
+    assert_eq!(fs::read_to_string(&counter).unwrap().trim(), "2");
+    assert!(
+        validation_marker.exists(),
+        "validation did not see both files"
+    );
+
+    let ledger_text = fs::read_to_string(&ledger_path).unwrap();
+    let second_entry: Value = serde_json::from_str(ledger_text.lines().nth(1).unwrap()).unwrap();
+    assert_eq!(second_entry["work_id"], "#909");
+    assert_eq!(second_entry["validation_result"], "passed");
+
+    let branch = second_entry["branch"].as_str().unwrap();
+    let tracked = ProcessCommand::new("git")
+        .args(["show", &format!("{branch}:README.md")])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let untracked = ProcessCommand::new("git")
+        .args(["show", &format!("{branch}:resume.txt")])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert_eq!(tracked.stdout, fs::read(expected_tracked).unwrap());
+    assert_eq!(untracked.stdout, fs::read(expected_untracked).unwrap());
+}
+
+#[test]
 fn dispatch_fix_escalate_flag_picks_stronger_backend_on_first_attempt() {
     let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, "validation_commands = [\"true\"]\n");

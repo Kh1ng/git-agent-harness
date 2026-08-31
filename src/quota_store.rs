@@ -623,7 +623,10 @@ mod tests {
         maybe_refresh_backend(&path, "test-refresh-again", now, move || {
             first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(None)
-        });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
         assert!(wait_for_backend_record(&path, "test-refresh-again"));
 
         let second = calls.clone();
@@ -635,14 +638,10 @@ mod tests {
                 second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(None)
             },
-        );
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while calls.load(std::sync::atomic::Ordering::SeqCst) < 2
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        )
+        .unwrap()
+        .join()
+        .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 

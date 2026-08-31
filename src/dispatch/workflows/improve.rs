@@ -163,6 +163,7 @@ pub(crate) fn improve(
     } else {
         format!("gah/{}-{}", profile.repo_id, ts)
     };
+    apply_manual_fix_context_to_ledger(ledger, ticket_meta.as_ref(), &branch, &manual_fix);
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
     let repo = Path::new(&profile.local_path);
     ensure_dispatch_capacity(profile, &worktree_base)?;
@@ -246,7 +247,6 @@ pub(crate) fn improve(
         None
     };
     ledger.branch = Some(branch.clone());
-    apply_manual_fix_context_to_ledger(ledger, ticket_meta.as_ref(), &branch, &manual_fix);
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
     let conflict_session = conflict_resolution::ConflictSession::prepare(
