@@ -146,6 +146,7 @@ test('toContextUsage hides absent, non-finite, or out-of-range usage_update data
   assert.equal(toContextUsage({ used: 10, size: Infinity }), null);
   assert.equal(toContextUsage({ used: -1, size: 131072 }), null);
   assert.equal(toContextUsage({ used: 10, size: 0 }), null);
+  assert.equal(toContextUsage({ used: 131073, size: 131072 }), null);
 });
 
 test('normalizeRemoteUrl collapses https/ssh/scp variants of the same remote', () => {

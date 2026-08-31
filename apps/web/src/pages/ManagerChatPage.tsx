@@ -305,8 +305,11 @@ export function ManagerChatPage() {
   // the header.
   useAutoRefresh(() => {
     if (activeSession) return;
+    const requestedProfile = profile;
     gahApi.getManagerChatModels(profile)
-      .then(({ contextUsage: usage }) => setContextUsage(usage ?? null))
+      .then(({ contextUsage: usage }) => {
+        if (activeProfileRef.current === requestedProfile) setContextUsage(usage ?? null);
+      })
       .catch(() => {});
   }, 5_000);
 
@@ -401,6 +404,7 @@ export function ManagerChatPage() {
     setCurrentModelId(null);
     setReasoningEfforts([]);
     setCurrentReasoningEffortId(null);
+    setContextUsage(null);
     setModelsLoaded(false);
     setModelChanging(false);
     gahApi
@@ -1039,7 +1043,7 @@ export function ManagerChatPage() {
             : `${activeBackendLabel}${activeBackendUnavailable ? ' (unavailable)' : ''}`
         }`}
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {/* Profile-wide pickers for the default conversation; a session
                 carries its own backend/model in the session bar below. */}
             {!activeSession && availableBackends.length > 0 && (
@@ -1096,7 +1100,7 @@ export function ManagerChatPage() {
             {!activeSession && contextUsage && (
               <span
                 aria-label="Context usage"
-                className="rounded-md border border-subtle bg-raised px-2 py-1.5 text-[11px] text-muted"
+                className="rounded-md border border-subtle bg-raised px-2 py-1.5 text-[11px] tabular-nums text-muted"
                 title={`${contextUsage.used.toLocaleString()} / ${contextUsage.size.toLocaleString()} tokens in context`}
               >
                 {Math.round((contextUsage.used / contextUsage.size) * 100)}% context

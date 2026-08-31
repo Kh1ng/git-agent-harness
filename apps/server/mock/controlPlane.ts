@@ -540,7 +540,8 @@ function modelSummary(state: MockState, backend: string): ManagerModelsSummary {
       models: [],
       currentModelId: null,
       reasoningEfforts: [],
-      currentReasoningEffortId: null
+      currentReasoningEffortId: null,
+      contextUsage: backend === 'hermes' ? { size: 131_072, used: 12_594 } : null
     } satisfies ManagerModelsSummary;
   }
 
@@ -555,7 +556,8 @@ function modelSummary(state: MockState, backend: string): ManagerModelsSummary {
         { id: 'standard', name: 'Standard' },
         { id: 'extended', name: 'Extended' }
       ],
-      currentReasoningEffortId: state.selectedEfforts.claude ?? 'standard'
+      currentReasoningEffortId: state.selectedEfforts.claude ?? 'standard',
+      contextUsage: null
     } satisfies ManagerModelsSummary;
   }
 
@@ -567,7 +569,8 @@ function modelSummary(state: MockState, backend: string): ManagerModelsSummary {
       ],
       currentModelId: state.selectedModels.opencode ?? 'openai/gpt-5.2',
       reasoningEfforts: [{ id: 'high', name: 'High' }],
-      currentReasoningEffortId: state.selectedEfforts.opencode ?? 'high'
+      currentReasoningEffortId: state.selectedEfforts.opencode ?? 'high',
+      contextUsage: null
     } satisfies ManagerModelsSummary;
   }
 
@@ -582,7 +585,8 @@ function modelSummary(state: MockState, backend: string): ManagerModelsSummary {
       { id: 'medium', name: 'Medium' },
       { id: 'xhigh', name: 'Extra high' }
     ],
-    currentReasoningEffortId: state.selectedEfforts.codex ?? 'medium'
+    currentReasoningEffortId: state.selectedEfforts.codex ?? 'medium',
+    contextUsage: null
   } satisfies ManagerModelsSummary;
 }
 

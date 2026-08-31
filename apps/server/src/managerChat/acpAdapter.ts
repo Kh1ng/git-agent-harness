@@ -185,12 +185,12 @@ function counterDelta(current: number, previous: number | undefined): number {
 }
 
 /** Validates the raw usage_update payload before it reaches the UI
- * (issue #865): a backend sending a non-finite or negative size/used would
- * otherwise render a nonsensical context meter. */
+ * (issue #865): invalid occupancy would otherwise render a nonsensical
+ * context meter. */
 export function toContextUsage(update: acp.UsageUpdate | null): { size: number; used: number } | null {
   if (!update) return null;
   const { size, used } = update;
-  if (!Number.isFinite(size) || !Number.isFinite(used) || size <= 0 || used < 0) return null;
+  if (!Number.isFinite(size) || !Number.isFinite(used) || size <= 0 || used < 0 || used > size) return null;
   return { size, used };
 }
 
