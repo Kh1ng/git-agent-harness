@@ -67,6 +67,12 @@ The two candidates remain separate routing, concurrency, availability, quota,
 ledger, and telemetry destinations even though runner, logical backend, and
 model are identical. The instance name is the durable destination key.
 
+Skill bindings use the same destination key. An instance binding takes
+precedence over its logical backend binding, and a project instance override
+takes precedence over both canonical sets. Bindings live in the central skill
+bank rather than TOML so chat and autonomous dispatch resolve the same
+versioned skill set.
+
 A local backend uses the same schema and no billing classification:
 
 ```toml

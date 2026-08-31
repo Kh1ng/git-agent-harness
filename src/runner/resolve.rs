@@ -148,6 +148,32 @@ pub fn filtered_backend_args(backend: &str, extra_args: &[String]) -> Vec<String
     filtered
 }
 
+pub fn filtered_configured_backend_args(backend: &str, extra_args: &[String]) -> Vec<String> {
+    if !matches!(backend, "hermes" | "openhands") {
+        return filtered_backend_args(backend, extra_args);
+    }
+    let mut filtered = Vec::with_capacity(extra_args.len());
+    let mut i = 0;
+    while i < extra_args.len() {
+        let arg = &extra_args[i];
+        if arg == "--skills" {
+            eprintln!(
+                "gah: ignoring deprecated {backend}_args --skills; bind skills through the central GAH skill bank"
+            );
+            i += 2;
+        } else if arg.starts_with("--skills=") {
+            eprintln!(
+                "gah: ignoring deprecated {backend}_args --skills; bind skills through the central GAH skill bank"
+            );
+            i += 1;
+        } else {
+            filtered.push(arg.clone());
+            i += 1;
+        }
+    }
+    filtered_backend_args(backend, &filtered)
+}
+
 pub fn extract_model_from_args(args: &[String]) -> Option<String> {
     let mut i = 0;
     while i < args.len() {
@@ -377,6 +403,16 @@ mod tests {
                 "json".to_string()
             ]
         );
+
+        let filtered = filtered_configured_backend_args(
+            "hermes",
+            &[
+                "--skills".to_string(),
+                "legacy-skill".to_string(),
+                "--trace".to_string(),
+            ],
+        );
+        assert_eq!(filtered, vec!["--trace".to_string()]);
     }
 
     #[test]

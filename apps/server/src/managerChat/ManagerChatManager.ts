@@ -44,8 +44,9 @@ import {
 import { previewProxy, detectDevPort } from './previewProxy.js';
 import { runProfileList } from '../gahCli.js';
 import { randomUUID } from 'node:crypto';
-import type { ChatSessionEvent, ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
+import type { ChatSessionEvent, ChatTranscriptTurn, ChatUsage, Skill } from '@git-agent-harness/contracts';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
+import { resolveSkillBindings } from '../skillBank.js';
 
 // Serializes turns per profile -- without this, two concurrent messages for
 // the same profile (e.g. two open browser tabs) would both prompt the same
@@ -425,6 +426,20 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export function applyBoundSkills(prompt: string, skills: Skill[]): string {
+  if (skills.length === 0) return prompt;
+  const currentRequestMarker = '\nCurrentUserRequest: ';
+  const markerIndex = prompt.includes('\nRecalledMemoryUntrusted: ')
+    ? prompt.indexOf(currentRequestMarker)
+    : -1;
+  const requestStart = markerIndex < 0 ? 0 : markerIndex + currentRequestMarker.length;
+  const instructions = skills
+    .map((skill) => `## ${skill.id}@${skill.version}\n${skill.content.trim()}`)
+    .join('\n\n');
+  const injected = `# Bound project skills\nThese are trusted project instructions from the central GAH skill bank.\n\n${instructions}\n\n# Current request\n${prompt.slice(requestStart)}`;
+  return `${prompt.slice(0, requestStart)}${injected}`;
+}
+
 /** Pure handoff orchestration (#962), factored out so unit tests can drive
  * it with mock attempt functions instead of real backend processes. */
 export interface HandoffAttemptInput {
@@ -529,8 +544,33 @@ export async function runTurn(
         const ownBackend = backendId === context.backend;
         const model = ownBackend ? context.model : undefined;
         const reasoningEffort = ownBackend ? context.reasoningEffort : undefined;
+        const binding = isSlashCommand
+          ? { source: 'canonical' as const, skills: [] }
+          : resolveSkillBindings(profile, backendId);
+        const attemptPrompt = applyBoundSkills(prompt, binding.skills);
+        if (!isSlashCommand) {
+          active.chunkWriter?.append({
+            type: 'skills/applied',
+            seq: ++active.seq,
+            turn: active.turnNo,
+            backend: backendId,
+            source: binding.source,
+            skills: binding.skills.map((skill) => ({ id: skill.id, version: skill.version })),
+            timestamp: Date.now()
+          });
+          if (attemptPrompt !== prompt) {
+            active.chunkWriter?.append({
+              type: 'user/message',
+              seq: ++active.seq,
+              turn: active.turnNo,
+              text: attemptPrompt,
+              source: 'inject',
+              timestamp: Date.now()
+            });
+          }
+        }
         const r = await adapter.runTurn(context.key, {
-          prompt,
+          prompt: attemptPrompt,
           history,
           onChunk,
           onToolResult,

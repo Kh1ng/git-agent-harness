@@ -1237,6 +1237,9 @@ export interface SkillBankFile {
   /** skillId -> human-readable binding labels (e.g. 'hermes' or
    * 'hermes:gah'). A skill with bindings cannot be deleted. */
   bindings: Record<string, string[]>;
+  /** Binding labels that declare a set explicitly. This preserves empty
+   * project overrides and distinguishes absent canonical instance sets. */
+  bindingOverrides: string[];
 }
 
 export interface SkillSummary {
@@ -1248,6 +1251,32 @@ export interface SkillSummary {
   source: string;
   /** True when this skill has live bindings (deletion would be refused). */
   bound: boolean;
+}
+
+export interface SkillBindingSummary {
+  profile: string;
+  backend: string;
+  instance: string | null;
+  source: 'canonical' | 'profile';
+  supported: boolean;
+  selectedIds: string[];
+  observedSkills: { id: string; version: string }[] | null;
+  skills: SkillSummary[];
+}
+
+export interface SkillBindingUpdate {
+  profile: string;
+  backend: string;
+  instance?: string | null;
+  skillIds: string[];
+}
+
+export interface SkillResolution {
+  profile: string;
+  backend: string;
+  instance: string | null;
+  source: 'canonical' | 'profile';
+  skills: Skill[];
 }
 
 // ---------------------------------------------------------------------------

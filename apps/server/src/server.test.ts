@@ -301,6 +301,31 @@ test('skill bank API stores versions, resolves newest, and refuses deletion of a
       assert.equal(v1.content, 'v1');
       assert.equal((await fetch(`${baseUrl}/api/skills/nope`)).status, 404);
 
+      const inherited = (await (await fetch(`${baseUrl}/api/skills/bindings?profile=alpha&backend=hermes`)).json()) as {
+        source: string;
+        selectedIds: string[];
+      };
+      assert.equal(inherited.source, 'canonical');
+      assert.deepEqual(inherited.selectedIds, ['gah-manager']);
+
+      const override = await fetch(`${baseUrl}/api/skills/bindings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile: 'alpha', backend: 'hermes', skillIds: ['alpha'] })
+      });
+      assert.equal(override.status, 200);
+      const resolved = (await (await fetch(`${baseUrl}/api/skills/resolve?profile=alpha&backend=hermes`)).json()) as {
+        source: string;
+        skills: Array<{ id: string; version: string; content: string }>;
+      };
+      assert.equal(resolved.source, 'profile');
+      assert.deepEqual(resolved.skills.map(({ id, version }) => `${id}@${version}`), ['alpha@2.0.0']);
+      assert.equal(resolved.skills[0]?.content, 'v2');
+
+      const inherit = await fetch(`${baseUrl}/api/skills/bindings?profile=alpha&backend=hermes`, { method: 'DELETE' });
+      assert.equal(inherit.status, 200);
+      assert.deepEqual(((await inherit.json()) as { selectedIds: string[] }).selectedIds, ['gah-manager']);
+
       // AC7: deleting a skill that is bound is refused, naming the bindings.
       const { addBinding } = await import('./skillBank.js');
       addBinding('alpha', 'hermes:gah');

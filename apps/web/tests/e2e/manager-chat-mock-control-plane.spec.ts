@@ -79,6 +79,24 @@ test('shared mock streams multiple chunks, tool activity, and completion', async
   await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0);
 });
 
+test('project skills inherit, override, and restore from chat', async ({ page, request }) => {
+  await selectScenario(request, 'normal');
+  await openChat(page);
+
+  const trigger = page.getByLabel('Project skills');
+  await expect(trigger).toContainText('Skills · 1');
+  await trigger.click();
+  await expect(page.getByText('Inherited default · codex')).toBeVisible();
+  await expect(page.getByText('Matches the latest applied turn.')).toBeVisible();
+  await page.getByRole('checkbox').uncheck();
+  await expect(trigger).toContainText('Skills · 0');
+  await expect(page.getByText('Project override · codex')).toBeVisible();
+  await expect(page.getByText('Changed since the latest applied turn. The next turn uses this selection.')).toBeVisible();
+  await page.getByRole('button', { name: 'Use default' }).click();
+  await expect(trigger).toContainText('Skills · 1');
+  await expect(page.getByText('Inherited default · codex')).toBeVisible();
+});
+
 test('streaming resumes after the mock drops and restores the real socket', async ({ page, request }) => {
   test.setTimeout(25_000);
   await selectScenario(request, 'reconnect-stream');

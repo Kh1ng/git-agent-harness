@@ -245,7 +245,11 @@ mod tests {
         let f = fixture();
         make_recording_bin(&f.bin_dir, "hermes", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
-        let extra_args = vec!["--skills".to_string(), "gah-manager".to_string()];
+        let extra_args = vec![
+            "--custom-flag".to_string(),
+            "--skills".to_string(),
+            "review".to_string(),
+        ];
 
         let ctx = RunContext {
             executable: Path::new("hermes"),
@@ -270,7 +274,8 @@ mod tests {
         assert!(argv.contains(&"--accept-hooks".to_string()));
         assert!(argv.contains(&"-m".to_string()));
         assert!(argv.contains(&"nous-portal/deepseek/deepseek-v4-flash".to_string()));
-        assert!(argv.contains(&"--skills".to_string()));
+        assert!(argv.contains(&"--custom-flag".to_string()));
+        assert!(argv.windows(2).any(|args| args == ["--skills", "review"]));
     }
 
     #[test]

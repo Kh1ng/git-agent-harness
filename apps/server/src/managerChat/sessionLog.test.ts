@@ -73,6 +73,34 @@ test('model history uses the logged model prompt while the UI uses the human pro
   assert.equal(deriveModelHistory(events)[0]?.text, 'context plus human prompt');
 });
 
+test('skill application is visible in replay but only the injected prompt reaches model history', () => {
+  const dir = tempStateDir();
+  const events: ChatSessionEvent[] = [
+    turnStart(1, 1),
+    userMsg(1, 2, 'human prompt'),
+    {
+      type: 'skills/applied',
+      seq: 3,
+      turn: 1,
+      backend: 'hermes',
+      source: 'profile',
+      skills: [{ id: 'review', version: '2.1.0' }],
+      timestamp: 2400
+    },
+    { type: 'user/message', seq: 4, turn: 1, text: 'bound instructions and prompt', source: 'inject', timestamp: 2500 },
+    assistantMsg(1, 5, 'answer'),
+    turnEnd(1, 6)
+  ];
+
+  try {
+    appendEvents('repo', events, { stateDir: dir });
+    assert.equal(foldSession('repo', { stateDir: dir }).turns[1]?.text, '[skills · hermes · profile] review@2.1.0');
+    assert.deepEqual(deriveModelHistory(events).map((turn) => turn.text), ['bound instructions and prompt', 'answer']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('tool and slash-command results survive the event log', () => {
   const dir = tempStateDir();
   const events: ChatSessionEvent[] = [

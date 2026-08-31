@@ -150,7 +150,11 @@ mod tests {
             "the hermes task",
             &f.session_dir,
             None,
-            &["--skills".to_string(), "gah-manager".to_string()],
+            &[
+                "--custom-flag".to_string(),
+                "--skills".to_string(),
+                "review".to_string(),
+            ],
             &envs,
             300,
         )
@@ -161,8 +165,8 @@ mod tests {
         assert!(argv.contains(&"the hermes task".to_string()));
         assert!(argv.contains(&"--yolo".to_string()));
         assert!(argv.contains(&"--accept-hooks".to_string()));
-        assert!(argv.contains(&"--skills".to_string()));
-        assert!(argv.contains(&"gah-manager".to_string()));
+        assert!(argv.contains(&"--custom-flag".to_string()));
+        assert!(argv.windows(2).any(|args| args == ["--skills", "review"]));
         assert!(!argv.contains(&"--worktree".to_string()));
     }
 

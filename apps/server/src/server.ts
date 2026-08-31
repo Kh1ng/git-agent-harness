@@ -46,7 +46,8 @@ import type {
   ProfileSummary,
   ProjectImportData,
   ProjectImportResult,
-  ChatNodeInfo
+  ChatNodeInfo,
+  ChatSessionEvent
 } from '@git-agent-harness/contracts';
 import { getFleetDispatch } from './wsServer.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
@@ -83,13 +84,19 @@ import { listAllChatSessions } from './managerChat/chatSessions.js';
 import { usageRollup } from './managerChat/usageRollup.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
 import {
+  addCanonicalSkillBinding,
+  clearProfileSkillBindings,
   deleteSkill,
   getSkill,
   listSkillSummaries,
   listSkills,
   putSkill,
-  seedSkillFromDocs
+  resolveSkillBindings,
+  seedSkillFromDocs,
+  setProfileSkillBindings,
+  skillBindingSummary
 } from './skillBank.js';
+import { readLog as readManagerChatLog } from './managerChat/sessionLog.js';
 import {
   getPendingCommits,
   readAdminUpdateState,
@@ -141,11 +148,24 @@ export function initializeSkillBank(): void {
   } catch (error) {
     console.error('Failed to seed skill bank from docs:', error);
   }
+  if (getSkill('gah-manager')) {
+    for (const backend of ['hermes', 'codex', 'claude', 'opencode']) {
+      addCanonicalSkillBinding('gah-manager', backend);
+    }
+  }
 }
 
 /** Same hardcoded default as wsServer.ts's welcome message, until Settings
  * gains real profile switching (see apps/web Settings page). */
 const DEFAULT_PROFILE = 'gah';
+
+function observedSkills(profile: string, backend: string, sessionId?: string): { id: string; version: string }[] | null {
+  const options = sessionId && sessionId !== 'default' ? { sessionId } : {};
+  const applied = readManagerChatLog(profile, options)
+    .reverse()
+    .find((event: ChatSessionEvent) => event.type === 'skills/applied' && event.backend === backend);
+  return applied?.type === 'skills/applied' ? applied.skills : null;
+}
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -929,6 +949,77 @@ export function createServer(
         message: error instanceof Error ? error.message : String(error)
       });
     }
+  });
+
+  app.get('/api/skills/bindings', (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : '';
+    const backend = typeof req.query.backend === 'string' ? req.query.backend : '';
+    const instance = typeof req.query.instance === 'string' ? req.query.instance : undefined;
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
+    if (!profile || !backend) {
+      res.status(400).json({ error: 'Invalid skill binding', message: 'profile and backend are required' });
+      return;
+    }
+    try {
+      res.json(skillBindingSummary(profile, backend, instance, observedSkills(profile, backend, sessionId)));
+    } catch (error) {
+      res.status(400).json({
+        error: 'Failed to resolve skill bindings',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/skills/resolve', (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : '';
+    const backend = typeof req.query.backend === 'string' ? req.query.backend : '';
+    const instance = typeof req.query.instance === 'string' ? req.query.instance : undefined;
+    if (!profile || !backend) {
+      res.status(400).json({ error: 'Invalid skill resolution', message: 'profile and backend are required' });
+      return;
+    }
+    try {
+      res.json(resolveSkillBindings(profile, backend, instance));
+    } catch (error) {
+      res.status(400).json({
+        error: 'Failed to resolve skills',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.put('/api/skills/bindings', (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : '';
+    const backend = typeof req.body?.backend === 'string' ? req.body.backend : '';
+    const instance = typeof req.body?.instance === 'string' ? req.body.instance : undefined;
+    const skillIds = Array.isArray(req.body?.skillIds)
+      ? req.body.skillIds.filter((id: unknown): id is string => typeof id === 'string')
+      : null;
+    if (!profile || !backend || skillIds === null || skillIds.length !== req.body.skillIds.length) {
+      res.status(400).json({ error: 'Invalid skill binding', message: 'profile, backend, and string skillIds are required' });
+      return;
+    }
+    try {
+      setProfileSkillBindings(profile, backend, skillIds, instance);
+      res.json(skillBindingSummary(profile, backend, instance));
+    } catch (error) {
+      res.status(400).json({
+        error: 'Failed to update skill bindings',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.delete('/api/skills/bindings', (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : '';
+    const backend = typeof req.query.backend === 'string' ? req.query.backend : '';
+    const instance = typeof req.query.instance === 'string' ? req.query.instance : undefined;
+    if (!profile || !backend) {
+      res.status(400).json({ error: 'Invalid skill binding', message: 'profile and backend are required' });
+      return;
+    }
+    clearProfileSkillBindings(profile, backend, instance);
+    res.json(skillBindingSummary(profile, backend, instance));
   });
 
   app.get('/api/skills/:id', (req, res) => {

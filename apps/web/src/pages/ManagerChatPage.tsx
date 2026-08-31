@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw } from 'lucide-react';
+import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
@@ -22,7 +22,8 @@ import type {
   ChatSessionSummary,
   ChatSessionProjectGroup,
   ChatPreviewInfo,
-  ChatReclaimResult
+  ChatReclaimResult,
+  SkillBindingSummary
 } from '@git-agent-harness/contracts';
 
 interface ChatTurn {
@@ -164,6 +165,84 @@ function ToolCallCard({ tool }: { tool: NonNullable<ChatTurn['tool']> }) {
   );
 }
 
+function SkillPicker({
+  binding,
+  busy,
+  onToggle,
+  onInherit
+}: {
+  binding: SkillBindingSummary | null;
+  busy: boolean;
+  onToggle: (id: string) => void;
+  onInherit: () => void;
+}) {
+  const observed = new Map(binding?.observedSkills?.map((skill) => [skill.id, skill.version]) ?? []);
+  const selected = new Set(binding?.selectedIds ?? []);
+  const selectedVersions = new Map(binding?.skills.filter((skill) => selected.has(skill.id)).map((skill) => [skill.id, skill.version]) ?? []);
+  const drift = binding?.observedSkills != null
+    && (selectedVersions.size !== observed.size || [...selectedVersions].some(([id, version]) => observed.get(id) !== version));
+
+  return (
+    <details className="group relative">
+      <summary
+        className="flex min-h-9 cursor-pointer list-none items-center gap-1.5 rounded-md border border-subtle bg-raised px-2.5 py-1.5 text-xs text-secondary hover:bg-white/5 focus-visible:outline-none [&::-webkit-details-marker]:hidden"
+        aria-label="Project skills"
+        onClick={(event) => { if (busy) event.preventDefault(); }}
+        title={busy ? 'Skill changes are disabled while a turn is in flight' : 'Choose the project skills applied to the next turn'}
+      >
+        <Sparkles size={13} className="text-accent" aria-hidden="true" />
+        Skills · {binding?.selectedIds.length ?? 0}
+        {drift && <span className="h-1.5 w-1.5 rounded-full bg-amber-400" title="Configured skills differ from the latest applied turn" />}
+      </summary>
+      <div className="absolute right-0 z-30 mt-1 w-64 max-w-[calc(100vw-2rem)] rounded-lg border border-subtle bg-raised p-3 shadow-xl">
+        <div className="mb-2 flex items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium text-primary">Project skills</p>
+            <p className="text-[11px] text-muted">
+              {binding ? `${binding.source === 'profile' ? 'Project override' : 'Inherited default'} · ${binding.backend}` : 'Loading…'}
+            </p>
+          </div>
+          {binding?.source === 'profile' && (
+            <button type="button" onClick={onInherit} disabled={busy} className="text-[11px] text-accent hover:underline disabled:opacity-50">
+              Use default
+            </button>
+          )}
+        </div>
+        {!binding ? (
+          <p className="py-3 text-xs text-muted">Loading available skills…</p>
+        ) : !binding.supported ? (
+          <p className="py-3 text-xs text-muted">This backend does not support bound skills.</p>
+        ) : binding.skills.length === 0 ? (
+          <p className="py-3 text-xs text-muted">No compatible skills are installed in the central bank.</p>
+        ) : (
+          <div className="space-y-1">
+            {binding.skills.map((skill) => (
+              <label key={skill.id} className="flex cursor-pointer gap-2 rounded-md px-2 py-1.5 hover:bg-white/5">
+                <input
+                  type="checkbox"
+                  checked={selected.has(skill.id)}
+                  disabled={busy}
+                  onChange={() => onToggle(skill.id)}
+                  className="mt-0.5 accent-[rgb(var(--accent))]"
+                />
+                <span className="min-w-0">
+                  <span className="block text-xs text-primary">{skill.displayName} <span className="font-mono text-[10px] text-muted">{skill.version}</span></span>
+                  <span className="block truncate text-[11px] text-muted" title={skill.description}>{skill.description}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+        {binding?.observedSkills != null && (
+          <p className={`mt-2 border-t border-subtle pt-2 text-[11px] ${drift ? 'text-amber-300' : 'text-muted'}`}>
+            {drift ? 'Changed since the latest applied turn. The next turn uses this selection.' : 'Matches the latest applied turn.'}
+          </p>
+        )}
+      </div>
+    </details>
+  );
+}
+
 export function ManagerChatPage() {
   const { sendMessage, messages, isConnected, reconnectSeq } = useWebSocket();
   const wsProfile = useWebSocket().profile;
@@ -260,6 +339,19 @@ export function ManagerChatPage() {
     () => sessions.find((s) => s.id === sessionId) ?? null,
     [sessions, sessionId]
   );
+  const skillBackend = activeSession?.backend ?? activeBackendId;
+  const [skillBinding, setSkillBinding] = useState<SkillBindingSummary | null>(null);
+  const [skillBindingChanging, setSkillBindingChanging] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSkillBinding(null);
+    if (!skillBackend) return;
+    gahApi.getSkillBindings(profile, skillBackend, sessionId)
+      .then((binding) => { if (!cancelled) setSkillBinding(binding); })
+      .catch(() => { if (!cancelled) setSkillBinding(null); });
+    return () => { cancelled = true; };
+  }, [profile, skillBackend, sessionId, turns.length]);
 
   useEffect(() => {
     gahApi.getProfiles().then(setAvailableProfiles).catch(() => {});
@@ -732,6 +824,43 @@ export function ManagerChatPage() {
   const activeBackendLabel = activeBackendInfo?.displayName ?? activeBackendId ?? 'manager';
   const activeBackendUnavailable = Boolean(activeBackendInfo && !activeBackendInfo.implemented);
 
+  const refreshSkillBinding = async () => {
+    if (!skillBackend) return;
+    setSkillBinding(await gahApi.getSkillBindings(profile, skillBackend, sessionId));
+  };
+
+  const handleSkillToggle = async (id: string) => {
+    if (!skillBackend || !skillBinding || turnBusy) return;
+    const selected = skillBinding.selectedIds.includes(id)
+      ? skillBinding.selectedIds.filter((current) => current !== id)
+      : [...skillBinding.selectedIds, id];
+    const previous = skillBinding;
+    setSkillBinding({ ...skillBinding, source: 'profile', selectedIds: selected });
+    setSkillBindingChanging(true);
+    try {
+      await gahApi.setSkillBindings({ profile, backend: skillBackend, skillIds: selected });
+      await refreshSkillBinding();
+    } catch (error) {
+      setSkillBinding(previous);
+      setTurns((current) => [...current, { role: 'error', text: `Failed to update skills: ${error instanceof Error ? error.message : String(error)}` }]);
+    } finally {
+      setSkillBindingChanging(false);
+    }
+  };
+
+  const handleSkillInherit = async () => {
+    if (!skillBackend || turnBusy) return;
+    setSkillBindingChanging(true);
+    try {
+      await gahApi.inheritSkillBindings(profile, skillBackend);
+      await refreshSkillBinding();
+    } catch (error) {
+      setTurns((current) => [...current, { role: 'error', text: `Failed to restore default skills: ${error instanceof Error ? error.message : String(error)}` }]);
+    } finally {
+      setSkillBindingChanging(false);
+    }
+  };
+
   const handleBackendChange = async (backendId: string) => {
     // #945 AC5: never apply mid-turn -- it would misattribute the in-flight
     // reply. The picker is disabled while a turn is in flight, and this guard
@@ -1044,6 +1173,14 @@ export function ManagerChatPage() {
         }`}
         actions={
           <div className="flex flex-wrap items-center justify-end gap-2">
+            {skillBackend && (
+              <SkillPicker
+                binding={skillBinding}
+                busy={turnBusy || skillBindingChanging}
+                onToggle={(id) => void handleSkillToggle(id)}
+                onInherit={() => void handleSkillInherit()}
+              />
+            )}
             {/* Profile-wide pickers for the default conversation; a session
                 carries its own backend/model in the session bar below. */}
             {!activeSession && availableBackends.length > 0 && (

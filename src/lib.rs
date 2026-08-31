@@ -45,6 +45,7 @@ pub mod report;
 pub mod routing;
 pub mod runner;
 pub mod server;
+pub mod skill_bindings;
 pub mod status;
 pub mod sync;
 pub mod telemetry;

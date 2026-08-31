@@ -238,7 +238,11 @@ mod tests {
             "the task text",
             &f.session_dir,
             &test_llm(),
-            &["--extra-flag".to_string()],
+            &[
+                "--extra-flag".to_string(),
+                "--skills".to_string(),
+                "review".to_string(),
+            ],
             &envs,
             300,
         )
@@ -250,6 +254,7 @@ mod tests {
         assert!(argv.contains(&"the task text".to_string()));
         assert!(argv.contains(&"--override-with-envs".to_string()));
         assert!(argv.contains(&"--extra-flag".to_string()));
+        assert!(argv.windows(2).any(|args| args == ["--skills", "review"]));
     }
 
     #[test]
