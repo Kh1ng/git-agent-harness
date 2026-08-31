@@ -349,6 +349,21 @@ test('composer favorites persist across reload and apply all three selections at
 
 test('composer favorites cannot select unavailable providers', async ({ page, request }) => {
   await selectScenario(request, 'normal');
+  await page.route('**/api/manager-chat/settings', async (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    const settings = await response.json();
+    await route.fulfill({
+      response,
+      json: {
+        ...settings,
+        availableBackends: [
+          ...settings.availableBackends,
+          { id: 'unavailable', displayName: 'Unavailable', implemented: false },
+        ],
+      },
+    });
+  });
   await openChat(page);
   await page.evaluate(() => window.localStorage.setItem('gah.composer.favorites', JSON.stringify([{ backend: 'unavailable' }])));
   await page.reload();
