@@ -182,8 +182,7 @@ pub struct Profile {
     /// OpenHands profile name (~/.openhands/profiles/<name>.json). Overrides default LLM config.
     #[serde(default)]
     pub oh_profile: Option<String>,
-    /// Extra CLI args appended to the OpenHands invocation. `--skills` is
-    /// ignored; central skill-bank bindings own project skills.
+    /// Extra OpenHands CLI args; `--skills` is ignored in favor of central bindings.
     #[serde(default)]
     pub openhands_args: Vec<String>,
     /// Extra CLI args appended to `codex exec` for invariant non-model flags.
@@ -215,8 +214,7 @@ pub struct Profile {
     /// Optional absolute/relative path to the OpenCode CLI executable.
     #[serde(default)]
     pub opencode_path: Option<String>,
-    /// Extra CLI args appended to `hermes -z`. `--skills` is ignored;
-    /// central skill-bank bindings own project skills.
+    /// Extra Hermes CLI args; `--skills` is ignored in favor of central bindings.
     #[serde(default)]
     pub hermes_args: Vec<String>,
     /// Optional absolute/relative path to the Hermes CLI executable.
