@@ -308,6 +308,17 @@ GAH_GATEWAY_API_KEY=<key> \
 scripts/install.sh
 ```
 
+`GAH_GATEWAY_URL` must use the **central/gateway node's tailnet address (or
+MagicDNS name)**, not a LAN IP. A LAN IP only works while the worker stays on
+that LAN; roaming makes recall/capture unreachable and hard-blocks manager
+chat and dispatch under issue #878's policy. It must also never be derived
+from `tailscale ip -4` on the worker: that is the worker's own address, not
+the gateway's. When the URL is unset, both installers reuse the host from
+`GAH_CONFIG` or `~/.config/gah/config.toml`'s `registry_central_url` and the
+default gateway port `8420`. A truly new machine has no way to identify which
+tailnet peer is the gateway, so use the Settings **Reveal setup command**
+(which supplies the central's address explicitly) or set `GAH_GATEWAY_URL`.
+
 Before writing anything, the script calls `POST /recall` against that URL
 (not `GET /health` — `/health` needs no auth, so it can't catch a wrong
 key; `/recall` is read-only and auth-required on every configured gateway).

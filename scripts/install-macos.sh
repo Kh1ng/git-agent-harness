@@ -52,7 +52,29 @@ upsert_env_line() {
 # Opt-in: GAH_GATEWAY_MODE unset (the default) skips this whole section.
 case "${GAH_GATEWAY_MODE:-}" in
   remote)
-    : "${GAH_GATEWAY_URL:?GAH_GATEWAY_MODE=remote requires GAH_GATEWAY_URL}"
+    # gateway-url-default:start -- extracted verbatim by
+    # tests/source_structure.rs::install_scripts_default_gateway_url_to_central_host.
+    # Issue #947: use the already-configured central host; `tailscale ip -4`
+    # would return this worker's own address, not the remote gateway's.
+    if [ -z "${GAH_GATEWAY_URL:-}" ]; then
+      gah_config="${GAH_CONFIG:-$HOME/.config/gah/config.toml}"
+      registry_central_url=""
+      if [ -f "$gah_config" ]; then
+        registry_central_url="$(sed -n 's/^[[:space:]]*registry_central_url[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$gah_config" | head -1)"
+      fi
+      : "${registry_central_url:?GAH_GATEWAY_MODE=remote requires GAH_GATEWAY_URL or registry_central_url in $gah_config; a worker cannot infer which Tailscale peer hosts the gateway}"
+      case "$registry_central_url" in
+        http://*|https://*) ;;
+        *) echo "ERROR: registry_central_url in $gah_config must be an http(s) URL" >&2; exit 1 ;;
+      esac
+      central_authority="${registry_central_url#*://}"
+      central_authority="${central_authority%%/*}"
+      central_host="${central_authority%%:*}"
+      : "${central_host:?registry_central_url in $gah_config has no host}"
+      GAH_GATEWAY_URL="http://${central_host}:8420"
+      echo "GAH_GATEWAY_URL not set; defaulting to configured central host: $GAH_GATEWAY_URL" >&2
+    fi
+    # gateway-url-default:end
     echo "Checking remote gateway reachability and auth: $GAH_GATEWAY_URL/recall"
     auth_header=()
     if [ -n "${GAH_GATEWAY_API_KEY:-}" ]; then
