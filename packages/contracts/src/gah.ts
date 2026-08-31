@@ -1117,6 +1117,9 @@ export interface GatewaySettingsSummary {
   apiKeyConfigured: boolean;
   enabled: boolean;
   disabledProfiles: string[];
+  contextPolicy: MemoryContextPolicy;
+  contextPolicies: Record<string, MemoryContextPolicy>;
+  degraded: GatewayHealthSummary;
   /** This host's own Tailscale IPv4, best-effort detected -- null if the
    * `tailscale` binary is missing, not logged in, or detection otherwise
    * failed. Used to build an "Add a Node" command a genuinely different
@@ -1124,6 +1127,20 @@ export interface GatewaySettingsSummary {
    * loopback-optimized for this server's own calls, not reachable by
    * anyone else. */
   tailscaleIPv4: string | null;
+}
+
+export interface MemoryContextPolicy {
+  /** Maximum recalled characters injected per turn. Unset = unlimited. */
+  budgetChars?: number;
+  /** Eligible memory tiers. Unset/empty = all tiers. */
+  tiers?: string[];
+}
+
+export interface GatewayHealthSummary {
+  degraded: boolean;
+  lastError: string | null;
+  lastFailedAt: number | null;
+  lastOkAt: number | null;
 }
 
 /** Sensitive response returned only after an explicit authenticated reveal. */
@@ -1136,6 +1153,8 @@ export interface GatewaySettingsUpdate {
   apiKey?: string | null;
   enabled?: boolean;
   disabledProfiles?: string[];
+  contextPolicy?: MemoryContextPolicy;
+  contextPolicies?: Record<string, MemoryContextPolicy>;
 }
 
 /** Payload for POST /api/manager-chat/settings. Omitted fields are left
