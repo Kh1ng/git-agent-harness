@@ -530,7 +530,8 @@ export interface UsageRollupRow {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
-  estimated_cost_usd: number;
+  /** null when any included turn did not report cost. */
+  estimated_cost_usd: number | null;
 }
 
 export interface UsageRollupSummary {
@@ -555,7 +556,8 @@ export interface UsageRollupTicketRow {
   title: string | null;
   turns: number;
   total_tokens: number;
-  estimated_cost_usd: number;
+  /** null when any included turn did not report cost. */
+  estimated_cost_usd: number | null;
   /** tokens per backend, e.g. { codex: 1500 }. */
   backends: Record<string, number>;
 }
