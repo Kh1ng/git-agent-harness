@@ -33,6 +33,13 @@ yet). Run the OS-specific script directly if you already know which one you
 want. `GAH_NODE_ROLE=worker scripts/install-linux.sh` gets a Linux worker
 node without the control-plane server too.
 
+For a roaming worker using `GAH_GATEWAY_MODE=remote`, the gateway URL must
+name the central/gateway node by its tailnet IP or MagicDNS name, never a LAN
+IP or the worker's own `tailscale ip -4`. If `GAH_GATEWAY_URL` is omitted, the
+installer reuses the host from `registry_central_url`; a machine with no
+central config must use the Settings **Reveal setup command** or provide the
+URL explicitly. See `docs/OPERATIONS.md` for the gateway setup details.
+
 The control-plane server binds `0.0.0.0:3773` by default. To bind a single
 interface instead (recommended, since the server's mutation routes have no
 authentication yet — see issue #532), set `GAH_SERVER_HOST` before first
