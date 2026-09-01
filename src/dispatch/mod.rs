@@ -224,7 +224,7 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         Ok(JobKind::Experiment) => {
             workflows::run_experiment(cfg, &args.profile, profile, args, &session_dir, &mut ledger)
         }
-        Ok(JobKind::Research | JobKind::Audit) => {
+        Ok(JobKind::Research | JobKind::Audit | JobKind::Estimate) => {
             workflows::run_research(cfg, &args.profile, profile, args, &session_dir, &mut ledger)
         }
         Err(_) => anyhow::bail!("unknown mode: {}", args.mode),

@@ -14,6 +14,9 @@
       "is_model": false,
       "memory_gateway_capture_l0_recorded": null,
       "output_tokens": 40,
+      "predicted_average_cost_usd": null,
+      "predicted_average_duration_seconds": null,
+      "predicted_difficulty_match_rate": null,
       "quota_observations": [
         {
           "backend": "openhands",
@@ -42,7 +45,7 @@
     }
   ],
   "group_by": "Backend",
-  "ledger_path": "/tmp/.tmp59opkf/artifacts/ledger.jsonl",
+  "ledger_path": "/tmp/.tmp24DDbZ/artifacts/ledger.jsonl",
   "profile": null,
   "since": "365d",
   "total_entries": 1,

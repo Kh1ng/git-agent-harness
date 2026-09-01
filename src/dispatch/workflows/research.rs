@@ -1,12 +1,20 @@
-//! `research`/`audit` job kinds (issue #848): read-only, investigation-only
-//! dispatch. No worktree, no commit, no push, no PR -- runs directly against
-//! the profile's real checkout (`profile.local_path`), the same way `pm`
-//! mode reads repo state without creating a worktree, since neither mode
-//! ever mutates the repo. The backend self-reports findings as a GitHub
+//! `research`/`audit`/`estimate` job kinds (issue #848, issue #916):
+//! read-only, investigation-only dispatch. No worktree, no commit, no push,
+//! no PR -- runs directly against the profile's real checkout
+//! (`profile.local_path`), the same way `pm` mode reads repo state without
+//! creating a worktree, since none of these modes ever mutate the repo.
+//!
+//! `research`/`audit` have the backend self-report findings as a GitHub
 //! issue via its own `gh`/`glab` CLI access (see
 //! `prompts::research_instruction`/`audit_instruction`) rather than GAH
 //! orchestrating issue creation in Rust -- kept deliberately simple per the
 //! owner's explicit "doesn't need to be perfected, just get it in."
+//!
+//! `estimate` shares this same read-only scaffold (route, env, backend
+//! invocation) but swaps in a narrow single-ticket prompt/parse pair
+//! (`estimator::build_estimate_task`/`parse_estimate_response`) and records
+//! its structured result onto the ledger's `predicted_*` fields instead of
+//! `target_summary`, so predicted-vs-actual accuracy can be measured later.
 
 use super::super::attempts::{
     apply_route_to_ledger, decide_route, preflight_identity,
@@ -16,6 +24,7 @@ use super::super::attempts::{
 use super::super::issues::resolve_target_to_issue_or_string;
 use super::super::prompts::build_task;
 use super::super::DispatchArgs;
+use super::estimator::{build_estimate_task, parse_estimate_response};
 use crate::config::{self, GahConfig, Profile};
 use crate::job_kind::JobKind;
 use crate::ledger::LedgerEntry;
@@ -76,13 +85,21 @@ pub(crate) fn research(
 
     let issue_details =
         resolve_target_to_issue_or_string(profile, &args.target, args.issue_intake_override)?;
-    let task = build_task(
-        profile,
-        repo,
-        kind.as_str(),
-        &args.target,
-        issue_details.as_ref(),
-    );
+    let task = if kind == JobKind::Estimate {
+        let (title, objective) = match issue_details.as_ref() {
+            Some(issue) => (issue.title.clone(), issue.body.clone()),
+            None => (args.target.clone(), String::new()),
+        };
+        build_estimate_task(&title, &objective)
+    } else {
+        build_task(
+            profile,
+            repo,
+            kind.as_str(),
+            &args.target,
+            issue_details.as_ref(),
+        )
+    };
 
     let attempt_dir = session_dir.join("attempt-1");
     fs::create_dir_all(&attempt_dir)?;
@@ -114,6 +131,36 @@ pub(crate) fn research(
     );
     ledger.backend_exit_code = Some(result.exit_code);
     record_external_approval_consumption_for_last_attempt(cfg, profile_name, profile, ledger);
+
+    if kind == JobKind::Estimate {
+        if result.exit_code != 0 {
+            anyhow::bail!(
+                "estimate backend exited {} ({})",
+                result.exit_code,
+                result.log_path
+            );
+        }
+        let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
+        let estimate = parse_estimate_response(&log_text)?;
+        println!(
+            "Predicted difficulty: {} (cost={} duration={})",
+            estimate.difficulty,
+            estimate
+                .predicted_cost_usd
+                .map(|c| format!("${c:.2}"))
+                .unwrap_or_else(|| "unknown".to_string()),
+            estimate
+                .predicted_duration_seconds
+                .map(|d| format!("{d:.0}s"))
+                .unwrap_or_else(|| "unknown".to_string()),
+        );
+        ledger.predicted_difficulty = Some(estimate.difficulty);
+        ledger.predicted_cost_usd = estimate.predicted_cost_usd;
+        ledger.predicted_duration_seconds = estimate.predicted_duration_seconds;
+        ledger.validation_result = Some("completed".into());
+        return Ok(());
+    }
+
     ledger.target_summary = result.final_summary.clone();
     ledger.validation_result = Some(if result.exit_code == 0 {
         "completed".into()

@@ -733,6 +733,9 @@ mod tests {
             requests_count: None,
             tokens_per_success: None,
             requests_per_success: None,
+            predicted_average_cost_usd: None,
+            predicted_average_duration_seconds: None,
+            predicted_difficulty_match_rate: None,
             quota_observations: vec![],
         }
     }

@@ -77,6 +77,21 @@ pub struct GroupSummary {
     pub requests_count: Option<u64>,
     pub tokens_per_success: Option<f64>,
     pub requests_per_success: Option<f64>,
+    /// Issue #916: average of `LedgerEntry.predicted_cost_usd` across this
+    /// group's entries that carried an estimate. `None` means no entry in
+    /// the group had a prediction recorded, distinct from an average of 0 --
+    /// compare directly against `average_cost_usd` (the actual outcome) to
+    /// gauge estimator accuracy.
+    pub predicted_average_cost_usd: Option<f64>,
+    /// Issue #916: same accuracy-tracking purpose as
+    /// `predicted_average_cost_usd`, compared against
+    /// `average_duration_seconds`.
+    pub predicted_average_duration_seconds: Option<f64>,
+    /// Issue #916: fraction of entries in this group where
+    /// `predicted_difficulty` matched the entry's own `difficulty`, among
+    /// entries where both were recorded. `None` when no entry in the group
+    /// had both fields.
+    pub predicted_difficulty_match_rate: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quota_observations: Vec<GroupQuotaObservation>,
 }
@@ -788,6 +803,12 @@ where
         let mut requests_count = 0u64;
         let mut memory_gateway_capture_l0_recorded = 0u64;
         let mut memory_gateway_capture_l0_recorded_seen = false;
+        let mut predicted_cost_total = 0.0f64;
+        let mut predicted_cost_count = 0usize;
+        let mut predicted_duration_total = 0.0f64;
+        let mut predicted_duration_count = 0usize;
+        let mut predicted_difficulty_match = 0usize;
+        let mut predicted_difficulty_compared = 0usize;
         let mut input_tokens_seen = false;
         let mut output_tokens_seen = false;
         let mut reasoning_tokens_seen = false;
@@ -866,6 +887,24 @@ where
             if let Some(captured) = entry.memory_gateway_capture_l0_recorded {
                 memory_gateway_capture_l0_recorded += captured;
                 memory_gateway_capture_l0_recorded_seen = true;
+            }
+
+            // Issue #916: accuracy tracking -- predicted vs. actual.
+            if let Some(cost) = entry.predicted_cost_usd {
+                predicted_cost_total += cost;
+                predicted_cost_count += 1;
+            }
+            if let Some(duration) = entry.predicted_duration_seconds {
+                predicted_duration_total += duration;
+                predicted_duration_count += 1;
+            }
+            if let (Some(predicted), Some(actual)) =
+                (&entry.predicted_difficulty, &entry.difficulty)
+            {
+                predicted_difficulty_compared += 1;
+                if predicted.eq_ignore_ascii_case(actual) {
+                    predicted_difficulty_match += 1;
+                }
             }
         }
 
@@ -1017,6 +1056,12 @@ where
         } else {
             None
         };
+        let predicted_average_cost_usd = (predicted_cost_count > 0)
+            .then_some(predicted_cost_total / predicted_cost_count as f64);
+        let predicted_average_duration_seconds = (predicted_duration_count > 0)
+            .then_some(predicted_duration_total / predicted_duration_count as f64);
+        let predicted_difficulty_match_rate = (predicted_difficulty_compared > 0)
+            .then_some(predicted_difficulty_match as f64 / predicted_difficulty_compared as f64);
 
         summaries.push(GroupSummary {
             group_key,
@@ -1046,6 +1091,9 @@ where
             requests_count: requests_count_seen.then_some(requests_count),
             tokens_per_success,
             requests_per_success,
+            predicted_average_cost_usd,
+            predicted_average_duration_seconds,
+            predicted_difficulty_match_rate,
             quota_observations: quota_observations.into_values().collect(),
         });
     }
