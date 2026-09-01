@@ -20,17 +20,19 @@ don't specify it per-call.
 
 ## Auth
 
-Not authenticated on its own — it inherits apps/server's loopback trust
-boundary. Running this against a non-loopback `GAH_SERVER_URL` means
-sending unauthenticated requests over the network; don't do that without
-first enabling auth on the target server (see `authMiddleware.ts`).
+For loopback servers, auth inherits apps/server's loopback trust boundary. For
+remote/Tailscale servers, set `GAH_SERVER_TOKEN` to the server's coordinator
+token; the adapter sends it as a Bearer token. Do not send a token over plain
+HTTP.
 
 ## Tools
 
-One tool per HTTP endpoint (`gah_status`, `gah_quota`, `gah_doctor`,
-`gah_report`, `gah_profiles`, `gah_work_history`, `gah_sync`,
+The adapter exposes control-plane and usage tools (`gah_info`, `gah_status`,
+`gah_quota`, `gah_usage_rollup`, `gah_doctor`, `gah_report`, `gah_profiles`,
+`gah_work_history`, `gah_sync`,
 `gah_ledger_summary`, `gah_ledger_clear_attempts`, `gah_availability`,
 `gah_availability_clear`, `gah_hold`, `gah_hold_set`, `gah_hold_clear`,
-`gah_dispatch`). `gah_dispatch` returns as soon as the session is created —
+`gah_events`, `gah_controller_activity`, `gah_loop_status`, `gah_dispatch`).
+`gah_usage_rollup` supports a 30-day monthly view. `gah_dispatch` returns as soon as the session is created —
 it does not block for or stream the dispatch run; poll `gah_status` or use
 the dashboard to watch progress.

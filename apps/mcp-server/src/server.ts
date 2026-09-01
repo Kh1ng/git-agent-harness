@@ -28,6 +28,12 @@ export function createGahMcpServer(): McpServer {
   const server = new McpServer({ name: 'gah', version: '0.1.0' });
 
   server.registerTool(
+    'gah_info',
+    { title: 'GAH server info', description: 'Identify the connected GAH control-plane node and API version.' },
+    () => tool(() => gah.info())
+  );
+
+  server.registerTool(
     'gah_status',
     {
       title: 'GAH status',
@@ -45,6 +51,19 @@ export function createGahMcpServer(): McpServer {
       inputSchema: { profile: profileArg, since: z.string().optional().describe('e.g. "7d"') }
     },
     ({ profile, since }) => tool(() => gah.quota(profile ?? DEFAULT_PROFILE, since))
+  );
+
+  server.registerTool(
+    'gah_usage_rollup',
+    {
+      title: 'GAH usage rollup',
+      description: 'Actual manager-chat usage by day, backend, and model; use days=30 for a monthly view.',
+      inputSchema: {
+        profile: profileArg,
+        days: z.number().int().min(1).max(90).default(30).describe('Number of days to include (1-90).')
+      }
+    },
+    ({ profile, days }) => tool(() => gah.usageRollup(profile ?? DEFAULT_PROFILE, days))
   );
 
   server.registerTool(
@@ -177,6 +196,36 @@ export function createGahMcpServer(): McpServer {
   );
 
   server.registerTool(
+    'gah_events',
+    {
+      title: 'GAH events',
+      description: 'Recent controller and dispatch events for a profile.',
+      inputSchema: { profile: profileArg, since: z.string().optional().describe('e.g. "24h" or "7d"') }
+    },
+    ({ profile, since }) => tool(() => gah.events(profile ?? DEFAULT_PROFILE, since))
+  );
+
+  server.registerTool(
+    'gah_controller_activity',
+    {
+      title: 'GAH controller activity',
+      description: 'Summarized agent/controller activity for a profile.',
+      inputSchema: { profile: profileArg, since: z.string().optional().describe('e.g. "24h" or "7d"') }
+    },
+    ({ profile, since }) => tool(() => gah.controllerActivity(profile ?? DEFAULT_PROFILE, since))
+  );
+
+  server.registerTool(
+    'gah_loop_status',
+    {
+      title: 'GAH loop status',
+      description: 'Report whether the autonomous GAH loop is running for a profile.',
+      inputSchema: { profile: profileArg }
+    },
+    ({ profile }) => tool(() => gah.loopStatus(profile ?? DEFAULT_PROFILE))
+  );
+
+  server.registerTool(
     'gah_dispatch',
     {
       title: 'Dispatch a GAH job',
@@ -195,7 +244,12 @@ export function createGahMcpServer(): McpServer {
         backend: z.string().optional(),
         model: z.string().optional(),
         budget: z.number().optional(),
-        dryRun: z.boolean().optional()
+        dryRun: z.boolean().optional(),
+        retries: z.number().int().min(0).optional(),
+        allowDraftFail: z.boolean().optional(),
+        requestId: z.string().optional(),
+        nodeId: z.string().optional(),
+        coordinatorNodeId: z.string().optional()
       }
     },
     (args) => tool(() => gah.dispatch({ ...args, profile: args.profile ?? DEFAULT_PROFILE }))
