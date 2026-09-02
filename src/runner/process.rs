@@ -36,6 +36,36 @@ pub fn install_shutdown_handler() -> Result<()> {
     .context("installing graceful shutdown handler")
 }
 
+/// Runs `cmd` to completion and captures its output, but never waits past
+/// `timeout`: on expiry the child is killed and `None` is returned. For
+/// bounded self-report queries (e.g. skill inventory, #966) that must never
+/// block a caller on a hung backend -- unlike `spawn_with_idle_watch`, there
+/// is no idle-vs-progress distinction here, just a hard deadline.
+pub fn run_bounded(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+    let child = cmd.spawn().ok()?;
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(output)) => Some(output),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            // SAFETY: `pid` is a plain integer read from the (still-owned,
+            // now moved into the waiter thread) child handle; sending
+            // SIGKILL to it has no memory-safety implications.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+            None
+        }
+    }
+}
+
 pub fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }

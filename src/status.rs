@@ -154,6 +154,13 @@ pub struct StatusSnapshot {
     /// failed export states without requiring an operator to inspect raw
     /// export files.
     pub export_health: crate::telemetry::health::ExportHealthView,
+    /// Issue #966 (#863 gap 2): per-backend-instance skill inventory --
+    /// what GAH intends bound vs. what the backend last self-reported
+    /// having, with drift and staleness so a dashboard never presents a
+    /// cached observation as live truth. Read-only projection of the
+    /// durable skill-inventory store; `gah skills refresh` is what actually
+    /// queries a backend.
+    pub skill_inventory: Vec<crate::skill_inventory::SkillInventoryView>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -845,6 +852,52 @@ fn build_snapshot_inner(
     }
     let effective_routing = profile.effective_routing(&cfg.defaults);
     let backend_instances = crate::config_show::backend_instance_summaries(&effective_routing);
+
+    // Issue #966: read-only projection -- bound resolution plus the latest
+    // stored self-report per instance, never a live backend query. `gah
+    // skills refresh` is what actually populates the store.
+    let skill_inventory_records =
+        crate::skill_inventory::load(&crate::skill_inventory::store_path()).unwrap_or_default();
+    let mut skill_instance_names: Vec<&String> =
+        effective_routing.backend_instances.keys().collect();
+    skill_instance_names.sort();
+    let skill_inventory: Vec<_> = skill_instance_names
+        .into_iter()
+        .map(|name| {
+            let instance = &effective_routing.backend_instances[name];
+            let logical_backend = instance
+                .logical_backend
+                .clone()
+                .unwrap_or_else(|| instance.runner_kind.clone());
+            let bound_skill_ids = crate::skill_bindings::resolve(
+                &cfg.defaults,
+                profile_name,
+                &logical_backend,
+                Some(name.as_str()),
+            )
+            .map(|resolution| {
+                resolution
+                    .skills
+                    .into_iter()
+                    .map(|skill| skill.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+            let record = crate::skill_inventory::latest_for(
+                &skill_inventory_records,
+                &logical_backend,
+                Some(name.as_str()),
+            );
+            crate::skill_inventory::view(
+                bound_skill_ids,
+                record,
+                &logical_backend,
+                Some(name.as_str()),
+                now,
+            )
+        })
+        .collect();
+
     for instance in effective_routing.backend_instances.into_values() {
         let configured = instance.executable.is_some();
         let backend = instance
@@ -903,6 +956,7 @@ fn build_snapshot_inner(
         export_health: crate::telemetry::health::read_view(
             &crate::telemetry::health::export_repo_path(cfg),
         ),
+        skill_inventory,
     };
 
     Ok(snapshot)
