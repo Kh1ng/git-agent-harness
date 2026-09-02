@@ -124,5 +124,6 @@
   "recent_ledger": null,
   "review_contract_version": 1,
   "review_held_work_ids": [],
-  "schema_version": 1
+  "schema_version": 1,
+  "skill_inventory": []
 }

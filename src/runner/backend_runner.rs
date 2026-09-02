@@ -18,11 +18,37 @@
 //! issue #833.
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
 use crate::backend_kind::BackendKind;
 use crate::runner::{LlmConfig, RunResult};
+
+/// What a backend instance reports having, from a bounded self-report query
+/// (issue #966). `Unknown` covers "this backend can't self-report" and
+/// "the query failed/timed out" alike -- both must stay distinct from
+/// `Skills(vec![])`, which means the backend was actually asked and
+/// confirmed it has zero skills.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObservedSkills {
+    Unknown,
+    Skills(Vec<String>),
+}
+
+/// Parameters for a skill-inventory self-report query. `timeout` bounds the
+/// query so a hung backend can never block a dispatch decision (#966 AC6).
+/// `cwd`/`env_vars` let the caller target one specific backend instance's
+/// isolated state/profile (mirroring every other Hermes invocation, which
+/// always runs with an explicit working directory and environment) instead
+/// of querying whatever instance gah's ambient environment happens to
+/// resolve to.
+pub struct SkillObservationContext<'a> {
+    pub executable: &'a Path,
+    pub timeout: Duration,
+    pub cwd: Option<&'a Path>,
+    pub env_vars: &'a [(String, String)],
+}
 
 pub struct RunContext<'a> {
     pub executable: &'a Path,
@@ -40,6 +66,31 @@ pub struct RunContext<'a> {
 pub trait BackendRunner {
     fn kind(&self) -> BackendKind;
     fn run(&self, ctx: &RunContext) -> Result<RunResult>;
+
+    /// Ask this backend instance what skills it currently has (#966).
+    /// Defaults to `Unknown` -- a backend gains real self-report only by
+    /// overriding this, so a backend nobody has wired up yet reports
+    /// "unknown" rather than silently claiming an empty inventory.
+    fn observe_skills(&self, ctx: &SkillObservationContext) -> ObservedSkills {
+        let _ = ctx;
+        ObservedSkills::Unknown
+    }
+}
+
+/// The one uniform constructor every `BackendKind` goes through. Callers
+/// that need per-instance behavior (dispatch's `run`, or a skill-inventory
+/// query) go through this instead of hand-writing their own match over
+/// `BackendKind` (#966 AC1).
+pub fn for_kind(kind: BackendKind) -> Box<dyn BackendRunner> {
+    match kind {
+        BackendKind::Claude => Box::new(ClaudeRunner),
+        BackendKind::Codex => Box::new(CodexRunner),
+        BackendKind::Opencode => Box::new(OpencodeRunner),
+        BackendKind::Openhands => Box::new(OpenhandsRunner),
+        BackendKind::Vibe => Box::new(VibeRunner),
+        BackendKind::Agy => Box::new(AgyRunner),
+        BackendKind::Hermes => Box::new(HermesRunner),
+    }
 }
 
 pub struct CodexRunner;
@@ -101,6 +152,15 @@ impl BackendRunner for HermesRunner {
             ctx.extra_args,
             ctx.env_vars,
             ctx.idle_timeout_seconds,
+        )
+    }
+
+    fn observe_skills(&self, ctx: &SkillObservationContext) -> ObservedSkills {
+        crate::runner::backends::hermes::observe_skills_with_executable(
+            ctx.executable,
+            ctx.cwd,
+            ctx.env_vars,
+            ctx.timeout,
         )
     }
 }
@@ -195,6 +255,63 @@ impl BackendRunner for AgyRunner {
 mod tests {
     use super::*;
     use crate::runner::backends::test_util::*;
+
+    // ── #966: uniform skill-inventory query ─────────────────────────────
+
+    #[test]
+    fn for_kind_covers_every_backend_kind_with_a_matching_runner() {
+        // The call site (`for_kind`) branches once, centrally -- no caller
+        // needs its own per-backend match to get a `BackendRunner` (#966
+        // AC1). Prove every kind is wired, not just some.
+        for kind in BackendKind::all() {
+            assert_eq!(for_kind(kind).kind(), kind);
+        }
+    }
+
+    #[test]
+    fn default_observe_skills_is_unknown_never_an_empty_list() {
+        let ctx = SkillObservationContext {
+            executable: Path::new("does-not-matter"),
+            timeout: Duration::from_secs(1),
+            cwd: None,
+            env_vars: &[],
+        };
+        // Every kind except Hermes uses the trait default today. A backend
+        // nobody has wired self-report for must say "unknown", never claim
+        // an empty inventory (#966 AC2).
+        for kind in BackendKind::all() {
+            if kind == BackendKind::Hermes {
+                continue;
+            }
+            assert_eq!(
+                for_kind(kind).observe_skills(&ctx),
+                ObservedSkills::Unknown,
+                "{kind:?} should default to Unknown"
+            );
+        }
+    }
+
+    #[test]
+    fn hermes_runner_overrides_the_default_observe_skills() {
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "hermes",
+            "#!/bin/sh\nprintf '%s\\n' \
+'┃ Name   ┃ Category ┃ Source ┃ Trust ┃ Status  ┃' \
+'│ review │          │ local  │ local │ enabled │'\n",
+        );
+        let ctx = SkillObservationContext {
+            executable: &f.bin_dir.join("hermes"),
+            timeout: Duration::from_secs(5),
+            cwd: None,
+            env_vars: &[],
+        };
+
+        let observed = HermesRunner.observe_skills(&ctx);
+
+        assert_eq!(observed, ObservedSkills::Skills(vec!["review".to_string()]));
+    }
 
     #[test]
     fn codex_runner_reports_codex_kind() {

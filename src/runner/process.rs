@@ -36,6 +36,61 @@ pub fn install_shutdown_handler() -> Result<()> {
     .context("installing graceful shutdown handler")
 }
 
+/// Runs `cmd` to completion and captures its output, but never waits past
+/// `timeout`: on expiry the child is killed and `None` is returned. For
+/// bounded self-report queries (e.g. skill inventory, #966) that must never
+/// block a caller on a hung backend -- unlike `spawn_with_idle_watch`, there
+/// is no idle-vs-progress distinction here, just a hard deadline.
+pub fn run_bounded(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+    let mut stdout = tempfile::tempfile().ok()?;
+    let mut stderr = tempfile::tempfile().ok()?;
+    cmd.stdout(Stdio::from(stdout.try_clone().ok()?))
+        .stderr(Stdio::from(stderr.try_clone().ok()?))
+        .stdin(Stdio::null());
+    // Own process group so a timeout can reap the whole tree, not just the
+    // direct child -- same discipline as every other timeout path in this
+    // file (`kill_process_group`/`kill_process_group_by_pid`); without it a
+    // descendant the backend spawns of its own (a shell wrapper, etc.)
+    // survives the SIGKILL below and leaks.
+    prepare_process_group(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                use std::io::Seek;
+                stdout.rewind().ok()?;
+                stderr.rewind().ok()?;
+                let mut stdout_bytes = Vec::new();
+                let mut stderr_bytes = Vec::new();
+                stdout.read_to_end(&mut stdout_bytes).ok()?;
+                stderr.read_to_end(&mut stderr_bytes).ok()?;
+                return Some(std::process::Output {
+                    status,
+                    stdout: stdout_bytes,
+                    stderr: stderr_bytes,
+                });
+            }
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(
+                    Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Ok(None) => {
+                kill_process_group(&mut child);
+                let _ = child.wait();
+                return None;
+            }
+            Err(_) => {
+                kill_process_group(&mut child);
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 pub fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }
@@ -842,6 +897,50 @@ mod tests {
         let log = fs::read_to_string(log_path).unwrap();
         assert!(!log.contains("leaked"));
         assert!(log.contains("configured 1s hard wall-clock timeout"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_bounded_kills_descendant_process_on_timeout() {
+        let _exec_guard = ExecGuard::new();
+        let f = fixture();
+        let child_pid_path = f.session_dir.join("child.pid");
+        make_fake_bin(
+            &f.bin_dir,
+            "backend",
+            &format!(
+                "#!/bin/sh\nsh -c 'echo $$ > \"{}\"; sleep 30' &\nwait\n",
+                child_pid_path.display()
+            ),
+        );
+        let command = Command::new(f.bin_dir.join("backend"));
+
+        let started = Instant::now();
+        let result = run_bounded(command, Duration::from_millis(300));
+        assert!(result.is_none());
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !child_pid_path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let child_pid = fs::read_to_string(&child_pid_path)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while linux_process_snapshot(child_pid).is_some_and(|process| !process.zombie)
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            linux_process_snapshot(child_pid).is_none_or(|process| process.zombie),
+            "run_bounded left descendant {child_pid} alive after its timeout, unlike every \
+             other timeout path in this file"
+        );
     }
 
     #[cfg(target_os = "linux")]

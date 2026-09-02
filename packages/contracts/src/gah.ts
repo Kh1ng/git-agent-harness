@@ -80,6 +80,37 @@ export interface ExportHealth {
   retry_pending: boolean;
 }
 
+// Issue #966 (#863 gap 2): per-backend-instance skill inventory -- what GAH
+// intends bound vs. what a backend instance last self-reported having.
+
+export interface SkillDrift {
+  /** Bound in GAH but missing from the backend's self-reported set. */
+  bound_not_observed: string[];
+  /** Present on the backend but not bound in GAH -- the #863 hand-edit
+   * scenario (an operator reconfigured a backend's skills out-of-band). */
+  observed_not_bound: string[];
+}
+
+export interface SkillInventoryView {
+  backend: string;
+  backend_instance?: string;
+  /** Absent means GAH could not resolve what's bound for this instance
+   * (store/registry failure), never an empty list -- an instance that was
+   * actually resolved and genuinely has nothing bound serializes as `[]`. */
+  bound_skill_ids?: string[];
+  /** Absent means the backend could not self-report (unknown), never an
+   * empty list -- a backend that was actually asked and confirmed zero
+   * skills serializes as `[]`. */
+  observed_skill_ids?: string[];
+  observed_at?: string;
+  observation_age_seconds?: number;
+  /** `true` means the dashboard must not present this observation as live
+   * truth (same #741 discipline as cached quota data). Absent when there is
+   * no observation yet to judge freshness of. */
+  observation_stale?: boolean;
+  drift?: SkillDrift;
+}
+
 export type AvailabilityScopeKind = 'backend_wide' | 'model_specific' | 'quota_pool';
 
 export interface AvailabilityScope {
@@ -391,6 +422,9 @@ export interface StatusSnapshot {
   /** Issue #230: automatic post-attempt telemetry export health. Optional
    * while schema-v1 clients may still be connected to an older CLI. */
   export_health?: ExportHealth;
+  /** Issue #966 (#863 gap 2): per-backend-instance skill inventory. Optional
+   * while schema-v1 clients may still be connected to an older CLI. */
+  skill_inventory?: SkillInventoryView[];
 }
 
 // ---------------------------------------------------------------------------
