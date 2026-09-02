@@ -240,6 +240,7 @@ export function createGahMcpServer(): McpServer {
         mode: z.string().describe('e.g. improve, fix, pm, review, experiment'),
         branch: z.string().optional(),
         target: z.string().optional(),
+        mr: z.string().optional().describe('Existing pull/merge request number to repair'),
         backend: z.string().optional(),
         model: z.string().optional(),
         budget: z.number().optional(),

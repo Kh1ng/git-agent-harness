@@ -27,6 +27,7 @@ export type SessionOptions = {
   repo: string;
   branch?: string;
   target?: string;
+  mr?: string;
   mode: string;
   backend?: string;
   model?: string;
@@ -145,6 +146,7 @@ class SessionManagerImpl {
       repo: options.repo,
       branch: options.branch,
       target: options.target,
+      mr: options.mr,
       mode: options.mode,
       backend: options.backend,
       model: options.model,
@@ -167,6 +169,7 @@ class SessionManagerImpl {
       backend: options.backend,
       target: options.target,
       branch: options.branch,
+      mr: options.mr,
       model: options.model,
       budget: options.budget,
       dryRun: options.dryRun,

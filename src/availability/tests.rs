@@ -180,6 +180,37 @@ fn explicit_available_record_clears_manual_disable() {
 }
 
 #[test]
+fn newer_model_block_is_not_masked_by_older_backend_clear() {
+    let tmp = TempDir::new().unwrap();
+    let p = path(&tmp);
+    let now = OffsetDateTime::now_utc();
+    record_available(
+        &p,
+        "agy",
+        None,
+        Source::Manual,
+        now - time::Duration::minutes(1),
+    )
+    .unwrap();
+    record_unavailable(
+        &p,
+        "agy",
+        Some("Gemini 3.7 Flash (Medium)"),
+        Reason::QuotaExhausted,
+        Source::BackendError,
+        Some(now + time::Duration::hours(2)),
+        Some("Individual quota reached".into()),
+        now,
+    )
+    .unwrap();
+
+    let decision = availability_for(&p, "agy", Some("Gemini 3.7 Flash (Medium)"), now).unwrap();
+    assert!(!decision.eligible);
+    assert_eq!(decision.reason, Some(Reason::QuotaExhausted));
+    assert_eq!(decision.scope, Some(BlockScope::ModelSpecific));
+}
+
+#[test]
 fn backend_wide_block_takes_precedence_over_model_availability() {
     let tmp = TempDir::new().unwrap();
     let p = path(&tmp);

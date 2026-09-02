@@ -512,8 +512,8 @@ fn latest_for_scope<'a>(
     backend: &str,
     backend_instance: Option<&str>,
     model: Option<&str>,
-) -> Option<&'a AvailabilityRecord> {
-    records.iter().rev().find(|r| {
+) -> Option<(usize, &'a AvailabilityRecord)> {
+    records.iter().enumerate().rev().find(|(_, r)| {
         r.backend == backend
             && r.model.as_deref() == model
             && match backend_instance {
@@ -529,11 +529,12 @@ fn latest_for_scope<'a>(
 fn latest_for_pool<'a>(
     records: &'a [AvailabilityRecord],
     pool: &str,
-) -> Option<&'a AvailabilityRecord> {
+) -> Option<(usize, &'a AvailabilityRecord)> {
     records
         .iter()
+        .enumerate()
         .rev()
-        .find(|r| r.quota_pool.as_deref() == Some(pool))
+        .find(|(_, r)| r.quota_pool.as_deref() == Some(pool))
 }
 
 /// Eligibility for `backend`/`model`/`quota_pool` at `now`. Precedence:
@@ -589,8 +590,9 @@ fn availability_for_key(
     // why `clear` works without deleting history. An *active* `unavailable`
     // record still blocks, with the usual pool > backend-wide > model-specific
     // precedence when two active blocks coexist.
+    let mut broader_clear_index = None;
     if let Some(pool) = quota_pool {
-        if let Some(record) = latest_for_pool(&state.records, pool) {
+        if let Some((index, record)) = latest_for_pool(&state.records, pool) {
             if is_active(record, now) {
                 return Ok(AvailabilityDecision {
                     eligible: false,
@@ -600,12 +602,13 @@ fn availability_for_key(
                 });
             }
             if record.status == Status::Available {
-                return Ok(AvailabilityDecision::eligible());
+                broader_clear_index = Some(index);
             }
         }
     }
 
-    if let Some(record) = latest_for_scope(&state.records, backend, backend_instance, None) {
+    if let Some((index, record)) = latest_for_scope(&state.records, backend, backend_instance, None)
+    {
         if is_active(record, now) {
             return Ok(AvailabilityDecision {
                 eligible: false,
@@ -615,15 +618,15 @@ fn availability_for_key(
             });
         }
         if record.status == Status::Available {
-            return Ok(AvailabilityDecision::eligible());
+            broader_clear_index = Some(broader_clear_index.map_or(index, |prior| prior.max(index)));
         }
     }
 
     if let Some(model) = model {
-        if let Some(record) =
+        if let Some((index, record)) =
             latest_for_scope(&state.records, backend, backend_instance, Some(model))
         {
-            if is_active(record, now) {
+            if is_active(record, now) && broader_clear_index.is_none_or(|clear| index > clear) {
                 return Ok(AvailabilityDecision {
                     eligible: false,
                     reason: Some(record.reason),
@@ -704,17 +707,20 @@ pub fn list_scopes(state_path: &Path, now: OffsetDateTime) -> Result<Vec<ScopeSt
                 &key.backend,
                 key.backend_instance.as_deref(),
                 None,
-            ),
+            )
+            .map(|(_, record)| record),
             Some(BlockScope::QuotaPool) => key
                 .quota_pool
                 .as_deref()
-                .and_then(|p| latest_for_pool(&state.records, p)),
+                .and_then(|p| latest_for_pool(&state.records, p))
+                .map(|(_, record)| record),
             _ => latest_for_scope(
                 &state.records,
                 &key.backend,
                 key.backend_instance.as_deref(),
                 key.model.as_deref(),
-            ),
+            )
+            .map(|(_, record)| record),
         };
         out.push(ScopeStatus {
             backend: key.backend,

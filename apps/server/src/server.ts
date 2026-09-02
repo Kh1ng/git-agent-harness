@@ -820,6 +820,7 @@ export function createServer(
       mode,
       branch: typeof body.branch === 'string' ? body.branch : undefined,
       target: typeof body.target === 'string' ? body.target : undefined,
+      mr: typeof body.mr === 'string' ? body.mr : undefined,
       backend: typeof body.backend === 'string' ? body.backend : undefined,
       model: typeof body.model === 'string' ? body.model : undefined,
       budget: typeof body.budget === 'number' ? body.budget : undefined,
