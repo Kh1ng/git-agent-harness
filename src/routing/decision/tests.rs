@@ -79,6 +79,53 @@ fn codex_stale_args_do_not_override_resolved_model() {
 }
 
 #[test]
+fn explicit_instance_uses_its_only_supported_model_when_model_is_omitted() {
+    let tmp = TempDir::new().unwrap();
+    let mut profile = profile();
+    profile.routing.backend_instances.insert(
+        "agy-second".into(),
+        crate::config::BackendInstanceConfig {
+            runner_kind: "agy".into(),
+            logical_backend: Some("agy-second".into()),
+            executable: Some("/bin/sh".into()),
+            supported_models: vec!["Claude Sonnet 4.6 (Thinking)".into()],
+            ..Default::default()
+        },
+    );
+    let mut candidate = candidate_config("agy-second", Some("Claude Sonnet 4.6 (Thinking)"), None);
+    candidate.instance = Some("agy-second".into());
+    profile.routing.review_candidates = Some(vec![candidate]);
+
+    let decision = decide_with(
+        &defaults(),
+        &profile,
+        RouteRequest {
+            mode: "fix",
+            requested_backend: "agy-second",
+            requested_model: None,
+            recommended_backend: None,
+            recommended_model: None,
+            session_id: None,
+            usage_summary: None,
+            last_failure_class: None,
+            exact_route_required: false,
+        },
+        &path(&tmp),
+        OffsetDateTime::now_utc(),
+        backend_available,
+    )
+    .unwrap();
+
+    assert_eq!(decision.identity.backend_instance, "agy-second");
+    assert_eq!(decision.identity.runner_kind, "agy");
+    assert_eq!(
+        decision.effective_model.as_deref(),
+        Some("Claude Sonnet 4.6 (Thinking)")
+    );
+    assert_eq!(decision.requested_model, None);
+}
+
+#[test]
 fn explicit_cross_mode_route_preserves_configured_usage_class() {
     let tmp = TempDir::new().unwrap();
     let defaults = defaults();
