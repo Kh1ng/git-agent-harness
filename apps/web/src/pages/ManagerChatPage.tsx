@@ -574,15 +574,27 @@ export function ManagerChatPage() {
     try {
       // null sentinel on failure (not []) so a transient refresh error
       // doesn't overwrite last-known issues/PRs with an empty list.
-      const [status, issues, prs] = await Promise.all([
+      const [status, issuesResult, prsResult] = await Promise.all([
         gahApi.getGitStatus(profile, forSessionId),
-        gahApi.getChatIssues(profile).then(({ issues }) => issues).catch(() => null),
-        gahApi.getChatPrs(profile).then(({ prs }) => prs).catch(() => null)
+        gahApi.getChatIssues(profile).then(({ issues }) => issues).catch((error) => {
+          // Surface individual fetch errors to the UI
+          if (gitRequestIdRef.current === requestId) {
+            setGitError(`Failed to load issues: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          return null;
+        }),
+        gahApi.getChatPrs(profile).then(({ prs }) => prs).catch((error) => {
+          // Surface individual fetch errors to the UI
+          if (gitRequestIdRef.current === requestId) {
+            setGitError(`Failed to load PRs: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          return null;
+        })
       ]);
       if (gitRequestIdRef.current !== requestId) return;
       setGitStatus(status);
-      if (issues !== null) setGitIssues(issues);
-      if (prs !== null) setGitPrs(prs);
+      if (issuesResult !== null) setGitIssues(issuesResult);
+      if (prsResult !== null) setGitPrs(prsResult);
     } catch (error) {
       if (gitRequestIdRef.current !== requestId) return;
       setGitError(error instanceof Error ? error.message : String(error));

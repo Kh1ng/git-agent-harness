@@ -16,6 +16,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
+import { AsyncTtlCache } from '../asyncTtlCache.js';
 import { appendEvents } from './sessionLog.js';
 import {
   chatSessionStoreOptions,
@@ -25,6 +26,11 @@ import {
 } from './chatSessions.js';
 
 const execFileAsync = promisify(execFile);
+
+// TTL for issue list cache (15 seconds)
+const ISSUES_CACHE_TTL_MS = 15_000;
+// Singleton cache for issues per profile
+const issuesCache = new AsyncTtlCache<string, ChatIssueSummary[]>(ISSUES_CACHE_TTL_MS);
 
 export interface ChatIssueSummary {
   number: number;
@@ -73,27 +79,30 @@ function normalizeIssue(raw: ProviderIssue): ChatIssueSummary & { body: string |
   };
 }
 
-/** Open issues for a profile's repo, newest-first. */
+/** Open issues for a profile's repo, newest-first. Cached per profile. */
 export async function listChatIssues(
   profileInfo: Pick<ProfileSummary, 'provider' | 'repo' | 'local_path'>,
   limit = 30
 ): Promise<ChatIssueSummary[]> {
-  const isGitLab = profileInfo.provider === 'gitlab';
-  const { stdout } = isGitLab
-    ? await execCli('glab', ['issue', 'list', '--output=json'], profileInfo.local_path)
-    : await execCli('gh', ['issue', 'list', '--json', 'number,title,url,labels,updatedAt,state', `--limit=${limit}`], profileInfo.local_path);
-  const parsed = JSON.parse(stdout) as ProviderIssue[];
-  const isOpen = (state: string): boolean => {
-    const normalized = state.toLowerCase();
-    // GitHub reports OPEN/CLOSED; GitLab opened/closed. Absent state (some
-    // list shapes) defaults to open: `issue list` without --state=all only
-    // returns open issues anyway.
-    return normalized === 'open' || normalized === 'opened' || state === '';
-  };
-  return parsed
-    .map((raw) => normalizeIssue(raw))
-    .filter((issue) => isOpen(issue.state))
-    .sort((a, b) => b.number - a.number);
+  const cacheKey = `${profileInfo.provider}:${profileInfo.repo}:${profileInfo.local_path}`;
+  return issuesCache.get(cacheKey, async () => {
+    const isGitLab = profileInfo.provider === 'gitlab';
+    const { stdout } = isGitLab
+      ? await execCli('glab', ['issue', 'list', '--output=json'], profileInfo.local_path)
+      : await execCli('gh', ['issue', 'list', '--json', 'number,title,url,labels,updatedAt,state', `--limit=${limit}`], profileInfo.local_path);
+    const parsed = JSON.parse(stdout) as ProviderIssue[];
+    const isOpen = (state: string): boolean => {
+      const normalized = state.toLowerCase();
+      // GitHub reports OPEN/CLOSED; GitLab opened/closed. Absent state (some
+      // list shapes) defaults to open: `issue list` without --state=all only
+      // returns open issues anyway.
+      return normalized === 'open' || normalized === 'opened' || state === '';
+    };
+    return parsed
+      .map((raw) => normalizeIssue(raw))
+      .filter((issue) => isOpen(issue.state))
+      .sort((a, b) => b.number - a.number);
+  });
 }
 
 async function fetchIssue(

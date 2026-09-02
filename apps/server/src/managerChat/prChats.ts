@@ -14,6 +14,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
+import { AsyncTtlCache } from '../asyncTtlCache.js';
 import { appendEvents } from './sessionLog.js';
 import {
   chatSessionStoreOptions,
@@ -23,6 +24,11 @@ import {
 } from './chatSessions.js';
 
 const execFileAsync = promisify(execFile);
+
+// TTL for PR list cache (15 seconds)
+const PRS_CACHE_TTL_MS = 15_000;
+// Singleton cache for PRs per profile
+const prsCache = new AsyncTtlCache<string, ChatPrSummary[]>(PRS_CACHE_TTL_MS);
 
 export interface ChatPrSummary {
   number: number;
@@ -72,25 +78,28 @@ function normalizePr(raw: ProviderPr): ChatPrSummary & { body: string | null; st
   };
 }
 
-/** Open PRs for a profile's repo, newest-first. */
+/** Open PRs for a profile's repo, newest-first. Cached per profile. */
 export async function listChatPrs(
   profileInfo: Pick<ProfileSummary, 'provider' | 'repo' | 'local_path'>,
   limit = 30
 ): Promise<ChatPrSummary[]> {
-  const isGitLab = profileInfo.provider === 'gitlab';
-  const { stdout } = isGitLab
-    ? await execCli('glab', ['mr', 'list', '--output=json'], profileInfo.local_path)
-    : await execCli('gh', ['pr', 'list', '--json', 'number,title,url,headRefName,isDraft,updatedAt,state,author,reviewDecision', `--limit=${limit}`], profileInfo.local_path);
-  const parsed = JSON.parse(stdout) as ProviderPr[];
-  const isOpen = (state: string): boolean => {
-    const normalized = state.toLowerCase();
-    // GitHub reports OPEN/MERGED/CLOSED; GitLab opened/closed/merged.
-    return normalized === 'open' || normalized === 'opened';
-  };
-  return parsed
-    .map((raw) => normalizePr(raw))
-    .filter((pr) => isOpen(pr.state))
-    .sort((a, b) => b.number - a.number);
+  const cacheKey = `${profileInfo.provider}:${profileInfo.repo}:${profileInfo.local_path}`;
+  return prsCache.get(cacheKey, async () => {
+    const isGitLab = profileInfo.provider === 'gitlab';
+    const { stdout } = isGitLab
+      ? await execCli('glab', ['mr', 'list', '--output=json'], profileInfo.local_path)
+      : await execCli('gh', ['pr', 'list', '--json', 'number,title,url,headRefName,isDraft,updatedAt,state,author,reviewDecision', `--limit=${limit}`], profileInfo.local_path);
+    const parsed = JSON.parse(stdout) as ProviderPr[];
+    const isOpen = (state: string): boolean => {
+      const normalized = state.toLowerCase();
+      // GitHub reports OPEN/MERGED/CLOSED; GitLab opened/closed/merged.
+      return normalized === 'open' || normalized === 'opened';
+    };
+    return parsed
+      .map((raw) => normalizePr(raw))
+      .filter((pr) => isOpen(pr.state))
+      .sort((a, b) => b.number - a.number);
+  });
 }
 
 async function fetchPr(
