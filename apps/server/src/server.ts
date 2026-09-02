@@ -3,7 +3,6 @@ import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import os from 'node:os';
 import { statfsSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getServerReadiness } from './serverReadiness.js';
@@ -80,10 +79,10 @@ import {
   enqueueManagerWake as enqueueManagerChatWake
 } from './managerChat/ManagerChatManager.js';
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
-import { listAllChatSessions } from './managerChat/chatSessions.js';
+import { listAllChatSessions, resolveSessionCwd, chatSessionStoreOptions } from './managerChat/chatSessions.js';
 import { usageRollup } from './managerChat/usageRollup.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
-import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitPrsCached, commitGitChanges } from './gitCache.js';
+import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitPrsCached, commitGitChanges, cliInDir } from './gitCache.js';
 import {
   addCanonicalSkillBinding,
   clearProfileSkillBindings,
@@ -277,6 +276,10 @@ export function createServer(
   // flag so this surface doesn't exist at all unless an operator enables it.
   app.use('/api/admin', authMiddleware);
   app.use('/api/manager-chat/wake', authMiddleware);
+  // /api/git/commit mutates a checkout on disk (git add -A + git commit),
+  // so it gets the same narrow auth gate as projects/skills/admin rather
+  // than the unauthenticated default the read-only git endpoints keep.
+  app.use('/api/git/commit', authMiddleware);
   app.use('/api/admin', (req, res, next) => {
     if (process.env.GAH_ENABLE_ADMIN_UPDATE !== '1') {
       return res.status(404).json({
@@ -1728,22 +1731,34 @@ export function createServer(
 
   // Git integration: thin wrappers over git/gh/glab so the UI can show
   // branch/PR state without the user leaving the dashboard.
-  async function resolveLocalPath(profile: string): Promise<string | null> {
+  async function resolveProfileInfo(profile: string): Promise<ProfileSummary | null> {
     const profiles = await runProfileList();
-    return profiles.find((p) => p.name === profile)?.local_path ?? null;
+    return profiles.find((p) => p.name === profile) ?? null;
   }
 
-  function cliInDir(bin: string, args: string[], cwd: string): { ok: boolean; out: string } {
-    const r = spawnSync(bin, args, { cwd, encoding: 'utf8' });
-    return { ok: r.status === 0, out: r.stdout ?? '' };
+  async function resolveLocalPath(profile: string): Promise<string | null> {
+    return (await resolveProfileInfo(profile))?.local_path ?? null;
+  }
+
+  /** Resolves the cwd for git surfaces: a chat session's own worktree when
+   * sessionId names a live session, else the profile's checkout. Falls
+   * back to the profile checkout for an unknown/archived session so git
+   * status/commit still work once the session's worktree is gone. */
+  async function resolveGitCwd(profile: string, sessionId?: string): Promise<string | null> {
+    const profileInfo = await resolveProfileInfo(profile);
+    if (!profileInfo) return null;
+    if (!sessionId) return profileInfo.local_path;
+    const resolved = await resolveSessionCwd(profile, sessionId, profileInfo, chatSessionStoreOptions);
+    return resolved ? resolved.cwd : profileInfo.local_path;
   }
 
   app.get('/api/git/status', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
-    const cwd = await resolveLocalPath(profile);
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
+    const cwd = await resolveGitCwd(profile, sessionId);
     if (!cwd) return res.status(404).json({ error: 'Profile not found' });
     try {
-      const result = await getGitStatusCached(profile, cwd);
+      const result = await getGitStatusCached(profile, cwd, sessionId);
       res.json(result);
     } catch (error) {
       res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
@@ -1806,12 +1821,13 @@ export function createServer(
 
   app.post('/api/git/commit', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
     const { message } = req.body as { message?: string };
     if (!message || !message.trim()) return res.status(400).json({ error: 'message required' });
-    const cwd = await resolveLocalPath(profile);
+    const cwd = await resolveGitCwd(profile, sessionId);
     if (!cwd) return res.status(404).json({ error: 'Profile not found' });
     try {
-      const result = await commitGitChanges(profile, cwd, message.trim());
+      const result = await commitGitChanges(profile, cwd, message.trim(), sessionId);
       res.json(result);
     } catch (error) {
       res.status(502).json({ error: error instanceof Error ? error.message : String(error) });

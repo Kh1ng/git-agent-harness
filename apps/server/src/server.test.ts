@@ -421,7 +421,7 @@ test('server startup from apps/server seeds the repo manager skill content intac
   }
 });
 
-test('skill bank mutation routes reject unauthenticated non-loopback requests like /api/projects', async () => {
+test('skill bank and git-commit mutation routes reject unauthenticated non-loopback requests like /api/projects', async () => {
   const { isLocalAddress } = await import('./authMiddleware.js');
   const dir = mkdtempSync(join(tmpdir(), 'gah-skills-api-'));
   const savedBank = process.env.GAH_SKILL_BANK_PATH;
@@ -439,7 +439,7 @@ test('skill bank mutation routes reject unauthenticated non-loopback requests li
     if (!nonLoopbackIp) return;
     const baseUrl = `http://${nonLoopbackIp}:${port}`;
     // No TLS, no token -> 403 Forbidden, exactly like /api/projects.
-    for (const path of ['/api/skills', '/api/projects', '/api/admin/update']) {
+    for (const path of ['/api/skills', '/api/projects', '/api/admin/update', '/api/git/commit']) {
       const res = await fetch(`${baseUrl}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

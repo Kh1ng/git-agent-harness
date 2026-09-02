@@ -7,6 +7,10 @@ import { spawnSync } from 'node:child_process';
 import { AsyncTtlCache } from './asyncTtlCache.js';
 
 const DEFAULT_GIT_CACHE_TTL_MS = 15_000; // 15 seconds TTL for git data
+// Bounds on every git/gh/glab subprocess: a hung or chatty provider call
+// must not block a request indefinitely or buffer unbounded output.
+const SUBPROCESS_TIMEOUT_MS = 10_000;
+const MAX_OUTPUT_BYTES = 5 * 1024 * 1024;
 
 interface GitStatusResult {
   branch: string;
@@ -33,12 +37,14 @@ interface GitCommitResult {
 }
 
 function gitInDir(cwd: string, args: string[]): { ok: boolean; out: string; err: string } {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: SUBPROCESS_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES });
   return { ok: r.status === 0, out: r.stdout ?? '', err: r.stderr ?? '' };
 }
 
-function cliInDir(bin: string, args: string[], cwd: string): { ok: boolean; out: string } {
-  const r = spawnSync(bin, args, { cwd, encoding: 'utf8' });
+/** Shared by the PR-fetch path here and the `gh pr create`/`glab mr create`
+ * mutation in server.ts, so both go through the same timeout/output bound. */
+export function cliInDir(bin: string, args: string[], cwd: string): { ok: boolean; out: string } {
+  const r = spawnSync(bin, args, { cwd, encoding: 'utf8', timeout: SUBPROCESS_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES });
   return { ok: r.status === 0, out: r.stdout ?? '' };
 }
 
@@ -48,16 +54,25 @@ const gitBranchesCache = new AsyncTtlCache<string, GitBranchesResult>(DEFAULT_GI
 const gitLogCache = new AsyncTtlCache<string, GitLogResult>(DEFAULT_GIT_CACHE_TTL_MS);
 const gitPrsCache = new AsyncTtlCache<string, GitPrsResult>(DEFAULT_GIT_CACHE_TTL_MS);
 
+function statusCacheKey(profile: string, sessionId?: string): string {
+  return sessionId ? `${profile}:${sessionId}` : profile;
+}
+
 /**
- * Cached git status: branch + changes for a profile's checkout.
- * Key: profile
+ * Cached git status: branch + changes for a profile's checkout, or for a
+ * chat session's own worktree when sessionId is given.
+ * Key: profile, or profile:sessionId
  */
-export async function getGitStatusCached(profile: string, cwd: string): Promise<GitStatusResult> {
-  return gitStatusCache.get(profile, async () => {
+export async function getGitStatusCached(profile: string, cwd: string, sessionId?: string): Promise<GitStatusResult> {
+  return gitStatusCache.get(statusCacheKey(profile, sessionId), async () => {
     const { ok, out, err } = gitInDir(cwd, ['status', '--porcelain', '-b']);
     if (!ok) throw new Error(err);
     const lines = out.split('\n').filter(Boolean);
-    const branch = lines[0]?.replace(/^## /, '') ?? '';
+    const branchLine = lines[0]?.replace(/^## /, '') ?? '';
+    // The `-b` header is `branch...origin/branch [ahead N, behind M]` (or
+    // just `branch` with no upstream) -- strip the tracking/ahead-behind
+    // suffix down to the branch name alone.
+    const branch = branchLine.split('...')[0].split(' ')[0];
     const changes = lines.slice(1).map((l) => ({ status: l.slice(0, 2).trim(), path: l.slice(3) }));
     return { branch, changes, cwd };
   });
@@ -135,17 +150,17 @@ export async function getGitPrsCached(
 export async function commitGitChanges(
   profile: string,
   cwd: string,
-  message: string
+  message: string,
+  sessionId?: string
 ): Promise<GitCommitResult> {
   const add = gitInDir(cwd, ['add', '-A']);
   if (!add.ok) throw new Error(add.err || 'git add failed');
   const commit = gitInDir(cwd, ['commit', '-m', message]);
   if (!commit.ok) throw new Error(commit.err || commit.out || 'git commit failed');
-  gitStatusCache.delete(profile);
+  gitStatusCache.delete(statusCacheKey(profile, sessionId));
   for (const key of gitLogCache.keys()) {
     if (key === profile || key.startsWith(`${profile}:`)) gitLogCache.delete(key);
   }
   const rev = gitInDir(cwd, ['rev-parse', 'HEAD']);
   return { hash: rev.ok ? rev.out.trim() : '' };
 }
-

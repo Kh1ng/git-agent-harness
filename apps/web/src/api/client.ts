@@ -228,12 +228,12 @@ export interface GahDataSource {
   setSkillBindings(data: SkillBindingUpdate): Promise<SkillBindingSummary>;
   inheritSkillBindings(profile: string, backend: string, instance?: string | null): Promise<SkillBindingSummary>;
   recallContext(profile: string, query: string): Promise<{ context: string; memoryCount: number }>;
-  getGitStatus(profile: string): Promise<{ branch: string; changes: { status: string; path: string }[]; cwd: string }>;
+  getGitStatus(profile: string, sessionId?: string): Promise<{ branch: string; changes: { status: string; path: string }[]; cwd: string }>;
   getGitBranches(profile: string): Promise<{ branches: string[]; current: string }>;
   getGitLog(profile: string, limit?: number): Promise<{ commits: { hash: string; short: string; subject: string; author: string; ago: string }[] }>;
   getGitPrs(profile: string): Promise<{ prs: Record<string, unknown>[]; warning?: string }>;
   createGitPr(profile: string, data: { title: string; body?: string; base?: string; draft?: boolean }): Promise<{ url: string }>;
-  createGitCommit(profile: string, message: string): Promise<{ hash: string }>;
+  createGitCommit(profile: string, message: string, sessionId?: string): Promise<{ hash: string }>;
   getManagerChatCommands(profile: string): Promise<{ commands: ManagerCommandInfo[] }>;
   getManagerChatModels(profile: string): Promise<ManagerModelsSummary>;
   setManagerChatModel(profile: string, modelId: string): Promise<{ success: boolean }>;
@@ -480,8 +480,8 @@ export const gahApi: GahDataSource = {
       { profile, query }
     );
   },
-  getGitStatus(profile) {
-    return getJson('/api/git/status', { profile });
+  getGitStatus(profile, sessionId) {
+    return getJson('/api/git/status', { profile, sessionId });
   },
   getGitBranches(profile) {
     return getJson('/api/git/branches', { profile });
@@ -495,8 +495,10 @@ export const gahApi: GahDataSource = {
   createGitPr(profile, data) {
     return postJson(`/api/git/pr?profile=${encodeURIComponent(profile)}`, data);
   },
-  createGitCommit(profile, message) {
-    return postJson(`/api/git/commit?profile=${encodeURIComponent(profile)}`, { message });
+  createGitCommit(profile, message, sessionId) {
+    const query = new URLSearchParams({ profile });
+    if (sessionId) query.set('sessionId', sessionId);
+    return postJson(`/api/git/commit?${query.toString()}`, { message });
   },
   getManagerChatCommands(profile) {
     return getJson<{ commands: ManagerCommandInfo[] }>('/api/manager-chat/commands', { profile });
