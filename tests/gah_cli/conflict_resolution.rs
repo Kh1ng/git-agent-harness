@@ -1,5 +1,18 @@
 use super::*;
 use git_agent_harness::{config, ledger::LedgerEntry};
+use sha2::{Digest, Sha256};
+
+fn review_metadata_fingerprint(source_sha: &str, title: &str, body: &str, draft: bool) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"gah-review-metadata-v1\0");
+    let title = title.strip_prefix("Draft: ").unwrap_or(title);
+    for value in [source_sha, title, body] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    hasher.update([u8::from(draft)]);
+    format!("sha256:{:x}", hasher.finalize())
+}
 
 fn git(repo: &std::path::Path, args: &[&str]) -> String {
     let output = ProcessCommand::new("git")
@@ -83,8 +96,13 @@ fn setup_conflicted_repair_with_config(
     review.branch = Some("repair".into());
     review.work_id = Some("repair".into());
     review.review_verdict = Some("NEEDS_FIX".into());
-    review.review_source_sha = Some(source_sha);
-    review.review_metadata_fingerprint = Some("sha256:conflict-fixture".into());
+    review.review_source_sha = Some(source_sha.clone());
+    review.review_metadata_fingerprint = Some(review_metadata_fingerprint(
+        &source_sha,
+        "Draft: repair",
+        "repair",
+        false,
+    ));
     review.review_contract_version = Some(git_agent_harness::ledger::REVIEW_CONTRACT_VERSION);
     review.review_generation = git_agent_harness::ledger::review_generation(
         review.review_source_sha.as_deref(),
@@ -105,13 +123,15 @@ fn setup_conflicted_repair_with_config(
     make_fake_bin_with_body(
         &fake_bin,
         "gh",
-        r#"#!/bin/sh
-if [ "$1" = "api" ] && [ "$2" = "--method" ] && [ "$3" = "GET" ]; then printf '[{"number":7}]\n'; exit 0; fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ]; then printf '{"number":7,"url":"https://github.com/owner/real/pull/7","title":"Draft: repair","body":"repair","headRefName":"repair","baseRefName":"main","headRefOid":"abc","statusCheckRollup":[]}\n'; exit 0; fi
+        &format!(
+            r#"#!/bin/sh
+if [ "$1" = "api" ] && [ "$2" = "--method" ] && [ "$3" = "GET" ]; then printf '[{{"number":7}}]\n'; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then printf '{{"number":7,"url":"https://github.com/owner/real/pull/7","title":"Draft: repair","body":"repair","headRefName":"repair","baseRefName":"main","headRefOid":"{source_sha}","statusCheckRollup":[]}}\n'; exit 0; fi
 if [ "$1" = "api" ]; then exit 0; fi
 echo "unexpected gh invocation: $*" >&2
 exit 1
-"#,
+"#
+        ),
     );
     (repo, home, cfg, ledger_path)
 }
