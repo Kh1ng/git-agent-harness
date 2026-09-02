@@ -83,6 +83,7 @@ import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
 import { listAllChatSessions } from './managerChat/chatSessions.js';
 import { usageRollup } from './managerChat/usageRollup.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
+import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitPrsCached } from './gitCache.js';
 import {
   addCanonicalSkillBinding,
   clearProfileSkillBindings,
@@ -1745,23 +1746,24 @@ export function createServer(
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const cwd = await resolveLocalPath(profile);
     if (!cwd) return res.status(404).json({ error: 'Profile not found' });
-    const { ok, out, err } = gitInDir(cwd, ['status', '--porcelain', '-b']);
-    if (!ok) return res.status(502).json({ error: err });
-    const lines = out.split('\n').filter(Boolean);
-    const branch = lines[0]?.replace(/^## /, '') ?? '';
-    const changes = lines.slice(1).map((l) => ({ status: l.slice(0, 2).trim(), path: l.slice(3) }));
-    res.json({ branch, changes, cwd });
+    try {
+      const result = await getGitStatusCached(profile, cwd);
+      res.json(result);
+    } catch (error) {
+      res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   app.get('/api/git/branches', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const cwd = await resolveLocalPath(profile);
     if (!cwd) return res.status(404).json({ error: 'Profile not found' });
-    const { ok, out, err } = gitInDir(cwd, ['branch', '-a', '--format=%(refname:short)']);
-    if (!ok) return res.status(502).json({ error: err });
-    const current = gitInDir(cwd, ['branch', '--show-current']).out.trim();
-    const branches = out.split('\n').filter(Boolean);
-    res.json({ branches, current });
+    try {
+      const result = await getGitBranchesCached(profile, cwd);
+      res.json(result);
+    } catch (error) {
+      res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   app.get('/api/git/log', async (req, res) => {
@@ -1769,13 +1771,12 @@ export function createServer(
     const limit = typeof req.query.limit === 'string' ? Math.min(50, parseInt(req.query.limit, 10) || 20) : 20;
     const cwd = await resolveLocalPath(profile);
     if (!cwd) return res.status(404).json({ error: 'Profile not found' });
-    const { ok, out, err } = gitInDir(cwd, ['log', `--max-count=${limit}`, '--pretty=format:%H|%h|%s|%an|%ar']);
-    if (!ok) return res.status(502).json({ error: err });
-    const commits = out.split('\n').filter(Boolean).map((l) => {
-      const [hash, short, subject, author, ago] = l.split('|');
-      return { hash, short, subject, author, ago };
-    });
-    res.json({ commits });
+    try {
+      const result = await getGitLogCached(profile, cwd, limit);
+      res.json(result);
+    } catch (error) {
+      res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   app.get('/api/git/prs', async (req, res) => {
@@ -1785,14 +1786,11 @@ export function createServer(
     const profiles = await runProfileList();
     const prof = profiles.find((p) => p.name === profile);
     const isGitLab = prof?.provider === 'gitlab';
-    if (isGitLab) {
-      const { ok, out } = cliInDir('glab', ['mr', 'list', '--output=json'], cwd);
-      if (!ok) return res.json({ prs: [], warning: 'glab not available or no MRs' });
-      try { res.json({ prs: JSON.parse(out) }); } catch { res.json({ prs: [], warning: 'glab output parse error' }); }
-    } else {
-      const { ok, out } = cliInDir('gh', ['pr', 'list', '--json', 'number,title,state,url,headRefName,isDraft'], cwd);
-      if (!ok) return res.json({ prs: [], warning: 'gh not available or no PRs' });
-      try { res.json({ prs: JSON.parse(out) }); } catch { res.json({ prs: [], warning: 'gh output parse error' }); }
+    try {
+      const result = await getGitPrsCached(profile, cwd, isGitLab);
+      res.json(result);
+    } catch (error) {
+      res.json({ prs: [], warning: error instanceof Error ? error.message : 'Unknown error' });
     }
   });
 

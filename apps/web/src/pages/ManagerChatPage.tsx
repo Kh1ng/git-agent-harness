@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles } from 'lucide-react';
+import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles, GitPullRequest, GitCommit } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
@@ -23,7 +23,9 @@ import type {
   ChatSessionProjectGroup,
   ChatPreviewInfo,
   ChatReclaimResult,
-  SkillBindingSummary
+  SkillBindingSummary,
+  ChatPrSummary,
+  ChatIssueSummary
 } from '@git-agent-harness/contracts';
 
 interface ChatTurn {
@@ -243,6 +245,70 @@ function SkillPicker({
   );
 }
 
+/**
+ * Git strip: compact view of branch, changes count, open issues/PRs with actions.
+ * Renders for the active session's project when git data is available.
+ */
+function GitStrip({
+  status,
+  issues,
+  prs,
+  onRefresh
+}: {
+  status: { branch: string; changes: { status: string; path: string }[]; cwd: string } | null;
+  issues: ChatIssueSummary[];
+  prs: ChatPrSummary[];
+  onRefresh: () => void;
+}) {
+  if (!status) return null;
+
+  const clean = status.changes.length === 0;
+  const changedFiles = status.changes.length;
+
+  return (
+    <div className="flex items-center justify-between gap-3 text-xs">
+      <div className="flex items-center gap-3 truncate">
+        <GitBranch size={14} className="text-muted shrink-0" />
+        <span className="font-mono text-secondary">{status.branch}</span>
+        {clean ? (
+          <span className="text-muted">clean</span>
+        ) : (
+          <span className="flex items-center gap-1 text-amber-400">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+            {changedFiles} changed
+          </span>
+        )}
+        {prs.length > 0 && (
+          <>
+            <span className="text-muted">|</span>
+            <span className="flex items-center gap-1">
+              <GitPullRequest size={13} className="text-purple-400" />
+              {prs.length}
+            </span>
+          </>
+        )}
+        {issues.length > 0 && (
+          <>
+            <span className="text-muted">|</span>
+            <span className="flex items-center gap-1">
+              <ShieldAlert size={13} className="text-blue-400" />
+              {issues.length}
+            </span>
+          </>
+        )}
+      </div>
+      <button
+        onClick={onRefresh}
+        className="text-muted hover:text-primary disabled:opacity-50"
+        title="Refresh git data"
+        disabled={!status}
+      >
+        <RefreshCw size={13} />
+      </button>
+    </div>
+  );
+}
+
 export function ManagerChatPage() {
   const { sendMessage, messages, isConnected, reconnectSeq } = useWebSocket();
   const wsProfile = useWebSocket().profile;
@@ -342,6 +408,13 @@ export function ManagerChatPage() {
   const skillBackend = activeSession?.backend ?? activeBackendId;
   const [skillBinding, setSkillBinding] = useState<SkillBindingSummary | null>(null);
   const [skillBindingChanging, setSkillBindingChanging] = useState(false);
+  
+  // Git strip data for active profile/project
+  const [gitStatus, setGitStatus] = useState<{ branch: string; changes: { status: string; path: string }[]; cwd: string } | null>(null);
+  const [gitIssues, setGitIssues] = useState<ChatIssueSummary[]>([]);
+  const [gitPrs, setGitPrs] = useState<ChatPrSummary[]>([]);
+  const [gitLoading, setGitLoading] = useState(false);
+  const [gitError, setGitError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -356,6 +429,27 @@ export function ManagerChatPage() {
   useEffect(() => {
     gahApi.getProfiles().then(setAvailableProfiles).catch(() => {});
   }, []);
+
+  const loadGitData = async () => {
+    setGitLoading(true);
+    setGitError(null);
+    try {
+      const [status, issues, prs] = await Promise.all([
+        gahApi.getGitStatus(profile),
+        gahApi.getChatIssues(profile).then(({ issues }) => issues).catch(() => [] as ChatIssueSummary[]),
+        gahApi.getChatPrs(profile).then(({ prs }) => prs).catch(() => [] as ChatPrSummary[])
+      ]);
+      setGitStatus(status);
+      setGitIssues(issues);
+      setGitPrs(prs);
+    } catch (error) {
+      setGitError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGitLoading(false);
+    }
+  };
+
+  useEffect(() => { loadGitData(); }, [profile]);
 
   const refreshSessions = (forProfile: string) => {
     gahApi
@@ -1257,6 +1351,13 @@ export function ManagerChatPage() {
           </div>
         }
       />
+
+      {/* Git strip: compact git state for the active session's project */}
+      {currentProfileInfo && (
+        <div className="card-padded">
+          <GitStrip status={gitStatus} issues={gitIssues} prs={gitPrs} onRefresh={loadGitData} />
+        </div>
+      )}
 
       {/* WP2 session bar: one conversation per worktree. Default = the
           profile's shared conversation; sessions run in isolated worktrees
