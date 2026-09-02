@@ -28,11 +28,14 @@ const ISSUES_CACHE_TTL_MS = 15_000;
 const issuesCache = new AsyncTtlCache<string, ChatIssueSummary[]>(ISSUES_CACHE_TTL_MS);
 
 interface ProviderIssue {
-  number: number;
+  number?: number;
+  iid?: number;
   title: string;
-  body: string | null;
+  body?: string | null;
+  description?: string | null;
   state: string;
-  url: string | null;
+  url?: string | null;
+  web_url?: string | null;
   labels: { name?: string; name_and_description?: string }[] | string[] | null;
   updatedAt?: string | null;
   updated_at?: string | null;
@@ -52,11 +55,11 @@ function normalizeLabels(raw: ProviderIssue['labels']): string[] {
 
 function normalizeIssue(raw: ProviderIssue): ChatIssueSummary & { body: string | null; state: string } {
   return {
-    number: raw.number,
+    number: raw.number ?? raw.iid ?? 0,
     title: raw.title,
-    body: raw.body ?? null,
+    body: raw.body ?? raw.description ?? null,
     state: raw.state,
-    url: raw.url ?? null,
+    url: raw.url ?? raw.web_url ?? null,
     labels: normalizeLabels(raw.labels),
     updatedAt: raw.updatedAt ?? raw.updated_at ?? null
   };
@@ -84,7 +87,8 @@ export async function listChatIssues(
     return parsed
       .map((raw) => normalizeIssue(raw))
       .filter((issue) => isOpen(issue.state))
-      .sort((a, b) => b.number - a.number);
+      .sort((a, b) => b.number - a.number)
+      .map(({ number, title, url, labels, updatedAt }) => ({ number, title, url, labels, updatedAt }));
   });
 }
 

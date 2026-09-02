@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -102,6 +102,48 @@ test('listChatIssues caches repeated reads and keeps limits separate', withEnv(a
   assert.equal(calls.length, 2);
   assert.ok(calls.some((args) => args.includes('--limit=1')));
   assert.ok(calls.some((args) => args.includes('--limit=30')));
+}));
+
+test('GitLab issue aliases populate the list and seeded chat', withEnv(async (env) => {
+  const binDir = join(env.root, 'gitlab-bin');
+  const dataDir = join(env.root, 'gitlab-data');
+  mkdirSync(binDir);
+  mkdirSync(dataDir);
+  symlinkSync(join(fixtures, 'gh/gh'), join(binDir, 'glab'));
+  const gitlabIssue = {
+    iid: 7,
+    title: 'GitLab issue',
+    description: 'GitLab description',
+    state: 'opened',
+    web_url: 'https://gitlab.example/owner/repo/-/issues/7',
+    labels: ['bug'],
+    updated_at: '2026-09-02T00:00:00Z'
+  };
+  writeFileSync(join(dataDir, 'issues.json'), JSON.stringify([gitlabIssue]));
+  writeFileSync(join(dataDir, 'issue-7.json'), JSON.stringify(gitlabIssue));
+  writeFileSync(join(dataDir, 'labels.json'), '[]');
+  process.env.GAH_FAKE_GH_FIXTURE = dataDir;
+  process.env.PATH = `${binDir}:${process.env.PATH}`;
+  env.profileInfo.provider = 'gitlab';
+
+  const issues = await listChatIssues(env.profileInfo);
+  assert.deepEqual(issues, [{
+    number: 7,
+    title: 'GitLab issue',
+    url: 'https://gitlab.example/owner/repo/-/issues/7',
+    labels: ['bug'],
+    updatedAt: '2026-09-02T00:00:00Z'
+  }]);
+
+  const { session } = await startIssueChat({
+    profile: 'p',
+    profileInfo: env.profileInfo,
+    issueNumber: 7,
+    backend: 'hermes'
+  });
+  const log = readFileSync(join(env.root, 'state', 'project-p', `session-${session.id}`, 'session.jsonl'), 'utf8');
+  assert.match(log, /#7 GitLab issue/);
+  assert.match(log, /GitLab description/);
 }));
 
 test('startIssueChat branches, marks in progress, and seeds the log with the issue', withEnv(async (env) => {

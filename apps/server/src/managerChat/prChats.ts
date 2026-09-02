@@ -78,7 +78,17 @@ export async function listChatPrs(
     return parsed
       .map((raw) => normalizePr(raw))
       .filter((pr) => isOpen(pr.state))
-      .sort((a, b) => b.number - a.number);
+      .sort((a, b) => b.number - a.number)
+      .map(({ number, title, url, author, headRefName, isDraft, reviewState, updatedAt }) => ({
+        number,
+        title,
+        url,
+        author,
+        headRefName,
+        isDraft,
+        reviewState,
+        updatedAt
+      }));
   });
 }
 

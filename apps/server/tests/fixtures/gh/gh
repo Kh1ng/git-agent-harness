@@ -43,7 +43,7 @@ if (command === 'issue' && sub === 'list') {
 } else if (command === 'issue' && sub === 'view') {
   const number = args[2];
   respond(`issue-${number}`);
-} else if (command === 'issue' && sub === 'edit') {
+} else if (command === 'issue' && (sub === 'edit' || sub === 'update')) {
   const number = args[2];
   fs.appendFileSync(stateFile, `${JSON.stringify({ number, args: args.slice(3) })}\n`);
   process.exit(0);
