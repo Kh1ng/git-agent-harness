@@ -40,21 +40,14 @@ fn resolve_instance(
         .logical_backend
         .clone()
         .unwrap_or_else(|| instance.runner_kind.clone());
-    // Fold legacy alias strings (e.g. "agy-second") to their canonical
-    // BackendKind the same way `dispatch/attempts.rs` does via
-    // `identity.runner_kind` -- `BackendKind::parse` deliberately rejects
-    // instance-alias strings directly (they name instances, not kinds), so
-    // an aliased instance must be folded first or every refresh for it
-    // fails outright.
-    let runner_kind = crate::execution_identity::runner_kind_for_backend(&logical_backend);
-    let kind = BackendKind::parse(runner_kind)
+    let kind = BackendKind::parse(&instance.runner_kind)
         .map_err(|e| anyhow::anyhow!("backend instance '{instance_name}': {e}"))?;
     let executable = match instance.executable.as_deref() {
         Some(path) if crate::runner::is_executable_path(Path::new(path)) => PathBuf::from(path),
         Some(path) => bail!(
             "configured executable '{path}' for instance '{instance_name}' does not exist or is not executable"
         ),
-        None => match crate::runner::resolve_backend_executable(profile, &logical_backend) {
+        None => match crate::runner::resolve_backend_executable(profile, &instance.runner_kind) {
             crate::runner::ExecutableResolution::Found(path) => path,
             other => bail!(
                 "could not resolve an executable for backend '{logical_backend}' (instance '{instance_name}'): {other:?}"
@@ -67,6 +60,37 @@ fn resolve_instance(
         logical_backend,
         state_root: instance.state_root.as_deref().map(PathBuf::from),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::BackendInstanceConfig;
+
+    #[test]
+    fn resolve_instance_uses_declared_runner_kind_for_arbitrary_logical_alias() {
+        let mut profile = crate::runner::backends::test_util::test_profile();
+        profile.routing.backend_instances.insert(
+            "research".into(),
+            BackendInstanceConfig {
+                runner_kind: "hermes".into(),
+                logical_backend: Some("hermes-research".into()),
+                executable: Some(
+                    std::env::current_exe()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ..Default::default()
+            },
+        );
+
+        let resolved =
+            resolve_instance(&profile, &crate::config::Defaults::default(), "research").unwrap();
+
+        assert_eq!(resolved.kind, BackendKind::Hermes);
+        assert_eq!(resolved.logical_backend, "hermes-research");
+    }
 }
 
 pub fn run(command: SkillsCommands) -> Result<()> {

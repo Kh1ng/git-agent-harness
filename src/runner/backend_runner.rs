@@ -297,7 +297,9 @@ mod tests {
         make_fake_bin(
             &f.bin_dir,
             "hermes",
-            "#!/bin/sh\necho '{\"skills\": [\"review\"]}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \
+'┃ Name   ┃ Category ┃ Source ┃ Trust ┃ Status  ┃' \
+'│ review │          │ local  │ local │ enabled │'\n",
         );
         let ctx = SkillObservationContext {
             executable: &f.bin_dir.join("hermes"),

@@ -98,10 +98,9 @@ pub fn run_hermes_with_executable(
 
 /// Self-report query for #966: ask a Hermes instance what skills it
 /// currently has configured, bounded by `timeout` so a hung/unreachable
-/// backend never blocks the caller. `--skills-status` is expected to print
-/// `{"skills": [...]}` to stdout and exit 0; any other shape, a nonzero
-/// exit, or a timeout all fold to `Unknown` -- this is a best-effort
-/// self-report, not something dispatch can depend on succeeding.
+/// backend never blocks the caller. Hermes exposes enabled skills through
+/// `skills list --enabled-only`; any unexpected output, a nonzero exit, or a
+/// timeout folds to `Unknown` rather than fabricating an empty inventory.
 ///
 /// `cwd`/`env_vars` target this specific backend instance's isolated
 /// state/profile (e.g. an instance-scoped `HOME`), the same way every other
@@ -115,26 +114,47 @@ pub(crate) fn observe_skills_with_executable(
     timeout: Duration,
 ) -> ObservedSkills {
     let mut cmd = Command::new(executable);
-    cmd.arg("--skills-status");
+    cmd.args(["skills", "list", "--enabled-only"]);
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
     crate::runner::apply_child_env(&mut cmd, env_vars);
+    // Rich truncates cells to terminal width. Pin a wide, colorless output
+    // so the table parser receives complete skill IDs from non-interactive
+    // subprocesses.
+    cmd.env("COLUMNS", "1000")
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb");
     match crate::runner::process::run_bounded(cmd, timeout) {
         Some(output) if output.status.success() => {
-            parse_skills_status(&output.stdout).unwrap_or(ObservedSkills::Unknown)
+            parse_skills_list(&output.stdout).unwrap_or(ObservedSkills::Unknown)
         }
         _ => ObservedSkills::Unknown,
     }
 }
 
-fn parse_skills_status(stdout: &[u8]) -> Option<ObservedSkills> {
-    #[derive(serde::Deserialize)]
-    struct Payload {
-        skills: Vec<String>,
+fn parse_skills_list(stdout: &[u8]) -> Option<ObservedSkills> {
+    let text = std::str::from_utf8(stdout).ok()?;
+    let mut saw_header = false;
+    let mut skills = Vec::new();
+    for line in text.lines().filter(|line| {
+        let line = line.trim_start();
+        line.starts_with('│') || line.starts_with('┃')
+    }) {
+        let cells: Vec<_> = line
+            .split(|character| character == '│' || character == '┃')
+            .map(str::trim)
+            .collect();
+        if cells.len() < 7 {
+            continue;
+        }
+        if cells[1] == "Name" && cells[5] == "Status" {
+            saw_header = true;
+        } else if cells[5] == "enabled" && !cells[1].is_empty() {
+            skills.push(cells[1].to_string());
+        }
     }
-    let payload: Payload = serde_json::from_slice(stdout).ok()?;
-    Some(ObservedSkills::Skills(payload.skills))
+    saw_header.then_some(ObservedSkills::Skills(skills))
 }
 
 #[cfg(test)]
@@ -330,11 +350,17 @@ mod tests {
     #[test]
     fn observe_skills_reports_the_self_reported_set() {
         let f = fixture();
-        make_fake_bin(
-            &f.bin_dir,
-            "hermes",
-            "#!/bin/sh\necho '{\"skills\": [\"review\", \"triage\"]}'\n",
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' \
+'┏━━━━━━━┳━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━━┓' \
+'┃ Name  ┃ Category ┃ Source ┃ Trust ┃ Status  ┃' \
+'┡━━━━━━━╇━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━━━┩' \
+'│ review │          │ local  │ local │ enabled │' \
+'│ triage │          │ local  │ local │ enabled │' \
+'└───────┴──────────┴────────┴───────┴─────────┘'\n",
+            f.record_dir.join("argv.txt").display(),
         );
+        make_fake_bin(&f.bin_dir, "hermes", &body);
 
         let observed = observe_skills_with_executable(
             &f.bin_dir.join("hermes"),
@@ -346,6 +372,10 @@ mod tests {
         assert_eq!(
             observed,
             ObservedSkills::Skills(vec!["review".to_string(), "triage".to_string()])
+        );
+        assert_eq!(
+            recorded_argv(&f.record_dir),
+            ["skills", "list", "--enabled-only"]
         );
     }
 
@@ -385,7 +415,11 @@ mod tests {
     #[test]
     fn observe_skills_is_unknown_on_malformed_output() {
         let f = fixture();
-        make_fake_bin(&f.bin_dir, "hermes", "#!/bin/sh\necho 'not json'\n");
+        make_fake_bin(
+            &f.bin_dir,
+            "hermes",
+            "#!/bin/sh\necho 'not a skills table'\n",
+        );
 
         let observed = observe_skills_with_executable(
             &f.bin_dir.join("hermes"),

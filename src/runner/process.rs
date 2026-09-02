@@ -42,8 +42,10 @@ pub fn install_shutdown_handler() -> Result<()> {
 /// block a caller on a hung backend -- unlike `spawn_with_idle_watch`, there
 /// is no idle-vs-progress distinction here, just a hard deadline.
 pub fn run_bounded(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let mut stdout = tempfile::tempfile().ok()?;
+    let mut stderr = tempfile::tempfile().ok()?;
+    cmd.stdout(Stdio::from(stdout.try_clone().ok()?))
+        .stderr(Stdio::from(stderr.try_clone().ok()?))
         .stdin(Stdio::null());
     // Own process group so a timeout can reap the whole tree, not just the
     // direct child -- same discipline as every other timeout path in this
@@ -51,18 +53,40 @@ pub fn run_bounded(mut cmd: Command, timeout: Duration) -> Option<std::process::
     // descendant the backend spawns of its own (a shell wrapper, etc.)
     // survives the SIGKILL below and leaks.
     prepare_process_group(&mut cmd);
-    let child = cmd.spawn().ok()?;
-    let pid = child.id();
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(output)) => Some(output),
-        Ok(Err(_)) => None,
-        Err(_) => {
-            kill_process_group_by_pid(pid);
-            None
+    let mut child = cmd.spawn().ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                use std::io::Seek;
+                stdout.rewind().ok()?;
+                stderr.rewind().ok()?;
+                let mut stdout_bytes = Vec::new();
+                let mut stderr_bytes = Vec::new();
+                stdout.read_to_end(&mut stdout_bytes).ok()?;
+                stderr.read_to_end(&mut stderr_bytes).ok()?;
+                return Some(std::process::Output {
+                    status,
+                    stdout: stdout_bytes,
+                    stderr: stderr_bytes,
+                });
+            }
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(
+                    Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Ok(None) => {
+                kill_process_group(&mut child);
+                let _ = child.wait();
+                return None;
+            }
+            Err(_) => {
+                kill_process_group(&mut child);
+                let _ = child.wait();
+                return None;
+            }
         }
     }
 }
