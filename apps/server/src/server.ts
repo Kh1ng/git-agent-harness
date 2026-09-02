@@ -798,11 +798,8 @@ export function createServer(
     }
   });
 
-  // Submits a dispatch as a fleet Session and returns immediately once it's
-  // created -- progress streams over the existing WebSocket push bus (the
-  // same mechanism the WS session.start path already uses), rather than
-  // this route blocking for the full dispatch run or reimplementing a
-  // second streaming transport.
+  // Submits a dispatch as a fleet Session. Callers may opt into a single
+  // push-driven wait for its terminal event; the default remains immediate.
   app.post('/api/dispatch', async (req, res) => {
     const body = req.body ?? {};
     const profile = typeof body.profile === 'string' ? body.profile : undefined;
@@ -836,7 +833,17 @@ export function createServer(
       coordinatorNodeId: typeof body.coordinatorNodeId === 'string' ? body.coordinatorNodeId : undefined
     };
     try {
-      const session = await getFleetDispatch().startSession(options);
+      const fleetDispatch = getFleetDispatch();
+      const session = await fleetDispatch.startSession(options);
+      if (body.waitForCompletion === true) {
+        const requestedSeconds = typeof body.waitTimeoutSeconds === 'number'
+          ? body.waitTimeoutSeconds
+          : 3_600;
+        const timeoutMs = Math.max(1, Math.min(7_200, requestedSeconds)) * 1_000;
+        const terminal = await fleetDispatch.waitForSession(session.id, timeoutMs);
+        res.status(terminal.timedOut ? 202 : 200).json(terminal);
+        return;
+      }
       res.status(202).json({ session });
     } catch (error) {
       res.status(502).json({

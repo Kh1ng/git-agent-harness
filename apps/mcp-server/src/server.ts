@@ -230,9 +230,8 @@ export function createGahMcpServer(): McpServer {
     {
       title: 'Dispatch a GAH job',
       description:
-        'Submit a dispatch as a fleet session and return immediately (does not block for the run to finish). ' +
-        'The response includes the session id; poll gah_status or the dashboard to watch progress -- ' +
-        'this tool does not wait for or stream the run.',
+        'Submit a dispatch as a fleet session and wait for its terminal push event by default. ' +
+        'Set waitForCompletion=false to return immediately with the running session.',
       inputSchema: {
         profile: profileArg,
         providerKind: z.enum(['github', 'gitlab']),
@@ -247,6 +246,8 @@ export function createGahMcpServer(): McpServer {
         dryRun: z.boolean().optional(),
         retries: z.number().int().min(0).optional(),
         allowDraftFail: z.boolean().optional(),
+        waitForCompletion: z.boolean().default(true),
+        waitTimeoutSeconds: z.number().int().min(1).max(7_200).default(3_600),
         requestId: z.string().optional(),
         nodeId: z.string().optional(),
         coordinatorNodeId: z.string().optional()

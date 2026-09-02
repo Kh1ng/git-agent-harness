@@ -63,7 +63,9 @@ test('lists usage and orchestration tools and forwards their HTTP calls', async 
       backend: 'claude',
       model: 'sonnet',
       retries: 1,
-      dryRun: true
+      dryRun: true,
+      waitForCompletion: true,
+      waitTimeoutSeconds: 3_600
     });
   } finally {
     await client.close();

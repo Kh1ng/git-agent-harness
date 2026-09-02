@@ -1,3 +1,5 @@
+#[path = "dispatch/operator_pins.rs"]
+mod operator_pins;
 #[path = "dispatch/planning_and_review.rs"]
 mod planning_and_review;
 #[path = "dispatch/retry_and_routing.rs"]

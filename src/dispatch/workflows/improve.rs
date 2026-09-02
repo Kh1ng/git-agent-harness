@@ -3,7 +3,7 @@ use super::super::attempts::{
     decide_route, failure_text_with_internal_log, preflight_identity,
     record_external_approval_consumption_for_last_attempt, record_route_attempt,
     reserve_backend_attempt, resolve_llm, route_after_backend_unavailable, route_identity,
-    route_label, run_backend_with_reserved_route, wip_checkpoint_branch,
+    route_label, run_backend_with_reserved_route, validation_retry_route, wip_checkpoint_branch,
 };
 use super::super::claims::ensure_dispatch_capacity;
 use super::super::identity::timestamp;
@@ -1318,16 +1318,14 @@ pub(crate) fn improve(
                         checkpoint,
                         utf8_safe_prefix(&failure_output, 8_000),
                     );
-                    // TICKET-089 AC7: made real (if imperfect) progress and
-                    // failed validation again -- a genuine agent-capability
-                    // failure, distinct from harness/backend/quota failures.
-                    // Route again with that context so cost-aware ordering
-                    // may escalate to a stronger model for the retry.
-                    let mut escalation_req = route_req.clone();
-                    escalation_req.last_failure_class =
-                        Some(crate::ledger::FailureClass::ValidationFailure.as_str());
-                    let rerouted =
-                        decide_route(cfg, profile, escalation_req, ticket_meta.as_ref(), ledger)?;
+                    let rerouted = validation_retry_route(
+                        cfg,
+                        profile,
+                        &route_req,
+                        ticket_meta.as_ref(),
+                        ledger,
+                        &route,
+                    )?;
                     let current_identity =
                         route_identity(&route.effective_backend, route.effective_model.as_deref());
                     let rerouted_identity = route_identity(

@@ -225,11 +225,17 @@ function createCoordinatorHarness(options: {
   published: PublishedMessage[];
 }) {
   const { leaseStorePath, registryService, coordinatorNodeId, coordinatorUrl, transportMap, published } = options;
+  const subscribers = new Set<(message: PublishedMessage) => void>();
   return createFleetDispatchCoordinator({
     registryService,
     pushBus: {
       publish(message) {
         published.push(message);
+        for (const subscriber of subscribers) subscriber(message);
+      },
+      subscribe(subscriber) {
+        subscribers.add(subscriber);
+        return () => subscribers.delete(subscriber);
       }
     },
     coordinatorIdentity: {
@@ -250,6 +256,50 @@ function createCoordinatorHarness(options: {
     }
   });
 }
+
+test('fleet dispatch wait resolves from the terminal push event', async () => {
+  const leaseDir = mkdtempSync(resolve(tmpdir(), 'gah-fleet-wait-'));
+  const leaseStorePath = resolve(leaseDir, 'dispatch-leases.json');
+  const published: PublishedMessage[] = [];
+  const transportMap = new Map<string, FakeTransport>();
+  const registryService = {
+    async getNodeObservations() {
+      return [
+        makeSnapshot('coordinator-1', 'http://127.0.0.1:9999', 90, 4, 2),
+        makeSnapshot('worker-1', 'http://127.0.0.1:9998', 10, 0, 0)
+      ];
+    }
+  } as unknown as RegistryService;
+  const coordinator = createCoordinatorHarness({
+    leaseStorePath,
+    registryService,
+    coordinatorNodeId: 'coordinator-1',
+    coordinatorUrl: 'http://127.0.0.1:9999',
+    transportMap,
+    published
+  });
+  const session = await coordinator.startSession({
+    requestId: 'dispatch-wait',
+    profile: 'gah',
+    providerKind: 'codex',
+    instanceId: 'codex-0',
+    repo: 'owner/repo',
+    mode: 'fix'
+  });
+
+  const terminal = coordinator.waitForSession(session.id, 1_000);
+  await coordinator.stopSession(session.id);
+
+  assert.deepEqual(await terminal, {
+    session: {
+      ...session,
+      status: 'stopped',
+      endedAt: coordinator.getSession(session.id)?.endedAt,
+      leaseState: 'terminal'
+    },
+    timedOut: false
+  });
+});
 
 test('fleet dispatch routes to the least-loaded healthy node and honors explicit pins', async () => {
   const mockNode = await createMockNode();

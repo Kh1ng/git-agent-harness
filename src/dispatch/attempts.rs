@@ -1061,6 +1061,24 @@ pub(super) fn decide_route(
     }
 }
 
+/// Preserve an operator-pinned backend across validation retries; automatic
+/// routes may escalate to a different candidate.
+pub(super) fn validation_retry_route(
+    cfg: &GahConfig,
+    profile: &Profile,
+    req: &RouteRequest<'_>,
+    task: Option<&WorkMetadata>,
+    ledger: &mut LedgerEntry,
+    current: &RouteDecision,
+) -> Result<RouteDecision> {
+    if req.requested_backend != "auto" {
+        return Ok(current.clone());
+    }
+    let mut escalation = req.clone();
+    escalation.last_failure_class = Some(crate::ledger::FailureClass::ValidationFailure.as_str());
+    decide_route(cfg, profile, escalation, task, ledger)
+}
+
 pub(super) fn routing_runtime_state(
     cfg: &GahConfig,
     current: &LedgerEntry,
