@@ -572,15 +572,17 @@ export function ManagerChatPage() {
     setGitLoading(true);
     setGitError(null);
     try {
+      // null sentinel on failure (not []) so a transient refresh error
+      // doesn't overwrite last-known issues/PRs with an empty list.
       const [status, issues, prs] = await Promise.all([
         gahApi.getGitStatus(profile, forSessionId),
-        gahApi.getChatIssues(profile).then(({ issues }) => issues).catch(() => [] as ChatIssueSummary[]),
-        gahApi.getChatPrs(profile).then(({ prs }) => prs).catch(() => [] as ChatPrSummary[])
+        gahApi.getChatIssues(profile).then(({ issues }) => issues).catch(() => null),
+        gahApi.getChatPrs(profile).then(({ prs }) => prs).catch(() => null)
       ]);
       if (gitRequestIdRef.current !== requestId) return;
       setGitStatus(status);
-      setGitIssues(issues);
-      setGitPrs(prs);
+      if (issues !== null) setGitIssues(issues);
+      if (prs !== null) setGitPrs(prs);
     } catch (error) {
       if (gitRequestIdRef.current !== requestId) return;
       setGitError(error instanceof Error ? error.message : String(error));
