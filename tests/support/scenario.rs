@@ -978,7 +978,7 @@ fn uniform_github_fixture(scenario: Scenario) -> GithubFixture {
 /// preflight can use: `gh pr view <n>` (a single object, `default`) and
 /// `gh api .../pulls` by branch (a JSON array, `open_pulls`).
 fn manual_fix_github_fixture(number: i64, state: &str, merged_at: Option<&str>) -> GithubFixture {
-    let pr = github_pr_json(GithubPrParams {
+    let mut pr = github_pr_json(GithubPrParams {
         title: "Draft: TICKET-269 Fix race".into(),
         branch: "gah/fix-needs-fix".into(),
         labels: vec!["gah-needs-fix".into()],
@@ -990,6 +990,7 @@ fn manual_fix_github_fixture(number: i64, state: &str, merged_at: Option<&str>) 
         merged_at: merged_at.map(String::from),
         updated_at: None,
     });
+    pr["headRefOid"] = serde_json::json!("HEAD");
     GithubFixture {
         default: Scenario::success().with_stdout(serde_json::to_string(&pr).unwrap()),
         open_pulls: Scenario::success().with_stdout(serde_json::to_string(&vec![&pr]).unwrap()),
@@ -1117,7 +1118,7 @@ fn manual_fix_gitlab_fixture(name: &str) -> Option<GitlabMrFixture> {
         "manual_fix_needs_fix_merged" => ("merged", Some("2026-07-01T00:00:00Z")),
         _ => return None,
     };
-    let mr = gitlab_mr_json(GitlabMrParams {
+    let mut mr = gitlab_mr_json(GitlabMrParams {
         title: "TICKET-269 Fix race".into(),
         branch: "gah/fix-needs-fix".into(),
         labels: vec!["gah-needs-fix".into()],
@@ -1129,6 +1130,7 @@ fn manual_fix_gitlab_fixture(name: &str) -> Option<GitlabMrFixture> {
         merged_at: merged_at.map(String::from),
         updated_at: None,
     });
+    mr["sha"] = serde_json::json!("HEAD");
     Some(GitlabMrFixture {
         list: Scenario::success().with_stdout(serde_json::to_string(&vec![&mr]).unwrap()),
         single: Scenario::success().with_stdout(serde_json::to_string(&mr).unwrap()),
