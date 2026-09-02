@@ -154,6 +154,13 @@ pub struct StatusSnapshot {
     /// failed export states without requiring an operator to inspect raw
     /// export files.
     pub export_health: crate::telemetry::health::ExportHealthView,
+    /// Issue #966 (#863 gap 2): per-backend-instance skill inventory --
+    /// what GAH intends bound vs. what the backend last self-reported
+    /// having, with drift and staleness so a dashboard never presents a
+    /// cached observation as live truth. Read-only projection of the
+    /// durable skill-inventory store; `gah skills refresh` is what actually
+    /// queries a backend.
+    pub skill_inventory: Vec<crate::skill_inventory::SkillInventoryView>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -845,6 +852,68 @@ fn build_snapshot_inner(
     }
     let effective_routing = profile.effective_routing(&cfg.defaults);
     let backend_instances = crate::config_show::backend_instance_summaries(&effective_routing);
+
+    // Issue #966: read-only projection -- bound resolution plus the latest
+    // stored self-report per instance, never a live backend query. `gah
+    // skills refresh` is what actually populates the store. Both the store
+    // load and the bound-skill resolution below are non-blocking
+    // (`resolve_cached_only` never issues a network call -- AC6) and
+    // failures are surfaced as `None`/an error, never silently coerced to
+    // an empty list, so a resolution failure can't be misread as "nothing
+    // bound" and fabricate drift.
+    let skill_inventory_records =
+        match crate::skill_inventory::load(&crate::skill_inventory::store_path()) {
+            Ok(records) => records,
+            Err(error) => {
+                errors.push(StatusError {
+                    subsystem: "skill_inventory".into(),
+                    message: format!("{error:#}"),
+                    incomplete_snapshot: false,
+                });
+                Vec::new()
+            }
+        };
+    let mut skill_instance_names: Vec<&String> =
+        effective_routing.backend_instances.keys().collect();
+    skill_instance_names.sort();
+    let skill_inventory: Vec<_> = skill_instance_names
+        .into_iter()
+        .map(|name| {
+            let instance = &effective_routing.backend_instances[name];
+            let logical_backend = instance
+                .logical_backend
+                .clone()
+                .unwrap_or_else(|| instance.runner_kind.clone());
+            let bound_skill_ids = crate::skill_bindings::resolve_cached_only(
+                &cfg.defaults,
+                profile_name,
+                &logical_backend,
+                Some(name.as_str()),
+            )
+            .map(|resolution| {
+                resolution
+                    .skills
+                    .into_iter()
+                    .map(|skill| skill.id)
+                    .collect()
+            })
+            .ok();
+            let record = crate::skill_inventory::latest_for(
+                &skill_inventory_records,
+                profile_name,
+                &logical_backend,
+                Some(name.as_str()),
+            );
+            crate::skill_inventory::view(
+                bound_skill_ids,
+                record,
+                &logical_backend,
+                Some(name.as_str()),
+                now,
+            )
+        })
+        .collect();
+
     for instance in effective_routing.backend_instances.into_values() {
         let configured = instance.executable.is_some();
         let backend = instance
@@ -903,6 +972,7 @@ fn build_snapshot_inner(
         export_health: crate::telemetry::health::read_view(
             &crate::telemetry::health::export_repo_path(cfg),
         ),
+        skill_inventory,
     };
 
     Ok(snapshot)
@@ -950,6 +1020,37 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
                     instance.executable_configured,
                     instance.isolated_state_configured
                 );
+            }
+        }
+
+        if !snapshot.skill_inventory.is_empty() {
+            println!("Skill inventory:");
+            for view in &snapshot.skill_inventory {
+                let bound = match &view.bound_skill_ids {
+                    Some(ids) => format!("{ids:?}"),
+                    None => "unknown".to_string(),
+                };
+                let observed = match &view.observed_skill_ids {
+                    Some(ids) => format!("{ids:?}"),
+                    None => "unknown".to_string(),
+                };
+                let stale = match view.observation_stale {
+                    Some(true) => " (STALE)",
+                    _ => "",
+                };
+                println!(
+                    "  - {} {}: bound={bound} observed={observed}{stale}",
+                    view.backend,
+                    view.backend_instance.as_deref().unwrap_or("-"),
+                );
+                if let Some(drift) = &view.drift {
+                    if !drift.is_empty() {
+                        println!(
+                            "      drift: bound_not_observed={:?} observed_not_bound={:?}",
+                            drift.bound_not_observed, drift.observed_not_bound
+                        );
+                    }
+                }
             }
         }
 

@@ -388,6 +388,13 @@ pub enum Commands {
         #[command(subcommand)]
         command: QuotaCommands,
     },
+    /// Query and reconcile per-backend-instance skill inventory (issue
+    /// #966, #863 gap 2): what GAH intends bound vs. what a backend
+    /// self-reports having.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommands,
+    },
     /// Inspect and manage work claims (issue #234)
     Claims {
         #[command(subcommand)]
@@ -1060,6 +1067,47 @@ pub enum QuotaCommands {
         since: String,
         #[arg(long, default_value_t = false)]
         json: bool,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+    },
+}
+
+/// Per-backend-instance skill inventory (issue #966 / #863 gap 2).
+#[derive(Subcommand)]
+pub enum SkillsCommands {
+    /// Ask a backend instance what skills it currently has, bounded by a
+    /// timeout, and persist the observation. A backend with no self-report
+    /// support (or one that fails/times out) is recorded as unknown, never
+    /// an empty list.
+    Refresh {
+        /// Profile the backend instance belongs to.
+        #[arg(long)]
+        profile: String,
+        /// Backend instance name (as configured under this profile's
+        /// `backend_instances`).
+        #[arg(long)]
+        instance: String,
+        /// Override the durable store path (default: $XDG_STATE_HOME/gah/...).
+        /// Mainly for testing/automation.
+        #[arg(long, name = "store")]
+        store_path: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+    },
+    /// Read-only projection of bound skills, the latest stored observation,
+    /// and any drift between them, for every (or one) configured backend
+    /// instance. Never spawns a backend process -- safe to call as often as
+    /// `gah status`.
+    Status {
+        #[arg(long)]
+        profile: String,
+        /// Limit to a single backend instance name.
+        #[arg(long)]
+        instance: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        #[arg(long, name = "store")]
+        store_path: Option<String>,
         #[arg(long, name = "config")]
         config_path: Option<String>,
     },

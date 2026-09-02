@@ -2,7 +2,9 @@ use anyhow::Result;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
+use crate::runner::backend_runner::ObservedSkills;
 use crate::runner::process::{spawn_with_idle_watch, write_redacted_task};
 use crate::runner::resolve::filtered_backend_args;
 use crate::runner::RunResult;
@@ -92,6 +94,64 @@ pub fn run_hermes_with_executable(
         transcript_path: None,
         agy_version: None,
     })
+}
+
+/// Self-report query for #966: ask a Hermes instance what skills it
+/// currently has configured, bounded by `timeout` so a hung/unreachable
+/// backend never blocks the caller. Hermes exposes enabled skills through
+/// `skills list --enabled-only`; any unexpected output, a nonzero exit, or a
+/// timeout folds to `Unknown` rather than fabricating an empty inventory.
+///
+/// `cwd`/`env_vars` target this specific backend instance's isolated
+/// state/profile (e.g. an instance-scoped `HOME`), the same way every other
+/// Hermes invocation in this file does -- without them the query would run
+/// against gah's own ambient environment rather than the instance being
+/// asked about.
+pub(crate) fn observe_skills_with_executable(
+    executable: &Path,
+    cwd: Option<&Path>,
+    env_vars: &[(String, String)],
+    timeout: Duration,
+) -> ObservedSkills {
+    let mut cmd = Command::new(executable);
+    cmd.args(["skills", "list", "--enabled-only"]);
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    crate::runner::apply_child_env(&mut cmd, env_vars);
+    // Rich truncates cells to terminal width. Pin a wide, colorless output
+    // so the table parser receives complete skill IDs from non-interactive
+    // subprocesses.
+    cmd.env("COLUMNS", "1000")
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb");
+    match crate::runner::process::run_bounded(cmd, timeout) {
+        Some(output) if output.status.success() => {
+            parse_skills_list(&output.stdout).unwrap_or(ObservedSkills::Unknown)
+        }
+        _ => ObservedSkills::Unknown,
+    }
+}
+
+fn parse_skills_list(stdout: &[u8]) -> Option<ObservedSkills> {
+    let text = std::str::from_utf8(stdout).ok()?;
+    let mut saw_header = false;
+    let mut skills = Vec::new();
+    for line in text.lines().filter(|line| {
+        let line = line.trim_start();
+        line.starts_with('│') || line.starts_with('┃')
+    }) {
+        let cells: Vec<_> = line.split(['│', '┃']).map(str::trim).collect();
+        if cells.len() < 7 {
+            continue;
+        }
+        if cells[1] == "Name" && cells[5] == "Status" {
+            saw_header = true;
+        } else if cells[5] == "enabled" && !cells[1].is_empty() {
+            skills.push(cells[1].to_string());
+        }
+    }
+    saw_header.then_some(ObservedSkills::Skills(skills))
 }
 
 #[cfg(test)]
@@ -279,6 +339,113 @@ mod tests {
         assert!(
             log.contains("killed after 1s with no new backend output or worktree progress"),
             "got log: {log}"
+        );
+    }
+
+    // ── observe_skills_with_executable (#966) ───────────────────────────
+
+    #[test]
+    fn observe_skills_reports_the_self_reported_set() {
+        let f = fixture();
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' \
+'┏━━━━━━━┳━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━━┓' \
+'┃ Name  ┃ Category ┃ Source ┃ Trust ┃ Status  ┃' \
+'┡━━━━━━━╇━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━━━┩' \
+'│ review │          │ local  │ local │ enabled │' \
+'│ triage │          │ local  │ local │ enabled │' \
+'└───────┴──────────┴────────┴───────┴─────────┘'\n",
+            f.record_dir.join("argv.txt").display(),
+        );
+        make_fake_bin(&f.bin_dir, "hermes", &body);
+
+        let observed = observe_skills_with_executable(
+            &f.bin_dir.join("hermes"),
+            None,
+            &[],
+            Duration::from_secs(5),
+        );
+
+        assert_eq!(
+            observed,
+            ObservedSkills::Skills(vec!["review".to_string(), "triage".to_string()])
+        );
+        assert_eq!(
+            recorded_argv(&f.record_dir),
+            ["skills", "list", "--enabled-only"]
+        );
+    }
+
+    #[test]
+    fn observe_skills_targets_the_instance_working_directory_and_environment() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "hermes", &f.record_dir, 0);
+        let env_vars = vec![("HOME".to_string(), "/instance/isolated/home".to_string())];
+
+        observe_skills_with_executable(
+            &f.bin_dir.join("hermes"),
+            Some(f.worktree.as_path()),
+            &env_vars,
+            Duration::from_secs(5),
+        );
+
+        let env = recorded_env(&f.record_dir);
+        assert!(env.contains("HOME=/instance/isolated/home"));
+    }
+
+    #[test]
+    fn observe_skills_is_unknown_not_empty_when_the_backend_reports_zero_and_fails() {
+        let f = fixture();
+        make_fake_bin(&f.bin_dir, "hermes", "#!/bin/sh\nexit 1\n");
+
+        let observed = observe_skills_with_executable(
+            &f.bin_dir.join("hermes"),
+            None,
+            &[],
+            Duration::from_secs(5),
+        );
+
+        assert_eq!(observed, ObservedSkills::Unknown);
+    }
+
+    #[test]
+    fn observe_skills_is_unknown_on_malformed_output() {
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "hermes",
+            "#!/bin/sh\necho 'not a skills table'\n",
+        );
+
+        let observed = observe_skills_with_executable(
+            &f.bin_dir.join("hermes"),
+            None,
+            &[],
+            Duration::from_secs(5),
+        );
+
+        assert_eq!(observed, ObservedSkills::Unknown);
+    }
+
+    #[test]
+    fn observe_skills_is_unknown_and_bounded_when_the_backend_hangs() {
+        let f = fixture();
+        make_fake_bin(&f.bin_dir, "hermes", "#!/bin/sh\nsleep 30\n");
+
+        let started = std::time::Instant::now();
+        let observed = observe_skills_with_executable(
+            &f.bin_dir.join("hermes"),
+            None,
+            &[],
+            Duration::from_millis(200),
+        );
+        let elapsed = started.elapsed();
+
+        assert_eq!(observed, ObservedSkills::Unknown);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "query did not respect the timeout, took {elapsed:?}"
         );
     }
 }
