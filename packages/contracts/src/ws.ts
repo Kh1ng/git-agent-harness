@@ -58,6 +58,7 @@ export interface Session {
   repo?: string;
   branch?: string;
   target?: string;
+  mr?: string;
   mode?: string;
   backend?: string;
   model?: string;
@@ -279,6 +280,7 @@ export type ClientMessage =
       repo: string;
       branch?: string;
       target?: string;
+      mr?: string;
       mode: string;
       backend?: string;
       model?: string;
