@@ -15,6 +15,7 @@ import type { RegistryService } from './registryService.js';
 
 type PushBusLike = {
   publish(message: ServerMessage): void;
+  subscribe?(subscriber: (message: ServerMessage) => void): () => void;
 };
 
 type RoutedSessionOptions = SessionOptions & {
@@ -745,6 +746,47 @@ export class FleetDispatchCoordinator {
       }
       seen.add(session.id);
       return true;
+    });
+  }
+
+  /** Wait for one dispatch to become terminal without polling its status. */
+  async waitForSession(
+    sessionId: string,
+    timeoutMs: number
+  ): Promise<{ session: Session; timedOut: boolean }> {
+    const current = this.getSession(sessionId);
+    if (!current) {
+      throw new GAHError(`Session ${sessionId} not found`, 'SESSION_NOT_FOUND');
+    }
+    if (sessionIsTerminal(current)) {
+      return { session: current, timedOut: false };
+    }
+    if (!this.pushBus.subscribe) {
+      throw new GAHError('Dispatch completion events are unavailable', 'SESSION_WAIT_UNAVAILABLE');
+    }
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let unsubscribe = () => {};
+      const finish = (session: Session, timedOut: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unsubscribe();
+        resolve({ session, timedOut });
+      };
+      const timer = setTimeout(() => {
+        finish(this.getSession(sessionId) ?? current, true);
+      }, timeoutMs);
+      unsubscribe = this.pushBus.subscribe!((message) => {
+        if (message.type === 'session.stopped' && message.session.id === sessionId) {
+          finish(message.session, false);
+        }
+      });
+      const afterSubscribe = this.getSession(sessionId);
+      if (afterSubscribe && sessionIsTerminal(afterSubscribe)) {
+        finish(afterSubscribe, false);
+      }
     });
   }
 
