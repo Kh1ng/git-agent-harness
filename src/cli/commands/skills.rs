@@ -62,37 +62,6 @@ fn resolve_instance(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::BackendInstanceConfig;
-
-    #[test]
-    fn resolve_instance_uses_declared_runner_kind_for_arbitrary_logical_alias() {
-        let mut profile = crate::runner::backends::test_util::test_profile();
-        profile.routing.backend_instances.insert(
-            "research".into(),
-            BackendInstanceConfig {
-                runner_kind: "hermes".into(),
-                logical_backend: Some("hermes-research".into()),
-                executable: Some(
-                    std::env::current_exe()
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned(),
-                ),
-                ..Default::default()
-            },
-        );
-
-        let resolved =
-            resolve_instance(&profile, &crate::config::Defaults::default(), "research").unwrap();
-
-        assert_eq!(resolved.kind, BackendKind::Hermes);
-        assert_eq!(resolved.logical_backend, "hermes-research");
-    }
-}
-
 pub fn run(command: SkillsCommands) -> Result<()> {
     match command {
         SkillsCommands::Refresh {
@@ -225,4 +194,35 @@ pub fn run(command: SkillsCommands) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::BackendInstanceConfig;
+
+    #[test]
+    fn resolve_instance_uses_declared_runner_kind_for_arbitrary_logical_alias() {
+        let mut profile = crate::runner::backends::test_util::test_profile();
+        profile.routing.backend_instances.insert(
+            "research".into(),
+            BackendInstanceConfig {
+                runner_kind: "hermes".into(),
+                logical_backend: Some("hermes-research".into()),
+                executable: Some(
+                    std::env::current_exe()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ..Default::default()
+            },
+        );
+
+        let resolved =
+            resolve_instance(&profile, &crate::config::Defaults::default(), "research").unwrap();
+
+        assert_eq!(resolved.kind, BackendKind::Hermes);
+        assert_eq!(resolved.logical_backend, "hermes-research");
+    }
 }

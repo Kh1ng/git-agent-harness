@@ -141,10 +141,7 @@ fn parse_skills_list(stdout: &[u8]) -> Option<ObservedSkills> {
         let line = line.trim_start();
         line.starts_with('│') || line.starts_with('┃')
     }) {
-        let cells: Vec<_> = line
-            .split(|character| character == '│' || character == '┃')
-            .map(str::trim)
-            .collect();
+        let cells: Vec<_> = line.split(['│', '┃']).map(str::trim).collect();
         if cells.len() < 7 {
             continue;
         }
