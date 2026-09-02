@@ -7,6 +7,7 @@ import { createSessionManager } from './SessionManager.js';
 test('session.start request ids are idempotent and emit one start event', async () => {
   const published: ServerMessage[] = [];
   let dispatchCalls = 0;
+  let dispatchedMr: string | undefined;
   const manager = createSessionManager({
     disableCleanupTimer: true,
     providerRegistry: {
@@ -17,8 +18,9 @@ test('session.start request ids are idempotent and emit one start event', async 
         published.push(message);
       }
     },
-    dispatchRunner: async () => {
+    dispatchRunner: async (options) => {
       dispatchCalls += 1;
+      dispatchedMr = options.mr;
       return await new Promise(() => {
         // Keep the dispatch active so the second request simulates a retry
         // against an in-flight run rather than a completed one.
@@ -32,6 +34,7 @@ test('session.start request ids are idempotent and emit one start event', async 
     providerKind: 'codex',
     instanceId: 'codex-0',
     repo: 'owner/repo',
+    mr: '1100',
     mode: 'improve'
   });
 
@@ -41,11 +44,13 @@ test('session.start request ids are idempotent and emit one start event', async 
     providerKind: 'codex',
     instanceId: 'codex-0',
     repo: 'owner/repo',
+    mr: '1100',
     mode: 'improve'
   });
 
   assert.equal(retry.id, session.id);
   assert.equal(dispatchCalls, 1);
+  assert.equal(dispatchedMr, '1100');
   assert.equal(manager.getAllSessions().length, 1);
   assert.equal(manager.getActiveSessions().length, 1);
   assert.equal(

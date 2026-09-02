@@ -362,6 +362,7 @@ paths:
                 mode: { type: string }
                 branch: { type: string }
                 target: { type: string }
+                mr: { type: string, description: Existing pull or merge request number to repair }
                 backend: { type: string }
                 model: { type: string }
                 budget: { type: number }

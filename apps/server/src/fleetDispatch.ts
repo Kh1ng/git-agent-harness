@@ -110,12 +110,13 @@ function encodeKeyPart(value: string): string {
   return encodeURIComponent(value);
 }
 
-function deriveDispatchWorkKey(options: Pick<RoutedSessionOptions, 'profile' | 'repo' | 'branch' | 'target' | 'mode' | 'backend' | 'model'>): string {
+function deriveDispatchWorkKey(options: Pick<RoutedSessionOptions, 'profile' | 'repo' | 'branch' | 'target' | 'mr' | 'mode' | 'backend' | 'model'>): string {
   return [
     options.profile,
     options.repo,
     options.branch ?? '',
     options.target ?? '',
+    options.mr ?? '',
     options.mode,
     options.backend ?? '',
     options.model ?? ''
@@ -132,6 +133,7 @@ function deriveLeaseWorkKey(lease: Pick<LeaseRecord, 'profile' | 'session'>): st
     repo: session.repo,
     branch: session.branch,
     target: session.target,
+    mr: session.mr,
     mode: session.mode,
     backend: session.backend,
     model: session.model
@@ -328,6 +330,7 @@ class RemoteNodeTransport implements NodeDispatchTransport {
           repo: options.repo,
           branch: options.branch,
           target: options.target,
+          mr: options.mr,
           mode: options.mode,
           backend: options.backend,
           model: options.model,
