@@ -92,8 +92,12 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             ],
         )?;
         run_command(&repo, "npm", &["run", "build:server"])?;
+        run_command(&repo, "npm", &["run", "build:mcp-server"])?;
         if !repo.join("apps/server/dist/bin.js").is_file() {
             bail!("server build did not produce apps/server/dist/bin.js");
+        }
+        if !repo.join("apps/mcp-server/dist/bin.js").is_file() {
+            bail!("MCP build did not produce apps/mcp-server/dist/bin.js");
         }
         println!(
             "Built server:  {}",
