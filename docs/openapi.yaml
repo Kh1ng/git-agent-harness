@@ -341,13 +341,12 @@ paths:
   /api/dispatch:
     post:
       tags: [status]
-      summary: Submit a dispatch as a fleet Session; progress streams over the WebSocket push bus
+      summary: Submit a dispatch as a fleet Session
       description: >-
-        Returns as soon as the Session is created (202), it does not block
-        for the full dispatch run. Reuses the same fleetDispatch coordinator
-        the WS `session.start` message already uses, so this is a second
-        entry point onto one execution/streaming path, not a second
-        implementation of dispatch.
+        Returns as soon as the Session is created (202) by default. When
+        waitForCompletion is true, waits for the Session's terminal push event
+        and returns 200, or 202 if waitTimeoutSeconds elapses. Reuses the same
+        fleetDispatch coordinator and push bus as WebSocket dispatch.
       requestBody:
         required: true
         content:
@@ -372,9 +371,16 @@ paths:
                 prod: { type: boolean }
                 allowUnknownRedBaseline: { type: boolean }
                 escalate: { type: boolean }
+                waitForCompletion: { type: boolean, default: false }
+                waitTimeoutSeconds: { type: integer, minimum: 1, maximum: 7200, default: 3600 }
       responses:
+        "200":
+          description: "{ session: Session, timedOut: false }"
+          content:
+            application/json:
+              schema: { type: object }
         "202":
-          description: "{ session: Session }"
+          description: "{ session: Session } or { session: Session, timedOut: true }"
           content:
             application/json:
               schema: { type: object }

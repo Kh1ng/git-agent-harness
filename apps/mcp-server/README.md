@@ -33,6 +33,6 @@ The adapter exposes control-plane and usage tools (`gah_info`, `gah_status`,
 `gah_ledger_summary`, `gah_ledger_clear_attempts`, `gah_availability`,
 `gah_availability_clear`, `gah_hold`, `gah_hold_set`, `gah_hold_clear`,
 `gah_events`, `gah_controller_activity`, `gah_loop_status`, `gah_dispatch`).
-`gah_usage_rollup` supports a 30-day monthly view. `gah_dispatch` returns as soon as the session is created —
-it does not block for or stream the dispatch run; poll `gah_status` or use
-the dashboard to watch progress.
+`gah_usage_rollup` supports a 30-day monthly view. `gah_dispatch` waits for the
+terminal push event by default; set `waitForCompletion=false` to return as soon
+as the session is created.
