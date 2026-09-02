@@ -72,6 +72,7 @@ class SessionManagerImpl {
   private pendingSessions: Map<string, Promise<Session>> = new Map();
   private outputBuffers: Map<SessionId, { stdout: string[]; stderr: string[] }> = new Map();
   private activeDispatches: Map<SessionId, ActiveDispatch> = new Map();
+  private profileDispatchTails: Map<string, Promise<void>> = new Map();
   private providerRegistry: ProviderRegistryLike;
   private pushBus: PushBusLike;
   private dispatchRunner: DispatchRunner;
@@ -211,10 +212,23 @@ class SessionManagerImpl {
     sessionId: SessionId,
     options: DispatchOptions
   ): Promise<DispatchResult> {
-    return this.dispatchRunner(options, (line: string) => {
-      // Forward each line as session.stdout message
-      this.addSessionOutput(sessionId, line, false);
-    });
+    const previous = this.profileDispatchTails.get(options.profile) ?? Promise.resolve();
+    let release!: () => void;
+    const slot = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.catch(() => undefined).then(() => slot);
+    this.profileDispatchTails.set(options.profile, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await this.dispatchRunner(options, (line: string) => {
+        // Forward each line as session.stdout message
+        this.addSessionOutput(sessionId, line, false);
+      });
+    } finally {
+      release();
+      if (this.profileDispatchTails.get(options.profile) === tail) {
+        this.profileDispatchTails.delete(options.profile);
+      }
+    }
   }
   
   /**

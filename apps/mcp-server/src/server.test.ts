@@ -15,7 +15,7 @@ async function connectedPair() {
 
 test('lists usage and orchestration tools and forwards their HTTP calls', async () => {
   const originalFetch = globalThis.fetch;
-  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  const requests: Array<{ url: string; init?: RequestInit & { dispatcher?: unknown } }> = [];
   globalThis.fetch = async (input, init) => {
     requests.push({ url: String(input), init });
     return new Response(JSON.stringify({ ok: true }), {
@@ -54,6 +54,7 @@ test('lists usage and orchestration tools and forwards their HTTP calls', async 
     });
     const dispatch = requests.at(-1);
     assert.equal(dispatch?.url, 'http://127.0.0.1:3773/api/dispatch');
+    assert(dispatch?.init?.dispatcher, 'terminal dispatch must override the five-minute fetch timeout');
     assert.deepEqual(JSON.parse(String(dispatch?.init?.body)), {
       profile: 'gah',
       providerKind: 'github',

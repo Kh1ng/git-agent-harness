@@ -6,8 +6,11 @@
  * (CLI -> gahCli.ts -> HTTP already exists; HTTP -> MCP is this file).
  */
 
+import { Agent } from 'undici';
+
 const BASE_URL = (process.env.GAH_SERVER_URL ?? 'http://127.0.0.1:3773').replace(/\/$/, '');
 const SERVER_TOKEN = process.env.GAH_SERVER_TOKEN;
+const DISPATCH_AGENT = new Agent({ headersTimeout: 7_260_000, bodyTimeout: 7_260_000 });
 
 export class GahApiError extends Error {
   constructor(
@@ -19,15 +22,22 @@ export class GahApiError extends Error {
   }
 }
 
-async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
+async function request<T>(
+  method: 'GET' | 'POST',
+  path: string,
+  body?: unknown,
+  waitForDispatch = false
+): Promise<T> {
   const headers = new Headers();
   if (body !== undefined) headers.set('Content-Type', 'application/json');
   if (SERVER_TOKEN) headers.set('Authorization', `Bearer ${SERVER_TOKEN}`);
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const init: RequestInit & { dispatcher?: Agent } = {
     method,
     headers,
-    body: body === undefined ? undefined : JSON.stringify(body)
-  });
+    body: body === undefined ? undefined : JSON.stringify(body),
+    dispatcher: waitForDispatch ? DISPATCH_AGENT : undefined
+  };
+  const res = await fetch(`${BASE_URL}${path}`, init);
   const text = await res.text();
   let parsed: unknown;
   try {
@@ -81,5 +91,6 @@ export const gah = {
   controllerActivity: (profile: string, since?: string) =>
     request('GET', `/api/controller-activity${query({ profile, since })}`),
   loopStatus: (profile: string) => request('GET', `/api/loop/status${query({ profile })}`),
-  dispatch: (options: Record<string, unknown>) => request('POST', '/api/dispatch', options)
+  dispatch: (options: Record<string, unknown>) =>
+    request('POST', '/api/dispatch', options, options.waitForCompletion === true)
 };
