@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,7 @@ interface TestEnv {
   root: string;
   profileInfo: ProfileSummary;
   stateFile: string;
+  callsFile: string;
   cleanup: () => void;
 }
 
@@ -36,15 +37,18 @@ function withEnv(testFn: (env: TestEnv) => void | Promise<void>): () => Promise<
     initRepo(checkout);
     const stateDir = join(root, 'state');
     const stateFile = join(root, 'gh-state.log');
+    const callsFile = join(root, 'gh-calls.log');
     setChatSessionStoreOptions({ stateDir });
     setSessionLogOptions({ stateDir });
     const savedPath = process.env.PATH;
     process.env.GAH_FAKE_GH_FIXTURE = join(fixtures, 'gh/data');
     process.env.GAH_FAKE_GH_STATE = stateFile;
+    process.env.GAH_FAKE_GH_CALLS = callsFile;
     process.env.PATH = `${join(fixtures, 'gh')}:${process.env.PATH}`;
     const env: TestEnv = {
       root,
       stateFile,
+      callsFile,
       profileInfo: {
         name: 'p',
         display_name: 'P',
@@ -65,6 +69,7 @@ function withEnv(testFn: (env: TestEnv) => void | Promise<void>): () => Promise<
         process.env.PATH = savedPath;
         delete process.env.GAH_FAKE_GH_FIXTURE;
         delete process.env.GAH_FAKE_GH_STATE;
+        delete process.env.GAH_FAKE_GH_CALLS;
         execFileSync('git', ['worktree', 'prune'], { cwd: checkout });
         rmSync(root, { recursive: true, force: true });
       }
@@ -82,6 +87,63 @@ test('listChatIssues returns open issues newest-first', withEnv(async (env) => {
   assert.deepEqual(issues.map((issue) => issue.number), [42, 41], 'closed issues filtered, newest first');
   assert.equal(issues[0].title, 'Fix the retry loop');
   assert.deepEqual(issues[0].labels, ['bug']);
+}));
+
+test('listChatIssues caches repeated reads and keeps limits separate', withEnv(async (env) => {
+  await listChatIssues(env.profileInfo, 1);
+  await listChatIssues(env.profileInfo, 1);
+  await listChatIssues(env.profileInfo, 30);
+
+  const calls = readFileSync(env.callsFile, 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as string[])
+    .filter(([command, sub]) => command === 'issue' && sub === 'list');
+  assert.equal(calls.length, 2);
+  assert.ok(calls.some((args) => args.includes('--limit=1')));
+  assert.ok(calls.some((args) => args.includes('--limit=30')));
+}));
+
+test('GitLab issue aliases populate the list and seeded chat', withEnv(async (env) => {
+  const binDir = join(env.root, 'gitlab-bin');
+  const dataDir = join(env.root, 'gitlab-data');
+  mkdirSync(binDir);
+  mkdirSync(dataDir);
+  symlinkSync(join(fixtures, 'gh/gh'), join(binDir, 'glab'));
+  const gitlabIssue = {
+    iid: 7,
+    title: 'GitLab issue',
+    description: 'GitLab description',
+    state: 'opened',
+    web_url: 'https://gitlab.example/owner/repo/-/issues/7',
+    labels: ['bug'],
+    updated_at: '2026-09-02T00:00:00Z'
+  };
+  writeFileSync(join(dataDir, 'issues.json'), JSON.stringify([gitlabIssue]));
+  writeFileSync(join(dataDir, 'issue-7.json'), JSON.stringify(gitlabIssue));
+  writeFileSync(join(dataDir, 'labels.json'), '[]');
+  process.env.GAH_FAKE_GH_FIXTURE = dataDir;
+  process.env.PATH = `${binDir}:${process.env.PATH}`;
+  env.profileInfo.provider = 'gitlab';
+
+  const issues = await listChatIssues(env.profileInfo);
+  assert.deepEqual(issues, [{
+    number: 7,
+    title: 'GitLab issue',
+    url: 'https://gitlab.example/owner/repo/-/issues/7',
+    labels: ['bug'],
+    updatedAt: '2026-09-02T00:00:00Z'
+  }]);
+
+  const { session } = await startIssueChat({
+    profile: 'p',
+    profileInfo: env.profileInfo,
+    issueNumber: 7,
+    backend: 'hermes'
+  });
+  const log = readFileSync(join(env.root, 'state', 'project-p', `session-${session.id}`, 'session.jsonl'), 'utf8');
+  assert.match(log, /#7 GitLab issue/);
+  assert.match(log, /GitLab description/);
 }));
 
 test('startIssueChat branches, marks in progress, and seeds the log with the issue', withEnv(async (env) => {

@@ -13,9 +13,9 @@
  * issue's branch is returned as-is instead of creating a second one.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import type { ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
+import type { ChatIssueSummary, ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
+import { AsyncTtlCache } from '../asyncTtlCache.js';
+import { execProviderCli } from './providerCli.js';
 import { appendEvents } from './sessionLog.js';
 import {
   chatSessionStoreOptions,
@@ -24,22 +24,18 @@ import {
   type ChatSessionStoreOptions
 } from './chatSessions.js';
 
-const execFileAsync = promisify(execFile);
-
-export interface ChatIssueSummary {
-  number: number;
-  title: string;
-  url: string | null;
-  labels: string[];
-  updatedAt: string | null;
-}
+const ISSUES_CACHE_TTL_MS = 15_000;
+const issuesCache = new AsyncTtlCache<string, ChatIssueSummary[]>(ISSUES_CACHE_TTL_MS);
 
 interface ProviderIssue {
-  number: number;
+  number?: number;
+  iid?: number;
   title: string;
-  body: string | null;
+  body?: string | null;
+  description?: string | null;
   state: string;
-  url: string | null;
+  url?: string | null;
+  web_url?: string | null;
   labels: { name?: string; name_and_description?: string }[] | string[] | null;
   updatedAt?: string | null;
   updated_at?: string | null;
@@ -50,10 +46,6 @@ interface ProviderIssue {
  * someone's repo is not ours to do). */
 export const ISSUE_IN_PROGRESS_LABEL = 'in-progress';
 
-function execCli(command: string, args: string[], cwd: string): Promise<{ stdout: string }> {
-  return execFileAsync(command, args, { cwd, maxBuffer: 16 * 1024 * 1024 });
-}
-
 function normalizeLabels(raw: ProviderIssue['labels']): string[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -63,37 +55,41 @@ function normalizeLabels(raw: ProviderIssue['labels']): string[] {
 
 function normalizeIssue(raw: ProviderIssue): ChatIssueSummary & { body: string | null; state: string } {
   return {
-    number: raw.number,
+    number: raw.number ?? raw.iid ?? 0,
     title: raw.title,
-    body: raw.body ?? null,
+    body: raw.body ?? raw.description ?? null,
     state: raw.state,
-    url: raw.url ?? null,
+    url: raw.url ?? raw.web_url ?? null,
     labels: normalizeLabels(raw.labels),
     updatedAt: raw.updatedAt ?? raw.updated_at ?? null
   };
 }
 
-/** Open issues for a profile's repo, newest-first. */
+/** Open issues for a profile's repo, newest-first. Cached per profile. */
 export async function listChatIssues(
   profileInfo: Pick<ProfileSummary, 'provider' | 'repo' | 'local_path'>,
   limit = 30
 ): Promise<ChatIssueSummary[]> {
-  const isGitLab = profileInfo.provider === 'gitlab';
-  const { stdout } = isGitLab
-    ? await execCli('glab', ['issue', 'list', '--output=json'], profileInfo.local_path)
-    : await execCli('gh', ['issue', 'list', '--json', 'number,title,url,labels,updatedAt,state', `--limit=${limit}`], profileInfo.local_path);
-  const parsed = JSON.parse(stdout) as ProviderIssue[];
-  const isOpen = (state: string): boolean => {
-    const normalized = state.toLowerCase();
-    // GitHub reports OPEN/CLOSED; GitLab opened/closed. Absent state (some
-    // list shapes) defaults to open: `issue list` without --state=all only
-    // returns open issues anyway.
-    return normalized === 'open' || normalized === 'opened' || state === '';
-  };
-  return parsed
-    .map((raw) => normalizeIssue(raw))
-    .filter((issue) => isOpen(issue.state))
-    .sort((a, b) => b.number - a.number);
+  const cacheKey = `${profileInfo.provider}:${profileInfo.repo}:${profileInfo.local_path}:${limit}`;
+  return issuesCache.get(cacheKey, async () => {
+    const isGitLab = profileInfo.provider === 'gitlab';
+    const { stdout } = isGitLab
+      ? await execProviderCli('glab', ['issue', 'list', '--output=json'], profileInfo.local_path)
+      : await execProviderCli('gh', ['issue', 'list', '--json', 'number,title,url,labels,updatedAt,state', `--limit=${limit}`], profileInfo.local_path);
+    const parsed = JSON.parse(stdout) as ProviderIssue[];
+    const isOpen = (state: string): boolean => {
+      const normalized = state.toLowerCase();
+      // GitHub reports OPEN/CLOSED; GitLab opened/closed. Absent state (some
+      // list shapes) defaults to open: `issue list` without --state=all only
+      // returns open issues anyway.
+      return normalized === 'open' || normalized === 'opened' || state === '';
+    };
+    return parsed
+      .map((raw) => normalizeIssue(raw))
+      .filter((issue) => isOpen(issue.state))
+      .sort((a, b) => b.number - a.number)
+      .map(({ number, title, url, labels, updatedAt }) => ({ number, title, url, labels, updatedAt }));
+  });
 }
 
 async function fetchIssue(
@@ -102,8 +98,8 @@ async function fetchIssue(
 ): Promise<ReturnType<typeof normalizeIssue>> {
   const isGitLab = profileInfo.provider === 'gitlab';
   const { stdout } = isGitLab
-    ? await execCli('glab', ['issue', 'view', String(issueNumber), '--output=json'], profileInfo.local_path)
-    : await execCli('gh', ['issue', 'view', String(issueNumber), '--json', 'number,title,body,state,url,labels'], profileInfo.local_path);
+    ? await execProviderCli('glab', ['issue', 'view', String(issueNumber), '--output=json'], profileInfo.local_path)
+    : await execProviderCli('gh', ['issue', 'view', String(issueNumber), '--json', 'number,title,body,state,url,labels'], profileInfo.local_path);
   return normalizeIssue(JSON.parse(stdout) as ProviderIssue);
 }
 
@@ -122,10 +118,10 @@ async function labelExists(
   try {
     const isGitLab = profileInfo.provider === 'gitlab';
     const { stdout } = isGitLab
-      ? await execCli('glab', ['label', 'list', '--output=json'], profileInfo.local_path)
+      ? await execProviderCli('glab', ['label', 'list', '--output=json'], profileInfo.local_path)
       : // gh defaults to 30 labels per page -- repos routinely have more
-      // (this one has ~35), which made the in-progress check miss.
-      await execCli('gh', ['label', 'list', '--json', 'name', '--limit', '200'], profileInfo.local_path);
+        // (this one has ~35), which made the in-progress check miss.
+      await execProviderCli('gh', ['label', 'list', '--json', 'name', '--limit', '200'], profileInfo.local_path);
     const parsed = JSON.parse(stdout) as { name?: string }[];
     return parsed.some((entry) => entry.name === label);
   } catch {
@@ -149,7 +145,7 @@ async function markIssueInProgress(
     if (isGitLab) args.push('--label', label);
     else args.push('--add-label', label);
   }
-  await execCli(isGitLab ? 'glab' : 'gh', args, profileInfo.local_path);
+  await execProviderCli(isGitLab ? 'glab' : 'gh', args, profileInfo.local_path);
 }
 
 export function issueBranchName(repoId: string, issueNumber: number): string {
@@ -195,7 +191,7 @@ export async function startIssueChat(input: StartIssueChatInput): Promise<StartI
 
   // After an archive the canonical branch still exists (branches survive
   // by design); a fresh grab for the same issue gets a suffixed branch.
-  const { stdout: existingBranches } = await execCli(
+  const { stdout: existingBranches } = await execProviderCli(
     'git',
     ['branch', '--list', canonicalBranch],
     profileInfo.local_path

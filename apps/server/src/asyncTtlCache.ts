@@ -20,6 +20,19 @@ export class AsyncTtlCache<K, V> {
     }
   }
 
+  /** Drops a cached entry so the next get() re-runs the loader. Used when a
+   * caller knows a mutation just invalidated the observation (e.g. a commit
+   * changing git status) and can't wait out the TTL. */
+  delete(key: K): void {
+    this.values.delete(key);
+  }
+
+  /** Snapshot of currently cached keys, for callers that need to invalidate
+   * by prefix rather than by an exact key they don't otherwise know. */
+  keys(): K[] {
+    return [...this.values.keys()];
+  }
+
   get(key: K, load: () => Promise<V>): Promise<V> {
     const cached = this.values.get(key);
     if (cached && cached.expiresAt > this.now()) {

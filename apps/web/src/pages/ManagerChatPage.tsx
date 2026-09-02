@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles } from 'lucide-react';
+import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles, GitPullRequest, GitCommit, AlertTriangle } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
@@ -23,7 +23,9 @@ import type {
   ChatSessionProjectGroup,
   ChatPreviewInfo,
   ChatReclaimResult,
-  SkillBindingSummary
+  SkillBindingSummary,
+  ChatPrSummary,
+  ChatIssueSummary
 } from '@git-agent-harness/contracts';
 
 interface ChatTurn {
@@ -243,6 +245,205 @@ function SkillPicker({
   );
 }
 
+/**
+ * Git strip: compact view of branch, changes count, open issues/PRs with actions.
+ * Renders for the active session's project when git data is available.
+ */
+const GIT_STRIP_MAX_ENTRIES = 3;
+
+/** Bounded, clickable list of PR/issue numbers -- up to GIT_STRIP_MAX_ENTRIES
+ * entries plus a "+N" remaining-count, instead of a bare total count. */
+function GitStripEntries({
+  items,
+  className
+}: {
+  items: { number: number; title: string; url: string | null }[];
+  className: string;
+}) {
+  return (
+    <span className="flex items-center gap-1.5 truncate">
+      {items.slice(0, GIT_STRIP_MAX_ENTRIES).map((item) => (
+        <a
+          key={item.number}
+          href={item.url ?? undefined}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={item.title}
+          className={`truncate max-w-[6rem] hover:underline ${className}`}
+        >
+          #{item.number}
+        </a>
+      ))}
+      {items.length > GIT_STRIP_MAX_ENTRIES && (
+        <span className="text-muted shrink-0">+{items.length - GIT_STRIP_MAX_ENTRIES}</span>
+      )}
+    </span>
+  );
+}
+
+function GitStrip({
+  profile,
+  sessionId,
+  activePrNumber,
+  status,
+  issues,
+  prs,
+  loading,
+  error,
+  onRefresh
+}: {
+  profile: string;
+  sessionId: string | null;
+  activePrNumber?: number;
+  status: { branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean } | null;
+  issues: ChatIssueSummary[];
+  prs: ChatPrSummary[];
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  const [commitOpen, setCommitOpen] = useState(false);
+  const [commitMessage, setCommitMessage] = useState('');
+  const [committing, setCommitting] = useState(false);
+  const [commitError, setCommitError] = useState<string | null>(null);
+
+  if (!status) {
+    if (loading) return <div className="text-xs text-muted">Loading git status…</div>;
+    if (error) {
+      return (
+        <div className="flex items-center gap-2 text-xs text-critical">
+          <AlertTriangle size={13} className="shrink-0" />
+          <span className="truncate">{error}</span>
+          <button onClick={onRefresh} className="text-muted hover:text-primary underline shrink-0">
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return null;
+  }
+
+  const clean = status.changes.length === 0;
+  const changedFiles = status.changes.length;
+  // Prefer the session's own PR, then an exact branch match; never fall
+  // back to an unrelated open PR.
+  const branchPr =
+    (activePrNumber !== undefined ? prs.find((pr) => pr.number === activePrNumber) : undefined) ??
+    prs.find((pr) => pr.headRefName === status.branch) ??
+    null;
+
+  const submitCommit = async () => {
+    if (!commitMessage.trim() || committing) return;
+    setCommitting(true);
+    setCommitError(null);
+    try {
+      await gahApi.createGitCommit(profile, commitMessage.trim(), sessionId ?? undefined);
+      setCommitMessage('');
+      setCommitOpen(false);
+      onRefresh();
+    } catch (error) {
+      setCommitError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCommitting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2 text-xs">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 truncate">
+          <GitBranch size={14} className="text-muted shrink-0" />
+          <span className="font-mono text-secondary">{status.branch}</span>
+          {status.readOnly ? (
+            <span className="text-muted">read only</span>
+          ) : clean ? (
+            <span className="text-muted">clean</span>
+          ) : (
+            <span className="flex items-center gap-1 text-amber-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+              {changedFiles} changed
+            </span>
+          )}
+          {loading && <RefreshCw size={12} className="animate-spin text-muted shrink-0" />}
+          {prs.length > 0 && (
+            <>
+              <span className="text-muted">|</span>
+              <GitPullRequest size={13} className="text-purple-400 shrink-0" />
+              <GitStripEntries items={prs} className="text-purple-300" />
+            </>
+          )}
+          {issues.length > 0 && (
+            <>
+              <span className="text-muted">|</span>
+              <ShieldAlert size={13} className="text-blue-400 shrink-0" />
+              <GitStripEntries items={issues} className="text-blue-300" />
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            onClick={() => { setCommitOpen((v) => !v); setCommitError(null); }}
+            className="flex items-center gap-1 text-muted hover:text-primary disabled:opacity-50"
+            title={status.readOnly ? 'This session has no writable checkout' : clean ? 'No changes to commit' : 'Commit changes'}
+            disabled={clean || status.readOnly}
+          >
+            <GitCommit size={13} />
+            Commit
+          </button>
+          <button
+            onClick={() => branchPr?.url && window.open(branchPr.url, '_blank', 'noopener,noreferrer')}
+            className="flex items-center gap-1 text-muted hover:text-primary disabled:opacity-50"
+            title={branchPr ? `View #${branchPr.number}: ${branchPr.title}` : 'No open PR for this branch'}
+            disabled={!branchPr?.url}
+          >
+            <ExternalLink size={13} />
+            View PR
+          </button>
+          <button
+            onClick={onRefresh}
+            className="text-muted hover:text-primary"
+            title="Refresh git data"
+          >
+            <RefreshCw size={13} />
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="flex items-center gap-2 text-critical">
+          <AlertTriangle size={12} className="shrink-0" />
+          <span className="truncate">{error}</span>
+          <button onClick={onRefresh} className="text-muted hover:text-primary underline shrink-0">
+            Retry
+          </button>
+        </div>
+      )}
+
+      {commitOpen && (
+        <div className="flex items-center gap-2 rounded-md border border-subtle bg-raised px-2 py-1.5">
+          <input
+            type="text"
+            autoFocus
+            value={commitMessage}
+            onChange={(e) => setCommitMessage(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void submitCommit(); if (e.key === 'Escape') setCommitOpen(false); }}
+            placeholder="Commit message"
+            className="flex-1 bg-transparent text-primary text-xs focus:outline-none"
+          />
+          <button
+            onClick={submitCommit}
+            disabled={!commitMessage.trim() || committing}
+            className="btn-primary text-[11px] px-2 py-1 disabled:opacity-50"
+          >
+            {committing ? 'Committing…' : 'Commit'}
+          </button>
+          {commitError && <span className="text-critical text-[11px]">{commitError}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ManagerChatPage() {
   const { sendMessage, messages, isConnected, reconnectSeq } = useWebSocket();
   const wsProfile = useWebSocket().profile;
@@ -343,6 +544,16 @@ export function ManagerChatPage() {
   const [skillBinding, setSkillBinding] = useState<SkillBindingSummary | null>(null);
   const [skillBindingChanging, setSkillBindingChanging] = useState(false);
 
+  // Git strip data for active profile/project
+  const [gitStatus, setGitStatus] = useState<{ branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean } | null>(null);
+  const [gitIssues, setGitIssues] = useState<ChatIssueSummary[]>([]);
+  const [gitPrs, setGitPrs] = useState<ChatPrSummary[]>([]);
+  const [gitLoading, setGitLoading] = useState(false);
+  const [gitError, setGitError] = useState<string | null>(null);
+  // Guards loadGitData against a slow, superseded request overwriting a
+  // newer profile/session selection's results (stale-response guard).
+  const gitRequestIdRef = useRef(0);
+
   useEffect(() => {
     let cancelled = false;
     setSkillBinding(null);
@@ -356,6 +567,50 @@ export function ManagerChatPage() {
   useEffect(() => {
     gahApi.getProfiles().then(setAvailableProfiles).catch(() => {});
   }, []);
+
+  const loadGitData = async () => {
+    const requestId = ++gitRequestIdRef.current;
+    const forSessionId = sessionId ?? undefined;
+    setGitLoading(true);
+    setGitError(null);
+    try {
+      // null sentinel on failure (not []) so a transient refresh error
+      // doesn't overwrite last-known issues/PRs with an empty list.
+      const [status, issuesResult, prsResult] = await Promise.all([
+        gahApi.getGitStatus(profile, forSessionId),
+        gahApi.getChatIssues(profile).then(({ issues }) => issues).catch((error) => {
+          // Surface individual fetch errors to the UI
+          if (gitRequestIdRef.current === requestId) {
+            setGitError(`Failed to load issues: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          return null;
+        }),
+        gahApi.getChatPrs(profile).then(({ prs }) => prs).catch((error) => {
+          // Surface individual fetch errors to the UI
+          if (gitRequestIdRef.current === requestId) {
+            setGitError(`Failed to load PRs: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          return null;
+        })
+      ]);
+      if (gitRequestIdRef.current !== requestId) return;
+      setGitStatus(status);
+      if (issuesResult !== null) setGitIssues(issuesResult);
+      if (prsResult !== null) setGitPrs(prsResult);
+    } catch (error) {
+      if (gitRequestIdRef.current !== requestId) return;
+      setGitError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (gitRequestIdRef.current === requestId) setGitLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    setGitStatus(null);
+    setGitIssues([]);
+    setGitPrs([]);
+    void loadGitData();
+  }, [profile, sessionId]);
 
   const refreshSessions = (forProfile: string) => {
     gahApi
@@ -1257,6 +1512,23 @@ export function ManagerChatPage() {
           </div>
         }
       />
+
+      {/* Git strip: compact git state for the active session's project */}
+      {currentProfileInfo && (
+        <div className="card-padded">
+          <GitStrip
+            profile={profile}
+            sessionId={sessionId}
+            activePrNumber={activeSession?.prNumber}
+            status={gitStatus}
+            issues={gitIssues}
+            prs={gitPrs}
+            loading={gitLoading}
+            error={gitError}
+            onRefresh={loadGitData}
+          />
+        </div>
+      )}
 
       {/* WP2 session bar: one conversation per worktree. Default = the
           profile's shared conversation; sessions run in isolated worktrees

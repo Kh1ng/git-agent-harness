@@ -11,9 +11,9 @@
  * PR number is returned as-is instead of creating a second one.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import type { ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
+import type { ChatPrSummary, ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
+import { AsyncTtlCache } from '../asyncTtlCache.js';
+import { execProviderCli } from './providerCli.js';
 import { appendEvents } from './sessionLog.js';
 import {
   chatSessionStoreOptions,
@@ -22,18 +22,8 @@ import {
   type ChatSessionStoreOptions
 } from './chatSessions.js';
 
-const execFileAsync = promisify(execFile);
-
-export interface ChatPrSummary {
-  number: number;
-  title: string;
-  url: string | null;
-  author: string | null;
-  headRefName: string | null;
-  isDraft: boolean;
-  reviewState: string | null;
-  updatedAt: string | null;
-}
+const PRS_CACHE_TTL_MS = 15_000;
+const prsCache = new AsyncTtlCache<string, ChatPrSummary[]>(PRS_CACHE_TTL_MS);
 
 interface ProviderPr {
   number?: number;
@@ -53,10 +43,6 @@ interface ProviderPr {
   reviewDecision?: string | null;
 }
 
-function execCli(command: string, args: string[], cwd: string): Promise<{ stdout: string }> {
-  return execFileAsync(command, args, { cwd, maxBuffer: 16 * 1024 * 1024 });
-}
-
 function normalizePr(raw: ProviderPr): ChatPrSummary & { body: string | null; state: string } {
   return {
     number: raw.number ?? raw.iid ?? 0,
@@ -72,25 +58,38 @@ function normalizePr(raw: ProviderPr): ChatPrSummary & { body: string | null; st
   };
 }
 
-/** Open PRs for a profile's repo, newest-first. */
+/** Open PRs for a profile's repo, newest-first. Cached per profile. */
 export async function listChatPrs(
   profileInfo: Pick<ProfileSummary, 'provider' | 'repo' | 'local_path'>,
   limit = 30
 ): Promise<ChatPrSummary[]> {
-  const isGitLab = profileInfo.provider === 'gitlab';
-  const { stdout } = isGitLab
-    ? await execCli('glab', ['mr', 'list', '--output=json'], profileInfo.local_path)
-    : await execCli('gh', ['pr', 'list', '--json', 'number,title,url,headRefName,isDraft,updatedAt,state,author,reviewDecision', `--limit=${limit}`], profileInfo.local_path);
-  const parsed = JSON.parse(stdout) as ProviderPr[];
-  const isOpen = (state: string): boolean => {
-    const normalized = state.toLowerCase();
-    // GitHub reports OPEN/MERGED/CLOSED; GitLab opened/closed/merged.
-    return normalized === 'open' || normalized === 'opened';
-  };
-  return parsed
-    .map((raw) => normalizePr(raw))
-    .filter((pr) => isOpen(pr.state))
-    .sort((a, b) => b.number - a.number);
+  const cacheKey = `${profileInfo.provider}:${profileInfo.repo}:${profileInfo.local_path}:${limit}`;
+  return prsCache.get(cacheKey, async () => {
+    const isGitLab = profileInfo.provider === 'gitlab';
+    const { stdout } = isGitLab
+      ? await execProviderCli('glab', ['mr', 'list', '--output=json'], profileInfo.local_path)
+      : await execProviderCli('gh', ['pr', 'list', '--json', 'number,title,url,headRefName,isDraft,updatedAt,state,author,reviewDecision', `--limit=${limit}`], profileInfo.local_path);
+    const parsed = JSON.parse(stdout) as ProviderPr[];
+    const isOpen = (state: string): boolean => {
+      const normalized = state.toLowerCase();
+      // GitHub reports OPEN/MERGED/CLOSED; GitLab opened/closed/merged.
+      return normalized === 'open' || normalized === 'opened';
+    };
+    return parsed
+      .map((raw) => normalizePr(raw))
+      .filter((pr) => isOpen(pr.state))
+      .sort((a, b) => b.number - a.number)
+      .map(({ number, title, url, author, headRefName, isDraft, reviewState, updatedAt }) => ({
+        number,
+        title,
+        url,
+        author,
+        headRefName,
+        isDraft,
+        reviewState,
+        updatedAt
+      }));
+  });
 }
 
 async function fetchPr(
@@ -99,8 +98,8 @@ async function fetchPr(
 ): Promise<ReturnType<typeof normalizePr>> {
   const isGitLab = profileInfo.provider === 'gitlab';
   const { stdout } = isGitLab
-    ? await execCli('glab', ['mr', 'view', String(prNumber), '--output=json'], profileInfo.local_path)
-    : await execCli('gh', ['pr', 'view', String(prNumber), '--json', 'number,title,body,state,url,headRefName,isDraft,author,reviewDecision'], profileInfo.local_path);
+    ? await execProviderCli('glab', ['mr', 'view', String(prNumber), '--output=json'], profileInfo.local_path)
+    : await execProviderCli('gh', ['pr', 'view', String(prNumber), '--json', 'number,title,body,state,url,headRefName,isDraft,author,reviewDecision'], profileInfo.local_path);
   return normalizePr(JSON.parse(stdout) as ProviderPr);
 }
 

@@ -5,10 +5,14 @@ import { resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
 import type { ConfigProfileSummary, DoctorSnapshot, ProfileSummary, SettingsConfigProfileSummary } from '@git-agent-harness/contracts';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { archiveSession, createSession } from './managerChat/chatSessions.js';
+
+const gitFixtures = resolve(dirname(fileURLToPath(import.meta.url)), '../tests/fixtures');
 
 function profilePayload(profile: string): ConfigProfileSummary {
   return {
@@ -421,7 +425,7 @@ test('server startup from apps/server seeds the repo manager skill content intac
   }
 });
 
-test('skill bank mutation routes reject unauthenticated non-loopback requests like /api/projects', async () => {
+test('skill bank and git-commit mutation routes reject unauthenticated non-loopback requests like /api/projects', async () => {
   const { isLocalAddress } = await import('./authMiddleware.js');
   const dir = mkdtempSync(join(tmpdir(), 'gah-skills-api-'));
   const savedBank = process.env.GAH_SKILL_BANK_PATH;
@@ -439,7 +443,7 @@ test('skill bank mutation routes reject unauthenticated non-loopback requests li
     if (!nonLoopbackIp) return;
     const baseUrl = `http://${nonLoopbackIp}:${port}`;
     // No TLS, no token -> 403 Forbidden, exactly like /api/projects.
-    for (const path of ['/api/skills', '/api/projects', '/api/admin/update']) {
+    for (const path of ['/api/skills', '/api/projects', '/api/admin/update', '/api/git/commit']) {
       const res = await fetch(`${baseUrl}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -581,4 +585,102 @@ test('GET /api/admin/update/status returns reconnect-safe state via the injected
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+});
+
+/** Session-scoped git requests never inherit the shared profile checkout. */
+test('git routes reject stale sessions and expose worktree-less sessions as read-only', { timeout: 30_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gah-git-commit-route-'));
+  const checkout = join(root, 'checkout');
+  execFileSync('mkdir', ['-p', checkout]);
+  execFileSync('git', ['init', '--quiet', '--initial-branch=main'], { cwd: checkout });
+  execFileSync('git', ['config', 'user.email', 't@t'], { cwd: checkout });
+  execFileSync('git', ['config', 'user.name', 't'], { cwd: checkout });
+  writeFileSync(join(checkout, 'README.md'), '# repo\n');
+  execFileSync('git', ['add', '.'], { cwd: checkout });
+  execFileSync('git', ['commit', '--quiet', '-m', 'init'], { cwd: checkout });
+
+  const profile = 'git-commit-route';
+  const profileListPath = join(root, 'profile-list.json');
+  const worktreeBase = join(root, 'worktrees');
+  writeFileSync(profileListPath, JSON.stringify([{
+    name: profile,
+    display_name: 'Git Commit Route',
+    provider: 'github',
+    repo: 'owner/repo',
+    repo_id: 'repo',
+    local_path: checkout,
+    worktree_base: worktreeBase,
+    web_url: 'https://github.com/owner/repo',
+    max_parallel_workers: null,
+    max_open_managed_mrs: 1,
+    manager_wake_autonomy: null,
+    validation_timeout_seconds: 300
+  }]));
+
+  const savedEnv = { ...process.env };
+  process.env.GAH_BINARY = join(gitFixtures, 'gah', 'gah');
+  process.env.GAH_FIXTURE_PROFILE_LIST = profileListPath;
+  process.env.GAH_CHAT_STATE_DIR = join(root, 'chat');
+  process.env.GAH_GATEWAY_SETTINGS_PATH = join(root, 'gateway.json');
+  process.env.GAH_MANAGER_CHAT_SETTINGS_PATH = join(root, 'manager-chat.json');
+  process.env.GAH_COORDINATOR_IDENTITY_PATH = join(root, 'coordinator-identity.json');
+  resetCachedCoordinatorIdentity();
+
+  const profileInfo = {
+    repo_id: 'repo',
+    local_path: checkout,
+    worktree_base: worktreeBase
+  };
+
+  const app = createServer({});
+  const server = http.createServer(app);
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const commit = (sessionId: string) => fetch(`${baseUrl}/api/git/commit?profile=${profile}&sessionId=${sessionId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'should not land' })
+    });
+    const status = (sessionId: string) => fetch(`${baseUrl}/api/git/status?profile=${profile}&sessionId=${sessionId}`);
+
+    const unknownResponse = await commit('does-not-exist');
+    assert.equal(unknownResponse.status, 404, 'unknown session id must be rejected, not routed to local_path');
+    assert.equal((await status('does-not-exist')).status, 404);
+
+    const archived = await createSession(
+      { profile, profileInfo, backend: 'codex', worktree: false },
+      { stateDir: join(root, 'chat') }
+    );
+    await archiveSession(profile, archived.id, profileInfo, { stateDir: join(root, 'chat') });
+    const archivedResponse = await commit(archived.id);
+    assert.equal(archivedResponse.status, 404, 'archived session must be rejected, not routed to local_path');
+    assert.equal((await status(archived.id)).status, 404);
+
+    const prSession = await createSession(
+      { profile, profileInfo, backend: 'codex', prNumber: 7, worktree: false },
+      { stateDir: join(root, 'chat') }
+    );
+    assert.equal(prSession.worktreePath, null, 'PR chat is worktree-less by design');
+    const prResponse = await commit(prSession.id);
+    assert.equal(prResponse.status, 403, 'worktree-less read-only PR session must be rejected, not routed to local_path');
+    const prStatusResponse = await status(prSession.id);
+    assert.equal(prStatusResponse.status, 200);
+    assert.deepEqual(await prStatusResponse.json(), {
+      branch: prSession.branch,
+      changes: [],
+      cwd: null,
+      readOnly: true
+    });
+
+    // Confirm none of the rejected attempts ever touched local_path.
+    const log = execFileSync('git', ['log', '--oneline'], { cwd: checkout }).toString();
+    assert.equal(log.trim().split('\n').length, 1, 'only the initial commit exists in the shared checkout');
+  } finally {
+    await new Promise<void>((done) => server.close(() => done()));
+    process.env = savedEnv;
+    resetCachedCoordinatorIdentity();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

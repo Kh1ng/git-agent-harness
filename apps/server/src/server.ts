@@ -3,7 +3,6 @@ import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import os from 'node:os';
 import { statfsSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getServerReadiness } from './serverReadiness.js';
@@ -80,9 +79,10 @@ import {
   enqueueManagerWake as enqueueManagerChatWake
 } from './managerChat/ManagerChatManager.js';
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
-import { listAllChatSessions } from './managerChat/chatSessions.js';
+import { listAllChatSessions, resolveSessionCwd, chatSessionStoreOptions } from './managerChat/chatSessions.js';
 import { usageRollup } from './managerChat/usageRollup.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
+import { getGitStatusCached, getGitBranchesCached, getGitLogCached, commitGitChanges, cliInDir } from './gitCache.js';
 import {
   addCanonicalSkillBinding,
   clearProfileSkillBindings,
@@ -276,6 +276,10 @@ export function createServer(
   // flag so this surface doesn't exist at all unless an operator enables it.
   app.use('/api/admin', authMiddleware);
   app.use('/api/manager-chat/wake', authMiddleware);
+  // /api/git/commit mutates a checkout on disk (git add -A + git commit),
+  // so it gets the same narrow auth gate as projects/skills/admin rather
+  // than the unauthenticated default the read-only git endpoints keep.
+  app.use('/api/git/commit', authMiddleware);
   app.use('/api/admin', (req, res, next) => {
     if (process.env.GAH_ENABLE_ADMIN_UPDATE !== '1') {
       return res.status(404).json({
@@ -1727,42 +1731,59 @@ export function createServer(
 
   // Git integration: thin wrappers over git/gh/glab so the UI can show
   // branch/PR state without the user leaving the dashboard.
-  async function resolveLocalPath(profile: string): Promise<string | null> {
+  async function resolveProfileInfo(profile: string): Promise<ProfileSummary | null> {
     const profiles = await runProfileList();
-    return profiles.find((p) => p.name === profile)?.local_path ?? null;
+    return profiles.find((p) => p.name === profile) ?? null;
   }
 
-  function gitInDir(cwd: string, args: string[]): { ok: boolean; out: string; err: string } {
-    const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
-    return { ok: r.status === 0, out: r.stdout ?? '', err: r.stderr ?? '' };
+  async function resolveLocalPath(profile: string): Promise<string | null> {
+    return (await resolveProfileInfo(profile))?.local_path ?? null;
   }
 
-  function cliInDir(bin: string, args: string[], cwd: string): { ok: boolean; out: string } {
-    const r = spawnSync(bin, args, { cwd, encoding: 'utf8' });
-    return { ok: r.status === 0, out: r.stdout ?? '' };
+  type GitTarget =
+    | { kind: 'checkout'; cwd: string }
+    | { kind: 'read-only'; branch: string }
+    | { kind: 'error'; status: number; error: string };
+
+  /** Resolves the checkout represented by a git request. A session request
+   * never falls back to the shared profile checkout. Worktree-less sessions
+   * expose only their recorded branch and reject mutations. */
+  async function resolveGitTarget(profile: string, sessionId?: string): Promise<GitTarget> {
+    const profileInfo = await resolveProfileInfo(profile);
+    if (!profileInfo) return { kind: 'error', status: 404, error: 'Profile not found' };
+    if (!sessionId) return { kind: 'checkout', cwd: profileInfo.local_path };
+    const resolved = await resolveSessionCwd(profile, sessionId, profileInfo, chatSessionStoreOptions);
+    if (!resolved) return { kind: 'error', status: 404, error: 'Chat session not found' };
+    if (!resolved.session.worktreePath) return { kind: 'read-only', branch: resolved.session.branch };
+    return { kind: 'checkout', cwd: resolved.cwd };
   }
 
   app.get('/api/git/status', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
-    const cwd = await resolveLocalPath(profile);
-    if (!cwd) return res.status(404).json({ error: 'Profile not found' });
-    const { ok, out, err } = gitInDir(cwd, ['status', '--porcelain', '-b']);
-    if (!ok) return res.status(502).json({ error: err });
-    const lines = out.split('\n').filter(Boolean);
-    const branch = lines[0]?.replace(/^## /, '') ?? '';
-    const changes = lines.slice(1).map((l) => ({ status: l.slice(0, 2).trim(), path: l.slice(3) }));
-    res.json({ branch, changes, cwd });
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
+    const target = await resolveGitTarget(profile, sessionId);
+    if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
+    if (target.kind === 'read-only') {
+      return res.json({ branch: target.branch, changes: [], cwd: null, readOnly: true });
+    }
+    try {
+      const result = await getGitStatusCached(profile, target.cwd, sessionId);
+      res.json(result);
+    } catch (error) {
+      res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   app.get('/api/git/branches', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const cwd = await resolveLocalPath(profile);
     if (!cwd) return res.status(404).json({ error: 'Profile not found' });
-    const { ok, out, err } = gitInDir(cwd, ['branch', '-a', '--format=%(refname:short)']);
-    if (!ok) return res.status(502).json({ error: err });
-    const current = gitInDir(cwd, ['branch', '--show-current']).out.trim();
-    const branches = out.split('\n').filter(Boolean);
-    res.json({ branches, current });
+    try {
+      const result = await getGitBranchesCached(profile, cwd);
+      res.json(result);
+    } catch (error) {
+      res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   app.get('/api/git/log', async (req, res) => {
@@ -1770,30 +1791,20 @@ export function createServer(
     const limit = typeof req.query.limit === 'string' ? Math.min(50, parseInt(req.query.limit, 10) || 20) : 20;
     const cwd = await resolveLocalPath(profile);
     if (!cwd) return res.status(404).json({ error: 'Profile not found' });
-    const { ok, out, err } = gitInDir(cwd, ['log', `--max-count=${limit}`, '--pretty=format:%H|%h|%s|%an|%ar']);
-    if (!ok) return res.status(502).json({ error: err });
-    const commits = out.split('\n').filter(Boolean).map((l) => {
-      const [hash, short, subject, author, ago] = l.split('|');
-      return { hash, short, subject, author, ago };
-    });
-    res.json({ commits });
+    try {
+      const result = await getGitLogCached(profile, cwd, limit);
+      res.json(result);
+    } catch (error) {
+      res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   app.get('/api/git/prs', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
-    const cwd = await resolveLocalPath(profile);
-    if (!cwd) return res.status(404).json({ error: 'Profile not found' });
-    const profiles = await runProfileList();
-    const prof = profiles.find((p) => p.name === profile);
-    const isGitLab = prof?.provider === 'gitlab';
-    if (isGitLab) {
-      const { ok, out } = cliInDir('glab', ['mr', 'list', '--output=json'], cwd);
-      if (!ok) return res.json({ prs: [], warning: 'glab not available or no MRs' });
-      try { res.json({ prs: JSON.parse(out) }); } catch { res.json({ prs: [], warning: 'glab output parse error' }); }
-    } else {
-      const { ok, out } = cliInDir('gh', ['pr', 'list', '--json', 'number,title,state,url,headRefName,isDraft'], cwd);
-      if (!ok) return res.json({ prs: [], warning: 'gh not available or no PRs' });
-      try { res.json({ prs: JSON.parse(out) }); } catch { res.json({ prs: [], warning: 'gh output parse error' }); }
+    try {
+      res.json({ prs: await listManagerChatPrs(profile) });
+    } catch (error) {
+      res.json({ prs: [], warning: error instanceof Error ? error.message : 'Unknown error' });
     }
   });
 
@@ -1809,6 +1820,24 @@ export function createServer(
     const { ok, out } = cliInDir('gh', args, cwd);
     if (!ok) return res.status(502).json({ error: 'gh pr create failed' });
     res.json({ url: out.trim() });
+  });
+
+  app.post('/api/git/commit', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
+    const { message } = req.body as { message?: string };
+    if (!message || !message.trim()) return res.status(400).json({ error: 'message required' });
+    const target = await resolveGitTarget(profile, sessionId);
+    if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
+    if (target.kind === 'read-only') {
+      return res.status(403).json({ error: 'Session is read-only and has no writable checkout' });
+    }
+    try {
+      const result = await commitGitChanges(profile, target.cwd, message.trim(), sessionId);
+      res.json(result);
+    } catch (error) {
+      res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   // Issue #989: in-app update path. Operates on this server's own GAH
