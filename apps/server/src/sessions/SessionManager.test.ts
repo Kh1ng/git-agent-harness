@@ -61,3 +61,36 @@ test('session.start request ids are idempotent and emit one start event', async 
     1
   );
 });
+
+test('same-profile sessions queue instead of racing the CLI profile lock', async () => {
+  const releases: Array<() => void> = [];
+  let dispatchCalls = 0;
+  const manager = createSessionManager({
+    disableCleanupTimer: true,
+    providerRegistry: { isProviderAvailable: () => true },
+    pushBus: { publish() {} },
+    dispatchRunner: async () => {
+      dispatchCalls += 1;
+      await new Promise<void>((resolve) => releases.push(resolve));
+      return { exitCode: 0, stdout: '', stderr: '' };
+    }
+  });
+  const options = {
+    profile: 'gah',
+    providerKind: 'github' as const,
+    instanceId: 'github-0',
+    repo: 'owner/repo',
+    mode: 'fix'
+  };
+
+  await Promise.all([
+    manager.startSession({ ...options, target: '#1' }),
+    manager.startSession({ ...options, target: '#2' })
+  ]);
+  assert.equal(dispatchCalls, 1);
+
+  releases.shift()?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(dispatchCalls, 2);
+  releases.shift()?.();
+});
