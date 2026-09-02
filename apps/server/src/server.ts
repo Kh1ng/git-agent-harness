@@ -1733,11 +1733,6 @@ export function createServer(
     return profiles.find((p) => p.name === profile)?.local_path ?? null;
   }
 
-  function gitInDir(cwd: string, args: string[]): { ok: boolean; out: string; err: string } {
-    const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
-    return { ok: r.status === 0, out: r.stdout ?? '', err: r.stderr ?? '' };
-  }
-
   function cliInDir(bin: string, args: string[], cwd: string): { ok: boolean; out: string } {
     const r = spawnSync(bin, args, { cwd, encoding: 'utf8' });
     return { ok: r.status === 0, out: r.stdout ?? '' };

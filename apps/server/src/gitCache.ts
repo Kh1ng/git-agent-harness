@@ -28,19 +28,6 @@ interface GitPrsResult {
   warning?: string;
 }
 
-/**
- * In-memory cache for git operations keyed by (profile, operation, params).
- * Uses a single AsyncTtlCache instance with stringified keys.
- */
-function makeGitCacheKey(profile: string, operation: string, params: Record<string, string | number | undefined>): string {
-  const sortedParams = Object.entries(params)
-    .filter(([, value]) => value !== undefined)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => `${k}:${v}`)
-    .join('|');
-  return `${profile}:${operation}:${sortedParams}`;
-}
-
 function gitInDir(cwd: string, args: string[]): { ok: boolean; out: string; err: string } {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
   return { ok: r.status === 0, out: r.stdout ?? '', err: r.stderr ?? '' };
@@ -134,10 +121,3 @@ export async function getGitPrsCached(
   });
 }
 
-/**
- * Clear all git caches. Useful for testing or when a profile's repo changes.
- */
-export function clearGitCaches(): void {
-  // AsyncTtlCache doesn't expose a clear method, so we'd need to add one.
-  // For now, the caches will naturally expire.
-}
