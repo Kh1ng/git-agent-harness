@@ -447,6 +447,31 @@ mod tests {
         let stale_now = OffsetDateTime::parse("2026-08-01T00:20:00Z", &Rfc3339).unwrap();
         let stale = view(vec![], Some(&rec), "hermes", None, stale_now);
         assert_eq!(stale.observation_age_seconds, Some(1200));
+        // AC5: observation older than 15 minutes must be marked stale so the
+        // dashboard does not present it as live truth.
         assert_eq!(stale.observation_stale, Some(true));
+    }
+
+    #[test]
+    fn observation_staleness_for_backend_instance_demonstrates_ac5() {
+        // AC5: For a named backend instance, an observation older than 15
+        // minutes must have observation_stale = Some(true) so the dashboard
+        // does not present it as live truth.
+        let rec = record(
+            "hermes",
+            Some("gah-manager"),
+            Some(vec!["review"]),
+            "2026-08-01T00:00:00Z",
+        );
+        let stale_now = OffsetDateTime::parse("2026-08-01T00:20:00Z", &Rfc3339).unwrap();
+        let view = view(
+            vec!["review".to_string()],
+            Some(&rec),
+            "hermes",
+            Some("gah-manager"),
+            stale_now,
+        );
+        assert_eq!(view.observation_age_seconds, Some(1200));
+        assert_eq!(view.observation_stale, Some(true));
     }
 }
