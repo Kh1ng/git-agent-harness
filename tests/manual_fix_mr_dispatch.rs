@@ -6,6 +6,7 @@ use support::fake_ledger::TestLedger;
 use support::scenario::ScenarioHarness;
 
 fn manual_fix_review_ledger_entry(
+    provider: &str,
     branch: &str,
     work_id: &str,
     source_issue: Option<&str>,
@@ -27,7 +28,11 @@ fn manual_fix_review_ledger_entry(
             "review_source_sha".into(),
             serde_json::json!("HEAD".to_string()),
         );
-        let metadata_fingerprint = "sha256:manual-fix-fixture";
+        let metadata_fingerprint = match provider {
+            "github" => "sha256:4de06d0d3e9ef0d348cc702330d4b8b4c23774bcec7deb7a859909f6fc45e742",
+            "gitlab" => "sha256:239825dc2bb63f6bce302cb8826e0b0ec30a71ecef21dbc2ab950c699ecffae5",
+            other => panic!("unsupported fixture provider {other}"),
+        };
         obj.insert(
             "review_metadata_fingerprint".into(),
             serde_json::json!(metadata_fingerprint),
@@ -93,6 +98,7 @@ fn github_fix_dispatch_resolves_manual_mr_source_branch_and_work_identity() {
         .with_worktree_base(tmp_dir.path().join("worktrees"))
         .with_ledger(
             TestLedger::new().with_entry(manual_fix_review_ledger_entry(
+                "github",
                 branch,
                 "#269",
                 None,
@@ -154,6 +160,7 @@ fn gitlab_fix_dispatch_resolves_manual_mr_source_branch_and_work_identity() {
         .with_worktree_base(tmp_dir.path().join("worktrees"))
         .with_ledger(
             TestLedger::new().with_entry(manual_fix_review_ledger_entry(
+                "gitlab",
                 branch,
                 "TICKET-269",
                 Some("269"),
@@ -198,6 +205,7 @@ fn manual_fix_dispatch_rejects_branch_that_disagrees_with_mr() {
     let mut harness = ScenarioHarness::new("github")
         .github_scenario("manual_fix_needs_fix")
         .with_ledger(TestLedger::new().with_entry(manual_fix_review_ledger_entry(
+            "github",
             branch,
             "#269",
             None,
@@ -251,12 +259,14 @@ fn manual_fix_dispatch_rejects_ambiguous_work_identity() {
     harness = harness.with_ledger(
         TestLedger::new()
             .with_entry(manual_fix_review_ledger_entry(
+                "github",
                 branch,
                 "#269",
                 None,
                 "2026-07-01T00:00:00Z",
             ))
             .with_entry(manual_fix_review_ledger_entry(
+                "github",
                 branch,
                 "TICKET-270",
                 Some("270"),
@@ -285,6 +295,7 @@ fn manual_fix_dispatch_rejects_ambiguous_work_identity() {
 fn github_manual_fix_dispatch_rejects_merged_mr() {
     let mut harness = ScenarioHarness::new("github").github_scenario("manual_fix_needs_fix_merged");
     harness = harness.with_ledger(TestLedger::new().with_entry(manual_fix_review_ledger_entry(
+        "github",
         "gah/fix-needs-fix",
         "#269",
         None,
@@ -312,6 +323,7 @@ fn github_manual_fix_dispatch_rejects_merged_mr() {
 fn github_manual_fix_dispatch_rejects_closed_mr_by_state() {
     let mut harness = ScenarioHarness::new("github").github_scenario("manual_fix_needs_fix_closed");
     harness = harness.with_ledger(TestLedger::new().with_entry(manual_fix_review_ledger_entry(
+        "github",
         "gah/fix-needs-fix",
         "#269",
         None,
@@ -342,6 +354,7 @@ fn gitlab_manual_fix_dispatch_rejects_merged_mr() {
         "provider_api_base = \"https://gitlab.example.com\"\nprovider_project_id = \"42\"\n\n[profiles.test.publishing]\nallow_pull_request_creation = false\nallow_commit_message_generation = false\n",
     );
     harness = harness.with_ledger(TestLedger::new().with_entry(manual_fix_review_ledger_entry(
+        "gitlab",
         "gah/fix-needs-fix",
         "#269",
         None,
@@ -372,6 +385,7 @@ fn gitlab_manual_fix_dispatch_rejects_closed_mr_by_state() {
         "provider_api_base = \"https://gitlab.example.com\"\nprovider_project_id = \"42\"\n\n[profiles.test.publishing]\nallow_pull_request_creation = false\nallow_commit_message_generation = false\n",
     );
     harness = harness.with_ledger(TestLedger::new().with_entry(manual_fix_review_ledger_entry(
+        "gitlab",
         "gah/fix-needs-fix",
         "#269",
         None,

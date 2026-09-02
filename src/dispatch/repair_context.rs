@@ -157,28 +157,33 @@ fn ensure_review_target_still_actionable(
             observed_source_sha: target.source_sha.clone(),
         });
     }
-    if let Some(expected) = identity.expected_review_generation {
-        let metadata_fingerprint = crate::sync::review_metadata_fingerprint(
+    let expected = identity
+        .expected_review_generation
+        .unwrap_or(&context.review_generation);
+    if !crate::sync::review_generation_matches(
+        expected,
+        target.source_sha.as_deref(),
+        target.title.as_deref(),
+        target.body.as_deref(),
+        target.draft,
+    ) {
+        let live_fingerprint = crate::sync::review_metadata_fingerprint(
             target.source_sha.as_deref(),
             target.title.as_deref(),
             target.body.as_deref(),
             target.draft,
         );
-        let live = crate::ledger::review_generation(
-            target.source_sha.as_deref(),
-            Some(&metadata_fingerprint),
-        );
-        if live.as_deref() != Some(expected) {
-            return Err(StaleSourceError {
-                branch: identity.branch.to_string(),
-                reason: format!(
-                    "changed after controller observation: expected review generation '{expected}', live provider generation is '{}'",
-                    live.as_deref().unwrap_or("unknown")
-                ),
-                expected_source_sha: Some(context.source_sha.clone()),
-                observed_source_sha: target.source_sha.clone(),
-            });
-        }
+        let live =
+            crate::ledger::review_generation(target.source_sha.as_deref(), Some(&live_fingerprint));
+        return Err(StaleSourceError {
+            branch: identity.branch.to_string(),
+            reason: format!(
+                "changed after review: expected review generation '{expected}', live provider generation is '{}'",
+                live.as_deref().unwrap_or("unknown")
+            ),
+            expected_source_sha: Some(context.source_sha.clone()),
+            observed_source_sha: target.source_sha.clone(),
+        });
     }
     Ok(())
 }
@@ -606,7 +611,12 @@ mod tests {
         entry.reviewer_model = Some("claude-sonnet-4".to_string());
         entry.reviewer_tier = Some("strong".to_string());
         entry.review_source_sha = Some(source_sha.clone());
-        entry.review_metadata_fingerprint = Some("sha256:test".to_string());
+        entry.review_metadata_fingerprint = Some(crate::sync::review_metadata_fingerprint(
+            Some(&source_sha),
+            Some("t"),
+            Some("b"),
+            false,
+        ));
         entry.review_contract_version = Some(crate::ledger::REVIEW_CONTRACT_VERSION);
         entry.review_generation = crate::ledger::review_generation(
             entry.review_source_sha.as_deref(),
@@ -628,7 +638,9 @@ mod tests {
         crate::runner::backends::test_util::make_fake_bin(
             bin_dir.path(),
             "gh",
-            "#!/bin/sh\ncase \"$1 $2\" in\n  \"api --method\") printf '[{\"number\":493}]\\n' ;;\n  \"pr view\") printf '{\"number\":493,\"url\":\"https://github.com/owner/repo/pull/493\",\"state\":\"OPEN\",\"mergedAt\":null,\"headRefOid\":\"livesha\",\"title\":\"t\",\"body\":\"b\",\"isDraft\":false,\"headRefName\":\"gah/fix\",\"baseRefName\":\"main\",\"statusCheckRollup\":[]}\\n' ;;\n  *) echo \"unexpected gh invocation: $@\" >&2; exit 1 ;;\nesac\n",
+            &format!(
+                "#!/bin/sh\ncase \"$1 $2\" in\n  \"api --method\") printf '[{{\"number\":493}}]\\n' ;;\n  \"pr view\") printf '{{\"number\":493,\"url\":\"https://github.com/owner/repo/pull/493\",\"state\":\"OPEN\",\"mergedAt\":null,\"headRefOid\":\"{source_sha}\",\"title\":\"t\",\"body\":\"b\",\"isDraft\":false,\"headRefName\":\"gah/fix\",\"baseRefName\":\"main\",\"statusCheckRollup\":[]}}\\n' ;;\n  *) echo \"unexpected gh invocation: $@\" >&2; exit 1 ;;\nesac\n"
+            ),
         );
         let _path_guard = FakeProviderPath::set(bin_dir.path().to_str().unwrap());
 
@@ -818,7 +830,22 @@ mod tests {
         let target = review_target(Some("OPEN"), None);
         let context = repair_context_fixture();
         let err = ensure_review_target_still_actionable(&identity, &target, &context).unwrap_err();
-        assert!(err.reason.contains("changed after controller observation"));
+        assert!(err.reason.contains("changed after review"));
+    }
+
+    #[test]
+    fn manual_repair_rejects_review_generation_drift() {
+        let identity = RepairIdentity {
+            profile_name: "p",
+            repo_id: "r",
+            branch: "gah/537",
+            work_id: None,
+            expected_review_generation: None,
+        };
+        let target = review_target(Some("OPEN"), None);
+        let context = repair_context_fixture();
+        let err = ensure_review_target_still_actionable(&identity, &target, &context).unwrap_err();
+        assert!(err.reason.contains("changed after review"));
     }
 
     #[test]
@@ -831,7 +858,18 @@ mod tests {
             expected_review_generation: None,
         };
         let target = review_target(Some("OPEN"), None);
-        let context = repair_context_fixture();
+        let mut context = repair_context_fixture();
+        let metadata_fingerprint = crate::sync::review_metadata_fingerprint(
+            target.source_sha.as_deref(),
+            target.title.as_deref(),
+            target.body.as_deref(),
+            target.draft,
+        );
+        context.review_generation = crate::ledger::review_generation(
+            target.source_sha.as_deref(),
+            Some(&metadata_fingerprint),
+        )
+        .unwrap();
         assert!(ensure_review_target_still_actionable(&identity, &target, &context).is_ok());
     }
 }
