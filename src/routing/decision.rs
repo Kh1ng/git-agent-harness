@@ -623,16 +623,31 @@ where
         None
     };
 
+    let effective_model = requested_model.clone().or_else(|| {
+        let mut models = effective_routing
+            .backend_instances
+            .values()
+            .filter(|instance| {
+                instance
+                    .logical_backend
+                    .as_deref()
+                    .unwrap_or(instance.runner_kind.as_str())
+                    == requested_backend
+            })
+            .flat_map(|instance| instance.supported_models.iter());
+        let first = models.next()?.clone();
+        models.all(|model| model == &first).then_some(first)
+    });
     let primary = configured_route_candidate(
         effective_routing,
         req.mode,
         &requested_backend,
-        requested_model.as_deref(),
+        effective_model.as_deref(),
     )
     .unwrap_or(RouteCandidate {
         identity: crate::execution_identity::ExecutionIdentity::legacy_candidate(
             requested_backend.clone(),
-            requested_model.clone(),
+            effective_model,
             None::<String>,
         ),
         priority: 0,
