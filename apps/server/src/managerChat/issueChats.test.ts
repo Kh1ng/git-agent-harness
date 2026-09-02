@@ -25,6 +25,7 @@ interface TestEnv {
   root: string;
   profileInfo: ProfileSummary;
   stateFile: string;
+  callsFile: string;
   cleanup: () => void;
 }
 
@@ -36,15 +37,18 @@ function withEnv(testFn: (env: TestEnv) => void | Promise<void>): () => Promise<
     initRepo(checkout);
     const stateDir = join(root, 'state');
     const stateFile = join(root, 'gh-state.log');
+    const callsFile = join(root, 'gh-calls.log');
     setChatSessionStoreOptions({ stateDir });
     setSessionLogOptions({ stateDir });
     const savedPath = process.env.PATH;
     process.env.GAH_FAKE_GH_FIXTURE = join(fixtures, 'gh/data');
     process.env.GAH_FAKE_GH_STATE = stateFile;
+    process.env.GAH_FAKE_GH_CALLS = callsFile;
     process.env.PATH = `${join(fixtures, 'gh')}:${process.env.PATH}`;
     const env: TestEnv = {
       root,
       stateFile,
+      callsFile,
       profileInfo: {
         name: 'p',
         display_name: 'P',
@@ -65,6 +69,7 @@ function withEnv(testFn: (env: TestEnv) => void | Promise<void>): () => Promise<
         process.env.PATH = savedPath;
         delete process.env.GAH_FAKE_GH_FIXTURE;
         delete process.env.GAH_FAKE_GH_STATE;
+        delete process.env.GAH_FAKE_GH_CALLS;
         execFileSync('git', ['worktree', 'prune'], { cwd: checkout });
         rmSync(root, { recursive: true, force: true });
       }
@@ -82,6 +87,21 @@ test('listChatIssues returns open issues newest-first', withEnv(async (env) => {
   assert.deepEqual(issues.map((issue) => issue.number), [42, 41], 'closed issues filtered, newest first');
   assert.equal(issues[0].title, 'Fix the retry loop');
   assert.deepEqual(issues[0].labels, ['bug']);
+}));
+
+test('listChatIssues caches repeated reads and keeps limits separate', withEnv(async (env) => {
+  await listChatIssues(env.profileInfo, 1);
+  await listChatIssues(env.profileInfo, 1);
+  await listChatIssues(env.profileInfo, 30);
+
+  const calls = readFileSync(env.callsFile, 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as string[])
+    .filter(([command, sub]) => command === 'issue' && sub === 'list');
+  assert.equal(calls.length, 2);
+  assert.ok(calls.some((args) => args.includes('--limit=1')));
+  assert.ok(calls.some((args) => args.includes('--limit=30')));
 }));
 
 test('startIssueChat branches, marks in progress, and seeds the log with the issue', withEnv(async (env) => {

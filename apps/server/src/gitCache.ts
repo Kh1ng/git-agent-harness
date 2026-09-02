@@ -27,32 +27,25 @@ interface GitLogResult {
   commits: { hash: string; short: string; subject: string; author: string; ago: string }[];
 }
 
-interface GitPrsResult {
-  prs: Record<string, unknown>[];
-  warning?: string;
-}
-
 interface GitCommitResult {
   hash: string;
 }
 
 function gitInDir(cwd: string, args: string[]): { ok: boolean; out: string; err: string } {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: SUBPROCESS_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES });
-  return { ok: r.status === 0, out: r.stdout ?? '', err: r.stderr ?? '' };
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: SUBPROCESS_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES });
+  return { ok: result.status === 0, out: result.stdout ?? '', err: result.stderr ?? '' };
 }
 
-/** Shared by the PR-fetch path here and the `gh pr create`/`glab mr create`
- * mutation in server.ts, so both go through the same timeout/output bound. */
+/** Runs a provider mutation with the same timeout/output bounds as git. */
 export function cliInDir(bin: string, args: string[], cwd: string): { ok: boolean; out: string } {
-  const r = spawnSync(bin, args, { cwd, encoding: 'utf8', timeout: SUBPROCESS_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES });
-  return { ok: r.status === 0, out: r.stdout ?? '' };
+  const result = spawnSync(bin, args, { cwd, encoding: 'utf8', timeout: SUBPROCESS_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES });
+  return { ok: result.status === 0, out: result.stdout ?? '' };
 }
 
 // Singleton caches for each operation type
 const gitStatusCache = new AsyncTtlCache<string, GitStatusResult>(DEFAULT_GIT_CACHE_TTL_MS);
 const gitBranchesCache = new AsyncTtlCache<string, GitBranchesResult>(DEFAULT_GIT_CACHE_TTL_MS);
 const gitLogCache = new AsyncTtlCache<string, GitLogResult>(DEFAULT_GIT_CACHE_TTL_MS);
-const gitPrsCache = new AsyncTtlCache<string, GitPrsResult>(DEFAULT_GIT_CACHE_TTL_MS);
 
 function statusCacheKey(profile: string, sessionId?: string): string {
   return sessionId ? `${profile}:${sessionId}` : profile;
@@ -107,36 +100,6 @@ export async function getGitLogCached(profile: string, cwd: string, limit: numbe
       return { hash, short, subject, author, ago };
     });
     return { commits };
-  });
-}
-
-/**
- * Cached git PRs: open PRs for a profile's checkout via gh/glab.
- * Key: profile
- */
-export async function getGitPrsCached(
-  profile: string,
-  cwd: string,
-  isGitLab: boolean
-): Promise<GitPrsResult> {
-  return gitPrsCache.get(profile, async () => {
-    if (isGitLab) {
-      const { ok, out } = cliInDir('glab', ['mr', 'list', '--output=json'], cwd);
-      if (!ok) return { prs: [], warning: 'glab not available or no MRs' };
-      try {
-        return { prs: JSON.parse(out) };
-      } catch {
-        return { prs: [], warning: 'glab output parse error' };
-      }
-    } else {
-      const { ok, out } = cliInDir('gh', ['pr', 'list', '--json', 'number,title,state,url,headRefName,isDraft'], cwd);
-      if (!ok) return { prs: [], warning: 'gh not available or no PRs' };
-      try {
-        return { prs: JSON.parse(out) };
-      } catch {
-        return { prs: [], warning: 'gh output parse error' };
-      }
-    }
   });
 }
 

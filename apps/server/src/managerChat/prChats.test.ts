@@ -7,6 +7,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
 import { listChatPrs, startPrChat } from './prChats.js';
+import { execProviderCli, PROVIDER_CLI_LIMITS } from './providerCli.js';
 import { startIssueChat } from './issueChats.js';
 import { archiveSession, setChatSessionStoreOptions, listSessions } from './chatSessions.js';
 import { setSessionLogOptions } from './ManagerChatManager.js';
@@ -26,6 +27,7 @@ interface TestEnv {
   root: string;
   profileInfo: ProfileSummary;
   stateFile: string;
+  callsFile: string;
   cleanup: () => void;
 }
 
@@ -37,15 +39,18 @@ function withEnv(testFn: (env: TestEnv) => void | Promise<void>): () => Promise<
     initRepo(checkout);
     const stateDir = join(root, 'state');
     const stateFile = join(root, 'gh-state.log');
+    const callsFile = join(root, 'gh-calls.log');
     setChatSessionStoreOptions({ stateDir });
     setSessionLogOptions({ stateDir });
     const savedPath = process.env.PATH;
     process.env.GAH_FAKE_GH_FIXTURE = join(fixtures, 'gh/data');
     process.env.GAH_FAKE_GH_STATE = stateFile;
+    process.env.GAH_FAKE_GH_CALLS = callsFile;
     process.env.PATH = `${join(fixtures, 'gh')}:${process.env.PATH}`;
     const env: TestEnv = {
       root,
       stateFile,
+      callsFile,
       profileInfo: {
         name: 'p',
         display_name: 'P',
@@ -66,6 +71,7 @@ function withEnv(testFn: (env: TestEnv) => void | Promise<void>): () => Promise<
         process.env.PATH = savedPath;
         delete process.env.GAH_FAKE_GH_FIXTURE;
         delete process.env.GAH_FAKE_GH_STATE;
+        delete process.env.GAH_FAKE_GH_CALLS;
         execFileSync('git', ['worktree', 'prune'], { cwd: checkout });
         rmSync(root, { recursive: true, force: true });
       }
@@ -89,6 +95,33 @@ test('listChatPrs returns open PRs newest-first with author and draft/review sta
   assert.equal(prs[1].isDraft, true, 'draft state reported');
   assert.equal(prs[1].reviewState, 'REVIEW_REQUIRED');
 }));
+
+test('listChatPrs caches repeated reads and keeps limits separate', withEnv(async (env) => {
+  await listChatPrs(env.profileInfo, 1);
+  await listChatPrs(env.profileInfo, 1);
+  await listChatPrs(env.profileInfo, 30);
+
+  const calls = readFileSync(env.callsFile, 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line) as string[])
+    .filter(([command, sub]) => command === 'pr' && sub === 'list');
+  assert.equal(calls.length, 2);
+  assert.ok(calls.some((args) => args.includes('--limit=1')));
+  assert.ok(calls.some((args) => args.includes('--limit=30')));
+}));
+
+test('provider CLI runner bounds time and output', async () => {
+  assert.equal(PROVIDER_CLI_LIMITS.timeout, 10_000);
+  await assert.rejects(
+    execProviderCli(
+      process.execPath,
+      ['-e', `process.stdout.write('x'.repeat(${PROVIDER_CLI_LIMITS.maxBuffer + 1}))`],
+      process.cwd()
+    ),
+    { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }
+  );
+});
 
 test('startPrChat opens a read-only seeded session: no branch, no worktree, no PR mutation', withEnv(async (env) => {
   const { session, existing } = await startPrChat({

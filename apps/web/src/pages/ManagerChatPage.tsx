@@ -295,7 +295,7 @@ function GitStrip({
   profile: string;
   sessionId: string | null;
   activePrNumber?: number;
-  status: { branch: string; changes: { status: string; path: string }[]; cwd: string } | null;
+  status: { branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean } | null;
   issues: ChatIssueSummary[];
   prs: ChatPrSummary[];
   loading: boolean;
@@ -354,7 +354,9 @@ function GitStrip({
         <div className="flex items-center gap-3 truncate">
           <GitBranch size={14} className="text-muted shrink-0" />
           <span className="font-mono text-secondary">{status.branch}</span>
-          {clean ? (
+          {status.readOnly ? (
+            <span className="text-muted">read only</span>
+          ) : clean ? (
             <span className="text-muted">clean</span>
           ) : (
             <span className="flex items-center gap-1 text-amber-400">
@@ -382,8 +384,8 @@ function GitStrip({
           <button
             onClick={() => { setCommitOpen((v) => !v); setCommitError(null); }}
             className="flex items-center gap-1 text-muted hover:text-primary disabled:opacity-50"
-            title={clean ? 'No changes to commit' : 'Commit changes'}
-            disabled={clean}
+            title={status.readOnly ? 'This session has no writable checkout' : clean ? 'No changes to commit' : 'Commit changes'}
+            disabled={clean || status.readOnly}
           >
             <GitCommit size={13} />
             Commit
@@ -543,7 +545,7 @@ export function ManagerChatPage() {
   const [skillBindingChanging, setSkillBindingChanging] = useState(false);
 
   // Git strip data for active profile/project
-  const [gitStatus, setGitStatus] = useState<{ branch: string; changes: { status: string; path: string }[]; cwd: string } | null>(null);
+  const [gitStatus, setGitStatus] = useState<{ branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean } | null>(null);
   const [gitIssues, setGitIssues] = useState<ChatIssueSummary[]>([]);
   const [gitPrs, setGitPrs] = useState<ChatPrSummary[]>([]);
   const [gitLoading, setGitLoading] = useState(false);
@@ -603,7 +605,12 @@ export function ManagerChatPage() {
     }
   };
 
-  useEffect(() => { loadGitData(); }, [profile, sessionId]);
+  useEffect(() => {
+    setGitStatus(null);
+    setGitIssues([]);
+    setGitPrs([]);
+    void loadGitData();
+  }, [profile, sessionId]);
 
   const refreshSessions = (forProfile: string) => {
     gahApi

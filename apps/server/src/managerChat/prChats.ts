@@ -11,10 +11,9 @@
  * PR number is returned as-is instead of creating a second one.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import type { ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
+import type { ChatPrSummary, ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
 import { AsyncTtlCache } from '../asyncTtlCache.js';
+import { execProviderCli } from './providerCli.js';
 import { appendEvents } from './sessionLog.js';
 import {
   chatSessionStoreOptions,
@@ -23,23 +22,8 @@ import {
   type ChatSessionStoreOptions
 } from './chatSessions.js';
 
-const execFileAsync = promisify(execFile);
-
-// TTL for PR list cache (15 seconds)
 const PRS_CACHE_TTL_MS = 15_000;
-// Singleton cache for PRs per profile
 const prsCache = new AsyncTtlCache<string, ChatPrSummary[]>(PRS_CACHE_TTL_MS);
-
-export interface ChatPrSummary {
-  number: number;
-  title: string;
-  url: string | null;
-  author: string | null;
-  headRefName: string | null;
-  isDraft: boolean;
-  reviewState: string | null;
-  updatedAt: string | null;
-}
 
 interface ProviderPr {
   number?: number;
@@ -57,10 +41,6 @@ interface ProviderPr {
   updatedAt?: string | null;
   updated_at?: string | null;
   reviewDecision?: string | null;
-}
-
-function execCli(command: string, args: string[], cwd: string): Promise<{ stdout: string }> {
-  return execFileAsync(command, args, { cwd, maxBuffer: 16 * 1024 * 1024 });
 }
 
 function normalizePr(raw: ProviderPr): ChatPrSummary & { body: string | null; state: string } {
@@ -83,12 +63,12 @@ export async function listChatPrs(
   profileInfo: Pick<ProfileSummary, 'provider' | 'repo' | 'local_path'>,
   limit = 30
 ): Promise<ChatPrSummary[]> {
-  const cacheKey = `${profileInfo.provider}:${profileInfo.repo}:${profileInfo.local_path}`;
+  const cacheKey = `${profileInfo.provider}:${profileInfo.repo}:${profileInfo.local_path}:${limit}`;
   return prsCache.get(cacheKey, async () => {
     const isGitLab = profileInfo.provider === 'gitlab';
     const { stdout } = isGitLab
-      ? await execCli('glab', ['mr', 'list', '--output=json'], profileInfo.local_path)
-      : await execCli('gh', ['pr', 'list', '--json', 'number,title,url,headRefName,isDraft,updatedAt,state,author,reviewDecision', `--limit=${limit}`], profileInfo.local_path);
+      ? await execProviderCli('glab', ['mr', 'list', '--output=json'], profileInfo.local_path)
+      : await execProviderCli('gh', ['pr', 'list', '--json', 'number,title,url,headRefName,isDraft,updatedAt,state,author,reviewDecision', `--limit=${limit}`], profileInfo.local_path);
     const parsed = JSON.parse(stdout) as ProviderPr[];
     const isOpen = (state: string): boolean => {
       const normalized = state.toLowerCase();
@@ -108,8 +88,8 @@ async function fetchPr(
 ): Promise<ReturnType<typeof normalizePr>> {
   const isGitLab = profileInfo.provider === 'gitlab';
   const { stdout } = isGitLab
-    ? await execCli('glab', ['mr', 'view', String(prNumber), '--output=json'], profileInfo.local_path)
-    : await execCli('gh', ['pr', 'view', String(prNumber), '--json', 'number,title,body,state,url,headRefName,isDraft,author,reviewDecision'], profileInfo.local_path);
+    ? await execProviderCli('glab', ['mr', 'view', String(prNumber), '--output=json'], profileInfo.local_path)
+    : await execProviderCli('gh', ['pr', 'view', String(prNumber), '--json', 'number,title,body,state,url,headRefName,isDraft,author,reviewDecision'], profileInfo.local_path);
   return normalizePr(JSON.parse(stdout) as ProviderPr);
 }
 

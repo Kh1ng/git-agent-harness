@@ -82,7 +82,7 @@ import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
 import { listAllChatSessions, resolveSessionCwd, chatSessionStoreOptions } from './managerChat/chatSessions.js';
 import { usageRollup } from './managerChat/usageRollup.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
-import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitPrsCached, commitGitChanges, cliInDir } from './gitCache.js';
+import { getGitStatusCached, getGitBranchesCached, getGitLogCached, commitGitChanges, cliInDir } from './gitCache.js';
 import {
   addCanonicalSkillBinding,
   clearProfileSkillBindings,
@@ -1740,49 +1740,34 @@ export function createServer(
     return (await resolveProfileInfo(profile))?.local_path ?? null;
   }
 
-  /** Resolves the cwd for read-only git surfaces (status): a chat session's
-   * own worktree when sessionId names a live session, else the profile's
-   * checkout. Falls back to the profile checkout for an unknown/archived
-   * session so status still renders once the session's worktree is gone.
-   * Mutations (commit) must use resolveCommitCwd instead -- falling back
-   * to the shared profile checkout there would let a session-scoped commit
-   * land in the wrong repo state. */
-  async function resolveGitCwd(profile: string, sessionId?: string): Promise<string | null> {
-    const profileInfo = await resolveProfileInfo(profile);
-    if (!profileInfo) return null;
-    if (!sessionId) return profileInfo.local_path;
-    const resolved = await resolveSessionCwd(profile, sessionId, profileInfo, chatSessionStoreOptions);
-    return resolved ? resolved.cwd : profileInfo.local_path;
-  }
+  type GitTarget =
+    | { kind: 'checkout'; cwd: string }
+    | { kind: 'read-only'; branch: string }
+    | { kind: 'error'; status: number; error: string };
 
-  type CommitCwdResolution = { cwd: string } | { status: number; error: string };
-
-  /** Resolves the cwd for a session-scoped git mutation (commit). Unlike
-   * resolveGitCwd, this never falls back to the shared profile checkout for
-   * a sessionId that doesn't resolve to a live, writable session: an
-   * unknown/archived session is rejected outright, and a worktree-less
-   * read-only PR chat (browsing only, nothing to commit) is rejected too,
-   * rather than silently committing into whatever else is checked out at
-   * local_path. */
-  async function resolveCommitCwd(profile: string, sessionId?: string): Promise<CommitCwdResolution> {
+  /** Resolves the checkout represented by a git request. A session request
+   * never falls back to the shared profile checkout. Worktree-less sessions
+   * expose only their recorded branch and reject mutations. */
+  async function resolveGitTarget(profile: string, sessionId?: string): Promise<GitTarget> {
     const profileInfo = await resolveProfileInfo(profile);
-    if (!profileInfo) return { status: 404, error: 'Profile not found' };
-    if (!sessionId) return { cwd: profileInfo.local_path };
+    if (!profileInfo) return { kind: 'error', status: 404, error: 'Profile not found' };
+    if (!sessionId) return { kind: 'checkout', cwd: profileInfo.local_path };
     const resolved = await resolveSessionCwd(profile, sessionId, profileInfo, chatSessionStoreOptions);
-    if (!resolved) return { status: 404, error: 'Chat session not found' };
-    if (resolved.session.prNumber !== undefined) {
-      return { status: 403, error: 'Session is a read-only PR chat and has no writable checkout' };
-    }
-    return { cwd: resolved.cwd };
+    if (!resolved) return { kind: 'error', status: 404, error: 'Chat session not found' };
+    if (!resolved.session.worktreePath) return { kind: 'read-only', branch: resolved.session.branch };
+    return { kind: 'checkout', cwd: resolved.cwd };
   }
 
   app.get('/api/git/status', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
-    const cwd = await resolveGitCwd(profile, sessionId);
-    if (!cwd) return res.status(404).json({ error: 'Profile not found' });
+    const target = await resolveGitTarget(profile, sessionId);
+    if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
+    if (target.kind === 'read-only') {
+      return res.json({ branch: target.branch, changes: [], cwd: null, readOnly: true });
+    }
     try {
-      const result = await getGitStatusCached(profile, cwd, sessionId);
+      const result = await getGitStatusCached(profile, target.cwd, sessionId);
       res.json(result);
     } catch (error) {
       res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
@@ -1816,14 +1801,8 @@ export function createServer(
 
   app.get('/api/git/prs', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
-    const cwd = await resolveLocalPath(profile);
-    if (!cwd) return res.status(404).json({ error: 'Profile not found' });
-    const profiles = await runProfileList();
-    const prof = profiles.find((p) => p.name === profile);
-    const isGitLab = prof?.provider === 'gitlab';
     try {
-      const result = await getGitPrsCached(profile, cwd, isGitLab);
-      res.json(result);
+      res.json({ prs: await listManagerChatPrs(profile) });
     } catch (error) {
       res.json({ prs: [], warning: error instanceof Error ? error.message : 'Unknown error' });
     }
@@ -1848,10 +1827,13 @@ export function createServer(
     const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
     const { message } = req.body as { message?: string };
     if (!message || !message.trim()) return res.status(400).json({ error: 'message required' });
-    const resolved = await resolveCommitCwd(profile, sessionId);
-    if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
+    const target = await resolveGitTarget(profile, sessionId);
+    if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
+    if (target.kind === 'read-only') {
+      return res.status(403).json({ error: 'Session is read-only and has no writable checkout' });
+    }
     try {
-      const result = await commitGitChanges(profile, resolved.cwd, message.trim(), sessionId);
+      const result = await commitGitChanges(profile, target.cwd, message.trim(), sessionId);
       res.json(result);
     } catch (error) {
       res.status(502).json({ error: error instanceof Error ? error.message : String(error) });

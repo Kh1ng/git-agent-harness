@@ -587,11 +587,8 @@ test('GET /api/admin/update/status returns reconnect-safe state via the injected
   });
 });
 
-/** POST /api/git/commit must never fall back to the shared profile checkout
- * for a sessionId that doesn't resolve to a live, writable session -- an
- * unknown/archived session or a worktree-less read-only PR chat has to be
- * rejected outright instead of silently committing into local_path. */
-test('POST /api/git/commit rejects unknown, archived, and read-only PR sessions instead of falling back to the profile checkout', { timeout: 30_000 }, async () => {
+/** Session-scoped git requests never inherit the shared profile checkout. */
+test('git routes reject stale sessions and expose worktree-less sessions as read-only', { timeout: 30_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'gah-git-commit-route-'));
   const checkout = join(root, 'checkout');
   execFileSync('mkdir', ['-p', checkout]);
@@ -646,9 +643,11 @@ test('POST /api/git/commit rejects unknown, archived, and read-only PR sessions 
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: 'should not land' })
     });
+    const status = (sessionId: string) => fetch(`${baseUrl}/api/git/status?profile=${profile}&sessionId=${sessionId}`);
 
     const unknownResponse = await commit('does-not-exist');
     assert.equal(unknownResponse.status, 404, 'unknown session id must be rejected, not routed to local_path');
+    assert.equal((await status('does-not-exist')).status, 404);
 
     const archived = await createSession(
       { profile, profileInfo, backend: 'codex', worktree: false },
@@ -657,6 +656,7 @@ test('POST /api/git/commit rejects unknown, archived, and read-only PR sessions 
     await archiveSession(profile, archived.id, profileInfo, { stateDir: join(root, 'chat') });
     const archivedResponse = await commit(archived.id);
     assert.equal(archivedResponse.status, 404, 'archived session must be rejected, not routed to local_path');
+    assert.equal((await status(archived.id)).status, 404);
 
     const prSession = await createSession(
       { profile, profileInfo, backend: 'codex', prNumber: 7, worktree: false },
@@ -665,6 +665,14 @@ test('POST /api/git/commit rejects unknown, archived, and read-only PR sessions 
     assert.equal(prSession.worktreePath, null, 'PR chat is worktree-less by design');
     const prResponse = await commit(prSession.id);
     assert.equal(prResponse.status, 403, 'worktree-less read-only PR session must be rejected, not routed to local_path');
+    const prStatusResponse = await status(prSession.id);
+    assert.equal(prStatusResponse.status, 200);
+    assert.deepEqual(await prStatusResponse.json(), {
+      branch: prSession.branch,
+      changes: [],
+      cwd: null,
+      readOnly: true
+    });
 
     // Confirm none of the rejected attempts ever touched local_path.
     const log = execFileSync('git', ['log', '--oneline'], { cwd: checkout }).toString();

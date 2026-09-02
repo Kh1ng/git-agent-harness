@@ -20,6 +20,7 @@ import path from 'node:path';
 
 const dataDir = process.env.GAH_FAKE_GH_FIXTURE;
 const stateFile = process.env.GAH_FAKE_GH_STATE;
+const callsFile = process.env.GAH_FAKE_GH_CALLS;
 
 if (!dataDir || !stateFile) {
   process.stderr.write('fake-gh fixture: GAH_FAKE_GH_FIXTURE and GAH_FAKE_GH_STATE must be set\n');
@@ -28,6 +29,8 @@ if (!dataDir || !stateFile) {
 
 const args = process.argv.slice(2);
 const [command, sub] = args;
+
+if (callsFile) fs.appendFileSync(callsFile, `${JSON.stringify(args)}\n`);
 
 function respond(name) {
   const file = path.join(dataDir, `${name}.json`);

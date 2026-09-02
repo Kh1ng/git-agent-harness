@@ -5,10 +5,11 @@ import { useUiStore } from '../store/uiStore.js';
 import { gahApi } from '../api/client.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
+import type { ChatPrSummary } from '@git-agent-harness/contracts';
 
-interface GitStatus { branch: string; changes: { status: string; path: string }[]; cwd: string }
+interface GitStatus { branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean }
 interface GitLog { commits: { hash: string; short: string; subject: string; author: string; ago: string }[] }
-interface GitPrs { prs: Record<string, unknown>[]; warning?: string }
+interface GitPrs { prs: ChatPrSummary[]; warning?: string }
 
 type Tab = 'status' | 'log' | 'prs';
 
@@ -228,15 +229,15 @@ export function GitPage() {
                 <tbody>
                   {prs.prs.map((pr, i) => (
                     <tr key={i}>
-                      <td className="text-muted text-xs">#{String(pr.number ?? '')}</td>
+                      <td className="text-muted text-xs">#{pr.number}</td>
                       <td className="text-sm text-primary">
-                        {String(pr.title ?? '')}
-                        {Boolean(pr.isDraft) && <span className="ml-2 text-xs text-muted">[draft]</span>}
+                        {pr.title}
+                        {pr.isDraft && <span className="ml-2 text-xs text-muted">[draft]</span>}
                       </td>
-                      <td className="font-mono text-xs text-secondary">{String(pr.headRefName ?? pr.source_branch ?? '')}</td>
+                      <td className="font-mono text-xs text-secondary">{pr.headRefName ?? ''}</td>
                       <td>
                         {pr.url ? (
-                          <a href={String(pr.url)} target="_blank" rel="noreferrer" className="text-muted hover:text-primary">
+                          <a href={pr.url} target="_blank" rel="noreferrer" className="text-muted hover:text-primary">
                             <ExternalLink size={13} />
                           </a>
                         ) : null}
