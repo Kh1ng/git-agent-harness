@@ -539,7 +539,7 @@ pub struct PmPlan {
 pub struct ActionableReviewFinding {
     pub summary: String,
     pub file: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_flexible_string")]
     pub line: Option<String>,
     pub status: String,
     #[serde(default, deserialize_with = "deserialize_string_list")]
@@ -638,6 +638,20 @@ where
     }
 }
 
+fn deserialize_optional_flexible_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => Ok(Some(value)),
+        Some(serde_json::Value::Number(value)) => Ok(Some(value.to_string())),
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "expected string, number, or null, got {other}"
+        ))),
+    }
+}
+
 /// Verdicts are a closed protocol value. Normalize harmless model casing and
 /// whitespace before dispatch applies its deterministic safety policy.
 fn deserialize_review_verdict<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -696,6 +710,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(verdict.confidence, "0.78");
+    }
+
+    #[test]
+    fn actionable_finding_accepts_numeric_line() {
+        let verdict: ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"NEEDS_FIX","confidence":"high","human_required":false,"actionable_findings":[{"summary":"blocking","file":"src/status.rs","line":872,"status":"confirmed","evidence":["diff:src/status.rs:blocking"]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(verdict.actionable_findings[0].line.as_deref(), Some("872"));
     }
 
     #[test]
