@@ -94,7 +94,10 @@ export interface SkillDrift {
 export interface SkillInventoryView {
   backend: string;
   backend_instance?: string;
-  bound_skill_ids: string[];
+  /** Absent means GAH could not resolve what's bound for this instance
+   * (store/registry failure), never an empty list -- an instance that was
+   * actually resolved and genuinely has nothing bound serializes as `[]`. */
+  bound_skill_ids?: string[];
   /** Absent means the backend could not self-report (unknown), never an
    * empty list -- a backend that was actually asked and confirmed zero
    * skills serializes as `[]`. */

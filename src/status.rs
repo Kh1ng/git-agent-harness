@@ -855,9 +855,24 @@ fn build_snapshot_inner(
 
     // Issue #966: read-only projection -- bound resolution plus the latest
     // stored self-report per instance, never a live backend query. `gah
-    // skills refresh` is what actually populates the store.
+    // skills refresh` is what actually populates the store. Both the store
+    // load and the bound-skill resolution below are non-blocking
+    // (`resolve_cached_only` never issues a network call -- AC6) and
+    // failures are surfaced as `None`/an error, never silently coerced to
+    // an empty list, so a resolution failure can't be misread as "nothing
+    // bound" and fabricate drift.
     let skill_inventory_records =
-        crate::skill_inventory::load(&crate::skill_inventory::store_path()).unwrap_or_default();
+        match crate::skill_inventory::load(&crate::skill_inventory::store_path()) {
+            Ok(records) => records,
+            Err(error) => {
+                errors.push(StatusError {
+                    subsystem: "skill_inventory".into(),
+                    message: format!("{error:#}"),
+                    incomplete_snapshot: false,
+                });
+                Vec::new()
+            }
+        };
     let mut skill_instance_names: Vec<&String> =
         effective_routing.backend_instances.keys().collect();
     skill_instance_names.sort();
@@ -869,7 +884,7 @@ fn build_snapshot_inner(
                 .logical_backend
                 .clone()
                 .unwrap_or_else(|| instance.runner_kind.clone());
-            let bound_skill_ids = crate::skill_bindings::resolve(
+            let bound_skill_ids = crate::skill_bindings::resolve_cached_only(
                 &cfg.defaults,
                 profile_name,
                 &logical_backend,
@@ -882,9 +897,10 @@ fn build_snapshot_inner(
                     .map(|skill| skill.id)
                     .collect()
             })
-            .unwrap_or_default();
+            .ok();
             let record = crate::skill_inventory::latest_for(
                 &skill_inventory_records,
+                profile_name,
                 &logical_backend,
                 Some(name.as_str()),
             );
@@ -1004,6 +1020,37 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
                     instance.executable_configured,
                     instance.isolated_state_configured
                 );
+            }
+        }
+
+        if !snapshot.skill_inventory.is_empty() {
+            println!("Skill inventory:");
+            for view in &snapshot.skill_inventory {
+                let bound = match &view.bound_skill_ids {
+                    Some(ids) => format!("{ids:?}"),
+                    None => "unknown".to_string(),
+                };
+                let observed = match &view.observed_skill_ids {
+                    Some(ids) => format!("{ids:?}"),
+                    None => "unknown".to_string(),
+                };
+                let stale = match view.observation_stale {
+                    Some(true) => " (STALE)",
+                    _ => "",
+                };
+                println!(
+                    "  - {} {}: bound={bound} observed={observed}{stale}",
+                    view.backend,
+                    view.backend_instance.as_deref().unwrap_or("-"),
+                );
+                if let Some(drift) = &view.drift {
+                    if !drift.is_empty() {
+                        println!(
+                            "      drift: bound_not_observed={:?} observed_not_bound={:?}",
+                            drift.bound_not_observed, drift.observed_not_bound
+                        );
+                    }
+                }
             }
         }
 

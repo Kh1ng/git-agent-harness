@@ -38,9 +38,16 @@ pub enum ObservedSkills {
 
 /// Parameters for a skill-inventory self-report query. `timeout` bounds the
 /// query so a hung backend can never block a dispatch decision (#966 AC6).
+/// `cwd`/`env_vars` let the caller target one specific backend instance's
+/// isolated state/profile (mirroring every other Hermes invocation, which
+/// always runs with an explicit working directory and environment) instead
+/// of querying whatever instance gah's ambient environment happens to
+/// resolve to.
 pub struct SkillObservationContext<'a> {
     pub executable: &'a Path,
     pub timeout: Duration,
+    pub cwd: Option<&'a Path>,
+    pub env_vars: &'a [(String, String)],
 }
 
 pub struct RunContext<'a> {
@@ -149,7 +156,12 @@ impl BackendRunner for HermesRunner {
     }
 
     fn observe_skills(&self, ctx: &SkillObservationContext) -> ObservedSkills {
-        crate::runner::backends::hermes::observe_skills_with_executable(ctx.executable, ctx.timeout)
+        crate::runner::backends::hermes::observe_skills_with_executable(
+            ctx.executable,
+            ctx.cwd,
+            ctx.env_vars,
+            ctx.timeout,
+        )
     }
 }
 
@@ -261,6 +273,8 @@ mod tests {
         let ctx = SkillObservationContext {
             executable: Path::new("does-not-matter"),
             timeout: Duration::from_secs(1),
+            cwd: None,
+            env_vars: &[],
         };
         // Every kind except Hermes uses the trait default today. A backend
         // nobody has wired self-report for must say "unknown", never claim
@@ -288,6 +302,8 @@ mod tests {
         let ctx = SkillObservationContext {
             executable: &f.bin_dir.join("hermes"),
             timeout: Duration::from_secs(5),
+            cwd: None,
+            env_vars: &[],
         };
 
         let observed = HermesRunner.observe_skills(&ctx);

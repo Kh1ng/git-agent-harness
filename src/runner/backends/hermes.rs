@@ -102,12 +102,24 @@ pub fn run_hermes_with_executable(
 /// `{"skills": [...]}` to stdout and exit 0; any other shape, a nonzero
 /// exit, or a timeout all fold to `Unknown` -- this is a best-effort
 /// self-report, not something dispatch can depend on succeeding.
+///
+/// `cwd`/`env_vars` target this specific backend instance's isolated
+/// state/profile (e.g. an instance-scoped `HOME`), the same way every other
+/// Hermes invocation in this file does -- without them the query would run
+/// against gah's own ambient environment rather than the instance being
+/// asked about.
 pub(crate) fn observe_skills_with_executable(
     executable: &Path,
+    cwd: Option<&Path>,
+    env_vars: &[(String, String)],
     timeout: Duration,
 ) -> ObservedSkills {
     let mut cmd = Command::new(executable);
     cmd.arg("--skills-status");
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    crate::runner::apply_child_env(&mut cmd, env_vars);
     match crate::runner::process::run_bounded(cmd, timeout) {
         Some(output) if output.status.success() => {
             parse_skills_status(&output.stdout).unwrap_or(ObservedSkills::Unknown)
@@ -324,8 +336,12 @@ mod tests {
             "#!/bin/sh\necho '{\"skills\": [\"review\", \"triage\"]}'\n",
         );
 
-        let observed =
-            observe_skills_with_executable(&f.bin_dir.join("hermes"), Duration::from_secs(5));
+        let observed = observe_skills_with_executable(
+            &f.bin_dir.join("hermes"),
+            None,
+            &[],
+            Duration::from_secs(5),
+        );
 
         assert_eq!(
             observed,
@@ -334,12 +350,34 @@ mod tests {
     }
 
     #[test]
+    fn observe_skills_targets_the_instance_working_directory_and_environment() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "hermes", &f.record_dir, 0);
+        let env_vars = vec![("HOME".to_string(), "/instance/isolated/home".to_string())];
+
+        observe_skills_with_executable(
+            &f.bin_dir.join("hermes"),
+            Some(f.worktree.as_path()),
+            &env_vars,
+            Duration::from_secs(5),
+        );
+
+        let env = recorded_env(&f.record_dir);
+        assert!(env.contains("HOME=/instance/isolated/home"));
+    }
+
+    #[test]
     fn observe_skills_is_unknown_not_empty_when_the_backend_reports_zero_and_fails() {
         let f = fixture();
         make_fake_bin(&f.bin_dir, "hermes", "#!/bin/sh\nexit 1\n");
 
-        let observed =
-            observe_skills_with_executable(&f.bin_dir.join("hermes"), Duration::from_secs(5));
+        let observed = observe_skills_with_executable(
+            &f.bin_dir.join("hermes"),
+            None,
+            &[],
+            Duration::from_secs(5),
+        );
 
         assert_eq!(observed, ObservedSkills::Unknown);
     }
@@ -349,8 +387,12 @@ mod tests {
         let f = fixture();
         make_fake_bin(&f.bin_dir, "hermes", "#!/bin/sh\necho 'not json'\n");
 
-        let observed =
-            observe_skills_with_executable(&f.bin_dir.join("hermes"), Duration::from_secs(5));
+        let observed = observe_skills_with_executable(
+            &f.bin_dir.join("hermes"),
+            None,
+            &[],
+            Duration::from_secs(5),
+        );
 
         assert_eq!(observed, ObservedSkills::Unknown);
     }
@@ -361,8 +403,12 @@ mod tests {
         make_fake_bin(&f.bin_dir, "hermes", "#!/bin/sh\nsleep 30\n");
 
         let started = std::time::Instant::now();
-        let observed =
-            observe_skills_with_executable(&f.bin_dir.join("hermes"), Duration::from_millis(200));
+        let observed = observe_skills_with_executable(
+            &f.bin_dir.join("hermes"),
+            None,
+            &[],
+            Duration::from_millis(200),
+        );
         let elapsed = started.elapsed();
 
         assert_eq!(observed, ObservedSkills::Unknown);

@@ -313,6 +313,10 @@ pub fn resolve(
             &cache_path(profile, backend, instance),
         );
     }
+    resolve_local(profile, backend, instance)
+}
+
+fn resolve_local(profile: &str, backend: &str, instance: Option<&str>) -> Result<SkillResolution> {
     let path = local_bank_path();
     if !path.exists() {
         return Ok(SkillResolution {
@@ -328,6 +332,29 @@ pub fn resolve(
     let bank = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing central skill bank {}", path.display()))?;
     resolve_bank(bank, profile, backend, instance)
+}
+
+/// Same resolution as `resolve`, but never performs network I/O: when a
+/// central registry is configured this reads only the last-known-good local
+/// cache (or reports failure if there isn't one yet), rather than issuing a
+/// bounded-but-still-blocking HTTP GET. For read-only, frequently-polled call
+/// sites (`gah status`, `gah skills status`) that must stay non-blocking
+/// (#966 AC6) -- an actual dispatch still goes through `resolve`, which is
+/// allowed to hit the network because it already bounds itself to one
+/// backend invocation, not a hot status path.
+pub fn resolve_cached_only(
+    defaults: &crate::config::Defaults,
+    profile: &str,
+    backend: &str,
+    instance: Option<&str>,
+) -> Result<SkillResolution> {
+    if defaults.registry_central_url.is_some() {
+        let cache = cache_path(profile, backend, instance);
+        let cached = read_cache(&cache)?;
+        validate_resolution(&cached, profile, backend, instance)?;
+        return Ok(cached);
+    }
+    resolve_local(profile, backend, instance)
 }
 
 pub fn materialize_args(

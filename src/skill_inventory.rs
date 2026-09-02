@@ -9,8 +9,18 @@
 //!
 //! Storage mirrors `quota_store.rs`'s design philosophy: append-only JSONL,
 //! not an in-place keyed map, so concurrent GAH processes can never erase
-//! each other's writes. "Current state" for a (backend, instance) scope is
-//! the latest record in that scope; a missing file is a clean empty state.
+//! each other's writes. "Current state" for a (profile, backend, instance)
+//! scope is the latest record in that scope; a missing file is a clean empty
+//! state.
+//!
+//! Unlike `availability.rs`/`quota_store.rs` (genuinely global: backend/model
+//! identity doesn't depend on which repo GAH is working on), this store is
+//! scoped per profile. `backend_instance` is a name the *profile's own*
+//! routing config chooses (`routing.backend_instances` keys); two unrelated
+//! profiles can each declare an instance called e.g. "main" that points at
+//! entirely different concrete backends. Without the profile in the record
+//! key, those two would silently read and overwrite each other's
+//! observations.
 //!
 //! A backend that cannot self-report (the `BackendRunner::observe_skills`
 //! default) is stored as `observed_skill_ids: None` -- distinct from
@@ -44,6 +54,7 @@ pub const STALE_AFTER_SECONDS: i64 = 15 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillInventoryRecord {
+    pub profile: String,
     pub backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
@@ -54,10 +65,10 @@ pub struct SkillInventoryRecord {
     pub observed_at: String,
 }
 
-/// Global, not per-profile (like `availability.rs`/`quota_store.rs`): a
-/// backend instance's self-reported skills don't depend on which repo GAH
-/// happens to be working on. `GAH_SKILL_INVENTORY_STORE_PATH` is an explicit
-/// override, matching the existing `GAH_AVAILABILITY_PATH`/
+/// One shared file across every profile -- records carry their own
+/// `profile` field for scoping (see module docs) rather than the path
+/// itself varying per profile. `GAH_SKILL_INVENTORY_STORE_PATH` is an
+/// explicit override, matching the existing `GAH_AVAILABILITY_PATH`/
 /// `GAH_QUOTA_STORE_PATH` convention.
 pub fn store_path() -> PathBuf {
     if let Ok(path) = std::env::var("GAH_SKILL_INVENTORY_STORE_PATH") {
@@ -113,15 +124,20 @@ pub fn append(state_path: &Path, rec: &SkillInventoryRecord) -> Result<()> {
     Ok(())
 }
 
-/// Most-recent observation for a (backend, instance) scope.
+/// Most-recent observation for a (profile, backend, instance) scope.
 pub fn latest_for<'a>(
     records: &'a [SkillInventoryRecord],
+    profile: &str,
     backend: &str,
     instance: Option<&str>,
 ) -> Option<&'a SkillInventoryRecord> {
     records
         .iter()
-        .filter(|r| r.backend == backend && r.backend_instance.as_deref() == instance)
+        .filter(|r| {
+            r.profile == profile
+                && r.backend == backend
+                && r.backend_instance.as_deref() == instance
+        })
         .max_by(|a, b| a.observed_at.cmp(&b.observed_at))
 }
 
@@ -130,20 +146,44 @@ pub fn latest_for<'a>(
 /// result. Bounded by `OBSERVATION_TIMEOUT`; a backend with no self-report
 /// support, or one that fails/times out, is stored as `Unknown`
 /// (`observed_skill_ids: None`), never an empty list (#966 AC2).
+///
+/// `kind` drives which `BackendRunner` actually issues the query (dispatch
+/// needs the canonical `BackendKind`, folded from aliases like "agy-second"
+/// by the caller), but the record is stored keyed by `logical_backend` --
+/// the same raw, possibly-aliased string `skill_bindings::resolve` and every
+/// other read path use -- so a write for an aliased instance is found again
+/// by a lookup that hasn't gone through the same folding.
+///
+/// `state_root`, when the instance declares one, is passed through as both
+/// the query's working directory and its `HOME` override (mirroring
+/// `dispatch::attempts::apply_execution_identity_env`) so the self-report
+/// targets that instance's own isolated profile/skill config rather than
+/// gah's ambient environment.
+#[allow(clippy::too_many_arguments)]
 pub fn refresh_and_store(
     kind: BackendKind,
+    profile: &str,
+    logical_backend: &str,
     instance: Option<&str>,
     executable: &Path,
+    state_root: Option<&Path>,
     state_path: &Path,
     now: OffsetDateTime,
 ) -> Result<SkillInventoryRecord> {
     let runner = backend_runner::for_kind(kind);
+    let mut env_vars: Vec<(String, String)> = Vec::new();
+    if let Some(root) = state_root {
+        env_vars.push(("HOME".to_string(), root.to_string_lossy().into_owned()));
+    }
     let observed = runner.observe_skills(&SkillObservationContext {
         executable,
         timeout: OBSERVATION_TIMEOUT,
+        cwd: state_root,
+        env_vars: &env_vars,
     });
     let record = SkillInventoryRecord {
-        backend: kind.as_str().to_string(),
+        profile: profile.to_string(),
+        backend: logical_backend.to_string(),
         backend_instance: instance.map(str::to_string),
         observed_skill_ids: match observed {
             ObservedSkills::Unknown => None,
@@ -180,7 +220,14 @@ pub struct SkillInventoryView {
     pub backend: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
-    pub bound_skill_ids: Vec<String>,
+    /// `None` means GAH could not resolve what's bound for this instance
+    /// (store/registry failure), never an empty list -- an instance that was
+    /// actually resolved and genuinely has nothing bound serializes as `[]`.
+    /// Drift is never computed against a `None` here: reporting bound-empty
+    /// as fact would fabricate `observed_not_bound` drift for skills that
+    /// may well be bound, GAH just couldn't confirm it this call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound_skill_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_skill_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -197,9 +244,10 @@ pub struct SkillInventoryView {
 }
 
 /// Build the reportable view for one backend instance from its bound
-/// resolution and its latest stored observation (if any).
+/// resolution (`None` if GAH could not resolve it) and its latest stored
+/// observation (if any).
 pub fn view(
-    bound_skill_ids: Vec<String>,
+    bound_skill_ids: Option<Vec<String>>,
     record: Option<&SkillInventoryRecord>,
     backend: &str,
     instance: Option<&str>,
@@ -213,18 +261,25 @@ pub fn view(
             .map(|parsed| (now - parsed).whole_seconds())
     });
     let observation_stale = observation_age_seconds.map(|age| age >= STALE_AFTER_SECONDS);
-    let drift = observed_skill_ids.as_ref().map(|observed| SkillDrift {
-        bound_not_observed: bound_skill_ids
-            .iter()
-            .filter(|id| !observed.contains(id))
-            .cloned()
-            .collect(),
-        observed_not_bound: observed
-            .iter()
-            .filter(|id| !bound_skill_ids.contains(id))
-            .cloned()
-            .collect(),
-    });
+    // Drift reconciliation is only meaningful once GAH has both a confirmed
+    // bound set and a confirmed observed set -- a resolution failure on
+    // either side must fall back to "unknown", never fabricate drift from
+    // treating the failed side as empty.
+    let drift = match (&bound_skill_ids, &observed_skill_ids) {
+        (Some(bound), Some(observed)) => Some(SkillDrift {
+            bound_not_observed: bound
+                .iter()
+                .filter(|id| !observed.contains(id))
+                .cloned()
+                .collect(),
+            observed_not_bound: observed
+                .iter()
+                .filter(|id| !bound.contains(id))
+                .cloned()
+                .collect(),
+        }),
+        _ => None,
+    };
     SkillInventoryView {
         backend: backend.to_string(),
         backend_instance: instance.map(str::to_string),
@@ -247,7 +302,18 @@ mod tests {
         observed_skill_ids: Option<Vec<&str>>,
         observed_at: &str,
     ) -> SkillInventoryRecord {
+        record_for_profile("repo", backend, instance, observed_skill_ids, observed_at)
+    }
+
+    fn record_for_profile(
+        profile: &str,
+        backend: &str,
+        instance: Option<&str>,
+        observed_skill_ids: Option<Vec<&str>>,
+        observed_at: &str,
+    ) -> SkillInventoryRecord {
         SkillInventoryRecord {
+            profile: profile.to_string(),
             backend: backend.to_string(),
             backend_instance: instance.map(str::to_string),
             observed_skill_ids: observed_skill_ids
@@ -325,7 +391,7 @@ mod tests {
             ),
         ];
 
-        let latest = latest_for(&records, "hermes", Some("a")).unwrap();
+        let latest = latest_for(&records, "repo", "hermes", Some("a")).unwrap();
 
         assert_eq!(latest.observed_skill_ids, Some(vec!["new".into()]));
     }
@@ -339,8 +405,26 @@ mod tests {
             "2026-06-01T00:00:00Z",
         )];
 
-        assert!(latest_for(&records, "hermes", Some("other-instance")).is_none());
-        assert!(latest_for(&records, "hermes", None).is_none());
+        assert!(latest_for(&records, "repo", "hermes", Some("other-instance")).is_none());
+        assert!(latest_for(&records, "repo", "hermes", None).is_none());
+    }
+
+    #[test]
+    fn latest_for_never_crosses_profile_scope() {
+        // Two unrelated profiles can each declare a backend_instance with
+        // the same name pointing at entirely different concrete backends
+        // (#966 repair finding); the store must not let one profile read
+        // the other's observation.
+        let records = vec![record_for_profile(
+            "profile-a",
+            "hermes",
+            Some("main"),
+            Some(vec!["review"]),
+            "2026-06-01T00:00:00Z",
+        )];
+
+        assert!(latest_for(&records, "profile-b", "hermes", Some("main")).is_none());
+        assert!(latest_for(&records, "profile-a", "hermes", Some("main")).is_some());
     }
 
     #[test]
@@ -351,13 +435,51 @@ mod tests {
 
         // Codex's BackendRunner uses the trait default -- Unknown -- since
         // no self-report implementation is wired up for it.
-        let rec =
-            refresh_and_store(BackendKind::Codex, None, Path::new("codex"), &path, now).unwrap();
+        let rec = refresh_and_store(
+            BackendKind::Codex,
+            "repo",
+            "codex",
+            None,
+            Path::new("codex"),
+            None,
+            &path,
+            now,
+        )
+        .unwrap();
 
         assert_eq!(rec.observed_skill_ids, None, "unknown must not become []");
+        assert_eq!(rec.profile, "repo");
+        assert_eq!(rec.backend, "codex");
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].observed_skill_ids, None);
+    }
+
+    #[test]
+    fn refresh_and_store_keys_by_the_raw_logical_backend_not_the_canonical_kind() {
+        // An aliased instance (e.g. "agy-second") dispatches through the
+        // canonical BackendKind::Agy runner, but must be stored (and later
+        // found) under its own raw logical_backend string, matching every
+        // other read path (skill_bindings::resolve, dispatch/attempts.rs).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("skill_inventory.jsonl");
+        let now = OffsetDateTime::parse("2026-08-01T00:00:00Z", &Rfc3339).unwrap();
+
+        let rec = refresh_and_store(
+            BackendKind::Agy,
+            "repo",
+            "agy-second",
+            Some("agy-second-instance"),
+            Path::new("agy"),
+            None,
+            &path,
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(rec.backend, "agy-second");
+        let loaded = load(&path).unwrap();
+        assert!(latest_for(&loaded, "repo", "agy-second", Some("agy-second-instance")).is_some());
     }
 
     #[test]
@@ -365,7 +487,7 @@ mod tests {
         let now = OffsetDateTime::parse("2026-08-01T00:00:00Z", &Rfc3339).unwrap();
 
         let view = view(
-            vec!["review".into()],
+            Some(vec!["review".into()]),
             None,
             "hermes",
             Some("gah-manager"),
@@ -390,7 +512,7 @@ mod tests {
         );
 
         let view = view(
-            vec!["review".into()],
+            Some(vec!["review".into()]),
             Some(&rec),
             "hermes",
             Some("gah-manager"),
@@ -414,7 +536,7 @@ mod tests {
             "2026-08-01T00:00:00Z",
         );
 
-        let view = view(vec![], Some(&rec), "hermes", Some("gah-manager"), now);
+        let view = view(Some(vec![]), Some(&rec), "hermes", Some("gah-manager"), now);
 
         let drift = view.drift.unwrap();
         assert!(drift.bound_not_observed.is_empty());
@@ -430,9 +552,32 @@ mod tests {
         let now = OffsetDateTime::parse("2026-08-01T00:00:05Z", &Rfc3339).unwrap();
         let rec = record("hermes", None, Some(vec!["review"]), "2026-08-01T00:00:00Z");
 
-        let view = view(vec!["review".into()], Some(&rec), "hermes", None, now);
+        let view = view(Some(vec!["review".into()]), Some(&rec), "hermes", None, now);
 
         assert!(view.drift.unwrap().is_empty());
+    }
+
+    #[test]
+    fn view_never_fabricates_drift_when_bound_resolution_is_unknown() {
+        // A store/registry failure must surface as unknown, not as "nothing
+        // is bound" -- the latter would fabricate observed_not_bound drift
+        // for a skill that may genuinely be bound (#966 repair finding).
+        let now = OffsetDateTime::parse("2026-08-01T00:00:05Z", &Rfc3339).unwrap();
+        let rec = record(
+            "hermes",
+            Some("gah-manager"),
+            Some(vec!["review"]),
+            "2026-08-01T00:00:00Z",
+        );
+
+        let view = view(None, Some(&rec), "hermes", Some("gah-manager"), now);
+
+        assert_eq!(view.bound_skill_ids, None);
+        assert_eq!(view.observed_skill_ids, Some(vec!["review".to_string()]));
+        assert!(
+            view.drift.is_none(),
+            "drift must stay unknown, not fabricated, when bound resolution failed"
+        );
     }
 
     #[test]
@@ -440,12 +585,12 @@ mod tests {
         let rec = record("hermes", None, Some(vec![]), "2026-08-01T00:00:00Z");
 
         let fresh_now = OffsetDateTime::parse("2026-08-01T00:05:00Z", &Rfc3339).unwrap();
-        let fresh = view(vec![], Some(&rec), "hermes", None, fresh_now);
+        let fresh = view(Some(vec![]), Some(&rec), "hermes", None, fresh_now);
         assert_eq!(fresh.observation_age_seconds, Some(300));
         assert_eq!(fresh.observation_stale, Some(false));
 
         let stale_now = OffsetDateTime::parse("2026-08-01T00:20:00Z", &Rfc3339).unwrap();
-        let stale = view(vec![], Some(&rec), "hermes", None, stale_now);
+        let stale = view(Some(vec![]), Some(&rec), "hermes", None, stale_now);
         assert_eq!(stale.observation_age_seconds, Some(1200));
         // AC5: observation older than 15 minutes must be marked stale so the
         // dashboard does not present it as live truth.
@@ -465,7 +610,7 @@ mod tests {
         );
         let stale_now = OffsetDateTime::parse("2026-08-01T00:20:00Z", &Rfc3339).unwrap();
         let view = view(
-            vec!["review".to_string()],
+            Some(vec!["review".to_string()]),
             Some(&rec),
             "hermes",
             Some("gah-manager"),
