@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { test, describe, beforeEach, afterEach } from 'node:test';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { AsyncTtlCache } from './asyncTtlCache.js';
+import { commitGitChanges, getGitStatusCached } from './gitCache.js';
 
 // Simple test to verify AsyncTtlCache works as expected for git caching scenarios
 
@@ -146,5 +151,46 @@ describe('Git cache TTL behavior', () => {
     now += 5_001;
     assert.deepEqual(await cache.get('gah', load), { branch: 'main' });
     assert.equal(loads, 2);
+  });
+});
+
+describe('commitGitChanges', () => {
+  function initRepo(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'gah-gitcache-'));
+    execFileSync('git', ['init', '--initial-branch=main', dir]);
+    execFileSync('git', [
+      '-C', dir, '-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+      'commit', '--allow-empty', '-m', 'initial'
+    ]);
+    return dir;
+  }
+
+  test('commits staged and unstaged changes and returns the new hash', async () => {
+    const dir = initRepo();
+    writeFileSync(join(dir, 'file.txt'), 'hello\n');
+
+    const result = await commitGitChanges('gitcache-test-commit', dir, 'add file');
+
+    assert.match(result.hash, /^[0-9a-f]{40}$/);
+    const subject = execFileSync('git', ['-C', dir, 'log', '-1', '--pretty=%s'], { encoding: 'utf8' }).trim();
+    assert.equal(subject, 'add file');
+  });
+
+  test('rejects when there is nothing to commit', async () => {
+    const dir = initRepo();
+    await assert.rejects(commitGitChanges('gitcache-test-empty', dir, 'no-op'));
+  });
+
+  test('invalidates the cached status so the next read reflects the commit', async () => {
+    const dir = initRepo();
+    const profile = 'gitcache-test-invalidate';
+    writeFileSync(join(dir, 'file.txt'), 'hello\n');
+
+    const dirty = await getGitStatusCached(profile, dir);
+    assert.equal(dirty.changes.length, 1);
+
+    await commitGitChanges(profile, dir, 'add file');
+    const after = await getGitStatusCached(profile, dir);
+    assert.equal(after.changes.length, 0);
   });
 });

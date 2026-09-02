@@ -83,7 +83,7 @@ import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
 import { listAllChatSessions } from './managerChat/chatSessions.js';
 import { usageRollup } from './managerChat/usageRollup.js';
 import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
-import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitPrsCached } from './gitCache.js';
+import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitPrsCached, commitGitChanges } from './gitCache.js';
 import {
   addCanonicalSkillBinding,
   clearProfileSkillBindings,
@@ -1802,6 +1802,20 @@ export function createServer(
     const { ok, out } = cliInDir('gh', args, cwd);
     if (!ok) return res.status(502).json({ error: 'gh pr create failed' });
     res.json({ url: out.trim() });
+  });
+
+  app.post('/api/git/commit', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const { message } = req.body as { message?: string };
+    if (!message || !message.trim()) return res.status(400).json({ error: 'message required' });
+    const cwd = await resolveLocalPath(profile);
+    if (!cwd) return res.status(404).json({ error: 'Profile not found' });
+    try {
+      const result = await commitGitChanges(profile, cwd, message.trim());
+      res.json(result);
+    } catch (error) {
+      res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   // Issue #989: in-app update path. Operates on this server's own GAH

@@ -28,6 +28,10 @@ interface GitPrsResult {
   warning?: string;
 }
 
+interface GitCommitResult {
+  hash: string;
+}
+
 function gitInDir(cwd: string, args: string[]): { ok: boolean; out: string; err: string } {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
   return { ok: r.status === 0, out: r.stdout ?? '', err: r.stderr ?? '' };
@@ -119,5 +123,29 @@ export async function getGitPrsCached(
       }
     }
   });
+}
+
+/**
+ * Commits staged + unstaged changes in a profile's checkout (`git add -A`
+ * then `git commit`). Not cached -- it's a mutation, not an observation --
+ * but it drops the status/log cache entries it just invalidated so the next
+ * strip refresh doesn't serve a stale pre-commit snapshot for the rest of
+ * the TTL window.
+ */
+export async function commitGitChanges(
+  profile: string,
+  cwd: string,
+  message: string
+): Promise<GitCommitResult> {
+  const add = gitInDir(cwd, ['add', '-A']);
+  if (!add.ok) throw new Error(add.err || 'git add failed');
+  const commit = gitInDir(cwd, ['commit', '-m', message]);
+  if (!commit.ok) throw new Error(commit.err || commit.out || 'git commit failed');
+  gitStatusCache.delete(profile);
+  for (const key of gitLogCache.keys()) {
+    if (key === profile || key.startsWith(`${profile}:`)) gitLogCache.delete(key);
+  }
+  const rev = gitInDir(cwd, ['rev-parse', 'HEAD']);
+  return { hash: rev.ok ? rev.out.trim() : '' };
 }
 

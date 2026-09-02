@@ -59,3 +59,23 @@ test('does not cache failures and retries the next caller', async () => {
   assert.equal(await cache.get('gah', load), 7);
   assert.equal(loads, 2);
 });
+
+test('delete() forces the next get() to reload', async () => {
+  let loads = 0;
+  const cache = new AsyncTtlCache<string, number>(30_000);
+  const load = async () => ++loads;
+
+  assert.equal(await cache.get('gah', load), 1);
+  cache.delete('gah');
+  assert.equal(await cache.get('gah', load), 2);
+});
+
+test('keys() snapshots the currently cached keys', async () => {
+  const cache = new AsyncTtlCache<string, number>(30_000);
+  await cache.get('gah', async () => 1);
+  await cache.get('sportsball', async () => 2);
+
+  assert.deepEqual(new Set(cache.keys()), new Set(['gah', 'sportsball']));
+  cache.delete('gah');
+  assert.deepEqual(cache.keys(), ['sportsball']);
+});

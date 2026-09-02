@@ -250,61 +250,130 @@ function SkillPicker({
  * Renders for the active session's project when git data is available.
  */
 function GitStrip({
+  profile,
   status,
   issues,
   prs,
   onRefresh
 }: {
+  profile: string;
   status: { branch: string; changes: { status: string; path: string }[]; cwd: string } | null;
   issues: ChatIssueSummary[];
   prs: ChatPrSummary[];
   onRefresh: () => void;
 }) {
+  const [commitOpen, setCommitOpen] = useState(false);
+  const [commitMessage, setCommitMessage] = useState('');
+  const [committing, setCommitting] = useState(false);
+  const [commitError, setCommitError] = useState<string | null>(null);
+
   if (!status) return null;
 
   const clean = status.changes.length === 0;
   const changedFiles = status.changes.length;
+  // The session's branch already maps to its PR via the settle-by-branch
+  // sweep, so prefer that match; fall back to the first open PR.
+  const branchPr = prs.find((pr) => pr.headRefName === status.branch) ?? prs[0] ?? null;
+
+  const submitCommit = async () => {
+    if (!commitMessage.trim() || committing) return;
+    setCommitting(true);
+    setCommitError(null);
+    try {
+      await gahApi.createGitCommit(profile, commitMessage.trim());
+      setCommitMessage('');
+      setCommitOpen(false);
+      onRefresh();
+    } catch (error) {
+      setCommitError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCommitting(false);
+    }
+  };
 
   return (
-    <div className="flex items-center justify-between gap-3 text-xs">
-      <div className="flex items-center gap-3 truncate">
-        <GitBranch size={14} className="text-muted shrink-0" />
-        <span className="font-mono text-secondary">{status.branch}</span>
-        {clean ? (
-          <span className="text-muted">clean</span>
-        ) : (
-          <span className="flex items-center gap-1 text-amber-400">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-            {changedFiles} changed
-          </span>
-        )}
-        {prs.length > 0 && (
-          <>
-            <span className="text-muted">|</span>
-            <span className="flex items-center gap-1">
-              <GitPullRequest size={13} className="text-purple-400" />
-              {prs.length}
+    <div className="space-y-2 text-xs">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 truncate">
+          <GitBranch size={14} className="text-muted shrink-0" />
+          <span className="font-mono text-secondary">{status.branch}</span>
+          {clean ? (
+            <span className="text-muted">clean</span>
+          ) : (
+            <span className="flex items-center gap-1 text-amber-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+              {changedFiles} changed
             </span>
-          </>
-        )}
-        {issues.length > 0 && (
-          <>
-            <span className="text-muted">|</span>
-            <span className="flex items-center gap-1">
-              <ShieldAlert size={13} className="text-blue-400" />
-              {issues.length}
-            </span>
-          </>
-        )}
+          )}
+          {prs.length > 0 && (
+            <>
+              <span className="text-muted">|</span>
+              <span className="flex items-center gap-1">
+                <GitPullRequest size={13} className="text-purple-400" />
+                {prs.length}
+              </span>
+            </>
+          )}
+          {issues.length > 0 && (
+            <>
+              <span className="text-muted">|</span>
+              <span className="flex items-center gap-1">
+                <ShieldAlert size={13} className="text-blue-400" />
+                {issues.length}
+              </span>
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            onClick={() => { setCommitOpen((v) => !v); setCommitError(null); }}
+            className="flex items-center gap-1 text-muted hover:text-primary disabled:opacity-50"
+            title={clean ? 'No changes to commit' : 'Commit changes'}
+            disabled={clean}
+          >
+            <GitCommit size={13} />
+            Commit
+          </button>
+          <button
+            onClick={() => branchPr?.url && window.open(branchPr.url, '_blank', 'noopener,noreferrer')}
+            className="flex items-center gap-1 text-muted hover:text-primary disabled:opacity-50"
+            title={branchPr ? `View #${branchPr.number}: ${branchPr.title}` : 'No open PR for this branch'}
+            disabled={!branchPr?.url}
+          >
+            <ExternalLink size={13} />
+            View PR
+          </button>
+          <button
+            onClick={onRefresh}
+            className="text-muted hover:text-primary"
+            title="Refresh git data"
+          >
+            <RefreshCw size={13} />
+          </button>
+        </div>
       </div>
-      <button
-        onClick={onRefresh}
-        className="text-muted hover:text-primary disabled:opacity-50"
-        title="Refresh git data"
-        disabled={!status}
-      >
-        <RefreshCw size={13} />
-      </button>
+
+      {commitOpen && (
+        <div className="flex items-center gap-2 rounded-md border border-subtle bg-raised px-2 py-1.5">
+          <input
+            type="text"
+            autoFocus
+            value={commitMessage}
+            onChange={(e) => setCommitMessage(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void submitCommit(); if (e.key === 'Escape') setCommitOpen(false); }}
+            placeholder="Commit message"
+            className="flex-1 bg-transparent text-primary text-xs focus:outline-none"
+          />
+          <button
+            onClick={submitCommit}
+            disabled={!commitMessage.trim() || committing}
+            className="btn-primary text-[11px] px-2 py-1 disabled:opacity-50"
+          >
+            {committing ? 'Committing…' : 'Commit'}
+          </button>
+          {commitError && <span className="text-critical text-[11px]">{commitError}</span>}
+        </div>
+      )}
     </div>
   );
 }
@@ -1355,7 +1424,7 @@ export function ManagerChatPage() {
       {/* Git strip: compact git state for the active session's project */}
       {currentProfileInfo && (
         <div className="card-padded">
-          <GitStrip status={gitStatus} issues={gitIssues} prs={gitPrs} onRefresh={loadGitData} />
+          <GitStrip profile={profile} status={gitStatus} issues={gitIssues} prs={gitPrs} onRefresh={loadGitData} />
         </div>
       )}
 

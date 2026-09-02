@@ -233,6 +233,7 @@ export interface GahDataSource {
   getGitLog(profile: string, limit?: number): Promise<{ commits: { hash: string; short: string; subject: string; author: string; ago: string }[] }>;
   getGitPrs(profile: string): Promise<{ prs: Record<string, unknown>[]; warning?: string }>;
   createGitPr(profile: string, data: { title: string; body?: string; base?: string; draft?: boolean }): Promise<{ url: string }>;
+  createGitCommit(profile: string, message: string): Promise<{ hash: string }>;
   getManagerChatCommands(profile: string): Promise<{ commands: ManagerCommandInfo[] }>;
   getManagerChatModels(profile: string): Promise<ManagerModelsSummary>;
   setManagerChatModel(profile: string, modelId: string): Promise<{ success: boolean }>;
@@ -493,6 +494,9 @@ export const gahApi: GahDataSource = {
   },
   createGitPr(profile, data) {
     return postJson(`/api/git/pr?profile=${encodeURIComponent(profile)}`, data);
+  },
+  createGitCommit(profile, message) {
+    return postJson(`/api/git/commit?profile=${encodeURIComponent(profile)}`, { message });
   },
   getManagerChatCommands(profile) {
     return getJson<{ commands: ManagerCommandInfo[] }>('/api/manager-chat/commands', { profile });
