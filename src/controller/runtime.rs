@@ -1112,7 +1112,13 @@ default_target_branch = "main"
     fn profile_lock_is_adjacent_to_config_not_xdg_state() {
         let config_file = tempfile::NamedTempFile::new().unwrap();
         let lock_path = loop_lock_path("test-profile", config_file.path());
-        let expected_dir = config_file.path().parent().unwrap().join(".gah-locks");
+        let expected_dir = config_file
+            .path()
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .join(".gah-locks");
         assert_eq!(lock_path.parent(), Some(expected_dir.as_path()));
     }
 

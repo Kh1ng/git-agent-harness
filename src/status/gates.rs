@@ -382,8 +382,8 @@ repo = "test/test"
 local_path = "/tmp"
 artifact_root = "{}"
 default_target_branch = "main"
-claude_path = "/bin/true"
-opencode_path = "/bin/true"
+claude_path = "/bin/sh"
+opencode_path = "/bin/sh"
 
 [[profiles.test.routing.review_candidates]]
 backend = "claude"
@@ -573,8 +573,8 @@ repo = "test/test"
 local_path = "/tmp"
 artifact_root = "{}"
 default_target_branch = "main"
-claude_path = "/bin/true"
-opencode_path = "/bin/true"
+claude_path = "/bin/sh"
+opencode_path = "/bin/sh"
 
 [[profiles.test.routing.improve_candidates]]
 backend = "opencode"
