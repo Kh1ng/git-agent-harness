@@ -830,9 +830,9 @@ fn spawn_with_idle_watch_with_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::backends::test_util::{fixture, make_fake_bin};
     #[cfg(target_os = "linux")]
     use crate::runner::backends::test_util::initialize_git_worktree;
+    use crate::runner::backends::test_util::{fixture, make_fake_bin};
     use crate::test_support::ExecGuard;
     use std::fs;
 
