@@ -35,8 +35,7 @@ async function openChat(page: Page): Promise<void> {
 }
 
 async function selectSeededSession(page: Page): Promise<void> {
-  await page.getByLabel('Chat session').click();
-  await page.getByRole('option', { name: 'Mock session', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ }).click();
   // The composer pill renders the session's provider once its model list
   // has loaded (the seeded session is codex / gpt-5.3-codex).
   const pill = page.getByRole('button', { name: 'Provider picker' });
@@ -44,15 +43,15 @@ async function selectSeededSession(page: Page): Promise<void> {
   await expect(pill).toContainText('GPT-5.3 Codex');
 }
 
-/** The picker's two top-level sections, for asserting where a session lives. */
-function pickerSection(page: Page, name: 'Active' | 'Archive') {
-  return page.getByRole('listbox', { name: 'All sessions' }).getByRole('group', { name });
+async function openArchivedChats(page: Page): Promise<void> {
+  const disclosure = page.getByText(/^Archived \(\d+\)$/);
+  if (!await page.getByRole('navigation', { name: 'Archived chats' }).isVisible()) await disclosure.click();
 }
 
 // The mock is one shared stateful process. Keep scenario mutations ordered.
 test.describe.configure({ mode: 'serial' });
 
-test('active picker discovers sessions created through REST', async ({ page, request }) => {
+test('chat rail discovers sessions created through REST', async ({ page, request }) => {
   await selectScenario(request, 'normal');
   await openChat(page);
 
@@ -61,8 +60,7 @@ test('active picker discovers sessions created through REST', async ({ page, req
   });
   expect(response.ok(), await response.text()).toBe(true);
 
-  await page.getByLabel('Chat session').click();
-  await expect(page.getByRole('option', { name: 'Externally created session' })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Externally created session/ })).toBeVisible({ timeout: 10_000 });
 });
 
 test('shared mock streams multiple chunks, tool activity, and completion', async ({ page, request }) => {
@@ -186,24 +184,25 @@ test('archive and preview states mutate through the same REST control plane', as
     await route.continue();
   });
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
-  const trigger = page.getByLabel('Chat session');
+  const defaultConversation = page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: 'Default conversation' });
   // The selection resets optimistically, before any refresh lands.
-  await expect(trigger).toContainText('Default conversation', { timeout: 750 });
+  await expect(defaultConversation).toHaveAttribute('aria-current', 'page', { timeout: 750 });
 
   const archived = await request.get(`${MOCK_BASE_URL}/api/manager-chat/sessions?profile=fixture`);
   expect(archived.ok(), await archived.text()).toBe(true);
   const archivedSessions = (await archived.json() as { sessions: { id: string; archivedAt: number | null }[] }).sessions;
   expect(archivedSessions.find((session) => session.id === 'mock-session-1')?.archivedAt).not.toBeNull();
 
-  // The picker now lists the archived session under Archive — and only there.
-  await trigger.click();
-  await expect(pickerSection(page, 'Archive').getByRole('option', { name: 'Mock session', exact: true })).toBeVisible({ timeout: 10_000 });
-  await expect(pickerSection(page, 'Active').getByRole('option', { name: 'Mock session', exact: true })).toHaveCount(0);
+  // The rail now lists the session under Archived, and not in the working set.
+  await expect(page.getByText(/^Archived \(\d+\)$/)).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ })).toHaveCount(0);
+  await openArchivedChats(page);
+  await expect(page.getByRole('navigation', { name: 'Archived chats' }).getByRole('button', { name: /Mock session/ })).toBeVisible();
 
   // The 5s auto-refresh keeps it archived: it never resurfaces as active.
   await page.waitForTimeout(5_500);
-  await expect(pickerSection(page, 'Archive').getByRole('option', { name: 'Mock session', exact: true })).toBeVisible();
-  await expect(pickerSection(page, 'Active').getByRole('option', { name: 'Mock session', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('navigation', { name: 'Archived chats' }).getByRole('button', { name: /Mock session/ })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ })).toHaveCount(0);
 
   await selectScenario(request, 'archive-success');
   const connectionsBeforeReconnect = await connectionCount(request);
@@ -212,15 +211,15 @@ test('archive and preview states mutate through the same REST control plane', as
   });
   expect(rearchived.ok(), await rearchived.text()).toBe(true);
   await expect.poll(() => connectionCount(request), { timeout: 15_000 }).toBeGreaterThan(connectionsBeforeReconnect);
-  await expect(trigger).toContainText('Default conversation');
-  await expect(pickerSection(page, 'Active').getByRole('option', { name: 'Mock session', exact: true })).toHaveCount(0);
+  await expect(defaultConversation).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ })).toHaveCount(0);
 
   await selectScenario(request, 'archive-failure');
   await openChat(page);
   await selectSeededSession(page);
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
   await expect(page.getByText('Failed to archive session: Mock archive failed')).toBeVisible();
-  await expect(page.getByLabel('Chat session')).toContainText('Mock session');
+  await expect(page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ })).toHaveAttribute('aria-current', 'page');
 });
 
 test('storage dry run selects idle sessions and bulk archives them safely', async ({ page, request }) => {
@@ -236,36 +235,32 @@ test('storage dry run selects idle sessions and bulk archives them safely', asyn
   await storage.getByRole('button', { name: 'Select idle (1)' }).click();
   await expect(storage.getByLabel('Select Mock session')).toBeChecked();
   await storage.getByRole('button', { name: 'Archive selected (1)' }).click();
-  await page.getByLabel('Chat session').click();
-  await expect(pickerSection(page, 'Archive').getByRole('option', { name: 'Mock session', exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText(/^Archived \(\d+\)$/)).toBeVisible({ timeout: 10_000 });
+  await openArchivedChats(page);
+  await expect(page.getByRole('navigation', { name: 'Archived chats' }).getByRole('button', { name: /Mock session/ })).toBeVisible();
   await expect(storage).toContainText('No live chat sessions.');
 });
 
-test('backend/model controls cover success, delayed, empty, failed, and AGY shapes', async ({ page, request }) => {
+test('composer provider control covers success, delayed, empty, failed, and AGY shapes', async ({ page, request }) => {
   await selectScenario(request, 'models-success');
   await openChat(page);
-  await expect(page.getByLabel('Harness / backend')).toHaveValue('codex');
-  await expect(page.getByLabel('Model')).toHaveValue('gpt-5.3-codex');
-  await expect(page.getByLabel('Reasoning effort')).toHaveValue('medium');
+  await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex · Medium');
 
   await selectScenario(request, 'models-delayed');
   await openChat(page);
-  await expect(page.getByLabel('Model')).toHaveCount(0);
-  await expect(page.getByLabel('Model')).toHaveValue('gpt-5.3-codex', { timeout: 5_000 });
+  await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex · Medium', { timeout: 5_000 });
 
   await selectScenario(request, 'models-empty');
   await openChat(page);
-  await expect(page.getByText('Default model · Codex', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex');
 
   await selectScenario(request, 'models-failure');
   await openChat(page);
-  await expect(page.getByText('Default model · Codex', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex');
 
   await selectScenario(request, 'models-agy');
   await openChat(page);
-  await expect(page.getByLabel('Harness / backend')).toHaveValue('agy');
-  await expect(page.getByText('Default model · AGY', { exact: true })).toBeVisible();
-  await expect(page.getByLabel('Reasoning effort')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('AGY');
 });
 
 test('the composer picker switches session backend, model, and effort', async ({ page, request }) => {
@@ -335,8 +330,7 @@ test('composer favorites persist across reload and apply all three selections at
   await expect(pill).toContainText('Claude · Default model');
   await page.reload();
   await openChat(page);
-  await page.getByLabel('Chat session').click();
-  await page.getByRole('option', { name: 'Mock session', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ }).click();
   await expect(pill).toContainText('Claude · Default model');
 
   await pill.click();

@@ -5,7 +5,6 @@ import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { NewChatModal } from '../components/NewChatModal.js';
-import { ChatSessionPicker } from '../components/ChatSessionPicker.js';
 import { ProviderPicker, type ProviderSelection, type ProviderPickerProps } from '../components/ProviderPicker.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
@@ -20,7 +19,6 @@ import type {
   ProfileSummary,
   ManagerBackendInfo,
   ChatSessionSummary,
-  ChatSessionProjectGroup,
   ChatPreviewInfo,
   ChatReclaimResult,
   SkillBindingSummary,
@@ -75,10 +73,6 @@ function formatBytes(bytes: number): string {
     unit = units[index];
   }
   return `${value.toFixed(value >= 10 ? 1 : 2)} ${unit}`;
-}
-
-function activeChatSessions(sessions: ChatSessionSummary[]): ChatSessionSummary[] {
-  return sessions.filter((session) => session.archivedAt === null);
 }
 
 function fromServerTurn(turn: ManagerChatTurn): ChatTurn {
@@ -489,7 +483,7 @@ export function ManagerChatPage() {
   const processedMessageIdRef = useRef(messages.at(-1)?.id ?? 0);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   /** Which harness answers this profile's chat (#945): a stored per-profile
-   * override, not client state. The header picker writes it via
+   * override, not client state. The composer picker writes it via
    * POST /api/manager-chat/settings and the next turn uses it. */
   const [activeBackendId, setActiveBackendId] = useState<string | null>(null);
   const [availableBackends, setAvailableBackends] = useState<ManagerBackendInfo[]>([]);
@@ -522,13 +516,8 @@ export function ManagerChatPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const [sessionsError, setSessionsError] = useState(false);
-  /** Cross-project picker data: every project's sessions (live + archived),
-   * independent of the profile this page is currently viewing. */
-  const [allSessions, setAllSessions] = useState<ChatSessionProjectGroup[]>([]);
-  const [allSessionsError, setAllSessionsError] = useState(false);
-  /** A cross-project picker selection (or new-chat creation) lands in the
-   * same render batch as the profile switch; the [profile] effect's cleanup
-   * would wipe the session id, so the effect restores it after the reset. */
+  /** A new chat created for another project lands in the same render batch
+   * as the profile switch; the [profile] effect restores its session id. */
   const pendingSessionRef = useRef<string | null>(null);
   const [storageOpen, setStorageOpen] = useState(false);
   const [storage, setStorage] = useState<ChatReclaimResult | null>(null);
@@ -617,7 +606,7 @@ export function ManagerChatPage() {
       .getChatSessions(forProfile)
       .then(({ sessions: fetched }) => {
         if (activeProfileRef.current !== forProfile) return;
-        setSessions(activeChatSessions(fetched));
+        setSessions(fetched);
         setSessionsError(false);
       })
       .catch(() => {
@@ -628,28 +617,14 @@ export function ManagerChatPage() {
       });
   };
 
-  const refreshAllSessions = () => {
-    gahApi
-      .getAllChatSessions()
-      .then(({ projects }) => {
-        setAllSessions(projects);
-        setAllSessionsError(false);
-      })
-      .catch(() => {
-        // Same resilience rule as refreshSessions: keep the last known
-        // groups and let the retry affordance surface the failure.
-        setAllSessionsError(true);
-      });
-  };
-
-  useAutoRefresh(() => { refreshSessions(profile); refreshAllSessions(); }, 5_000);
-  useWsReconnectRefresh(() => { refreshSessions(profile); refreshAllSessions(); });
+  useAutoRefresh(() => refreshSessions(profile), 5_000);
+  useWsReconnectRefresh(() => refreshSessions(profile));
   // #865: Hermes pushes usage_update per turn, so the context meter is
   // polled independently of the models/reasoning-effort list (which only
   // refreshes on explicit profile/backend/model changes) to stay live
   // through an ongoing conversation. Only the default (non-session)
   // conversation shows the meter, so skip the request while a session owns
-  // the header.
+  // the composer settings.
   useAutoRefresh(() => {
     if (activeSession) return;
     const requestedProfile = profile;
@@ -664,7 +639,6 @@ export function ManagerChatPage() {
     const pendingSession = pendingSessionRef.current;
     pendingSessionRef.current = null;
     refreshSessions(profile);
-    refreshAllSessions();
     if (pendingSession !== null) setSessionId(pendingSession);
     return () => {
       setSessions([]);
@@ -674,17 +648,6 @@ export function ManagerChatPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile]);
-
-  /** Picker selection: a session of another project first switches the chat
-   * page to that project (the WebSocket reconnects with it), then opens the
-   * session via the regular session-open path. */
-  const handlePickerSelect = (sessionProfile: string, pickedSessionId: string | null) => {
-    if (sessionProfile !== profile) {
-      pendingSessionRef.current = pickedSessionId;
-      setProfileOverride(sessionProfile);
-    }
-    setSessionId(pickedSessionId);
-  };
 
   const refreshStorage = async (forProfile = profile) => {
     setStorageLoading(true);
@@ -1073,11 +1036,6 @@ export function ManagerChatPage() {
 
   const turnBusy = pendingRequest !== null || remoteTurnBusy || streaming !== null;
   const sendBlocked = !historyLoaded;
-  // #945: the header shows the actual configured harness, and flags a
-  // configured-but-unimplemented backend rather than silently falling back.
-  const activeBackendInfo = availableBackends.find((b) => b.id === activeBackendId);
-  const activeBackendLabel = activeBackendInfo?.displayName ?? activeBackendId ?? 'manager';
-  const activeBackendUnavailable = Boolean(activeBackendInfo && !activeBackendInfo.implemented);
 
   const refreshSkillBinding = async () => {
     if (!skillBackend) return;
@@ -1171,8 +1129,8 @@ export function ManagerChatPage() {
     scrollAnchorRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [turns, turnBusy]);
 
-  /** Composer provider picker, profile variant: drives the same
-   *  profile-level settings the header selects do. A favorite can carry
+  /** Composer provider picker, profile variant: drives the profile-level
+   *  settings. A favorite can carry
    *  backend + model + effort, so a backend switch is followed by the
    *  pinned model/effort when the favorite specified them. */
   const applyProfileSelection = async (next: ProviderSelection) => {
@@ -1192,7 +1150,7 @@ export function ManagerChatPage() {
 
   /** Which conversation the composer's pill controls: the active session
    *  carries its own backend/model/effort; the default conversation drives
-   *  the profile-level settings (same state the header selects show). */
+   *  the profile-level settings. */
   const composerPicker: ProviderPickerProps | null = (() => {
     if (availableBackends.length === 0) return null;
     if (activeSession) {
@@ -1309,9 +1267,8 @@ export function ManagerChatPage() {
     if (!activeSession) return;
     try {
       const archived = await gahApi.archiveChatSession(profile, activeSession.id);
-      setSessions((current) => activeChatSessions(current.filter((session) => session.id !== archived.id)));
+      setSessions((current) => current.map((session) => session.id === archived.id ? archived : session));
       refreshSessions(profile);
-      refreshAllSessions();
       setSessionId(null);
     } catch (err) {
       setTurns((prev) => [...prev, { role: 'error', text: `Failed to archive session: ${err instanceof Error ? err.message : String(err)}` }]);
@@ -1327,7 +1284,6 @@ export function ManagerChatPage() {
       if (sessionId && selectedSessionIds.has(sessionId)) setSessionId(null);
       setSelectedSessionIds(new Set());
       refreshSessions(profile);
-      refreshAllSessions();
       await refreshStorage(profile);
     } catch (error) {
       setStorageError(error instanceof Error ? error.message : String(error));
@@ -1345,7 +1301,6 @@ export function ManagerChatPage() {
       setStorageError(result.warnings[0] ?? null);
       setSelectedSessionIds(new Set());
       refreshSessions(profile);
-      refreshAllSessions();
       await refreshStorage(profile);
     } catch (error) {
       setStorageError(error instanceof Error ? error.message : String(error));
@@ -1411,106 +1366,22 @@ export function ManagerChatPage() {
       setProfileOverride(createdProfile);
     }
     refreshSessions(createdProfile);
-    // The picker's trigger label resolves against the cross-project groups,
-    // so the fresh session must land there too before it can be shown.
-    refreshAllSessions();
     setSessionId(createdSessionId);
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <PageHeader
         title={currentProfileInfo?.repo ? currentProfileInfo.repo.split('/').pop() ?? 'Chat' : 'Chat'}
-        description={`${currentProfileInfo?.repo ?? profile} · ${
-          activeSession
-            ? `${activeSession.backend}${activeSession.model ? ` / ${activeSession.model}` : ''}`
-            : `${activeBackendLabel}${activeBackendUnavailable ? ' (unavailable)' : ''}`
-        }`}
-        actions={
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {skillBackend && (
-              <SkillPicker
-                binding={skillBinding}
-                busy={turnBusy || skillBindingChanging}
-                onToggle={(id) => void handleSkillToggle(id)}
-                onInherit={() => void handleSkillInherit()}
-              />
-            )}
-            {/* Profile-wide pickers for the default conversation; a session
-                carries its own backend/model in the session bar below. */}
-            {!activeSession && availableBackends.length > 0 && (
-              <select
-                value={activeBackendId ?? ''}
-                onChange={(e) => handleBackendChange(e.target.value)}
-                disabled={backendChanging || turnBusy}
-                title={turnBusy ? 'Switching harness is disabled while a turn is in flight' : 'Harness / backend'}
-                className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary max-w-[170px]"
-                aria-label="Harness / backend"
-              >
-                {availableBackends.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.displayName}{b.implemented ? '' : ' (unavailable)'}
-                  </option>
-                ))}
-              </select>
-            )}
-            {!activeSession && models.length > 0 && (
-              <select
-                value={currentModelId ?? ''}
-                onChange={(e) => handleModelChange(e.target.value)}
-                disabled={modelChanging}
-                className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary max-w-[220px]"
-                aria-label="Model"
-              >
-                {models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-            )}
-            {!activeSession && reasoningEfforts.length > 0 && (
-              <select
-                value={currentReasoningEffortId ?? ''}
-                onChange={(e) => handleReasoningEffortChange(e.target.value)}
-                disabled={reasoningEffortChanging || modelChanging || backendChanging || turnBusy}
-                title={turnBusy ? 'Switching reasoning effort is disabled while a turn is in flight' : 'Reasoning effort'}
-                className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary max-w-[170px]"
-                aria-label="Reasoning effort"
-              >
-                {reasoningEfforts.map((effort) => (
-                  <option key={effort.id} value={effort.id} title={effort.description}>
-                    {effort.name}
-                  </option>
-                ))}
-              </select>
-            )}
-            {/* #865: context-window occupancy from the backend's own
-                usage_update push (Hermes today). Hidden entirely for a
-                backend that doesn't advertise it, the same empty-state
-                pattern as the model picker just below. */}
-            {!activeSession && contextUsage && (
-              <span
-                aria-label="Context usage"
-                className="rounded-md border border-subtle bg-raised px-2 py-1.5 text-[11px] tabular-nums text-muted"
-                title={`${contextUsage.used.toLocaleString()} / ${contextUsage.size.toLocaleString()} tokens in context`}
-              >
-                {Math.round((contextUsage.used / contextUsage.size) * 100)}% context
-              </span>
-            )}
-            {/* This provider doesn't expose a model picker over its protocol
-                (e.g. Hermes over ACP): say so instead of silently hiding the
-                control. Codex / Claude / OpenCode expose live lists. */}
-            {!activeSession && modelsLoaded && models.length === 0 && activeBackendId && (
-              <span
-                className="rounded-md border border-subtle bg-raised px-2 py-1.5 text-[11px] text-muted"
-                title="This provider uses its configured default model and doesn't expose a picker. Switch to a provider that advertises models or use its own model command in chat."
-              >
-                Default model · {activeBackendLabel}
-              </span>
-            )}
-          </div>
-        }
+        description={currentProfileInfo?.repo ?? profile}
+        actions={skillBackend ? (
+          <SkillPicker
+            binding={skillBinding}
+            busy={turnBusy || skillBindingChanging}
+            onToggle={(id) => void handleSkillToggle(id)}
+            onInherit={() => void handleSkillInherit()}
+          />
+        ) : undefined}
       />
 
       {/* Git strip: compact git state for the active session's project */}
@@ -1530,28 +1401,7 @@ export function ManagerChatPage() {
         </div>
       )}
 
-      {/* WP2 session bar: one conversation per worktree. Default = the
-          profile's shared conversation; sessions run in isolated worktrees
-          (branch survives archive; a reclaimed worktree rematerializes on
-          resume). "New chat" is the T3 flow: project → node → provider. */}
       <div className="flex items-center gap-2 flex-wrap">
-        <GitBranch size={14} className="text-muted shrink-0" aria-hidden="true" />
-        <ChatSessionPicker
-          groups={allSessions}
-          selectedProfile={profile}
-          selectedSessionId={sessionId}
-          onSelect={handlePickerSelect}
-        />
-        {(sessionsError || allSessionsError) && (
-          <button
-            type="button"
-            onClick={() => { refreshSessions(profile); refreshAllSessions(); }}
-            className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300 hover:bg-amber-500/20"
-            title="Session list failed to load — showing the last known sessions. Click to retry."
-          >
-            Sessions · retry
-          </button>
-        )}
         <button
           onClick={() => setNewChatOpen(true)}
           disabled={!isConnected}
@@ -1706,7 +1556,12 @@ export function ManagerChatPage() {
         <ProjectRail
           currentProfile={profile}
           profiles={availableProfiles}
+          sessions={sessions}
+          selectedSessionId={sessionId}
           onSelect={setProfileOverride}
+          onSessionSelect={setSessionId}
+          sessionsError={sessionsError}
+          onRetrySessions={() => refreshSessions(profile)}
           onProjectAdded={(project) => {
             setAvailableProfiles((profiles) => [...profiles.filter((profile) => profile.name !== project.name), project]);
           }}
@@ -1909,9 +1764,20 @@ export function ManagerChatPage() {
           <div ref={scrollAnchorRef} />
         </div>
 
-        <div className="relative flex items-end gap-2 pt-3 mt-3 border-t border-subtle">
-          {composerPicker && (
-            <ProviderPicker {...composerPicker} />
+        <div className="relative grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 border-t border-subtle pt-3 mt-3 sm:flex">
+          {(composerPicker || (!activeSession && contextUsage)) && (
+            <div className="col-span-2 flex min-w-0 items-end gap-2 sm:col-span-1">
+              {composerPicker && <ProviderPicker {...composerPicker} />}
+              {!activeSession && contextUsage && (
+                <span
+                  aria-label="Context usage"
+                  className="shrink-0 px-1 pb-2 text-[11px] tabular-nums text-muted"
+                  title={`${contextUsage.used.toLocaleString()} / ${contextUsage.size.toLocaleString()} tokens in context`}
+                >
+                  {Math.round((contextUsage.used / contextUsage.size) * 100)}% context
+                </span>
+              )}
+            </div>
           )}
           {paletteOpen && (
             <div className="absolute bottom-full left-0 mb-1 w-full max-w-sm bg-card border border-subtle rounded-md shadow-lg overflow-hidden z-10">

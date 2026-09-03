@@ -131,10 +131,10 @@ test('profile changes reject stale chat replies and control data', async ({ page
   await page.waitForTimeout(100);
   await expect(page.getByText('Thinking…')).toHaveCount(0);
   await expect(page.getByText('stale alpha reply')).toHaveCount(0);
-  await expect(page.getByLabel('Model')).toHaveValue('beta-model');
+  await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('beta-backend · beta model');
   await page.getByPlaceholder(/Message the manager/).fill('/');
   await expect(page.getByText('/beta-command', { exact: true })).toBeVisible();
-  await expect(page.getByText('org/beta · beta-backend')).toBeVisible();
+  await expect(page.getByText('org/beta', { exact: true }).first()).toBeVisible();
 });
 
 test('reconnect restores and follows an in-flight reply', async ({ page }) => {

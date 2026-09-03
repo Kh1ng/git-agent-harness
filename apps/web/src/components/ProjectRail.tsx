@@ -1,12 +1,12 @@
 import { useMemo, useState } from 'react';
-import { FolderGit2 } from 'lucide-react';
-import type { ProfileSummary } from '@git-agent-harness/contracts';
+import { ChevronRight, FolderGit2 } from 'lucide-react';
+import type { ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
 
 /**
- * The chat page's project rail (T3 flow, step 1): every configured profile
- * is one click away — clicking switches the whole chat surface to that
- * project's conversations. "Import from Git" adds a brand-new project.
+ * The chat page's navigator: every configured project and every conversation
+ * in the selected project is one click away. Archived conversations stay
+ * available behind a disclosure instead of crowding the working set.
  *
  * The curated catalog (`/api/projects`) is no longer the gate it once was:
  * it drives the Overview dashboard, while chat lists all configured
@@ -15,12 +15,22 @@ import { gahApi } from '../api/client.js';
 export function ProjectRail({
   currentProfile,
   profiles,
+  sessions,
+  selectedSessionId,
   onSelect,
+  onSessionSelect,
+  sessionsError,
+  onRetrySessions,
   onProjectAdded
 }: {
   currentProfile: string;
   profiles: ProfileSummary[];
+  sessions: ChatSessionSummary[];
+  selectedSessionId: string | null;
   onSelect: (profile: string | null) => void;
+  onSessionSelect: (sessionId: string | null) => void;
+  sessionsError: boolean;
+  onRetrySessions: () => void;
   onProjectAdded: (profile: ProfileSummary) => void;
 }) {
   const [gitUrl, setGitUrl] = useState('');
@@ -32,6 +42,10 @@ export function ProjectRail({
     () => [...profiles].sort((a, b) => (a.display_name || a.name).localeCompare(b.display_name || b.name)),
     [profiles]
   );
+  const liveSessions = sessions.filter((session) => session.outcome === 'live');
+  const archivedSessions = sessions.filter((session) => session.outcome !== 'live');
+  const sessionClasses = (active: boolean) =>
+    `block w-full rounded-md px-2 py-1.5 text-left ${active ? 'bg-accent/15' : 'hover:bg-white/5'}`;
 
   const importProject = async () => {
     if (!gitUrl.trim()) return;
@@ -58,33 +72,92 @@ export function ProjectRail({
   };
 
   return (
-    <aside className="card p-3 xl:h-[65vh] xl:overflow-y-auto" aria-label="Project rail">
-      <div className="flex items-center justify-between gap-2 px-1 pb-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted">Projects</h3>
-        <span className="text-xs tabular-nums text-muted">{sorted.length}</span>
-      </div>
+    <aside className="card p-3 xl:h-[65vh] xl:overflow-y-auto" aria-label="Chat navigation">
+      <details open>
+        <summary className="group flex cursor-pointer list-none items-center justify-between gap-2 rounded px-1 pb-2 text-xs font-semibold uppercase tracking-wide text-muted marker:content-none hover:text-primary">
+          <span className="flex items-center gap-1">
+            <ChevronRight size={12} className="transition-transform group-open:rotate-90" aria-hidden="true" />
+            Projects
+          </span>
+          <span className="tabular-nums">{sorted.length}</span>
+        </summary>
 
-      <nav aria-label="Projects" className="space-y-1">
-        {sorted.length === 0 && (
-          <p className="px-2 py-3 text-xs leading-relaxed text-muted">Import a repository below to start.</p>
-        )}
-        {sorted.map((project) => {
-          const active = project.name === currentProfile;
-          return (
-            <div key={project.name} className={`flex items-center rounded-md ${active ? 'bg-accent/15' : 'hover:bg-white/5'}`}>
+        <nav aria-label="Projects" className="space-y-1">
+          {sorted.length === 0 && (
+            <p className="px-2 py-3 text-xs leading-relaxed text-muted">Import a repository below to start.</p>
+          )}
+          {sorted.map((project) => {
+            const active = project.name === currentProfile;
+            return (
               <button
+                key={project.name}
                 type="button"
                 onClick={() => onSelect(project.name)}
-                className="min-w-0 flex-1 px-2 py-2 text-left focus-visible:rounded-md"
+                className={`block w-full rounded-md px-2 py-2 text-left ${active ? 'bg-accent/15' : 'hover:bg-white/5'}`}
                 aria-current={active ? 'page' : undefined}
               >
                 <span className="block truncate text-sm font-medium text-primary">{project.display_name || project.name}</span>
                 <span className="block truncate text-[11px] text-muted">{project.repo}</span>
               </button>
-            </div>
-          );
-        })}
-      </nav>
+            );
+          })}
+        </nav>
+      </details>
+
+      <section className="mt-4 border-t border-subtle pt-3" aria-labelledby="chat-list-title">
+        <div className="flex items-center justify-between gap-2 px-1 pb-2">
+          <h3 id="chat-list-title" className="text-xs font-semibold uppercase tracking-wide text-muted">Chats</h3>
+          {sessionsError ? (
+            <button type="button" onClick={onRetrySessions} className="text-[11px] text-amber-300 hover:text-primary">Retry</button>
+          ) : (
+            <span className="text-xs tabular-nums text-muted">{liveSessions.length + 1}</span>
+          )}
+        </div>
+        <nav aria-label="Chats" className="space-y-1">
+          <button
+            type="button"
+            onClick={() => onSessionSelect(null)}
+            className={sessionClasses(selectedSessionId === null)}
+            aria-current={selectedSessionId === null ? 'page' : undefined}
+          >
+            <span className="block truncate text-sm text-primary">Default conversation</span>
+          </button>
+          {liveSessions.map((session) => (
+            <button
+              key={session.id}
+              type="button"
+              onClick={() => onSessionSelect(session.id)}
+              className={sessionClasses(session.id === selectedSessionId)}
+              aria-current={session.id === selectedSessionId ? 'page' : undefined}
+            >
+              <span className="block truncate text-sm text-primary">{session.title ?? session.branch}</span>
+              <span className="block truncate text-[11px] text-muted">{session.branch}</span>
+            </button>
+          ))}
+        </nav>
+
+        {archivedSessions.length > 0 && (
+          <details className="mt-2">
+            <summary className="cursor-pointer select-none rounded px-2 py-1 text-xs text-muted hover:bg-white/5 hover:text-primary">
+              Archived ({archivedSessions.length})
+            </summary>
+            <nav aria-label="Archived chats" className="mt-1 space-y-1">
+              {archivedSessions.map((session) => (
+                <button
+                  key={session.id}
+                  type="button"
+                  onClick={() => onSessionSelect(session.id)}
+                  className={sessionClasses(session.id === selectedSessionId)}
+                  aria-current={session.id === selectedSessionId ? 'page' : undefined}
+                >
+                  <span className="block truncate text-sm text-secondary">{session.title ?? session.branch}</span>
+                  <span className="block truncate text-[11px] text-muted">{session.branch}</span>
+                </button>
+              ))}
+            </nav>
+          </details>
+        )}
+      </section>
 
       <div className="mt-4 border-t border-subtle pt-3 space-y-2">
         <details className="pt-1">

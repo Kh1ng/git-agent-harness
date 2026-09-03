@@ -10,11 +10,11 @@ const WELCOME = {
 };
 
 // #865: Hermes pushes real per-turn context-window occupancy over ACP's
-// usage_update notification. The manager-chat header shows it as a small
+// usage_update notification. The manager-chat composer shows it as a small
 // badge next to the model picker for a backend that reports it, and hides
 // it entirely for one that doesn't -- same empty-state pattern as the
 // model/reasoning-effort pickers just next to it.
-test('the chat header shows and hides the context-usage badge based on backend data', async ({ page }) => {
+test('the chat composer shows and hides context usage based on backend data', async ({ page }) => {
   let contextUsage: { size: number; used: number } | null = { size: 131072, used: 12594 };
 
   await page.route('**/api/**', async (route) => {
