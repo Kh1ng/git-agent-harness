@@ -75,6 +75,9 @@ struct BackendModelComparison {
     requests_count: Option<u64>,
     tokens_per_success: Option<f64>,
     requests_per_success: Option<f64>,
+    predicted_average_cost_usd: Option<f64>,
+    predicted_average_duration_seconds: Option<f64>,
+    predicted_difficulty_match_rate: Option<f64>,
     quota_observations: Vec<crate::ledger::summary::GroupQuotaObservation>,
     review_verdict_distribution: Vec<(String, usize)>,
 }
@@ -337,6 +340,9 @@ fn transform_to_report_format(
                 requests_count: group.requests_count,
                 tokens_per_success: group.tokens_per_success,
                 requests_per_success: group.requests_per_success,
+                predicted_average_cost_usd: group.predicted_average_cost_usd,
+                predicted_average_duration_seconds: group.predicted_average_duration_seconds,
+                predicted_difficulty_match_rate: group.predicted_difficulty_match_rate,
                 quota_observations: group.quota_observations.clone(),
                 review_verdict_distribution: review_verdicts,
             });
@@ -503,6 +509,35 @@ fn display_report(
             if let Some(avg_duration) = group.average_duration_seconds {
                 println!("  Avg duration: {:.1}s", avg_duration);
             }
+
+            // Issue #916: predicted vs. actual accuracy tracking.
+            if group.predicted_average_cost_usd.is_some()
+                || group.predicted_average_duration_seconds.is_some()
+                || group.predicted_difficulty_match_rate.is_some()
+            {
+                println!(
+                    "  Predicted avg cost: {} (actual: {}), predicted avg duration: {} (actual: {})",
+                    group
+                        .predicted_average_cost_usd
+                        .map(|c| format!("${c:.4}"))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    group
+                        .average_cost_usd
+                        .map(|c| format!("${c:.4}"))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    group
+                        .predicted_average_duration_seconds
+                        .map(|d| format!("{d:.1}s"))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    group
+                        .average_duration_seconds
+                        .map(|d| format!("{d:.1}s"))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                );
+                if let Some(rate) = group.predicted_difficulty_match_rate {
+                    println!("  Predicted difficulty match rate: {:.1}%", rate * 100.0);
+                }
+            }
             println!(
                 "  Usage: input={} output={} reasoning={} cache_read={} cache_write={} total={} requests={}",
                 group
@@ -612,6 +647,9 @@ mod tests {
             requests_count: Some(10),
             tokens_per_success: Some(125.0),
             requests_per_success: Some(1.25),
+            predicted_average_cost_usd: None,
+            predicted_average_duration_seconds: None,
+            predicted_difficulty_match_rate: None,
             quota_observations: vec![],
         });
         grouped_by_backend.push(GroupSummary {
@@ -641,6 +679,9 @@ mod tests {
             requests_count: Some(10),
             tokens_per_success: Some(125.0),
             requests_per_success: Some(2.5),
+            predicted_average_cost_usd: None,
+            predicted_average_duration_seconds: None,
+            predicted_difficulty_match_rate: None,
             quota_observations: vec![],
         });
 
@@ -808,6 +849,9 @@ mod tests {
             requests_count: None,
             tokens_per_success: None,
             requests_per_success: None,
+            predicted_average_cost_usd: None,
+            predicted_average_duration_seconds: None,
+            predicted_difficulty_match_rate: None,
             quota_observations: vec![],
         }];
 
@@ -849,6 +893,9 @@ mod tests {
             requests_count: None,
             tokens_per_success: None,
             requests_per_success: None,
+            predicted_average_cost_usd: None,
+            predicted_average_duration_seconds: None,
+            predicted_difficulty_match_rate: None,
             quota_observations: vec![],
         }];
 

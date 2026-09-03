@@ -143,6 +143,13 @@ pub(in crate::dispatch) fn dry_run(
             );
             println!("No worktree, no commit, no push, no MR.");
         }
+        Ok(JobKind::Estimate) => {
+            println!("Backend:      {}", args.backend);
+            println!(
+                "Steps: estimate backend (read-only) → predicted difficulty/cost/duration recorded on the ledger entry"
+            );
+            println!("No worktree, no commit, no push, no MR.");
+        }
         Err(_) => println!("mode '{}': not yet implemented", args.mode),
     }
     println!("\n## Safety\n- No pushes, no MRs, no provider calls (dry run)");

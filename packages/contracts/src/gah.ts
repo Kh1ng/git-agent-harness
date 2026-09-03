@@ -539,6 +539,14 @@ export interface BackendModelComparison {
   requests_count: number | null;
   tokens_per_success: number | null;
   requests_per_success: number | null;
+  /** Issue #916: average predicted cost/duration for this group's entries
+   *  that carried an estimate, for comparison against average_cost_usd /
+   *  average_duration_seconds (the actual outcome). */
+  predicted_average_cost_usd: number | null;
+  predicted_average_duration_seconds: number | null;
+  /** Fraction 0..1 of entries where predicted_difficulty matched the
+   *  entry's own difficulty, among entries where both were recorded. */
+  predicted_difficulty_match_rate: number | null;
   quota_observations: QuotaObservation[];
   /** [verdict, count] pairs, e.g. ["APPROVE_STRONG", 3]. */
   review_verdict_distribution: [string, number][];

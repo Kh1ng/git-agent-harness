@@ -74,6 +74,11 @@ pub enum JobKind {
     Experiment,
     Research,
     Audit,
+    /// Issue #916: standalone, read-only difficulty/cost/duration estimate
+    /// for a single ticket, callable against any target the same way
+    /// `Research`/`Audit` are -- not tied to `Pm`'s multi-ticket
+    /// decomposition call. No worktree, no commit, no push, no PR.
+    Estimate,
 }
 
 /// The behavioral grouping routing policy actually cares about: `pm` and
@@ -111,6 +116,7 @@ impl JobKind {
             "experiment" => Ok(Self::Experiment),
             "research" => Ok(Self::Research),
             "audit" => Ok(Self::Audit),
+            "estimate" => Ok(Self::Estimate),
             other => Err(UnknownJobKind(other.to_string())),
         }
     }
@@ -124,6 +130,7 @@ impl JobKind {
             Self::Experiment => "experiment",
             Self::Research => "research",
             Self::Audit => "audit",
+            Self::Estimate => "estimate",
         }
     }
 
@@ -132,11 +139,11 @@ impl JobKind {
             Self::Pm => JobFamily::Pm,
             Self::Review => JobFamily::Review,
             Self::Improve | Self::Fix | Self::Experiment => JobFamily::ImproveLike,
-            Self::Research | Self::Audit => JobFamily::Investigation,
+            Self::Research | Self::Audit | Self::Estimate => JobFamily::Investigation,
         }
     }
 
-    pub fn all() -> [JobKind; 7] {
+    pub fn all() -> [JobKind; 8] {
         [
             Self::Improve,
             Self::Fix,
@@ -145,6 +152,7 @@ impl JobKind {
             Self::Experiment,
             Self::Research,
             Self::Audit,
+            Self::Estimate,
         ]
     }
 }
@@ -198,12 +206,13 @@ mod tests {
     fn family_groups_research_and_audit_together() {
         assert_eq!(JobKind::Research.family(), JobFamily::Investigation);
         assert_eq!(JobKind::Audit.family(), JobFamily::Investigation);
+        assert_eq!(JobKind::Estimate.family(), JobFamily::Investigation);
     }
 
     #[test]
-    fn all_returns_exactly_seven_kinds_with_no_duplicates() {
+    fn all_returns_exactly_eight_kinds_with_no_duplicates() {
         let all = JobKind::all();
-        assert_eq!(all.len(), 7);
+        assert_eq!(all.len(), 8);
         let mut seen = std::collections::HashSet::new();
         for kind in all {
             assert!(seen.insert(kind), "duplicate kind in all(): {kind:?}");

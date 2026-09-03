@@ -490,6 +490,21 @@ pub struct LedgerEntry {
     /// JSONL ledger lines.
     #[serde(default)]
     pub difficulty: Option<String>,
+    /// Issue #916: standalone difficulty/cost/duration estimate produced by
+    /// the callable ticket estimator (`dispatch::estimator`) before
+    /// dispatch, recorded alongside the eventual actual outcome
+    /// (`duration_seconds`, `usage`, `attempts_started`,
+    /// `validation_result` on this same entry) so predicted-vs-actual
+    /// accuracy can be measured afterward. Distinct from `difficulty`,
+    /// which is author-supplied/PM-decided metadata, not a prediction.
+    /// `#[serde(default)]` so pre-existing JSONL ledger lines without these
+    /// keys still deserialize.
+    #[serde(default)]
+    pub predicted_difficulty: Option<String>,
+    #[serde(default)]
+    pub predicted_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub predicted_duration_seconds: Option<f64>,
     pub session_dir: Option<String>,
     pub duration_seconds: Option<f64>,
     pub backend_exit_code: Option<i32>,
@@ -736,6 +751,9 @@ impl LedgerEntry {
             work_title: None,
             task_class: None,
             difficulty: None,
+            predicted_difficulty: None,
+            predicted_cost_usd: None,
+            predicted_duration_seconds: None,
             branch: None,
             session_dir: session_dir.map(|p| p.display().to_string()),
             duration_seconds: None,
@@ -847,6 +865,9 @@ impl LedgerEntry {
             work_title: None,
             task_class: None,
             difficulty: None,
+            predicted_difficulty: None,
+            predicted_cost_usd: None,
+            predicted_duration_seconds: None,
             branch: None,
             session_dir: None,
             duration_seconds: None,
