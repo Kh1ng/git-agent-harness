@@ -4,8 +4,11 @@
 //! launcher. Systemd is the only supported detached owner and additionally
 //! supplies the cgroup boundary that contains every backend descendant.
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
+#[cfg(target_os = "linux")]
+use anyhow::{bail, Context};
 
+#[cfg(target_os = "linux")]
 fn validate_live_parent(parent: libc::pid_t) -> Result<()> {
     if parent == 1 {
         bail!(
