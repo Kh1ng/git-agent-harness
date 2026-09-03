@@ -901,7 +901,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(observed_cwd).unwrap().trim(),
-            worktree.display().to_string()
+            worktree.canonicalize().unwrap().display().to_string()
         );
     }
 

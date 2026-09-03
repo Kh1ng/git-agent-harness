@@ -615,7 +615,8 @@ fn branch_attachment_detects_foreign_worktree_without_inferring_ownership() {
     let attachment = branch_attachment(&repo, "shared-branch").unwrap();
     let attachment = attachment.expect("must detect the attached worktree");
     assert_eq!(
-        attachment.path, foreign,
+        attachment.path,
+        foreign.canonicalize().unwrap(),
         "path must be the foreign worktree"
     );
     assert!(attachment.clean);
