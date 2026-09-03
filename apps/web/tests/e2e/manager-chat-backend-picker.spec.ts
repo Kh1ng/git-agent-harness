@@ -9,12 +9,12 @@ const WELCOME = {
   profile: 'alpha'
 };
 
-// #945: the harness/backend selector lives in the chat header, next to the
-// model picker. Switching writes a per-profile override via
+// #945: the composer owns the only harness/model/effort selector. Switching
+// writes a per-profile override via
 // POST /api/manager-chat/settings (preserving other profiles' overrides),
 // and a configured-but-unimplemented backend is flagged, not silently
 // fallen back to.
-test('the chat header switches the harness and persists a per-profile override', async ({ page }) => {
+test('the composer picker switches the harness and persists a per-profile override', async ({ page }) => {
   let socket: WebSocketRoute;
   let lastPost: { profileOverrides?: Record<string, string> } | null = null;
   let selectedBackend = 'hermes';
@@ -114,24 +114,25 @@ test('the chat header switches the harness and persists a per-profile override',
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toBeVisible();
 
-  const harness = page.getByLabel('Harness / backend');
-  await expect(harness).toHaveValue('hermes');
-  await expect(page.getByLabel('Reasoning effort')).toHaveCount(0);
+  const picker = page.getByRole('button', { name: 'Provider picker' });
+  await expect(picker).toContainText('Hermes');
+  await expect(page.getByLabel('Harness / backend')).toHaveCount(0);
+  await picker.click();
+  const controls = page.getByRole('dialog', { name: 'Provider picker' });
   // A configured-but-unimplemented backend is shown, not silently skipped.
-  await expect(harness.locator('option[value="vibe"]')).toHaveText('Vibe (unavailable)');
+  await expect(controls.getByRole('button', { name: 'Vibe (unavailable)', exact: true })).toBeDisabled();
 
-  await harness.selectOption('claude');
-  await expect(harness).toHaveValue('claude');
-  await expect(page.getByText('org/alpha · Claude')).toBeVisible();
+  await controls.getByRole('button', { name: 'Claude', exact: true }).click();
+  await expect(picker).toContainText('Claude');
+  await expect(page.getByRole('paragraph').filter({ hasText: 'org/alpha' })).toBeVisible();
   await expect.poll(() => lastPost).not.toBeNull();
   expect(lastPost?.profileOverrides).toEqual({ alpha: 'claude' });
 
   // Capability-aware: render exactly the active backend's advertised
   // thought-level values. There is no GAH-owned low/medium/high enum.
-  const reasoning = page.getByLabel('Reasoning effort');
-  await expect(reasoning).toHaveValue('low');
-  await expect(reasoning.locator('option')).toHaveText(['Low', 'Ultra']);
-  await reasoning.selectOption('ultra');
+  await expect(picker).toBeEnabled();
+  await expect(controls.getByRole('button', { name: 'Low', exact: true })).toBeVisible();
+  await controls.getByRole('button', { name: 'Ultra', exact: true }).click();
   await expect.poll(() => selectedReasoningEffort).toBe('ultra');
 
   // AC5: the picker is disabled while a turn is in flight, and re-enables
@@ -141,10 +142,9 @@ test('the chat header switches the harness and persists a per-profile override',
   await page.getByPlaceholder(/Message the manager/).fill('question');
   await page.getByRole('button', { name: 'Send' }).click();
   await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
-  await expect(harness).toBeDisabled();
-  await expect(reasoning).toBeDisabled();
+  await expect(picker).toBeDisabled();
+  await expect(controls).toHaveCount(0);
   releaseReply();
   await expect(page.getByRole('button', { name: 'Send' })).toBeVisible();
-  await expect(harness).toBeEnabled();
-  await expect(reasoning).toBeEnabled();
+  await expect(picker).toBeEnabled();
 });

@@ -205,8 +205,9 @@ export function ProviderPicker({
         <div
           role="dialog"
           aria-label={triggerAriaLabel}
-          className="absolute bottom-full left-0 z-20 mb-1.5 w-[30rem] max-w-[calc(100vw-3rem)] rounded-md border border-subtle bg-card shadow-lg"
+          className="absolute bottom-full left-0 z-20 mb-1.5 max-h-[70vh] w-[30rem] max-w-[calc(100vw-3rem)] overflow-y-auto rounded-md border border-subtle bg-card shadow-lg"
         >
+          <fieldset disabled={busy} className="contents">
           <div className="border-b border-subtle px-2.5 py-2">
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">Favorites</span>
@@ -254,7 +255,7 @@ export function ProviderPicker({
               <p className="mt-1 text-[11px] text-muted">No favorites yet — star a provider, model, or the current selection.</p>
             )}
           </div>
-          <div className="grid grid-cols-3 gap-2 px-2.5 py-2">
+          <div className="grid grid-cols-1 gap-2 px-2.5 py-2 sm:grid-cols-3">
             <div className="min-w-0">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">Provider</p>
               <div className="mt-1 max-h-44 space-y-0.5 overflow-y-auto">
@@ -392,6 +393,7 @@ export function ProviderPicker({
               </div>
             </div>
           </div>
+          </fieldset>
         </div>
       )}
     </div>
