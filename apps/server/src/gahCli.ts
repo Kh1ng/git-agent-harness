@@ -126,10 +126,13 @@ function getSpawnOptions(config?: string, detached?: boolean): SpawnOptions {
     stdio: ['ignore', 'pipe', 'pipe']
   };
   
-  // Use setsid on Unix to create a new process group for proper cleanup
+  // On Unix, `detached: true` makes the child the leader of a new process
+  // group (its pid becomes the pgid), so `process.kill(-pid, signal)` below
+  // reaches the whole group -- not just the direct child. There is no
+  // equivalent Node spawn flag on Windows; descendant-tree termination there
+  // goes through `taskkill /T` instead (see terminateProcessTree).
   if (detached && process.platform !== 'win32') {
-    // @ts-expect-error - setsid is available on Unix platforms
-    options.setsid = true;
+    options.detached = true;
   }
   
   return options;
@@ -505,72 +508,141 @@ export interface CancellationResult {
 export interface CancellableDispatch {
   promise: Promise<DispatchResult>;
   cancel: () => Promise<CancellationResult>;
-  childProcess: ChildProcess | null;
+}
+
+function buildDispatchArgs(options: DispatchOptions): string[] {
+  const args = ['dispatch', '--profile', options.profile, '--mode', options.mode];
+
+  if (options.backend) {
+    args.push('--backend', options.backend);
+  }
+
+  if (options.target) {
+    args.push('--target', options.target);
+  }
+
+  if (options.branch) {
+    args.push('--branch', options.branch);
+  }
+
+  if (options.mr) {
+    args.push('--mr', options.mr);
+  }
+
+  if (options.model) {
+    args.push('--model', options.model);
+  }
+
+  if (options.budget !== undefined) {
+    args.push('--budget', options.budget.toString());
+  }
+
+  if (options.dryRun) {
+    args.push('--dry-run');
+  }
+
+  if (options.currentBranch) {
+    args.push('--current-branch');
+  }
+
+  if (options.retries !== undefined) {
+    args.push('--retries', options.retries.toString());
+  }
+
+  if (options.allowDraftFail) {
+    args.push('--allow-draft-fail');
+  }
+
+  if (options.prod) {
+    args.push('--prod');
+  }
+
+  if (options.allowUnknownRedBaseline) {
+    args.push('--allow-unknown-red-baseline');
+  }
+
+  if (options.escalate) {
+    args.push('--escalate');
+  }
+
+  if (options.configPath) {
+    args.push('--config-path', options.configPath);
+  }
+
+  return args;
 }
 
 export async function runDispatch(
   options: DispatchOptions,
   onLine: (line: string) => void
 ): Promise<DispatchResult> {
-  const args = ['dispatch', '--profile', options.profile, '--mode', options.mode];
-  
-  if (options.backend) {
-    args.push('--backend', options.backend);
-  }
-  
-  if (options.target) {
-    args.push('--target', options.target);
-  }
-  
-  if (options.branch) {
-    args.push('--branch', options.branch);
-  }
-  
-  if (options.mr) {
-    args.push('--mr', options.mr);
-  }
-  
-  if (options.model) {
-    args.push('--model', options.model);
-  }
-  
-  if (options.budget !== undefined) {
-    args.push('--budget', options.budget.toString());
-  }
-  
-  if (options.dryRun) {
-    args.push('--dry-run');
-  }
-  
-  if (options.currentBranch) {
-    args.push('--current-branch');
-  }
-  
-  if (options.retries !== undefined) {
-    args.push('--retries', options.retries.toString());
-  }
-  
-  if (options.allowDraftFail) {
-    args.push('--allow-draft-fail');
-  }
-  
-  if (options.prod) {
-    args.push('--prod');
-  }
-  
-  if (options.allowUnknownRedBaseline) {
-    args.push('--allow-unknown-red-baseline');
-  }
-  
-  if (options.escalate) {
-    args.push('--escalate');
-  }
-  
-  if (options.configPath) {
-    args.push('--config-path', options.configPath);
+  return runDispatchCancellable(options, onLine).promise;
+}
+
+/** Waits for the child's `close` event, up to `timeoutMs`. Resolves `true`
+ * if the process is confirmed gone, `false` if the deadline passed with no
+ * `close` event -- callers use that to decide whether escalation or an
+ * explicit error is warranted, never a silent "cancelled". */
+function waitForClose(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve(true);
+      return;
+    }
+    const onClose = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      child.off('close', onClose);
+      resolve(false);
+    }, timeoutMs);
+    child.once('close', onClose);
+  });
+}
+
+const TERMINATE_GRACE_MS = 5000;
+const TERMINATE_KILL_TIMEOUT_MS = 5000;
+
+/**
+ * Terminate a dispatch child and its descendants, and confirm it actually
+ * happened before returning. Unix: the child was spawned with
+ * `detached: true` (see getSpawnOptions), so its pid is also its process
+ * group id -- signalling `-pid` reaches the whole group, not just the
+ * direct child. Windows has no process-group signalling equivalent, so
+ * `taskkill /T` is used to walk and kill the descendant tree instead.
+ */
+async function terminateProcessTree(pid: number, child: ChildProcess): Promise<boolean> {
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F']);
+    return waitForClose(child, TERMINATE_KILL_TIMEOUT_MS);
   }
 
-  return runDispatchCancellable(options, onLine).promise;
+  try {
+    process.kill(-pid, 'SIGTERM');
+  } catch {
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      // Process may have already terminated.
+    }
+  }
+
+  if (await waitForClose(child, TERMINATE_GRACE_MS)) {
+    return true;
+  }
+
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // Process may have already terminated.
+    }
+  }
+
+  return waitForClose(child, TERMINATE_KILL_TIMEOUT_MS);
 }
 
 /**
@@ -580,72 +652,20 @@ export function runDispatchCancellable(
   options: DispatchOptions,
   onLine: (line: string) => void
 ): CancellableDispatch {
-  const args = ['dispatch', '--profile', options.profile, '--mode', options.mode];
+  const args = buildDispatchArgs(options);
 
-  if (options.backend) {
-    args.push('--backend', options.backend);
-  }
-
-  if (options.target) {
-    args.push('--target', options.target);
-  }
-
-  if (options.branch) {
-    args.push('--branch', options.branch);
-  }
-
-  if (options.mr) {
-    args.push('--mr', options.mr);
-  }
-
-  if (options.model) {
-    args.push('--model', options.model);
-  }
-
-  if (options.budget !== undefined) {
-    args.push('--budget', options.budget.toString());
-  }
-
-  if (options.dryRun) {
-    args.push('--dry-run');
-  }
-
-  if (options.currentBranch) {
-    args.push('--current-branch');
-  }
-
-  if (options.retries !== undefined) {
-    args.push('--retries', options.retries.toString());
-  }
-
-  if (options.allowDraftFail) {
-    args.push('--allow-draft-fail');
-  }
-
-  if (options.prod) {
-    args.push('--prod');
-  }
-
-  if (options.allowUnknownRedBaseline) {
-    args.push('--allow-unknown-red-baseline');
-  }
-
-  if (options.escalate) {
-    args.push('--escalate');
-  }
-
-  if (options.configPath) {
-    args.push('--config-path', options.configPath);
-  }
-
-  let child: ChildProcess | null = null;
-  let cancelled = false;
   let processCompleted = false;
   let stderr = '';
 
-  const promise = new Promise<DispatchResult>((resolve) => {
-    child = spawn(findGahBinary(), args, getSpawnOptions(options.configPath, true));
-    
+  const child = spawn(findGahBinary(), args, getSpawnOptions(options.configPath, true));
+
+  const promise = new Promise<DispatchResult>((resolvePromise) => {
+    const settleOnce = (result: DispatchResult) => {
+      if (processCompleted) return;
+      processCompleted = true;
+      resolvePromise(result);
+    };
+
     child.stdout?.on('data', (data) => {
       const text = data.toString();
       const lines = text.split('\n');
@@ -655,98 +675,64 @@ export function runDispatchCancellable(
         }
       }
     });
-    
+
     child.stderr?.on('data', (data) => {
       stderr += data.toString();
     });
-    
+
     child.on('close', (code) => {
-      if (!cancelled) {
-        processCompleted = true;
-        resolve({
-          exitCode: code || 0,
-          stderr
-        });
-      }
+      // `code` is null when the process was terminated by a signal (e.g.
+      // our own SIGTERM/SIGKILL during cancellation) -- collapsing that to
+      // 0 would misreport an abnormal termination as a clean success.
+      settleOnce({ exitCode: code ?? -1, stderr });
     });
-    
+
     child.on('error', (error) => {
-      if (!cancelled) {
-        processCompleted = true;
-        resolve({
-          exitCode: -1,
-          stderr: `Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`
-        });
-      }
+      settleOnce({
+        exitCode: -1,
+        stderr: `Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`
+      });
     });
   });
 
-  const cancel = async (): Promise<CancellationResult> => {
-    if (!child || processCompleted) {
-      return { cancelled: false, error: 'Process already completed' };
-    }
+  let cancelPromise: Promise<CancellationResult> | null = null;
 
-    cancelled = true;
-    
-    return new Promise((resolve) => {
-      try {
-        // Kill the entire process group on Unix
-        if (process.platform !== 'win32' && child!.pid) {
-          // Try to kill the process group first
-          try {
-            process.kill(-Math.abs(child!.pid), 'SIGTERM');
-          } catch (e) {
-            // Fall back to killing the process directly
-            try {
-              child!.kill('SIGTERM');
-            } catch (e2) {
-              // Process may have already terminated
-            }
-          }
-        } else {
-          // On Windows or if pid is not available, kill directly
-          child!.kill('SIGTERM');
-        }
-        
-        // Give it a moment to terminate gracefully, then force kill
-        const timeout = setTimeout(() => {
-          try {
-            if (process.platform !== 'win32' && child!.pid) {
-              process.kill(-Math.abs(child!.pid), 'SIGKILL');
-            } else {
-              child!.kill('SIGKILL');
-            }
-          } catch (e) {
-            // Process may have already terminated
-          }
-          resolve({ cancelled: true });
-        }, 5000);
-        
-        child!.on('close', () => {
-          clearTimeout(timeout);
-          resolve({ cancelled: true });
-        });
-        
-        child!.on('error', () => {
-          clearTimeout(timeout);
-          resolve({ cancelled: true });
-        });
-        
-      } catch (error) {
-        clearTimeout(setTimeout(() => {}, 0));
-        resolve({ 
-          cancelled: false, 
-          error: `Failed to cancel: ${error instanceof Error ? error.message : String(error)}` 
-        });
+  const cancel = (): Promise<CancellationResult> => {
+    // Memoized: every caller of this dispatch's cancel() must observe the
+    // exact same settlement, and the underlying signal/wait sequence must
+    // only run once.
+    if (cancelPromise) return cancelPromise;
+
+    cancelPromise = (async (): Promise<CancellationResult> => {
+      if (processCompleted) {
+        return { cancelled: false, error: 'Process already completed' };
       }
-    });
+      if (!child.pid) {
+        return { cancelled: false, error: 'Process has no pid to signal' };
+      }
+
+      const pid = child.pid;
+      try {
+        const confirmed = await terminateProcessTree(pid, child);
+        if (!confirmed) {
+          return {
+            cancelled: false,
+            error: `Could not confirm termination of process tree for pid ${pid}`
+          };
+        }
+        return { cancelled: true };
+      } catch (error) {
+        return {
+          cancelled: false,
+          error: `Failed to cancel: ${error instanceof Error ? error.message : String(error)}`
+        };
+      }
+    })();
+
+    return cancelPromise;
   };
 
-  return {
-    promise,
-    cancel,
-    childProcess: child
-  };
+  return { promise, cancel };
 }
 
 /**
