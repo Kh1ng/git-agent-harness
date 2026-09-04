@@ -635,6 +635,38 @@ fn review_targets_capture_provider_source_and_target_shas() {
 }
 
 #[test]
+fn github_review_target_aggregates_every_ci_check() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin(
+        &bin_dir,
+        "gh",
+        r#"#!/bin/sh
+case "$3" in
+  1) checks='[{"conclusion":"SUCCESS"},{"conclusion":"FAILURE"}]' ;;
+  2) checks='[{"conclusion":"SUCCESS"},{"status":"IN_PROGRESS","conclusion":null}]' ;;
+  3) checks='[{"conclusion":"SUCCESS"},{"conclusion":"NEUTRAL"},{"conclusion":"SKIPPED"}]' ;;
+  *) exit 1 ;;
+esac
+printf '{"number":%s,"url":"https://github.test/owner/repo/pull/%s","headRefName":"gah/%s","baseRefName":"main","headRefOid":"sha-%s","statusCheckRollup":%s}\n' "$3" "$3" "$3" "$3" "$checks"
+"#,
+    );
+    let _guard = PathOverride::set(bin_dir.to_string_lossy().into_owned());
+
+    for (number, expected) in [("1", "failed"), ("2", "pending"), ("3", "passed")] {
+        assert_eq!(
+            github_review_target_by_number(&github_profile(), number)
+                .unwrap()
+                .ci_status
+                .as_deref(),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
 fn find_review_target_by_mr_prefers_pipeline_status_for_ci_status_on_draft_mr() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let tmp = TempDir::new().unwrap();

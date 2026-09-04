@@ -448,24 +448,24 @@ struct GithubCheck {
 }
 
 fn github_ci_failed(checks: Option<&[GithubCheck]>) -> bool {
-    let checks = checks.unwrap_or_default();
-    checks
-        .iter()
-        .any(|check| check.conclusion.as_deref() == Some("FAILURE"))
+    crate::github_ci::classify(
+        checks
+            .unwrap_or_default()
+            .iter()
+            .map(|check| check.conclusion.as_deref()),
+    ) == crate::github_ci::GithubCiStatus::Failed
 }
 
 /// Every check present, all terminal, none failed -- as opposed to
 /// `!github_ci_failed`, which is also true while checks are still pending
 /// (`conclusion == None`) or absent altogether.
 fn github_ci_passed(checks: Option<&[GithubCheck]>) -> bool {
-    let checks = checks.unwrap_or_default();
-    !checks.is_empty()
-        && checks.iter().all(|check| {
-            matches!(
-                check.conclusion.as_deref(),
-                Some("SUCCESS") | Some("NEUTRAL") | Some("SKIPPED")
-            )
-        })
+    crate::github_ci::classify(
+        checks
+            .unwrap_or_default()
+            .iter()
+            .map(|check| check.conclusion.as_deref()),
+    ) == crate::github_ci::GithubCiStatus::Passed
 }
 
 #[derive(Debug, Deserialize)]
