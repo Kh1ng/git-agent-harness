@@ -277,9 +277,9 @@ pub(crate) fn improve(
         ),
         ledger,
     )?;
-    let _cargo_target =
+    let cargo_target =
         crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
-    let validation_environment = validation_env(profile, session_dir);
+    let validation_environment = validation_env(cargo_target.path());
 
     let mut base_task = build_redispatch_task(profile, &wt, args, &target, issue_details.as_ref());
     if let Some(repair_context) = repair_context.as_ref() {
@@ -452,6 +452,7 @@ pub(crate) fn improve(
             &wt,
             &task,
             &attempt_session,
+            cargo_target.path(),
             &llm,
             env_path,
             cfg,

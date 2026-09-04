@@ -137,7 +137,7 @@ pub(crate) fn pm(
     }
 
     let task = build_pm_plan_task(profile, &preflight_ctx, &args.target)?;
-    let _cargo_target =
+    let cargo_target =
         crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
 
     let mut attempted_routes = HashSet::new();
@@ -166,6 +166,7 @@ pub(crate) fn pm(
                     repo,
                     &task,
                     &attempt_dir,
+                    cargo_target.path(),
                     &llm,
                     None,
                     cfg,

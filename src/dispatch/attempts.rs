@@ -324,6 +324,7 @@ pub(super) fn run_backend(
     wt: &Path,
     task: &str,
     session_dir: &Path,
+    cargo_target_dir: &Path,
     llm: &runner::LlmConfig,
     effective_model: Option<&str>,
     env_path: Option<&str>,
@@ -341,6 +342,7 @@ pub(super) fn run_backend(
         wt,
         task,
         session_dir,
+        cargo_target_dir,
         llm,
         env_path,
         cfg,
@@ -360,6 +362,7 @@ pub(super) fn run_backend_for_identity(
     wt: &Path,
     task: &str,
     session_dir: &Path,
+    cargo_target_dir: &Path,
     llm: &runner::LlmConfig,
     env_path: Option<&str>,
     work_id: Option<&str>,
@@ -371,6 +374,7 @@ pub(super) fn run_backend_for_identity(
         wt,
         task,
         session_dir,
+        cargo_target_dir,
         llm,
         env_path,
         cfg,
@@ -388,6 +392,7 @@ pub(super) fn run_backend_with_reserved_route(
     wt: &Path,
     task: &str,
     session_dir: &Path,
+    cargo_target_dir: &Path,
     llm: &runner::LlmConfig,
     env_path: Option<&str>,
     cfg: &GahConfig,
@@ -417,9 +422,7 @@ pub(super) fn run_backend_with_reserved_route(
     // otherwise multiply multi-gigabyte artifacts until the host fills.
     env_vars.push((
         "CARGO_TARGET_DIR".to_string(),
-        crate::build_cache::target_dir(&profile.artifact_root, session_dir)
-            .to_string_lossy()
-            .into_owned(),
+        cargo_target_dir.to_string_lossy().into_owned(),
     ));
     apply_execution_identity_env(profile, identity, &mut env_vars);
     env_vars.retain(|(key, _)| key != crate::runner::process::HARD_TIMEOUT_ENV);

@@ -6,7 +6,6 @@ use crate::ledger::LedgerEntry;
 use crate::routing::{CandidateIdentity, RouteRequest};
 use crate::test_support::PathGuard;
 use std::fs;
-use std::path::Path;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -31,7 +30,6 @@ fn review_preflight_fails_with_backend_unavailable_when_executable_missing() {
     let err = review_preflight(&cfg, &prof, "claude").unwrap_err();
     assert!(format!("{:#}", err).contains("backend unavailable"));
 }
-
 #[test]
 fn attempt_usage_parses_real_log_file() {
     let tmp = tempfile::tempdir().unwrap();
@@ -53,7 +51,6 @@ fn attempt_usage_parses_real_log_file() {
     assert_eq!(usage.output_tokens, Some(120));
     assert_eq!(usage.total_tokens, Some(620));
 }
-
 #[test]
 fn attempt_usage_attributes_missing_artifact_without_fabricating_tokens() {
     let usage = attempt_usage(
@@ -69,7 +66,6 @@ fn attempt_usage_attributes_missing_artifact_without_fabricating_tokens() {
     assert_eq!(usage.usage_classification.as_deref(), Some("quota_backed"));
     assert!(usage.actual_model_unknown_reason.is_some());
 }
-
 #[test]
 fn attempt_usage_is_empty_when_log_has_no_usage_info() {
     let tmp = tempfile::tempdir().unwrap();
@@ -88,7 +84,6 @@ fn attempt_usage_is_empty_when_log_has_no_usage_info() {
     assert_eq!(usage.requests_count, Some(1));
     assert_eq!(usage.usage_classification, Some("quota_backed".to_string()));
 }
-
 #[test]
 fn structured_behavior_survives_every_structured_usage_early_return() {
     let tmp = tempfile::tempdir().unwrap();
@@ -137,7 +132,6 @@ fn structured_behavior_survives_every_structured_usage_early_return() {
         assert_eq!(metrics.test_runs.as_ref().unwrap().count, Some(3));
     }
 }
-
 #[test]
 fn attempt_usage_records_the_bound_agy_model_when_cli_logs_only_quota_state() {
     let tmp = tempfile::tempdir().unwrap();
@@ -162,7 +156,6 @@ fn attempt_usage_records_the_bound_agy_model_when_cli_logs_only_quota_state() {
     assert_eq!(usage.requests_count, Some(1));
     assert_eq!(usage.quota_window.as_deref(), Some("AGY individual quota"));
 }
-
 #[test]
 fn review_usage_records_an_agy_review_without_token_counters() {
     let tmp = tempfile::tempdir().unwrap();
@@ -190,7 +183,6 @@ fn review_usage_records_an_agy_review_without_token_counters() {
     assert_eq!(usage.input_tokens, None);
     assert_eq!(usage.quota_window.as_deref(), Some("AGY individual quota"));
 }
-
 #[test]
 fn review_usage_consumes_each_backends_run_scoped_artifact() {
     let tmp = tempfile::tempdir().unwrap();
@@ -300,7 +292,6 @@ fn review_usage_consumes_each_backends_run_scoped_artifact() {
         .is_some_and(|source| source.contains("agy_cli_log_delta")));
     assert!(agy.quota_reset_at.is_some());
 }
-
 #[test]
 fn attempt_usage_does_not_scrape_codex_tool_output_as_usage() {
     let tmp = tempfile::tempdir().unwrap();
@@ -325,7 +316,6 @@ fn attempt_usage_does_not_scrape_codex_tool_output_as_usage() {
     assert_eq!(usage.requests_count, Some(1));
     assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
 }
-
 #[test]
 fn implementation_escalation_ignores_review_failure_routes() {
     let tmp = tempfile::tempdir().unwrap();
@@ -362,7 +352,6 @@ fn implementation_escalation_ignores_review_failure_routes() {
         .attempted
         .contains(&CandidateIdentity::new("codex", Some("worker-model"))));
 }
-
 fn make_fake_bin(dir: &Path, name: &str) -> std::path::PathBuf {
     let path = dir.join(name);
     fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
@@ -375,7 +364,6 @@ fn make_fake_bin(dir: &Path, name: &str) -> std::path::PathBuf {
     }
     path
 }
-
 #[test]
 fn agy_second_backend_runs_with_agy_second_home_override() {
     let _exec_guard = crate::test_support::ExecGuard::new();
@@ -407,6 +395,7 @@ fn agy_second_backend_runs_with_agy_second_home_override() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -422,6 +411,7 @@ fn agy_second_backend_runs_with_agy_second_home_override() {
         tmp.path(),
         "do the thing",
         &session_dir,
+        cargo_target.path(),
         &llm,
         None,
         None,
@@ -465,6 +455,7 @@ fn agy_backend_without_second_home_uses_real_home() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -480,6 +471,7 @@ fn agy_backend_without_second_home_uses_real_home() {
         tmp.path(),
         "do the thing",
         &session_dir,
+        cargo_target.path(),
         &llm,
         None,
         None,
@@ -526,6 +518,7 @@ fn run_backend_looks_up_agy_print_timeout_by_exact_model_name() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -541,6 +534,7 @@ fn run_backend_looks_up_agy_print_timeout_by_exact_model_name() {
         tmp.path(),
         "do the thing",
         &session_dir,
+        cargo_target.path(),
         &llm,
         None,
         None,
@@ -585,6 +579,7 @@ fn run_backend_omits_print_timeout_for_unmapped_model() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -600,6 +595,7 @@ fn run_backend_omits_print_timeout_for_unmapped_model() {
         tmp.path(),
         "do the thing",
         &session_dir,
+        cargo_target.path(),
         &llm,
         None,
         None,
@@ -649,6 +645,7 @@ fn run_backend_looks_up_opencode_idle_timeout_by_exact_model_name() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -664,6 +661,7 @@ fn run_backend_looks_up_opencode_idle_timeout_by_exact_model_name() {
         tmp.path(),
         "do the thing",
         &session_dir,
+        cargo_target.path(),
         &llm,
         Some("litellm-lan/qwen3.6:35b-a3b"),
         None,
@@ -712,6 +710,7 @@ fn run_backend_falls_back_to_flat_opencode_idle_timeout_for_unmapped_model() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -727,6 +726,7 @@ fn run_backend_falls_back_to_flat_opencode_idle_timeout_for_unmapped_model() {
         tmp.path(),
         "do the thing",
         &session_dir,
+        cargo_target.path(),
         &llm,
         Some("litellm-lan/qwen3.6:35b-a3b"), // not in the map
         None,
@@ -783,6 +783,7 @@ fn run_backend_routes_vibe_to_run_vibe_not_the_openhands_fallthrough() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -798,6 +799,7 @@ fn run_backend_routes_vibe_to_run_vibe_not_the_openhands_fallthrough() {
         tmp.path(),
         "do the thing",
         &session_dir,
+        cargo_target.path(),
         &llm,
         None,
         None,
@@ -1490,6 +1492,9 @@ fn backend_failure_reset_time_resolves_in_local_offset_not_utc() {
     assert_eq!(in_local.minute(), 1);
 }
 
+#[cfg(test)]
+#[path = "build_cache_tests.rs"]
+mod build_cache_tests;
 #[cfg(test)]
 #[path = "external_env_tests.rs"]
 mod external_env_tests;

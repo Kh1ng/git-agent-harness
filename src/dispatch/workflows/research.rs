@@ -103,7 +103,7 @@ pub(crate) fn research(
 
     let attempt_dir = session_dir.join("attempt-1");
     fs::create_dir_all(&attempt_dir)?;
-    let _cargo_target =
+    let cargo_target =
         crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
 
     println!(
@@ -120,6 +120,7 @@ pub(crate) fn research(
         repo,
         &task,
         &attempt_dir,
+        cargo_target.path(),
         &llm,
         env_path,
         ledger.work_id.as_deref(),

@@ -91,7 +91,7 @@ pub(crate) fn experiment(
     ledger.branch = Some(branch.clone());
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
-    let _cargo_target =
+    let cargo_target =
         crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
 
     let issue_details =
@@ -123,6 +123,7 @@ pub(crate) fn experiment(
         &wt,
         &task,
         &attempt_dir,
+        cargo_target.path(),
         &llm,
         env_path,
         ledger.work_id.as_deref(),

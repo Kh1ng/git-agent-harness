@@ -94,12 +94,10 @@ pub(super) fn run_auto_fix_commands(commands: &[String], wt: &Path, env_vars: &[
     }
 }
 
-pub(super) fn validation_env(profile: &Profile, session_scope: &Path) -> Vec<(String, String)> {
+pub(super) fn validation_env(cargo_target_dir: &Path) -> Vec<(String, String)> {
     vec![(
         "CARGO_TARGET_DIR".to_string(),
-        crate::build_cache::target_dir(&profile.artifact_root, session_scope)
-            .to_string_lossy()
-            .into_owned(),
+        cargo_target_dir.to_string_lossy().into_owned(),
     )]
 }
 
