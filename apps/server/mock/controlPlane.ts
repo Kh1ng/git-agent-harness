@@ -991,6 +991,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     const created = {
       id,
       profile,
+      prNumber: pr.number,
       worktreePath: null,
       branch: pr.headRefName ?? `gah/pr/${id}`,
       backend: backend ?? state.settings.defaultBackend,
@@ -1257,7 +1258,13 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     res.json(skillBindingSummary(state, profile, backend));
   });
 
-  app.get('/api/git/status', (_req, res) => {
+  app.get('/api/git/status', (req, res) => {
+    const sessionId = bodyString(req.query.sessionId);
+    const session = sessionId ? state.sessions.get(sessionId) : null;
+    if (session && !session.worktreePath) {
+      res.json({ branch: session.branch, changes: [], cwd: null, readOnly: true });
+      return;
+    }
     res.json({ branch: 'feat/mock-control-plane-1087', changes: [{ status: 'M', path: 'apps/server/mock/controlPlane.ts' }], cwd: '/mock/in-memory-only' });
   });
   app.get('/api/git/log', (_req, res) => {
