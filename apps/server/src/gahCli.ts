@@ -4,7 +4,7 @@
  * Replaces the broken stdin/stdout bridge in rustBackend.ts
  */
 
-import { spawn, spawnSync, SpawnOptions } from 'node:child_process';
+import { spawn, spawnSync, SpawnOptions, ChildProcess } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -112,7 +112,7 @@ function getConfigPath(config?: string): string | undefined {
 /**
  * Spawn options for running GAH CLI commands
  */
-function getSpawnOptions(config?: string): SpawnOptions {
+function getSpawnOptions(config?: string, detached?: boolean): SpawnOptions {
   const env = { ...process.env };
   
   // Set config path if provided
@@ -120,11 +120,19 @@ function getSpawnOptions(config?: string): SpawnOptions {
     env.GAH_CONFIG_PATH = config;
   }
   
-  return {
+  const options: SpawnOptions = {
     cwd: resolve(__dirname, '..'),
     env,
     stdio: ['ignore', 'pipe', 'pipe']
   };
+  
+  // Use setsid on Unix to create a new process group for proper cleanup
+  if (detached && process.platform !== 'win32') {
+    // @ts-expect-error - setsid is available on Unix platforms
+    options.setsid = true;
+  }
+  
+  return options;
 }
 
 /**
@@ -489,6 +497,17 @@ export interface DispatchResult {
   stderr: string;
 }
 
+export interface CancellationResult {
+  cancelled: boolean;
+  error?: string;
+}
+
+export interface CancellableDispatch {
+  promise: Promise<DispatchResult>;
+  cancel: () => Promise<CancellationResult>;
+  childProcess: ChildProcess | null;
+}
+
 export async function runDispatch(
   options: DispatchOptions,
   onLine: (line: string) => void
@@ -551,14 +570,84 @@ export async function runDispatch(
     args.push('--config-path', options.configPath);
   }
 
-  return new Promise((resolve) => {
-    const child = spawn(findGahBinary(), args, getSpawnOptions(options.configPath));
-    
-    let stderr = '';
+  return runDispatchCancellable(options, onLine).promise;
+}
+
+/**
+ * Run a cancellable dispatch command with process group isolation
+ */
+export function runDispatchCancellable(
+  options: DispatchOptions,
+  onLine: (line: string) => void
+): CancellableDispatch {
+  const args = ['dispatch', '--profile', options.profile, '--mode', options.mode];
+
+  if (options.backend) {
+    args.push('--backend', options.backend);
+  }
+
+  if (options.target) {
+    args.push('--target', options.target);
+  }
+
+  if (options.branch) {
+    args.push('--branch', options.branch);
+  }
+
+  if (options.mr) {
+    args.push('--mr', options.mr);
+  }
+
+  if (options.model) {
+    args.push('--model', options.model);
+  }
+
+  if (options.budget !== undefined) {
+    args.push('--budget', options.budget.toString());
+  }
+
+  if (options.dryRun) {
+    args.push('--dry-run');
+  }
+
+  if (options.currentBranch) {
+    args.push('--current-branch');
+  }
+
+  if (options.retries !== undefined) {
+    args.push('--retries', options.retries.toString());
+  }
+
+  if (options.allowDraftFail) {
+    args.push('--allow-draft-fail');
+  }
+
+  if (options.prod) {
+    args.push('--prod');
+  }
+
+  if (options.allowUnknownRedBaseline) {
+    args.push('--allow-unknown-red-baseline');
+  }
+
+  if (options.escalate) {
+    args.push('--escalate');
+  }
+
+  if (options.configPath) {
+    args.push('--config-path', options.configPath);
+  }
+
+  let child: ChildProcess | null = null;
+  let cancelled = false;
+  let processCompleted = false;
+  let stderr = '';
+
+  const promise = new Promise<DispatchResult>((resolve) => {
+    child = spawn(findGahBinary(), args, getSpawnOptions(options.configPath, true));
     
     child.stdout?.on('data', (data) => {
       const text = data.toString();
-      // Split by newlines and forward each line
       const lines = text.split('\n');
       for (const line of lines) {
         if (line.trim()) {
@@ -572,20 +661,92 @@ export async function runDispatch(
     });
     
     child.on('close', (code) => {
-      resolve({
-        exitCode: code || 0,
-        stderr
-      });
+      if (!cancelled) {
+        processCompleted = true;
+        resolve({
+          exitCode: code || 0,
+          stderr
+        });
+      }
     });
     
     child.on('error', (error) => {
-      // Still resolve with error info
-      resolve({
-        exitCode: -1,
-        stderr: `Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`
-      });
+      if (!cancelled) {
+        processCompleted = true;
+        resolve({
+          exitCode: -1,
+          stderr: `Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`
+        });
+      }
     });
   });
+
+  const cancel = async (): Promise<CancellationResult> => {
+    if (!child || processCompleted) {
+      return { cancelled: false, error: 'Process already completed' };
+    }
+
+    cancelled = true;
+    
+    return new Promise((resolve) => {
+      try {
+        // Kill the entire process group on Unix
+        if (process.platform !== 'win32' && child.pid) {
+          // Try to kill the process group first
+          try {
+            process.kill(-Math.abs(child.pid), 'SIGTERM');
+          } catch (e) {
+            // Fall back to killing the process directly
+            try {
+              child.kill('SIGTERM');
+            } catch (e2) {
+              // Process may have already terminated
+            }
+          }
+        } else {
+          // On Windows or if pid is not available, kill directly
+          child.kill('SIGTERM');
+        }
+        
+        // Give it a moment to terminate gracefully, then force kill
+        const timeout = setTimeout(() => {
+          try {
+            if (process.platform !== 'win32' && child.pid) {
+              process.kill(-Math.abs(child.pid), 'SIGKILL');
+            } else {
+              child.kill('SIGKILL');
+            }
+          } catch (e) {
+            // Process may have already terminated
+          }
+          resolve({ cancelled: true });
+        }, 5000);
+        
+        child.on('close', () => {
+          clearTimeout(timeout);
+          resolve({ cancelled: true });
+        });
+        
+        child.on('error', () => {
+          clearTimeout(timeout);
+          resolve({ cancelled: true });
+        });
+        
+      } catch (error) {
+        clearTimeout(setTimeout(() => {}, 0));
+        resolve({ 
+          cancelled: false, 
+          error: `Failed to cancel: ${error instanceof Error ? error.message : String(error)}` 
+        });
+      }
+    });
+  };
+
+  return {
+    promise,
+    cancel,
+    childProcess: child
+  };
 }
 
 /**
