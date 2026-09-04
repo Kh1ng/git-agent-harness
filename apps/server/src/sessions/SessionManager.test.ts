@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import type { ServerMessage } from '@git-agent-harness/contracts';
+import type { ServerMessage, Session } from '@git-agent-harness/contracts';
 import { createSessionManager } from './SessionManager.js';
 
 test('session.start request ids are idempotent and emit one start event', async () => {
@@ -27,7 +27,6 @@ test('session.start request ids are idempotent and emit one start event', async 
           // against an in-flight run rather than a completed one.
         }),
         cancel: async () => ({ cancelled: true }),
-        childProcess: null
       };
     }
   });
@@ -99,7 +98,6 @@ test('same-profile sessions queue instead of racing the CLI profile lock', async
           resolvePromise!({ exitCode: -1, stdout: '', stderr: 'cancelled' });
           return { cancelled: true };
         },
-        childProcess: null
       };
     }
   });
@@ -147,7 +145,6 @@ test('stopSession terminates running dispatch and awaits completion', async () =
         cancelResolve();
         return { cancelled: true };
       },
-      childProcess: null
     })
   });
 
@@ -185,7 +182,6 @@ test('stopSession prevents queued same-profile session from starting', async () 
       return {
         promise: new Promise(() => {}), // Never completes
         cancel: async () => ({ cancelled: true }),
-        childProcess: null
       };
     }
   });
@@ -239,7 +235,6 @@ test('stopSession does not publish stopped until cancellation completes', async 
         cancelResolve();
         return { cancelled: true };
       },
-      childProcess: null
     })
   });
 
@@ -288,7 +283,6 @@ test('late process completion cannot overwrite cancelled terminal state', async 
           // Even though we cancel, the process might still complete later
           return { cancelled: true };
         },
-        childProcess: null,
         // Add a method to simulate late completion
         simulateLateCompletion: () => {
           resolveDispatch!({ exitCode: 0, stderr: '' });
@@ -309,15 +303,13 @@ test('late process completion cannot overwrite cancelled terminal state', async 
   await manager.stopSession(session.id);
   
   // Now simulate a late completion - this should not overwrite the cancelled state
-  const activeDispatch = Array.from((manager as any).activeDispatches.values()).find(
+  // Note: This test accesses internal structures to simulate a late completion
+  const activeDispatches = (manager as any).activeDispatches as Map<string, any>;
+  const activeDispatch = Array.from(activeDispatches.values()).find(
     (d: any) => d.sessionId === session.id
   );
-  if (activeDispatch) {
-    // This is a bit of a hack to access the internal structure, but for testing purposes
-    const cancellableDispatch = activeDispatch.cancellableDispatch;
-    if (cancellableDispatch && typeof (cancellableDispatch as any).simulateLateCompletion === 'function') {
-      (cancellableDispatch as any).simulateLateCompletion();
-    }
+  if (activeDispatch?.cancellableDispatch && typeof activeDispatch.cancellableDispatch.simulateLateCompletion === 'function') {
+    activeDispatch.cancellableDispatch.simulateLateCompletion();
   }
   
   // Wait a bit for any late completion to be processed
@@ -345,7 +337,6 @@ test('stopSession times out if cancellation takes too long', async () => {
         await new Promise(() => {});
         return { cancelled: true };
       },
-      childProcess: null
     })
   });
 
@@ -358,8 +349,8 @@ test('stopSession times out if cancellation takes too long', async () => {
   });
 
   // This should timeout and still complete
-  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Test timeout')), 35000));
-  const stopPromise = Promise.race([
+  const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Test timeout')), 35000));
+  const stopPromise: Promise<Session> = Promise.race([
     manager.stopSession(session.id),
     timeout
   ]);

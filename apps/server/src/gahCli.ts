@@ -691,30 +691,30 @@ export function runDispatchCancellable(
     return new Promise((resolve) => {
       try {
         // Kill the entire process group on Unix
-        if (process.platform !== 'win32' && child.pid) {
+        if (process.platform !== 'win32' && child!.pid) {
           // Try to kill the process group first
           try {
-            process.kill(-Math.abs(child.pid), 'SIGTERM');
+            process.kill(-Math.abs(child!.pid), 'SIGTERM');
           } catch (e) {
             // Fall back to killing the process directly
             try {
-              child.kill('SIGTERM');
+              child!.kill('SIGTERM');
             } catch (e2) {
               // Process may have already terminated
             }
           }
         } else {
           // On Windows or if pid is not available, kill directly
-          child.kill('SIGTERM');
+          child!.kill('SIGTERM');
         }
         
         // Give it a moment to terminate gracefully, then force kill
         const timeout = setTimeout(() => {
           try {
-            if (process.platform !== 'win32' && child.pid) {
-              process.kill(-Math.abs(child.pid), 'SIGKILL');
+            if (process.platform !== 'win32' && child!.pid) {
+              process.kill(-Math.abs(child!.pid), 'SIGKILL');
             } else {
-              child.kill('SIGKILL');
+              child!.kill('SIGKILL');
             }
           } catch (e) {
             // Process may have already terminated
@@ -722,12 +722,12 @@ export function runDispatchCancellable(
           resolve({ cancelled: true });
         }, 5000);
         
-        child.on('close', () => {
+        child!.on('close', () => {
           clearTimeout(timeout);
           resolve({ cancelled: true });
         });
         
-        child.on('error', () => {
+        child!.on('error', () => {
           clearTimeout(timeout);
           resolve({ cancelled: true });
         });

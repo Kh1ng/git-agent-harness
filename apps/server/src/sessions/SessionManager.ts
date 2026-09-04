@@ -9,7 +9,7 @@
 import { generateSessionId, GAHError } from '@git-agent-harness/shared';
 import { getProviderRegistry } from '../provider/ProviderRegistry.js';
 import { getServerPushBus } from '../serverPushBus.js';
-import { runDispatchCancellable, type DispatchOptions, type DispatchResult, type CancellableDispatch } from '../gahCli.js';
+import { runDispatchCancellable, type DispatchOptions, type DispatchResult, type CancellableDispatch, type CancellationResult } from '../gahCli.js';
 import type {
   Session, 
   SessionId, 
@@ -241,6 +241,7 @@ class SessionManagerImpl {
         this.pushBus.publish({ type: 'session.status', session });
       }
 
+
       actualDispatch = this.dispatchRunner(options, (line: string) => {
         // Forward each line as session.stdout message
         this.addSessionOutput(sessionId, line, false);
@@ -265,7 +266,7 @@ class SessionManagerImpl {
       }
     });
     
-    const cancel = async (): Promise<void> => {
+    const cancel = async (): Promise<CancellationResult> => {
       if (actualDispatch) {
         await actualDispatch.cancel();
       }
@@ -273,13 +274,10 @@ class SessionManagerImpl {
       if (this.profileDispatchTails.get(options.profile) === tail) {
         this.profileDispatchTails.delete(options.profile);
       }
+      return { cancelled: true };
     };
     
-    return {
-      promise,
-      cancel,
-      childProcess: null
-    };
+    return { promise, cancel };
   }
   
   /**
@@ -411,7 +409,7 @@ class SessionManagerImpl {
     
     // Clean up output buffers
     this.outputBuffers.delete(sessionId);
-    
+
     // Notify about session stop - only after cancellation completes or times out
     this.pushBus.publish({
       type: 'session.stopped',
