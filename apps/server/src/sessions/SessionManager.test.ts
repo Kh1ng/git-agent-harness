@@ -69,11 +69,16 @@ test('session.start request ids are idempotent and emit one start event', async 
 
 test('same-profile sessions queue instead of racing the CLI profile lock', async () => {
   const releases: Array<() => void> = [];
+  const statusChanges: Array<{ id: string; status: string }> = [];
   let dispatchCalls = 0;
   const manager = createSessionManager({
     disableCleanupTimer: true,
     providerRegistry: { isProviderAvailable: () => true },
-    pushBus: { publish() {} },
+    pushBus: {
+      publish(message) {
+        if (message.type === 'session.status') statusChanges.push({ id: message.session.id, status: message.session.status });
+      }
+    },
     dispatchRunner: async () => {
       dispatchCalls += 1;
       await new Promise<void>((resolve) => releases.push(resolve));
@@ -88,14 +93,22 @@ test('same-profile sessions queue instead of racing the CLI profile lock', async
     mode: 'fix'
   };
 
-  await Promise.all([
+  const [first, second] = await Promise.all([
     manager.startSession({ ...options, target: '#1' }),
     manager.startSession({ ...options, target: '#2' })
   ]);
   assert.equal(dispatchCalls, 1);
+  assert.equal(first.status, 'running');
+  assert.equal(second.status, 'starting');
+  assert.deepEqual(statusChanges, [{ id: first.id, status: 'running' }]);
 
   releases.shift()?.();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(dispatchCalls, 2);
+  assert.equal(second.status, 'running');
+  assert.deepEqual(statusChanges, [
+    { id: first.id, status: 'running' },
+    { id: second.id, status: 'running' }
+  ]);
   releases.shift()?.();
 });
