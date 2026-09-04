@@ -86,6 +86,20 @@ fn is_policy_approval_gate(entry: &LedgerEntry) -> bool {
             == Some(crate::ledger::FailureClass::HumanBlocked.as_str())
 }
 
+fn append_terminal_ledger_entry(
+    cfg: &GahConfig,
+    ledger: &LedgerEntry,
+    policy_approval_gate: bool,
+) -> Result<bool> {
+    if policy_approval_gate {
+        let appended = crate::ledger::append_human_gate_if_transition(cfg, ledger)?;
+        if appended {
+            return Ok(true);
+        }
+    }
+    crate::ledger::append(cfg, ledger).map(|_| false)
+}
+
 fn ensure_terminal_failure_attribution(
     failure_class: &mut Option<String>,
     failure_stage: &mut Option<String>,
@@ -243,13 +257,8 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     }
     let policy_approval_gate = is_policy_approval_gate(&ledger);
     let mut new_policy_approval_transition = true;
-    let append_result = if policy_approval_gate {
-        crate::ledger::append_human_gate_if_transition(cfg, &ledger).map(|appended| {
-            new_policy_approval_transition = appended;
-        })
-    } else {
-        crate::ledger::append(cfg, &ledger).map(|_| ())
-    };
+    let append_result = append_terminal_ledger_entry(cfg, &ledger, policy_approval_gate)
+        .map(|appended| new_policy_approval_transition = appended);
     if let Err(err) = append_result {
         eprintln!("warning: failed to append ledger entry: {:#}", err);
     }

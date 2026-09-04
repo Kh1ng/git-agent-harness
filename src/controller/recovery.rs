@@ -268,6 +268,45 @@ pub(super) fn detect_stuck_loop(
             break;
         }
     }
+
+    // Route-level approval refusals can spin entirely inside dispatch
+    // retries, so they need a second durable signal when the controller
+    // never gets a repeated `action_decided` fingerprint to count.
+    if matches!(
+        action,
+        NextAction::Retry { .. } | NextAction::Escalate { .. } | NextAction::DispatchTicket { .. }
+    ) {
+        let mut consecutive_route_approvals = 0;
+        for event in events.iter().rev() {
+            if event.profile.as_deref() != Some(profile_name) {
+                continue;
+            }
+            if event.work_id.as_deref() != Some(work_id) {
+                continue;
+            }
+            if reset_after.is_some_and(|reset| timestamp_at_or_before(&event.timestamp, reset)) {
+                break;
+            }
+            if event.review_contract_version.unwrap_or(0)
+                < crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION
+            {
+                break;
+            }
+            if event.event_type != "dispatch_finished" {
+                continue;
+            }
+            if !event.details.contains("operator approval required") {
+                break;
+            }
+            consecutive_route_approvals += 1;
+            if consecutive_route_approvals >= STUCK_LOOP_THRESHOLD {
+                return Some(format!(
+                    "stuck-loop detected: route approval required {} times in a row for {} with no intervening state change",
+                    consecutive_route_approvals, work_id
+                ));
+            }
+        }
+    }
     None
 }
 
@@ -608,6 +647,27 @@ mod tests {
         }
     }
 
+    fn dispatch_event(
+        profile: &str,
+        work_id: &str,
+        timestamp: &str,
+        event_type: &str,
+        details: &str,
+        run_id: &str,
+    ) -> ControllerEvent {
+        ControllerEvent {
+            timestamp: timestamp.into(),
+            event_type: event_type.into(),
+            profile: Some(profile.into()),
+            work_id: Some(work_id.into()),
+            run_id: Some(run_id.into()),
+            reason_code: None,
+            review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
+            details: details.into(),
+            remediation_plan: None,
+        }
+    }
+
     fn fix_mr_action() -> NextAction {
         NextAction::FixMr {
             work_id: Some("TICKET-500".into()),
@@ -774,6 +834,49 @@ mod tests {
             detect_stuck_loop(&events, "real", &fix_mr_action(), None),
             None
         );
+    }
+
+    #[test]
+    fn repeated_route_approval_dispatch_failures_are_detected_without_action_decided_events() {
+        let approval_details = "retry: operator approval required before using paid route opencode/nous-portal/z-ai/glm-5.2 (instance opencode:nous-portal-api); skipped: vibe/mistral-medium-3.5: already_attempted_after_capability_failure, opencode/nous-portal/z-ai/glm-5.2: operator_approval_required";
+        let mut events = Vec::new();
+        for index in 0..STUCK_LOOP_THRESHOLD {
+            let suffix = index + 1;
+            let run_id = format!("run-{suffix}");
+            let base = format!("2026-07-05T00:00:0{suffix}Z");
+            events.push(dispatch_event(
+                "real",
+                "TICKET-520",
+                &base,
+                "dispatch_started",
+                "retry: /tmp/TICKET-520",
+                &run_id,
+            ));
+            events.push(dispatch_event(
+                "real",
+                "TICKET-520",
+                &base,
+                "dispatch_finished",
+                approval_details,
+                &run_id,
+            ));
+            events.push(dispatch_event(
+                "real",
+                "TICKET-520",
+                &base,
+                "loop_stopped",
+                approval_details,
+                &run_id,
+            ));
+        }
+
+        let action = NextAction::Retry {
+            work_id: "TICKET-520".into(),
+            ticket_path: "520".into(),
+            reason: "retry".into(),
+        };
+
+        assert!(detect_stuck_loop(&events, "real", &action, None).is_some());
     }
 
     fn capacity_finished(profile: &str, work_id: &str, timestamp: &str) -> ControllerEvent {
