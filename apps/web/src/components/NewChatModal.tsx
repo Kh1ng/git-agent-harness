@@ -357,13 +357,14 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
 
         {mode === 'blank' && (
           <section className="space-y-2">
-            <label htmlFor="new-chat-title" className="block text-xs font-medium text-secondary">Title (optional)</label>
+            <label htmlFor="new-chat-title" className="block text-xs font-medium text-secondary">Chat name</label>
             <input
               id="new-chat-title"
               type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="e.g. Fix the retry loop"
+              required
               className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-xs text-primary"
             />
           </section>
@@ -376,7 +377,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
           <button
             type="button"
             onClick={create}
-            disabled={creating || !backend || profiles.length === 0 || (mode === 'issue' && !issue) || (mode === 'pr' && !pr)}
+            disabled={creating || !backend || profiles.length === 0 || (mode === 'blank' && !title.trim()) || (mode === 'issue' && !issue) || (mode === 'pr' && !pr)}
             className="btn-primary text-xs"
           >
             {creating ? 'Creating…' : 'Start chat'}

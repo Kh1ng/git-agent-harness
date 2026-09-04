@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { ChevronRight, FolderGit2 } from 'lucide-react';
 import type { ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
+import { formatChatName } from '../lib/format.js';
 import { gahApi } from '../api/client.js';
 
 /**
@@ -130,7 +131,7 @@ export function ProjectRail({
               className={sessionClasses(session.id === selectedSessionId)}
               aria-current={session.id === selectedSessionId ? 'page' : undefined}
             >
-              <span className="block truncate text-sm text-primary">{session.title ?? session.branch}</span>
+              <span className="block truncate text-sm text-primary">{formatChatName(session)}</span>
               <span className="block truncate text-[11px] text-muted">{session.branch}</span>
             </button>
           ))}
@@ -150,7 +151,7 @@ export function ProjectRail({
                   className={sessionClasses(session.id === selectedSessionId)}
                   aria-current={session.id === selectedSessionId ? 'page' : undefined}
                 >
-                  <span className="block truncate text-sm text-secondary">{session.title ?? session.branch}</span>
+                  <span className="block truncate text-sm text-secondary">{formatChatName(session)}</span>
                   <span className="block truncate text-[11px] text-muted">{session.branch}</span>
                 </button>
               ))}

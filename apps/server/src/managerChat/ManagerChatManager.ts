@@ -31,6 +31,7 @@ import { effectiveContextPolicy, applyContextBudget } from '../gatewaySettingsSt
 import { appendEvents, createEventWriter, deriveModelHistory, foldSession, loadLog, type SessionLogOptions } from './sessionLog.js';
 import {
   archiveSession,
+  chatTitleFromText,
   chatKey,
   chatSessionStoreOptions,
   createSession,
@@ -771,6 +772,10 @@ export function sendManagerChatMessage(
     const resolved = await resolveSessionCwd(profile, sessionId, profileInfo, chatSessionStoreOptions);
     if (!resolved) {
       throw new Error(`No active chat session '${sessionId}' for profile '${profile}'`);
+    }
+    if (!resolved.session.title && !message.trim().startsWith('/')) {
+      const title = chatTitleFromText(message);
+      if (title) updateSession(profile, sessionId, { title }, chatSessionStoreOptions);
     }
     return { cwd: resolved.cwd, backend: resolved.session.backend, model: resolved.session.model, reasoningEffort: resolved.session.reasoningEffort };
   };

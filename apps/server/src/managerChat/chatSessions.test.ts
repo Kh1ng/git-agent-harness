@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
 import {
   archiveSession,
+  chatTitleFromText,
   chatKey,
   createSession,
   getSession,
@@ -64,6 +65,19 @@ test('createSession makes a worktree and branch under the prune-recognized names
   const branches = execFileSync('git', ['branch', '--list', session.branch], { cwd: env.checkout, encoding: 'utf8' });
   assert.ok(branches.includes(session.branch), 'branch exists in the main checkout');
   assert.equal(listSessions('p')[0].id, session.id);
+}));
+
+test('named sessions get readable branches and first messages get compact titles', withEnv(async (env) => {
+  const session = await createSession({
+    profile: 'p',
+    profileInfo: env.profileInfo,
+    backend: 'hermes',
+    title: 'Fix the Retry Loop!'
+  });
+  assert.match(session.branch, /^gah\/chat\/repo-fix-the-retry-loop-[0-9a-f]{8}$/);
+  assert.equal(chatTitleFromText('  Fix   the retry loop\nwithout losing work  '), 'Fix the retry loop without losing work');
+  assert.equal(chatTitleFromText(''), null);
+  assert.equal(chatTitleFromText('x'.repeat(80)), `${'x'.repeat(63)}…`);
 }));
 
 test('createSession without a worktree_base still works (checkout mode)', withEnv(async (env) => {

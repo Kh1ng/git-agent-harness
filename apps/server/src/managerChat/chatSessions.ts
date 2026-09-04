@@ -10,7 +10,7 @@
  * as a patch before removing the worktree; the branch always survives.
  *
  * Naming follows the dispatch conventions exactly (see src/prune.rs and
- * src/dispatch/workflows): branch `gah/chat/<repo_id>-<session>`, worktree
+ * src/dispatch/workflows): branch `gah/chat/<repo_id>-<title>-<session>`, worktree
  * dir `gah-chat-<repo_id>-<session>` under defaults.worktree_base. repo_id
  * comes from ProfileSummary (config truth), never derived from `repo`, or
  * prune's prefix match would silently miss these worktrees.
@@ -113,8 +113,21 @@ export function worktreeDirName(repoId: string, sessionId: string): string {
   return `gah-chat-${repoId}-${sessionId}`;
 }
 
-export function sessionBranchName(repoId: string, sessionId: string): string {
-  return `gah/chat/${repoId}-${sessionId}`;
+export function chatTitleFromText(text: string): string | null {
+  const title = text.trim().replace(/\s+/g, ' ');
+  if (!title) return null;
+  return title.length <= 64 ? title : `${title.slice(0, 63).trimEnd()}…`;
+}
+
+export function sessionBranchName(repoId: string, sessionId: string, title?: string): string {
+  const slug = title
+    ?.trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 40)
+    .replace(/-$/g, '');
+  return `gah/chat/${repoId}-${slug ? `${slug}-` : ''}${sessionId}`;
 }
 
 function git(repoPath: string, ...args: string[]): Promise<{ stdout: string; stderr: string }> {
@@ -164,7 +177,7 @@ export async function createSession(input: CreateSessionInput, opts?: ChatSessio
     profile,
     ...(input.prNumber === undefined ? {} : { prNumber: input.prNumber }),
     worktreePath: null,
-    branch: input.branch ?? sessionBranchName(profileInfo.repo_id, sessionId),
+    branch: input.branch ?? sessionBranchName(profileInfo.repo_id, sessionId, input.title),
     backend,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,

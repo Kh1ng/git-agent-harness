@@ -5,6 +5,7 @@ import type { Session } from '@git-agent-harness/contracts';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { StatusBadge, type StatusTone } from './ui/StatusBadge.js';
 import { providerIcon } from '../lib/icons.js';
+import { formatDispatchName } from '../lib/format.js';
 
 type SessionDetailModalProps = {
   session: Session;
@@ -37,6 +38,7 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
   const output = sessionOutput[session.id];
   const Icon = providerIcon(session.providerKind);
   const isRunning = session.status === 'running';
+  const name = formatDispatchName(session);
 
   useEffect(() => {
     outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight });
@@ -71,8 +73,8 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
           <div className="flex items-center gap-3 min-w-0">
             <Icon size={20} className="text-muted shrink-0" aria-hidden="true" />
             <div className="min-w-0">
-              <h3 className="text-sm font-semibold text-primary truncate">{session.repo || 'Session'}</h3>
-              <p className="text-xs text-muted truncate">{session.id}</p>
+              <h3 className="text-sm font-semibold text-primary truncate">{name}</h3>
+              <p className="text-xs text-muted truncate">{session.repo || session.id}</p>
             </div>
           </div>
 
@@ -87,8 +89,11 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
         <div className="flex-1 overflow-y-auto p-4 sm:p-5">
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-5">
             <Field label="Provider" value={session.providerKind} />
+            <Field label="Session ID" value={session.id} />
             <Field label="Mode" value={session.mode} />
             <Field label="Backend" value={session.backend} />
+            <Field label="Target" value={session.target} />
+            <Field label="Pull request" value={session.mr} />
             <Field label="Branch" value={session.branch} />
             <Field label="Model" value={session.model} />
             <Field label="Budget" value={session.budget} />
