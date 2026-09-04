@@ -295,7 +295,10 @@ pub(super) fn detect_stuck_loop(
             if event.event_type != "dispatch_finished" {
                 continue;
             }
-            if !event.details.contains("operator approval required") {
+            if event.reason_code.as_deref() != Some(HumanRequiredReason::PolicyApproval.as_str())
+                && !event.details.contains("operator approval required")
+                && !event.details.contains("paid route approval required")
+            {
                 break;
             }
             consecutive_route_approvals += 1;
@@ -526,7 +529,7 @@ pub(super) fn defer_if_branch_attached(
 mod tests {
     use super::{
         latest_clear_attempts_timestamp, recently_capacity_deferred_work_ids,
-        resolve_attached_branch_conflicts, NextAction, STUCK_LOOP_THRESHOLD,
+        resolve_attached_branch_conflicts, HumanRequiredReason, NextAction, STUCK_LOOP_THRESHOLD,
     };
     use crate::config::{Defaults, GahConfig, RoutingPolicy};
     use crate::events::ControllerEvent;
@@ -860,6 +863,51 @@ mod tests {
                 approval_details,
                 &run_id,
             ));
+            events.push(dispatch_event(
+                "real",
+                "TICKET-520",
+                &base,
+                "loop_stopped",
+                approval_details,
+                &run_id,
+            ));
+        }
+
+        let action = NextAction::Retry {
+            work_id: "TICKET-520".into(),
+            ticket_path: "520".into(),
+            reason: "retry".into(),
+        };
+
+        assert!(detect_stuck_loop(&events, "real", &action, None).is_some());
+    }
+
+    #[test]
+    fn paid_route_approval_dispatch_failures_are_detected_via_stable_reason_code() {
+        let approval_details = "dispatch_ticket: paid route approval required; run: gah route-approval grant --profile real TICKET-520 --backend opencode --model glm-5.2";
+        let mut events = Vec::new();
+        for index in 0..STUCK_LOOP_THRESHOLD {
+            let suffix = index + 1;
+            let run_id = format!("run-{suffix}");
+            let base = format!("2026-07-05T00:00:0{suffix}Z");
+            events.push(dispatch_event(
+                "real",
+                "TICKET-520",
+                &base,
+                "dispatch_started",
+                "retry: /tmp/TICKET-520",
+                &run_id,
+            ));
+            let mut finished = dispatch_event(
+                "real",
+                "TICKET-520",
+                &base,
+                "dispatch_finished",
+                approval_details,
+                &run_id,
+            );
+            finished.reason_code = Some(HumanRequiredReason::PolicyApproval.as_str().into());
+            events.push(finished);
             events.push(dispatch_event(
                 "real",
                 "TICKET-520",

@@ -931,14 +931,42 @@ pub(crate) fn run_dispatch_and_record(
             } else {
                 crate::events::EventType::DispatchFinished
             };
-            crate::events::record_with_run_id(
-                cfg,
-                event_type,
-                Some(args.profile.as_str()),
-                work_id,
-                args.run_id.as_deref(),
-                format!("{label}: {e:#}"),
-            )?;
+            let reason_code = if matches!(event_type, crate::events::EventType::DispatchFinished)
+                && e.chain().any(|cause| {
+                    cause
+                        .downcast_ref::<crate::routing::RouteError>()
+                        .is_some_and(|route_error| {
+                            matches!(
+                                route_error,
+                                crate::routing::RouteError::ApprovalRequired { .. }
+                            )
+                        })
+                }) {
+                Some(HumanRequiredReason::PolicyApproval.as_str())
+            } else {
+                None
+            };
+            let details = format!("{label}: {e:#}");
+            if let Some(reason_code) = reason_code {
+                crate::events::record_with_run_id_and_reason_code(
+                    cfg,
+                    event_type,
+                    Some(args.profile.as_str()),
+                    work_id,
+                    args.run_id.as_deref(),
+                    details,
+                    Some(reason_code),
+                )?;
+            } else {
+                crate::events::record_with_run_id(
+                    cfg,
+                    event_type,
+                    Some(args.profile.as_str()),
+                    work_id,
+                    args.run_id.as_deref(),
+                    details,
+                )?;
+            }
             Err(e)
         }
     }
