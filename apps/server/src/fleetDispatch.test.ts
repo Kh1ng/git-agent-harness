@@ -459,6 +459,10 @@ test('fleet dispatch reuses request ids across coordinator restarts and reconcil
     const reconciled = restartedCoordinator.getSession(first.id);
     assert.equal(reconciled?.leaseState, 'running');
     assert.equal(reconciled?.nodeId, 'worker-1');
+
+    mockNode.sessions = [];
+    await restartedCoordinator.reconcileLeases('gah');
+    assert.deepEqual(restartedCoordinator.getAllSessions(), []);
   } finally {
     await mockNode.close();
     try {

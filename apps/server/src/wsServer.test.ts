@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
+import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { createWebSocketHandler } from './wsServer.js';
 import type { ServerMessage } from '@git-agent-harness/contracts';
 
@@ -105,3 +109,46 @@ test(
     });
   }
 );
+
+test('server.welcome reconciles persisted leases before reporting running sessions', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-welcome-leases-'));
+  const leasesPath = join(dir, 'dispatch-leases.json');
+  const identity = getCoordinatorIdentity();
+  const timestamp = new Date().toISOString();
+  writeFileSync(leasesPath, JSON.stringify({
+    leases: [{
+      requestId: 'stale-request',
+      workKey: 'stale-work',
+      profile: 'gah',
+      nodeId: identity.node_id,
+      nodeUrl: identity.advertised_url,
+      session: {
+        id: 'stale-session',
+        providerKind: 'codex',
+        instanceId: 'codex-0',
+        status: 'running',
+        repo: 'owner/repo',
+        mode: 'improve'
+      },
+      state: 'running',
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      coordinatorNodeId: identity.node_id
+    }]
+  }));
+
+  const previousPath = process.env.GAH_DISPATCH_LEASES_PATH;
+  process.env.GAH_DISPATCH_LEASES_PATH = leasesPath;
+  try {
+    await withWsServer(async (wsUrl) => {
+      const ws = new WebSocket(wsUrl);
+      const welcome = await nextWelcome(ws);
+      assert.deepEqual(welcome.sessions, []);
+      ws.close();
+    });
+  } finally {
+    if (previousPath === undefined) delete process.env.GAH_DISPATCH_LEASES_PATH;
+    else process.env.GAH_DISPATCH_LEASES_PATH = previousPath;
+    rmSync(dir, { recursive: true });
+  }
+});

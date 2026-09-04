@@ -510,11 +510,13 @@ async function handleProviderList(ws: WebSocket, message: Extract<ClientMessage,
 async function sendWelcomeMessage(ws: WebSocket) {
   try {
     const providerRegistry = getProviderRegistry();
+    const defaultProfile = sessionStore.get(ws)?.profile ?? pendingProfiles.get(ws) ?? 'gah';
 
     const serverProviderCatalog = {
       providers: providerRegistry.getProviderInstances()
     };
 
+    await fleetDispatch.reconcileLeases(defaultProfile);
     const sessions = fleetDispatch.getAllSessions();
     const providers = providerRegistry.getAllProviderStatuses();
 
@@ -522,7 +524,6 @@ async function sendWelcomeMessage(ws: WebSocket) {
     // path TICKET-113 already wired up -- there's no separate
     // per-field ProviderRegistry accessor, `gah status --json` returns
     // all of this in one call.
-    const defaultProfile = sessionStore.get(ws)?.profile ?? pendingProfiles.get(ws) ?? 'gah';
     let mergeRequests: MergeRequest[] = [];
     let availability: AvailabilityScope[] = [];
     let blockers: Blocker[] = [];
