@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, ListChecks, FileText, Rocket } from 'lucide-react';
+import { ArrowLeft, ChevronRight, ListChecks, FileText, Rocket } from 'lucide-react';
 import type { Session } from '@git-agent-harness/contracts';
 import { generateProviderInstanceId } from '@git-agent-harness/shared';
 import { useWebSocket } from '../ws/WebSocketContext.js';
@@ -171,7 +171,8 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
     return <WorkDetail workId={selectedWorkId} onBack={() => setSelectedWorkId(null)} />;
   }
 
-  const activeSessions = sessions.filter((s) => ['starting', 'running'].includes(s.status));
+  const activeSessions = sessions.filter((s) => s.status === 'running');
+  const queuedSessions = sessions.filter((s) => s.status === 'starting');
   const recentSessions = sessions.filter((s) => ['stopped', 'error'].includes(s.status)).slice(0, 5);
   const tickets = status.data?.available_tickets ?? [];
   const issueIntakeRejections = status.data?.issue_intake_rejections ?? [];
@@ -204,9 +205,9 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
       </section>
 
       <section>
-        <h3 className="text-sm font-semibold text-primary mb-3">Active sessions ({activeSessions.length})</h3>
+        <h3 className="text-sm font-semibold text-primary mb-3">Running sessions ({activeSessions.length})</h3>
         {activeSessions.length === 0 ? (
-          <EmptyState icon={ListChecks} title="No active sessions" />
+          <EmptyState icon={ListChecks} title="No running sessions" />
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {activeSessions.map((session) => (
@@ -215,6 +216,22 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
           </div>
         )}
       </section>
+
+      {queuedSessions.length > 0 && (
+        <section>
+          <details className="group">
+            <summary className="mb-3 flex cursor-pointer list-none items-center gap-2 text-sm font-semibold text-secondary hover:text-primary [&::-webkit-details-marker]:hidden">
+              <ChevronRight size={14} className="transition-transform group-open:rotate-90" aria-hidden="true" />
+              Queued sessions ({queuedSessions.length})
+            </summary>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {queuedSessions.map((session) => (
+                <SessionCard key={session.id} session={session} onClick={() => onSelectSession(session)} />
+              ))}
+            </div>
+          </details>
+        </section>
+      )}
 
       <section>
         <h3 className="text-sm font-semibold text-primary mb-3">

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { GitBranch, GitCommit, GitPullRequest, RefreshCw, Plus, ExternalLink } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
+import { useGahStore } from '../store/gahStore.js';
 import { gahApi } from '../api/client.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
@@ -16,7 +17,10 @@ type Tab = 'status' | 'log' | 'prs';
 export function GitPage() {
   const wsProfile = useWebSocket().profile;
   const profileOverride = useUiStore((s) => s.profileOverride);
+  const setProfileOverride = useUiStore((s) => s.setProfileOverride);
   const profile = profileOverride ?? wsProfile ?? 'gah';
+  const profiles = useGahStore((s) => s.profiles);
+  const fetchProfiles = useGahStore((s) => s.fetchProfiles);
 
   const [tab, setTab] = useState<Tab>('status');
   const [status, setStatus] = useState<GitStatus | null>(null);
@@ -53,6 +57,7 @@ export function GitPage() {
   };
 
   useEffect(() => { load(); }, [profile]);
+  useEffect(() => { fetchProfiles(); }, [fetchProfiles]);
 
   const createPr = async () => {
     if (!prTitle) return;
@@ -88,16 +93,31 @@ export function GitPage() {
         onRefresh={load}
         refreshing={loading}
         actions={
-          <div className="flex rounded-md border border-subtle overflow-hidden text-xs">
-            {tabs.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => setTab(t.id)}
-                className={`px-3 py-1.5 ${tab === t.id ? 'bg-accent text-white' : 'text-secondary hover:bg-white/5'}`}
-              >
-                {t.label}
-              </button>
-            ))}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <select
+              aria-label="Project"
+              value={profile}
+              onChange={(event) => setProfileOverride(event.target.value)}
+              disabled={profiles.loading && !profiles.data}
+              className="rounded-md border border-subtle bg-raised px-3 py-1.5 text-xs text-primary"
+            >
+              {(profiles.data ?? []).map((candidate) => (
+                <option key={candidate.name} value={candidate.name}>
+                  {candidate.display_name || candidate.name}
+                </option>
+              ))}
+            </select>
+            <div className="flex overflow-hidden rounded-md border border-subtle text-xs">
+              {tabs.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => setTab(t.id)}
+                  className={`px-3 py-1.5 ${tab === t.id ? 'bg-accent text-white' : 'text-secondary hover:bg-white/5'}`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
           </div>
         }
       />

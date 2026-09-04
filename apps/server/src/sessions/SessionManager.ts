@@ -201,10 +201,8 @@ class SessionManagerImpl {
       this.handleDispatchError(sessionId, error);
     });
     
-    // Return the session immediately - it's now running
-    session.status = 'running';
-    this.sessions.set(sessionId, session);
-    
+    // Return immediately. runDispatchProcess promotes it after the profile
+    // queue grants this session the CLI slot.
     return session;
   }
   
@@ -222,6 +220,12 @@ class SessionManagerImpl {
     this.profileDispatchTails.set(options.profile, tail);
     await previous.catch(() => undefined);
     try {
+      const session = this.sessions.get(sessionId);
+      if (session?.status === 'starting') {
+        session.status = 'running';
+        this.sessions.set(sessionId, session);
+        this.pushBus.publish({ type: 'session.status', session });
+      }
       return await this.dispatchRunner(options, (line: string) => {
         // Forward each line as session.stdout message
         this.addSessionOutput(sessionId, line, false);

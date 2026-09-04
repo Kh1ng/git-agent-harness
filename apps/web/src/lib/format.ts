@@ -71,13 +71,13 @@ export function formatAge(iso: string | null | undefined, now: Date = new Date()
 }
 
 export function formatDispatchName(session: Pick<Session, 'id' | 'mode' | 'mr' | 'target' | 'branch' | 'repo'>): string {
-  const mode = session.mode ? `${session.mode[0].toUpperCase()}${session.mode.slice(1)}` : 'Dispatch';
+  const mode = session.mode === 'pm' ? 'PM' : session.mode ? `${session.mode[0].toUpperCase()}${session.mode.slice(1)}` : 'Dispatch';
   if (session.mr) return `${mode} PR #${session.mr.replace(/^#/, '')}`;
   if (session.target) {
     const pr = session.target.match(/\bPR\s*#?(\d+)/i);
     if (pr) return `${mode} PR #${pr[1]}`;
     const issue = session.target.match(/^#?(\d+)$/);
-    return `${mode} ${issue ? `#${issue[1]}` : session.target}`;
+    return `${mode} ${issue ? `${session.mode === 'review' ? 'PR ' : ''}#${issue[1]}` : session.target}`;
   }
   return session.branch ?? session.repo ?? session.id;
 }
