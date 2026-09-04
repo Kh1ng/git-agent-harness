@@ -94,13 +94,6 @@ pub(super) fn run_auto_fix_commands(commands: &[String], wt: &Path, env_vars: &[
     }
 }
 
-pub(super) fn validation_env(cargo_target_dir: &Path) -> Vec<(String, String)> {
-    vec![(
-        "CARGO_TARGET_DIR".to_string(),
-        cargo_target_dir.to_string_lossy().into_owned(),
-    )]
-}
-
 /// TICKET-073: verify a profile's `validation_commands` against a genuinely
 /// fresh worktree before trusting the dispatch gate.
 ///
@@ -210,7 +203,7 @@ pub fn self_check_validation_gate(profile: &Profile, cfg: &GahConfig, skip: bool
         &worktree_base,
     )?;
     let timeout = std::time::Duration::from_secs(profile.validation_timeout_seconds());
-    let cargo_target = crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, &wt)?;
+    let cargo_target = crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root)?;
     let gate_environment = cargo_target.environment();
     let verified_at = vc::now_rfc3339(OffsetDateTime::now_utc());
     let result = validate(

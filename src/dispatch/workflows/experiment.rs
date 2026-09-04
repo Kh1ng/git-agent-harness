@@ -91,8 +91,7 @@ pub(crate) fn experiment(
     ledger.branch = Some(branch.clone());
     println!("Worktree: {}", wt.display());
     println!("Branch:   {}", branch);
-    let cargo_target =
-        crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
+    let cargo_target = crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root)?;
 
     let issue_details =
         resolve_target_to_issue_or_string(profile, &args.target, args.issue_intake_override)?;
@@ -123,7 +122,7 @@ pub(crate) fn experiment(
         &wt,
         &task,
         &attempt_dir,
-        cargo_target.path(),
+        &cargo_target,
         &llm,
         env_path,
         ledger.work_id.as_deref(),

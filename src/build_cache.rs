@@ -97,15 +97,11 @@ pub struct ScopedCargoTarget {
 }
 
 impl ScopedCargoTarget {
-    pub fn acquire(artifact_root: &str, scope: &Path) -> Result<Self> {
-        Self::acquire_with_hook(artifact_root, scope, || {})
+    pub fn acquire(artifact_root: &str) -> Result<Self> {
+        Self::acquire_with_hook(artifact_root, || {})
     }
 
-    fn acquire_with_hook<F>(
-        artifact_root: &str,
-        _scope: &Path,
-        mut after_lock_open: F,
-    ) -> Result<Self>
+    fn acquire_with_hook<F>(artifact_root: &str, mut after_lock_open: F) -> Result<Self>
     where
         F: FnMut(),
     {
@@ -262,22 +258,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_root = tmp.path().join("artifacts");
         let artifact_root = artifact_root.to_str().unwrap();
-        let session_a = tmp.path().join("sessions/a");
-        let session_b = tmp.path().join("sessions/b");
-        let live = ScopedCargoTarget::acquire(artifact_root, &session_a).unwrap();
+        let _session_a = tmp.path().join("sessions/a");
+        let _session_b = tmp.path().join("sessions/b");
+        let live = ScopedCargoTarget::acquire(artifact_root).unwrap();
         let live_path = live.path().to_path_buf();
         assert_ne!(
             live_path,
-            ScopedCargoTarget::acquire(artifact_root, &session_b)
-                .unwrap()
-                .path()
+            ScopedCargoTarget::acquire(artifact_root).unwrap().path()
         );
         drop(live);
         assert_eq!(
             live_path,
-            ScopedCargoTarget::acquire(artifact_root, &tmp.path().join("sessions/c"))
-                .unwrap()
-                .path()
+            ScopedCargoTarget::acquire(artifact_root).unwrap().path()
         );
     }
 
@@ -286,11 +278,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path;
         {
-            let guard = ScopedCargoTarget::acquire(
-                tmp.path().to_str().unwrap(),
-                &tmp.path().join("session"),
-            )
-            .unwrap();
+            let guard = ScopedCargoTarget::acquire(tmp.path().to_str().unwrap()).unwrap();
             path = guard.path().to_path_buf();
             fs::write(path.join("artifact"), "data").unwrap();
             assert!(path.exists());
@@ -302,7 +290,7 @@ mod tests {
     fn prune_keeps_live_target_and_removes_abandoned_target() {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_root = tmp.path().to_str().unwrap();
-        let live = ScopedCargoTarget::acquire(artifact_root, &tmp.path().join("live")).unwrap();
+        let live = ScopedCargoTarget::acquire(artifact_root).unwrap();
         let abandoned = slot_dir(artifact_root, 1);
         fs::create_dir_all(&abandoned).unwrap();
         fs::write(abandoned.join("artifact"), "data").unwrap();
@@ -316,7 +304,6 @@ mod tests {
     fn prune_cannot_unlink_a_target_between_opening_and_locking() {
         let tmp = tempfile::tempdir().unwrap();
         let artifact_root = tmp.path().join("artifacts");
-        let scope = tmp.path().join("session");
         let artifact_root_text = artifact_root.to_string_lossy().into_owned();
         let (opened_tx, opened_rx) = mpsc::channel();
         let (continue_tx, continue_rx) = mpsc::channel();
@@ -325,7 +312,7 @@ mod tests {
 
         let worker_root = artifact_root_text.clone();
         let worker = std::thread::spawn(move || {
-            let guard = ScopedCargoTarget::acquire_with_hook(&worker_root, &scope, || {
+            let guard = ScopedCargoTarget::acquire_with_hook(&worker_root, || {
                 opened_tx.send(()).unwrap();
                 continue_rx.recv().unwrap();
             })
@@ -387,9 +374,8 @@ mod tests {
                 format!("fn main() {{ println!(\"{identity}\"); }}\n"),
             )
             .unwrap();
-            let session = tmp.path().join("sessions").join(identity);
-            let guard =
-                ScopedCargoTarget::acquire(artifact_root.to_str().unwrap(), &session).unwrap();
+            let _session = tmp.path().join("sessions").join(identity);
+            let guard = ScopedCargoTarget::acquire(artifact_root.to_str().unwrap()).unwrap();
             runs.push((identity.to_string(), crate_dir, guard));
         }
 
@@ -434,9 +420,7 @@ mod tests {
     #[test]
     fn wrapper_presence_agrees_between_signature_and_real_environment() {
         let tmp = tempfile::tempdir().unwrap();
-        let guard =
-            ScopedCargoTarget::acquire(tmp.path().to_str().unwrap(), &tmp.path().join("session"))
-                .unwrap();
+        let guard = ScopedCargoTarget::acquire(tmp.path().to_str().unwrap()).unwrap();
         let signature_has_wrapper =
             super::validation_environment_signature(tmp.path().to_str().unwrap())
                 .iter()

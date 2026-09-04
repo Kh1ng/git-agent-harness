@@ -395,7 +395,7 @@ fn agy_second_backend_runs_with_agy_second_home_override() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
-    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -411,7 +411,7 @@ fn agy_second_backend_runs_with_agy_second_home_override() {
         tmp.path(),
         "do the thing",
         &session_dir,
-        cargo_target.path(),
+        &cargo_target,
         &llm,
         None,
         None,
@@ -455,7 +455,7 @@ fn agy_backend_without_second_home_uses_real_home() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
-    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -471,7 +471,7 @@ fn agy_backend_without_second_home_uses_real_home() {
         tmp.path(),
         "do the thing",
         &session_dir,
-        cargo_target.path(),
+        &cargo_target,
         &llm,
         None,
         None,
@@ -518,7 +518,7 @@ fn run_backend_looks_up_agy_print_timeout_by_exact_model_name() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
-    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -534,7 +534,7 @@ fn run_backend_looks_up_agy_print_timeout_by_exact_model_name() {
         tmp.path(),
         "do the thing",
         &session_dir,
-        cargo_target.path(),
+        &cargo_target,
         &llm,
         None,
         None,
@@ -579,7 +579,7 @@ fn run_backend_omits_print_timeout_for_unmapped_model() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
-    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -595,7 +595,7 @@ fn run_backend_omits_print_timeout_for_unmapped_model() {
         tmp.path(),
         "do the thing",
         &session_dir,
-        cargo_target.path(),
+        &cargo_target,
         &llm,
         None,
         None,
@@ -645,7 +645,7 @@ fn run_backend_looks_up_opencode_idle_timeout_by_exact_model_name() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
-    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -661,7 +661,7 @@ fn run_backend_looks_up_opencode_idle_timeout_by_exact_model_name() {
         tmp.path(),
         "do the thing",
         &session_dir,
-        cargo_target.path(),
+        &cargo_target,
         &llm,
         Some("litellm-lan/qwen3.6:35b-a3b"),
         None,
@@ -710,7 +710,7 @@ fn run_backend_falls_back_to_flat_opencode_idle_timeout_for_unmapped_model() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
-    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -726,7 +726,7 @@ fn run_backend_falls_back_to_flat_opencode_idle_timeout_for_unmapped_model() {
         tmp.path(),
         "do the thing",
         &session_dir,
-        cargo_target.path(),
+        &cargo_target,
         &llm,
         Some("litellm-lan/qwen3.6:35b-a3b"), // not in the map
         None,
@@ -783,7 +783,7 @@ fn run_backend_routes_vibe_to_run_vibe_not_the_openhands_fallthrough() {
 
     let session_dir = tmp.path().join("session");
     fs::create_dir_all(&session_dir).unwrap();
-    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp, &session_dir);
+    let cargo_target = build_cache_tests::acquire_cargo_target(&tmp);
     let llm = crate::runner::LlmConfig {
         base_url: String::new(),
         api_key: String::new(),
@@ -799,7 +799,7 @@ fn run_backend_routes_vibe_to_run_vibe_not_the_openhands_fallthrough() {
         tmp.path(),
         "do the thing",
         &session_dir,
-        cargo_target.path(),
+        &cargo_target,
         &llm,
         None,
         None,

@@ -17,7 +17,7 @@ use super::super::repair_context;
 use super::super::text::utf8_safe_prefix;
 use super::super::validation::{
     classify_validation_failure_progress, run_auto_fix_commands, should_skip_per_dispatch_baseline,
-    validation_env, validation_failure_no_progress_reason,
+    validation_failure_no_progress_reason,
 };
 use super::super::DispatchArgs;
 use super::already_satisfied_reconcile::AlreadySatisfiedRun;
@@ -277,9 +277,8 @@ pub(crate) fn improve(
         ),
         ledger,
     )?;
-    let cargo_target =
-        crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
-    let validation_environment = validation_env(cargo_target.path());
+    let cargo_target = crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root)?;
+    let validation_environment = cargo_target.environment();
 
     let mut base_task = build_redispatch_task(profile, &wt, args, &target, issue_details.as_ref());
     if let Some(repair_context) = repair_context.as_ref() {
@@ -452,7 +451,7 @@ pub(crate) fn improve(
             &wt,
             &task,
             &attempt_session,
-            cargo_target.path(),
+            &cargo_target,
             &llm,
             env_path,
             cfg,

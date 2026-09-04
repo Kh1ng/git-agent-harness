@@ -347,8 +347,7 @@ pub(in crate::dispatch) fn review(
     } else {
         runner::load_env_file(resolved_env)
     };
-    let cargo_target =
-        crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
+    let cargo_target = crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root)?;
     env_vars.extend(cargo_target.environment());
 
     // Escalate to the next untried reviewer in the ordered

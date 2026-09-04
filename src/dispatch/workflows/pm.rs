@@ -137,8 +137,7 @@ pub(crate) fn pm(
     }
 
     let task = build_pm_plan_task(profile, &preflight_ctx, &args.target)?;
-    let cargo_target =
-        crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root, session_dir)?;
+    let cargo_target = crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root)?;
 
     let mut attempted_routes = HashSet::new();
     let backend_budget = Duration::from_secs(profile.publishing.pm_timeout_seconds());
@@ -166,7 +165,7 @@ pub(crate) fn pm(
                     repo,
                     &task,
                     &attempt_dir,
-                    cargo_target.path(),
+                    &cargo_target,
                     &llm,
                     None,
                     cfg,

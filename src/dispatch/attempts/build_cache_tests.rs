@@ -1,24 +1,37 @@
-use std::path::Path;
-
 pub(super) fn acquire_cargo_target(
     tmp: &tempfile::TempDir,
-    session_dir: &Path,
 ) -> crate::build_cache::ScopedCargoTarget {
-    crate::build_cache::ScopedCargoTarget::acquire(tmp.path().to_str().unwrap(), session_dir)
-        .unwrap()
+    crate::build_cache::ScopedCargoTarget::acquire(tmp.path().to_str().unwrap()).unwrap()
 }
 
 #[test]
-fn sequential_sessions_reuse_a_slot_but_live_sessions_do_not_share() {
+fn cargo_target_environment_includes_sccache_when_available() {
+    // This test verifies that the complete ScopedCargoTarget environment
+    // (including CARGO_TARGET_DIR and RUSTC_WRAPPER when sccache is available)
+    // is properly constructed and would reach a launched backend.
     let tmp = tempfile::tempdir().unwrap();
-    let session_a = tmp.path().join("sessions/a");
-    let session_b = tmp.path().join("sessions/b");
-    let live = acquire_cargo_target(&tmp, &session_a);
-    let live_path = live.path().to_path_buf();
-    assert_ne!(live_path, acquire_cargo_target(&tmp, &session_b).path());
-    drop(live);
-    assert_eq!(
-        live_path,
-        acquire_cargo_target(&tmp, &tmp.path().join("sessions/c")).path()
-    );
+    let cargo_target = acquire_cargo_target(&tmp);
+    let env = cargo_target.environment();
+
+    // CARGO_TARGET_DIR must always be present
+    let target_dir = env
+        .iter()
+        .find(|(key, _)| key == "CARGO_TARGET_DIR")
+        .expect("CARGO_TARGET_DIR must be in environment");
+    assert_eq!(target_dir.1, cargo_target.path().to_string_lossy());
+
+    // If sccache is available on PATH, RUSTC_WRAPPER must be present
+    let has_sccache = std::process::Command::new("which")
+        .arg("sccache")
+        .output()
+        .ok()
+        .is_some_and(|out| out.status.success());
+
+    if has_sccache {
+        let rustc_wrapper = env
+            .iter()
+            .find(|(key, _)| key == "RUSTC_WRAPPER")
+            .expect("RUSTC_WRAPPER must be in environment when sccache is available");
+        assert!(rustc_wrapper.1.contains("sccache"));
+    }
 }
