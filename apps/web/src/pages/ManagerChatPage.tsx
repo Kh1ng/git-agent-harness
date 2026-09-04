@@ -5,6 +5,7 @@ import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { NewChatModal } from '../components/NewChatModal.js';
+import { formatChatName } from '../lib/format.js';
 import { ProviderPicker, type ProviderSelection, type ProviderPickerProps } from '../components/ProviderPicker.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
@@ -1524,9 +1525,9 @@ export function ManagerChatPage() {
                         if (event.target.checked) next.add(session.id); else next.delete(session.id);
                         return next;
                       })}
-                      aria-label={`Select ${session.title ?? session.branch}`}
+                      aria-label={`Select ${formatChatName(session)}`}
                     />
-                    <span className="min-w-0 flex-1 truncate text-primary">{session.title ?? session.branch}</span>
+                    <span className="min-w-0 flex-1 truncate text-primary">{formatChatName(session)}</span>
                     {item?.idle && <span className="text-amber-300">idle</span>}
                     {candidate && <span className="text-accent">{candidate.outcome === 'settled' ? `settle · ${candidate.reason}` : 'archive · idle'}</span>}
                     <span className="font-mono text-muted">{formatBytes(item?.worktreeBytes ?? 0)}</span>

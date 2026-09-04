@@ -1,3 +1,5 @@
+import type { ChatSessionSummary, Session } from '@git-agent-harness/contracts';
+
 /**
  * Formatting helpers that enforce the one non-negotiable rule across every
  * page: a missing/unknown value renders as "Unknown" text, never as 0, 0%,
@@ -66,6 +68,22 @@ export function formatAge(iso: string | null | undefined, now: Date = new Date()
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+export function formatDispatchName(session: Pick<Session, 'id' | 'mode' | 'mr' | 'target' | 'branch' | 'repo'>): string {
+  const mode = session.mode ? `${session.mode[0].toUpperCase()}${session.mode.slice(1)}` : 'Dispatch';
+  if (session.mr) return `${mode} PR #${session.mr.replace(/^#/, '')}`;
+  if (session.target) {
+    const pr = session.target.match(/\bPR\s*#?(\d+)/i);
+    if (pr) return `${mode} PR #${pr[1]}`;
+    const issue = session.target.match(/^#?(\d+)$/);
+    return `${mode} ${issue ? `#${issue[1]}` : session.target}`;
+  }
+  return session.branch ?? session.repo ?? session.id;
+}
+
+export function formatChatName(session: Pick<ChatSessionSummary, 'id' | 'title'>): string {
+  return session.title?.trim() || `Chat ${session.id}`;
 }
 
 /** Absolute local-timezone timestamp for an event/observation, e.g.

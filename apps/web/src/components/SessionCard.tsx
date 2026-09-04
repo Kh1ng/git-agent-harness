@@ -2,6 +2,7 @@ import { GitBranch, Cpu, Brain } from 'lucide-react';
 import type { Session } from '@git-agent-harness/contracts';
 import { StatusBadge, type StatusTone } from './ui/StatusBadge.js';
 import { providerIcon } from '../lib/icons.js';
+import { formatDispatchName } from '../lib/format.js';
 
 type SessionCardProps = {
   session: Session;
@@ -19,6 +20,7 @@ const STATUS_TONE: Record<Session['status'], StatusTone> = {
 
 export function SessionCard({ session, onClick }: SessionCardProps) {
   const Icon = providerIcon(session.providerKind);
+  const name = formatDispatchName(session);
 
   return (
     <button
@@ -29,8 +31,8 @@ export function SessionCard({ session, onClick }: SessionCardProps) {
         <div className="flex items-start gap-3 min-w-0">
           <Icon size={18} className="text-muted shrink-0 mt-0.5" aria-hidden="true" />
           <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-primary truncate">{session.repo || session.id}</h3>
-            <p className="text-xs text-muted truncate">{session.id}</p>
+            <h3 className="text-sm font-semibold text-primary truncate" title={name}>{name}</h3>
+            <p className="text-xs text-muted truncate">{session.repo || session.id}</p>
 
             <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-secondary">
               {session.mode && <span>{session.mode}</span>}
