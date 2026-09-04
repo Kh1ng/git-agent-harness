@@ -1,6 +1,6 @@
+use super::terminal::{append_ledger_entry, is_policy_approval_gate};
 use super::{
-    append_terminal_ledger_entry, capacity_deferred_error, ensure_terminal_failure_attribution,
-    is_policy_approval_gate, should_notify_dispatch_failure,
+    capacity_deferred_error, ensure_terminal_failure_attribution, should_notify_dispatch_failure,
 };
 use crate::routing::{RouteError, SkippedBackend};
 
@@ -81,8 +81,8 @@ fn repeated_policy_approval_terminal_entries_still_get_written() {
     entry.failure_class = Some("human_blocked".into());
     entry.failure_stage = Some("route".into());
 
-    assert!(append_terminal_ledger_entry(&cfg, &entry, true).unwrap());
-    assert!(!append_terminal_ledger_entry(&cfg, &entry, true).unwrap());
+    assert!(append_ledger_entry(&cfg, &entry, true).unwrap());
+    assert!(!append_ledger_entry(&cfg, &entry, true).unwrap());
 
     let ledger = crate::ledger::read_entries(&cfg).unwrap();
     assert_eq!(ledger.len(), 2);
