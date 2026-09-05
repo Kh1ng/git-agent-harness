@@ -47,6 +47,11 @@ test('Telemetry page renders a backend row from the fixture report', async ({ pa
   // responses/report.json carries codex + claude comparison rows.
   await expect(page.getByText('codex', { exact: false }).first()).toBeVisible();
   await expect(page.getByText('claude', { exact: false }).first()).toBeVisible();
+
+  const chatUsage = page.locator('section').filter({ hasText: 'Manager chat usage' });
+  await expect(chatUsage.getByText('gpt-5.3-codex · 3.0k · 4 turns', { exact: true })).toBeVisible();
+  await expect(chatUsage.getByRole('columnheader', { name: 'Cache / other' })).toBeVisible();
+  await expect(chatUsage.getByText(/\$0\.0500 API equivalent/)).toBeVisible();
 });
 
 test('Settings profile section lists the fixture profile', async ({ page }) => {

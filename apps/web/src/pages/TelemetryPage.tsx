@@ -78,27 +78,56 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
 
   const rows = rollup?.rows ?? [];
   const byBackend = useMemo(() => {
-    const map = new Map<string, { turns: number; total_tokens: number; estimated_cost_usd: number | null }>();
+    const map = new Map<string, {
+      turns: number;
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+      apiCostUsd: number;
+      costedTurns: number;
+      models: Map<string, { turns: number; totalTokens: number }>;
+    }>();
     for (const row of rows) {
-      const agg = map.get(row.backend) ?? { turns: 0, total_tokens: 0, estimated_cost_usd: 0 };
+      const agg = map.get(row.backend) ?? {
+        turns: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        apiCostUsd: 0,
+        costedTurns: 0,
+        models: new Map()
+      };
       agg.turns += row.turns;
-      agg.total_tokens += row.total_tokens;
-      agg.estimated_cost_usd = agg.estimated_cost_usd === null || row.estimated_cost_usd === null
-        ? null
-        : agg.estimated_cost_usd + row.estimated_cost_usd;
+      agg.inputTokens += row.input_tokens;
+      agg.outputTokens += row.output_tokens;
+      agg.totalTokens += row.total_tokens;
+      if (row.estimated_cost_usd !== null) {
+        agg.apiCostUsd += row.estimated_cost_usd;
+        agg.costedTurns += row.turns;
+      }
+      const model = row.model ?? 'default';
+      const modelTotal = agg.models.get(model) ?? { turns: 0, totalTokens: 0 };
+      modelTotal.turns += row.turns;
+      modelTotal.totalTokens += row.total_tokens;
+      agg.models.set(model, modelTotal);
       map.set(row.backend, agg);
     }
-    return [...map.entries()].sort((a, b) => b[1].total_tokens - a[1].total_tokens);
+    return [...map.entries()].sort((a, b) => b[1].totalTokens - a[1].totalTokens);
   }, [rows]);
+
+  const reportedTurns = byBackend.reduce((sum, [, row]) => sum + row.turns, 0);
+  const reportedTokens = byBackend.reduce((sum, [, row]) => sum + row.totalTokens, 0);
+  const apiCostUsd = byBackend.reduce((sum, [, row]) => sum + row.apiCostUsd, 0);
+  const costedTurns = byBackend.reduce((sum, [, row]) => sum + row.costedTurns, 0);
 
   return (
     <section className="card-padded">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
         <div>
-          <h3 className="text-sm font-semibold text-primary">Actual usage — manager chat</h3>
+          <h3 className="text-sm font-semibold text-primary">Manager chat usage</h3>
           <p className="text-xs text-muted mt-0.5">
-            Tokens and turns as reported by each backend during chat, aggregated from GAH's own session logs.
-            {rollup && rollup.unattributed_turns > 0 && ` ${rollup.unattributed_turns} turn(s) reported no usage.`}
+            Backend-reported usage from GAH session logs. API equivalent is an estimate, not your subscription bill.
+            {rollup && rollup.unattributed_turns > 0 && ` ${rollup.unattributed_turns} turns reported no usage.`}
           </p>
         </div>
         <div className="flex rounded-md border border-subtle overflow-hidden text-xs">
@@ -121,28 +150,47 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
         <EmptyState icon={FlaskConical} title="No usage recorded" description={`No manager-chat usage in the last ${days} days.`} />
       ) : (
         <>
+          <p className="mb-3 text-xs tabular-nums text-secondary">
+            {formatCount(reportedTurns)} usage-reported turns · {formatTokens(reportedTokens)} tokens ·{' '}
+            {costedTurns > 0 ? formatCost(apiCostUsd) : 'Unmeasured'} API equivalent
+            {costedTurns > 0 && costedTurns < reportedTurns ? ` on ${formatCount(costedTurns)} of ${formatCount(reportedTurns)} turns` : ''}
+          </p>
           <div className="overflow-x-auto">
-            <table className="w-full text-xs">
+            <table className="w-full text-xs tabular-nums">
               <thead>
                 <tr className="text-left text-muted border-b border-subtle">
                   <th className="py-2 pr-4 font-medium">Backend</th>
                   <th className="py-2 pr-4 font-medium">Turns</th>
-                  <th className="py-2 pr-4 font-medium">Tokens</th>
-                  <th className="py-2 pr-4 font-medium">Est. cost</th>
-                  <th className="py-2 font-medium">By model</th>
+                  <th className="hidden py-2 pr-4 font-medium sm:table-cell">Input</th>
+                  <th className="hidden py-2 pr-4 font-medium sm:table-cell">Output</th>
+                  <th className="hidden py-2 pr-4 font-medium sm:table-cell" title="Total minus reported input and output tokens">Cache / other</th>
+                  <th className="py-2 pr-4 font-medium">Total</th>
+                  <th className="py-2 font-medium">API equivalent</th>
                 </tr>
               </thead>
               <tbody>
                 {byBackend.map(([backend, agg]) => {
-                  const modelRows = rows.filter((row) => row.backend === backend).sort((a, b) => b.total_tokens - a.total_tokens);
+                  const models = [...agg.models.entries()].sort((a, b) => b[1].totalTokens - a[1].totalTokens);
+                  const cacheOrOtherTokens = Math.max(0, agg.totalTokens - agg.inputTokens - agg.outputTokens);
                   return (
                     <tr key={backend} className="border-b border-subtle/50">
-                      <td className="py-2 pr-4 text-primary">{backend}</td>
+                      <td className="py-2 pr-4 text-primary">
+                        <span className="block font-medium">{backend}</span>
+                        <span className="mt-0.5 block text-muted">
+                          {models.map(([model, usage]) => `${model} · ${formatTokens(usage.totalTokens)} · ${formatCount(usage.turns)} turns`).join(' · ')}
+                        </span>
+                      </td>
                       <td className="py-2 pr-4">{formatCount(agg.turns)}</td>
-                      <td className="py-2 pr-4">{formatTokens(agg.total_tokens)}</td>
-                      <td className="py-2 pr-4">{agg.estimated_cost_usd === null ? <span className="text-muted">unmeasured</span> : formatCost(agg.estimated_cost_usd)}</td>
-                      <td className="py-2 text-muted">
-                        {modelRows.map((row) => `${row.model ?? 'default'}: ${formatTokens(row.total_tokens)}`).join(' · ')}
+                      <td className="hidden py-2 pr-4 sm:table-cell">{formatTokens(agg.inputTokens)}</td>
+                      <td className="hidden py-2 pr-4 sm:table-cell">{formatTokens(agg.outputTokens)}</td>
+                      <td className="hidden py-2 pr-4 sm:table-cell">{formatTokens(cacheOrOtherTokens)}</td>
+                      <td className="py-2 pr-4 font-medium text-primary">{formatTokens(agg.totalTokens)}</td>
+                      <td className="py-2 whitespace-nowrap">
+                        {agg.costedTurns === 0 ? (
+                          <span className="text-muted">unmeasured</span>
+                        ) : (
+                          <span>{formatCost(agg.apiCostUsd)}{agg.costedTurns < agg.turns ? ` · ${agg.costedTurns}/${agg.turns} turns` : ''}</span>
+                        )}
                       </td>
                     </tr>
                   );
@@ -158,22 +206,22 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
                   <thead>
                     <tr className="text-left text-muted border-b border-subtle">
                       <th className="py-2 pr-4 font-medium">Ticket</th>
-                      <th className="py-2 pr-4 font-medium">Session</th>
+                      <th className="hidden py-2 pr-4 font-medium sm:table-cell">Session</th>
                       <th className="py-2 pr-4 font-medium">Turns</th>
                       <th className="py-2 pr-4 font-medium">Tokens</th>
-                      <th className="py-2 pr-4 font-medium">Est. cost</th>
-                      <th className="py-2 font-medium">Backends</th>
+                      <th className="py-2 pr-4 font-medium">API equivalent</th>
+                      <th className="hidden py-2 font-medium sm:table-cell">Backends</th>
                     </tr>
                   </thead>
                   <tbody>
                     {rollup.tickets.map((ticket) => (
                       <tr key={ticket.ticket} className="border-b border-subtle/50">
                         <td className="py-2 pr-4 text-primary">{ticket.ticket}</td>
-                        <td className="py-2 pr-4 text-muted">{ticket.title ?? '—'}</td>
+                        <td className="hidden py-2 pr-4 text-muted sm:table-cell">{ticket.title ?? '—'}</td>
                         <td className="py-2 pr-4">{formatCount(ticket.turns)}</td>
                         <td className="py-2 pr-4">{formatTokens(ticket.total_tokens)}</td>
                         <td className="py-2 pr-4">{ticket.estimated_cost_usd === null ? <span className="text-muted">unmeasured</span> : formatCost(ticket.estimated_cost_usd)}</td>
-                        <td className="py-2 text-muted">
+                        <td className="hidden py-2 text-muted sm:table-cell">
                           {Object.entries(ticket.backends).sort((a, b) => b[1] - a[1]).map(([backend, tokens]) => `${backend}: ${formatTokens(tokens)}`).join(' · ')}
                         </td>
                       </tr>
