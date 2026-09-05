@@ -1392,15 +1392,11 @@ fn github_review_target_by_number(profile: &Profile, number: &str) -> Result<Rev
         anyhow::bail!("gh pr view failed: {}", redacted_stderr(&out));
     }
     let resp: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-    let ci_status = resp["statusCheckRollup"]
-        .as_array()
-        .and_then(|items| items.first())
-        .and_then(|item| {
-            item["conclusion"]
-                .as_str()
-                .or_else(|| item["status"].as_str())
-        })
-        .map(str::to_string);
+    let ci_status = resp["statusCheckRollup"].as_array().and_then(|items| {
+        crate::github_ci::classify(items.iter().map(|item| item["conclusion"].as_str()))
+            .as_str()
+            .map(str::to_string)
+    });
     Ok(ReviewTarget {
         id: resp["number"]
             .as_i64()
