@@ -16,7 +16,8 @@
             "core:default",
             "core:window:allow-show",
             "core:window:allow-hide",
-            "core:window:allow-close"
+            "core:window:allow-close",
+            "opener:allow-open-url"
           ]
         },
         {
@@ -33,21 +34,7 @@
         }
       ]
     },
-    "windows": [
-      {
-        "label": "main",
-        "title": "GAH Dashboard",
-        "url": "http://100.118.97.79",
-        "width": 1400,
-        "height": 900,
-        "minWidth": 900,
-        "minHeight": 600,
-        "resizable": true,
-        "center": true,
-        "decorations": true,
-        "visible": false
-      }
-    ]
+    "windows": []
   },
   "build": {
     "frontendDist": "dist",

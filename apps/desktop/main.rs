@@ -162,7 +162,26 @@ fn main() {
         central_url: Mutex::new(central_url.clone()),
     });
 
+    // Intercept external link clicks in the webview and open them in the
+    // system browser via tauri-plugin-opener instead of a new webview window.
+    let external_link_script = r#"
+        document.addEventListener('click', function(e) {
+            var el = e.target && e.target.closest ? e.target.closest('a') : null;
+            if (!el) return;
+            var href = el.getAttribute('href');
+            if (!href) return;
+            try {
+                var url = new URL(href, location.href);
+                if ((url.protocol === 'http:' || url.protocol === 'https:') && url.origin !== location.origin) {
+                    e.preventDefault();
+                    window.__TAURI_INTERNALS__.invoke('plugin:opener|open_url', { url: href });
+                }
+            } catch (_) {}
+        }, true);
+    "#;
+
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
             // Keep app alive with no windows open
             let _ = app.handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -170,6 +189,22 @@ fn main() {
             let handle = app.handle().clone();
             let state = worker_state.clone();
             let url = central_url.clone();
+
+            // Window is created here (not in tauri.conf.json) so we can attach
+            // the initialization_script for external-link interception.
+            let window_url = tauri::WebviewUrl::External(
+                url.parse().unwrap_or_else(|_| "http://100.118.97.79".parse().unwrap())
+            );
+            tauri::WebviewWindowBuilder::new(app, "main", window_url)
+                .title("GAH Dashboard")
+                .inner_size(1400.0, 900.0)
+                .min_inner_size(900.0, 600.0)
+                .resizable(true)
+                .center()
+                .decorations(true)
+                .visible(false)
+                .initialization_script(external_link_script)
+                .build()?;
 
             let menu = build_tray_menu(&handle, false, &url)?;
 
