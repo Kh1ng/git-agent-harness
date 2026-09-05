@@ -250,15 +250,24 @@ const MOCK_USAGE_ROLLUP = {
     output_tokens: 800,
     total_tokens: 2_000,
     estimated_cost_usd: 0.04
+  }, {
+    backend: 'codex',
+    model: 'gpt-5.3-codex',
+    day: '2023-11-13',
+    turns: 1,
+    input_tokens: 100,
+    output_tokens: 100,
+    total_tokens: 1_000,
+    estimated_cost_usd: 0.01
   }],
   unattributed_turns: 0,
   tickets: [{
     ticket: '#1087',
     title: 'Mock control plane',
-    turns: 3,
-    total_tokens: 2_000,
-    estimated_cost_usd: 0.04,
-    backends: { codex: 2_000 }
+    turns: 4,
+    total_tokens: 3_000,
+    estimated_cost_usd: 0.05,
+    backends: { codex: 3_000 }
   }]
 } satisfies UsageRollupSummary;
 
