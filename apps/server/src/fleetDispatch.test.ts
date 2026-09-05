@@ -459,6 +459,10 @@ test('fleet dispatch reuses request ids across coordinator restarts and reconcil
     const reconciled = restartedCoordinator.getSession(first.id);
     assert.equal(reconciled?.leaseState, 'running');
     assert.equal(reconciled?.nodeId, 'worker-1');
+
+    mockNode.sessions = [];
+    await restartedCoordinator.reconcileLeases('gah');
+    assert.deepEqual(restartedCoordinator.getAllSessions(), []);
   } finally {
     await mockNode.close();
     try {
@@ -935,6 +939,7 @@ test('fleet dispatch skips unsupported, unavailable, and saturated nodes, and ma
     await coordinator.reconcileLeases('gah');
     const reconciled = coordinator.getSession(routed.id);
     assert.equal(reconciled?.leaseState, 'uncertain_reconciling');
+    assert.equal(reconciled?.status, 'starting');
   } finally {
     try {
       unlinkSync(leaseStorePath);

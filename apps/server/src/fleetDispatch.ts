@@ -740,8 +740,15 @@ export class FleetDispatchCoordinator {
       ?? this.leaseStore.getBySessionId(sessionId)?.session;
   }
 
-  getAllSessions(): Session[] {
-    const sessions = [...this.localTransport.getSessions(), ...this.leaseStore.values().map((lease) => lease.session)];
+  getAllSessions(profile?: string): Session[] {
+    const leases = this.leaseStore.values();
+    const leasedSessionIds = new Set(leases.map((lease) => lease.session.id));
+    const sessions = [
+      ...this.localTransport.getSessions().filter((session) => !leasedSessionIds.has(session.id)),
+      ...leases
+        .filter((lease) => lease.state !== 'expired' && (!profile || lease.profile === profile))
+        .map((lease) => lease.session)
+    ];
     const seen = new Set<string>();
     return sessions.filter((session) => {
       if (seen.has(session.id)) {
@@ -798,12 +805,13 @@ export class FleetDispatchCoordinator {
     if (leases.length === 0) {
       return;
     }
+    const probes = new Map<string, Promise<{ sessions: Session[] } | null>>();
 
     for (const lease of leases) {
       if (lease.profile !== profile) {
         continue;
       }
-      if (lease.state === 'terminal') {
+      if (lease.state === 'terminal' || lease.state === 'expired') {
         continue;
       }
       const local = lease.nodeId === this.coordinatorIdentity.node_id
@@ -819,11 +827,14 @@ export class FleetDispatchCoordinator {
         });
         continue;
       }
-      const probe = await this.probeNodeSessions(lease.nodeId, lease.nodeUrl, profile);
+      const probeKey = `${lease.nodeId}\0${lease.nodeUrl}`;
+      const probePromise = probes.get(probeKey) ?? this.probeNodeSessions(lease.nodeId, lease.nodeUrl, profile);
+      probes.set(probeKey, probePromise);
+      const probe = await probePromise;
       if (!probe) {
         this.recordLease({
           ...lease,
-          session: decorateSession(lease.session, lease.nodeId, 'uncertain_reconciling'),
+          session: decorateSession({ ...lease.session, status: 'starting' }, lease.nodeId, 'uncertain_reconciling'),
           state: 'uncertain_reconciling',
           updatedAt: nowIso()
         });
