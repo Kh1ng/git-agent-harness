@@ -37,6 +37,10 @@ test('PR tab lists open PRs and starts a chat seeded with one', async ({ page, r
 
   await page.getByText('#12 Ship the PR chat mode').click();
   await expect(page.getByText(/read-only: no branch is created and the PR is not modified/)).toBeVisible();
+  await page.route('**/api/manager-chat/prs**', (route) =>
+    route.request().method() === 'GET'
+      ? route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ prs: [] }) })
+      : route.continue());
   await page.getByRole('button', { name: 'Start chat' }).click();
 
   // The modal closes and the fresh session is selected, its transcript
@@ -44,15 +48,19 @@ test('PR tab lists open PRs and starts a chat seeded with one', async ({ page, r
   await expect(page.getByRole('dialog', { name: 'New chat' })).toHaveCount(0);
   await expect(page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /#12 Ship the PR chat mode/ })).toHaveAttribute('aria-current', 'page');
   await expect(page.getByText('Head branch: feat/pr-chat')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'View PR' })).toHaveAttribute('href', 'https://github.com/Kh1ng/git-agent-harness/pull/12');
+  await expect(page.getByRole('button', { name: 'Commit', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Refresh git data' })).toBeEnabled();
 
   // The created session is read-only on the provider: worktree-less.
   const state = await request.get(`${MOCK_BASE_URL}/api/mock/state`);
   expect(state.ok(), await state.text()).toBe(true);
-  const { sessions } = await state.json() as { sessions: { title: string; worktreePath: string | null; branch: string }[] };
+  const { sessions } = await state.json() as { sessions: { title: string; worktreePath: string | null; branch: string; prNumber?: number }[] };
   const created = sessions.find((session) => session.title === '#12 Ship the PR chat mode');
   expect(created, 'the PR session exists in the mock').toBeTruthy();
   expect(created!.worktreePath).toBeNull();
   expect(created!.branch).toBe('feat/pr-chat');
+  expect(created!.prNumber).toBe(12);
 });
 
 test('PR tab empty and failed states match the issue tab', async ({ page, request }) => {
@@ -78,4 +86,24 @@ test('PR tab empty and failed states match the issue tab', async ({ page, reques
   // The issue tab is still its old self alongside the new tab.
   await page.getByRole('tab', { name: 'From issue' }).click();
   await expect(page.getByText('No open issues for this project.')).toBeVisible();
+});
+
+test('git strip commits a writable checkout and exposes an accessible refresh action', async ({ page, request }) => {
+  await selectScenario(request, 'normal');
+  let message: string | undefined;
+  await page.route('**/api/git/commit?**', async (route) => {
+    message = (await route.request().postDataJSON() as { message?: string }).message;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ hash: 'abcdef1' }) });
+  });
+  await openChat(page);
+
+  await expect(page.getByRole('button', { name: 'Commit', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Commit', exact: true }).click();
+  const commitMessage = page.getByPlaceholder('Commit message');
+  await commitMessage.fill('fix the chat git actions');
+  await commitMessage.locator('..').getByRole('button', { name: 'Commit', exact: true }).click();
+
+  await expect(commitMessage).toHaveCount(0);
+  expect(message).toBe('fix the chat git actions');
+  await expect(page.getByRole('button', { name: 'Refresh git data' })).toBeEnabled();
 });

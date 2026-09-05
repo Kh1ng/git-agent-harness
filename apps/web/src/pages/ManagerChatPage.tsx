@@ -280,6 +280,8 @@ function GitStrip({
   profile,
   sessionId,
   activePrNumber,
+  provider,
+  repoUrl,
   status,
   issues,
   prs,
@@ -290,6 +292,8 @@ function GitStrip({
   profile: string;
   sessionId: string | null;
   activePrNumber?: number;
+  provider: string;
+  repoUrl: string | null;
   status: { branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean } | null;
   issues: ChatIssueSummary[];
   prs: ChatPrSummary[];
@@ -326,6 +330,15 @@ function GitStrip({
     (activePrNumber !== undefined ? prs.find((pr) => pr.number === activePrNumber) : undefined) ??
     prs.find((pr) => pr.headRefName === status.branch) ??
     null;
+  const activePrUrl = branchPr?.url ?? (
+    activePrNumber !== undefined && repoUrl
+      ? provider === 'github'
+        ? `${repoUrl.replace(/\/$/, '')}/pull/${activePrNumber}`
+        : provider === 'gitlab'
+          ? `${repoUrl.replace(/\/$/, '')}/-/merge_requests/${activePrNumber}`
+          : null
+      : null
+  );
 
   const submitCommit = async () => {
     if (!commitMessage.trim() || committing) return;
@@ -376,28 +389,35 @@ function GitStrip({
           )}
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {!clean && !status.readOnly && (
+            <button
+              type="button"
+              onClick={() => { setCommitOpen((v) => !v); setCommitError(null); }}
+              className="flex items-center gap-1 text-muted hover:text-primary"
+              title="Commit changes"
+            >
+              <GitCommit size={13} />
+              Commit
+            </button>
+          )}
+          {activePrUrl && (
+            <a
+              href={activePrUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 text-muted hover:text-primary hover:underline"
+              title={branchPr ? `View #${branchPr.number}: ${branchPr.title}` : `View PR #${activePrNumber}`}
+            >
+              <ExternalLink size={13} />
+              View PR
+            </a>
+          )}
           <button
-            onClick={() => { setCommitOpen((v) => !v); setCommitError(null); }}
-            className="flex items-center gap-1 text-muted hover:text-primary disabled:opacity-50"
-            title={status.readOnly ? 'This session has no writable checkout' : clean ? 'No changes to commit' : 'Commit changes'}
-            disabled={clean || status.readOnly}
-          >
-            <GitCommit size={13} />
-            Commit
-          </button>
-          <button
-            onClick={() => branchPr?.url && window.open(branchPr.url, '_blank', 'noopener,noreferrer')}
-            className="flex items-center gap-1 text-muted hover:text-primary disabled:opacity-50"
-            title={branchPr ? `View #${branchPr.number}: ${branchPr.title}` : 'No open PR for this branch'}
-            disabled={!branchPr?.url}
-          >
-            <ExternalLink size={13} />
-            View PR
-          </button>
-          <button
+            type="button"
             onClick={onRefresh}
             className="text-muted hover:text-primary"
             title="Refresh git data"
+            aria-label="Refresh git data"
           >
             <RefreshCw size={13} />
           </button>
@@ -1392,6 +1412,8 @@ export function ManagerChatPage() {
             profile={profile}
             sessionId={sessionId}
             activePrNumber={activeSession?.prNumber}
+            provider={currentProfileInfo.provider}
+            repoUrl={currentProfileInfo.web_url}
             status={gitStatus}
             issues={gitIssues}
             prs={gitPrs}
