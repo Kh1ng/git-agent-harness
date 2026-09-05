@@ -1284,6 +1284,18 @@ export interface SkillBankFile {
   bindingOverrides: string[];
 }
 
+/** POST /api/skills body: id/version/content are required, everything else
+ * is optional and server-defaulted (see apps/server/src/server.ts). */
+export interface SkillCreateData {
+  id: string;
+  version: string;
+  displayName?: string;
+  description?: string;
+  content: string;
+  backends?: string[];
+  source?: string;
+}
+
 export interface SkillSummary {
   id: string;
   version: string;

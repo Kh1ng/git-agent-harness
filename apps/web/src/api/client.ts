@@ -39,6 +39,8 @@ import type {
   GatewayBootstrapCommand,
   GatewaySettingsSummary,
   GatewaySettingsUpdate,
+  Skill,
+  SkillCreateData,
   SkillSummary,
   SkillBindingSummary,
   SkillBindingUpdate,
@@ -224,6 +226,7 @@ export interface GahDataSource {
   revealGatewayBootstrapCommand(): Promise<GatewayBootstrapCommand>;
   updateGatewaySettings(data: GatewaySettingsUpdate): Promise<GatewaySettingsSummary>;
   getSkills(): Promise<{ skills: SkillSummary[] }>;
+  createSkill(data: SkillCreateData): Promise<Skill>;
   getSkillBindings(profile: string, backend: string, sessionId?: string | null): Promise<SkillBindingSummary>;
   setSkillBindings(data: SkillBindingUpdate): Promise<SkillBindingSummary>;
   inheritSkillBindings(profile: string, backend: string, instance?: string | null): Promise<SkillBindingSummary>;
@@ -458,6 +461,9 @@ export const gahApi: GahDataSource = {
   },
   getSkills() {
     return getJson<{ skills: SkillSummary[] }>('/api/skills');
+  },
+  createSkill(data) {
+    return postJson<Skill, SkillCreateData>('/api/skills', data);
   },
   getSkillBindings(profile, backend, sessionId) {
     return getJson<SkillBindingSummary>('/api/skills/bindings', {
