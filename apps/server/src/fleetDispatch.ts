@@ -805,6 +805,7 @@ export class FleetDispatchCoordinator {
     if (leases.length === 0) {
       return;
     }
+    const probes = new Map<string, Promise<{ sessions: Session[] } | null>>();
 
     for (const lease of leases) {
       if (lease.profile !== profile) {
@@ -826,11 +827,14 @@ export class FleetDispatchCoordinator {
         });
         continue;
       }
-      const probe = await this.probeNodeSessions(lease.nodeId, lease.nodeUrl, profile);
+      const probeKey = `${lease.nodeId}\0${lease.nodeUrl}`;
+      const probePromise = probes.get(probeKey) ?? this.probeNodeSessions(lease.nodeId, lease.nodeUrl, profile);
+      probes.set(probeKey, probePromise);
+      const probe = await probePromise;
       if (!probe) {
         this.recordLease({
           ...lease,
-          session: decorateSession(lease.session, lease.nodeId, 'uncertain_reconciling'),
+          session: decorateSession({ ...lease.session, status: 'starting' }, lease.nodeId, 'uncertain_reconciling'),
           state: 'uncertain_reconciling',
           updatedAt: nowIso()
         });

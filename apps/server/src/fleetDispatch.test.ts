@@ -939,6 +939,7 @@ test('fleet dispatch skips unsupported, unavailable, and saturated nodes, and ma
     await coordinator.reconcileLeases('gah');
     const reconciled = coordinator.getSession(routed.id);
     assert.equal(reconciled?.leaseState, 'uncertain_reconciling');
+    assert.equal(reconciled?.status, 'starting');
   } finally {
     try {
       unlinkSync(leaseStorePath);
