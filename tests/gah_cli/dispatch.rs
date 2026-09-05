@@ -2,6 +2,8 @@
 mod operator_pins;
 #[path = "dispatch/planning_and_review.rs"]
 mod planning_and_review;
+#[path = "dispatch/recovery.rs"]
+mod recovery;
 #[path = "dispatch/retry_and_routing.rs"]
 mod retry_and_routing;
 #[path = "dispatch/validation_and_publish.rs"]
