@@ -6,7 +6,9 @@ const SKILL_MD = `---
 id: gah-manager
 version: 2.0.0
 displayName: GAH Manager
-description: Orchestrates GAH work.
+description: |
+  Orchestrates GAH work.
+  Keeps dispatches focused.
 backends: [hermes, codex]
 ---
 
@@ -70,7 +72,7 @@ test.describe('SkillBankSettingsSection', () => {
       id: 'gah-manager',
       version: '2.0.0',
       displayName: 'GAH Manager',
-      description: 'Orchestrates GAH work.',
+      description: 'Orchestrates GAH work.\nKeeps dispatches focused.',
       backends: ['hermes', 'codex'],
       content: SKILL_MD
     });

@@ -44,12 +44,34 @@ export function parseFrontMatterFields(text: string): Record<string, string> {
   const closingIndex = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
   if (closingIndex === -1) return {};
   const fields: Record<string, string> = {};
-  for (const line of lines.slice(1, closingIndex)) {
+  let i = 1;
+  while (i < closingIndex) {
+    const line = lines[i];
     const separator = line.indexOf(':');
-    if (separator === -1) continue;
+    if (separator === -1) { i++; continue; }
     const key = line.slice(0, separator).trim();
-    if (!key) continue;
-    fields[key] = line.slice(separator + 1).trim();
+    if (!key) { i++; continue; }
+    const rawValue = line.slice(separator + 1).trim();
+    // ponytail: handles | and |- only; add > (folded) if real skills use it
+    if (rawValue === '|' || rawValue === '|-' || rawValue === '|+') {
+      const blockLines: string[] = [];
+      let indent = -1;
+      i++;
+      while (i < closingIndex) {
+        const nextLine = lines[i];
+        if (nextLine.trim() === '') { blockLines.push(''); i++; continue; }
+        const lineIndent = nextLine.length - nextLine.trimStart().length;
+        if (indent === -1) indent = lineIndent;
+        if (lineIndent < indent) break;
+        blockLines.push(nextLine.slice(indent));
+        i++;
+      }
+      while (blockLines.length > 0 && blockLines[blockLines.length - 1] === '') blockLines.pop();
+      fields[key] = blockLines.join('\n');
+      continue;
+    }
+    fields[key] = rawValue;
+    i++;
   }
   return fields;
 }
