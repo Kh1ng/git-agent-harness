@@ -183,7 +183,8 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
-            // Keep app alive with no windows open
+            // Keep app alive with no windows open (macOS accessory policy hides the dock icon)
+            #[cfg(target_os = "macos")]
             let _ = app.handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let handle = app.handle().clone();
