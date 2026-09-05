@@ -126,7 +126,7 @@ pub(super) fn recently_capacity_deferred_work_ids(
 /// the event stream used for live activity and the normalized ledger used for
 /// routing/usage reports. `run_once` calls this after acquiring the profile
 /// lock, so an open start is provably abandoned rather than merely slow.
-pub(super) fn reconcile_abandoned_dispatches(
+pub(crate) fn reconcile_abandoned_dispatches(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
     entries: &mut Vec<crate::ledger::LedgerEntry>,

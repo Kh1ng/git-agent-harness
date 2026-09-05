@@ -66,6 +66,8 @@ pub fn run(args: Args) -> Result<()> {
     let run_id = Uuid::new_v4().to_string();
     let resolved_config_path = config::resolve_config_path(args.config_path.as_deref());
     let _lock = controller_runtime::acquire_profile_lock(&args.profile, &resolved_config_path)?;
+    let mut ledger_entries = crate::ledger::read_entries(&cfg)?;
+    controller_runtime::reconcile_abandoned_dispatches(&cfg, &args.profile, &mut ledger_entries)?;
     let dispatch_args = CliDispatchArgs {
         run_id: Some(run_id),
         ..args.into()
