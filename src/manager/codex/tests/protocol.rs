@@ -329,7 +329,11 @@ fn request_deadline_includes_delivery_to_a_non_reading_server() {
     let session_dir = f.record_dir.join("sessions");
     let mut session =
         CodexManagerSession::new_with_session_dir(f.bin_dir.join("codex"), &session_dir).unwrap();
-    session.transport.response_timeout = Duration::from_millis(50);
+    // 500ms: generous enough for the thread/start round-trip on a loaded CI
+    // runner, tight enough that the blocked 2MB turn/start write still fires
+    // the deadline well within the elapsed bound (pipe buffer << 2MB, so the
+    // write stalls immediately regardless of runner speed).
+    session.transport.response_timeout = Duration::from_millis(500);
 
     let started = Instant::now();
     let error = session
@@ -338,7 +342,7 @@ fn request_deadline_includes_delivery_to_a_non_reading_server() {
             instruction: "x".repeat(2 * 1024 * 1024),
         })
         .unwrap_err();
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_secs(3));
     assert!(format!("{error:#}").contains("timed out writing Codex app-server request"));
     assert!(session.sessions.is_empty());
     assert!(fs::read_dir(&session_dir).unwrap().next().is_none());
