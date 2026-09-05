@@ -188,4 +188,6 @@ jobs:
 
       - name: Check desktop application
         if: steps.rust-test-scope.outputs.has_desktop_changes == 'true'
-        run: cargo check --manifest-path apps/desktop/Cargo.toml
+        run: |
+          mkdir -p apps/desktop/dist
+          cargo check --manifest-path apps/desktop/Cargo.toml
