@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Sun, Moon, Info, ExternalLink, Save, Loader2, RefreshCw, Eye, EyeOff, Copy, Check, ChevronRight } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Sun, Moon, Info, ExternalLink, Save, Loader2, RefreshCw, Eye, EyeOff, Copy, Check, ChevronRight, Upload } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -11,6 +11,7 @@ import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
 import { ProfileEditor } from '../components/ProfileEditor.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt } from '../lib/format.js';
+import { skillFromFrontMatter, SkillFrontMatterError } from '../lib/skillFrontMatter.js';
 import { gahApi, GahApiError } from '../api/client.js';
 import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, SkillSummary, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
 
@@ -899,23 +900,84 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
   );
 }
 
-function SkillBankSettingsSection() {
+export function SkillBankSettingsSection() {
   const [skills, setSkills] = useState<SkillSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploaded, setUploaded] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
+  const load = () => {
     gahApi.getSkills()
       .then(({ skills: loaded }) => {
         setSkills(loaded);
         setError(null);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, []);
+  };
+
+  useEffect(load, []);
+
+  const handleFileSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setUploading(true);
+    setUploadError(null);
+    setUploaded(null);
+    try {
+      const text = await file.text();
+      const created = await gahApi.createSkill(skillFromFrontMatter(file.name, text));
+      setUploaded(`${created.id}@${created.version}`);
+      load();
+    } catch (err) {
+      setUploadError(
+        err instanceof SkillFrontMatterError || err instanceof GahApiError || err instanceof Error
+          ? err.message
+          : String(err)
+      );
+    } finally {
+      setUploading(false);
+    }
+  };
 
   return (
     <section className="card-padded">
-      <h3 className="text-sm font-semibold text-primary mb-1">Central skill bank</h3>
-      <p className="text-xs text-muted mb-3">Read-only inventory. Bind skills to projects from Manager Chat.</p>
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-1">
+        <h3 className="text-sm font-semibold text-primary">Central skill bank</h3>
+        <div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".md"
+            onChange={handleFileSelected}
+            className="hidden"
+            aria-label="Upload SKILL.md"
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50 inline-flex items-center gap-1.5"
+          >
+            {uploading ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Upload size={14} aria-hidden="true" />}
+            {uploading ? 'Uploading…' : 'Upload SKILL.md'}
+          </button>
+        </div>
+      </div>
+      <p className="text-xs text-muted mb-3">
+        Bind skills to projects from Manager Chat. Upload a SKILL.md with a leading <code className="font-mono">---</code> front
+        matter block (<code className="font-mono">id</code>, optionally <code className="font-mono">version</code>,{' '}
+        <code className="font-mono">displayName</code>, <code className="font-mono">description</code>,{' '}
+        <code className="font-mono">backends</code>) to add it as a new version.
+      </p>
+      {uploadError && (
+        <p role="alert" className="text-xs text-critical mb-3">Failed to upload skill: {uploadError}</p>
+      )}
+      {uploaded && !uploadError && (
+        <p className="text-xs text-green-600 mb-3">Uploaded {uploaded}.</p>
+      )}
       {error ? (
         <p className="text-xs text-critical">Failed to load skills: {error}</p>
       ) : skills === null ? (
