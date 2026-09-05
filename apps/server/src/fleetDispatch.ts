@@ -741,9 +741,11 @@ export class FleetDispatchCoordinator {
   }
 
   getAllSessions(profile?: string): Session[] {
+    const leases = this.leaseStore.values();
+    const leasedSessionIds = new Set(leases.map((lease) => lease.session.id));
     const sessions = [
-      ...this.localTransport.getSessions(),
-      ...this.leaseStore.values()
+      ...this.localTransport.getSessions().filter((session) => !leasedSessionIds.has(session.id)),
+      ...leases
         .filter((lease) => lease.state !== 'expired' && (!profile || lease.profile === profile))
         .map((lease) => lease.session)
     ];
