@@ -125,6 +125,36 @@ test.describe('Dependency Blockers Component', () => {
     await expect(component.getByText('Blocked by open prerequisite #652')).toBeVisible();
   });
 
+  test('dashboard merge-request links navigate in the current host', async ({ mount }) => {
+    const snapshot = createMockSnapshot([]);
+    snapshot.merge_requests = [{
+      branch: 'fix/dashboard-link',
+      work_id: '#1124',
+      id: '1124',
+      url: 'https://github.com/Kh1ng/git-agent-harness/pull/1124',
+      title: 'Fix dashboard MR link',
+      state: 'open',
+      draft: false,
+      merge_status: null,
+      merged: false,
+      ci_passed: true,
+      ci_pending: false,
+      review_contract_version: 1,
+      classification: 'NEEDS_REVIEW',
+      recommended_action: 'RUN_REVIEW'
+    }];
+
+    const component = await mount(
+      <MockStoreProvider statusData={snapshot}>
+        <WebSocketProvider>
+          <OverviewPage sessions={[mockSession]} onSelectSession={() => {}} onNavigate={() => {}} />
+        </WebSocketProvider>
+      </MockStoreProvider>
+    );
+
+    await expect(component.getByRole('link', { name: 'View MR' })).not.toHaveAttribute('target', '_blank');
+  });
+
   test('renders dependency blockers with cycle state', async ({ mount }) => {
     const cycleDeps = createDependencyBlocker(
       '#1',
