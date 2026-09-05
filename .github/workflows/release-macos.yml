@@ -1,0 +1,64 @@
+name: Release — macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag (e.g. v0.2.0). Created if absent; shared with other release workflows when set.
+        default: ''
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: macOS DMG
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared packages
+        run: npm run build:contracts && npm run build:shared
+
+      - name: Build frontendDist stub
+        working-directory: apps/desktop
+        run: npx vite build
+
+      - name: Build DMG
+        working-directory: apps/desktop
+        run: npx tauri build --bundles dmg
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dmg=$(ls apps/desktop/target/release/bundle/dmg/*.dmg | head -1)
+          tag="${{ github.event.inputs.version }}"
+          if [ -z "$tag" ]; then
+            tag="release-$(date -u +%Y%m%d-%H%M)-macos"
+          fi
+          gh release create "$tag" "$dmg" \
+            --title "GAH Worker — $tag" \
+            --notes "macOS DMG (unsigned — right-click → Open to bypass Gatekeeper on first launch). Built from ${{ github.ref }}." \
+            --repo "${{ github.repository }}" || \
+          gh release upload "$tag" "$dmg" --clobber \
+            --repo "${{ github.repository }}"
