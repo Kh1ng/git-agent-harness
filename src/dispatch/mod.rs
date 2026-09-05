@@ -28,6 +28,7 @@ mod publish;
 mod repair_context;
 mod repo_inspection;
 mod review;
+mod terminal;
 #[cfg(test)]
 mod test_util;
 mod text;
@@ -76,14 +77,6 @@ pub use self::validation::{self_check_validation_gate, ValidationGateError};
 
 fn should_notify_dispatch_failure(error: &anyhow::Error) -> bool {
     review_budget_exhausted_error(error).is_none() && !capacity_deferred_error(error)
-}
-
-fn is_policy_approval_gate(entry: &LedgerEntry) -> bool {
-    entry.human_required
-        && entry.human_required_reason_code.as_deref()
-            == Some(crate::controller::HumanRequiredReason::PolicyApproval.as_str())
-        && entry.failure_class.as_deref()
-            == Some(crate::ledger::FailureClass::HumanBlocked.as_str())
 }
 
 fn ensure_terminal_failure_attribution(
@@ -241,15 +234,10 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         ensure_terminal_failure_attribution(&mut ledger.failure_class, &mut ledger.failure_stage);
         ledger.error_summary = Some(error::summarize_error(err));
     }
-    let policy_approval_gate = is_policy_approval_gate(&ledger);
+    let policy_approval_gate = terminal::is_policy_approval_gate(&ledger);
     let mut new_policy_approval_transition = true;
-    let append_result = if policy_approval_gate {
-        crate::ledger::append_human_gate_if_transition(cfg, &ledger).map(|appended| {
-            new_policy_approval_transition = appended;
-        })
-    } else {
-        crate::ledger::append(cfg, &ledger).map(|_| ())
-    };
+    let append_result = terminal::append_ledger_entry(cfg, &ledger, policy_approval_gate)
+        .map(|appended| new_policy_approval_transition = appended);
     if let Err(err) = append_result {
         eprintln!("warning: failed to append ledger entry: {:#}", err);
     }

@@ -1,6 +1,6 @@
+use super::terminal::{append_ledger_entry, is_policy_approval_gate};
 use super::{
-    capacity_deferred_error, ensure_terminal_failure_attribution, is_policy_approval_gate,
-    should_notify_dispatch_failure,
+    capacity_deferred_error, ensure_terminal_failure_attribution, should_notify_dispatch_failure,
 };
 use crate::routing::{RouteError, SkippedBackend};
 
@@ -60,6 +60,35 @@ fn only_typed_paid_route_human_blocks_are_transition_deduplicated() {
     entry.failure_class = Some("human_blocked".into());
     entry.human_required_reason_code = Some("review_evidence_gate".into());
     assert!(!is_policy_approval_gate(&entry));
+}
+
+#[test]
+fn repeated_policy_approval_terminal_entries_still_get_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = crate::dispatch::test_util::gah_config_with_ledger(
+        tmp.path(),
+        crate::config::RoutingPolicy::default(),
+    );
+    let mut profile = crate::ledger::test_util::profile();
+    profile.artifact_root = tmp.path().display().to_string();
+    cfg.profiles.insert("test".into(), profile.clone());
+
+    let mut entry =
+        crate::ledger::LedgerEntry::new("test", &profile, "auto", "fix", "#639", None, None);
+    entry.work_id = Some("#639".into());
+    entry.human_required = true;
+    entry.human_required_reason_code = Some("policy_approval".into());
+    entry.failure_class = Some("human_blocked".into());
+    entry.failure_stage = Some("route".into());
+
+    assert!(append_ledger_entry(&cfg, &entry, true).unwrap());
+    assert!(!append_ledger_entry(&cfg, &entry, true).unwrap());
+
+    let ledger = crate::ledger::read_entries(&cfg).unwrap();
+    assert_eq!(ledger.len(), 2);
+    assert!(ledger
+        .iter()
+        .all(|row| row.work_id.as_deref() == Some("#639")));
 }
 
 #[test]
