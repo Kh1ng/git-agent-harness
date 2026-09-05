@@ -517,7 +517,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
     };
 
     await fleetDispatch.reconcileLeases(defaultProfile);
-    const sessions = fleetDispatch.getAllSessions();
+    const sessions = fleetDispatch.getAllSessions(defaultProfile);
     const providers = providerRegistry.getAllProviderStatuses();
 
     // Include real GAH data (TICKET-114) via the same gahCli.runStatus()

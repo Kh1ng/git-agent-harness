@@ -115,26 +115,36 @@ test('server.welcome reconciles persisted leases before reporting running sessio
   const leasesPath = join(dir, 'dispatch-leases.json');
   const identity = getCoordinatorIdentity();
   const timestamp = new Date().toISOString();
+  const staleLease = {
+    requestId: 'stale-request',
+    workKey: 'stale-work',
+    profile: 'gah',
+    nodeId: identity.node_id,
+    nodeUrl: identity.advertised_url,
+    session: {
+      id: 'stale-session',
+      providerKind: 'codex',
+      instanceId: 'codex-0',
+      status: 'running',
+      repo: 'owner/repo',
+      mode: 'improve'
+    },
+    state: 'running',
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    coordinatorNodeId: identity.node_id
+  };
   writeFileSync(leasesPath, JSON.stringify({
-    leases: [{
-      requestId: 'stale-request',
-      workKey: 'stale-work',
-      profile: 'gah',
-      nodeId: identity.node_id,
-      nodeUrl: identity.advertised_url,
-      session: {
-        id: 'stale-session',
-        providerKind: 'codex',
-        instanceId: 'codex-0',
-        status: 'running',
-        repo: 'owner/repo',
-        mode: 'improve'
-      },
-      state: 'running',
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      coordinatorNodeId: identity.node_id
-    }]
+    leases: [
+      staleLease,
+      {
+        ...staleLease,
+        requestId: 'other-request',
+        workKey: 'other-work',
+        profile: 'other',
+        session: { ...staleLease.session, id: 'other-session' }
+      }
+    ]
   }));
 
   const previousPath = process.env.GAH_DISPATCH_LEASES_PATH;
@@ -142,9 +152,12 @@ test('server.welcome reconciles persisted leases before reporting running sessio
   try {
     await withWsServer(async (wsUrl) => {
       const ws = new WebSocket(wsUrl);
-      const welcome = await nextWelcome(ws);
-      assert.deepEqual(welcome.sessions, []);
-      ws.close();
+      try {
+        const welcome = await nextWelcome(ws);
+        assert.deepEqual(welcome.sessions, []);
+      } finally {
+        ws.close();
+      }
     });
   } finally {
     if (previousPath === undefined) delete process.env.GAH_DISPATCH_LEASES_PATH;

@@ -740,11 +740,11 @@ export class FleetDispatchCoordinator {
       ?? this.leaseStore.getBySessionId(sessionId)?.session;
   }
 
-  getAllSessions(): Session[] {
+  getAllSessions(profile?: string): Session[] {
     const sessions = [
       ...this.localTransport.getSessions(),
       ...this.leaseStore.values()
-        .filter((lease) => lease.state !== 'expired')
+        .filter((lease) => lease.state !== 'expired' && (!profile || lease.profile === profile))
         .map((lease) => lease.session)
     ];
     const seen = new Set<string>();
@@ -808,7 +808,7 @@ export class FleetDispatchCoordinator {
       if (lease.profile !== profile) {
         continue;
       }
-      if (lease.state === 'terminal') {
+      if (lease.state === 'terminal' || lease.state === 'expired') {
         continue;
       }
       const local = lease.nodeId === this.coordinatorIdentity.node_id
