@@ -45,6 +45,10 @@ jobs:
         working-directory: apps/desktop
         run: npx vite build
 
+      - name: Generate icons
+        working-directory: apps/desktop
+        run: npx tauri icon icons/icon.png
+
       - name: Build NSIS installer
         working-directory: apps/desktop
         run: npx tauri build --bundles nsis

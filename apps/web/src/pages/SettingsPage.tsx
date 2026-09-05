@@ -362,6 +362,10 @@ function DispatchSettingsSection({
   const [parallel, setParallel] = useState<string>('');
   const [validationTimeout, setValidationTimeout] = useState<string>('');
   const [autonomy, setAutonomy] = useState<WakeAutonomyValue>('off');
+  // Tracks which profile name the form was last seeded for. We only seed once
+  // per profile selection — subsequent data refreshes (e.g. a GET after a
+  // PATCH) must not overwrite the user's in-progress edits.
+  const seededProfileRef = useRef<string | null>(null);
 
   const validationTimeoutValue = validationTimeout.trim();
   const parsedValidationTimeout = Number(validationTimeoutValue);
@@ -370,12 +374,14 @@ function DispatchSettingsSection({
     ? 'Validation timeout must be a whole number of seconds greater than zero.'
     : null;
 
-  // Re-seed the form whenever the selected profile changes or its values load.
   useEffect(() => {
-    setParallel(selected?.max_parallel_workers != null ? String(selected.max_parallel_workers) : '');
-    setValidationTimeout(selected?.validation_timeout_seconds != null ? String(selected.validation_timeout_seconds) : '');
-    setAutonomy(selected?.manager_wake_autonomy ?? 'off');
-  }, [selectedName, selected?.max_parallel_workers, selected?.validation_timeout_seconds, selected?.manager_wake_autonomy]);
+    if (!selected) return;
+    if (seededProfileRef.current === selectedName) return;
+    seededProfileRef.current = selectedName;
+    setParallel(selected.max_parallel_workers != null ? String(selected.max_parallel_workers) : '');
+    setValidationTimeout(selected.validation_timeout_seconds != null ? String(selected.validation_timeout_seconds) : '');
+    setAutonomy(selected.manager_wake_autonomy ?? 'off');
+  }, [selectedName, selected]);
 
   if (profileLoading && !selected) {
     return (
