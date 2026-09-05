@@ -24,9 +24,6 @@ jobs:
             artifact_name: gah-macos-universal
             # Build arm64 natively and cross-compile x86_64, then lipo
             extra_targets: x86_64-apple-darwin
-          - os: windows-latest
-            name: CLI — Windows (x86_64)
-            artifact_name: gah-windows-x86_64.exe
           - os: ubuntu-22.04
             name: CLI — Linux (x86_64)
             artifact_name: gah-linux-x86_64
@@ -52,16 +49,11 @@ jobs:
             target/x86_64-apple-darwin/release/gah \
             -output gah-macos-universal
 
-      - name: Build CLI (Windows)
-        if: runner.os == 'Windows'
-        run: cargo build --release --bin gah
-
       - name: Build CLI (Linux)
         if: runner.os == 'Linux'
         run: cargo build --release --bin gah
 
-      - name: Stage artifact (Unix)
-        if: runner.os != 'Windows'
+      - name: Stage artifact
         run: |
           if [ "${{ runner.os }}" = "macOS" ]; then
             cp gah-macos-universal "${{ matrix.artifact_name }}"
@@ -69,11 +61,6 @@ jobs:
             cp target/release/gah "${{ matrix.artifact_name }}"
           fi
           chmod +x "${{ matrix.artifact_name }}"
-
-      - name: Stage artifact (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: cp target/release/gah.exe "${{ matrix.artifact_name }}"
 
       - name: Publish GitHub Release
         shell: bash
@@ -86,7 +73,7 @@ jobs:
           fi
           gh release create "$tag" "${{ matrix.artifact_name }}" \
             --title "GAH CLI — $tag" \
-            --notes "GAH CLI binaries for macOS (universal), Windows (x86_64), and Linux (x86_64). Built from ${{ github.ref }}." \
+            --notes "GAH CLI binaries for macOS (universal arm64+x86_64) and Linux (x86_64). Built from ${{ github.ref }}." \
             --repo "${{ github.repository }}" || \
           gh release upload "$tag" "${{ matrix.artifact_name }}" --clobber \
             --repo "${{ github.repository }}"

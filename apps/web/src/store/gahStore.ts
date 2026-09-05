@@ -288,12 +288,12 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
     set({ profileCrud: { ...get().profileCrud, updating: true, updateError: null } });
     try {
       await gahApi.updateProfile(name, data);
-      set({ 
-        profileCrud: { 
-          ...get().profileCrud, 
-          updating: false, 
-          updateError: null, 
-          lastUpdateSuccess: true 
+      set({
+        profileCrud: {
+          ...get().profileCrud,
+          updating: false,
+          updateError: null,
+          lastUpdateSuccess: true
         },
         // Refresh profiles list
         profiles: { ...get().profiles, loading: true }
@@ -301,13 +301,13 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
       // Re-fetch profiles
       try {
         const profilesData = await gahApi.getProfiles();
-        set({ 
-          profiles: { 
-            data: profilesData, 
-            loading: false, 
-            error: null, 
-            fetchedAt: Date.now(), 
-            key: '' 
+        set({
+          profiles: {
+            data: profilesData,
+            loading: false,
+            error: null,
+            fetchedAt: Date.now(),
+            key: ''
           }
         });
       } catch {
