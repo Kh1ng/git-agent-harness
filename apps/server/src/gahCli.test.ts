@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -9,6 +9,7 @@ import {
   buildProfileSetArgs,
   findGahBinary,
   loopSystemctlArgs,
+  runDispatchCancellable,
   startLoop,
   stopLoop,
 } from './gahCli.js';
@@ -307,5 +308,125 @@ test('with no GAH_BINARY set, resolution is unaffected by the override candidate
   } finally {
     if (original === undefined) delete process.env.GAH_BINARY;
     else process.env.GAH_BINARY = original;
+  }
+});
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) {
+      throw new Error('Timed out waiting for condition');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+// P0 regression: cancel() must kill the whole process tree, not just the
+// direct `gah` child. GAH_BINARY here points at a fake "gah" that forks a
+// grandchild (a background `sleep`) -- the real dispatch/validation
+// processes GAH itself spawns. If cancel() only signalled the direct
+// child (or used the unsupported SpawnOptions.setsid that never took
+// effect), the grandchild would survive.
+test(
+  'cancel() confirms termination of the whole descendant process tree, not just the direct child',
+  { skip: process.platform === 'win32' ? 'process-group signalling is Unix-only' : false },
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gah-descendant-'));
+    const script = join(dir, 'fake-gah');
+    const marker = join(dir, 'grandchild.pid');
+    writeFileSync(
+      script,
+      `#!/bin/sh
+sleep 60 &
+echo $! > "${marker}"
+wait
+`
+    );
+    chmodSync(script, 0o755);
+
+    const original = process.env.GAH_BINARY;
+    process.env.GAH_BINARY = script;
+    try {
+      const dispatch = runDispatchCancellable({ profile: 'p', mode: 'fix' }, () => {});
+
+      await waitUntil(() => existsSync(marker));
+      const grandchildPid = Number.parseInt(readFileSync(marker, 'utf8').trim(), 10);
+      assert.ok(isPidAlive(grandchildPid), 'grandchild should be running before cancellation');
+
+      const result = await dispatch.cancel();
+
+      assert.deepEqual(result, { cancelled: true });
+      assert.equal(
+        isPidAlive(grandchildPid),
+        false,
+        'grandchild must be terminated along with its parent process group'
+      );
+
+      const dispatchResult = await dispatch.promise;
+      assert.notEqual(dispatchResult.exitCode, 0);
+    } finally {
+      if (original === undefined) delete process.env.GAH_BINARY;
+      else process.env.GAH_BINARY = original;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+);
+
+// P0 regression: cancel() must not report success for a pid that never
+// existed / already exited -- it has to return an explicit error rather
+// than a bare "cancelled: true" it cannot actually back up.
+test('cancel() returns an explicit error when the process has already completed', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-already-done-'));
+  const script = join(dir, 'fake-gah');
+  writeFileSync(script, `#!/bin/sh\nexit 0\n`);
+  chmodSync(script, 0o755);
+
+  const original = process.env.GAH_BINARY;
+  process.env.GAH_BINARY = script;
+  try {
+    const dispatch = runDispatchCancellable({ profile: 'p', mode: 'fix' }, () => {});
+    await dispatch.promise;
+
+    const result = await dispatch.cancel();
+    assert.equal(result.cancelled, false);
+    assert.match(result.error ?? '', /already completed/);
+  } finally {
+    if (original === undefined) delete process.env.GAH_BINARY;
+    else process.env.GAH_BINARY = original;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Every caller of cancel() on the same dispatch must observe the exact
+// same settlement, and the underlying kill/confirm sequence must run
+// exactly once -- not once per caller.
+test('cancel() is idempotent: concurrent callers settle on one shared result', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-idempotent-cancel-'));
+  const script = join(dir, 'fake-gah');
+  writeFileSync(script, `#!/bin/sh\nsleep 60\n`);
+  chmodSync(script, 0o755);
+
+  const original = process.env.GAH_BINARY;
+  process.env.GAH_BINARY = script;
+  try {
+    const dispatch = runDispatchCancellable({ profile: 'p', mode: 'fix' }, () => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const [first, second] = await Promise.all([dispatch.cancel(), dispatch.cancel()]);
+    assert.deepEqual(first, { cancelled: true });
+    assert.deepEqual(second, { cancelled: true });
+  } finally {
+    if (original === undefined) delete process.env.GAH_BINARY;
+    else process.env.GAH_BINARY = original;
+    rmSync(dir, { recursive: true, force: true });
   }
 });

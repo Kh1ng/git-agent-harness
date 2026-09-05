@@ -9,7 +9,7 @@
 import { generateSessionId, GAHError } from '@git-agent-harness/shared';
 import { getProviderRegistry } from '../provider/ProviderRegistry.js';
 import { getServerPushBus } from '../serverPushBus.js';
-import { runDispatch, type DispatchOptions, type DispatchResult } from '../gahCli.js';
+import { runDispatchCancellable, type DispatchOptions, type DispatchResult, type CancellableDispatch, type CancellationResult } from '../gahCli.js';
 import type {
   Session, 
   SessionId, 
@@ -49,7 +49,7 @@ type PushBusLike = {
   publish(message: Parameters<ReturnType<typeof getServerPushBus>['publish']>[0]): void;
 };
 
-type DispatchRunner = typeof runDispatch;
+type DispatchRunner = typeof runDispatchCancellable;
 
 type SessionManagerDeps = {
   providerRegistry?: ProviderRegistryLike;
@@ -58,22 +58,18 @@ type SessionManagerDeps = {
   disableCleanupTimer?: boolean;
 };
 
-// Active dispatch processes tracked by sessionId
-class ActiveDispatch {
-  constructor(
-    public readonly sessionId: SessionId,
-    public readonly process: Promise<DispatchResult>,
-    public readonly cancel: () => void
-  ) {}
-}
-
 class SessionManagerImpl {
   private sessions: Map<SessionId, Session> = new Map();
   private requestToSessionId: Map<string, SessionId> = new Map();
   private pendingSessions: Map<string, Promise<Session>> = new Map();
   private outputBuffers: Map<SessionId, { stdout: string[]; stderr: string[] }> = new Map();
-  private activeDispatches: Map<SessionId, ActiveDispatch> = new Map();
+  private activeDispatches: Map<SessionId, CancellableDispatch> = new Map();
   private profileDispatchTails: Map<string, Promise<void>> = new Map();
+  // Sessions cancelled while still queued behind another same-profile
+  // dispatch. Scoped to a single sessionId only -- never the whole profile
+  // -- so stopping one session can never drop or misfire an unrelated
+  // queued session for the same profile.
+  private cancelledSessions: Set<SessionId> = new Set();
   private providerRegistry: ProviderRegistryLike;
   private pushBus: PushBusLike;
   private dispatchRunner: DispatchRunner;
@@ -81,7 +77,7 @@ class SessionManagerImpl {
   constructor(deps: SessionManagerDeps = {}) {
     this.providerRegistry = deps.providerRegistry ?? getProviderRegistry();
     this.pushBus = deps.pushBus ?? getServerPushBus();
-    this.dispatchRunner = deps.dispatchRunner ?? runDispatch;
+    this.dispatchRunner = deps.dispatchRunner ?? runDispatchCancellable;
 
     // Set up periodic session cleanup. unref() so this housekeeping timer
     // never keeps the process (or a test importing this singleton) alive.
@@ -155,7 +151,7 @@ class SessionManagerImpl {
     
     this.sessions.set(sessionId, session);
     this.outputBuffers.set(sessionId, { stdout: [], stderr: [] });
-    
+
     // Notify about session start immediately
     this.pushBus.publish({
       type: 'session.started',
@@ -181,61 +177,111 @@ class SessionManagerImpl {
     };
     
     // Start the actual gah dispatch process
-    const dispatchPromise = this.runDispatchProcess(sessionId, dispatchOptions);
+    const cancellableDispatch = this.startDispatchProcess(sessionId, dispatchOptions);
     
     // Store the active dispatch so we can potentially cancel it
-    this.activeDispatches.set(sessionId, new ActiveDispatch(
-      sessionId,
-      dispatchPromise,
-      () => {
-        // Cancel logic would go here
-        // For now, we don't have a way to cancel a running dispatch
-        console.log(`Cancel requested for session ${sessionId}`);
-      }
-    ));
+    this.activeDispatches.set(sessionId, cancellableDispatch);
     
     // Wait for dispatch to complete (but don't block the session start)
-    dispatchPromise.then((result) => {
+    cancellableDispatch.promise.then((result) => {
       this.handleDispatchComplete(sessionId, result);
     }).catch((error) => {
       this.handleDispatchError(sessionId, error);
     });
     
-    // Return immediately. runDispatchProcess promotes it after the profile
-    // queue grants this session the CLI slot.
+    // Return the session immediately - it's now running
+    session.status = 'running';
+    this.sessions.set(sessionId, session);
+    
     return session;
   }
   
   /**
    * Run the actual gah dispatch process and stream output
    */
-  private async runDispatchProcess(
+  private startDispatchProcess(
     sessionId: SessionId,
     options: DispatchOptions
-  ): Promise<DispatchResult> {
+  ): CancellableDispatch {
     const previous = this.profileDispatchTails.get(options.profile) ?? Promise.resolve();
-    let release!: () => void;
+    let release: () => void;
     const slot = new Promise<void>((resolve) => { release = resolve; });
+    // Serializes same-profile dispatches: the next queued dispatch on this
+    // profile awaits `tail`, which only resolves once `release()` runs --
+    // and `release()` is not called until this dispatch's own termination
+    // (natural completion or cancel()) has finished. So the profile stays
+    // serialized for as long as this dispatch's process tree is alive.
     const tail = previous.catch(() => undefined).then(() => slot);
     this.profileDispatchTails.set(options.profile, tail);
-    await previous.catch(() => undefined);
-    try {
+
+    // Deferred: the real dispatch process is only started once it's this
+    // session's turn in the profile queue (see startAfterPrevious below).
+    let actualDispatch: CancellableDispatch | null = null;
+
+    const startAfterPrevious = async (): Promise<CancellableDispatch> => {
+      await previous.catch(() => undefined);
+
+      // A session cancelled while still queued must never start -- and
+      // this check is scoped to exactly this sessionId, so stopping one
+      // queued session can never skip an unrelated sibling on the same
+      // profile.
+      if (this.cancelledSessions.has(sessionId)) {
+        this.cancelledSessions.delete(sessionId);
+        return {
+          promise: Promise.resolve({ exitCode: -1, stderr: 'Session was cancelled before starting' }),
+          cancel: async () => ({ cancelled: true })
+        };
+      }
+
+      // Promote status now that this session owns the profile slot.
       const session = this.sessions.get(sessionId);
       if (session?.status === 'starting') {
         session.status = 'running';
         this.sessions.set(sessionId, session);
         this.pushBus.publish({ type: 'session.status', session });
       }
-      return await this.dispatchRunner(options, (line: string) => {
+
+      actualDispatch = this.dispatchRunner(options, (line: string) => {
         // Forward each line as session.stdout message
         this.addSessionOutput(sessionId, line, false);
       });
-    } finally {
-      release();
-      if (this.profileDispatchTails.get(options.profile) === tail) {
-        this.profileDispatchTails.delete(options.profile);
-      }
-    }
+      return actualDispatch;
+    };
+
+    // Start the process after previous completes
+    const dispatchPromise = startAfterPrevious().then(dispatch => dispatch.promise);
+
+    const promise = new Promise<DispatchResult>((resolve, reject) => {
+      dispatchPromise
+        .then(resolve, reject)
+        .finally(() => {
+          release();
+          if (this.profileDispatchTails.get(options.profile) === tail) {
+            this.profileDispatchTails.delete(options.profile);
+          }
+        });
+    });
+
+    let cancelPromise: Promise<CancellationResult> | null = null;
+
+    // Memoized so every caller observes the same settlement and the
+    // underlying process-tree termination only runs once per dispatch.
+    const cancel = (): Promise<CancellationResult> => {
+      if (cancelPromise) return cancelPromise;
+
+      cancelPromise = (async (): Promise<CancellationResult> => {
+        const result = actualDispatch ? await actualDispatch.cancel() : { cancelled: true };
+        release();
+        if (this.profileDispatchTails.get(options.profile) === tail) {
+          this.profileDispatchTails.delete(options.profile);
+        }
+        return result;
+      })();
+
+      return cancelPromise;
+    };
+
+    return { promise, cancel };
   }
   
   /**
@@ -246,6 +292,12 @@ class SessionManagerImpl {
     if (!session) return;
     
     this.activeDispatches.delete(sessionId);
+    
+    // Do not overwrite terminal state if session was already stopped/stopping
+    if (session.status === 'stopped' || session.status === 'stopping' || session.status === 'error') {
+      // Session was already cancelled or stopped, ignore late completion
+      return;
+    }
     
     if (result.exitCode === 0) {
       session.status = 'stopped';
@@ -281,6 +333,12 @@ class SessionManagerImpl {
     
     this.activeDispatches.delete(sessionId);
     
+    // Do not overwrite terminal state if session was already stopped/stopping
+    if (session.status === 'stopped' || session.status === 'stopping' || session.status === 'error') {
+      // Session was already cancelled or stopped, ignore late error
+      return;
+    }
+    
     session.status = 'error';
     session.error = error instanceof Error ? error.message : String(error);
     session.endedAt = new Date().toISOString();
@@ -303,34 +361,65 @@ class SessionManagerImpl {
       return session;
     }
     
-    // If there's an active dispatch, cancel it
-    const activeDispatch = this.activeDispatches.get(sessionId);
-    if (activeDispatch) {
-      activeDispatch.cancel();
-      this.activeDispatches.delete(sessionId);
-    }
-    
-    // Update session status
+    // Mark only this session as cancelled -- if it is still queued behind
+    // another same-profile dispatch, startAfterPrevious will see this and
+    // skip starting it. This deliberately never touches any other session,
+    // queued or running, on the same profile.
+    this.cancelledSessions.add(sessionId);
+
+    // Update session status to stopping
     session.status = 'stopping';
     this.sessions.set(sessionId, session);
     
-    // Notify about session stop
-      this.pushBus.publish({
-        type: 'session.status',
-        session
-      });
-    
-    // Mark as stopped after a brief delay
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
-    session.status = 'stopped';
+    // Notify about session stop request
+    this.pushBus.publish({
+      type: 'session.status',
+      session
+    });
+
+    // If there's an active dispatch, cancel it and wait for the process
+    // tree to actually terminate before reporting success. A late-arriving
+    // timeout or an unconfirmed kill must surface as an explicit error, not
+    // a silent "stopped".
+    const activeDispatch = this.activeDispatches.get(sessionId);
+    if (activeDispatch) {
+      this.activeDispatches.delete(sessionId);
+
+      try {
+        const cancelTimeout = new Promise<{ timedOut: true }>((resolve) => {
+          setTimeout(() => resolve({ timedOut: true }), 30000); // 30 second timeout
+        });
+
+        const outcome = await Promise.race([
+          activeDispatch.cancel().then((result) => ({ timedOut: false as const, result })),
+          cancelTimeout
+        ]);
+
+        if (outcome.timedOut) {
+          session.status = 'error';
+          session.error = 'Session cancellation timed out';
+        } else if (!outcome.result.cancelled) {
+          session.status = 'error';
+          session.error = outcome.result.error ?? 'Session cancellation failed';
+        } else {
+          session.status = 'stopped';
+        }
+      } catch (error) {
+        session.status = 'error';
+        session.error = `Error during cancellation: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    } else {
+      // No active dispatch, just mark as stopped
+      session.status = 'stopped';
+    }
+
     session.endedAt = new Date().toISOString();
     this.sessions.set(sessionId, session);
-    
+
     // Clean up output buffers
     this.outputBuffers.delete(sessionId);
-    
-    // Notify about session stop
+
+    // Notify about session stop - only after cancellation completes or times out
     this.pushBus.publish({
       type: 'session.stopped',
       session
