@@ -1,0 +1,79 @@
+name: Release — Linux
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag (e.g. v0.2.0). Created if absent; shared with other release workflows when set.
+        default: ''
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Linux AppImage
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop
+
+      - name: Install Tauri Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared packages
+        run: npm run build:contracts && npm run build:shared
+
+      - name: Build frontendDist stub
+        working-directory: apps/desktop
+        run: npx vite build
+
+      - name: Build AppImage
+        working-directory: apps/desktop
+        run: npx tauri build --bundles appimage
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          appimage=$(ls apps/desktop/target/release/bundle/appimage/*.AppImage | head -1)
+          tag="${{ github.event.inputs.version }}"
+          if [ -z "$tag" ]; then
+            tag="release-$(date -u +%Y%m%d-%H%M)-linux"
+          fi
+          gh release create "$tag" "$appimage" \
+            --title "GAH Worker — $tag" \
+            --notes "Linux AppImage (portable, no install needed — chmod +x and run). Built from ${{ github.ref }}." \
+            --repo "${{ github.repository }}" || \
+          gh release upload "$tag" "$appimage" --clobber \
+            --repo "${{ github.repository }}"

@@ -1,0 +1,92 @@
+name: Release — CLI
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag (e.g. v0.2.0). Created if absent; shared with other release workflows when set.
+        default: ''
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: CLI — macOS (universal)
+            artifact_name: gah-macos-universal
+            # Build arm64 natively and cross-compile x86_64, then lipo
+            extra_targets: x86_64-apple-darwin
+          - os: windows-latest
+            name: CLI — Windows (x86_64)
+            artifact_name: gah-windows-x86_64.exe
+          - os: ubuntu-22.04
+            name: CLI — Linux (x86_64)
+            artifact_name: gah-linux-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.extra_targets || '' }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build CLI (macOS universal)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --bin gah --target aarch64-apple-darwin
+          cargo build --release --bin gah --target x86_64-apple-darwin
+          lipo -create \
+            target/aarch64-apple-darwin/release/gah \
+            target/x86_64-apple-darwin/release/gah \
+            -output gah-macos-universal
+
+      - name: Build CLI (Windows)
+        if: runner.os == 'Windows'
+        run: cargo build --release --bin gah
+
+      - name: Build CLI (Linux)
+        if: runner.os == 'Linux'
+        run: cargo build --release --bin gah
+
+      - name: Stage artifact (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cp gah-macos-universal "${{ matrix.artifact_name }}"
+          else
+            cp target/release/gah "${{ matrix.artifact_name }}"
+          fi
+          chmod +x "${{ matrix.artifact_name }}"
+
+      - name: Stage artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cp target/release/gah.exe "${{ matrix.artifact_name }}"
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.version }}"
+          if [ -z "$tag" ]; then
+            tag="release-$(date -u +%Y%m%d-%H%M)-cli"
+          fi
+          gh release create "$tag" "${{ matrix.artifact_name }}" \
+            --title "GAH CLI — $tag" \
+            --notes "GAH CLI binaries for macOS (universal), Windows (x86_64), and Linux (x86_64). Built from ${{ github.ref }}." \
+            --repo "${{ github.repository }}" || \
+          gh release upload "$tag" "${{ matrix.artifact_name }}" --clobber \
+            --repo "${{ github.repository }}"

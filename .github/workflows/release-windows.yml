@@ -1,0 +1,67 @@
+name: Release — Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag (e.g. v0.2.0). Created if absent; shared with other release workflows when set.
+        default: ''
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Windows NSIS installer
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust (stable MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared packages
+        run: npm run build:contracts && npm run build:shared
+
+      - name: Build frontendDist stub
+        working-directory: apps/desktop
+        run: npx vite build
+
+      - name: Build NSIS installer
+        working-directory: apps/desktop
+        run: npx tauri build --bundles nsis
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          exe=$(ls apps/desktop/target/release/bundle/nsis/*.exe | head -1)
+          tag="${{ github.event.inputs.version }}"
+          if [ -z "$tag" ]; then
+            tag="release-$(date -u +%Y%m%d-%H%M)-windows"
+          fi
+          gh release create "$tag" "$exe" \
+            --title "GAH Worker — $tag" \
+            --notes "Windows NSIS silent installer. One-liner install: see scripts/install-windows.ps1. Built from ${{ github.ref }}." \
+            --repo "${{ github.repository }}" || \
+          gh release upload "$tag" "$exe" --clobber \
+            --repo "${{ github.repository }}"
