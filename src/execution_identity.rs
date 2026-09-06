@@ -268,11 +268,10 @@ mod tests {
     #[test]
     fn durable_labels_reject_paths_and_token_material() {
         assert!(validate_operator_label("backend instance", "/home/user/codex").is_err());
-        assert!(validate_operator_label(
-            "backend instance",
-            "sk-abcdefghijklmnopqrstuvwxyz123456"
-        )
-        .is_err());
+        assert!(
+            validate_operator_label("backend instance", "sk-abcdefghijklmnopqrstuvwxyz123456")
+                .is_err()
+        );
         assert_eq!(
             validate_operator_label("backend instance", " codex-main ").unwrap(),
             "codex-main"

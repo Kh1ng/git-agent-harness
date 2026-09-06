@@ -157,8 +157,7 @@ fn validate_instance(
         ("quota pool", instance.quota_pool.as_deref()),
     ] {
         if let Some(value) = value {
-            if let Err(error) = crate::execution_identity::validate_operator_label(field, value)
-            {
+            if let Err(error) = crate::execution_identity::validate_operator_label(field, value) {
                 errors.push(format!("instance '{name}': {error:#}"));
             }
         }
