@@ -2,6 +2,61 @@
 
 `gah` is a CLI that runs coding agents against real repositories with guardrails around git worktrees, validation, pushing, draft MR/PR creation, PM ticket decomposition, session logging, and cleanup.
 
+## Binary releases (no build required)
+
+Pre-built binaries are published to [GitHub Releases](https://github.com/Kh1ng/git-agent-harness/releases). A GitHub token with `repo` read scope is required because the repository is private.
+
+### Windows — desktop worker (NSIS installer)
+
+```powershell
+$env:GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
+irm "https://raw.githubusercontent.com/Kh1ng/git-agent-harness/main/scripts/install-windows.ps1" | iex
+```
+
+Smoke test: GAH Worker appears in the system tray after install.
+
+### Linux — desktop worker (AppImage)
+
+```bash
+export GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
+ASSET_ID=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/repos/Kh1ng/git-agent-harness/releases/latest" \
+  | python3 -c "import sys,json; a=[x for x in json.load(sys.stdin)['assets'] if x['name'].endswith('.AppImage')]; print(a[0]['id'])")
+curl -L -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/octet-stream" \
+  "https://api.github.com/repos/Kh1ng/git-agent-harness/releases/assets/$ASSET_ID" \
+  -o GAH-Worker.AppImage
+chmod +x GAH-Worker.AppImage && ./GAH-Worker.AppImage
+```
+
+Smoke test: GAH Worker appears in the system tray.
+
+### CLI binary (`gah`) — Linux or macOS
+
+```bash
+export GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
+# Linux: gah-linux-x86_64 | macOS: gah-macos-universal
+ASSET_NAME="gah-linux-x86_64"
+ASSET_ID=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/repos/Kh1ng/git-agent-harness/releases/latest" \
+  | python3 -c "import sys,json; a=[x for x in json.load(sys.stdin)['assets'] if x['name']=='$ASSET_NAME']; print(a[0]['id'])")
+curl -L -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/octet-stream" \
+  "https://api.github.com/repos/Kh1ng/git-agent-harness/releases/assets/$ASSET_ID" \
+  -o /usr/local/bin/gah && chmod +x /usr/local/bin/gah
+```
+
+Smoke test:
+
+```bash
+gah --help
+gah doctor
+```
+
+---
+
 ## Requirements
 
 - `git`

@@ -13,7 +13,7 @@ import { resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
 import { setChatSessionStoreOptions } from './managerChat/chatSessions.js';
 import { appendEvents } from './managerChat/sessionLog.js';
 
-const NOW = Date.parse('2026-08-30T12:00:00Z');
+const NOW = Date.now();
 
 test('GET /api/usage/rollup aggregates session-log usage and bounds the window', async () => {
   resetCachedCoordinatorIdentity();
