@@ -379,7 +379,7 @@ pub fn record_unavailable(
     now: OffsetDateTime,
 ) -> Result<()> {
     let quota_pool = quota_pool
-        .map(|pool| crate::execution_identity::validate_secret_safe_label("quota pool", pool))
+        .map(|pool| crate::execution_identity::validate_operator_label("quota pool", pool))
         .transpose()?;
     let record = AvailabilityRecord {
         backend: backend.to_string(),
@@ -407,7 +407,7 @@ pub fn record_available(
     now: OffsetDateTime,
 ) -> Result<()> {
     let quota_pool = quota_pool
-        .map(|pool| crate::execution_identity::validate_secret_safe_label("quota pool", pool))
+        .map(|pool| crate::execution_identity::validate_operator_label("quota pool", pool))
         .transpose()?;
     let record = AvailabilityRecord {
         backend: backend.to_string(),
@@ -435,14 +435,14 @@ pub fn record_unavailable_for_identity(
     last_error_summary: Option<String>,
     now: OffsetDateTime,
 ) -> Result<()> {
-    let backend_instance = crate::execution_identity::validate_secret_safe_label(
+    let backend_instance = crate::execution_identity::validate_operator_label(
         "backend instance",
         &identity.backend_instance,
     )?;
     let quota_pool = identity
         .quota_pool
         .as_deref()
-        .map(|pool| crate::execution_identity::validate_secret_safe_label("quota pool", pool))
+        .map(|pool| crate::execution_identity::validate_operator_label("quota pool", pool))
         .transpose()?;
     let record = AvailabilityRecord {
         backend: identity.logical_backend.clone(),
@@ -466,14 +466,14 @@ pub fn record_available_for_identity(
     source: Source,
     now: OffsetDateTime,
 ) -> Result<()> {
-    let backend_instance = crate::execution_identity::validate_secret_safe_label(
+    let backend_instance = crate::execution_identity::validate_operator_label(
         "backend instance",
         &identity.backend_instance,
     )?;
     let quota_pool = identity
         .quota_pool
         .as_deref()
-        .map(|pool| crate::execution_identity::validate_secret_safe_label("quota pool", pool))
+        .map(|pool| crate::execution_identity::validate_operator_label("quota pool", pool))
         .transpose()?;
     let record = AvailabilityRecord {
         backend: identity.logical_backend.clone(),
@@ -948,11 +948,11 @@ pub mod cli {
         let backend = crate::config::canonical_backend_name(backend).to_string();
         let backend_instance = backend_instance
             .map(|instance| {
-                crate::execution_identity::validate_secret_safe_label("backend instance", instance)
+                crate::execution_identity::validate_operator_label("backend instance", instance)
             })
             .transpose()?;
         let quota_pool = quota_pool
-            .map(|pool| crate::execution_identity::validate_secret_safe_label("quota pool", pool))
+            .map(|pool| crate::execution_identity::validate_operator_label("quota pool", pool))
             .transpose()?;
         let now = OffsetDateTime::now_utc();
         let record = AvailabilityRecord {
