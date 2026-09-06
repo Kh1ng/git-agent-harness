@@ -55,9 +55,7 @@ jobs:
 
       - name: Stage artifact
         run: |
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            cp gah-macos-universal "${{ matrix.artifact_name }}"
-          else
+          if [ "${{ runner.os }}" != "macOS" ]; then
             cp target/release/gah "${{ matrix.artifact_name }}"
           fi
           chmod +x "${{ matrix.artifact_name }}"
