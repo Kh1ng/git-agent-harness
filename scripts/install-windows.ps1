@@ -27,6 +27,17 @@ function Download-SetupFile([string]$Name, [string]$Destination) {
     Invoke-WebRequest -UseBasicParsing -Uri "$CentralUrl/api/settings/nodes/$Name" -Headers @{ Authorization = "Bearer $CoordinatorToken" } -OutFile $Destination
 }
 
+# Installer reruns change the connection, not the operator's desktop preferences.
+function Save-DesktopConnection([string]$Path, [string]$Address, [string]$Distribution) {
+    $settings = if (Test-Path -LiteralPath $Path) {
+        Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    } else { [pscustomobject]@{} }
+    if ($settings -isnot [pscustomobject]) { throw "Desktop settings at $Path must be a JSON object. Repair the file before rerunning setup." }
+    $settings | Add-Member -NotePropertyName central_url -NotePropertyValue $Address -Force
+    $settings | Add-Member -NotePropertyName wsl_distribution -NotePropertyValue $Distribution -Force
+    [IO.File]::WriteAllText($Path, ($settings | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+}
+
 if ($CentralUrl) {
     $uri = [uri]$CentralUrl
     if ($uri.Scheme -notin @('http', 'https') -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $uri.AbsolutePath -ne '/') { throw 'CentralUrl must be an HTTP(S) origin without credentials or a path.' }
@@ -77,7 +88,7 @@ try {
     New-Item -ItemType Directory -Path $configDir -Force | Out-Null
     $utf8 = New-Object Text.UTF8Encoding($false)
     if ($CentralUrl) {
-        [IO.File]::WriteAllText((Join-Path $configDir 'desktop.json'), (@{ central_url = $CentralUrl; wsl_distribution = $WslDistribution } | ConvertTo-Json), $utf8)
+        Save-DesktopConnection (Join-Path $configDir 'desktop.json') $CentralUrl $WslDistribution
     }
     if ($Role -ne 'desktop') {
         $connection = Test-NetConnection -ComputerName ([uri]$CentralUrl).DnsSafeHost -Port ([uri]$CentralUrl).Port -InformationLevel Detailed -WarningAction SilentlyContinue
