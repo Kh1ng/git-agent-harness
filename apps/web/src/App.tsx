@@ -2,6 +2,11 @@ import { lazy, Suspense, useState } from 'react';
 import { LoadingState } from './components/ui/EmptyState.js';
 import { useWebSocket } from './ws/WebSocketContext.js';
 import { OverviewPage } from './pages/OverviewPage.js';
+import { Navbar } from './components/Navbar.js';
+import { ConnectionStatus } from './components/ConnectionStatus.js';
+import { SessionDetailModal } from './components/SessionDetailModal.js';
+import type { Session } from '@git-agent-harness/contracts';
+
 const WorkPage = lazy(() => import('./pages/WorkPage.js').then((module) => ({ default: module.WorkPage })));
 const TelemetryPage = lazy(() => import('./pages/TelemetryPage.js').then((module) => ({ default: module.TelemetryPage })));
 const QuotaPage = lazy(() => import('./pages/QuotaPage.js').then((module) => ({ default: module.QuotaPage })));
@@ -9,18 +14,9 @@ const EventsPage = lazy(() => import('./pages/EventsPage.js').then((module) => (
 const SettingsPage = lazy(() => import('./pages/SettingsPage.js').then((module) => ({ default: module.SettingsPage })));
 const ManagerChatPage = lazy(() => import('./pages/ManagerChatPage.js').then((module) => ({ default: module.ManagerChatPage })));
 const GitPage = lazy(() => import('./pages/GitPage.js').then((module) => ({ default: module.GitPage })));
-import { Navbar } from './components/Navbar.js';
-import { ConnectionStatus } from './components/ConnectionStatus.js';
-import { SessionDetailModal } from './components/SessionDetailModal.js';
-import type { Session } from '@git-agent-harness/contracts';
+const NodesPage = lazy(() => import('./pages/NodesPage.js').then((module) => ({ default: module.NodesPage })));
 
-// Overview / Work / Telemetry / Quota / Events / Settings -- consolidated
-// from the task's preferred 8-section nav. "Models" is a tab within
-// Telemetry (same report data, same page) rather than a separate route;
-// "Reviews" is exposed inside a work item's attempt timeline (a review is
-// just a ledger entry tied to a work_id) rather than its own top-level
-// data-fetch layer. See the final report for the full rationale.
-export type Page = 'overview' | 'work' | 'telemetry' | 'quota' | 'events' | 'settings' | 'chat' | 'git';
+export type Page = 'overview' | 'work' | 'telemetry' | 'quota' | 'events' | 'settings' | 'chat' | 'git' | 'nodes';
 
 export function App() {
   const [currentPage, setCurrentPage] = useState<Page>('overview');
@@ -29,6 +25,8 @@ export function App() {
 
   const renderPage = () => {
     switch (currentPage) {
+      case 'nodes':
+        return <NodesPage />;
       case 'work':
         return <WorkPage sessions={sessions} onSelectSession={setSelectedSession} />;
       case 'telemetry':

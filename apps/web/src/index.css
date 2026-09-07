@@ -5,6 +5,7 @@
 /* Semantic text colors meet 4.5:1 on page, card, and raised surfaces.
    Chart series remain independent from status text and button fills. */
 :root {
+  color-scheme: dark;
   --surface-page: 13 13 13;      /* #0d0d0d */
   --surface-card: 26 26 25;      /* #1a1a19 */
   --surface-raised: 35 35 33;    /* #232321, one step up for popovers/modals */
@@ -36,6 +37,7 @@
 }
 
 [data-theme='light'] {
+  color-scheme: light;
   --surface-page: 249 249 247;   /* #f9f9f7 */
   --surface-card: 252 252 251;   /* #fcfcfb */
   --surface-raised: 255 255 255;
@@ -66,6 +68,7 @@
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']) {
+    color-scheme: light;
     --surface-page: 249 249 247;
     --surface-card: 252 252 251;
     --surface-raised: 255 255 255;
@@ -123,6 +126,10 @@
 }
 
 @layer components {
+  .input {
+    @apply rounded-md border border-subtle bg-raised px-3 py-2 text-sm text-primary placeholder:text-muted disabled:opacity-50;
+  }
+
   .card {
     @apply bg-card border border-subtle rounded-lg;
   }
