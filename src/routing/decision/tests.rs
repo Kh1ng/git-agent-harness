@@ -15,6 +15,60 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 #[test]
+fn explicit_backend_never_uses_configured_fallback() {
+    for mode in ["review", "improve", "fix", "pm", "research", "experiment"] {
+        let tmp = TempDir::new().unwrap();
+        let mut profile = profile();
+        profile.routing.allow_review_fallback = true;
+        profile.routing.allow_implementation_fallback = true;
+        let candidates = vec![
+            candidate_config("vibe", Some("mistral-medium-3.5"), None),
+            candidate_config("codex", Some("gpt-5.4-mini"), None),
+        ];
+        profile.routing.review_candidates = Some(candidates.clone());
+        profile.routing.improve_candidates = Some(candidates);
+        let request = RouteRequest {
+            mode,
+            requested_backend: "vibe",
+            requested_model: Some("mistral-medium-3.5"),
+            recommended_backend: None,
+            recommended_model: None,
+            session_id: None,
+            usage_summary: None,
+            last_failure_class: None,
+            exact_route_required: false,
+        };
+        let now = OffsetDateTime::now_utc();
+        let selected = decide_with(
+            &defaults(),
+            &profile,
+            request.clone(),
+            &path(&tmp),
+            now,
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(selected.requested_backend, selected.effective_backend);
+        assert_eq!(selected.requested_model, selected.effective_model);
+        assert!(!selected.fallback_used);
+
+        let err = decide_with(
+            &defaults(),
+            &profile,
+            request,
+            &path(&tmp),
+            now,
+            |backend| backend != "vibe",
+        )
+        .expect_err(mode);
+        assert!(matches!(err.downcast_ref::<RouteError>(),
+            Some(RouteError::NoEligibleBackend { preferred_backend, skipped, .. })
+                if preferred_backend == "vibe" && skipped.len() == 1 && skipped[0].backend == "vibe"
+        ));
+    }
+}
+
+#[test]
 fn codex_fallback_model_extracted_from_profile_codex_args() {
     let tmp = TempDir::new().unwrap();
     let defaults = defaults();
@@ -559,6 +613,8 @@ fn all_candidates_unavailable_returns_earliest_reset() {
 fn fallback_route_records_availability_reason() {
     let tmp = TempDir::new().unwrap();
     let now = OffsetDateTime::now_utc();
+    let mut profile = profile();
+    profile.routing.review_backend = Some("claude".into());
     record_unavailable(
         &path(&tmp),
         "claude",
@@ -573,11 +629,11 @@ fn fallback_route_records_availability_reason() {
 
     let decision = decide_with(
         &defaults(),
-        &profile(),
+        &profile,
         RouteRequest {
             last_failure_class: None,
             mode: "review",
-            requested_backend: "claude",
+            requested_backend: "auto",
             requested_model: None,
             recommended_backend: None,
             recommended_model: None,
@@ -593,7 +649,7 @@ fn fallback_route_records_availability_reason() {
     .unwrap();
 
     assert_eq!(decision.effective_backend, "codex");
-    assert_eq!(decision.identity.requested_backend, "claude");
+    assert_eq!(decision.identity.requested_backend, "auto");
     assert_eq!(decision.identity.logical_backend, "codex");
     assert_eq!(decision.identity.runner_kind, "codex");
     assert_eq!(decision.identity.backend_instance, "codex");
@@ -1186,7 +1242,7 @@ fn validation_retry_returns_structured_no_route_when_all_candidates_were_tried()
 }
 
 #[test]
-fn explicit_retry_preserves_configured_backend_model_pairs() {
+fn explicit_retry_cannot_switch_backend() {
     let tmp = TempDir::new().unwrap();
     let now = OffsetDateTime::now_utc();
     let mut profile = profile();
@@ -1201,7 +1257,7 @@ fn explicit_retry_preserves_configured_backend_model_pairs() {
         .dispatch_attempted
         .insert(CandidateIdentity::new("codex", Some("gpt-5.4-mini")));
 
-    let decision = decide_with_runtime(
+    let err = decide_with_runtime(
         &defaults(),
         &profile,
         RouteRequest {
@@ -1221,13 +1277,13 @@ fn explicit_retry_preserves_configured_backend_model_pairs() {
         now,
         backend_available,
     )
-    .unwrap();
-
-    assert_eq!(decision.effective_backend, "opencode");
-    assert_eq!(
-        decision.effective_model.as_deref(),
-        Some("opencode/hy3-free")
-    );
+    .unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<RouteError>(),
+        Some(RouteError::NoEligibleBackend { preferred_backend, skipped, .. })
+            if preferred_backend == "codex" && skipped.len() == 1
+                && skipped[0].reason == "already_attempted_after_capability_failure"
+    ));
 }
 
 #[test]

@@ -3,10 +3,9 @@
 use super::diagnostics::build_routing_diagnostics;
 use super::policy::{
     any_available_backend, append_reorder_reason, auto_candidates, builtin_backend,
-    configured_route_candidate, configured_route_requires_approval, explicit_candidates,
-    is_genuine_agent_failure, order_candidates, policy_backend_model, policy_candidates,
-    review_fallback_backend, review_fallback_model, same_destination, task_rule_candidates,
-    RouteCandidate,
+    configured_route_candidate, configured_route_requires_approval, is_genuine_agent_failure,
+    order_candidates, policy_backend_model, policy_candidates, review_fallback_backend,
+    review_fallback_model, same_destination, task_rule_candidates, RouteCandidate,
 };
 use super::reservation::max_concurrent_skip;
 use super::types::{
@@ -307,7 +306,6 @@ where
         // triggers for requested_backend == "auto"), so the candidate list
         // is never consulted here.
         return route_explicit(
-            defaults,
             profile,
             &effective_routing,
             req,
@@ -589,9 +587,9 @@ where
     ))
 }
 
+/// Evaluate only the requested destination; unavailability is a typed error.
 #[allow(clippy::too_many_arguments)]
 fn route_explicit<F>(
-    defaults: &Defaults,
     profile: &Profile,
     effective_routing: &RoutingPolicy,
     req: RouteRequest<'_>,
@@ -605,23 +603,9 @@ fn route_explicit<F>(
 where
     F: Fn(&str) -> bool + Copy,
 {
-    let allow_impl_fallback = effective_routing.allow_implementation_fallback;
-    let allow_review_fallback = effective_routing.allow_review_fallback;
-    // Issue #607: an exact, pre-selected route (e.g. an ordered review
-    // escalation identity) is the only eligible route for this step. Disable
-    // generic fallback so a paid/unavailable exact route reports a typed
-    // pause/deferral rather than silently substituting a prior reviewer.
-    let exact_route = req.exact_route_required;
-    let allow_impl_fallback = allow_impl_fallback && !exact_route;
-    let allow_review_fallback = allow_review_fallback && !exact_route;
     let exclude_attempted = is_genuine_agent_failure(req.last_failure_class)
         || !runtime.attempted.is_empty()
         || !runtime.dispatch_attempted.is_empty();
-    let review_fallback = if is_review_mode(req.mode) && allow_review_fallback {
-        review_fallback_backend(defaults, profile, backend_available)
-    } else {
-        None
-    };
 
     let effective_model = requested_model.clone().or_else(|| {
         let mut models = effective_routing
@@ -663,14 +647,9 @@ where
         ),
         original_order: 0,
     });
-    let candidates = explicit_candidates(
-        effective_routing,
-        req.mode,
-        &primary,
-        review_fallback,
-        allow_review_fallback,
-        allow_impl_fallback,
-    );
+    // Manual selections and controller escalations share the same exact-route
+    // contract. Only auto routing may spend a different provider's quota.
+    let candidates = vec![primary];
     let candidates_for_diagnostics = candidates.clone();
     let (selected, skipped) = pick_route_candidate(
         candidates,
@@ -681,38 +660,6 @@ where
         runtime,
         exclude_attempted,
     )?;
-
-    if same_destination(&selected, &primary) {
-        let routing_diagnostics = Some(build_routing_diagnostics(
-            &candidates_for_diagnostics,
-            &selected,
-            &skipped,
-            None,
-            &profile.pacing,
-        ));
-        return Ok(RouteDecision::from_identity(
-            selected
-                .identity
-                .with_request(requested_backend, requested_model),
-            "explicit CLI override".into(),
-            false,
-            None,
-            false,
-            routing_diagnostics,
-        ));
-    }
-
-    let mut routing_reason = if is_review_mode(req.mode) {
-        "explicit CLI override unavailable; review fallback".to_string()
-    } else {
-        "explicit CLI override unavailable; implementation fallback".to_string()
-    };
-    routing_reason = append_availability_reason(
-        routing_reason,
-        &skipped,
-        selected.backend(),
-        is_review_mode(req.mode),
-    );
 
     let routing_diagnostics = Some(build_routing_diagnostics(
         &candidates_for_diagnostics,
@@ -725,14 +672,10 @@ where
         selected
             .identity
             .with_request(requested_backend, requested_model),
-        routing_reason,
-        true,
-        if is_review_mode(req.mode) {
-            Some("low".into())
-        } else {
-            Some("medium".into())
-        },
-        is_review_mode(req.mode),
+        "explicit CLI override".into(),
+        false,
+        None,
+        false,
         routing_diagnostics,
     ))
 }

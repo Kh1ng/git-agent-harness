@@ -4,6 +4,36 @@ import { test } from 'node:test';
 import type { ServerMessage, Session } from '@git-agent-harness/contracts';
 import { createSessionManager } from './SessionManager.js';
 
+test('explicit review and improve routes reach dispatch unchanged and do not fall back on failure', async () => {
+  for (const mode of ['review', 'improve']) {
+    const dispatched: Array<{ mode: string; backend?: string; model?: string }> = [];
+    const manager = createSessionManager({
+      disableCleanupTimer: true,
+      providerRegistry: { isProviderAvailable: () => true },
+      pushBus: { publish() {} },
+      dispatchRunner: (options) => {
+        dispatched.push({ mode: options.mode, backend: options.backend, model: options.model });
+        return {
+          promise: Promise.resolve({
+            exitCode: 1, stdout: '',
+            stderr: 'no eligible backend available for preferred vibe/mistral-medium-3.5',
+          }),
+          cancel: async () => ({ cancelled: false }),
+        };
+      },
+    });
+    const session = await manager.startSession({
+      profile: 'gah', providerKind: 'github', instanceId: 'github-0',
+      repo: 'owner/repo', mode, backend: 'vibe', model: 'mistral-medium-3.5',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(dispatched, [{ mode, backend: 'vibe', model: 'mistral-medium-3.5' }]);
+    assert.equal(manager.getSession(session.id)?.status, 'error');
+    assert.equal(manager.getSession(session.id)?.backend, 'vibe');
+    assert.equal(manager.getSession(session.id)?.model, 'mistral-medium-3.5');
+  }
+});
+
 test('session.start request ids are idempotent and emit one start event', async () => {
   const published: ServerMessage[] = [];
   let dispatchCalls = 0;

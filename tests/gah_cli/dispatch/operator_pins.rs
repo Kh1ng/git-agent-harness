@@ -1,6 +1,77 @@
 use crate::*;
 
 #[test]
+fn explicit_backend_unavailable_never_launches_fallback() {
+    use git_agent_harness::availability::{record_unavailable, Reason, Source};
+    for mode in ["review", "improve"] {
+        let tmp = test_tempdir();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        add_origin_and_feature_commit(&repo);
+        let cfg = write_real_repo_config_with_extra(
+            &tmp, &repo, "github",
+            "[profiles.real.routing]\nallow_review_fallback = true\nallow_implementation_fallback = true\nreview_candidates = [{ backend = \"vibe\", model = \"mistral-medium-3.5\" }, { backend = \"codex\" }]\nimprove_candidates = [{ backend = \"vibe\", model = \"mistral-medium-3.5\" }, { backend = \"codex\" }]\n",
+            "",
+        );
+        let state = tmp.path().join("availability.json");
+        record_unavailable(
+            &state,
+            "vibe",
+            Some("mistral-medium-3.5"),
+            None,
+            Reason::BackendOutage,
+            Source::BackendError,
+            None,
+            None,
+            time::OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        let fake_bin = tmp.path().join("bin");
+        fs::create_dir_all(&fake_bin).unwrap();
+        let launched = tmp.path().join("backend-launched");
+        for backend in ["vibe", "codex"] {
+            make_fake_bin_with_body(
+                &fake_bin,
+                backend,
+                &format!("#!/bin/sh\ntouch '{}'\nexit 1\n", launched.display()),
+            );
+        }
+        make_fake_github_review_api(&fake_bin);
+        bin()
+            .args([
+                "dispatch",
+                "--profile",
+                "real",
+                "--mode",
+                mode,
+                "--backend",
+                "vibe",
+                "--model",
+                "mistral-medium-3.5",
+                "--branch",
+                "feature/review",
+                "--target",
+                "fix the marker file",
+                "--skip-validation-gate",
+                "--config-path",
+                cfg.to_str().unwrap(),
+            ])
+            .env("PATH", prepend_path(&fake_bin))
+            .env("GAH_AVAILABILITY_PATH", &state)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "no eligible backend available for preferred vibe/mistral-medium-3.5",
+            ));
+        assert!(
+            !launched.exists(),
+            "{mode} launched a backend despite the unavailable explicit route"
+        );
+    }
+}
+
+#[test]
 fn explicit_backend_pin_survives_validation_retry() {
     let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(
