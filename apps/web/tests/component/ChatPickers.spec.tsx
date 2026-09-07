@@ -69,10 +69,15 @@ for (const mode of ['issue', 'pr'] as const) {
       labels: index === 13 ? ['bugfix'] : [], headRefName: `fix/branch-${index + 1}`,
       author: 'colton', isDraft: false, reviewState: null
     }));
+    let sourceAttempts = 0;
     let started: unknown;
     let created = '';
     await page.route('**/api/**', async (route) => {
       const pathname = new URL(route.request().url()).pathname;
+      if (pathname.endsWith(mode === 'issue' ? '/issues' : '/prs') && ++sourceAttempts === 1) {
+        await route.fulfill({ status: 503, json: { error: 'Provider temporarily unavailable' } });
+        return;
+      }
       let body: unknown = {};
       if (pathname.endsWith('/nodes')) body = { nodes: [] };
       if (pathname.endsWith('/settings')) body = { profileOverrides: {}, defaultBackend: 'claude' };
@@ -92,7 +97,15 @@ for (const mode of ['issue', 'pr'] as const) {
     await component.getByRole('tab', { name: mode === 'issue' ? 'From issue' : 'From PR' }).click();
     const rows = component.getByRole('button', { name: /^#\d/ });
     const filter = component.getByRole('searchbox');
+    await expect(component.getByRole('alert')).toContainText(`Could not load ${mode === 'issue' ? 'issues' : 'pull requests'}`);
+    await expect(component.getByText(/No open .* for this project/)).not.toBeVisible();
+    await expect(component.getByRole('button', { name: 'Start chat' })).toBeDisabled();
+    await filter.fill('Work item');
+    await component.getByRole('button', { name: mode === 'issue' ? 'Retry issues' : 'Retry pull requests' }).press('Enter');
+    await expect(component.getByRole('alert')).not.toBeVisible();
+    await expect(filter).toHaveValue('Work item');
     await expect(rows).toHaveCount(10);
+    expect(sourceAttempts).toBe(2);
     if (mode === 'issue') await page.screenshot({ path: '/tmp/gah-1116-modal-desktop.png' });
     await component.getByRole('button', { name: 'Show all' }).click();
     await expect(rows).toHaveCount(15);

@@ -43,9 +43,12 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
   const [mode, setMode] = useState<'blank' | 'issue' | 'pr'>('blank');
   const [issues, setIssues] = useState<ChatIssueSummary[]>([]);
   const [issuesLoading, setIssuesLoading] = useState(false);
+  const [issuesError, setIssuesError] = useState<string | null>(null);
   const [issue, setIssue] = useState<ChatIssueSummary | null>(null);
   const [prs, setPrs] = useState<ChatPrSummary[]>([]);
   const [prsLoading, setPrsLoading] = useState(false);
+  const [prsError, setPrsError] = useState<string | null>(null);
+  const [sourceRetry, setSourceRetry] = useState(0);
   const [pr, setPr] = useState<ChatPrSummary | null>(null);
 
   const implementedBackends = backends.filter((b) => b.implemented);
@@ -58,10 +61,6 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
     setQuery('');
     setModel(null);
     setMode('blank');
-    setIssue(null);
-    setIssues([]);
-    setPr(null);
-    setPrs([]);
     gahApi
       .getChatNodes()
       .then(({ nodes }) => setNodes(nodes))
@@ -69,37 +68,43 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  // A different source discards its selection; retrying the same source does not.
+  useEffect(() => {
+    setIssues([]);
+    setIssue(null);
+    setPrs([]);
+    setPr(null);
+  }, [open, mode, project]);
+
   // Issue list follows the selected project in issue mode.
   useEffect(() => {
     if (!open || mode !== 'issue') return;
     let cancelled = false;
-    setIssues([]);
-    setIssue(null);
+    setIssuesError(null);
     setIssuesLoading(true);
     gahApi
       .getChatIssues(project)
       .then(({ issues }) => { if (!cancelled) setIssues(issues); })
-      .catch(() => { if (!cancelled) setIssues([]); })
+      .catch((err) => { if (!cancelled) setIssuesError(err instanceof Error ? err.message : String(err)); })
       .finally(() => { if (!cancelled) setIssuesLoading(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, mode, project]);
+  }, [open, mode, project, sourceRetry]);
 
   // PR list follows the selected project in PR mode.
   useEffect(() => {
     if (!open || mode !== 'pr') return;
     let cancelled = false;
-    setPrs([]);
-    setPr(null);
+    setPrsError(null);
     setPrsLoading(true);
     gahApi
       .getChatPrs(project)
       .then(({ prs }) => { if (!cancelled) setPrs(prs); })
-      .catch(() => { if (!cancelled) setPrs([]); })
+      .catch((err) => { if (!cancelled) setPrsError(err instanceof Error ? err.message : String(err)); })
       .finally(() => { if (!cancelled) setPrsLoading(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, mode, project]);
+  }, [open, mode, project, sourceRetry]);
 
   useEffect(() => {
     if (!open) return;
@@ -228,8 +233,14 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
               <CircleDot size={13} aria-hidden="true" /> Issue
             </h3>
             {issuesLoading && <p className="text-xs text-muted">Loading issues…</p>}
+            {issuesError && (
+              <div className="space-y-2">
+                <p role="alert" className="text-sm text-red-400">Could not load issues. {issuesError}</p>
+                <button type="button" className="btn-secondary text-xs" onClick={() => setSourceRetry((attempt) => attempt + 1)}>Retry issues</button>
+              </div>
+            )}
             <div className="grid gap-1 max-h-40 overflow-y-auto">
-              {!issuesLoading && <BoundedCollection key={project} items={issues} query={query} label="issues"
+              {!issuesLoading && !issuesError && <BoundedCollection key={project} items={issues} query={query} label="issues"
                 emptyMessage="No open issues for this project."
                 searchText={(candidate) => `#${candidate.number} ${candidate.title} ${candidate.labels.join(' ')}`}
                 isSelected={(candidate) => issue?.number === candidate.number}>
@@ -263,8 +274,14 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
               <GitPullRequest size={13} aria-hidden="true" /> Pull request
             </h3>
             {prsLoading && <p className="text-xs text-muted">Loading pull requests…</p>}
+            {prsError && (
+              <div className="space-y-2">
+                <p role="alert" className="text-sm text-red-400">Could not load pull requests. {prsError}</p>
+                <button type="button" className="btn-secondary text-xs" onClick={() => setSourceRetry((attempt) => attempt + 1)}>Retry pull requests</button>
+              </div>
+            )}
             <div className="grid gap-1 max-h-40 overflow-y-auto">
-              {!prsLoading && <BoundedCollection key={project} items={prs} query={query} label="pull requests"
+              {!prsLoading && !prsError && <BoundedCollection key={project} items={prs} query={query} label="pull requests"
                 emptyMessage="No open pull requests for this project."
                 searchText={(candidate) => `#${candidate.number} ${candidate.title} ${candidate.headRefName ?? ''} ${candidate.author ?? ''}`}
                 isSelected={(candidate) => pr?.number === candidate.number}>
