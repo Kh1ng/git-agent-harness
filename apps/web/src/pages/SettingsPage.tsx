@@ -10,12 +10,11 @@ import { EmptyState } from '../components/ui/EmptyState.js';
 import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
 import { ProfileEditor } from '../components/ProfileEditor.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
-import { oldestFetchedAt } from '../lib/format.js';
+import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
 import { skillFromFrontMatter, SkillFrontMatterError } from '../lib/skillFrontMatter.js';
 import { gahApi, GahApiError } from '../api/client.js';
 import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, SkillSummary, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
 
-const SCM_PROVIDER_KINDS = new Set(['github', 'gitlab']);
 const SETTINGS_REFRESH_MS = 60 * 1000;
 const SETTINGS_SECTIONS_KEY = 'gah.settings.openSections';
 type SettingsSectionId = 'general' | 'skills' | 'memory' | 'factory';
@@ -39,6 +38,8 @@ export function SettingsPage() {
   const clearConfigErrors = useGahStore((s) => s.clearConfigErrors);
   const doctor = useGahStore((s) => s.doctor);
   const fetchDoctor = useGahStore((s) => s.fetchDoctor);
+  const quota = useGahStore((s) => s.quota);
+  const fetchQuota = useGahStore((s) => s.fetchQuota);
   const configuredProfiles = profiles.data ?? [];
   const selectedName = profileOverride ?? profile ?? '';
   const selected = configuredProfiles.find((p) => p.name === selectedName);
@@ -65,8 +66,9 @@ export function SettingsPage() {
     if (selectedName) {
       fetchProfileConfig(selectedName);
       fetchDoctor(selectedName);
+      fetchQuota({ profile: selectedName, since: '7d' });
     }
-  }, [selectedName, fetchProfileConfig, fetchDoctor]);
+  }, [selectedName, fetchProfileConfig, fetchDoctor, fetchQuota]);
 
   const refreshAll = () => {
     fetchProfiles({ force: true });
@@ -74,13 +76,14 @@ export function SettingsPage() {
     if (selectedName) {
       fetchProfileConfig(selectedName, { force: true });
       fetchDoctor(selectedName, { force: true });
+      fetchQuota({ profile: selectedName, since: '7d' }, { force: true });
     }
   };
   useAutoRefresh(refreshAll, SETTINGS_REFRESH_MS);
   useWsReconnectRefresh(refreshAll);
   const lastUpdated = oldestFetchedAt(profiles.fetchedAt, config.fetchedAt, profileConfig.fetchedAt, doctor.fetchedAt);
 
-  const agentBackends = providers.filter((p) => !SCM_PROVIDER_KINDS.has(p.providerKind));
+  const backendSnapshot = quota.data?.profile.profile === selectedName ? quota.data : null;
   const activeScmProvider = selected?.provider
     ? providers.find((p) => p.providerKind === selected.provider)
     : null;
@@ -252,22 +255,24 @@ export function SettingsPage() {
       <ManagerChatSettingsSection configuredProfiles={configuredProfiles} />
       <AdminUpdateSection />
       <AddNodeSection />
-      <section>
-        <h3 className="text-sm font-semibold text-primary mb-3">Agent backends {serverVersion && <span className="text-muted font-normal">· server v{serverVersion}</span>}</h3>
-        {agentBackends.length === 0 ? (
-          <EmptyState icon={Info} title="No agent backends registered" />
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {agentBackends.map((provider) => (
-              <ProviderStatusCard
-                key={provider.instanceId}
-                provider={provider}
-                status={providerStatuses[provider.instanceId]}
-                onClick={() => handleRefreshProvider(provider.instanceId)}
-              />
-            ))}
-          </div>
-        )}
+      <section aria-labelledby="agent-availability-title">
+        <h3 id="agent-availability-title" className="text-sm font-semibold text-primary mb-3">Agent backends {serverVersion && <span className="text-muted font-normal">· server v{serverVersion}</span>}</h3>
+        <p className="text-sm text-secondary mb-3">Routing eligibility from the latest Quota snapshot.</p>
+        {backendSnapshot && <p className="text-xs text-muted mb-3">Snapshot <time dateTime={backendSnapshot.generated_at}>{formatAge(backendSnapshot.generated_at) ?? backendSnapshot.generated_at}</time></p>}
+        {quota.error && <p role="alert" className="text-sm text-critical mb-3">Cannot refresh backend availability: {quota.error}. {backendSnapshot ? 'Showing the last snapshot.' : ''} Use Refresh to retry.</p>}
+        {!backendSnapshot ? <p role="status" className="text-sm text-muted">{quota.loading ? 'Loading backend availability…' : 'No backend availability snapshot.'}</p>
+          : backendSnapshot.candidates.length === 0 ? <EmptyState icon={Info} title="No canonical candidates recorded" description="Add routing candidates to this profile to see eligibility." />
+          : <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {backendSnapshot.candidates.map((candidate, index) => <article key={index} className="card-padded min-w-0">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <h4 className="text-sm font-medium text-primary break-words">{[candidate.backend, candidate.quota_pool, candidate.model].filter(Boolean).join(' / ')}</h4>
+                <StatusBadge tone={candidate.eligible_now ? 'good' : 'critical'} label={candidate.eligible_now ? 'Eligible' : 'Unavailable'} />
+              </div>
+              {!candidate.eligible_now && <p className="text-sm text-secondary mt-2">Reason: {candidate.reason ?? 'Unknown'}</p>}
+              <p className="text-xs text-muted mt-2">{candidate.observed_at ? <>Observed <time dateTime={candidate.observed_at}>{formatAge(candidate.observed_at) ?? candidate.observed_at}</time></> : 'No observation'}</p>
+              {isStale(candidate.observed_at) && <StatusBadge tone="serious" label="Stale" />}
+            </article>)}
+          </div>}
       </section>
         </SettingsSectionPanel>}
 
