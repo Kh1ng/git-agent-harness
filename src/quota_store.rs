@@ -164,7 +164,7 @@ pub fn append(state_path: &Path, rec: &QuotaObservationRecord) -> Result<()> {
         ("quota pool", rec.quota_pool.as_deref()),
     ] {
         if let Some(value) = value {
-            let normalized = crate::execution_identity::validate_secret_safe_label(field, value)?;
+            let normalized = crate::execution_identity::validate_operator_label(field, value)?;
             if normalized != value {
                 anyhow::bail!("{field} must not contain surrounding whitespace");
             }
