@@ -531,6 +531,7 @@ pub(in crate::dispatch) fn review(
             let prompt = enforce_context_budget(
                 cfg,
                 profile,
+                repo,
                 &args.profile,
                 &route.effective_backend,
                 "review",

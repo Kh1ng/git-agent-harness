@@ -418,6 +418,7 @@ pub(crate) fn improve(
         let context = match enforce_context_budget(
             cfg,
             profile,
+            &wt,
             &args.profile,
             &route.effective_backend,
             if JobKind::parse(&args.mode) == Ok(JobKind::Fix) {

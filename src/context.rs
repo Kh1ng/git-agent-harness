@@ -157,6 +157,7 @@ pub struct ContextBuild {
     /// backend after compaction. This makes the context artifact an audit
     /// record rather than just a token counter.
     pub sources: Vec<ContextSource>,
+    pub deferred_sources: Vec<DeferredContextSource>,
     pub review_project_brief: Option<ReviewProjectBriefContext>,
 }
 
@@ -171,6 +172,16 @@ pub struct ContextSource {
     pub name: String,
     pub bytes: u64,
     pub estimated_tokens: u64,
+}
+
+/// Context available on demand but not sent to the backend. Unfetched sources
+/// have unknown size, rather than a misleading zero-byte estimate.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DeferredContextSource {
+    pub name: String,
+    pub path: Option<String>,
+    pub bytes: Option<u64>,
+    pub estimated_tokens: Option<u64>,
 }
 
 /// Conservative provider-independent estimate: four UTF-8 bytes per token.
@@ -192,6 +203,7 @@ pub fn enforce(prompt: &str, cfg: &ContextConfig) -> Result<ContextBuild> {
             issue_section_names,
             largest_sections: section_sizes(prompt),
             sources: context_sources(prompt),
+            deferred_sources: Vec::new(),
             review_project_brief: None,
         });
     }
@@ -253,6 +265,7 @@ pub fn enforce(prompt: &str, cfg: &ContextConfig) -> Result<ContextBuild> {
         // pre-compaction prompt that was merely considered.
         largest_sections,
         sources,
+        deferred_sources: Vec::new(),
         review_project_brief: None,
     })
 }
@@ -279,6 +292,8 @@ fn split_sections(prompt: &str) -> Vec<Section> {
                 "Focus",
                 "Live Task Pack",
                 "Safety",
+                "Project Rules",
+                "Deferred Context",
                 "Acceptance Criteria",
                 "Verification Commands",
                 "Prior attempts",
