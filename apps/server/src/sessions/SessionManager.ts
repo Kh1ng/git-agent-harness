@@ -385,9 +385,10 @@ class SessionManagerImpl {
     if (activeDispatch) {
       this.activeDispatches.delete(sessionId);
 
+      let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         const cancelTimeout = new Promise<{ timedOut: true }>((resolve) => {
-          setTimeout(() => resolve({ timedOut: true }), 30000); // 30 second timeout
+          timeout = setTimeout(() => resolve({ timedOut: true }), 30000); // 30 second timeout
         });
 
         const outcome = await Promise.race([
@@ -407,6 +408,8 @@ class SessionManagerImpl {
       } catch (error) {
         session.status = 'error';
         session.error = `Error during cancellation: ${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        clearTimeout(timeout);
       }
     } else {
       // No active dispatch, just mark as stopped

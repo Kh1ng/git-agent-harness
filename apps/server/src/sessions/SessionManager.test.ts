@@ -393,7 +393,8 @@ test('late process completion cannot overwrite cancelled terminal state', async 
   assert.equal(finalSession?.status, 'stopped');
 });
 
-test('stopSession times out if cancellation takes too long', async () => {
+test('stopSession times out if cancellation takes too long', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const published: ServerMessage[] = [];
   const manager = createSessionManager({
     disableCleanupTimer: true,
@@ -421,15 +422,12 @@ test('stopSession times out if cancellation takes too long', async () => {
     mode: 'fix'
   });
 
-  // This should timeout and still complete
-  const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Test timeout')), 35000));
-  const stopPromise: Promise<Session> = Promise.race([
-    manager.stopSession(session.id),
-    timeout
-  ]);
-  
+  const stopPromise = manager.stopSession(session.id);
+  t.mock.timers.tick(29_999);
+  assert.equal(manager.getSession(session.id)?.status, 'stopping');
+  t.mock.timers.tick(1);
   const stoppedSession = await stopPromise;
-  
+
   // Should have timed out and marked as error
   assert.equal(stoppedSession.status, 'error');
   assert.equal(stoppedSession.error, 'Session cancellation timed out');
