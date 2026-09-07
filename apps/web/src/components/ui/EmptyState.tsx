@@ -38,7 +38,7 @@ export function ErrorState({
   onRetry?: () => void;
 }) {
   return (
-    <div className="card-padded flex flex-col items-center justify-center gap-2 py-10 text-center border-critical/30">
+    <div role="alert" className="card-padded flex flex-col items-center justify-center gap-2 py-10 text-center border-critical/30">
       <AlertCircle size={24} className="text-critical" aria-hidden="true" />
       <p className="text-sm font-medium text-primary">Failed to load data</p>
       <p className="text-xs text-muted max-w-sm">

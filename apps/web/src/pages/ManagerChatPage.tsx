@@ -182,7 +182,7 @@ function SkillPicker({
   return (
     <details className="group relative">
       <summary
-        className="flex min-h-9 cursor-pointer list-none items-center gap-1.5 rounded-md border border-subtle bg-raised px-2.5 py-1.5 text-xs text-secondary hover:bg-white/5 focus-visible:outline-none [&::-webkit-details-marker]:hidden"
+        className="flex min-h-9 cursor-pointer list-none items-center gap-1.5 rounded-md border border-subtle bg-raised px-2.5 py-1.5 text-xs text-secondary hover:bg-white/5 [&::-webkit-details-marker]:hidden"
         aria-label="Project skills"
         onClick={(event) => { if (busy) event.preventDefault(); }}
         title={busy ? 'Skill changes are disabled while a turn is in flight' : 'Choose the project skills applied to the next turn'}

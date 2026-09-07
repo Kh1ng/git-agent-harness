@@ -1,13 +1,14 @@
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
+import { LoadingState } from './components/ui/EmptyState.js';
 import { useWebSocket } from './ws/WebSocketContext.js';
 import { OverviewPage } from './pages/OverviewPage.js';
-import { WorkPage } from './pages/WorkPage.js';
-import { TelemetryPage } from './pages/TelemetryPage.js';
-import { QuotaPage } from './pages/QuotaPage.js';
-import { EventsPage } from './pages/EventsPage.js';
-import { SettingsPage } from './pages/SettingsPage.js';
-import { ManagerChatPage } from './pages/ManagerChatPage.js';
-import { GitPage } from './pages/GitPage.js';
+const WorkPage = lazy(() => import('./pages/WorkPage.js').then((module) => ({ default: module.WorkPage })));
+const TelemetryPage = lazy(() => import('./pages/TelemetryPage.js').then((module) => ({ default: module.TelemetryPage })));
+const QuotaPage = lazy(() => import('./pages/QuotaPage.js').then((module) => ({ default: module.QuotaPage })));
+const EventsPage = lazy(() => import('./pages/EventsPage.js').then((module) => ({ default: module.EventsPage })));
+const SettingsPage = lazy(() => import('./pages/SettingsPage.js').then((module) => ({ default: module.SettingsPage })));
+const ManagerChatPage = lazy(() => import('./pages/ManagerChatPage.js').then((module) => ({ default: module.ManagerChatPage })));
+const GitPage = lazy(() => import('./pages/GitPage.js').then((module) => ({ default: module.GitPage })));
 import { Navbar } from './components/Navbar.js';
 import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { SessionDetailModal } from './components/SessionDetailModal.js';
@@ -56,6 +57,7 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-page lg:flex">
+      <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 bg-card text-primary p-3 rounded-md">Skip to content</a>
       <Navbar currentPage={currentPage} onPageChange={setCurrentPage} />
 
       <div className="flex-1 min-w-0">
@@ -68,7 +70,7 @@ export function App() {
           />
         </div>
 
-        <main className="px-4 py-4 sm:px-6 sm:py-6 max-w-[1400px] mx-auto">
+        <main id="main-content" tabIndex={-1} className="px-4 py-4 sm:px-6 sm:py-6 max-w-[1400px] mx-auto">
           <div className="lg:hidden mb-4">
             <ConnectionStatus
               isConnected={isConnected}
@@ -77,7 +79,7 @@ export function App() {
               serverVersion={serverVersion}
             />
           </div>
-          {renderPage()}
+          <Suspense fallback={<LoadingState label="Loading page…" />}>{renderPage()}</Suspense>
         </main>
       </div>
 

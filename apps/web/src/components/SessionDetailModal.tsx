@@ -128,9 +128,10 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
                 value={command}
                 onChange={(e) => setCommand(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSendCommand()}
+                aria-label="Session command"
                 placeholder="Send a command to this session…"
                 disabled={!isConnected}
-                className="flex-1 bg-page border border-subtle rounded-md px-3 py-1.5 text-sm text-primary placeholder:text-muted focus-visible:outline-none min-w-0"
+                className="flex-1 bg-page border border-subtle rounded-md px-3 py-1.5 text-sm text-primary placeholder:text-muted min-w-0"
               />
               <button onClick={handleSendCommand} disabled={!isConnected || !command.trim()} className="btn-secondary">
                 <Send size={14} aria-hidden="true" />
