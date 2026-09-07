@@ -1,9 +1,9 @@
 # Ticket sweep, 7 September 2026
 
-Work is integrated on local branch `codex/sept-ticket-sweep` in the sibling
-`gah-ticket-sweep` worktree. It builds on `5a2be52`, the Windows GUI and WSL
-onboarding change. Nothing has been pushed or released, and GitHub tickets
-have not been closed.
+Work is integrated on branch `codex/sept-ticket-sweep` in
+[PR #1137](https://github.com/Kh1ng/git-agent-harness/pull/1137). It builds on
+`5a2be52`, the Windows GUI and WSL onboarding change. Merge requires the
+final revision to pass CI. No release has been published.
 
 ## Implemented
 
@@ -19,6 +19,11 @@ The UI audit also fixed shared text contrast, keyboard focus, modal behavior,
 issue/PR error recovery, and eager secondary-page imports. See
 [the scoped Impeccable report](UI_AUDIT_2026-09-07.md) for measurements and
 remaining UI work.
+
+Settings now uses the same quota snapshot as Quota for backend eligibility
+(#760), including observation times and refresh failures. Profile changes
+reject late responses. SCM authentication controls remain separate. See
+[the testing audit](TESTING_AUDIT_2026-09-07.md) for coverage gaps found and fixed.
 
 ## Design choices
 
