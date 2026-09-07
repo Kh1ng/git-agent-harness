@@ -17,6 +17,8 @@
  * item's attempt history, the controller event stream.
  */
 import type {
+  FleetSnapshot,
+  NodeHealthCheckResult,
   StatusSnapshot,
   QuotaSnapshot,
   UsageRollupSummary,
@@ -202,6 +204,8 @@ export interface StopLoopResult {
 }
 
 export interface GahDataSource {
+  getFleetSnapshot(): Promise<FleetSnapshot>;
+  checkNodeHealth(nodeId: string): Promise<NodeHealthCheckResult>;
   getStatus(profile?: string): Promise<StatusSnapshot>;
   getQuota(params?: { profile?: string; since?: string }): Promise<QuotaSnapshot>;
   getUsageRollup(profile?: string, days?: number): Promise<UsageRollupSummary>;
@@ -348,6 +352,12 @@ async function deleteJson<T>(path: string, params?: Record<string, string | unde
 }
 
 export const gahApi: GahDataSource = {
+  getFleetSnapshot() {
+    return getJson<FleetSnapshot>('/api/registry/fleet/snapshot');
+  },
+  checkNodeHealth(nodeId) {
+    return getJson<NodeHealthCheckResult>(`/api/registry/nodes/${encodeURIComponent(nodeId)}/health`);
+  },
   getStatus(profile) {
     return getJson<StatusSnapshot>('/api/status', { profile });
   },

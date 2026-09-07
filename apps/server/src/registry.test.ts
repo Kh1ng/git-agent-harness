@@ -1199,3 +1199,101 @@ test('authMiddleware timing-safe comparison rejects invalid tokens', () => {
   
   delete process.env.COORDINATOR_TOKEN;
 });
+
+test('fleet snapshot reuses liveness observations and exposes metadata and current leases without secrets', async () => {
+  const registryPath = createTempRegistryFile();
+  const claimsPath = createTempRegistryFile();
+  const worker = new MockNodeServer();
+  let polls = 0;
+  worker.behavior = (req, res) => {
+    assert.equal(new URL(req.url!, 'http://worker').searchParams.get('profile'), 'other');
+    polls++;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(statusPayload({ generated_at: new Date().toISOString(), profile: { profile: 'other' } })));
+  };
+  const workerPort = await worker.start();
+  const registry = new RegistryService(registryPath);
+  const claims = new ClaimsService(claimsPath);
+  const app = createServer({ registryService: registry, claimsService: claims });
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  let changes = 0;
+  const unsubscribe = registry.onChange(() => changes++);
+  try {
+    registry.registerNode({ node_id: 'fleet-worker', display_name: 'Fleet Worker', advertised_url: `http://127.0.0.1:${workerPort}`,
+      transport_mode: 'loopback', secret_ref: 'env:PRIVATE_CANARY', version: '0.1.0', schema_digest: COORDINATOR_SCHEMA_DIGEST, profiles: ['other'] });
+    const read = () => makeRequest(base, '/api/registry/fleet/snapshot');
+    const initial = await read();
+    assert.equal(initial.status, 200);
+    assert.deepEqual(initial.body.observations, []);
+    assert.deepEqual(initial.body.nodes[0].profiles, ['other']);
+    assert.equal(JSON.stringify(initial.body).includes('PRIVATE_CANARY'), false);
+    assert.equal(polls, 0);
+    claims.acquire('fleet-worker', 'other', '#946');
+    await registry.runLivenessCheck();
+    const observed = await read();
+    assert.equal(observed.body.observations[0].state, 'healthy');
+    assert.equal(observed.body.leases[0].work_id, '#946');
+    await read();
+    assert.equal(polls, 1, 'snapshot reads must not poll workers');
+    assert.equal(changes, 2, 'registration and completed liveness cycle invalidate once each');
+    worker.behavior = (_req, res) => { polls++; res.writeHead(401); res.end(); };
+    const failed = await makeRequest(base, '/api/registry/nodes/fleet-worker/health');
+    assert.equal(failed.body.error.kind, 'AUTH');
+    assert.equal((await read()).body.observations[0].state, 'auth_failed');
+    assert.equal(changes, 3);
+    claims.release('fleet-worker', 'other', '#946');
+    assert.deepEqual((await read()).body.leases, []);
+    registry.revokeNode('fleet-worker');
+    assert.deepEqual((await read()).body.observations, []);
+  } finally {
+    unsubscribe();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await worker.stop();
+    unlinkSync(registryPath); unlinkSync(claimsPath);
+  }
+});
+
+test('fleet publication ignores superseded polls and revoked or repointed registrations', async () => {
+  const path = createTempRegistryFile();
+  const worker = new MockNodeServer();
+  const port = await worker.start();
+  const registry = new RegistryService(path);
+  const node: RegisteredNode = { node_id: 'racing-worker', display_name: 'Racing Worker', advertised_url: `http://127.0.0.1:${port}`,
+    transport_mode: 'loopback', secret_ref: 'env:UNUSED', version: '0.1.0', schema_digest: COORDINATOR_SCHEMA_DIGEST };
+  try {
+    for (const action of ['newer-check', 'repoint', 'revoke'] as const) {
+      registry.registerNode({ ...node });
+      let deliver: () => void = () => {};
+      let arrived: () => void = () => {};
+      const started = new Promise<void>((resolve) => { arrived = resolve; });
+      worker.behavior = (_req, res) => {
+        deliver = () => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(statusPayload({ generated_at: new Date().toISOString() }))); };
+        arrived();
+      };
+      const slow = registry.checkNodeHealth(node.node_id);
+      await started;
+      if (action === 'newer-check') {
+        worker.behavior = (_req, res) => { res.writeHead(401); res.end(); };
+        await registry.checkNodeHealth(node.node_id);
+      } else if (action === 'repoint') {
+        registry.registerNode({ ...node, advertised_url: 'http://127.0.0.1:9' });
+      } else {
+        registry.revokeNode(node.node_id);
+      }
+      deliver();
+      await slow;
+      if (action === 'newer-check') {
+        assert.equal(registry.getNode(node.node_id)?.last_observed_state, 'auth_failed');
+        assert.equal(registry.getCachedObservations()[0].state, 'auth_failed');
+      } else {
+        assert.deepEqual(registry.getCachedObservations(), []);
+        assert.equal(registry.getNode(node.node_id)?.last_observed_state, undefined);
+      }
+    }
+  } finally {
+    await worker.stop();
+    unlinkSync(path);
+  }
+});

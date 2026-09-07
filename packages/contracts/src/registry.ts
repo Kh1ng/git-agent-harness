@@ -1,4 +1,5 @@
 import type { ActiveClaim, AvailabilityScope, BackendInstanceSummary, RecentLedgerSummary } from './gah.js';
+import type { ClaimLease } from './claims.js';
 import coordinatorProtocol from './coordinator-protocol.json' with { type: 'json' };
 
 export const COORDINATOR_VERSION = coordinatorProtocol.version;
@@ -31,6 +32,7 @@ export interface NodeSummary {
   version: string;
   schema_digest: string;
   labels?: string[];
+  profiles?: string[];
   transport_mode: 'loopback' | 'authenticated_remote' | 'trusted_lan';
   last_seen_at?: string | null;
   last_observed_state?: NodeObservationState | null;
@@ -116,4 +118,11 @@ export interface NodeHealthCheckResult {
 
 export interface RegistryConfig {
   nodes: RegisteredNode[];
+}
+
+/** Cached scheduler observations; absent observations have unknown health. */
+export interface FleetSnapshot {
+  nodes: NodeSummary[];
+  observations: NodeObservationSnapshot[];
+  leases: ClaimLease[];
 }

@@ -151,6 +151,12 @@ export class ClaimsService {
     }
   }
 
+  /** Current central leases, excluding expired grants. */
+  getLeases(): ClaimLease[] {
+    this.sweepExpired(Date.now());
+    return [...this.leases.values()];
+  }
+
   getLease(profile: string, workId: string): ClaimLease | undefined {
     this.sweepExpired(Date.now());
     return this.leases.get(claimKey(profile, workId));

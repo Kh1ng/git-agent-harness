@@ -468,6 +468,19 @@ export function createServer(
     }
   });
 
+  app.get('/api/registry/fleet/snapshot', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      res.json({
+        nodes: registryService.getNodesSummary(),
+        observations: registryService.getCachedObservations(),
+        leases: claimsService.getLeases()
+      });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to read fleet', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   app.get('/api/registry/fleet', async (req, res) => {
     try {
       const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
