@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { FolderGit2, Server, Cpu, X, CircleDot, GitPullRequest } from 'lucide-react';
 import type { ChatIssueSummary, ChatNodeInfo, ChatPrSummary, ManagerModelInfo, ProfileSummary } from '@git-agent-harness/contracts';
+import { BoundedCollection } from './BoundedCollection.js';
 import { gahApi } from '../api/client.js';
 import type { ManagerBackendInfo } from '@git-agent-harness/contracts';
 
@@ -38,6 +39,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [query, setQuery] = useState('');
   const [mode, setMode] = useState<'blank' | 'issue' | 'pr'>('blank');
   const [issues, setIssues] = useState<ChatIssueSummary[]>([]);
   const [issuesLoading, setIssuesLoading] = useState(false);
@@ -53,6 +55,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
     setProject(currentProfile);
     setError(null);
     setTitle('');
+    setQuery('');
     setModel(null);
     setMode('blank');
     setIssue(null);
@@ -210,29 +213,41 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
           </button>
         </div>
 
+        {mode !== 'blank' && (
+          <label className="block space-y-1 text-sm text-secondary">
+            <span>Filter {mode === 'issue' ? 'issues' : 'pull requests'}</span>
+            <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
+              placeholder={mode === 'issue' ? 'Number, title or label' : 'Number, title, branch or author'}
+              className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-base text-primary placeholder:text-secondary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" />
+          </label>
+        )}
+
         {mode === 'issue' && (
           <section className="space-y-2">
             <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
               <CircleDot size={13} aria-hidden="true" /> Issue
             </h3>
             {issuesLoading && <p className="text-xs text-muted">Loading issues…</p>}
-            {!issuesLoading && issues.length === 0 && (
-              <p className="text-xs text-muted">No open issues for this project.</p>
-            )}
             <div className="grid gap-1 max-h-40 overflow-y-auto">
-              {issues.map((candidate) => (
-                <button
-                  key={candidate.number}
-                  type="button"
-                  onClick={() => setIssue(candidate)}
-                  className={`rounded-md px-3 py-2 text-left ${issue?.number === candidate.number ? 'bg-accent/15 border border-accent/40' : 'border border-transparent hover:bg-white/5'}`}
-                >
-                  <span className="block text-sm font-medium text-primary truncate">#{candidate.number} {candidate.title}</span>
-                  {candidate.labels.length > 0 && (
-                    <span className="block text-[11px] text-muted truncate">{candidate.labels.join(', ')}</span>
-                  )}
-                </button>
-              ))}
+              {!issuesLoading && <BoundedCollection key={project} items={issues} query={query} label="issues"
+                emptyMessage="No open issues for this project."
+                searchText={(candidate) => `#${candidate.number} ${candidate.title} ${candidate.labels.join(' ')}`}
+                isSelected={(candidate) => issue?.number === candidate.number}>
+                {(candidate) => (
+                  <button
+                    key={candidate.number}
+                    type="button"
+                    onClick={() => setIssue(candidate)}
+                    aria-pressed={issue?.number === candidate.number}
+                    className={`rounded-md px-3 py-2 text-left ${issue?.number === candidate.number ? 'bg-accent/15 border border-accent/40' : 'border border-transparent hover:bg-white/5'}`}
+                  >
+                    <span className="block text-sm font-medium text-primary truncate">#{candidate.number} {candidate.title}</span>
+                    {candidate.labels.length > 0 && (
+                      <span className="block text-[11px] text-muted truncate">{candidate.labels.join(', ')}</span>
+                    )}
+                  </button>
+                )}
+              </BoundedCollection>}
             </div>
             {issue && (
               <p className="text-[11px] text-muted">
@@ -248,27 +263,30 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
               <GitPullRequest size={13} aria-hidden="true" /> Pull request
             </h3>
             {prsLoading && <p className="text-xs text-muted">Loading pull requests…</p>}
-            {!prsLoading && prs.length === 0 && (
-              <p className="text-xs text-muted">No open pull requests for this project.</p>
-            )}
             <div className="grid gap-1 max-h-40 overflow-y-auto">
-              {prs.map((candidate) => (
-                <button
-                  key={candidate.number}
-                  type="button"
-                  onClick={() => setPr(candidate)}
-                  className={`rounded-md px-3 py-2 text-left ${pr?.number === candidate.number ? 'bg-accent/15 border border-accent/40' : 'border border-transparent hover:bg-white/5'}`}
-                >
-                  <span className="block text-sm font-medium text-primary truncate">#{candidate.number} {candidate.title}</span>
-                  <span className="block text-[11px] text-muted truncate">
-                    {[
-                      candidate.author,
-                      candidate.isDraft ? 'draft' : null,
-                      candidate.reviewState ? candidate.reviewState.toLowerCase().replaceAll('_', ' ') : null
-                    ].filter((part) => part !== null && part.length > 0).join(' · ')}
-                  </span>
-                </button>
-              ))}
+              {!prsLoading && <BoundedCollection key={project} items={prs} query={query} label="pull requests"
+                emptyMessage="No open pull requests for this project."
+                searchText={(candidate) => `#${candidate.number} ${candidate.title} ${candidate.headRefName ?? ''} ${candidate.author ?? ''}`}
+                isSelected={(candidate) => pr?.number === candidate.number}>
+                {(candidate) => (
+                  <button
+                    key={candidate.number}
+                    type="button"
+                    onClick={() => setPr(candidate)}
+                    aria-pressed={pr?.number === candidate.number}
+                    className={`rounded-md px-3 py-2 text-left ${pr?.number === candidate.number ? 'bg-accent/15 border border-accent/40' : 'border border-transparent hover:bg-white/5'}`}
+                  >
+                    <span className="block text-sm font-medium text-primary truncate">#{candidate.number} {candidate.title}</span>
+                    <span className="block text-[11px] text-muted truncate">
+                      {[
+                        candidate.author,
+                        candidate.isDraft ? 'draft' : null,
+                        candidate.reviewState ? candidate.reviewState.toLowerCase().replaceAll('_', ' ') : null
+                      ].filter((part) => part !== null && part.length > 0).join(' · ')}
+                    </span>
+                  </button>
+                )}
+              </BoundedCollection>}
             </div>
             {pr && (
               <p className="text-[11px] text-muted">

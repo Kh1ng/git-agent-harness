@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { ChevronRight, FolderGit2 } from 'lucide-react';
 import type { ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
 import { formatChatName } from '../lib/format.js';
+import { BoundedCollection } from './BoundedCollection.js';
 import { gahApi } from '../api/client.js';
 
 /**
@@ -34,6 +35,7 @@ export function ProjectRail({
   onRetrySessions: () => void;
   onProjectAdded: (profile: ProfileSummary) => void;
 }) {
+  const [query, setQuery] = useState('');
   const [gitUrl, setGitUrl] = useState('');
   const [reclone, setReclone] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -114,47 +116,47 @@ export function ProjectRail({
             <span className="text-xs tabular-nums text-muted">{liveSessions.length + 1}</span>
           )}
         </div>
+        <label className="mb-2 block space-y-1 text-sm text-secondary">
+          <span>Filter chats and archive</span>
+          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
+            placeholder="Name, number or branch"
+            className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-base text-primary placeholder:text-secondary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" />
+        </label>
         <nav aria-label="Chats" className="space-y-1">
-          <button
-            type="button"
-            onClick={() => onSessionSelect(null)}
-            className={sessionClasses(selectedSessionId === null)}
-            aria-current={selectedSessionId === null ? 'page' : undefined}
-          >
-            <span className="block truncate text-sm text-primary">Default conversation</span>
-          </button>
-          {liveSessions.map((session) => (
-            <button
-              key={session.id}
-              type="button"
-              onClick={() => onSessionSelect(session.id)}
-              className={sessionClasses(session.id === selectedSessionId)}
-              aria-current={session.id === selectedSessionId ? 'page' : undefined}
-            >
-              <span className="block truncate text-sm text-primary">{formatChatName(session)}</span>
-              <span className="block truncate text-[11px] text-muted">{session.branch}</span>
-            </button>
-          ))}
+          <BoundedCollection<ChatSessionSummary | null> key={currentProfile} items={[null, ...liveSessions]} query={query}
+            label="chats" emptyMessage="No chats yet."
+            searchText={(session) => session ? `${formatChatName(session)} ${session.branch} ${session.prNumber ?? ''}` : 'Default conversation'}
+            isSelected={(session) => (session?.id ?? null) === selectedSessionId}>
+            {(session) => (
+              <button key={session?.id ?? 'default'} type="button" onClick={() => onSessionSelect(session?.id ?? null)}
+                className={sessionClasses((session?.id ?? null) === selectedSessionId)}
+                aria-current={(session?.id ?? null) === selectedSessionId ? 'page' : undefined}>
+                <span className="block truncate text-sm text-primary">{session ? formatChatName(session) : 'Default conversation'}</span>
+                {session && <span className="block truncate text-[11px] text-muted">{session.branch}</span>}
+              </button>
+            )}
+          </BoundedCollection>
         </nav>
 
         {archivedSessions.length > 0 && (
-          <details className="mt-2">
+          <details className="mt-2" open={archivedSessions.some((session) => session.id === selectedSessionId) || undefined}>
             <summary className="cursor-pointer select-none rounded px-2 py-1 text-xs text-muted hover:bg-white/5 hover:text-primary">
               Archived ({archivedSessions.length})
             </summary>
             <nav aria-label="Archived chats" className="mt-1 space-y-1">
-              {archivedSessions.map((session) => (
-                <button
-                  key={session.id}
-                  type="button"
-                  onClick={() => onSessionSelect(session.id)}
-                  className={sessionClasses(session.id === selectedSessionId)}
-                  aria-current={session.id === selectedSessionId ? 'page' : undefined}
-                >
-                  <span className="block truncate text-sm text-secondary">{formatChatName(session)}</span>
-                  <span className="block truncate text-[11px] text-muted">{session.branch}</span>
-                </button>
-              ))}
+              <BoundedCollection key={currentProfile} items={archivedSessions} query={query} label="archived chats"
+                emptyMessage="No archived chats."
+                searchText={(session) => `${formatChatName(session)} ${session.branch} ${session.prNumber ?? ''}`}
+                isSelected={(session) => session.id === selectedSessionId}>
+                {(session) => (
+                  <button key={session.id} type="button" onClick={() => onSessionSelect(session.id)}
+                    className={sessionClasses(session.id === selectedSessionId)}
+                    aria-current={session.id === selectedSessionId ? 'page' : undefined}>
+                    <span className="block truncate text-sm text-secondary">{formatChatName(session)}</span>
+                    <span className="block truncate text-[11px] text-muted">{session.branch}</span>
+                  </button>
+                )}
+              </BoundedCollection>
             </nav>
           </details>
         )}
