@@ -70,9 +70,10 @@ test('semantic text and badges retain contrast in explicit and system themes', a
 test('session details use a modal with a named command input and Escape dismissal', async ({ mount, page }) => {
   await page.routeWebSocket('**/ws', () => {});
   let closed = false;
-  await mount(<WebSocketProvider><SessionDetailModal session={{ id: 'test-session', providerKind: 'claude', status: 'running', repo: 'owner/repo', mode: 'improve', target: '#1112', backend: 'claude' }} onClose={() => { closed = true; }} /></WebSocketProvider>);
+  await mount(<React.StrictMode><WebSocketProvider><SessionDetailModal session={{ id: 'test-session', providerKind: 'claude', status: 'running', repo: 'owner/repo', mode: 'improve', target: '#1112', backend: 'claude' }} onClose={() => { closed = true; }} /></WebSocketProvider></React.StrictMode>);
   const modal = page.getByRole('dialog', { name: 'Session: Improve #1112' });
   await expect(modal).toBeVisible();
+  expect(closed).toBe(false);
   await expect(modal.getByRole('textbox', { name: 'Session command' })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(modal).not.toBeVisible();

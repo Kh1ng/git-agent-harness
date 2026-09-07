@@ -38,9 +38,7 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
   const dialog = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
-    const element = dialog.current;
-    element?.showModal();
-    return () => element?.close();
+    dialog.current?.showModal();
   }, []);
   const output = sessionOutput[session.id];
   const Icon = providerIcon(session.providerKind);
