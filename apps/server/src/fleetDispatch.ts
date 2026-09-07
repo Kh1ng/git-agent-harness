@@ -11,7 +11,7 @@ import type {
 } from '@git-agent-harness/contracts';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { getSessionManager, type SessionOptions } from './sessions/SessionManager.js';
-import type { RegistryService } from './registryService.js';
+import { resolveSecret, type RegistryService } from './registryService.js';
 
 type PushBusLike = {
   publish(message: ServerMessage): void;
@@ -303,7 +303,8 @@ class RemoteNodeTransport implements NodeDispatchTransport {
     private readonly coordinatorNodeId: string,
     private readonly onTerminal: (session: Session) => void,
     initialProfile = 'gah',
-    initialSession?: Session
+    initialSession?: Session,
+    private readonly headers: Record<string, string> = {}
   ) {
     this.profile = initialProfile;
     if (initialSession) {
@@ -418,7 +419,7 @@ class RemoteNodeTransport implements NodeDispatchTransport {
     if (profileHint) {
       this.profile = profileHint;
     }
-    const socket = new WebSocket(toWsUrl(this.node.advertisedUrl));
+    const socket = new WebSocket(toWsUrl(this.node.advertisedUrl), { headers: this.headers });
     this.socket = socket;
     await new Promise<void>((resolve, reject) => {
       const handleOpen = () => {
@@ -519,6 +520,14 @@ class RemoteNodeTransport implements NodeDispatchTransport {
   }
 }
 
+function nodeAuthHeaders(registry: RegistryService, nodeId: string, nodeUrl: string): Record<string, string> {
+  const node = registry.getNode(nodeId);
+  if (node?.secret_ref && new URL(node.advertised_url).origin !== new URL(nodeUrl).origin) {
+    throw new GAHError('The registered node endpoint changed. Refusing to send its credential to an old address.', 'NODE_ENDPOINT_CHANGED');
+  }
+  return node?.secret_ref ? { Authorization: `Bearer ${resolveSecret(node.secret_ref)}` } : {};
+}
+
 function defaultTransportFactory(
   node: NodeSelection,
   context: {
@@ -528,7 +537,8 @@ function defaultTransportFactory(
     localSessionManager: ReturnType<typeof getSessionManager>;
     profile?: string;
     session?: Session;
-  }
+  },
+  registryService: RegistryService
 ): NodeDispatchTransport {
   if (node.isLocal) {
     return new LocalNodeTransport(context.localSessionManager);
@@ -539,7 +549,8 @@ function defaultTransportFactory(
     context.coordinatorNodeId,
     context.onTerminal,
     context.profile,
-    context.session
+    context.session,
+    nodeAuthHeaders(registryService, node.nodeId, node.advertisedUrl)
   );
 }
 
@@ -564,7 +575,7 @@ export class FleetDispatchCoordinator {
       deps.leaseStorePath ?? leaseStorePath('./config/dispatch-leases.json')
     );
     this.localTransport = new LocalNodeTransport(this.localSessionManager);
-    this.transportFactory = deps.transportFactory ?? defaultTransportFactory;
+    this.transportFactory = deps.transportFactory ?? ((node, context) => defaultTransportFactory(node, context, this.registryService));
   }
 
   async startSession(options: RoutedSessionOptions): Promise<Session> {
@@ -1104,15 +1115,17 @@ export class FleetDispatchCoordinator {
         sessions: this.localTransport.getSessions()
       };
     }
-    const socket = new WebSocket(toWsUrl(nodeUrl));
+    let socket: WebSocket | undefined;
     try {
+      const connection = new WebSocket(toWsUrl(nodeUrl), { headers: nodeAuthHeaders(this.registryService, nodeId, nodeUrl) });
+      socket = connection;
       const sessions = await new Promise<Session[]>((resolve, reject) => {
         const timer = setTimeout(() => {
           reject(new Error(`Timed out probing node ${nodeId}`));
         }, RECONCILE_TIMEOUT_MS);
         timer.unref?.();
-        socket.once('open', () => {
-          socket.send(
+        connection.once('open', () => {
+          connection.send(
             JSON.stringify({
               type: 'client.hello',
               clientVersion: '0.1.0',
@@ -1125,26 +1138,26 @@ export class FleetDispatchCoordinator {
             })
           );
         });
-        socket.on('message', (data: WebSocket.RawData) => {
+        connection.on('message', (data: WebSocket.RawData) => {
           try {
             const message = JSON.parse(data.toString()) as ServerMessage;
             if (message.type === 'server.welcome') {
               clearTimeout(timer);
               resolve(message.sessions);
-              socket.close();
+              connection.close();
             }
           } catch {
             // ignore malformed probe messages
           }
         });
-        socket.once('error', (error) => {
+        connection.once('error', (error) => {
           clearTimeout(timer);
           reject(error);
         });
       });
       return { sessions };
     } catch {
-      socket.close();
+      socket?.close();
       return null;
     }
   }

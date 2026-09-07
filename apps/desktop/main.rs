@@ -1,248 +1,371 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+#[cfg(not(windows))]
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
     Manager,
 };
 
-struct WorkerState {
-    process: Mutex<Option<Child>>,
-    profile: Mutex<String>,
-    central_url: Mutex<String>,
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct DesktopSettings {
+    central_url: String,
+    wsl_distribution: String,
 }
 
-fn home_dir() -> PathBuf {
-    std::env::var("HOME")
+struct WorkerState(Mutex<Option<Child>>);
+
+fn config_dir() -> PathBuf {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".config/gah")
 }
 
-/// Parse KEY=VALUE lines from a shell env file, skipping comments and blanks.
-fn load_env_file(path: &PathBuf) -> HashMap<String, String> {
-    let Ok(f) = std::fs::File::open(path) else {
-        return HashMap::new();
-    };
-    BufReader::new(f)
+fn read_settings() -> DesktopSettings {
+    let dir = config_dir();
+    if let Ok(text) = std::fs::read_to_string(dir.join("desktop.json")) {
+        if let Ok(settings) = serde_json::from_str(&text) {
+            return settings;
+        }
+    }
+    let text = std::fs::read_to_string(dir.join("config.toml")).unwrap_or_default();
+    let central_url = text
         .lines()
-        .filter_map(|l| l.ok())
-        .filter(|l| !l.trim_start().starts_with('#') && l.contains('='))
-        .filter_map(|l| {
-            let (k, v) = l.split_once('=')?;
-            Some((k.trim().to_string(), v.trim().to_string()))
+        .find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "registry_central_url")
+                .then(|| value.trim().trim_matches('"').to_owned())
         })
-        .collect()
-}
-
-/// Read registry_central_url from ~/.config/gah/config.toml.
-/// Simple line scan — avoids pulling in a TOML dep.
-fn read_central_url() -> String {
-    let path = home_dir().join(".config/gah/config.toml");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return "http://100.118.97.79".to_string();
-    };
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("registry_central_url") {
-            if let Some(val) = trimmed.split('=').nth(1) {
-                return val.trim().trim_matches('"').to_string();
-            }
-        }
+        .unwrap_or_default();
+    DesktopSettings {
+        central_url,
+        ..Default::default()
     }
-    "http://100.118.97.79".to_string()
 }
 
-fn read_profile() -> String {
-    // First profile found in config.toml [profiles.*] section.
-    let path = home_dir().join(".config/gah/config.toml");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return "gah".to_string();
-    };
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with("[profiles.") && t.ends_with(']') {
-            let name = t.trim_start_matches("[profiles.").trim_end_matches(']');
-            if !name.is_empty() {
-                return name.to_string();
-            }
-        }
-    }
-    "gah".to_string()
-}
-
-fn is_worker_running(state: &WorkerState) -> bool {
-    let mut guard = state.process.lock().unwrap();
-    guard
-        .as_mut()
-        .map(|c| c.try_wait().map_or(true, |r| r.is_none()))
-        .unwrap_or(false)
-}
-
-fn start_worker(state: &WorkerState) -> Result<(), String> {
-    let mut guard = state.process.lock().unwrap();
-    if guard
-        .as_mut()
-        .map(|c| c.try_wait().map_or(true, |r| r.is_none()))
-        .unwrap_or(false)
+fn central_url(value: &str) -> Result<tauri::Url, String> {
+    let url: tauri::Url = value
+        .trim()
+        .parse()
+        .map_err(|_| "Enter a full http:// or https:// address.")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
     {
-        return Err("already running".into());
+        return Err("Use an HTTP or HTTPS address without embedded credentials.".into());
     }
+    Ok(url)
+}
 
-    let env_path = home_dir().join(".config/gah/gah-loop.env");
-    let env_vars = load_env_file(&env_path);
-    let profile = state.profile.lock().unwrap().clone();
-
-    let gah = home_dir().join(".cargo/bin/gah");
-    let mut cmd = Command::new(gah);
-    cmd.args(["loop", "--profile", &profile])
-        .envs(&env_vars)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    let child = cmd.spawn().map_err(|e| e.to_string())?;
-    *guard = Some(child);
+// The remotely hosted dashboard must never invoke local process controls.
+fn local_only(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("This command is only available in the local connection window.".into());
+    }
     Ok(())
 }
 
-fn stop_worker(state: &WorkerState) {
-    let mut guard = state.process.lock().unwrap();
-    if let Some(child) = guard.as_mut() {
-        let _ = child.kill();
+#[tauri::command]
+fn desktop_settings(window: tauri::WebviewWindow) -> Result<DesktopSettings, String> {
+    local_only(&window)?;
+    Ok(read_settings())
+}
+
+fn open_dashboard(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("dashboard") {
+        window.navigate(url).map_err(|e| e.to_string())?;
+        window.show().map_err(|e| e.to_string())?;
+        return window.set_focus().map_err(|e| e.to_string());
     }
-    *guard = None;
+    tauri::WebviewWindowBuilder::new(app, "dashboard", tauri::WebviewUrl::External(url))
+        .title("GAH Dashboard")
+        .inner_size(1400.0, 900.0)
+        .min_inner_size(900.0, 600.0)
+        .center()
+        .visible(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
-fn build_tray_menu<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
+#[tauri::command]
+async fn connect_dashboard(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    settings: DesktopSettings,
+) -> Result<(), String> {
+    local_only(&window)?;
+    let url = central_url(&settings.central_url)?;
+    if settings.wsl_distribution.starts_with('-')
+        || settings.wsl_distribution.chars().any(char::is_control)
+    {
+        return Err("Invalid WSL distribution name.".into());
+    }
+    let settings = DesktopSettings {
+        central_url: url.to_string(),
+        ..settings
+    };
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("desktop.json"),
+        serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    open_dashboard(&app, url)
+}
+
+fn command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd.stdin(Stdio::null());
+    cmd
+}
+
+#[cfg(windows)]
+fn wsl_command(settings: &DesktopSettings) -> Command {
+    let mut cmd = command("wsl.exe");
+    if !settings.wsl_distribution.is_empty() {
+        cmd.args(["--distribution", &settings.wsl_distribution]);
+    }
+    cmd
+}
+
+#[derive(serde::Serialize)]
+struct ToolStatus {
+    name: String,
+    environment: String,
+    installed: bool,
+}
+
+#[derive(serde::Serialize)]
+struct WorkerStatus {
     running: bool,
-    central_url: &str,
-) -> tauri::Result<Menu<R>> {
-    let status_label = if running { "● Worker running" } else { "○ Worker stopped" };
-    let status = MenuItem::with_id(app, "status", status_label, false, None::<&str>)?;
-    let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)?;
-    let sep1 = PredefinedMenuItem::separator(app)?;
-    let start = MenuItem::with_id(
-        app,
-        "start",
-        "Start Worker",
-        !running,
-        None::<&str>,
-    )?;
-    let stop = MenuItem::with_id(app, "stop", "Stop Worker", running, None::<&str>)?;
-    let sep2 = PredefinedMenuItem::separator(app)?;
-    let url_item = MenuItem::with_id(app, "url", &format!("Central: {central_url}"), false, None::<&str>)?;
-    let sep3 = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-
-    Menu::with_items(app, &[&status, &open, &sep1, &start, &stop, &sep2, &url_item, &sep3, &quit])
+    tools: Vec<ToolStatus>,
+    note: String,
 }
 
-fn rebuild_tray<R: tauri::Runtime>(app: &tauri::AppHandle<R>, state: &Arc<WorkerState>) {
-    let running = is_worker_running(state);
-    let central_url = state.central_url.lock().unwrap().clone();
-    if let Ok(menu) = build_tray_menu(app, running, &central_url) {
-        if let Some(tray) = app.tray_by_id("gah-tray") {
-            let _ = tray.set_menu(Some(menu));
-            let title = if running { "GAH ●" } else { "GAH" };
-            let _ = tray.set_title(Some(title));
+#[tauri::command]
+async fn worker_status(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkerState>,
+) -> Result<WorkerStatus, String> {
+    local_only(&window)?;
+    let names = ["git", "gh", "glab", "claude", "codex", "opencode", "vibe"];
+    let mut tools = Vec::new();
+    for name in names {
+        let installed = command(if cfg!(windows) { "where.exe" } else { "which" })
+            .arg(name)
+            .output()
+            .is_ok_and(|out| out.status.success());
+        tools.push(ToolStatus {
+            name: name.into(),
+            environment: if cfg!(windows) { "Windows" } else { "Local" }.into(),
+            installed,
+        });
+    }
+    #[cfg(windows)]
+    {
+        let settings = read_settings();
+        for name in names {
+            let installed = wsl_command(&settings)
+                .args([
+                    "--exec",
+                    "bash",
+                    "-lc",
+                    &format!("command -v {name} >/dev/null"),
+                ])
+                .output()
+                .is_ok_and(|out| out.status.success());
+            tools.push(ToolStatus {
+                name: name.into(),
+                environment: "WSL".into(),
+                installed,
+            });
         }
+        let running = wsl_command(&settings)
+            .args([
+                "--exec",
+                "systemctl",
+                "--user",
+                "is-active",
+                "--quiet",
+                "gah-worker.service",
+            ])
+            .output()
+            .is_ok_and(|out| out.status.success());
+        let _ = state;
+        Ok(WorkerStatus { running, tools, note: "The headless worker uses the selected WSL distribution. Windows tools are listed separately; installation does not verify login or worker compatibility. Quitting this app leaves the WSL service running.".into() })
+    }
+    #[cfg(not(windows))]
+    {
+        let mut process = state.0.lock().map_err(|e| e.to_string())?;
+        let running = process
+            .as_mut()
+            .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_none()));
+        Ok(WorkerStatus { running, tools, note: "Tool installation does not verify login. Use the dashboard readiness checks for the repository and backend you will run.".into() })
+    }
+}
+
+#[tauri::command]
+async fn set_worker_running(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkerState>,
+    running: bool,
+) -> Result<(), String> {
+    local_only(&window)?;
+    #[cfg(windows)]
+    {
+        let _ = state;
+        let out = wsl_command(&read_settings())
+            .args([
+                "--exec",
+                "systemctl",
+                "--user",
+                if running { "start" } else { "stop" },
+                "gah-worker.service",
+            ])
+            .output()
+            .map_err(|e| {
+                format!("Cannot launch WSL: {e}. Install the worker from Settings → Add a Node.")
+            })?;
+        if !out.status.success() {
+            return Err(format!("WSL worker service could not be changed. Install it from Settings → Add a Node. {}", String::from_utf8_lossy(&out.stderr)));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let mut process = state.0.lock().map_err(|e| e.to_string())?;
+        if !running {
+            if let Some(child) = process.as_mut() {
+                child.kill().map_err(|e| e.to_string())?;
+                child.wait().map_err(|e| e.to_string())?;
+            }
+            *process = None;
+        } else if !process
+            .as_mut()
+            .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_none()))
+        {
+            let dir = config_dir();
+            let config = std::fs::read_to_string(dir.join("config.toml"))
+                .map_err(|e| format!("Configure a worker profile first: {e}"))?;
+            let profile = config
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("[profiles.")?.strip_suffix(']'))
+                .ok_or("Configure a worker profile first.")?;
+            let env: HashMap<_, _> = std::fs::read_to_string(dir.join("gah-loop.env"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| !line.trim_start().starts_with('#'))
+                .filter_map(|line| {
+                    line.split_once('=')
+                        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+                })
+                .collect();
+            let log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("desktop-worker.log"))
+                .map_err(|e| e.to_string())?;
+            let gah = dir
+                .parent()
+                .and_then(|p| p.parent())
+                .ok_or("Cannot find home directory")?
+                .join(".cargo/bin/gah");
+            *process = Some(
+                command(gah.to_str().ok_or("Invalid worker path")?)
+                    .args(["loop", "--profile", profile])
+                    .envs(env)
+                    .stderr(log.try_clone().map_err(|e| e.to_string())?)
+                    .stdout(log)
+                    .spawn()
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn show_connection(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
     }
 }
 
 fn main() {
-    let central_url = read_central_url();
-    let profile = read_profile();
-
-    let worker_state = Arc::new(WorkerState {
-        process: Mutex::new(None),
-        profile: Mutex::new(profile),
-        central_url: Mutex::new(central_url.clone()),
-    });
-
-    // Intercept external link clicks in the webview and open them in the
-    // system browser via tauri-plugin-opener instead of a new webview window.
-    let external_link_script = r#"
-        document.addEventListener('click', function(e) {
-            var el = e.target && e.target.closest ? e.target.closest('a') : null;
-            if (!el) return;
-            var href = el.getAttribute('href');
-            if (!href) return;
-            try {
-                var url = new URL(href, location.href);
-                if ((url.protocol === 'http:' || url.protocol === 'https:') && url.origin !== location.origin) {
-                    e.preventDefault();
-                    window.__TAURI_INTERNALS__.invoke('plugin:opener|open_url', { url: href });
-                }
-            } catch (_) {}
-        }, true);
-    "#;
-
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .setup(move |app| {
-            // Keep app alive with no windows open (macOS accessory policy hides the dock icon)
-            #[cfg(target_os = "macos")]
-            let _ = app.handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
-
-            let handle = app.handle().clone();
-            let state = worker_state.clone();
-            let url = central_url.clone();
-
-            // Window is created here (not in tauri.conf.json) so we can attach
-            // the initialization_script for external-link interception.
-            let window_url = tauri::WebviewUrl::External(
-                url.parse().unwrap_or_else(|_| "http://100.118.97.79".parse().unwrap())
-            );
-            tauri::WebviewWindowBuilder::new(app, "main", window_url)
-                .title("GAH Dashboard")
-                .inner_size(1400.0, 900.0)
-                .min_inner_size(900.0, 600.0)
-                .resizable(true)
-                .center()
-                .decorations(true)
-                .visible(false)
-                .initialization_script(external_link_script)
-                .build()?;
-
-            let menu = build_tray_menu(&handle, false, &url)?;
-
-            // The tray is built ONLY here. Declaring `app.trayIcon` in
-            // tauri.conf.json as well creates a SECOND native menu-bar icon
-            // with the same id (Tauri's manager map keeps one entry, the
-            // other native icon leaks) — the "two GAH icons" bug.
+        .manage(WorkerState(Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![
+            desktop_settings,
+            connect_dashboard,
+            worker_status,
+            set_worker_running
+        ])
+        .setup(|app| {
+            tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("GAH — Connection & Worker")
+            .inner_size(760.0, 780.0)
+            .min_inner_size(560.0, 500.0)
+            // Keep the command-capable window local, including after a navigation attempt.
+            .on_navigation(|url| {
+                url.scheme() == "tauri"
+                    || url.origin().ascii_serialization() == "http://tauri.localhost"
+                    || url.origin().ascii_serialization() == "https://tauri.localhost"
+                    || (cfg!(debug_assertions)
+                        && url.origin().ascii_serialization() == "http://localhost:1420")
+            })
+            .visible(true)
+            .center()
+            .build()?;
+            let connection =
+                MenuItem::with_id(app, "connection", "Connection & Worker", true, None::<&str>)?;
+            let dashboard =
+                MenuItem::with_id(app, "dashboard", "Open Dashboard", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit GAH", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&connection, &dashboard, &quit])?;
             TrayIconBuilder::with_id("gah-tray")
                 .icon(app.default_window_icon().unwrap().clone())
                 .icon_as_template(true)
-                .title("GAH")
-                .tooltip("GAH Worker")
-                .show_menu_on_left_click(false)
+                .tooltip("GAH")
                 .menu(&menu)
-                .on_menu_event({
-                    let state = state.clone();
-                    move |app, event| match event.id().as_ref() {
-                        "open" => {
-                            if let Some(win) = app.get_webview_window("main") {
-                                let _ = win.show();
-                                let _ = win.set_focus();
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "connection" => show_connection(app),
+                    "dashboard" => {
+                        if central_url(&read_settings().central_url)
+                            .and_then(|url| open_dashboard(app, url))
+                            .is_err()
+                        {
+                            show_connection(app);
+                        }
+                    }
+                    "quit" => {
+                        #[cfg(not(windows))]
+                        if let Ok(mut process) = app.state::<WorkerState>().0.lock() {
+                            if let Some(child) = process.as_mut() {
+                                let _ = child.kill();
+                                let _ = child.wait();
                             }
                         }
-                        "start" => {
-                            let _ = start_worker(&state);
-                            rebuild_tray(app, &state);
-                        }
-                        "stop" => {
-                            stop_worker(&state);
-                            rebuild_tray(app, &state);
-                        }
-                        "quit" => {
-                            stop_worker(&state);
-                            app.exit(0);
-                        }
-                        _ => {}
+                        app.exit(0);
                     }
+                    _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
@@ -251,21 +374,45 @@ fn main() {
                         ..
                     } = event
                     {
-                        if let Some(win) = tray.app_handle().get_webview_window("main") {
-                            let visible = win.is_visible().unwrap_or(false);
-                            if visible {
-                                let _ = win.hide();
-                            } else {
-                                let _ = win.show();
-                                let _ = win.set_focus();
-                            }
-                        }
+                        show_connection(tray.app_handle());
                     }
                 })
                 .build(app)?;
-
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .run(tauri::generate_context!())
-        .expect("error running GAH worker");
+        .expect("error running GAH desktop");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dashboard_addresses_require_http_without_credentials() {
+        for value in [
+            "http://192.168.1.8:3773",
+            "https://gah.example.test",
+            "http://[::1]:3773",
+        ] {
+            assert!(central_url(value).is_ok(), "{value}");
+        }
+        for value in [
+            "",
+            "localhost",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "https://user:secret@gah.test",
+        ] {
+            assert!(central_url(value).is_err(), "{value}");
+        }
+    }
 }

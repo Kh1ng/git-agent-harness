@@ -45,7 +45,14 @@ jobs:
       - name: Build shared packages
         run: npm run build:contracts && npm run build:shared
 
-      - name: Build frontendDist stub
+      - name: Check desktop types
+        run: npm run --workspace=apps/desktop typecheck
+
+      - name: Check Windows installer syntax
+        if: runner.os == 'Windows'
+        run: powershell -NoProfile -File scripts/test-windows-installer.ps1
+
+      - name: Build local connection screen
         working-directory: apps/desktop
         run: npx vite build
 
@@ -90,7 +97,14 @@ jobs:
       - name: Build shared packages
         run: npm run build:contracts && npm run build:shared
 
-      - name: Build frontendDist stub
+      - name: Check desktop types
+        run: npm run --workspace=apps/desktop typecheck
+
+      - name: Check Windows installer syntax
+        if: runner.os == 'Windows'
+        run: powershell -NoProfile -File scripts/test-windows-installer.ps1
+
+      - name: Build local connection screen
         working-directory: apps/desktop
         run: npx vite build
 

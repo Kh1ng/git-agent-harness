@@ -63,6 +63,11 @@ const SERVER_URL =
   (import.meta as unknown as { env: { VITE_SERVER_URL?: string } }).env?.VITE_SERVER_URL ||
   (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
 
+function authHeaders(): Record<string, string> {
+  const token = typeof window === 'undefined' ? null : window.sessionStorage.getItem('gah.coordinatorToken');
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 export class GahApiError extends Error {
   constructor(
     message: string,
@@ -81,7 +86,7 @@ async function getJson<T>(path: string, params?: Record<string, string | undefin
       if (value !== undefined) url.searchParams.set(key, value);
     }
   }
-  const res = await fetch(url.toString());
+  const res = await fetch(url.toString(), { headers: authHeaders() });
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`;
     try {
@@ -224,6 +229,7 @@ export interface GahDataSource {
   setManagerChatSettings(data: ManagerChatSettingsUpdate): Promise<{ success: boolean }>;
   getGatewaySettings(): Promise<GatewaySettingsSummary>;
   revealGatewayBootstrapCommand(): Promise<GatewayBootstrapCommand>;
+  getWindowsSetupCommand(data: { centralUrl: string; role: 'desktop' | 'worker' | 'both' }): Promise<{ command: string }>;
   updateGatewaySettings(data: GatewaySettingsUpdate): Promise<GatewaySettingsSummary>;
   getSkills(): Promise<{ skills: SkillSummary[] }>;
   createSkill(data: SkillCreateData): Promise<Skill>;
@@ -266,7 +272,7 @@ async function postJson<T, U>(path: string, body: U): Promise<T> {
   const url = new URL(path, SERVER_URL);
   const res = await fetch(url.toString(), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
   if (!res.ok) {
@@ -286,7 +292,7 @@ async function patchJson<T, U>(path: string, body: U): Promise<T> {
   const url = new URL(path, SERVER_URL);
   const res = await fetch(url.toString(), {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
   if (!res.ok) {
@@ -306,7 +312,7 @@ async function putJson<T, U>(path: string, body: U): Promise<T> {
   const url = new URL(path, SERVER_URL);
   const res = await fetch(url.toString(), {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
   if (!res.ok) {
@@ -327,7 +333,7 @@ async function deleteJson<T>(path: string, params?: Record<string, string | unde
       if (value !== undefined) url.searchParams.set(key, value);
     }
   }
-  const res = await fetch(url.toString(), { method: 'DELETE' });
+  const res = await fetch(url.toString(), { method: 'DELETE', headers: authHeaders() });
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`;
     try {
@@ -421,7 +427,7 @@ export const gahApi: GahDataSource = {
     const url = new URL('/api/loop/start', SERVER_URL);
     const res = await fetch(url.toString(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ profile })
     });
     return (await res.json()) as StartLoopResult;
@@ -430,7 +436,7 @@ export const gahApi: GahDataSource = {
     const url = new URL('/api/loop/stop', SERVER_URL);
     const res = await fetch(url.toString(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ profile })
     });
     return (await res.json()) as StopLoopResult;
@@ -452,6 +458,9 @@ export const gahApi: GahDataSource = {
   },
   getGatewaySettings() {
     return getJson<GatewaySettingsSummary>('/api/settings/gateway');
+  },
+  getWindowsSetupCommand(data) {
+    return postJson<{ command: string }, typeof data>('/api/settings/nodes/command', data);
   },
   revealGatewayBootstrapCommand() {
     return postJson<GatewayBootstrapCommand, Record<string, never>>('/api/settings/gateway/bootstrap-command', {});
@@ -582,7 +591,7 @@ export const gahApi: GahDataSource = {
     // real error and goes through the same message extraction as
     // postJson/patchJson.
     const url = new URL('/api/admin/update', SERVER_URL);
-    const res = await fetch(url.toString(), { method: 'POST' });
+    const res = await fetch(url.toString(), { method: 'POST', headers: authHeaders() });
     if (res.status === 202 || res.status === 409) {
       return (await res.json()) as AdminUpdateState;
     }

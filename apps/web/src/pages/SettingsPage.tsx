@@ -251,6 +251,7 @@ export function SettingsPage() {
 
       <ManagerChatSettingsSection configuredProfiles={configuredProfiles} />
       <AdminUpdateSection />
+      <AddNodeSection />
       <section>
         <h3 className="text-sm font-semibold text-primary mb-3">Agent backends {serverVersion && <span className="text-muted font-normal">· server v{serverVersion}</span>}</h3>
         {agentBackends.length === 0 ? (
@@ -276,7 +277,7 @@ export function SettingsPage() {
 
         {openSections.has('memory') && <SettingsSectionPanel id="memory">
           <GatewaySettingsSection configuredProfiles={configuredProfiles} />
-          <AddNodeSection />
+          <GatewaySetupSection />
         </SettingsSectionPanel>}
 
         {openSections.has('factory') && <SettingsSectionPanel id="factory">
@@ -1293,16 +1294,57 @@ function GatewaySettingsSection({ configuredProfiles }: { configuredProfiles: Pr
   );
 }
 
-/** Issue #880/#881 follow-up: generates a ready-to-paste command for a
- * genuinely different machine (macOS or Linux -- bootstrap.sh handles
- * both identically, no OS branching needed; Windows gets a one-line WSL
- * note rather than a separate script) to point at this node's compaction
- * db. Deliberately does NOT also generate a full node-registration
- * command (issue #881's `register-node`) -- that requires the central
- * node to be reachable over HTTPS (registerNode() rejects a non-loopback
- * `authenticated_remote` URL that isn't https/wss), which this host isn't
- * set up for yet. */
 export function AddNodeSection() {
+  const [centralUrl, setCentralUrl] = useState(window.location.origin);
+  const [role, setRole] = useState<'desktop' | 'worker' | 'both'>('both');
+  const [token, setToken] = useState(() => window.sessionStorage.getItem('gah.coordinatorToken') ?? '');
+  const [command, setCommand] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const reveal = async () => {
+    setBusy(true); setError(''); setCommand(''); setCopied(false);
+    try {
+      if (token) window.sessionStorage.setItem('gah.coordinatorToken', token);
+      else window.sessionStorage.removeItem('gah.coordinatorToken');
+      setCommand((await gahApi.getWindowsSetupCommand({ centralUrl, role })).command);
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <section className="card-padded max-w-2xl">
+      <h3 className="text-sm font-semibold text-primary mb-1">Add a Node</h3>
+      <p className="text-xs text-muted mb-3">Install GAH on Windows. The native desktop opens your central dashboard; the headless worker runs in WSL2 and continues after the app closes.</p>
+      <label className="block text-xs text-secondary mb-3">Central LAN or VPN address
+        <input type="url" className="input w-full mt-1" value={centralUrl} onChange={(event) => { setCentralUrl(event.target.value); setCommand(''); }} placeholder="http://192.168.1.10:3773" />
+      </label>
+      <label className="block text-xs text-secondary mb-3">Install
+        <select className="input w-full mt-1" value={role} onChange={(event) => { setRole(event.target.value as typeof role); setCommand(''); }}>
+          <option value="both">Desktop app + WSL worker</option>
+          <option value="desktop">Desktop app only</option>
+          <option value="worker">Headless WSL worker only</option>
+        </select>
+      </label>
+      <label className="block text-xs text-secondary mb-3">Central access token (required for direct LAN access)
+        <input type="password" autoComplete="off" className="input w-full mt-1" value={token} onChange={(event) => { setToken(event.target.value); setCommand(''); }} />
+      </label>
+      <p className="text-xs text-muted mb-3">The access token stays in this tab’s session. The generated command contains the central access token; use it only on a computer you trust.</p>
+      {role !== 'desktop' && <p className="text-xs text-muted mb-3">Run PowerShell as administrator. First-time WSL setup may require a restart and a Linux user login before you rerun the command. Worker networking currently requires trusted LAN/VPN transport enabled on the central server.</p>}
+      <button type="button" onClick={reveal} disabled={busy} className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50">{busy ? 'Preparing…' : 'Reveal Windows install command'}</button>
+      {command && <div className="mt-3">
+        <textarea aria-label="Windows install command" readOnly value={command} rows={5} className="input w-full font-mono text-xs" onFocus={(event) => event.target.select()} />
+        <button type="button" className="btn-secondary text-xs px-3 py-1.5 mt-2" onClick={async () => {
+          try { await navigator.clipboard.writeText(command); setCopied(true); }
+          catch { setError('Clipboard access is unavailable on this connection. Select the command above and copy it manually.'); }
+        }}>{copied ? 'Copied' : 'Copy command'}</button>
+      </div>}
+      {error && <p role="alert" className="mt-3 text-xs text-critical">{error}</p>}
+      <p className="text-xs text-muted mt-3">Registered does not mean ready. Authenticate the tools you use inside WSL, add your repository profile, and check its readiness before dispatching. Claude alone is a valid backend; GitHub repositories use gh and GitLab repositories use glab.</p>
+    </section>
+  );
+}
+
+function GatewaySetupSection() {
   const [settings, setSettings] = useState<GatewaySettingsSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [command, setCommand] = useState<string | null>(null);
@@ -1322,7 +1364,7 @@ export function AddNodeSection() {
   if (!settings) {
     return (
       <section className="card-padded max-w-2xl">
-        <h3 className="text-sm font-semibold text-primary mb-1">Add a Node</h3>
+        <h3 className="text-sm font-semibold text-primary mb-1">Memory gateway</h3>
         {error ? <p className="text-xs text-critical">Failed to load: {error}</p> : <p className="text-xs text-muted">Loading…</p>}
       </section>
     );
@@ -1359,9 +1401,9 @@ export function AddNodeSection() {
 
   return (
     <section className="card-padded max-w-2xl">
-      <h3 className="text-sm font-semibold text-primary mb-1">Add a Node</h3>
+      <h3 className="text-sm font-semibold text-primary mb-1">Memory gateway</h3>
       <p className="text-xs text-muted mb-3">
-        Paste on a new machine (macOS or Linux — on Windows, run this inside WSL) to point it at this node's
+        This configures memory access; it does not register a worker. Paste on a new machine (macOS or Linux — on Windows, run this inside WSL) to point it at this node's
         compaction db over Tailscale. Installs Rust/Node if missing, clones the repo, and validates the key
         against this gateway before completing — it fails loudly instead of silently succeeding with a bad key.
       </p>
