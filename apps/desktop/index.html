@@ -13,6 +13,9 @@
       input, button { font: inherit; border-radius: .35rem; border: 1px solid #536078; padding: .55rem .75rem; }
       input { display: block; box-sizing: border-box; width: 100%; background: #11151f; color: inherit; }
       button { background: #283c5b; color: white; cursor: pointer; margin-top: 1rem; }
+      input[type="checkbox"] { display: inline-block; width: 1.1rem; height: 1.1rem; margin: 0 .6rem 0 0; vertical-align: middle; accent-color: #8ab4ff; }
+      .preference { min-height: 2.75rem; display: flex; align-items: center; margin: 0; cursor: pointer; }
+      button:hover:not(:disabled) { background: #354e73; } button:active:not(:disabled) { background: #20314a; }
       button:disabled { opacity: .6; cursor: wait; } :focus-visible { outline: 2px solid #8ab4ff; outline-offset: 3px; }
       section { border-top: 1px solid #303849; margin-top: 2rem; padding-top: .75rem; }
       table { width: 100%; border-collapse: collapse; font-size: .85rem; } th, td { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid #232936; }
@@ -33,6 +36,17 @@
       </form>
       <p id="status" role="status"></p>
       <p id="error" role="alert"></p>
+      <section aria-labelledby="presence-heading">
+        <h2 id="presence-heading">App presence</h2>
+        <form id="presence">
+          <label class="preference" id="dock-label" hidden><input id="show-dock" type="checkbox" />Show Dock icon</label>
+          <label class="preference"><input id="show-tray" type="checkbox" />Show tray icon</label>
+          <label class="preference"><input id="launch-window" type="checkbox" aria-describedby="presence-recovery" />Open a window on launch</label>
+          <p id="presence-recovery" hidden>A window is required when both icons are off. Closing the connection window quits GAH; open the app again to return.</p>
+          <button type="submit">Save app presence</button>
+          <p id="presence-status" role="status"></p>
+        </form>
+      </section>
       <section aria-labelledby="worker-heading">
         <h2 id="worker-heading">Use this computer as a worker</h2>
         <p>Install the headless worker from your central dashboard’s Settings → Add a Node. You can use the dashboard without installing a worker.</p>

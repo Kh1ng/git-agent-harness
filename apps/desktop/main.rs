@@ -16,6 +16,38 @@ use tauri::{
 struct DesktopSettings {
     central_url: String,
     wsl_distribution: String,
+    presence: Presence,
+}
+
+/// Presence preferences always leave a way to return to the local controls.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Presence {
+    dock: bool,
+    launch_window: bool,
+    tray: bool,
+}
+
+impl Default for Presence {
+    fn default() -> Self {
+        Self {
+            dock: false,
+            launch_window: true,
+            tray: true,
+        }
+    }
+}
+
+impl Presence {
+    fn can_hide(self) -> bool {
+        self.tray || (cfg!(target_os = "macos") && self.dock)
+    }
+
+    // Without a persistent icon, opening the app must open a window.
+    fn recoverable(mut self) -> Self {
+        self.launch_window |= !self.can_hide();
+        self
+    }
 }
 
 struct WorkerState(Mutex<Option<Child>>);
@@ -30,7 +62,8 @@ fn config_dir() -> PathBuf {
 fn read_settings() -> DesktopSettings {
     let dir = config_dir();
     if let Ok(text) = std::fs::read_to_string(dir.join("desktop.json")) {
-        if let Ok(settings) = serde_json::from_str(&text) {
+        if let Ok(mut settings) = serde_json::from_str::<DesktopSettings>(&text) {
+            settings.presence = settings.presence.recoverable();
             return settings;
         }
     }
@@ -47,6 +80,46 @@ fn read_settings() -> DesktopSettings {
         central_url,
         ..Default::default()
     }
+}
+
+fn write_settings(settings: &DesktopSettings) -> Result<(), String> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("desktop.json"),
+        serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Change native presence without navigating or hiding the operator's current window.
+fn apply_presence(app: &tauri::AppHandle, presence: Presence) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    app.set_activation_policy(if presence.dock {
+        tauri::ActivationPolicy::Regular
+    } else {
+        tauri::ActivationPolicy::Accessory
+    })
+    .map_err(|e| e.to_string())?;
+    if let Some(tray) = app.tray_by_id("gah-tray") {
+        tray.set_visible(presence.tray).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn save_presence(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    presence: Presence,
+) -> Result<Presence, String> {
+    local_only(&window)?;
+    let mut settings = read_settings();
+    settings.presence = presence.recoverable();
+    write_settings(&settings)?;
+    apply_presence(&app, settings.presence)
+        .map_err(|e| format!("Preferences saved, but could not apply them. Restart GAH: {e}"))?;
+    Ok(settings.presence)
 }
 
 fn central_url(value: &str) -> Result<tauri::Url, String> {
@@ -110,15 +183,10 @@ async fn connect_dashboard(
     }
     let settings = DesktopSettings {
         central_url: url.to_string(),
-        ..settings
+        wsl_distribution: settings.wsl_distribution,
+        ..read_settings()
     };
-    let dir = config_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(
-        dir.join("desktop.json"),
-        serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    write_settings(&settings)?;
     open_dashboard(&app, url)
 }
 
@@ -304,16 +372,45 @@ fn show_connection(app: &tauri::AppHandle) {
     }
 }
 
+fn quit(app: &tauri::AppHandle) {
+    #[cfg(not(windows))]
+    if let Ok(mut process) = app.state::<WorkerState>().0.lock() {
+        if let Some(child) = process.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+    app.exit(0);
+}
+
+fn menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
+    match event.id().as_ref() {
+        "connection" => show_connection(app),
+        "dashboard" => {
+            if central_url(&read_settings().central_url)
+                .and_then(|url| open_dashboard(app, url))
+                .is_err()
+            {
+                show_connection(app);
+            }
+        }
+        "quit" => quit(app),
+        _ => {}
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(WorkerState(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             desktop_settings,
+            save_presence,
             connect_dashboard,
             worker_status,
             set_worker_running
         ])
         .setup(|app| {
+            let settings = read_settings();
             tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
@@ -330,7 +427,7 @@ fn main() {
                     || (cfg!(debug_assertions)
                         && url.origin().ascii_serialization() == "http://localhost:1420")
             })
-            .visible(true)
+            .visible(settings.presence.launch_window)
             .center()
             .build()?;
             let connection =
@@ -345,28 +442,6 @@ fn main() {
                 .tooltip("GAH")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    "connection" => show_connection(app),
-                    "dashboard" => {
-                        if central_url(&read_settings().central_url)
-                            .and_then(|url| open_dashboard(app, url))
-                            .is_err()
-                        {
-                            show_connection(app);
-                        }
-                    }
-                    "quit" => {
-                        #[cfg(not(windows))]
-                        if let Ok(mut process) = app.state::<WorkerState>().0.lock() {
-                            if let Some(child) = process.as_mut() {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                            }
-                        }
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: tauri::tray::MouseButton::Left,
@@ -378,23 +453,83 @@ fn main() {
                     }
                 })
                 .build(app)?;
+            #[cfg(target_os = "macos")]
+            {
+                let native_menu = Menu::default(app.handle())?;
+                native_menu.append(&tauri::menu::Submenu::with_items(
+                    app,
+                    "GAH Controls",
+                    true,
+                    &[&connection, &dashboard],
+                )?)?;
+                app.set_menu(native_menu)?;
+            }
+            apply_presence(app.handle(), settings.presence)?;
+            if settings.presence.launch_window && !settings.central_url.is_empty() {
+                if let Ok(url) = central_url(&settings.central_url) {
+                    let _ = open_dashboard(app.handle(), url);
+                }
+            }
             Ok(())
         })
+        .on_menu_event(menu_event)
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
-                    let _ = window.hide();
+                    if read_settings().presence.can_hide() {
+                        let _ = window.hide();
+                    } else {
+                        quit(window.app_handle());
+                    }
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error running GAH desktop");
+        .build(tauri::generate_context!())
+        .expect("error building GAH desktop")
+        .run(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = _event
+            {
+                show_connection(_app);
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presence_defaults_migrate_and_every_combination_is_recoverable() {
+        let legacy: DesktopSettings = serde_json::from_str(
+            r#"{"central_url":"http://localhost:3773","wsl_distribution":"Ubuntu"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.presence, Presence::default());
+        assert!(!legacy.presence.dock);
+        assert!(legacy.presence.tray && legacy.presence.launch_window);
+        for dock in [false, true] {
+            for tray in [false, true] {
+                for launch_window in [false, true] {
+                    let requested = Presence {
+                        dock,
+                        tray,
+                        launch_window,
+                    };
+                    let actual = requested.recoverable();
+                    assert_eq!((actual.dock, actual.tray), (dock, tray));
+                    assert_eq!(actual.launch_window, launch_window || !actual.can_hide());
+                    assert_eq!(actual.recoverable(), actual);
+                    let saved = serde_json::to_string(&actual).unwrap();
+                    assert_eq!(serde_json::from_str::<Presence>(&saved).unwrap(), actual);
+                }
+            }
+        }
+    }
 
     #[test]
     fn dashboard_addresses_require_http_without_credentials() {
