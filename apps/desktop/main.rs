@@ -94,6 +94,12 @@ fn write_settings(settings: &DesktopSettings) -> Result<(), String> {
 
 /// Change native presence without navigating or hiding the operator's current window.
 fn apply_presence(app: &tauri::AppHandle, presence: Presence) -> Result<(), String> {
+    // Enable the replacement icon before removing the previous recovery surface.
+    if presence.tray {
+        if let Some(tray) = app.tray_by_id("gah-tray") {
+            tray.set_visible(true).map_err(|e| e.to_string())?;
+        }
+    }
     #[cfg(target_os = "macos")]
     app.set_activation_policy(if presence.dock {
         tauri::ActivationPolicy::Regular
@@ -101,8 +107,10 @@ fn apply_presence(app: &tauri::AppHandle, presence: Presence) -> Result<(), Stri
         tauri::ActivationPolicy::Accessory
     })
     .map_err(|e| e.to_string())?;
-    if let Some(tray) = app.tray_by_id("gah-tray") {
-        tray.set_visible(presence.tray).map_err(|e| e.to_string())?;
+    if !presence.tray {
+        if let Some(tray) = app.tray_by_id("gah-tray") {
+            tray.set_visible(false).map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }
@@ -372,15 +380,15 @@ fn show_connection(app: &tauri::AppHandle) {
     }
 }
 
-fn quit(app: &tauri::AppHandle) {
-    #[cfg(not(windows))]
+// Every exit path, including the native application menu, reaps an owned worker.
+#[cfg(not(windows))]
+fn stop_owned_worker(app: &tauri::AppHandle) {
     if let Ok(mut process) = app.state::<WorkerState>().0.lock() {
         if let Some(child) = process.as_mut() {
             let _ = child.kill();
             let _ = child.wait();
         }
     }
-    app.exit(0);
 }
 
 fn menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
@@ -394,7 +402,7 @@ fn menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                 show_connection(app);
             }
         }
-        "quit" => quit(app),
+        "quit" => app.exit(0),
         _ => {}
     }
 }
@@ -480,7 +488,7 @@ fn main() {
                     if read_settings().presence.can_hide() {
                         let _ = window.hide();
                     } else {
-                        quit(window.app_handle());
+                        window.app_handle().exit(0);
                     }
                 }
             }
@@ -488,6 +496,10 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error building GAH desktop")
         .run(|_app, _event| {
+            #[cfg(not(windows))]
+            if let tauri::RunEvent::Exit = _event {
+                stop_owned_worker(_app);
+            }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen {
                 has_visible_windows: false,
