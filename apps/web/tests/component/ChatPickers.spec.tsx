@@ -12,7 +12,7 @@ const sessions: ChatSessionSummary[] = Array.from({ length: 30 }, (_, index) => 
   settledAt: null, settledReason: null
 }));
 
-test('chat and archive navigation bounds rows, shares search, and retains the selection', async ({ mount, page }) => {
+test('chat and archive navigation bounds rows, shares search, and retains the selection', async ({ mount, page }, testInfo) => {
   let selected: string | null = '15';
   const component = await mount(<ProjectRail currentProfile="gah" profiles={[]} sessions={sessions}
     selectedSessionId="15" onSelect={() => {}} onSessionSelect={(id) => { selected = id; }}
@@ -24,7 +24,7 @@ test('chat and archive navigation bounds rows, shares search, and retains the se
   await expect(live.getByRole('button', { name: 'Conversation 15', exact: false })).toHaveAttribute('aria-current', 'page');
   await expect(live.getByRole('button', { name: /Conversation 15/ })).toBeInViewport();
   await expect(archived).not.toBeVisible();
-  await page.screenshot({ path: '/tmp/gah-1116-rail-desktop.png' });
+  await page.screenshot({ path: testInfo.outputPath('gah-1116-rail-desktop.png') });
   await live.getByRole('button', { name: 'Show all' }).click();
   await expect(live.getByRole('button')).toHaveCount(17); // 16 chats and disclosure
   await live.getByRole('button', { name: 'Show fewer' }).press('Enter');
@@ -48,7 +48,7 @@ test('chat and archive navigation bounds rows, shares search, and retains the se
   await expect(archived.getByRole('button', { name: /Conversation 30/ })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(filter).toBeVisible();
-  await page.screenshot({ path: '/tmp/gah-1116-rail-mobile.png' });
+  await page.screenshot({ path: testInfo.outputPath('gah-1116-rail-mobile.png') });
   expect(await component.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
 });
 
@@ -63,7 +63,7 @@ test('a selected archived chat opens its disclosure and survives the ten-row bou
 });
 
 for (const mode of ['issue', 'pr'] as const) {
-  test(`${mode} picker filters provider fields, bounds rows, and starts the selected chat`, async ({ mount, page }) => {
+  test(`${mode} picker filters provider fields, bounds rows, and starts the selected chat`, async ({ mount, page }, testInfo) => {
     const candidates = Array.from({ length: 15 }, (_, index) => ({
       number: index + 1, title: `Work item ${index + 1}`, url: null, updatedAt: null,
       labels: index === 13 ? ['bugfix'] : [], headRefName: `fix/branch-${index + 1}`,
@@ -106,7 +106,7 @@ for (const mode of ['issue', 'pr'] as const) {
     await expect(filter).toHaveValue('Work item');
     await expect(rows).toHaveCount(10);
     expect(sourceAttempts).toBe(2);
-    if (mode === 'issue') await page.screenshot({ path: '/tmp/gah-1116-modal-desktop.png' });
+    if (mode === 'issue') await page.screenshot({ path: testInfo.outputPath('gah-1116-modal-desktop.png') });
     await component.getByRole('button', { name: 'Show all' }).click();
     await expect(rows).toHaveCount(15);
     await rows.last().click();
@@ -127,7 +127,7 @@ for (const mode of ['issue', 'pr'] as const) {
     await expect(rows).toHaveCount(1);
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(filter).toBeVisible();
-    if (mode === 'issue') await page.screenshot({ path: '/tmp/gah-1116-modal-mobile.png' });
+    if (mode === 'issue') await page.screenshot({ path: testInfo.outputPath('gah-1116-modal-mobile.png') });
     expect(await component.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     await component.getByRole('button', { name: 'Start chat' }).click();
     expect(started).toMatchObject({ profile: 'gah', [`${mode}Number`]: 15, backend: 'claude' });
@@ -136,7 +136,7 @@ for (const mode of ['issue', 'pr'] as const) {
 }
 
 
-test('new chat contains keyboard focus and restores it after Escape or backdrop dismissal', async ({ mount, page }) => {
+test('new chat contains keyboard focus and restores it after Escape or backdrop dismissal', async ({ mount, page }, testInfo) => {
   let closed = 0;
   await page.route('**/api/**', (route) => route.fulfill({ json: { nodes: [], profileOverrides: {}, defaultBackend: '' } }));
   const render = (open: boolean) => <div>

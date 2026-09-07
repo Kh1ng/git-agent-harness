@@ -4,7 +4,7 @@ import { Navbar } from '../../src/components/Navbar.js';
 import { SessionDetailModal } from '../../src/components/SessionDetailModal.js';
 import { WebSocketProvider } from '../../src/ws/WebSocketContext.js';
 
-test('mobile navigation contains focus, closes with Escape, selection, backdrop, and desktop resize', async ({ mount, page }) => {
+test('mobile navigation contains focus, closes with Escape, selection, backdrop, and desktop resize', async ({ mount, page }, testInfo) => {
   await page.emulateMedia({ colorScheme: 'dark', reducedMotion: 'reduce' });
   await page.setViewportSize({ width: 390, height: 844 });
   const selected: string[] = [];
@@ -36,13 +36,13 @@ test('mobile navigation contains focus, closes with Escape, selection, backdrop,
   await page.mouse.click(380, 400);
   await expect(dialog).not.toBeVisible();
   await opener.click();
-  await page.screenshot({ path: '/tmp/gah-audit-mobile-dark.png' });
+  await page.screenshot({ path: testInfo.outputPath('gah-audit-mobile-dark.png') });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await expect(dialog).not.toBeVisible();
-  await page.screenshot({ path: '/tmp/gah-audit-desktop-dark.png' });
+  await page.screenshot({ path: testInfo.outputPath('gah-audit-desktop-dark.png') });
 });
 
-test('semantic text and badges retain contrast in explicit and system themes', async ({ mount, page }) => {
+test('semantic text and badges retain contrast in explicit and system themes', async ({ mount, page }, testInfo) => {
   await mount(<div className="bg-card p-4"><p className="text-muted">Last seen</p><button className="btn-primary">Add node</button>{['good', 'warning', 'serious', 'critical'].map((status) => <span key={status} className={`badge badge-${status}`}>{status}</span>)}</div>);
   for (const theme of ['dark', 'light', 'system']) {
     await page.emulateMedia({ colorScheme: theme === 'dark' ? 'dark' : 'light' });
@@ -63,11 +63,11 @@ test('semantic text and badges retain contrast in explicit and system themes', a
     });
     for (const { text, ratio } of ratios) expect(ratio, `${theme}: ${text}`).toBeGreaterThanOrEqual(4.5);
   }
-  await page.screenshot({ path: '/tmp/gah-audit-light-tokens.png' });
+  await page.screenshot({ path: testInfo.outputPath('gah-audit-light-tokens.png') });
 });
 
 
-test('session details use a modal with a named command input and Escape dismissal', async ({ mount, page }) => {
+test('session details use a modal with a named command input and Escape dismissal', async ({ mount, page }, testInfo) => {
   await page.routeWebSocket('**/ws', () => {});
   let closed = false;
   await mount(<React.StrictMode><WebSocketProvider><SessionDetailModal session={{ id: 'test-session', providerKind: 'claude', status: 'running', repo: 'owner/repo', mode: 'improve', target: '#1112', backend: 'claude' }} onClose={() => { closed = true; }} /></WebSocketProvider></React.StrictMode>);

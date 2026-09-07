@@ -19,6 +19,7 @@ const baseURL = `http://localhost:${port}`;
  */
 export default defineConfig({
   testDir: './tests/e2e',
+  outputDir: './test-results/e2e',
   // All specs share one intentionally global, stateful mock control plane.
   // Keep scenario selection/reset deterministic across files as well as CI.
   workers: 1,
@@ -30,7 +31,8 @@ export default defineConfig({
   reporter: 'list',
   use: {
     baseURL,
-    screenshot: 'only-on-failure'
+    screenshot: 'only-on-failure',
+    trace: 'retain-on-failure'
   },
   webServer: [
     {

@@ -1316,17 +1316,17 @@ export function AddNodeSection() {
       <h3 className="text-sm font-semibold text-primary mb-1">Add a Node</h3>
       <p className="text-xs text-muted mb-3">Install GAH on Windows. The native desktop opens your central dashboard; the headless worker runs in WSL2 and continues after the app closes.</p>
       <label className="block text-xs text-secondary mb-3">Central LAN or VPN address
-        <input type="url" className="input w-full mt-1" value={centralUrl} onChange={(event) => { setCentralUrl(event.target.value); setCommand(''); }} placeholder="http://192.168.1.10:3773" />
+        <input disabled={busy} type="url" className="input w-full mt-1" value={centralUrl} onChange={(event) => { setCentralUrl(event.target.value); setCommand(''); }} placeholder="http://192.168.1.10:3773" />
       </label>
       <label className="block text-xs text-secondary mb-3">Install
-        <select className="input w-full mt-1" value={role} onChange={(event) => { setRole(event.target.value as typeof role); setCommand(''); }}>
+        <select disabled={busy} className="input w-full mt-1" value={role} onChange={(event) => { setRole(event.target.value as typeof role); setCommand(''); }}>
           <option value="both">Desktop app + WSL worker</option>
           <option value="desktop">Desktop app only</option>
           <option value="worker">Headless WSL worker only</option>
         </select>
       </label>
       <label className="block text-xs text-secondary mb-3">Central access token (required for direct LAN access)
-        <input type="password" autoComplete="off" className="input w-full mt-1" value={token} onChange={(event) => { setToken(event.target.value); setCommand(''); }} />
+        <input disabled={busy} type="password" autoComplete="off" className="input w-full mt-1" value={token} onChange={(event) => { setToken(event.target.value); setCommand(''); }} />
       </label>
       <p className="text-xs text-muted mb-3">The access token stays in this tab’s session. The generated command contains the central access token; use it only on a computer you trust.</p>
       {role !== 'desktop' && <p className="text-xs text-muted mb-3">Run PowerShell as administrator. First-time WSL setup may require a restart and a Linux user login before you rerun the command. Worker networking currently requires trusted LAN/VPN transport enabled on the central server.</p>}
