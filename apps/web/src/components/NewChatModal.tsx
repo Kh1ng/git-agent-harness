@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FolderGit2, Server, Cpu, X, CircleDot, GitPullRequest } from 'lucide-react';
 import type { ChatIssueSummary, ChatNodeInfo, ChatPrSummary, ManagerModelInfo, ProfileSummary } from '@git-agent-harness/contracts';
 import { BoundedCollection } from './BoundedCollection.js';
@@ -30,6 +30,7 @@ interface NewChatModalProps {
  * no worktree, nothing at the provider is touched.
  */
 export function NewChatModal({ open, currentProfile, profiles, backends, onClose, onCreated }: NewChatModalProps) {
+  const dialog = useRef<HTMLDialogElement>(null);
   const [project, setProject] = useState(currentProfile);
   const [nodes, setNodes] = useState<ChatNodeInfo[]>([]);
   const [backend, setBackend] = useState<string>('');
@@ -52,6 +53,11 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
   const [pr, setPr] = useState<ChatPrSummary | null>(null);
 
   const implementedBackends = backends.filter((b) => b.implemented);
+
+  useEffect(() => {
+    if (open) dialog.current?.showModal();
+    else dialog.current?.close();
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -167,7 +173,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
         const session = await gahApi.createChatSession(project, backend, model, title.trim() || undefined);
         onCreated(project, session.id);
       }
-      onClose();
+      dialog.current?.close();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -176,11 +182,13 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="New chat">
-      <div className="card w-full max-w-lg max-h-[85vh] overflow-y-auto p-5 space-y-5">
+    <dialog ref={dialog} onClose={onClose} aria-label="New chat"
+      onClick={(event) => { if (event.target === event.currentTarget) dialog.current?.close(); }}
+      className="m-auto w-[calc(100%_-_2rem)] max-w-lg max-h-[85vh] overflow-visible border-0 bg-transparent p-0 text-primary backdrop:bg-black/60">
+      <div className="card w-full max-h-[85vh] overflow-y-auto p-5 space-y-5">
         <div className="flex items-center justify-between">
           <h2 className="text-base font-semibold text-primary">New chat</h2>
-          <button onClick={onClose} className="rounded p-1 text-muted hover:bg-white/5 hover:text-primary" aria-label="Close">
+          <button onClick={() => dialog.current?.close()} className="rounded p-1 text-muted hover:bg-white/5 hover:text-primary" aria-label="Close">
             <X size={16} aria-hidden="true" />
           </button>
         </div>
@@ -235,7 +243,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
             {issuesLoading && <p className="text-xs text-muted">Loading issues…</p>}
             {issuesError && (
               <div className="space-y-2">
-                <p role="alert" className="text-sm text-red-400">Could not load issues. {issuesError}</p>
+                <p role="alert" className="text-sm text-critical">Could not load issues. {issuesError}</p>
                 <button type="button" className="btn-secondary text-xs" onClick={() => setSourceRetry((attempt) => attempt + 1)}>Retry issues</button>
               </div>
             )}
@@ -276,7 +284,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
             {prsLoading && <p className="text-xs text-muted">Loading pull requests…</p>}
             {prsError && (
               <div className="space-y-2">
-                <p role="alert" className="text-sm text-red-400">Could not load pull requests. {prsError}</p>
+                <p role="alert" className="text-sm text-critical">Could not load pull requests. {prsError}</p>
                 <button type="button" className="btn-secondary text-xs" onClick={() => setSourceRetry((attempt) => attempt + 1)}>Retry pull requests</button>
               </div>
             )}
@@ -408,7 +416,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
         {error && <p className="text-xs text-red-400">{error}</p>}
 
         <div className="flex justify-end gap-2 pt-1">
-          <button type="button" onClick={onClose} className="btn-secondary text-xs">Cancel</button>
+          <button type="button" onClick={() => dialog.current?.close()} className="btn-secondary text-xs">Cancel</button>
           <button
             type="button"
             onClick={create}
@@ -419,6 +427,6 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
           </button>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }

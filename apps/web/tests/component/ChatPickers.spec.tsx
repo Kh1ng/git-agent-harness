@@ -134,3 +134,47 @@ for (const mode of ['issue', 'pr'] as const) {
     await expect.poll(() => created).toBe('created');
   });
 }
+
+
+test('new chat contains keyboard focus and restores it after Escape or backdrop dismissal', async ({ mount, page }) => {
+  let closed = 0;
+  await page.route('**/api/**', (route) => route.fulfill({ json: { nodes: [], profileOverrides: {}, defaultBackend: '' } }));
+  const render = (open: boolean) => <div>
+    <button type="button">Open chat</button>
+    <NewChatModal open={open} currentProfile="gah" profiles={[]} backends={[]}
+      onClose={() => { closed += 1; }} onCreated={() => {}} />
+  </div>;
+  const component = await mount(render(false));
+  const trigger = component.getByRole('button', { name: 'Open chat', exact: true });
+  await trigger.focus();
+  await component.update(render(true));
+  const dialog = component.getByRole('dialog', { name: 'New chat' });
+  await expect(dialog).toBeVisible();
+  const close = dialog.getByRole('button', { name: 'Close', exact: true });
+  const cancel = dialog.getByRole('button', { name: 'Cancel', exact: true });
+  await expect(close).toBeFocused();
+  await cancel.focus();
+  // Background controls are inert, even when focus is requested directly.
+  await trigger.evaluate((button: HTMLButtonElement) => button.focus());
+  await expect(cancel).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(trigger).not.toBeFocused();
+  // Chromium may visit browser chrome between the last and first modal control.
+  if (!(await close.evaluate((button) => button === document.activeElement))) await page.keyboard.press('Tab');
+  await expect(close).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(trigger).not.toBeFocused();
+  if (!(await cancel.evaluate((button) => button === document.activeElement))) await page.keyboard.press('Shift+Tab');
+  await expect(cancel).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).not.toBeVisible();
+  await expect.poll(() => closed).toBe(1);
+  await expect(trigger).toBeFocused();
+  await component.update(render(false));
+  await component.update(render(true));
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(2, 2);
+  await expect(dialog).not.toBeVisible();
+  await expect.poll(() => closed).toBe(2);
+  await expect(trigger).toBeFocused();
+});
