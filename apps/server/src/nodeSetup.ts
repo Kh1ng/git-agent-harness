@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile } from 'node:fs/promises';
@@ -42,6 +43,9 @@ async function githubHeaders(): Promise<Record<string, string>> {
 export function nodeSetupRouter(): Router {
   const router = Router();
   router.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
+  // Enrollment serves archives and release assets; bound work even for authenticated clients.
+  router.use(rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: true, legacyHeaders: false,
+    message: { message: 'Too many setup requests. Retry in a minute.' } }));
   router.post('/command', (req, res) => {
     try {
       if (req.body.role !== 'desktop' && process.env.GAH_ALLOW_INSECURE_HTTP !== '1') {

@@ -50,3 +50,30 @@ test('Windows enrollment excludes CLI executables and the broken hidden-window d
   for (const name of ['gah.exe', 'GAH.Worker_0.1.0_x64-setup.exe', 'GAH.Worker_0.1.1_arm64-setup.exe']) assert.equal(isSupportedWindowsInstaller(name), false);
   for (const name of ['GAH.Worker_0.1.1_x64-setup.exe', 'GAH.Worker_0.2.0_x64-setup.exe', 'GAH.Worker_1.0.0_x64-setup.exe']) assert.equal(isSupportedWindowsInstaller(name), true);
 });
+
+
+test('setup rate limits installer reads and archive generation through one shared boundary', async () => {
+  const app = express();
+  app.use('/setup', nodeSetupRouter());
+  const server = createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const base = `http://127.0.0.1:${address.port}/setup`;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const response = await fetch(`${base}/install.ps1`);
+      assert.equal(response.status, 200);
+      await response.text();
+    }
+    for (const path of ['install.ps1', 'source.tar.gz', 'release/linux-cli']) {
+      const response = await fetch(`${base}/${path}`);
+      assert.equal(response.status, 429);
+      assert.ok(Number(response.headers.get('retry-after')) > 0);
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+      await response.text();
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
