@@ -30,7 +30,11 @@ function Download-SetupFile([string]$Name, [string]$Destination) {
 # Installer reruns change the connection, not the operator's desktop preferences.
 function Save-DesktopConnection([string]$Path, [string]$Address, [string]$Distribution) {
     $settings = if (Test-Path -LiteralPath $Path) {
-        Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        $json = [IO.File]::ReadAllText($Path)
+        # Windows PowerShell unwraps JSON arrays on the pipeline. Reject non-object
+        # roots before parsing so a one-object array cannot masquerade as settings.
+        if (-not $json.TrimStart().StartsWith('{')) { throw "Desktop settings at $Path must be a JSON object." }
+        ConvertFrom-Json -InputObject $json
     } else { [pscustomobject]@{} }
     if ($settings -isnot [pscustomobject]) { throw "Desktop settings at $Path must be a JSON object. Repair the file before rerunning setup." }
     $settings | Add-Member -NotePropertyName central_url -NotePropertyValue $Address -Force

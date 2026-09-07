@@ -27,12 +27,12 @@ try {
     $updated = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
     if ($updated.central_url -ne 'https://new.test' -or $updated.wsl_distribution -ne "Ubuntu 'quoted'") { throw 'Connection was not updated.' }
     if (-not $updated.presence.dock -or $updated.presence.launch_window -or $updated.presence.tray -or $updated.future_preference -ne 'keep') { throw 'Installer rerun erased desktop preferences.' }
-    foreach ($invalid in @('{broken', '[]', 'null', '"text"')) {
+    foreach ($invalid in @('{broken', '[]', '[{}]', 'null', '"text"')) {
         Set-Content -LiteralPath $config -Value $invalid
         $before = [IO.File]::ReadAllText($config)
         $rejected = $false
         try { Save-DesktopConnection $config 'https://new.test' 'Ubuntu' } catch { $rejected = $true }
-        if (-not $rejected -or [IO.File]::ReadAllText($config) -ne $before) { throw 'Invalid existing settings must be preserved and rejected.' }
+        if (-not $rejected -or [IO.File]::ReadAllText($config) -ne $before) { throw "Invalid existing settings must be preserved and rejected: $invalid" }
     }
 } finally { Remove-Item -LiteralPath $stage -Recurse -Force }
 
