@@ -123,7 +123,7 @@ function safePreviewUrl(url: string): string | null {
 function ToolCallCard({ tool }: { tool: NonNullable<ChatTurn['tool']> }) {
   const [open, setOpen] = useState(false);
   const statusColor = tool.status === 'failed'
-    ? 'text-red-400'
+    ? 'text-critical'
     : tool.status === 'completed'
       ? 'text-emerald-400'
       : 'text-muted animate-pulse';
@@ -189,7 +189,7 @@ function SkillPicker({
       >
         <Sparkles size={13} className="text-accent" aria-hidden="true" />
         Skills · {binding?.selectedIds.length ?? 0}
-        {drift && <span className="h-1.5 w-1.5 rounded-full bg-amber-400" title="Configured skills differ from the latest applied turn" />}
+        {drift && <span className="h-1.5 w-1.5 rounded-full bg-warning" title="Configured skills differ from the latest applied turn" />}
       </summary>
       <div className="absolute right-0 z-30 mt-1 w-64 max-w-[calc(100vw-2rem)] rounded-lg border border-subtle bg-raised p-3 shadow-xl">
         <div className="mb-2 flex items-start justify-between gap-3">
@@ -231,7 +231,7 @@ function SkillPicker({
           </div>
         )}
         {binding?.observedSkills != null && (
-          <p className={`mt-2 border-t border-subtle pt-2 text-[11px] ${drift ? 'text-amber-300' : 'text-muted'}`}>
+          <p className={`mt-2 border-t border-subtle pt-2 text-[11px] ${drift ? 'text-warning' : 'text-muted'}`}>
             {drift ? 'Changed since the latest applied turn. The next turn uses this selection.' : 'Matches the latest applied turn.'}
           </p>
         )}
@@ -367,8 +367,8 @@ function GitStrip({
           ) : clean ? (
             <span className="text-muted">clean</span>
           ) : (
-            <span className="flex items-center gap-1 text-amber-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+            <span className="flex items-center gap-1 text-warning">
+              <span className="h-1.5 w-1.5 rounded-full bg-warning" />
               {changedFiles} changed
             </span>
           )}
@@ -383,8 +383,8 @@ function GitStrip({
           {issues.length > 0 && (
             <>
               <span className="text-muted">|</span>
-              <ShieldAlert size={13} className="text-blue-400 shrink-0" />
-              <GitStripEntries items={issues} className="text-blue-300" />
+              <ShieldAlert size={13} className="text-accent shrink-0" />
+              <GitStripEntries items={issues} className="text-accent" />
             </>
           )}
         </div>
@@ -1531,8 +1531,8 @@ export function ManagerChatPage() {
                 </button>
               </div>
             </div>
-            {storageError && <p className="text-xs text-red-400" role="alert">{storageError}</p>}
-            {storage?.warnings.map((warning) => <p key={warning} className="text-xs text-amber-300">{warning}</p>)}
+            {storageError && <p className="text-xs text-critical" role="alert">{storageError}</p>}
+            {storage?.warnings.map((warning) => <p key={warning} className="text-xs text-warning">{warning}</p>)}
             <div className="divide-y divide-subtle rounded-md border border-subtle">
               {liveSessions.map((session) => {
                 const item = storageBySession.get(session.id);
@@ -1550,7 +1550,7 @@ export function ManagerChatPage() {
                       aria-label={`Select ${formatChatName(session)}`}
                     />
                     <span className="min-w-0 flex-1 truncate text-primary">{formatChatName(session)}</span>
-                    {item?.idle && <span className="text-amber-300">idle</span>}
+                    {item?.idle && <span className="text-warning">idle</span>}
                     {candidate && <span className="text-accent">{candidate.outcome === 'settled' ? `settle · ${candidate.reason}` : 'archive · idle'}</span>}
                     <span className="font-mono text-muted">{formatBytes(item?.worktreeBytes ?? 0)}</span>
                     {(item?.projectedReclaimBytes ?? 0) > 0 && (
@@ -1621,7 +1621,7 @@ export function ManagerChatPage() {
             </div>
           </div>
           {preview && safePreviewUrl(preview.url) === null ? (
-            <p className="text-xs text-red-400 px-4 py-6">
+            <p className="text-xs text-critical px-4 py-6">
               Preview URL failed validation and was blocked.
             </p>
           ) : preview ? (
@@ -1718,7 +1718,7 @@ export function ManagerChatPage() {
                     turn.role === 'user'
                       ? 'bg-accent text-white'
                       : turn.role === 'error'
-                        ? 'bg-red-500/10 text-red-400 border border-red-500/30'
+                        ? 'bg-critical/10 text-critical border border-critical/30'
                         : turn.role === 'system'
                           ? 'bg-transparent text-muted italic text-xs px-0'
                           : 'bg-raised text-primary border border-subtle'
@@ -1742,9 +1742,9 @@ export function ManagerChatPage() {
           {/* Slice 3: permission prompt -- the turn is blocked until one of
               these is clicked (or it times out / is cancelled server-side). */}
           {permission && (
-            <div className="w-full max-w-[80%] rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 space-y-2" role="alertdialog" aria-label="Permission request">
+            <div className="w-full max-w-[80%] rounded-lg border border-warning/40 bg-warning/10 px-3 py-2.5 space-y-2" role="alertdialog" aria-label="Permission request">
               <div className="flex items-start gap-2">
-                <ShieldAlert size={15} className="text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
+                <ShieldAlert size={15} className="text-warning shrink-0 mt-0.5" aria-hidden="true" />
                 <div className="min-w-0">
                   <p className="text-sm text-primary font-medium break-words">{permission.title}</p>
                   {permission.locations.length > 0 && (

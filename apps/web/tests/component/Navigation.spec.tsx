@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/experimental-ct-react';
 import React from 'react';
 import { Navbar } from '../../src/components/Navbar.js';
+import { SessionDetailModal } from '../../src/components/SessionDetailModal.js';
+import { WebSocketProvider } from '../../src/ws/WebSocketContext.js';
 
 test('mobile navigation contains focus, closes with Escape, selection, backdrop, and desktop resize', async ({ mount, page }) => {
   await page.emulateMedia({ colorScheme: 'dark', reducedMotion: 'reduce' });
@@ -62,4 +64,17 @@ test('semantic text and badges retain contrast in explicit and system themes', a
     for (const { text, ratio } of ratios) expect(ratio, `${theme}: ${text}`).toBeGreaterThanOrEqual(4.5);
   }
   await page.screenshot({ path: '/tmp/gah-audit-light-tokens.png' });
+});
+
+
+test('session details use a modal with a named command input and Escape dismissal', async ({ mount, page }) => {
+  await page.routeWebSocket('**/ws', () => {});
+  let closed = false;
+  await mount(<WebSocketProvider><SessionDetailModal session={{ id: 'test-session', providerKind: 'claude', status: 'running', repo: 'owner/repo', mode: 'improve', target: '#1112', backend: 'claude' }} onClose={() => { closed = true; }} /></WebSocketProvider>);
+  const modal = page.getByRole('dialog', { name: 'Session: Improve #1112' });
+  await expect(modal).toBeVisible();
+  await expect(modal.getByRole('textbox', { name: 'Session command' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(modal).not.toBeVisible();
+  await expect.poll(() => closed).toBe(true);
 });
