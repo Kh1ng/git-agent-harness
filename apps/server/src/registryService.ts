@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { hostname, networkInterfaces } from 'node:os';
 import type {
+  DoctorSnapshot,
   RegisteredNode,
   NodeSummary,
   NodeHealthCheckResult,
@@ -213,17 +214,34 @@ function emptyNodeObservation(
   };
 }
 
+/** The deadline covers response-body reads too; redirects cannot change the registered target. */
 async function fetchWithTimeout(url: string, headers: Record<string, string>, timeoutMs: number): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, {
-      headers,
-      signal: controller.signal
-    });
-  } finally {
-    clearTimeout(timeout);
+  return fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs), redirect: 'error' });
+}
+
+/** All registered-node requests use the same transport and secret-reference rules. */
+function nodeHeaders(node: RegisteredNode): Record<string, string> {
+  const headers: Record<string, string> = { Accept: 'application/json', 'User-Agent': 'GAH-Coordinator/0.1.0' };
+  if (node.transport_mode === 'authenticated_remote' || (node.transport_mode === 'trusted_lan' && !isLoopback(node.advertised_url))) {
+    headers.Authorization = `Bearer ${resolveSecret(node.secret_ref)}`;
   }
+  return headers;
+}
+
+export class NodeDoctorError extends Error {
+  constructor(public readonly status: number, message: string) { super(message); }
+}
+
+/** Validate the worker boundary before its output becomes dashboard readiness. */
+function isDoctorSnapshot(value: unknown, profile: string): value is DoctorSnapshot {
+  if (!value || typeof value !== 'object') return false;
+  const snapshot = value as Partial<DoctorSnapshot>;
+  return snapshot.schema_version === 1 && typeof snapshot.generated_at === 'string'
+    && Number.isFinite(Date.parse(snapshot.generated_at))
+    && ['ok', 'warn', 'fail'].includes(snapshot.overall_status ?? '')
+    && Array.isArray(snapshot.checks) && snapshot.checks.length > 0
+    && snapshot.checks.every((check) => check && typeof check.name === 'string' && typeof check.detail === 'string'
+      && ['ok', 'warn', 'fail'].includes(check.status) && (check.profile == null || check.profile === profile));
 }
 
 async function mapWithConcurrency<T, U>(
@@ -416,33 +434,15 @@ export class RegistryService {
       snapshotUrl.searchParams.set('profile', observedProfile);
     }
 
-    const headers: Record<string, string> = {
-      Accept: 'application/json',
-      'User-Agent': 'GAH-Coordinator/0.1.0'
-    };
-
-    if (
-      node.transport_mode === 'authenticated_remote' ||
-      (node.transport_mode === 'trusted_lan' && !isLoopback(node.advertised_url))
-    ) {
-      let token = '';
-      try {
-        token = resolveSecret(node.secret_ref);
-      } catch (e: any) {
-        const error: NonNullable<NodeHealthCheckResult['error']> = {
-          kind: 'AUTH',
-          message: `Failed to resolve secret reference: ${e.message}`
-        };
-        return {
-          node_id: node.node_id,
-          status: 'unhealthy',
-          state: 'auth_failed',
-          timestamp: start,
-          last_seen_at: node.last_seen_at ?? null,
-          error
-        };
-      }
-      headers.Authorization = `Bearer ${token}`;
+    let headers: Record<string, string>;
+    try {
+      headers = nodeHeaders(node);
+    } catch (e: any) {
+      return {
+        node_id: node.node_id, status: 'unhealthy', state: 'auth_failed', timestamp: start,
+        last_seen_at: node.last_seen_at ?? null,
+        error: { kind: 'AUTH', message: `Failed to resolve secret reference: ${e.message}` }
+      };
     }
 
     let response: Response;
@@ -776,6 +776,32 @@ export class RegistryService {
     }
     node.secret_ref = secretRef;
     this.save();
+  }
+
+  /** Run readiness on one declared worker profile, without changing fleet health or routing eligibility. */
+  async checkNodeDoctor(nodeId: string, profile: string): Promise<DoctorSnapshot> {
+    const node = this.nodes.get(nodeId);
+    if (!node) throw new NodeDoctorError(404, 'Node is not registered.');
+    if (!profile || !node.profiles?.includes(profile)) throw new NodeDoctorError(400, 'Select a profile declared by this worker. Configure or import a worker profile and register it first.');
+    let headers: Record<string, string>;
+    try { headers = nodeHeaders(node); }
+    catch { throw new NodeDoctorError(502, 'AUTH: Cannot resolve the worker credential on central.'); }
+    const url = new URL('/api/doctor', node.advertised_url);
+    url.searchParams.set('profile', profile);
+    try {
+      const response = await fetchWithTimeout(url.toString(), headers, 30_000);
+      if (response.status === 401 || response.status === 403) throw new NodeDoctorError(502, 'AUTH: Worker rejected its configured credential.');
+      if (!response.ok) throw new NodeDoctorError(502, `UPSTREAM: Worker doctor returned HTTP ${response.status}.`);
+      const snapshot: unknown = await response.json();
+      if (!isDoctorSnapshot(snapshot, profile)) throw new NodeDoctorError(502, 'PROTOCOL: Worker returned an invalid or mismatched doctor result.');
+      if (this.nodes.get(nodeId) !== node) throw new NodeDoctorError(409, 'Node registration changed during the check. Run readiness again.');
+      return snapshot;
+    } catch (error) {
+      if (error instanceof NodeDoctorError) throw error;
+      if (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)) throw new NodeDoctorError(504, 'TIMEOUT: Worker readiness did not finish within 30 seconds.');
+      if (error instanceof SyntaxError) throw new NodeDoctorError(502, 'PROTOCOL: Worker doctor response was not JSON.');
+      throw new NodeDoctorError(502, 'NETWORK: Cannot reach the registered worker doctor endpoint.');
+    }
   }
 
   async checkNodeHealth(nodeId: string, profile?: string): Promise<NodeHealthCheckResult> {

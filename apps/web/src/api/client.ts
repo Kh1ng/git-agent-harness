@@ -206,6 +206,7 @@ export interface StopLoopResult {
 export interface GahDataSource {
   getFleetSnapshot(): Promise<FleetSnapshot>;
   checkNodeHealth(nodeId: string): Promise<NodeHealthCheckResult>;
+  getNodeDoctor(nodeId: string, profile: string): Promise<DoctorSnapshot>;
   getStatus(profile?: string): Promise<StatusSnapshot>;
   getQuota(params?: { profile?: string; since?: string }): Promise<QuotaSnapshot>;
   getUsageRollup(profile?: string, days?: number): Promise<UsageRollupSummary>;
@@ -352,6 +353,9 @@ async function deleteJson<T>(path: string, params?: Record<string, string | unde
 }
 
 export const gahApi: GahDataSource = {
+  getNodeDoctor(nodeId, profile) {
+    return getJson<DoctorSnapshot>(`/api/registry/nodes/${encodeURIComponent(nodeId)}/doctor`, { profile });
+  },
   getFleetSnapshot() {
     return getJson<FleetSnapshot>('/api/registry/fleet/snapshot');
   },

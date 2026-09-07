@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { FleetSnapshot, NodeHealthCheckResult, NodeObservationSnapshot } from '@git-agent-harness/contracts';
+import type { DoctorSnapshot, FleetSnapshot, NodeHealthCheckResult, NodeObservationSnapshot } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { AddNodeSection } from './SettingsPage.js';
@@ -128,6 +128,7 @@ export function NodesPage() {
         <p className="text-sm text-secondary">Resources at that manual check:</p>
         <Resources observation={health.snapshot ?? undefined} />
       </div>}
+      <NodeReadiness key={`${selected.node_id}:${selected.advertised_url}:${selected.profiles?.join(',')}`} nodeId={selected.node_id} profiles={selected.profiles ?? []} />
       <h4 className="font-medium text-primary">Observed local claims</h4>
       <p className="text-sm text-secondary">{observationLabel(observation)} · observed {age(observation?.observed_at)}{observation?.profile ? ` · profile ${observation.profile}` : ''}</p>
       {!observation || (observation.state !== 'healthy' && observation.state !== 'stale') ? <p className="text-sm text-secondary">Local claims are unknown until the node returns a status snapshot.</p>
@@ -138,6 +139,53 @@ export function NodesPage() {
         : <ul className="space-y-2 text-sm text-primary">{leases.map((lease) => <li key={`${lease.profile}:${lease.work_id}`}>{lease.profile} / {lease.work_id} · renewed {age(lease.renewed_at)} · expires {new Date(lease.expires_at).toLocaleString()}</li>)}</ul>}
     </section>}
   </>;
+}
+
+/** Readiness is an explicit worker/profile observation, separate from HTTP health. */
+function NodeReadiness({ nodeId, profiles }: { nodeId: string; profiles: string[] }) {
+  const [profile, setProfile] = useState(profiles[0] ?? '');
+  const [result, setResult] = useState<DoctorSnapshot | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const request = useRef(0);
+  useEffect(() => () => { ++request.current; }, []);
+  const check = async () => {
+    const sequence = ++request.current;
+    setBusy(true); setError(''); setResult(null);
+    try {
+      const snapshot = await gahApi.getNodeDoctor(nodeId, profile);
+      if (sequence === request.current) setResult(snapshot);
+    } catch (err) {
+      if (sequence === request.current) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (sequence === request.current) setBusy(false);
+    }
+  };
+  const stale = result && Date.now() - Date.parse(result.generated_at) > 120_000;
+  return <section aria-label="Worker readiness" className="space-y-3 border-y border-subtle py-4">
+    <h4 className="font-medium text-primary">Worker readiness</h4>
+    {profiles.length === 0 ? <p className="text-sm text-secondary">Configure or import a repository profile on this worker, then register its profile name before checking readiness.</p> : <>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="text-sm text-secondary">Worker profile
+          <select className="input block mt-1" value={profile} onChange={(event) => { ++request.current; setProfile(event.target.value); setResult(null); setError(''); setBusy(false); }}>
+            {profiles.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
+        </label>
+        <button type="button" className="btn-secondary" disabled={busy} onClick={check}>{busy ? 'Checking readiness…' : 'Check readiness'}</button>
+      </div>
+      {!result && !busy && !error && <p className="text-sm text-secondary">Not checked for this worker and profile.</p>}
+      {error && <p role="alert" className="text-sm text-critical">Readiness unknown. {error} Retry with Check readiness.</p>}
+      {result && <>
+        <p role="status" className={`text-sm ${stale || result.overall_status === 'warn' ? 'text-warning' : result.overall_status === 'fail' ? 'text-critical' : 'text-primary'}`}>
+          {stale ? 'Stale readiness result' : 'Readiness checks'}: {result.overall_status} · observed {age(result.generated_at)}
+        </p>
+        <dl className="space-y-2 text-sm">{result.checks.map((item, index) => <div key={`${item.name}:${index}`}>
+          <dt className="font-medium text-primary">{item.name}: {item.status}</dt><dd className="break-words text-secondary">{item.detail}</dd>
+        </div>)}</dl>
+      </>}
+      <p className="text-sm text-secondary">These checks run on this worker. Results older than 2 minutes are stale. Passing prerequisites does not guarantee agent login or routing eligibility.</p>
+    </>}
+  </section>;
 }
 
 /** Produce an executable command from explicit worker connection settings.

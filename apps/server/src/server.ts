@@ -54,7 +54,7 @@ import type { SessionOptions } from './sessions/SessionManager.js';
 import { deriveControllerActivity } from './controllerActivity.js';
 import { authMiddleware, coordinatorTokenMatches } from './authMiddleware.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
-import { RegistryService } from './registryService.js';
+import { RegistryService, NodeDoctorError } from './registryService.js';
 import { ClaimsService, ClaimConflictError } from './claimsService.js';
 import { readSettings as readManagerChatSettings, writeSettings as writeManagerChatSettings } from './managerChat/settingsStore.js';
 import { gatewayBaseUrl, gatewayApiKey, gatewayHealth, recall } from './managerChat/memoryGatewayClient.js';
@@ -464,6 +464,18 @@ export function createServer(
       res.status(404).json({
         error: 'Not Found',
         message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/registry/nodes/:nodeId/doctor', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const profile = typeof req.query.profile === 'string' ? req.query.profile : '';
+      res.json(await registryService.checkNodeDoctor(req.params.nodeId, profile));
+    } catch (error) {
+      res.status(error instanceof NodeDoctorError ? error.status : 502).json({
+        error: 'Worker readiness unavailable', message: error instanceof Error ? error.message : String(error)
       });
     }
   });
