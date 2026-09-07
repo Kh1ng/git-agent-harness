@@ -74,10 +74,21 @@ fn explicit_backend_unavailable_never_launches_fallback() {
 #[test]
 fn explicit_backend_pin_survives_validation_retry() {
     let tmp = test_tempdir();
-    let (_repo, home, cfg) = setup_fix_dispatch_repo(
+    let (repo, home, cfg) = setup_fix_dispatch_repo(
         &tmp,
         "validation_commands = [\"grep -q '^done$' marker.txt\"]\n",
     );
+    fs::write(
+        repo.join("docs/PROJECT_BRIEF.md"),
+        "BROAD BACKGROUND SHOULD STAY DEFERRED\n## Working rules\nKeep operator backend selections exact.\n",
+    ).unwrap();
+    let config = fs::read_to_string(&cfg).unwrap();
+    fs::write(
+        &cfg,
+        format!("{config}\n[context]\nsoft_limit_tokens = 1\nhard_limit_tokens = 20000\n"),
+    )
+    .unwrap();
+    let captured_args = tmp.path().join("backend-args");
     let ledger_path = tmp.path().join("ledger.jsonl");
     let claude_count = tmp.path().join("claude-call-count");
     let codex_called = tmp.path().join("codex-called");
@@ -87,8 +98,9 @@ fn explicit_backend_pin_survives_validation_retry() {
         &fake_bin,
         "claude",
         &format!(
-            "#!/bin/sh\nn=$( [ -f '{claude_count}' ] && cat '{claude_count}' || echo 0 )\nn=$((n+1))\necho \"$n\" > '{claude_count}'\nif [ \"$n\" -eq 1 ]; then echo partial > marker.txt; else echo done > marker.txt; fi\nexit 0\n",
+            "#!/bin/sh\nn=$( [ -f '{claude_count}' ] && cat '{claude_count}' || echo 0 )\nn=$((n+1))\necho \"$n\" > '{claude_count}'\nprintf '%s\\n' \"$@\" > '{captured_args}'-\"$n\"\nif [ \"$n\" -eq 1 ]; then echo partial > marker.txt; else echo done > marker.txt; fi\nexit 0\n",
             claude_count = claude_count.display(),
+            captured_args = captured_args.display(),
         ),
     );
     make_fake_bin_with_body(
@@ -145,4 +157,39 @@ fn explicit_backend_pin_survives_validation_retry() {
     .unwrap();
     assert_eq!(entry["attempts"][0]["backend"], "claude");
     assert_eq!(entry["attempts"][1]["backend"], "claude");
+    let session = std::path::Path::new(entry["session_dir"].as_str().unwrap());
+    for attempt in 1..=2 {
+        let dir = session.join(format!("attempt-{attempt}"));
+        let task = fs::read_to_string(dir.join("task.md")).unwrap();
+        let context: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("context-built.json")).unwrap())
+                .unwrap();
+        let argv = fs::read_to_string(format!("{}-{attempt}", captured_args.display())).unwrap();
+        assert!(
+            argv.contains(&task),
+            "backend must receive the audited prompt"
+        );
+        assert_eq!(context["prompt"].as_str(), Some(task.as_str()));
+        assert_eq!(context["compacted"], true);
+        assert!(task.contains("Keep operator backend selections exact."));
+        assert!(!task.contains("BROAD BACKGROUND"));
+        assert_eq!(task.matches("## Deferred Context").count(), 1);
+        let map = context["deferred_sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["name"] == "Repository Map")
+            .unwrap();
+        let map_path = map["path"].as_str().unwrap();
+        assert!(task.contains(map_path));
+        let map_body = fs::read_to_string(map_path).unwrap();
+        assert!(map_body.contains("README.md"));
+        assert!(!task.contains(&map_body));
+        if attempt == 2 {
+            assert!(
+                task.contains("This retry starts from a clean target branch"),
+                "current validation repair evidence must survive compaction"
+            );
+        }
+    }
 }
