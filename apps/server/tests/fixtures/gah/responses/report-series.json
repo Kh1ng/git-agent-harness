@@ -1,0 +1,17 @@
+{
+  "ledger_path": "/fixture/ledger.jsonl",
+  "since": "7d",
+  "bucket": "daily",
+  "profile": null,
+  "series": [
+    {
+      "date": "2099-07-19",
+      "total_tokens": 0,
+      "actual_cost_usd": null,
+      "estimated_cost_usd": null,
+      "success_rate": 0.0,
+      "entries": 1,
+      "validation_pass": 0
+    }
+  ]
+}

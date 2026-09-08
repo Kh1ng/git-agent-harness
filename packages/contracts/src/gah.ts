@@ -559,7 +559,9 @@ export interface BackendModelComparison {
   review_verdict_distribution: [string, number][];
 }
 
-export type ReportGroupBy = 'backend' | 'model';
+/** Clap values shared by `gah report` and `gah ledger summary` (ledger::GroupBy). */
+export const REPORT_GROUP_BY_VALUES = ['none', 'backend', 'model', 'difficulty', 'backend-difficulty'] as const;
+export type ReportGroupBy = typeof REPORT_GROUP_BY_VALUES[number];
 
 /**
  * Actual token/cost burn observed by GAH itself, aggregated from the
@@ -1105,23 +1107,63 @@ export interface LedgerSummary {
   fallback_count: number;
   validation_pass: number;
   push_success: number;
+  auto_backend_routing_failures: number;
   mr_count: number;
   human_required_count: number;
-  attempts_started: number;
-  attempts_completed: number;
+  attempts_started: number | null;
+  attempts_completed: number | null;
   attempts_started_unknown: number;
   attempts_completed_unknown: number;
   average_duration_seconds: number | null;
-  usage_input_tokens: number;
-  usage_output_tokens: number;
-  usage_reasoning_tokens: number;
-  usage_cache_read_tokens: number;
-  usage_cache_write_tokens: number;
-  usage_total_tokens: number;
-  usage_requests_count: number;
+  usage_input_tokens: number | null;
+  usage_output_tokens: number | null;
+  usage_reasoning_tokens: number | null;
+  usage_cache_read_tokens: number | null;
+  usage_cache_write_tokens: number | null;
+  usage_total_tokens: number | null;
+  usage_requests_count: number | null;
   estimated_cost_usd: number | null;
   actual_cost_usd: number | null;
   last_run: string | null;
+  /** Rust omits groups that were not requested. `groupBy=none` omits all four. */
+  grouped_by_backend?: LedgerGroupSummary[];
+  grouped_by_model?: LedgerGroupSummary[];
+  grouped_by_difficulty?: LedgerGroupSummary[];
+  grouped_by_backend_difficulty?: LedgerGroupSummary[];
+}
+
+/** `ledger::summary::GroupSummary`; unknown observations remain null. */
+export interface LedgerGroupSummary {
+  group_key: string;
+  entries: number;
+  attempts: number;
+  attempts_started: number | null;
+  attempts_completed: number | null;
+  attempts_started_unknown: number;
+  attempts_completed_unknown: number;
+  validation_pass: number;
+  success_rate: number | null;
+  review_verdict_distribution: Record<string, number>;
+  total_cost_usd: number | null;
+  actual_cost_usd: number | null;
+  estimated_cost_usd: number | null;
+  average_cost_usd: number | null;
+  average_duration_seconds: number | null;
+  cost_per_approve_strong: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  reasoning_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  total_tokens: number | null;
+  memory_gateway_capture_l0_recorded: number | null;
+  requests_count: number | null;
+  tokens_per_success: number | null;
+  requests_per_success: number | null;
+  predicted_average_cost_usd: number | null;
+  predicted_average_duration_seconds: number | null;
+  predicted_difficulty_match_rate: number | null;
+  quota_observations?: QuotaObservation[];
 }
 
 /** One row of the raw, unnormalized `gah availability --json` state dump --

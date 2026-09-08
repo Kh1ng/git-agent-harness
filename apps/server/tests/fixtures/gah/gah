@@ -38,6 +38,9 @@ function respond(name) {
 
 const args = process.argv.slice(2);
 const [command, sub] = args;
+if (process.env.GAH_FIXTURE_QUERY_LOG && (command === 'report' || (command === 'ledger' && sub === 'summary'))) {
+  fs.appendFileSync(process.env.GAH_FIXTURE_QUERY_LOG, JSON.stringify(args) + '\n');
+}
 
 if (command === 'pm') {
   if (process.env.GAH_FIXTURE_PM_LOG) fs.appendFileSync(process.env.GAH_FIXTURE_PM_LOG, JSON.stringify(args) + '\n');
@@ -72,7 +75,9 @@ if (command === 'pm') {
 } else if (command === 'quota' && sub === 'snapshot') {
   respond('quota');
 } else if (command === 'report') {
-  respond('report');
+  respond(args.includes('--series') ? 'report-series' : 'report');
+} else if (command === 'ledger' && sub === 'summary') {
+  respond('ledger-summary');
 } else if (command === 'config' && sub === 'show') {
   respond('config-show');
 } else if (command === 'profile' && sub === 'list') {
