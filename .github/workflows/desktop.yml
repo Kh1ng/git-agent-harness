@@ -14,6 +14,8 @@ on:
       - 'scripts/install-wsl-worker.sh'
       - 'scripts/test-windows-installer.ps1'
       - 'scripts/test-wsl-worker-config.py'
+      - 'scripts/stage-node-test-artifacts.mjs'
+      - 'scripts/test-node-test-artifacts.mjs'
       - 'packages/**'
       - 'package.json'
       - 'package-lock.json'
@@ -58,7 +60,9 @@ jobs:
         run: npm run --workspace=apps/desktop typecheck
 
       - name: Check Windows installer contracts
-        run: powershell -NoProfile -File scripts/test-windows-installer.ps1
+        run: |
+          node scripts/test-node-test-artifacts.mjs
+          powershell -NoProfile -File scripts/test-windows-installer.ps1
 
       - name: Build local connection screen
         working-directory: apps/desktop
@@ -76,11 +80,14 @@ jobs:
         working-directory: apps/desktop
         run: npx tauri build --bundles nsis
 
+      - name: Stage installer and source manifest
+        run: node scripts/stage-node-test-artifacts.mjs desktop node-test-desktop
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: gah-worker-windows-nsis
-          path: apps/desktop/target/release/bundle/nsis/*.exe
+          path: node-test-desktop/*
           if-no-files-found: error
 
   macos:
@@ -134,4 +141,26 @@ jobs:
         with:
           name: gah-worker-macos-app
           path: apps/desktop/target/release/bundle/macos/*.app
+          if-no-files-found: error
+
+  linux-worker-test:
+    name: Linux worker test bundle
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Linux CLI
+        run: cargo build --release --bin gah
+      - name: Stage CLI, tracked source, and installers
+        run: node scripts/stage-node-test-artifacts.mjs worker node-test-worker
+      - name: Upload worker test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: gah-worker-linux-test
+          path: node-test-worker/*
           if-no-files-found: error
