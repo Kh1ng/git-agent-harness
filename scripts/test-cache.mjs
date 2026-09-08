@@ -32,7 +32,7 @@ const cacheDir = join(repoRoot, 'node_modules', '.cache', 'gah-tests');
 const CONFIG = {
   server: {
     cwd: join(repoRoot, 'apps', 'server'),
-    command: ['npx', '--no-install', 'tsx', '--test', ...collect(join(repoRoot, 'apps', 'server', 'src'), /\.test\.ts$/)],
+    command: [process.execPath, join(repoRoot, 'apps', 'server', 'test.mjs')],
     roots: [
       join(repoRoot, 'apps', 'server'),
       join(repoRoot, 'apps', 'server', 'tests'),
@@ -80,7 +80,7 @@ function suiteHash(profile) {
   const { roots } = CONFIG[profile];
   const files = [];
   for (const root of roots) {
-    const actionable = lstatSync(root).isDirectory() ? collect(root, /\.(ts|tsx|js|json|html|css)$/) : [root];
+    const actionable = lstatSync(root).isDirectory() ? collect(root, /\.(ts|tsx|js|mjs|json|html|css)$/) : [root];
     for (const f of actionable) {
       const rel = relative(repoRoot, f);
       if (rel.includes(`${sep}node_modules${sep}`)) continue;

@@ -117,63 +117,6 @@ pub(super) fn auto_candidates(
     dedupe_candidates(candidates)
 }
 
-pub(super) fn explicit_candidates(
-    routing: &RoutingPolicy,
-    mode: &str,
-    primary: &RouteCandidate,
-    review_fallback_backend: Option<String>,
-    allow_review_fallback: bool,
-    allow_impl_fallback: bool,
-) -> Vec<RouteCandidate> {
-    let mut candidates = vec![primary.clone()];
-    let fallback_allowed = if is_review_mode(mode) {
-        allow_review_fallback
-    } else {
-        allow_impl_fallback
-    };
-    if fallback_allowed {
-        // Candidate identity is a backend/model pair. If the explicit route
-        // belongs to the configured pool, continue with only the remainder of
-        // that ordered pool. For an ad-hoc explicit route, fall back to the
-        // complete configured pool. Never copy the explicit model onto a
-        // different runner: that was the source of codex aliases reaching
-        // OpenHands/Claude and being reported as exit-0 no-progress.
-        if let Some(configured) = policy_candidates(routing, mode) {
-            if let Some(position) = configured
-                .iter()
-                .position(|candidate| same_destination(candidate, primary))
-            {
-                candidates.extend(configured.into_iter().skip(position + 1));
-            } else {
-                candidates.extend(configured);
-            }
-        }
-
-        if is_review_mode(mode) {
-            if let Some(weak_backend) = review_fallback_backend {
-                let weak_model = review_fallback_model(routing).map(str::to_string);
-                let quota_pool =
-                    routing.find_quota_pool(mode, &weak_backend, weak_model.as_deref());
-                candidates.push(RouteCandidate {
-                    identity: ExecutionIdentity::legacy_candidate(
-                        weak_backend,
-                        weak_model,
-                        quota_pool,
-                    ),
-                    priority: 0,
-                    included_in_quota: false,
-                    marginal_cost_usd: None,
-                    quota_usage_percent: None,
-                    quota_days_remaining: None,
-                    requires_approval: false,
-                    original_order: candidates.len(),
-                });
-            }
-        }
-    }
-    dedupe_candidates(candidates)
-}
-
 fn extend_default_backend_candidates(
     routing: &RoutingPolicy,
     candidates: &mut Vec<RouteCandidate>,

@@ -25,7 +25,7 @@ export function SessionCard({ session, onClick }: SessionCardProps) {
   return (
     <button
       onClick={onClick}
-      className="card-padded w-full text-left transition-colors hover:border-accent/40 focus-visible:outline-none"
+      className="card-padded w-full text-left transition-colors hover:border-accent/40"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-start gap-3 min-w-0">

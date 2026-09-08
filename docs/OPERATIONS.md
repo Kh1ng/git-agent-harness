@@ -499,7 +499,10 @@ plain-HTTP status polling. This flag is deliberately named for what it does —
 it lifts the TLS requirement for **every** `authMiddleware`-protected route
 (the registry, claims, and settings APIs), not just LAN registration — so
 treat it as "this host accepts plain HTTP for authenticated API traffic".
-Requests still require `COORDINATOR_TOKEN`.
+Remote and reverse-proxied requests still require `COORDINATOR_TOKEN`.
+Direct loopback CLI requests and same-origin loopback browser requests may omit
+the token. Cross-origin requests and non-loopback Host names do not receive this
+exemption. Reverse proxies must send `Forwarded` or `X-Forwarded-*` headers.
 Without the opt-in, access is rejected. The central also rejects any node that
 advertises the central node's own endpoint, which would make its liveness
 poller poll itself and recurse. Re-running registration updates the existing
@@ -510,9 +513,8 @@ node's validated endpoint, transport, secret reference, and profile declarations
 > loopback/authenticated requests. But a re-registration that matches an
 > existing `node_id` repoints where the central polls (`advertised_url`) and
 > how it authenticates (`secret_ref`), so the route requires a valid
-> `COORDINATOR_TOKEN` even for loopback-looking requests — otherwise any
-> tailnet peer reaching the central through its reverse proxy (which appears
-> loopback to the server) could hijack a node by its ID alone.
+> `COORDINATOR_TOKEN` even for direct loopback requests. Reverse-proxied
+> requests always require the token at the shared authentication boundary.
 
 ### Node liveness scheduler (issue #883)
 

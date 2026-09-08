@@ -4,6 +4,36 @@ import { test } from 'node:test';
 import type { ServerMessage, Session } from '@git-agent-harness/contracts';
 import { createSessionManager } from './SessionManager.js';
 
+test('explicit review and improve routes reach dispatch unchanged and do not fall back on failure', async () => {
+  for (const mode of ['review', 'improve']) {
+    const dispatched: Array<{ mode: string; backend?: string; model?: string }> = [];
+    const manager = createSessionManager({
+      disableCleanupTimer: true,
+      providerRegistry: { isProviderAvailable: () => true },
+      pushBus: { publish() {} },
+      dispatchRunner: (options) => {
+        dispatched.push({ mode: options.mode, backend: options.backend, model: options.model });
+        return {
+          promise: Promise.resolve({
+            exitCode: 1, stdout: '',
+            stderr: 'no eligible backend available for preferred vibe/mistral-medium-3.5',
+          }),
+          cancel: async () => ({ cancelled: false }),
+        };
+      },
+    });
+    const session = await manager.startSession({
+      profile: 'gah', providerKind: 'github', instanceId: 'github-0',
+      repo: 'owner/repo', mode, backend: 'vibe', model: 'mistral-medium-3.5',
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(dispatched, [{ mode, backend: 'vibe', model: 'mistral-medium-3.5' }]);
+    assert.equal(manager.getSession(session.id)?.status, 'error');
+    assert.equal(manager.getSession(session.id)?.backend, 'vibe');
+    assert.equal(manager.getSession(session.id)?.model, 'mistral-medium-3.5');
+  }
+});
+
 test('session.start request ids are idempotent and emit one start event', async () => {
   const published: ServerMessage[] = [];
   let dispatchCalls = 0;
@@ -363,7 +393,8 @@ test('late process completion cannot overwrite cancelled terminal state', async 
   assert.equal(finalSession?.status, 'stopped');
 });
 
-test('stopSession times out if cancellation takes too long', async () => {
+test('stopSession times out if cancellation takes too long', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const published: ServerMessage[] = [];
   const manager = createSessionManager({
     disableCleanupTimer: true,
@@ -391,15 +422,12 @@ test('stopSession times out if cancellation takes too long', async () => {
     mode: 'fix'
   });
 
-  // This should timeout and still complete
-  const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Test timeout')), 35000));
-  const stopPromise: Promise<Session> = Promise.race([
-    manager.stopSession(session.id),
-    timeout
-  ]);
-  
+  const stopPromise = manager.stopSession(session.id);
+  t.mock.timers.tick(29_999);
+  assert.equal(manager.getSession(session.id)?.status, 'stopping');
+  t.mock.timers.tick(1);
   const stoppedSession = await stopPromise;
-  
+
   // Should have timed out and marked as error
   assert.equal(stoppedSession.status, 'error');
   assert.equal(stoppedSession.error, 'Session cancellation timed out');

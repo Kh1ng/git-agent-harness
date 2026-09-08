@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { coordinatorTokenMatches } from './authMiddleware.js';
 import { createServer as createExpressServer, initializeSkillBank } from './server.js';
 import { createServer as createHttpServer } from 'http';
 import { WebSocketServer } from 'ws';
@@ -48,7 +49,11 @@ async function main() {
   const server = createHttpServer(app);
   
   // Create WebSocket server
-  const wss = new WebSocketServer({ server });
+  const wss = new WebSocketServer({ server, verifyClient: (info: { req: import('node:http').IncomingMessage }) => {
+    if (process.env.GAH_NODE_ROLE !== 'worker') return true;
+    const authorization = info.req.headers.authorization;
+    return !!authorization?.startsWith('Bearer ') && coordinatorTokenMatches(authorization.slice(7));
+  } });
   
   // Check GAH CLI availability (real status/dispatch data is loaded
   // on-demand per WebSocket connection in wsServer.ts's sendWelcomeMessage,
@@ -88,7 +93,7 @@ async function main() {
   // PR merged/closed (or whose issue closed) on a bounded interval instead
   // of only at the daily prune, so "the work shipped" is visible while it
   // still matters.
-  startChatMaintenanceScheduler();
+  if (process.env.GAH_NODE_ROLE !== 'worker') startChatMaintenanceScheduler();
 
   // Start HTTP server
   server.listen(PORT, HOST, () => {

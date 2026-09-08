@@ -2,15 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
-/**
- * Design tokens. Dark-first (this is an operator control plane, not a
- * marketing site) with a light override for `[data-theme="light"]` or
- * `prefers-color-scheme: light`. Values are the dataviz skill's validated
- * reference palette (references/palette.md) -- chosen for its restraint
- * (no gradient, no saturated brand hue) and re-used unmodified rather than
- * inventing a new one for a single frontend pass.
- */
+/* Semantic text colors meet 4.5:1 on page, card, and raised surfaces.
+   Chart series remain independent from status text and button fills. */
 :root {
+  color-scheme: dark;
   --surface-page: 13 13 13;      /* #0d0d0d */
   --surface-card: 26 26 25;      /* #1a1a19 */
   --surface-raised: 35 35 33;    /* #232321, one step up for popovers/modals */
@@ -19,15 +14,16 @@
 
   --ink-primary: 255 255 255;
   --ink-secondary: 195 194 183;  /* #c3c2b7 */
-  --ink-muted: 137 135 129;      /* #898781 */
+  --ink-muted: 145 143 137;
 
-  --status-good: 12 163 12;      /* #0ca30c */
+  --status-good: 58 190 90;
   --status-warning: 250 178 25;  /* #fab219 */
   --status-serious: 236 131 90;  /* #ec835a */
-  --status-critical: 208 59 59;  /* #d03b3b */
-  --status-unknown: 137 135 129; /* same as ink-muted: neutral, not alarming */
+  --status-critical: 245 115 115;
+  --status-unknown: 145 143 137; /* same as ink-muted: neutral, not alarming */
 
-  --accent: 57 135 229;          /* #3987e5, categorical slot 1 (blue), dark step */
+  --accent-fill: 30 98 180;
+  --accent: 80 155 245;
 
   /* Categorical series order is fixed -- never reassigned per filter. */
   --series-1: 57 135 229;   /* blue */
@@ -41,6 +37,7 @@
 }
 
 [data-theme='light'] {
+  color-scheme: light;
   --surface-page: 249 249 247;   /* #f9f9f7 */
   --surface-card: 252 252 251;   /* #fcfcfb */
   --surface-raised: 255 255 255;
@@ -49,15 +46,15 @@
 
   --ink-primary: 11 11 11;
   --ink-secondary: 82 81 78;     /* #52514e */
-  --ink-muted: 137 135 129;
+  --ink-muted: 108 106 100;
 
-  --status-good: 12 163 12;
-  --status-warning: 250 178 25;
-  --status-serious: 236 131 90;
-  --status-critical: 208 59 59;
-  --status-unknown: 137 135 129;
+  --status-good: 17 113 39;
+  --status-warning: 136 87 0;
+  --status-serious: 164 61 23;
+  --status-critical: 179 39 39;
+  --status-unknown: 108 106 100;
 
-  --accent: 42 120 214;          /* #2a78d6, categorical slot 1, light step */
+  --accent: 30 98 180;
 
   --series-1: 42 120 214;
   --series-2: 27 175 122;
@@ -71,6 +68,7 @@
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']) {
+    color-scheme: light;
     --surface-page: 249 249 247;
     --surface-card: 252 252 251;
     --surface-raised: 255 255 255;
@@ -78,8 +76,13 @@
     --border-subtle: 225 224 217;
     --ink-primary: 11 11 11;
     --ink-secondary: 82 81 78;
-    --ink-muted: 137 135 129;
-    --accent: 42 120 214;
+    --ink-muted: 108 106 100;
+    --status-good: 17 113 39;
+    --status-warning: 136 87 0;
+    --status-serious: 164 61 23;
+    --status-critical: 179 39 39;
+    --status-unknown: 108 106 100;
+    --accent: 30 98 180;
     --series-1: 42 120 214;
     --series-2: 27 175 122;
     --series-3: 237 161 0;
@@ -111,18 +114,22 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-      animation-duration: 0.001ms !important;
-      animation-iteration-count: 1 !important;
-      transition-duration: 0.001ms !important;
-      scroll-behavior: auto !important;
+    /* Keep loading labels and status changes visible without spinning or pulsing. */
+    .animate-spin,
+    .animate-pulse {
+      animation: none !important;
+    }
+    html:focus-within {
+      scroll-behavior: auto;
     }
   }
 }
 
 @layer components {
+  .input {
+    @apply rounded-md border border-subtle bg-raised px-3 py-2 text-sm text-primary placeholder:text-muted disabled:opacity-50;
+  }
+
   .card {
     @apply bg-card border border-subtle rounded-lg;
   }
@@ -132,16 +139,16 @@
   }
 
   .btn {
-    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors focus-visible:outline-none disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
     min-height: 36px;
   }
 
   .btn-primary {
     @apply btn text-white;
-    background-color: rgb(var(--accent));
+    background-color: rgb(var(--accent-fill));
   }
   .btn-primary:hover:not(:disabled) {
-    filter: brightness(1.1);
+    filter: brightness(0.9);
   }
 
   .btn-secondary {

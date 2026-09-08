@@ -22,7 +22,7 @@ use super::super::attempts::{
     run_backend_for_identity,
 };
 use super::super::issues::resolve_target_to_issue_or_string;
-use super::super::prompts::build_task;
+use super::super::prompts::{build_task, enforce_context_budget};
 use super::super::DispatchArgs;
 use super::estimator::{build_estimate_task, parse_estimate_response};
 use crate::config::{self, GahConfig, Profile};
@@ -103,6 +103,22 @@ pub(crate) fn research(
 
     let attempt_dir = session_dir.join("attempt-1");
     fs::create_dir_all(&attempt_dir)?;
+    let task = enforce_context_budget(
+        cfg,
+        profile,
+        repo,
+        profile_name,
+        &route.effective_backend,
+        &args.mode,
+        true,
+        &task,
+        &attempt_dir,
+        args.run_id.as_deref(),
+        ledger,
+        None,
+    )?
+    .prompt;
+
     let cargo_target = crate::build_cache::ScopedCargoTarget::acquire(&profile.artifact_root)?;
 
     println!(

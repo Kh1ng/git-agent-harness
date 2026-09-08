@@ -6,7 +6,7 @@ use super::super::attempts::{
 use super::super::identity::timestamp;
 use super::super::issues::resolve_target_to_issue_or_string;
 use super::super::metrics::apply_diff_stats;
-use super::super::prompts::build_task;
+use super::super::prompts::{build_task, enforce_context_budget};
 use super::super::publish::{
     build_experiment_mr_body, emit_human_handoff, enforce_generated_artifact_policy,
     handle_handoff_delivery, publishing_allows_publish, ExperimentMrRenderContext,
@@ -107,6 +107,21 @@ pub(crate) fn experiment(
     );
     let attempt_dir = session_dir.join("attempt-1");
     fs::create_dir_all(&attempt_dir)?;
+    let task = enforce_context_budget(
+        cfg,
+        profile,
+        &wt,
+        profile_name,
+        &route.effective_backend,
+        &args.mode,
+        true,
+        &task,
+        &attempt_dir,
+        args.run_id.as_deref(),
+        ledger,
+        None,
+    )?
+    .prompt;
 
     let env_path = if !resolved_env.is_empty() {
         Some(resolved_env)

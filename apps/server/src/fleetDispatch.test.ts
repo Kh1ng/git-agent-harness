@@ -263,6 +263,7 @@ test('fleet dispatch wait resolves from the terminal push event', async () => {
   const published: PublishedMessage[] = [];
   const transportMap = new Map<string, FakeTransport>();
   const registryService = {
+    getNode: () => undefined,
     async getNodeObservations() {
       return [
         makeSnapshot('coordinator-1', 'http://127.0.0.1:9999', 90, 4, 2),
@@ -309,6 +310,7 @@ test('fleet dispatch routes to the least-loaded healthy node and honors explicit
   const transportMap = new Map<string, FakeTransport>();
 
   const registryService = {
+    getNode: () => undefined,
     async getNodeObservations() {
       return [
         makeSnapshot('coordinator-1', 'http://127.0.0.1:9999', 90, 4, 2),
@@ -397,6 +399,7 @@ test('fleet dispatch reuses request ids across coordinator restarts and reconcil
   };
 
   const registryService = {
+    getNode: () => undefined,
     async getNodeObservations() {
       return [
         makeSnapshot('coordinator-1', coordinatorIdentity.advertised_url, 90, 4, 2),
@@ -488,6 +491,7 @@ test('fleet dispatch can stop a remote lease after a coordinator restart', async
   };
 
   const registryService = {
+    getNode: () => undefined,
     async getNodeObservations() {
       return [
         makeSnapshot('coordinator-1', coordinatorIdentity.advertised_url, 90, 4, 2),
@@ -558,6 +562,7 @@ test('fleet dispatch deduplicates concurrent starts with the same request id', a
   const transportMap = new Map<string, FakeTransport>();
 
   const registryService = {
+    getNode: () => undefined,
     async getNodeObservations() {
       return [
         makeSnapshot('coordinator-1', 'http://127.0.0.1:9999', 10, 0, 0)
@@ -621,6 +626,7 @@ test('fleet dispatch deduplicates concurrent starts for the same work identity a
   const transportMap = new Map<string, FakeTransport>();
 
   const registryService = {
+    getNode: () => undefined,
     async getNodeObservations() {
       return [
         makeSnapshot('worker-1', 'http://127.0.0.1:9998', 15, 0, 0, {
@@ -708,6 +714,7 @@ test('fleet dispatch allows redispatch after terminal completion and keeps backe
   const transportMap = new Map<string, FakeTransport>();
 
   const registryService = {
+    getNode: () => undefined,
     async getNodeObservations() {
       return [
         makeSnapshot('coordinator-1', 'http://127.0.0.1:9999', 10, 0, 0, {
@@ -814,6 +821,7 @@ test('fleet dispatch skips unsupported, unavailable, and saturated nodes, and ma
   const unreachableWorkerUrl = 'http://127.0.0.1:65535';
 
   const registryService = {
+    getNode: () => undefined,
     async getNodeObservations() {
       return [
         makeSnapshot('blocked-availability', 'http://127.0.0.1:9997', 5, 0, 0, {
@@ -946,5 +954,51 @@ test('fleet dispatch skips unsupported, unavailable, and saturated nodes, and ma
     } catch {
       // ignore cleanup failures
     }
+  }
+});
+
+test('remote dispatch and reconciliation send the registered node credential', async () => {
+  const secretDir = mkdtempSync(resolve(tmpdir(), 'gah-fleet-auth-'));
+  const { rmSync } = await import('node:fs');
+  const previousToken = process.env.GAH_FLEET_TEST_TOKEN;
+  process.env.GAH_FLEET_TEST_TOKEN = 'node-test-secret';
+  const authorizations: (string | undefined)[] = [];
+  const server = http.createServer();
+  const wss = new WebSocketServer({ server, verifyClient: (info: { req: http.IncomingMessage }) => {
+    authorizations.push(info.req.headers.authorization);
+    return info.req.headers.authorization === 'Bearer node-test-secret';
+  } });
+  const session: Session = { id: 'authenticated-session', providerKind: 'codex', instanceId: 'codex-0', repo: 'owner/repo', mode: 'improve', status: 'running', startedAt: new Date().toISOString() };
+  wss.on('connection', (socket) => socket.on('message', (raw) => {
+    const message = JSON.parse(raw.toString()) as { type: string };
+    if (message.type === 'session.start') socket.send(JSON.stringify({ type: 'session.started', session }));
+    if (message.type === 'client.hello') socket.send(JSON.stringify({ type: 'server.welcome', sessions: [session] }));
+  }));
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const nodeUrl = `http://127.0.0.1:${address.port}`;
+  let registeredUrl = nodeUrl;
+  const registryService = {
+    getNode: () => ({ secret_ref: 'env:GAH_FLEET_TEST_TOKEN', advertised_url: registeredUrl }),
+    getNodeObservations: async () => [makeSnapshot('worker', nodeUrl, 0, 0, 0)]
+  } as unknown as RegistryService;
+  const coordinator = createFleetDispatchCoordinator({ registryService, pushBus: { publish() {} },
+    coordinatorIdentity: { node_id: 'central', display_name: 'central', advertised_url: 'http://127.0.0.1:9999', version: '0.1.0', schema_digest: 'schema' },
+    leaseStorePath: resolve(secretDir, 'leases.json') });
+  try {
+    await coordinator.startSession({ requestId: 'auth-dispatch', nodeId: 'worker', profile: 'gah', providerKind: 'codex', instanceId: 'codex-0', repo: 'owner/repo', mode: 'improve' });
+    await coordinator.reconcileLeases('gah');
+    assert.deepEqual(authorizations, ['Bearer node-test-secret', 'Bearer node-test-secret']);
+    assert.equal(coordinator.getSession(session.id)?.leaseState, 'running');
+    registeredUrl = 'http://127.0.0.1:9998';
+    await coordinator.reconcileLeases('gah');
+    assert.equal(authorizations.length, 2, 'a stale lease must not send credentials to the old address');
+    assert.equal(coordinator.getSession(session.id)?.leaseState, 'uncertain_reconciling');
+  } finally {
+    for (const socket of wss.clients) socket.terminate();
+    await new Promise<void>((done) => wss.close(() => server.close(() => done())));
+    rmSync(secretDir, { recursive: true, force: true });
+    if (previousToken === undefined) delete process.env.GAH_FLEET_TEST_TOKEN; else process.env.GAH_FLEET_TEST_TOKEN = previousToken;
   }
 });

@@ -35,6 +35,11 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
   const { sessionOutput, sendMessage, isConnected } = useWebSocket();
   const [command, setCommand] = useState('');
   const outputRef = useRef<HTMLDivElement>(null);
+  const dialog = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    dialog.current?.showModal();
+  }, []);
   const output = sessionOutput[session.id];
   const Icon = providerIcon(session.providerKind);
   const isRunning = session.status === 'running';
@@ -67,8 +72,8 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
   const combinedOutput = [output?.stdout, output?.stderr].filter(Boolean).join('');
 
   return (
-    <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
-      <div className="card max-w-3xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+    <dialog ref={dialog} onClose={onClose} aria-label={`Session: ${name}`} className="card p-0 text-primary max-w-3xl w-[calc(100%-2rem)] max-h-[90dvh] overflow-y-auto backdrop:bg-black/70">
+      <div className="flex flex-col">
         <div className="flex justify-between items-center p-4 sm:p-5 border-b border-subtle">
           <div className="flex items-center gap-3 min-w-0">
             <Icon size={20} className="text-muted shrink-0" aria-hidden="true" />
@@ -128,9 +133,10 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
                 value={command}
                 onChange={(e) => setCommand(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSendCommand()}
+                aria-label="Session command"
                 placeholder="Send a command to this session…"
                 disabled={!isConnected}
-                className="flex-1 bg-page border border-subtle rounded-md px-3 py-1.5 text-sm text-primary placeholder:text-muted focus-visible:outline-none min-w-0"
+                className="flex-1 bg-page border border-subtle rounded-md px-3 py-1.5 text-sm text-primary placeholder:text-muted min-w-0"
               />
               <button onClick={handleSendCommand} disabled={!isConnected || !command.trim()} className="btn-secondary">
                 <Send size={14} aria-hidden="true" />
@@ -151,6 +157,6 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
           </div>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }

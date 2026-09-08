@@ -66,7 +66,10 @@ export interface Session {
 }
 
 // WebSocket message types
-export type ServerMessage = 
+export type ServerMessage =
+  // Invalidation only: fleet details require the authenticated REST endpoint.
+  | { type: "fleet.changed" }
+
   | {
       type: "server.welcome";
       serverVersion: string;

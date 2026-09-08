@@ -1,14 +1,23 @@
-# Desktop app installers (WP4): Windows NSIS installer and the macOS app.
-#
-# Manual dispatch (or a `desktop-*` tag). Windows can only be built on
-# windows-latest and macOS app bundles on macOS runners, so neither belongs
-# in the main CI path. The desktop app is a thin worker tray (Tauri) that
-# loads the central node's web UI, so the build only needs the workspace's
-# shared packages and a frontendDist stub.
+# Native desktop builds also gate pull requests that change the app or its installer.
 name: Desktop
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/desktop.yml'
+      - 'apps/desktop/**'
+      - 'apps/server/src/nodeSetup*'
+      - 'apps/server/src/authMiddleware.ts'
+      - 'scripts/install-windows.ps1'
+      - 'scripts/install-wsl-worker.sh'
+      - 'scripts/test-windows-installer.ps1'
+      - 'scripts/test-wsl-worker-config.py'
+      - 'packages/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.base.json'
   push:
     tags:
       - 'desktop-*'
@@ -45,13 +54,23 @@ jobs:
       - name: Build shared packages
         run: npm run build:contracts && npm run build:shared
 
-      - name: Build frontendDist stub
+      - name: Check desktop types
+        run: npm run --workspace=apps/desktop typecheck
+
+      - name: Check Windows installer contracts
+        run: powershell -NoProfile -File scripts/test-windows-installer.ps1
+
+      - name: Build local connection screen
         working-directory: apps/desktop
         run: npx vite build
 
       - name: Generate icons
         working-directory: apps/desktop
         run: npx tauri icon icons/icon.png
+
+      - name: Test desktop settings and URL validation
+        working-directory: apps/desktop
+        run: cargo test -- --test-threads=1
 
       - name: Build the Windows installer
         working-directory: apps/desktop
@@ -90,9 +109,21 @@ jobs:
       - name: Build shared packages
         run: npm run build:contracts && npm run build:shared
 
-      - name: Build frontendDist stub
+      - name: Check desktop types
+        run: npm run --workspace=apps/desktop typecheck
+
+      - name: Check WSL worker configuration
+        run: |
+          bash -n scripts/install-wsl-worker.sh
+          python3 scripts/test-wsl-worker-config.py
+
+      - name: Build local connection screen
         working-directory: apps/desktop
         run: npx vite build
+
+      - name: Test desktop settings and URL validation
+        working-directory: apps/desktop
+        run: cargo test -- --test-threads=1
 
       - name: Build the macOS app
         working-directory: apps/desktop

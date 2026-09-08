@@ -284,6 +284,9 @@ export function resolveSecret(secretRef: string): string {
 }
 
 export class RegistryService {
+  private observationRequests = new Map<string, number>();
+  private observations = new Map<string, NodeObservationSnapshot>();
+  private listeners = new Set<() => void>();
   private configPath: string;
   private nodes: Map<string, RegisteredNode> = new Map();
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
@@ -346,23 +349,39 @@ export class RegistryService {
     return this.getNodes().map(({ secret_ref, ...summary }) => summary);
   }
 
+  /** Notify dashboards to refetch authenticated data, without publishing node details. */
+  onChange(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
+  private changed(): void {
+    for (const listener of this.listeners) listener();
+  }
+
+  /** Reads observations already collected by liveness checks; never contacts a node. */
+  getCachedObservations(): NodeObservationSnapshot[] {
+    return [...this.observations.values()];
+  }
+
   async getNodeObservations(profile?: string): Promise<NodeObservationSnapshot[]> {
     const nodes = this.getNodes();
-    return mapWithConcurrency(nodes, NODE_POLL_CONCURRENCY, async (node) => {
+    const observations = await mapWithConcurrency(nodes, NODE_POLL_CONCURRENCY, async (node) => {
       const result = await this.pollNodeObservation(node, profile);
       return result.snapshot ?? emptyNodeObservation(node, nowIso(result.timestamp), result.state, result.last_seen_at ?? null, result.error ?? null);
     });
+    if (!profile) this.changed();
+    return observations;
   }
 
   private persistObservation(
-    nodeId: string,
+    node: RegisteredNode,
     observedAt: string,
     state: NodeObservationState,
     lastSeenAt: string | null,
     error?: { kind: string; message: string } | null
   ): void {
-    const node = this.nodes.get(nodeId);
-    if (!node) return;
+    if (this.nodes.get(node.node_id) !== node) return;
     node.last_observed_at = observedAt;
     node.last_observed_state = state;
     node.last_seen_at = lastSeenAt ?? node.last_seen_at ?? null;
@@ -372,11 +391,29 @@ export class RegistryService {
   }
 
   private async pollNodeObservation(node: RegisteredNode, profile?: string): Promise<NodeHealthCheckResult> {
+    const sequence = (this.observationRequests.get(node.node_id) ?? 0) + 1;
+    this.observationRequests.set(node.node_id, sequence);
+    const result = await this.fetchNodeObservation(node, profile);
+    // Publish only the newest request for this registration. A slow poll must
+    // not undo a newer health check or restore a revoked/repointed node.
+    if (this.nodes.get(node.node_id) === node && this.observationRequests.get(node.node_id) === sequence) {
+      this.persistObservation(node, nowIso(result.timestamp), result.state, result.last_seen_at, result.error);
+      // A scoped dispatch must not replace the fleet-wide observation.
+      if (!profile) this.observations.set(node.node_id, result.snapshot ?? emptyNodeObservation(
+        node, nowIso(result.timestamp), result.state, result.last_seen_at, result.error
+      ));
+    }
+    return result;
+  }
+
+  private async fetchNodeObservation(node: RegisteredNode, profile?: string): Promise<NodeHealthCheckResult> {
     const start = Date.now();
     const observedAt = nowIso(start);
     const snapshotUrl = new URL('/api/status', node.advertised_url);
-    if (profile) {
-      snapshotUrl.searchParams.set('profile', profile);
+    // Workers may not have a profile named "gah" (the status endpoint's default).
+    const observedProfile = profile ?? node.profiles?.[0];
+    if (observedProfile) {
+      snapshotUrl.searchParams.set('profile', observedProfile);
     }
 
     const headers: Record<string, string> = {
@@ -396,7 +433,6 @@ export class RegistryService {
           kind: 'AUTH',
           message: `Failed to resolve secret reference: ${e.message}`
         };
-        this.persistObservation(node.node_id, observedAt, 'auth_failed', null, error);
         return {
           node_id: node.node_id,
           status: 'unhealthy',
@@ -423,7 +459,6 @@ export class RegistryService {
         kind = 'TLS';
       }
       const error = { kind, message: `Node observation failed: ${errorMessage}` };
-      this.persistObservation(node.node_id, observedAt, state, node.last_seen_at ?? null, error);
       return {
         node_id: node.node_id,
         status: 'unhealthy',
@@ -439,7 +474,6 @@ export class RegistryService {
         kind: 'AUTH',
         message: `Node returned HTTP ${response.status} (Unauthorized)`
       };
-      this.persistObservation(node.node_id, observedAt, 'auth_failed', null, error);
       return {
         node_id: node.node_id,
         status: 'unhealthy',
@@ -455,7 +489,6 @@ export class RegistryService {
         kind: 'PROTOCOL',
         message: `Node returned HTTP status ${response.status}`
       };
-      this.persistObservation(node.node_id, observedAt, 'unreachable', null, error);
       return {
         node_id: node.node_id,
         status: 'unhealthy',
@@ -472,7 +505,6 @@ export class RegistryService {
         kind: 'PROTOCOL',
         message: `Node returned non-JSON content-type: ${contentType}`
       };
-      this.persistObservation(node.node_id, observedAt, 'incompatible', null, error);
       return {
         node_id: node.node_id,
         status: 'unhealthy',
@@ -491,7 +523,6 @@ export class RegistryService {
         kind: 'PROTOCOL',
         message: `Failed to parse JSON response: ${err?.message || String(err)}`
       };
-      this.persistObservation(node.node_id, observedAt, 'incompatible', null, error);
       return {
         node_id: node.node_id,
         status: 'unhealthy',
@@ -507,7 +538,6 @@ export class RegistryService {
         kind: 'PROTOCOL',
         message: 'Node status response is not an object'
       };
-      this.persistObservation(node.node_id, observedAt, 'incompatible', null, error);
       return {
         node_id: node.node_id,
         status: 'unhealthy',
@@ -534,7 +564,6 @@ export class RegistryService {
           : `Schema digest mismatch. Registered: ${node.schema_digest}, node reported: ${payloadSchemaDigest}`
       };
       const lastSeenAt = typeof payload.generated_at === 'string' ? payload.generated_at : observedAt;
-      this.persistObservation(node.node_id, observedAt, 'incompatible', lastSeenAt, error);
       return {
         node_id: node.node_id,
         status: 'unhealthy',
@@ -584,7 +613,6 @@ export class RegistryService {
       error: null
     };
 
-    this.persistObservation(node.node_id, observedAt, state, generatedAt, null);
     return {
       node_id: node.node_id,
       status: mapStateToResult(state),
@@ -721,14 +749,19 @@ export class RegistryService {
     // never inherit stale profiles or secret_ref from an older partial
     // payload.
     this.nodes.set(node.node_id, node);
+    this.observations.delete(node.node_id);
     this.save();
+    this.changed();
     return { warnings, created: !existing };
   }
 
   revokeNode(nodeId: string): boolean {
     const deleted = this.nodes.delete(nodeId);
     if (deleted) {
+      this.observations.delete(nodeId);
+      this.observationRequests.delete(nodeId);
       this.save();
+      this.changed();
     }
     return deleted;
   }
@@ -750,7 +783,9 @@ export class RegistryService {
     if (!node) {
       throw new Error(`Node ${nodeId} not found`);
     }
-    return this.pollNodeObservation(node, profile);
+    const result = await this.pollNodeObservation(node, profile);
+    if (!profile) this.changed();
+    return result;
   }
 
   /** Starts the periodic liveness poll (issue #883). Idempotent -- calling

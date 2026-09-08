@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
-import { getCoordinatorIdentity } from './coordinatorIdentity.js';
+import { RegistryService } from './registryService.js';
+import { COORDINATOR_SCHEMA_DIGEST, getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { createWebSocketHandler } from './wsServer.js';
 import type { ServerMessage } from '@git-agent-harness/contracts';
 
@@ -162,6 +163,38 @@ test('server.welcome reconciles persisted leases before reporting running sessio
   } finally {
     if (previousPath === undefined) delete process.env.GAH_DISPATCH_LEASES_PATH;
     else process.env.GAH_DISPATCH_LEASES_PATH = previousPath;
+    rmSync(dir, { recursive: true });
+  }
+});
+
+
+test('registry changes push only an invalidation over the existing websocket', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-fleet-push-'));
+  const registry = new RegistryService(join(dir, 'registry.json'));
+  const server = http.createServer();
+  const wss = new WebSocketServer({ server });
+  createWebSocketHandler(wss, { registryService: registry });
+  const hello = new Promise<void>((resolve) => wss.once('connection', (socket) => socket.once('message', () => resolve())));
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const ws = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}`);
+  try {
+    ws.once('open', () => ws.send(JSON.stringify({ type: 'client.hello', clientVersion: 'test', capabilities: {} })));
+    await hello;
+    const changed = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('No fleet invalidation received')), 2000);
+      ws.on('message', (bytes) => {
+        const message = JSON.parse(bytes.toString());
+        if (message.type === 'fleet.changed') { clearTimeout(timer); resolve(message); }
+      });
+    });
+    registry.registerNode({ node_id: 'hidden-node-id', display_name: 'Fleet Worker', advertised_url: 'http://127.0.0.1:9',
+      version: '0.1.0', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback', secret_ref: 'env:PRIVATE_CANARY' });
+    assert.deepEqual(await changed, { type: 'fleet.changed' });
+  } finally {
+    ws.terminate();
+    for (const socket of wss.clients) socket.terminate();
+    await new Promise<void>((resolve) => wss.close(() => resolve()));
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(dir, { recursive: true });
   }
 });

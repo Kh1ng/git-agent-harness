@@ -21,12 +21,19 @@ const VIEWPORTS = [
 
 const ROUTES: { label: string; heading: string }[] = [
   { label: 'Overview', heading: 'Overview' },
+  { label: 'Nodes', heading: 'Nodes' },
   { label: 'Work', heading: 'Work' },
   { label: 'Telemetry', heading: 'Telemetry' },
   { label: 'Quota', heading: 'Quota' },
   { label: 'Events', heading: 'Events' },
   { label: 'Settings', heading: 'Settings' }
 ];
+
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/registry/fleet/snapshot', (route) => route.fulfill({
+    json: { nodes: [], observations: [], leases: [] }
+  }));
+});
 
 async function navigateTo(page: import('@playwright/test').Page, label: string, isMobile: boolean) {
   if (isMobile) {
@@ -65,7 +72,7 @@ for (const viewport of VIEWPORTS) {
 test.describe('desktop content', () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test('sidebar navigation is present with all six sections', async ({ page }) => {
+  test('sidebar navigation is present with all core sections', async ({ page }) => {
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: 'Primary' });
     for (const route of ROUTES) {

@@ -86,8 +86,11 @@ export function createWebSocketHandler(
     coordinatorIdentity?: ReturnType<typeof getCoordinatorIdentity>;
   } = {}
 ) {
+  const registryService = deps.registryService ?? new RegistryService();
+  const unsubscribeFleet = registryService.onChange(() => pushBus.publish({ type: 'fleet.changed' }));
+  wss.once('close', unsubscribeFleet);
   fleetDispatch = createFleetDispatchCoordinator({
-    registryService: deps.registryService ?? new RegistryService(),
+    registryService,
     pushBus,
     coordinatorIdentity: deps.coordinatorIdentity ?? getCoordinatorIdentity(),
     localSessionManager: getSessionManager()

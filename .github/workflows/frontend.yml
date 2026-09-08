@@ -30,6 +30,11 @@ jobs:
       - name: Typecheck frontend
         run: npm run typecheck --workspace=apps/web
 
+      - name: Typecheck server and MCP applications
+        run: |
+          npm run typecheck --workspace=apps/server
+          npm run typecheck --workspace=apps/mcp-server
+
       - name: Typecheck mock control plane
         run: npm run typecheck:mock --workspace=apps/server
 
@@ -70,7 +75,19 @@ jobs:
         working-directory: apps/web
 
       - name: Run e2e tests
+        id: e2e
         run: npm run e2e --workspace=apps/web
 
       - name: Run component tests
+        # A failing e2e assertion must not hide independent component regressions.
+        if: ${{ !cancelled() && (steps.e2e.outcome == 'success' || steps.e2e.outcome == 'failure') }}
         run: npm run test:component --workspace=apps/web
+
+      - name: Upload browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-failure-evidence
+          path: apps/web/test-results/
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FolderGit2, Server, Cpu, X, CircleDot, GitPullRequest } from 'lucide-react';
 import type { ChatIssueSummary, ChatNodeInfo, ChatPrSummary, ManagerModelInfo, ProfileSummary } from '@git-agent-harness/contracts';
+import { BoundedCollection } from './BoundedCollection.js';
 import { gahApi } from '../api/client.js';
 import type { ManagerBackendInfo } from '@git-agent-harness/contracts';
 
@@ -29,6 +30,7 @@ interface NewChatModalProps {
  * no worktree, nothing at the provider is touched.
  */
 export function NewChatModal({ open, currentProfile, profiles, backends, onClose, onCreated }: NewChatModalProps) {
+  const dialog = useRef<HTMLDialogElement>(null);
   const [project, setProject] = useState(currentProfile);
   const [nodes, setNodes] = useState<ChatNodeInfo[]>([]);
   const [backend, setBackend] = useState<string>('');
@@ -38,27 +40,33 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [query, setQuery] = useState('');
   const [mode, setMode] = useState<'blank' | 'issue' | 'pr'>('blank');
   const [issues, setIssues] = useState<ChatIssueSummary[]>([]);
   const [issuesLoading, setIssuesLoading] = useState(false);
+  const [issuesError, setIssuesError] = useState<string | null>(null);
   const [issue, setIssue] = useState<ChatIssueSummary | null>(null);
   const [prs, setPrs] = useState<ChatPrSummary[]>([]);
   const [prsLoading, setPrsLoading] = useState(false);
+  const [prsError, setPrsError] = useState<string | null>(null);
+  const [sourceRetry, setSourceRetry] = useState(0);
   const [pr, setPr] = useState<ChatPrSummary | null>(null);
 
   const implementedBackends = backends.filter((b) => b.implemented);
+
+  useEffect(() => {
+    if (open) dialog.current?.showModal();
+    else dialog.current?.close();
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
     setProject(currentProfile);
     setError(null);
     setTitle('');
+    setQuery('');
     setModel(null);
     setMode('blank');
-    setIssue(null);
-    setIssues([]);
-    setPr(null);
-    setPrs([]);
     gahApi
       .getChatNodes()
       .then(({ nodes }) => setNodes(nodes))
@@ -66,37 +74,43 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  // A different source discards its selection; retrying the same source does not.
+  useEffect(() => {
+    setIssues([]);
+    setIssue(null);
+    setPrs([]);
+    setPr(null);
+  }, [open, mode, project]);
+
   // Issue list follows the selected project in issue mode.
   useEffect(() => {
     if (!open || mode !== 'issue') return;
     let cancelled = false;
-    setIssues([]);
-    setIssue(null);
+    setIssuesError(null);
     setIssuesLoading(true);
     gahApi
       .getChatIssues(project)
       .then(({ issues }) => { if (!cancelled) setIssues(issues); })
-      .catch(() => { if (!cancelled) setIssues([]); })
+      .catch((err) => { if (!cancelled) setIssuesError(err instanceof Error ? err.message : String(err)); })
       .finally(() => { if (!cancelled) setIssuesLoading(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, mode, project]);
+  }, [open, mode, project, sourceRetry]);
 
   // PR list follows the selected project in PR mode.
   useEffect(() => {
     if (!open || mode !== 'pr') return;
     let cancelled = false;
-    setPrs([]);
-    setPr(null);
+    setPrsError(null);
     setPrsLoading(true);
     gahApi
       .getChatPrs(project)
       .then(({ prs }) => { if (!cancelled) setPrs(prs); })
-      .catch(() => { if (!cancelled) setPrs([]); })
+      .catch((err) => { if (!cancelled) setPrsError(err instanceof Error ? err.message : String(err)); })
       .finally(() => { if (!cancelled) setPrsLoading(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, mode, project]);
+  }, [open, mode, project, sourceRetry]);
 
   useEffect(() => {
     if (!open) return;
@@ -159,7 +173,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
         const session = await gahApi.createChatSession(project, backend, model, title.trim() || undefined);
         onCreated(project, session.id);
       }
-      onClose();
+      dialog.current?.close();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -168,11 +182,13 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label="New chat">
-      <div className="card w-full max-w-lg max-h-[85vh] overflow-y-auto p-5 space-y-5">
+    <dialog ref={dialog} onClose={onClose} aria-label="New chat"
+      onClick={(event) => { if (event.target === event.currentTarget) dialog.current?.close(); }}
+      className="m-auto w-[calc(100%_-_2rem)] max-w-lg max-h-[85vh] overflow-visible border-0 bg-transparent p-0 text-primary backdrop:bg-black/60">
+      <div className="card w-full max-h-[85vh] overflow-y-auto p-5 space-y-5">
         <div className="flex items-center justify-between">
           <h2 className="text-base font-semibold text-primary">New chat</h2>
-          <button onClick={onClose} className="rounded p-1 text-muted hover:bg-white/5 hover:text-primary" aria-label="Close">
+          <button onClick={() => dialog.current?.close()} className="rounded p-1 text-muted hover:bg-white/5 hover:text-primary" aria-label="Close">
             <X size={16} aria-hidden="true" />
           </button>
         </div>
@@ -210,29 +226,47 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
           </button>
         </div>
 
+        {mode !== 'blank' && (
+          <label className="block space-y-1 text-sm text-secondary">
+            <span>Filter {mode === 'issue' ? 'issues' : 'pull requests'}</span>
+            <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
+              placeholder={mode === 'issue' ? 'Number, title or label' : 'Number, title, branch or author'}
+              className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-base text-primary placeholder:text-secondary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" />
+          </label>
+        )}
+
         {mode === 'issue' && (
           <section className="space-y-2">
             <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
               <CircleDot size={13} aria-hidden="true" /> Issue
             </h3>
             {issuesLoading && <p className="text-xs text-muted">Loading issues…</p>}
-            {!issuesLoading && issues.length === 0 && (
-              <p className="text-xs text-muted">No open issues for this project.</p>
+            {issuesError && (
+              <div className="space-y-2">
+                <p role="alert" className="text-sm text-critical">Could not load issues. {issuesError}</p>
+                <button type="button" className="btn-secondary text-xs" onClick={() => setSourceRetry((attempt) => attempt + 1)}>Retry issues</button>
+              </div>
             )}
             <div className="grid gap-1 max-h-40 overflow-y-auto">
-              {issues.map((candidate) => (
-                <button
-                  key={candidate.number}
-                  type="button"
-                  onClick={() => setIssue(candidate)}
-                  className={`rounded-md px-3 py-2 text-left ${issue?.number === candidate.number ? 'bg-accent/15 border border-accent/40' : 'border border-transparent hover:bg-white/5'}`}
-                >
-                  <span className="block text-sm font-medium text-primary truncate">#{candidate.number} {candidate.title}</span>
-                  {candidate.labels.length > 0 && (
-                    <span className="block text-[11px] text-muted truncate">{candidate.labels.join(', ')}</span>
-                  )}
-                </button>
-              ))}
+              {!issuesLoading && !issuesError && <BoundedCollection key={project} items={issues} query={query} label="issues"
+                emptyMessage="No open issues for this project."
+                searchText={(candidate) => `#${candidate.number} ${candidate.title} ${candidate.labels.join(' ')}`}
+                isSelected={(candidate) => issue?.number === candidate.number}>
+                {(candidate) => (
+                  <button
+                    key={candidate.number}
+                    type="button"
+                    onClick={() => setIssue(candidate)}
+                    aria-pressed={issue?.number === candidate.number}
+                    className={`rounded-md px-3 py-2 text-left ${issue?.number === candidate.number ? 'bg-accent/15 border border-accent/40' : 'border border-transparent hover:bg-white/5'}`}
+                  >
+                    <span className="block text-sm font-medium text-primary truncate">#{candidate.number} {candidate.title}</span>
+                    {candidate.labels.length > 0 && (
+                      <span className="block text-[11px] text-muted truncate">{candidate.labels.join(', ')}</span>
+                    )}
+                  </button>
+                )}
+              </BoundedCollection>}
             </div>
             {issue && (
               <p className="text-[11px] text-muted">
@@ -248,27 +282,36 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
               <GitPullRequest size={13} aria-hidden="true" /> Pull request
             </h3>
             {prsLoading && <p className="text-xs text-muted">Loading pull requests…</p>}
-            {!prsLoading && prs.length === 0 && (
-              <p className="text-xs text-muted">No open pull requests for this project.</p>
+            {prsError && (
+              <div className="space-y-2">
+                <p role="alert" className="text-sm text-critical">Could not load pull requests. {prsError}</p>
+                <button type="button" className="btn-secondary text-xs" onClick={() => setSourceRetry((attempt) => attempt + 1)}>Retry pull requests</button>
+              </div>
             )}
             <div className="grid gap-1 max-h-40 overflow-y-auto">
-              {prs.map((candidate) => (
-                <button
-                  key={candidate.number}
-                  type="button"
-                  onClick={() => setPr(candidate)}
-                  className={`rounded-md px-3 py-2 text-left ${pr?.number === candidate.number ? 'bg-accent/15 border border-accent/40' : 'border border-transparent hover:bg-white/5'}`}
-                >
-                  <span className="block text-sm font-medium text-primary truncate">#{candidate.number} {candidate.title}</span>
-                  <span className="block text-[11px] text-muted truncate">
-                    {[
-                      candidate.author,
-                      candidate.isDraft ? 'draft' : null,
-                      candidate.reviewState ? candidate.reviewState.toLowerCase().replaceAll('_', ' ') : null
-                    ].filter((part) => part !== null && part.length > 0).join(' · ')}
-                  </span>
-                </button>
-              ))}
+              {!prsLoading && !prsError && <BoundedCollection key={project} items={prs} query={query} label="pull requests"
+                emptyMessage="No open pull requests for this project."
+                searchText={(candidate) => `#${candidate.number} ${candidate.title} ${candidate.headRefName ?? ''} ${candidate.author ?? ''}`}
+                isSelected={(candidate) => pr?.number === candidate.number}>
+                {(candidate) => (
+                  <button
+                    key={candidate.number}
+                    type="button"
+                    onClick={() => setPr(candidate)}
+                    aria-pressed={pr?.number === candidate.number}
+                    className={`rounded-md px-3 py-2 text-left ${pr?.number === candidate.number ? 'bg-accent/15 border border-accent/40' : 'border border-transparent hover:bg-white/5'}`}
+                  >
+                    <span className="block text-sm font-medium text-primary truncate">#{candidate.number} {candidate.title}</span>
+                    <span className="block text-[11px] text-muted truncate">
+                      {[
+                        candidate.author,
+                        candidate.isDraft ? 'draft' : null,
+                        candidate.reviewState ? candidate.reviewState.toLowerCase().replaceAll('_', ' ') : null
+                      ].filter((part) => part !== null && part.length > 0).join(' · ')}
+                    </span>
+                  </button>
+                )}
+              </BoundedCollection>}
             </div>
             {pr && (
               <p className="text-[11px] text-muted">
@@ -373,7 +416,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
         {error && <p className="text-xs text-red-400">{error}</p>}
 
         <div className="flex justify-end gap-2 pt-1">
-          <button type="button" onClick={onClose} className="btn-secondary text-xs">Cancel</button>
+          <button type="button" onClick={() => dialog.current?.close()} className="btn-secondary text-xs">Cancel</button>
           <button
             type="button"
             onClick={create}
@@ -384,6 +427,6 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
           </button>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }

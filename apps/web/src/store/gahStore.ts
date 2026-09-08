@@ -147,13 +147,18 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
   async fetchQuota(params, opts) {
     const key = JSON.stringify(params ?? {});
     const current = get().quota;
-    if (current.loading || (!opts?.force && isFresh(current, key))) return;
-    set({ quota: { ...current, loading: true, error: null } });
+    if ((current.loading && current.key === key) || (!opts?.force && isFresh(current, key))) return;
+    // A profile switch must start its own request and hide the old profile.
+    // Object identity also rejects a late response from an earlier selection.
+    const pending = { ...(current.key === key ? current : emptyResource<QuotaSnapshot>()), loading: true, error: null, key };
+    set({ quota: pending });
     try {
       const data = await gahApi.getQuota(params);
+      if (get().quota !== pending) return;
       set({ quota: { data, loading: false, error: null, fetchedAt: Date.now(), key } });
     } catch (error) {
-      set({ quota: { ...get().quota, loading: false, error: errorMessage(error), key } });
+      if (get().quota !== pending) return;
+      set({ quota: { ...pending, loading: false, error: errorMessage(error) } });
     }
   },
 

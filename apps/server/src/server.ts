@@ -1,4 +1,5 @@
 import express from 'express';
+import { nodeSetupRouter } from './nodeSetup.js';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import os from 'node:os';
@@ -266,6 +267,8 @@ export function createServer(
   // credential-bearing bootstrap command, so the whole narrow surface gets
   // the same gate as registry/claims rather than the unauthenticated default.
   app.use('/api/settings', authMiddleware);
+  app.use('/api/settings/nodes', nodeSetupRouter());
+  if (process.env.GAH_NODE_ROLE === 'worker') app.use('/api', authMiddleware);
   app.use('/api/projects', authMiddleware);
   // /api/skills (issue #963/#964): the central skill bank mutates the
   // versioned store, so it gets the same narrow auth gate as projects.
@@ -462,6 +465,19 @@ export function createServer(
         error: 'Not Found',
         message: error instanceof Error ? error.message : String(error)
       });
+    }
+  });
+
+  app.get('/api/registry/fleet/snapshot', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      res.json({
+        nodes: registryService.getNodesSummary(),
+        observations: registryService.getCachedObservations(),
+        leases: claimsService.getLeases()
+      });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to read fleet', message: error instanceof Error ? error.message : String(error) });
     }
   });
 

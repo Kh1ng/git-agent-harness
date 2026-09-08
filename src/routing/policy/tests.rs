@@ -289,9 +289,8 @@ fn load_balancing_does_not_reorder_review_candidates() {
     // in src/dispatch.rs deliberately tracks all agent-execution modes for
     // attribution), but the balancing TIE-BREAK must stay scoped to
     // implementation dispatch. Review's configured order is a
-    // deliberate escalation chain (see explicit_candidates' "Claude ->
-    // GLM must not fall back to AGY again" invariant elsewhere in this
-    // file) and must not be silently reshuffled by usage counts.
+    // deliberate escalation chain and must not be silently reshuffled by
+    // usage counts.
     let tmp = TempDir::new().unwrap();
     let mut profile = profile();
     let mut first = candidate_config("claude", Some("sonnet"), None);
@@ -596,13 +595,12 @@ fn exact_escalatory_route_unavailable_does_not_reuse_prior_reviewer() {
                 && preferred_model.as_deref() == Some("nous-portal/z-ai/glm-5.2")
     ));
 
-    // Without the guard the same unavailable exact route silently falls back to
-    // the prior reviewer (Claude/sonnet) from the configured review pool.
+    // Auto routing still falls back to the available configured reviewer.
     let fallback_request = RouteRequest {
         last_failure_class: None,
         mode: "review",
-        requested_backend: "opencode",
-        requested_model: Some("nous-portal/z-ai/glm-5.2"),
+        requested_backend: "auto",
+        requested_model: None,
         recommended_backend: None,
         recommended_model: None,
         session_id: None,
@@ -894,7 +892,7 @@ fn default_candidate_list_is_inherited_when_profile_only_overrides_other_fields(
 }
 
 #[test]
-fn explicit_review_fallback_preserves_the_remaining_review_order() {
+fn explicit_review_cannot_switch_backend_instances() {
     let tmp = TempDir::new().unwrap();
     let now = OffsetDateTime::now_utc();
     let mut profile = profile();
@@ -950,8 +948,11 @@ fn explicit_review_fallback_preserves_the_remaining_review_order() {
         now,
         backend_available,
     )
-    .unwrap();
-    assert_eq!(via_agy.effective_backend, "agy-second");
+    .unwrap_err();
+    assert!(matches!(via_agy.downcast_ref::<RouteError>(),
+        Some(RouteError::NoEligibleBackend { preferred_backend, skipped, .. })
+            if preferred_backend == "agy" && skipped.len() == 1
+    ));
 
     record_unavailable(
         &path(&tmp),
@@ -983,16 +984,15 @@ fn explicit_review_fallback_preserves_the_remaining_review_order() {
         now,
         backend_available,
     )
-    .unwrap();
-    assert_eq!(via_claude.effective_backend, "opencode");
-    assert_eq!(
-        via_claude.effective_model.as_deref(),
-        Some("nous-portal/z-ai/glm-5.2")
-    );
+    .unwrap_err();
+    assert!(matches!(via_claude.downcast_ref::<RouteError>(),
+        Some(RouteError::NoEligibleBackend { preferred_backend, skipped, .. })
+            if preferred_backend == "claude" && skipped.len() == 1
+    ));
 }
 
 #[test]
-fn explicit_review_fallback_preserves_order_when_request_omits_model() {
+fn explicit_review_without_model_cannot_switch_backend() {
     let tmp = TempDir::new().unwrap();
     let now = OffsetDateTime::now_utc();
     let mut profile = profile();
@@ -1019,9 +1019,7 @@ fn explicit_review_fallback_preserves_order_when_request_omits_model() {
         now,
     )
     .unwrap();
-    // A manual/escalated review request that names the backend but not a
-    // model must still locate its position in the configured pool and
-    // preserve the remainder, not fall through to weak_review_backend.
+    // Omitting the model does not permit switching the requested backend.
     let via_agy = decide_with(
         &defaults(),
         &profile,
@@ -1041,9 +1039,11 @@ fn explicit_review_fallback_preserves_order_when_request_omits_model() {
         now,
         backend_available,
     )
-    .unwrap();
-    assert_eq!(via_agy.effective_backend, "claude");
-    assert_eq!(via_agy.effective_model.as_deref(), Some("sonnet-5"));
+    .unwrap_err();
+    assert!(matches!(via_agy.downcast_ref::<RouteError>(),
+        Some(RouteError::NoEligibleBackend { preferred_backend, skipped, .. })
+            if preferred_backend == "agy" && skipped.len() == 1
+    ));
 }
 
 #[test]
