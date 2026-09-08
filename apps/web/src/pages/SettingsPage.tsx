@@ -1307,7 +1307,10 @@ function GatewaySettingsSection({ configuredProfiles }: { configuredProfiles: Pr
 
 export function AddNodeSection() {
   const [centralUrl, setCentralUrl] = useState(window.location.origin);
-  const [role, setRole] = useState<'desktop' | 'worker' | 'both'>('both');
+  const [os, setOs] = useState<'windows' | 'linux' | 'macos'>('windows');
+  const [role, setRole] = useState<'desktop' | 'worker' | 'both' | 'central'>('both');
+  const [gatewayUrl, setGatewayUrl] = useState('');
+  const osName = { windows: 'Windows', linux: 'Linux', macos: 'macOS' }[os];
   const [command, setCommand] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -1315,36 +1318,51 @@ export function AddNodeSection() {
   const reveal = async () => {
     setBusy(true); setError(''); setCommand(''); setCopied(false);
     try {
-      setCommand((await gahApi.getWindowsSetupCommand({ centralUrl, role })).command);
+      setCommand((await gahApi.getNodeSetupCommand({ os, centralUrl, role, ...(role === 'central' && gatewayUrl ? { gatewayUrl } : {}) })).command);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setBusy(false); }
   };
   return (
     <section className="card-padded max-w-2xl">
       <h3 className="text-sm font-semibold text-primary mb-1">Add a Node</h3>
-      <p className="text-xs text-muted mb-3">Install GAH on Windows. The native desktop opens your central dashboard; the headless worker runs in WSL2 and continues after the app closes.</p>
-      <label className="block text-xs text-secondary mb-3">Central LAN or VPN address
-        <input disabled={busy} type="url" className="input w-full mt-1" value={centralUrl} onChange={(event) => { setCentralUrl(event.target.value); setCommand(''); }} placeholder="http://192.168.1.10:3773" />
-      </label>
-      <label className="block text-xs text-secondary mb-3">Install
-        <select disabled={busy} className="input w-full mt-1" value={role} onChange={(event) => { setRole(event.target.value as typeof role); setCommand(''); }}>
-          <option value="both">Desktop app + WSL worker</option>
-          <option value="desktop">Desktop app only</option>
-          <option value="worker">Headless WSL worker only</option>
+      <p className="text-xs text-muted mb-3">Choose the new computer’s operating system and role, then copy its install command.</p>
+      <label className="block text-xs text-secondary mb-3">Operating system
+        <select disabled={busy} className="input w-full mt-1 min-h-11" value={os} onChange={(event) => { setOs(event.target.value as typeof os); setRole(event.target.value === 'windows' ? 'both' : 'worker'); setCommand(''); setError(''); setCopied(false); }}>
+          <option value="windows">Windows</option><option value="linux">Linux</option><option value="macos">macOS</option>
         </select>
       </label>
-      <p className="text-xs text-muted mb-3">For remote access, save your token in Central access token above first. The generated command contains that token; use it only on a computer you trust.</p>
-      {role !== 'desktop' && <p className="text-xs text-muted mb-3">Run PowerShell as administrator. First-time WSL setup may require a restart and a Linux user login before you rerun the command. Worker networking currently requires trusted LAN/VPN transport enabled on the central server.</p>}
-      <button type="button" onClick={reveal} disabled={busy} className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50">{busy ? 'Preparing…' : 'Reveal Windows install command'}</button>
+      {role !== 'central' && <label className="block text-xs text-secondary mb-3">Central LAN or VPN address
+        <input disabled={busy} type="url" className="input w-full mt-1 min-h-11" value={centralUrl} onChange={(event) => { setCentralUrl(event.target.value); setCommand(''); }} placeholder="http://192.168.1.10:3773" />
+      </label>}
+      <label className="block text-xs text-secondary mb-3">Install
+        <select disabled={busy} className="input w-full mt-1 min-h-11" value={role} onChange={(event) => { setRole(event.target.value as typeof role); setCommand(''); }}>
+          {os === 'windows' ? <>
+            <option value="both">Desktop app + WSL worker</option>
+            <option value="desktop">Desktop app only</option>
+            <option value="worker">Headless WSL worker only</option>
+          </> : <>
+            <option value="worker">Worker CLI</option>
+            {os === 'linux' && <option value="central">Central server</option>}
+          </>}
+        </select>
+      </label>
+      {role === 'central' && <label className="block text-xs text-secondary mb-3">Remote memory gateway (optional)
+        <input disabled={busy} type="url" className="input w-full mt-1 min-h-11" value={gatewayUrl} onChange={(event) => { setGatewayUrl(event.target.value); setCommand(''); }} placeholder="https://memory.example.com" />
+      </label>}
+      {os === 'windows' ? <p className="text-xs text-muted mb-3">For remote access, save your token in Central access token above first. The generated command contains that token; use it only on a computer you trust.</p>
+        : <p className="text-xs text-muted mb-3">Run in Terminal. The command installs from GitHub and prompts privately for any required token. First installation compiles GAH and can take several minutes.</p>}
+      {os === 'macos' && <p className="text-xs text-muted mb-3">macOS installs the worker CLI. Run its loop in Terminal; automatic startup and central server installation are not available yet.</p>}
+      {os === 'windows' && role !== 'desktop' && <p className="text-xs text-muted mb-3">Run PowerShell as administrator. First-time WSL setup may require a restart and a Linux user login before you rerun the command. Worker networking currently requires trusted LAN/VPN transport enabled on the central server.</p>}
+      <button type="button" onClick={reveal} disabled={busy} className="btn-secondary text-xs px-3 py-1.5 min-h-11 disabled:opacity-50">{busy ? 'Preparing…' : `Reveal ${osName} install command`}</button>
       {command && <div className="mt-3">
-        <textarea aria-label="Windows install command" readOnly value={command} rows={5} className="input w-full font-mono text-xs" onFocus={(event) => event.target.select()} />
-        <button type="button" className="btn-secondary text-xs px-3 py-1.5 mt-2" onClick={async () => {
+        <textarea aria-label={`${osName} install command`} readOnly value={command} rows={5} className="input w-full font-mono text-xs" onFocus={(event) => event.target.select()} />
+        <button type="button" className="btn-secondary text-xs px-3 py-1.5 min-h-11 mt-2" onClick={async () => {
           try { await navigator.clipboard.writeText(command); setCopied(true); }
           catch { setError('Clipboard access is unavailable on this connection. Select the command above and copy it manually.'); }
         }}>{copied ? 'Copied' : 'Copy command'}</button>
       </div>}
       {error && <p role="alert" className="mt-3 text-xs text-critical">{error}</p>}
-      <p className="text-xs text-muted mt-3">Registered does not mean ready. Authenticate the tools you use inside WSL, add your repository profile, and check its readiness before dispatching. Claude alone is a valid backend; GitHub repositories use gh and GitLab repositories use glab.</p>
+      <p className="text-xs text-muted mt-3">Registered does not mean ready. Authenticate the tools you use {os === 'windows' ? 'inside WSL' : 'on the worker'}, add your repository profile, and check its readiness before dispatching. Claude alone is a valid backend; GitHub repositories use gh and GitLab repositories use glab.</p>
     </section>
   );
 }

@@ -247,7 +247,7 @@ export interface GahDataSource {
   setManagerChatSettings(data: ManagerChatSettingsUpdate): Promise<{ success: boolean }>;
   getGatewaySettings(): Promise<GatewaySettingsSummary>;
   revealGatewayBootstrapCommand(): Promise<GatewayBootstrapCommand>;
-  getWindowsSetupCommand(data: { centralUrl: string; role: 'desktop' | 'worker' | 'both' }): Promise<{ command: string }>;
+  getNodeSetupCommand(data: { os: 'windows' | 'linux' | 'macos'; centralUrl: string; role: 'desktop' | 'worker' | 'both' | 'central'; gatewayUrl?: string }): Promise<{ command: string }>;
   updateGatewaySettings(data: GatewaySettingsUpdate): Promise<GatewaySettingsSummary>;
   getSkills(): Promise<{ skills: SkillSummary[] }>;
   createSkill(data: SkillCreateData): Promise<Skill>;
@@ -486,7 +486,7 @@ export const gahApi: GahDataSource = {
   getGatewaySettings() {
     return getJson<GatewaySettingsSummary>('/api/settings/gateway');
   },
-  getWindowsSetupCommand(data) {
+  getNodeSetupCommand(data) {
     return postJson<{ command: string }, typeof data>('/api/settings/nodes/command', data);
   },
   revealGatewayBootstrapCommand() {
