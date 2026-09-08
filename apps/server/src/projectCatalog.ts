@@ -226,8 +226,8 @@ export function parseGitUrl(value: string, options: Pick<ProjectImportData, 'pro
   if (provider === 'gitlab') {
     const api = new URL(options.providerApiBase || `${httpsOrigin || `https://${host}`}/api/v4`);
     if (api.protocol !== 'https:' || api.username || api.password || api.search || api.hash
-      || api.hostname.toLowerCase() !== host || !api.pathname.replace(/\/$/, '').endsWith('/api/v4')) {
-      throw new Error('GitLab API URL must use HTTPS on the repository host, end in /api/v4, and contain no credentials, query, or fragment');
+      || api.hostname.toLowerCase() !== host || api.pathname.replace(/\/$/, '') !== '/api/v4') {
+      throw new Error('GitLab API URL must use HTTPS on the repository host, use the root /api/v4 path, and contain no credentials, query, or fragment');
     }
     providerApiBase = api.toString().replace(/\/$/, '');
   } else if (options.providerApiBase) throw new Error('GitLab API URL applies only to GitLab repositories');

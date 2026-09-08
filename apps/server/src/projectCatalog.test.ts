@@ -229,6 +229,7 @@ test('custom GitLab import requires explicit provider and preserves API authorit
   assert.equal(parseGitUrl('ssh://git@git.example.test:2222/team/repo', { provider: 'gitlab' }).providerApiBase, 'https://git.example.test/api/v4');
   assert.throws(() => parseGitUrl(url, { provider: 'gitlab', providerApiBase: 'https://user:secret@git.example.test/api/v4' }), /credentials/);
   assert.throws(() => parseGitUrl(url, { provider: 'gitlab', providerApiBase: 'https://elsewhere.test/api/v4' }), /repository host/);
+  assert.throws(() => parseGitUrl(url, { provider: 'gitlab', providerApiBase: 'https://git.example.test:8443/gitlab/api/v4' }), /root \/api\/v4/);
   assert.throws(() => parseGitUrl('https://github.com/a/b', { provider: 'gitlab' }), /does not match/);
   let touched = false;
   await assert.rejects(importGitProject({ gitUrl: url, provider: 'gitlab' }, { listProfiles: async () => { touched = true; return []; }, addProfile: async () => {} }), /numeric project ID/);

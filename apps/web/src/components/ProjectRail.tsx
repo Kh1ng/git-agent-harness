@@ -224,7 +224,7 @@ export function ProjectRail({
                   placeholder="https://gitlab.example.com/api/v4" aria-describedby="gitlab-api-hint"
                   className="w-full rounded-md border border-subtle bg-raised px-2 py-2 text-base text-primary placeholder:text-muted" />
               </label>
-              <p id="gitlab-api-hint" className="text-xs text-muted">Defaults to HTTPS on the repository host. Set this for a custom API port or path.</p>
+              <p id="gitlab-api-hint" className="text-xs text-muted">Use /api/v4 on the repository host. Include a custom port when required.</p>
             </>}
             <label className="flex items-start gap-2 text-[11px] leading-snug text-muted">
               <input type="checkbox" checked={reclone} onChange={(event) => setReclone(event.target.checked)} className="mt-0.5" />
