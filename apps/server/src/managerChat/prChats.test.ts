@@ -96,6 +96,31 @@ test('listChatPrs returns open PRs newest-first with author and draft/review sta
   assert.equal(prs[1].reviewState, 'REVIEW_REQUIRED');
 }));
 
+test('GitLab MR chat preserves the description and custom-host link', withEnv(async (env) => {
+  env.profileInfo.provider = 'gitlab';
+  env.profileInfo.repo = 'group/subgroup/project';
+  env.profileInfo.web_url = 'https://gitlab.example.test/group/subgroup/project';
+  const mr = {
+    iid: 7, title: 'Review custom-host changes', state: 'opened',
+    description: 'Keep this GitLab description in the agent context.',
+    web_url: `${env.profileInfo.web_url}/-/merge_requests/7`,
+    source_branch: 'feature/custom-host', draft: true
+  };
+  writeFileSync(join(env.root, 'glab'), `#!/usr/bin/env node
+if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(['mr', 'view', '7', '--output=json'])) process.exit(2);
+process.stdout.write(${JSON.stringify(JSON.stringify(mr))});
+`, { mode: 0o755 });
+  process.env.PATH = `${env.root}:${process.env.PATH}`;
+  const { session } = await startPrChat({ profile: 'p', profileInfo: env.profileInfo, prNumber: 7, backend: 'codex' });
+  const log = readFileSync(join(env.root, 'state', 'project-p', `session-${session.id}`, 'session.jsonl'), 'utf8');
+  const prompt = log.trim().split('\n').map(line => JSON.parse(line)).find(event => event.type === 'user/message');
+  assert.ok(prompt.text.includes(mr.description));
+  assert.ok(prompt.text.includes(mr.web_url));
+  assert.equal(session.branch, mr.source_branch);
+  assert.equal(session.worktreePath, null);
+  assert.ok(!existsSync(env.stateFile), 'MR chat makes no provider mutation');
+}));
+
 test('listChatPrs caches repeated reads and keeps limits separate', withEnv(async (env) => {
   await listChatPrs(env.profileInfo, 1);
   await listChatPrs(env.profileInfo, 1);

@@ -89,6 +89,7 @@ import { projectRoutes } from './projectRoutes.js';
 import { chatNodes, configureChatRouting } from './chatRouting.js';
 import { createWorkerChatRouter } from './workerChat.js';
 import { getGitStatusCached, getGitBranchesCached, getGitLogCached, commitGitChanges, cliInDir } from './gitCache.js';
+import { createGitLabMergeRequest } from './gitPullRequest.js';
 import {
   addCanonicalSkillBinding,
   clearProfileSkillBindings,
@@ -1742,14 +1743,26 @@ export function createServer(
 
   app.post('/api/git/pr', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
-    const { title, body = '', base, draft = false } = req.body as { title?: string; body?: string; base?: string; draft?: boolean };
-    if (!title) return res.status(400).json({ error: 'title required' });
-    const cwd = await resolveLocalPath(profile);
-    if (!cwd) return res.status(404).json({ error: 'Profile not found' });
+    const { title, body = '', base, draft = false } = req.body ?? {};
+    if (typeof title !== 'string' || !title.trim()) return res.status(400).json({ error: 'title required' });
+    if (typeof body !== 'string' || typeof draft !== 'boolean'
+      || (base !== undefined && (typeof base !== 'string' || !base.trim()))) {
+      return res.status(400).json({ error: 'Invalid pull request fields' });
+    }
+    const profileInfo = await resolveProfileInfo(profile);
+    if (!profileInfo?.local_path) return res.status(404).json({ error: 'Profile not found' });
+    if (profileInfo.provider === 'gitlab') {
+      try {
+        return res.json({ url: await createGitLabMergeRequest(profileInfo, { title, body, base, draft }) });
+      } catch {
+        return res.status(502).json({ error: 'GitLab merge request creation failed' });
+      }
+    }
+    if (profileInfo.provider !== 'github') return res.status(400).json({ error: 'Unsupported repository provider' });
     const args = ['pr', 'create', '--title', title, '--body', body];
     if (base) args.push('--base', base);
     if (draft) args.push('--draft');
-    const { ok, out } = cliInDir('gh', args, cwd);
+    const { ok, out } = cliInDir('gh', args, profileInfo.local_path);
     if (!ok) return res.status(502).json({ error: 'gh pr create failed' });
     res.json({ url: out.trim() });
   });
