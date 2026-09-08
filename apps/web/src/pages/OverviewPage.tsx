@@ -286,8 +286,9 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
                           <StatusBadge tone={tone} label={label} />
                         </td>
                         <td>
+                          {/* Embedded dashboard hosts may not support new windows. */}
                           {mr.url && (
-                            <a href={mr.url} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline text-xs">
+                            <a href={mr.url} rel="noreferrer" className="text-accent hover:underline text-xs">
                               View MR
                             </a>
                           )}
@@ -329,7 +330,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
                       </td>
                       <td className="text-xs max-w-[16rem] truncate" title={mr.title ?? mr.branch}>
                         {mr.url ? (
-                          <a href={mr.url} target="_blank" rel="noopener noreferrer" className="text-primary hover:text-accent hover:underline">
+                          <a href={mr.url} rel="noreferrer" className="text-primary hover:text-accent hover:underline">
                             {mr.title ?? mr.branch}
                           </a>
                         ) : (
@@ -363,7 +364,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
                       </td>
                       <td>
                         {mr.url && (
-                          <a href={mr.url} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline text-xs whitespace-nowrap">
+                          <a href={mr.url} rel="noreferrer" className="text-accent hover:underline text-xs whitespace-nowrap">
                             View
                           </a>
                         )}
