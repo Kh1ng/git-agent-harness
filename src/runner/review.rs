@@ -620,7 +620,13 @@ mod tests {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
-        let profile = test_profile();
+        let mut profile = test_profile();
+        profile.vibe_args = vec![
+            "--max-turns".into(),
+            "40".into(),
+            "--max-price".into(),
+            "2".into(),
+        ];
         let _guard = PathGuard::set(f.bin_dir.display().to_string());
 
         let result = run_review_backend(
@@ -638,6 +644,18 @@ mod tests {
         assert!(result.stderr.contains("stderr-marker-vibe"));
 
         let argv = recorded_argv(&f.record_dir);
+        // Characterize #833: review currently drops the configured limits.
+        assert_eq!(
+            argv,
+            [
+                "-p",
+                "task",
+                "--output",
+                "text",
+                "--trust",
+                "--auto-approve"
+            ]
+        );
         assert_eq!(argv[0], "-p");
         assert!(argv.contains(&"task".to_string()));
         assert!(argv.contains(&"--output".to_string()));
@@ -657,7 +675,17 @@ mod tests {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         make_recording_bin(&f.bin_dir, "opencode", &f.record_dir, 0);
-        let profile = test_profile();
+        let mut profile = test_profile();
+        profile.opencode_args = vec![
+            "--agent".into(),
+            "gah-implementer".into(),
+            "--agent=gah-implementer".into(),
+            "--model".into(),
+            "stale-model".into(),
+            "--model=another-stale-model".into(),
+            "--format".into(),
+            "json".into(),
+        ];
         let _guard = PathGuard::set(f.bin_dir.display().to_string());
 
         let result = run_review_backend(
@@ -672,6 +700,19 @@ mod tests {
 
         assert_eq!(result.outcome, ReviewProcessOutcome::Success);
         let argv = recorded_argv(&f.record_dir);
+        // Characterize #833: the review role/model are fixed, but all other
+        // configured arguments are lost with the conflicting arguments.
+        assert_eq!(
+            argv,
+            [
+                "run",
+                "--agent",
+                "gah-reviewer",
+                "--model",
+                "provider/review-model",
+                "task"
+            ]
+        );
         assert!(argv
             .windows(2)
             .any(|args| args == ["--agent", "gah-reviewer"]));
