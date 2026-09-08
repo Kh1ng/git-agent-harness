@@ -85,14 +85,14 @@ pub fn store_path() -> PathBuf {
     }
 }
 
-/// Load all records. A missing file is an empty list; any read/parse error
-/// is swallowed to an empty list so callers can always safely enrich a report
-/// without a quota store present (e.g. in hermetic tests).
+/// Load readable records, skipping malformed JSONL lines. A missing file is
+/// an empty list; other read failures are returned to the caller.
 pub fn load(state_path: &Path) -> Result<Vec<QuotaObservationRecord>> {
-    if !state_path.exists() {
-        return Ok(vec![]);
-    }
-    let content = fs::read_to_string(state_path).context("read quota store")?;
+    let content = match fs::read_to_string(state_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) => return Err(error).context("read quota store"),
+    };
     let mut records = Vec::new();
     for line in content.lines() {
         if line.trim().is_empty() {

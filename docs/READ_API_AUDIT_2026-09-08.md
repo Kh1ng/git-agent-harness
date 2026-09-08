@@ -22,7 +22,7 @@ dry-run. These routes do not establish complete parity with the CLI.
 | `telemetry.aggregate` | JSON exists in `telemetry::cli::run_aggregate`. Preserve dimensions, date bounds, optional profile, failure/retry flags, and all attribution filters. No typed HTTP adapter or manifest response schema exists. |
 | `claims.list` | JSON exists in `handle_claims_list`. Global results include a canonical profile scope; scoped results omit that field. Central claim leases represent different state. Listing also migrates and rewrites local claim state under the existing lock. |
 | `external_approval.inspect` | JSON exists in `external_approval::inspect`. It requires profile, work ID, credential label, and operation kind. Its private `ScopeStatus` includes a local ledger path, so define the permitted remote projection and redaction before exposing it. |
-| `quota.list` | JSON exists for persisted observations. `/api/quota` returns a computed profile snapshot instead. `quota_store::load(...).unwrap_or_default()` currently turns store I/O failures into healthy empty output. Correct that CLI behavior before adding parity coverage. |
+| `quota.list` | JSON exists for persisted observations. `/api/quota` returns a computed profile snapshot instead. The quota-list follow-up now propagates store read failures, while a missing store remains empty. The typed HTTP adapter is still missing. |
 
 CLI sources: [telemetry commands](../src/cli/commands/telemetry.rs),
 [telemetry output](../src/telemetry/mod.rs),
