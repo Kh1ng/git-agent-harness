@@ -75,6 +75,7 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [profile, days, retry]);
+  useWsReconnectRefresh(() => setRetry(value => value + 1));
 
   const rows = rollup?.rows ?? [];
   const byBackend = useMemo(() => {

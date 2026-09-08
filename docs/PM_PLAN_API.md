@@ -63,3 +63,8 @@ The integrated PM API and common HTTP guard pass all 337 server checks and full
 workspace typechecks. Rust contract drift, CLI capabilities, and all 23 source-structure
 checks pass. The worker regression confirms `/api/pm/plans` is central-only.
 Generated capability metadata was checked against the combined Rust implementation.
+
+Seven browser scenarios cover first-token recovery in Overview, Chat, Settings, Git,
+and Telemetry. The regression checks fail without their reconnect subscriptions.
+The memory editor retains unsaved settings after reconnect; labels identify its URL
+and key fields. Seven affected Settings component checks also pass.

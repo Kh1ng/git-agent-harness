@@ -788,6 +788,7 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  useWsReconnectRefresh(load);
 
   const save = async (update: { defaultBackend?: string; profileOverrides?: Record<string, string> }) => {
     setLoading(true);
@@ -930,6 +931,7 @@ export function SkillBankSettingsSection() {
   };
 
   useEffect(load, []);
+  useWsReconnectRefresh(load);
 
   const handleFileSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -1087,6 +1089,8 @@ function GatewaySettingsSection({ configuredProfiles }: { configuredProfiles: Pr
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
 
   useEffect(() => { load(); }, []);
+  // Recover a failed initial read without replacing unsaved settings on reconnect.
+  useWsReconnectRefresh(() => { if (!settings) void load(); });
 
   const save = async () => {
     const drafts = [globalPolicyDraft, ...Object.values(profilePolicyDrafts)];
@@ -1164,8 +1168,9 @@ function GatewaySettingsSection({ configuredProfiles }: { configuredProfiles: Pr
       </div>
 
       <div className="max-w-2xl">
-        <label className="block text-xs font-medium text-secondary mb-1">Gateway URL</label>
+        <label htmlFor="gateway-url" className="block text-xs font-medium text-secondary mb-1">Gateway URL</label>
         <input
+          id="gateway-url"
           type="text"
           value={urlDraft}
           onChange={(e) => setUrlDraft(e.target.value)}
@@ -1176,9 +1181,10 @@ function GatewaySettingsSection({ configuredProfiles }: { configuredProfiles: Pr
       </div>
 
       <div>
-        <label className="block text-xs font-medium text-secondary mb-1">New API Key</label>
+        <label htmlFor="gateway-api-key" className="block text-xs font-medium text-secondary mb-1">New API Key</label>
         <div className="flex items-center gap-2">
           <input
+            id="gateway-api-key"
             type={revealKey ? 'text' : 'password'}
             value={keyDraft}
             onChange={(e) => setKeyDraft(e.target.value)}
@@ -1350,7 +1356,7 @@ function GatewaySetupSection() {
   const [revealing, setRevealing] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  useEffect(() => {
+  const load = () => {
     gahApi
       .getGatewaySettings()
       .then((data) => {
@@ -1358,7 +1364,9 @@ function GatewaySetupSection() {
         setError(null);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, []);
+  };
+  useEffect(load, []);
+  useWsReconnectRefresh(load);
 
   if (!settings) {
     return (
@@ -1453,10 +1461,10 @@ export function AdminUpdateSection() {
   const [polling, setPolling] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = () => {
     gahApi
       .getAdminUpdatePending()
-      .then(setPending)
+      .then(data => { setPending(data); setError(null); setEnabled(true); })
       .catch((err) => {
         if (err instanceof GahApiError && err.status === 404) {
           setEnabled(false);
@@ -1471,7 +1479,9 @@ export function AdminUpdateSection() {
         if (data.status === 'running') setPolling(true);
       })
       .catch(() => {});
-  }, []);
+  };
+  useEffect(load, []);
+  useWsReconnectRefresh(load);
 
   useEffect(() => {
     if (!polling) return;
