@@ -119,7 +119,7 @@ test('only the typed usage-limit code permits remote handoff and raw worker erro
   const server = createServer((req, res) => {
     req.resume();
     res.setHeader('Content-Type', 'application/x-ndjson');
-    res.end(JSON.stringify(event) + '\n');
+    res.end((typeof event === 'string' ? event : JSON.stringify(event)) + '\n');
   });
   t.after(async () => {
     server.closeAllConnections();
@@ -134,13 +134,14 @@ test('only the typed usage-limit code permits remote handoff and raw worker erro
     version: '0.1.0', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback',
     secret_ref: 'env:WORKER_CHAT_TEST_TOKEN', profiles: ['demo'] });
   const adapter = workerChatConnection(registry, 'worker', 'demo', { repo: 'owner/repo', provider: 'github', web_url: 'https://github.com/owner/repo' }).adapter('claude');
-  for (const code of ['usage_limit', undefined, 'unknown']) {
-    event = { type: 'error', error: 'Quota exceeded; private-token=do-not-copy', ...(code ? { code } : {}) };
+  for (const code of ['usage_limit', undefined, 'unknown', 'malformed']) {
+    event = code === 'malformed' ? 'private-token=do-not-copy' : { type: 'error', error: 'Quota exceeded; private-token=do-not-copy', ...(code ? { code } : {}) };
     await assert.rejects(adapter.runTurn('demo', { prompt: 'hello', history: [], onChunk() {}, onToolResult() {} }), error => {
       assert.ok(error instanceof Error);
       assert.equal(isUsageLimitError(error), code === 'usage_limit');
       assert.doesNotMatch(error.message, /private-token|do-not-copy/);
       if (code === 'usage_limit') assert.equal(error.message, 'Worker agent usage limit reached.');
+      if (code === 'malformed') assert.equal(error.message, 'Worker returned an invalid chat event.');
       return true;
     });
   }

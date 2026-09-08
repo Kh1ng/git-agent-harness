@@ -68,7 +68,10 @@ export function workerChatConnection(registry: RegistryService, nodeId: string, 
               if (buffer.length > 2_000_000) throw new Error('Worker chat event exceeds the supported size.');
               let end: number;
               while ((end = buffer.indexOf('\n')) >= 0) {
-                const event = parseWorkerChatEvent(JSON.parse(buffer.slice(0, end)));
+                let value: unknown;
+                try { value = JSON.parse(buffer.slice(0, end)); }
+                catch { throw new Error('Worker returned an invalid chat event.'); }
+                const event = parseWorkerChatEvent(value);
                 buffer = buffer.slice(end + 1);
                 assertRegistration();
                 if (event.type === 'chunk') input.onChunk(event.text);
