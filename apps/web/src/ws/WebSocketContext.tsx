@@ -1,3 +1,4 @@
+import { coordinatorWebSocketProtocols, TOKEN_CHANGED_EVENT } from '../api/coordinatorToken.js';
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from 'react';
 import { useUiStore } from '../store/uiStore.js';
 import type {
@@ -49,6 +50,7 @@ type WebSocketContextType = {
   // TICKET-157: per-backend "configured for this profile" signal.
   backendConfigured: Record<string, boolean>;
   serverVersion: string | null;
+  trustedLanMode: boolean;
   profile: string | null;
   mergeRequests: MergeRequest[];
   availability: AvailabilityScope[];
@@ -100,6 +102,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   // TICKET-157: per-backend "configured for this profile" signal from
   // `configured_backend_path()`. Maps backend name -> configured bool.
   const [backendConfigured, setBackendConfigured] = useState<Record<string, boolean>>({});
+  const [trustedLanMode, setTrustedLanMode] = useState(false);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [profile, setProfile] = useState<string | null>(null);
   const [mergeRequests, setMergeRequests] = useState<MergeRequest[]>([]);
@@ -113,7 +116,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [reconnectSeq, setReconnectSeq] = useState(0);
   const socketRef = useRef<WebSocket | null>(null);
   const connectionCleanupRef = useRef<(() => void) | null>(null);
-  const hasConnectedOnceRef = useRef(false);
+  const refreshOnConnectRef = useRef(false);
   const nextMessageIdRef = useRef(0);
 
   const activityProfile = profileOverride ?? profile ?? 'gah';
@@ -145,7 +148,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     setError(null);
 
     try {
-      const newSocket = new WebSocket(getWebSocketUrl(profileOverride));
+      const newSocket = new WebSocket(getWebSocketUrl(profileOverride), coordinatorWebSocketProtocols());
 
       newSocket.onopen = () => {
         setIsConnected(true);
@@ -154,10 +157,10 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         setSocket(newSocket);
         socketRef.current = newSocket;
 
-        if (hasConnectedOnceRef.current) {
+        if (refreshOnConnectRef.current) {
           setReconnectSeq((n) => n + 1);
         }
-        hasConnectedOnceRef.current = true;
+        refreshOnConnectRef.current = true;
 
         newSocket.send(JSON.stringify({
           type: 'client.hello' as const,
@@ -194,6 +197,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           switch (message.type) {
             case 'server.welcome':
               setServerVersion(message.serverVersion);
+              setTrustedLanMode(message.trustedLanMode === true);
               setServerProviderCatalog(message.serverProviderCatalog);
               setSessions(message.sessions);
               setProviderStatuses(message.providers);
@@ -330,6 +334,16 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    const credentialChanged = () => {
+      // Panels may already show 401s before the first authorized connection.
+      refreshOnConnectRef.current = true;
+      reconnect();
+    };
+    window.addEventListener(TOKEN_CHANGED_EVENT, credentialChanged);
+    return () => window.removeEventListener(TOKEN_CHANGED_EVENT, credentialChanged);
+  }, [reconnect]);
+
+  useEffect(() => {
     connect();
     return () => {
       connectionCleanupRef.current?.();
@@ -360,6 +374,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     serverProviderCatalog,
     backendConfigured,
     serverVersion,
+    trustedLanMode,
     profile,
     mergeRequests,
     availability,

@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { isIP } from 'node:net';
+import type { IncomingHttpHeaders } from 'node:http';
 
 export function isLocalAddress(ip: string): boolean {
   if (!ip) return false;
@@ -26,7 +27,7 @@ export function coordinatorTokenMatches(token: string): boolean {
 
 /** Local CLI and same-origin browser requests may omit the token. A proxy
  * hop or an unrelated browser origin never inherits the socket's local trust. */
-function isTrustedLocalRequest(req: Request): boolean {
+export function isTrustedLocalRequest(req: { socket: { remoteAddress?: string }; headers: IncomingHttpHeaders; protocol: string }): boolean {
   if (!isLocalAddress(req.socket.remoteAddress || '')) return false;
   if (Object.keys(req.headers).some((name) => name === 'forwarded' || name.startsWith('x-forwarded-'))) return false;
   try {

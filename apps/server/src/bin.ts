@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 
-import { coordinatorTokenMatches } from './authMiddleware.js';
+import { createAuthorizedWebSocketServer } from './webSocketAuth.js';
 import { createServer as createExpressServer, initializeSkillBank } from './server.js';
 import { createServer as createHttpServer } from 'http';
-import { WebSocketServer } from 'ws';
 import { createWebSocketHandler } from './wsServer.js';
 import { validateNodeRole, workerMemoryEnvironment } from './nodeRole.js';
 import { runNodeRole } from './gahCli.js';
@@ -55,11 +54,7 @@ async function main() {
   const server = createHttpServer(app);
   
   // Create WebSocket server
-  const wss = new WebSocketServer({ server, verifyClient: (info: { req: import('node:http').IncomingMessage }) => {
-    if (node.role !== 'worker') return true;
-    const authorization = info.req.headers.authorization;
-    return !!authorization?.startsWith('Bearer ') && coordinatorTokenMatches(authorization.slice(7));
-  } });
+  const wss = createAuthorizedWebSocketServer(server, node.role);
   
   // Check GAH CLI availability (real status/dispatch data is loaded
   // on-demand per WebSocket connection in wsServer.ts's sendWelcomeMessage,

@@ -4,6 +4,7 @@
  */
 
 import { WebSocket, WebSocketServer } from 'ws';
+import { requiresFleetAuthentication, trustedLanWebSocketMode } from './webSocketAuth.js';
 import { SERVER_VERSION } from './server.js';
 import { createServerPushBus } from './serverPushBus.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
@@ -111,6 +112,10 @@ export function createWebSocketHandler(
         const message = JSON.parse(data.toString()) as ClientMessage;
         if (deps.node?.role === 'worker' && message.type.startsWith('manager.chat.')) {
           throw new GAHError('Manager chat is only available on the central node.', 'WORKER_ROLE_RESTRICTION');
+        }
+        if (requiresFleetAuthentication(ws, message.type)) {
+          ws.send(JSON.stringify(createErrorResponse('requestId' in message ? message.requestId ?? generateRequestId() : generateRequestId(), new Error('A coordinator token is required for session operations. Trusted-LAN mode does not authorize fleet work.'))));
+          return;
         }
         await handleClientMessage(ws, message);
       } catch (error) {
@@ -569,6 +574,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
     } = {
       type: 'server.welcome',
       serverVersion: SERVER_VERSION,
+      trustedLanMode: trustedLanWebSocketMode(ws),
       serverProviderCatalog,
       sessions,
       providers,

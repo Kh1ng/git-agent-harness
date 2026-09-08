@@ -1302,7 +1302,6 @@ function GatewaySettingsSection({ configuredProfiles }: { configuredProfiles: Pr
 export function AddNodeSection() {
   const [centralUrl, setCentralUrl] = useState(window.location.origin);
   const [role, setRole] = useState<'desktop' | 'worker' | 'both'>('both');
-  const [token, setToken] = useState(() => window.sessionStorage.getItem('gah.coordinatorToken') ?? '');
   const [command, setCommand] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -1310,8 +1309,6 @@ export function AddNodeSection() {
   const reveal = async () => {
     setBusy(true); setError(''); setCommand(''); setCopied(false);
     try {
-      if (token) window.sessionStorage.setItem('gah.coordinatorToken', token);
-      else window.sessionStorage.removeItem('gah.coordinatorToken');
       setCommand((await gahApi.getWindowsSetupCommand({ centralUrl, role })).command);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setBusy(false); }
@@ -1330,10 +1327,7 @@ export function AddNodeSection() {
           <option value="worker">Headless WSL worker only</option>
         </select>
       </label>
-      <label className="block text-xs text-secondary mb-3">Central access token (required for remote access)
-        <input disabled={busy} type="password" autoComplete="off" className="input w-full mt-1" value={token} onChange={(event) => { setToken(event.target.value); setCommand(''); }} />
-      </label>
-      <p className="text-xs text-muted mb-3">The access token stays in this tab’s session. The generated command contains the central access token; use it only on a computer you trust.</p>
+      <p className="text-xs text-muted mb-3">For remote access, save your token in Central access token above first. The generated command contains that token; use it only on a computer you trust.</p>
       {role !== 'desktop' && <p className="text-xs text-muted mb-3">Run PowerShell as administrator. First-time WSL setup may require a restart and a Linux user login before you rerun the command. Worker networking currently requires trusted LAN/VPN transport enabled on the central server.</p>}
       <button type="button" onClick={reveal} disabled={busy} className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50">{busy ? 'Preparing…' : 'Reveal Windows install command'}</button>
       {command && <div className="mt-3">

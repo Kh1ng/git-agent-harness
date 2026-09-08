@@ -1,3 +1,4 @@
+import { coordinatorToken } from './coordinatorToken.js';
 /**
  * Typed data-source client for GAH's pull-data REST endpoints.
  *
@@ -66,7 +67,7 @@ const SERVER_URL =
   (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
 
 function authHeaders(): Record<string, string> {
-  const token = typeof window === 'undefined' ? null : window.sessionStorage.getItem('gah.coordinatorToken');
+  const token = coordinatorToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
