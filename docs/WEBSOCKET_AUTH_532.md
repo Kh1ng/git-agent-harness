@@ -1,7 +1,7 @@
 # HTTP and WebSocket authentication for #532
 
-Central WebSocket upgrades now require the existing `COORDINATOR_TOKEN` outside
-verified direct local access. Workers always require a token. An unauthorized
+Central WebSocket upgrades require the existing `COORDINATOR_TOKEN` or a valid paired-device cookie outside
+verified direct local access. Workers require the coordinator token. An unauthorized
 upgrade receives no welcome payload and cannot enter the message handlers.
 
 The browser and Tauri dashboard share the **Central access token** control above
@@ -15,10 +15,11 @@ The server selects only `gah.v1`. The credential never enters a request URL or
 response protocol. Proxy logs must omit credential-bearing headers, including
 `Authorization` and `Sec-WebSocket-Protocol`.
 
-All `/api` HTTP routes now use that same authentication boundary, including legacy
+All ordinary `/api` HTTP routes use that same authentication boundary, including legacy
 configuration, dispatch, loop, profile, and manager-chat endpoints. This also protects
 new routes by default. Remote reads require credentials because configuration and chat
 responses can expose private data. `/health` remains public for connection checks.
+The narrow pairing code exchange and cookie clearing exception is described in [CONTROL_SURFACES.md](CONTROL_SURFACES.md).
 
 Web, desktop, and MCP callers send the existing bearer token. Custom integrations that
 previously called unguarded routes must send `Authorization: Bearer TOKEN` and use TLS
@@ -54,8 +55,8 @@ Compatibility sockets cannot call `session.*`: those operations use the fleet
 coordinator even without an explicit remote node. Supply a token to start, stop,
 or send commands to sessions. This mode never weakens worker, registry, claims,
 or node-setup authentication. It applies only to WebSockets. Remote HTTP reads and
-mutations still require a bearer token, so this mode alone does not provide a usable
-unauthenticated dashboard. Save a token to load projects and use dashboard controls.
+mutations still require owner or paired-device credentials, so this mode alone does not provide a usable
+unauthenticated dashboard. Save a token or pair the device to use dashboard controls.
 
 ## Verification and remaining work
 
@@ -73,7 +74,7 @@ future routes reject unauthenticated requests. It also checks valid and invalid 
 TLS policy, local access, and public health checks. The regression fails before the
 common API guard is applied.
 
-This does not complete #532. Per-device scoped credentials, revocation, capability
-policy, idempotency, policy parity, and append-only operation auditing remain open.
-Credential changes on the server affect new upgrades; this change does not revoke
-already-open sockets. Physical Windows, iOS, and Android validation remains pending.
+This does not complete #532. Fine-grained device scopes, capability policy, idempotency,
+policy parity, and append-only operation auditing remain open. Paired devices can be
+revoked individually, including existing sockets. Changing the coordinator token still
+affects new upgrades only; it does not revoke already-open owner sockets. Physical Windows, iOS, and Android validation remains pending.

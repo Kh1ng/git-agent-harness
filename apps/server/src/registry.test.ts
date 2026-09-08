@@ -1056,6 +1056,7 @@ test('authMiddleware accepts non-loopback requests when req.secure is true and t
   let nextCalled = false;
 
   const res = {
+    locals: {},
     status: (code: number) => {
       statusCalledWith = code;
       return {
@@ -1092,6 +1093,7 @@ test('authMiddleware accepts opted-in non-loopback HTTP with a valid token', () 
   } as any;
   let status: number | undefined;
   const res = {
+    locals: {},
     status(code: number) { status = code; return this; },
     json() { return this; }
   } as any;
