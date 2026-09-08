@@ -35,6 +35,7 @@ try {
   const archive = run('tar', ['-tzf', join(root, 'worker/source.tar.gz')]).toString();
   assert.match(archive, /scripts\/install-windows.ps1/);
   assert.ok(!archive.includes('private-untracked'));
+  assert.throws(() => run(process.execPath, [stageScript, 'worker', 'worker']), /Artifact destination must be empty/);
   writeFileSync(join(root, 'apps/desktop/target/release/bundle/nsis', 'GAH Worker_0.1.2_x64-setup.exe'), 'another binary');
   assert.throws(() => run(process.execPath, [stageScript, 'desktop', 'ambiguous']));
   console.log('Artifact staging passed: matching revisions, file checksums, tracked source only, ambiguous installers rejected.');

@@ -9,6 +9,7 @@ if (!['desktop', 'worker'].includes(kind) || !destination) throw new Error('Usag
 const revision = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 const output = resolve(destination);
 mkdirSync(output, { recursive: true });
+if (readdirSync(output).length) throw new Error('Artifact destination must be empty.');
 const sources = { 'install-windows.ps1': 'scripts/install-windows.ps1' };
 if (kind === 'desktop') {
   const directory = 'apps/desktop/target/release/bundle/nsis';
