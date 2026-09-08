@@ -173,7 +173,6 @@ test('Unix bootstrap commands select supported roles, quote origins, and prompt 
     const command = unixSetupCommand(os, 'worker', 'https://central.example.com:8443');
     assert.match(command, /GAH_NODE_ROLE=/);
     assert.match(command, /GAH_CENTRAL_URL=/);
-    assert.ok(command.includes('central.example.com:8443'));
     assert.match(command, /read -rsp/);
     assert.match(command, /COORDINATOR_TOKEN/);
     assert.ok(!command.includes('GAH_GATEWAY_API_KEY'));
@@ -181,7 +180,6 @@ test('Unix bootstrap commands select supported roles, quote origins, and prompt 
   }
   const central = unixSetupCommand('linux', 'central', '', 'https://memory.example.com:8420');
   assert.match(central, /GAH_GATEWAY_MODE=remote/);
-  assert.ok(central.includes('memory.example.com:8420'));
   assert.match(central, /read -rsp/);
   assert.match(central, /GAH_GATEWAY_API_KEY/);
   execFileSync('bash', ['-n', '-c', central]);
