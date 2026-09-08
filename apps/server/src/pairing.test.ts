@@ -58,8 +58,10 @@ test('real HTTP/WS pairing confirms access, rejects CSRF and owner exports, and 
   const remote = { 'X-Forwarded-For': '198.51.100.2', Origin: base };
   const owner = { ...remote, Authorization: 'Bearer owner-secret-never-in-qr' };
   const post = (path: string, body: unknown, headers: Record<string, string> = remote) => fetch(base + path, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const connect = (cookie: string, origin = base): Promise<WebSocket | number> => new Promise((resolve, reject) => {
-    const socket = new WebSocket(base.replace('http:', 'ws:') + '/ws', ['gah.v1'], { headers: { ...remote, Origin: origin, Cookie: cookie } });
+  const connect = (cookie: string, origin: string | null = base): Promise<WebSocket | number> => new Promise((resolve, reject) => {
+    const socket = new WebSocket(base.replace('http:', 'ws:') + '/ws', ['gah.v1'], { headers: {
+      'X-Forwarded-For': remote['X-Forwarded-For'], Cookie: cookie, ...(origin === null ? { Referer: base + '/' } : { Origin: origin })
+    } });
     socket.once('open', () => resolve(socket));
     socket.once('unexpected-response', (_req, res) => { res.resume(); resolve(res.statusCode!); });
     socket.once('error', reject);
@@ -91,6 +93,23 @@ test('real HTTP/WS pairing confirms access, rejects CSRF and owner exports, and 
     const paired = { ...remote, Cookie: cookie };
     assert.equal((await fetch(base + '/api/info', { headers: paired })).status, 200);
     assert.equal((await fetch(base + '/api/info', { headers: { Cookie: cookie, 'Sec-Fetch-Site': 'same-origin' } })).status, 200, 'Same-origin browser GETs may omit Origin');
+    // WebView2 omits Origin and Fetch Metadata on plain-HTTP dashboard reads.
+    const httpBrowser = { 'X-Forwarded-For': remote['X-Forwarded-For'], Cookie: cookie, Referer: base + '/' };
+    assert.equal((await fetch(base + '/api/pairing/session', { headers: httpBrowser })).status, 200, 'Paired HTTP browser remains authenticated after redeem');
+    assert.equal((await fetch(base + '/api/info', { headers: httpBrowser })).status, 200);
+    assert.equal((await fetch(base + '/api/info', { method: 'HEAD', headers: httpBrowser })).status, 200);
+    for (const headers of [
+      { ...httpBrowser, Referer: 'http://attacker.test/' },
+      { ...httpBrowser, Referer: base.replace('http:', 'https:') + '/' },
+      { ...httpBrowser, Referer: 'not a URL' },
+      { ...httpBrowser, Origin: 'http://attacker.test' },
+      { ...httpBrowser, Origin: 'null' },
+      { ...httpBrowser, 'Sec-Fetch-Site': 'cross-site' },
+      { ...httpBrowser, 'Sec-Fetch-Site': 'same-site' },
+      { ...httpBrowser, 'Sec-Fetch-Site': 'none' },
+    ]) assert.equal((await fetch(base + '/api/info', { headers })).status, 401, 'Referer cannot override conflicting or invalid origin evidence');
+    assert.equal((await post('/api/config', {}, httpBrowser)).status, 401, 'Mutations still require Origin');
+    assert.equal((await post('/api/pairing/logout', {}, httpBrowser)).status, 403, 'Pairing mutations still require Origin');
     assert.equal((await fetch(base + '/api/info', { headers: { Cookie: cookie } })).status, 401, 'Cookie access without browser origin evidence is denied');
     assert.equal((await fetch(base + '/api/info', { headers: { ...paired, Origin: 'http://attacker.test' } })).status, 401);
     assert.equal((await post('/api/pairing/offers', { origin: base }, paired)).status, 403);
@@ -122,6 +141,7 @@ test('real HTTP/WS pairing confirms access, rejects CSRF and owner exports, and 
     assert.equal(adminUpdates, 1, 'Explicit owner credentials retain administration access');
     assert.equal((await fetch(base + '/api/info', { headers: { ...paired, Cookie: `${cookie}; ${cookie}` } })).status, 401);
     assert.equal(await connect(cookie, 'http://attacker.test'), 403);
+    assert.equal(await connect(cookie, null), 401, 'Referer alone cannot authorize a WebSocket upgrade');
     const socket = await connect(cookie);
     assert.ok(socket instanceof WebSocket);
     socket.send('test');

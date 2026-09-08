@@ -102,12 +102,16 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 }
 
 /** Cookie credentials are ambient: require the browser's exact origin, not a
- * same-site subdomain. Same-origin GET fetches may omit Origin. */
+ * same-site subdomain. HTTP browser reads can omit both Origin and Fetch
+ * Metadata; their Referer must then prove the same origin. */
 export function sameOriginRequest(req: { headers: IncomingHttpHeaders; protocol: string; method?: string }): boolean {
   try {
     const target = new URL(`${req.protocol}://${req.headers.host}`);
     if (req.headers.origin !== undefined) return new URL(req.headers.origin).origin === target.origin;
-    return (req.method === 'GET' || req.method === 'HEAD') && req.headers['sec-fetch-site'] === 'same-origin';
+    if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+    if (req.headers['sec-fetch-site'] !== undefined) return req.headers['sec-fetch-site'] === 'same-origin';
+    if (req.headers.upgrade !== undefined || req.headers.referer === undefined) return false;
+    return new URL(req.headers.referer).origin === target.origin;
   } catch { return false; }
 }
 
