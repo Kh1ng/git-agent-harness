@@ -740,9 +740,9 @@ export class RegistryService {
     // ownership check for existing nodes lives in the POST /api/registry/nodes
     // ROUTE (apps/server/src/server.ts), which requires the coordinator token
     // before registerNode is called for an existing node_id. This method has
-    // exactly one caller today; if a second caller appears, it MUST preserve
-    // that gate, or any caller that can reach registerNode with a known
-    // node_id can hijack the node.
+    // endpoint-changing callers must preserve that gate. The authenticated
+    // project import route may append declared profiles after worker identity
+    // verification; it preserves the registered URL and secret reference.
     //
     // By the time we're here a duplicate node_id is either a legitimate,
     // authenticated reconciliation or a brand-new node. Store the incoming

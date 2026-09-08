@@ -698,14 +698,36 @@ export interface ProfileSummary {
   chat_session_idle_days?: number;
 }
 
+/** Catalog ownership is node-qualified. Paths describe the owning worker, never a central checkout. */
+export interface ProjectSummary extends ProfileSummary {
+  node_id: string;
+  /** Conversation identity, not a CLI profile name. Local names remain unchanged. */
+  chat_profile: string;
+}
+
+export function projectChatProfile(profileName: string, nodeId: string, localNodeId: string): string {
+  return nodeId === localNodeId ? profileName : `gah-node:${encodeURIComponent(nodeId)}:${encodeURIComponent(profileName)}`;
+}
+
+/** Stable UI key for same-named profiles owned by different nodes. */
+export function projectKey(project: Pick<ProjectSummary, 'node_id' | 'name'>): string {
+  return JSON.stringify([project.node_id, project.name]);
+}
+
 export interface ProjectImportData {
   gitUrl: string;
+  /** Omit to import on the central node. */
+  nodeId?: string;
+  /** Explicitly identify GitLab when importing from a custom host. */
+  provider?: 'github' | 'gitlab';
+  providerApiBase?: string;
+  providerProjectId?: string;
   /** Replace an existing managed checkout after verifying it is clean. */
   reclone?: boolean;
 }
 
 export interface ProjectImportResult {
-  project: ProfileSummary;
+  project: ProjectSummary;
   checkoutPath: string;
   checkoutStatus: 'cloned' | 'verified' | 'recloned';
   detectedLanguages: string[];

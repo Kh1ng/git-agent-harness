@@ -47,6 +47,7 @@ import type {
   SkillSummary,
   SkillBindingSummary,
   SkillBindingUpdate,
+  ProjectSummary,
   ProjectImportData,
   ProjectImportResult,
   ChatSessionSummary,
@@ -218,9 +219,9 @@ export interface GahDataSource {
   getEvents(params?: { profile?: string; since?: string }): Promise<ControllerEvent[]>;
   getControllerActivity(params?: { profile?: string; since?: string }): Promise<ControllerActivity[]>;
   getProfiles(): Promise<ProfileSummary[]>;
-  getProjects(): Promise<ProfileSummary[]>;
-  addProject(profile: string): Promise<ProfileSummary>;
-  removeProject(profile: string): Promise<{ removed: boolean }>;
+  getProjects(): Promise<ProjectSummary[]>;
+  addProject(profile: string): Promise<ProjectSummary>;
+  removeProject(profile: string, nodeId?: string): Promise<{ removed: boolean }>;
   importProject(data: ProjectImportData): Promise<ProjectImportResult>;
   addProfile(data: ProfileAddData): Promise<{ success: boolean; message: string }>;
   updateProfile(name: string, data: ProfileUpdateData): Promise<{ success: boolean; message: string }>;
@@ -411,13 +412,13 @@ export const gahApi: GahDataSource = {
     return getJson<ProfileSummary[]>('/api/profiles');
   },
   getProjects() {
-    return getJson<ProfileSummary[]>('/api/projects');
+    return getJson<ProjectSummary[]>('/api/projects');
   },
   addProject(profile) {
-    return postJson<ProfileSummary, { profile: string }>('/api/projects', { profile });
+    return postJson<ProjectSummary, { profile: string }>('/api/projects', { profile });
   },
-  removeProject(profile) {
-    return deleteJson<{ removed: boolean }>(`/api/projects/${encodeURIComponent(profile)}`);
+  removeProject(profile, nodeId) {
+    return deleteJson<{ removed: boolean }>(`/api/projects/${encodeURIComponent(profile)}${nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : ''}`);
   },
   importProject(data) {
     return postJson<ProjectImportResult, ProjectImportData>('/api/projects/import', data);

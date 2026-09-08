@@ -49,8 +49,6 @@ import type {
   SettingsConfigProfileSummary,
   DoctorSnapshot,
   ProfileSummary,
-  ProjectImportData,
-  ProjectImportResult,
   ChatNodeInfo,
   ChatSessionEvent
 } from '@git-agent-harness/contracts';
@@ -87,7 +85,7 @@ import {
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
 import { listAllChatSessions, resolveSessionCwd, chatSessionStoreOptions } from './managerChat/chatSessions.js';
 import { usageRollup } from './managerChat/usageRollup.js';
-import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
+import { projectRoutes } from './projectRoutes.js';
 import { getGitStatusCached, getGitBranchesCached, getGitLogCached, commitGitChanges, cliInDir } from './gitCache.js';
 import {
   addCanonicalSkillBinding,
@@ -286,12 +284,7 @@ export function createServer(
     }
     next();
   });
-  app.use('/api/projects/import', rateLimit({
-    windowMs: 60_000,
-    limit: 10,
-    standardHeaders: true,
-    legacyHeaders: false
-  }));
+  app.use('/api', projectRoutes({ node, registry: registryService, listProfiles, addProfile, localNodeId: getCoordinatorIdentity(undefined, coordinatorPort).node_id }));
   // Issue #882 (CodeQL: js/missing-rate-limiting) -- these routes are
   // authenticated but called frequently by design (a renewal every
   // lease/3, ~5 min, per in-flight dispatch), so the limit is generous for
@@ -898,83 +891,6 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load gah profiles',
-        message: error instanceof Error ? error.message : String(error)
-      });
-    }
-  });
-
-  app.get('/api/projects', async (_req, res) => {
-    try {
-      res.json(listProjects(await listProfiles()));
-    } catch (error) {
-      res.status(502).json({
-        error: 'Failed to load projects',
-        message: error instanceof Error ? error.message : String(error)
-      });
-    }
-  });
-
-  app.post('/api/projects', async (req, res) => {
-    const profile = typeof req.body?.profile === 'string' ? req.body.profile.trim() : '';
-    if (!profile) {
-      res.status(400).json({ error: 'Invalid project', message: 'profile is required' });
-      return;
-    }
-    try {
-      res.status(201).json(addProject(profile, await listProfiles()));
-    } catch (error) {
-      res.status(400).json({
-        error: 'Failed to add project',
-        message: error instanceof Error ? error.message : String(error)
-      });
-    }
-  });
-
-  app.post('/api/projects/import', async (req, res) => {
-    const gitUrl = typeof req.body?.gitUrl === 'string' ? req.body.gitUrl.trim() : '';
-    if (!gitUrl) {
-      res.status(400).json({ error: 'Invalid project import', message: 'gitUrl is required' });
-      return;
-    }
-    try {
-      parseGitUrl(gitUrl);
-    } catch (error) {
-      res.status(400).json({
-        error: 'Invalid project import',
-        message: error instanceof Error ? error.message : String(error)
-      });
-      return;
-    }
-    try {
-      const input: ProjectImportData = { gitUrl, reclone: req.body?.reclone === true };
-      const imported = await importGitProject(input, { listProfiles, addProfile });
-      const project = addProject(imported.profileName, await listProfiles());
-      const result: ProjectImportResult = {
-        project,
-        checkoutPath: imported.checkoutPath,
-        checkoutStatus: imported.checkoutStatus,
-        detectedLanguages: imported.detectedLanguages,
-        validationCommands: imported.validationCommands
-      };
-      res.status(201).json(result);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const conflict = message.includes('uncommitted changes')
-        || message.includes('checkout origin')
-        || message.includes('managed checkouts');
-      res.status(conflict ? 409 : 502).json({
-        error: 'Failed to import project',
-        message
-      });
-    }
-  });
-
-  app.delete('/api/projects/:profile', (req, res) => {
-    try {
-      res.json({ removed: removeProject(req.params.profile) });
-    } catch (error) {
-      res.status(502).json({
-        error: 'Failed to remove project',
         message: error instanceof Error ? error.message : String(error)
       });
     }

@@ -17,7 +17,7 @@ export function workerRouteGuard(node: NodeRoleStatus): RequestHandler {
   return (req, res, next) => {
     if (node.role === 'central') return next();
     const readPaths = ['/health', '/api/info', '/api/status', '/api/doctor', '/api/quota', '/api/report', '/api/report/series', '/api/events', '/api/availability', '/api/profiles', '/api/loop/status'];
-    const writePaths = ['/api/dispatch', '/api/availability/clear', '/api/loop/start', '/api/loop/stop'];
+    const writePaths = ['/api/worker/projects/import', '/api/dispatch', '/api/availability/clear', '/api/loop/start', '/api/loop/stop'];
     if ((req.method === 'GET' && readPaths.includes(req.path)) || (req.method === 'POST' && writePaths.includes(req.path))) return next();
     res.status(409).json({ error: 'This node is an execution worker. Use the central node for control, memory, and skills.', central_url: node.central_url });
   };
