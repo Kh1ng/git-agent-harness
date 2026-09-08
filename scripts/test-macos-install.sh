@@ -30,7 +30,7 @@ from pathlib import Path
 import tomllib
 
 config_root = Path.home() / '.config'
-config = tomllib.loads((config_root / 'gah/config.toml').read_text())
+config = tomllib.loads((config_root / 'gah/config.toml').read_text())['defaults']
 assert config['node_role'] == 'worker', config
 assert config['registry_central_url'] == os.environ['GAH_CENTRAL_URL'], config
 credentials = config_root / 'gah/gah-loop.env'
