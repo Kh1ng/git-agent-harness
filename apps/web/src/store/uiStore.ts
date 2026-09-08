@@ -5,6 +5,7 @@
  * and provider data follow the same profile as the REST-backed pages.
  */
 import { create } from 'zustand';
+import { readNavigation } from '../lib/navigationState.js';
 
 export type Theme = 'dark' | 'light';
 
@@ -24,7 +25,7 @@ function initialTheme(): Theme {
 
 export const useUiStore = create<UiStoreState>((set) => ({
   theme: initialTheme(),
-  profileOverride: null,
+  profileOverride: typeof window === 'undefined' ? null : readNavigation().profile,
   setTheme: (theme) => {
     if (typeof document !== 'undefined') {
       document.documentElement.setAttribute('data-theme', theme);

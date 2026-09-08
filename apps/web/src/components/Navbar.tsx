@@ -93,7 +93,7 @@ export function Navbar({ currentPage, onPageChange }: NavbarProps) {
       </aside>
 
       {/* Mobile top bar */}
-      <header className="lg:hidden sticky top-0 z-30 flex items-center justify-between h-14 px-4 bg-card border-b border-subtle">
+      <header className="mobile-app-header lg:hidden sticky top-0 z-30 flex items-center justify-between px-4 bg-card border-b border-subtle">
         <div>
           <h1 className="text-sm font-semibold text-primary">Git Agent Harness</h1>
           <p className="text-[10px] text-muted font-mono" data-testid="frontend-build">{FRONTEND_BUILD}</p>
@@ -121,7 +121,7 @@ export function Navbar({ currentPage, onPageChange }: NavbarProps) {
             setDrawerOpen(false);
           }
         }}
-        className="m-0 h-dvh max-h-none w-72 max-w-[85vw] bg-card text-primary border-0 border-r border-subtle p-3 backdrop:bg-black/60"
+        className="mobile-drawer m-0 h-dvh max-h-none w-72 max-w-[85vw] bg-card text-primary border-0 border-r border-subtle px-3 backdrop:bg-black/60"
       >
         <div className="flex items-center justify-between px-2 py-3 mb-2">
           <div>

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { LoadingState } from './components/ui/EmptyState.js';
 import { useWebSocket } from './ws/WebSocketContext.js';
 import { OverviewPage } from './pages/OverviewPage.js';
@@ -7,6 +7,7 @@ import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { CoordinatorConnection } from './components/CoordinatorConnection.js';
 import { SessionDetailModal } from './components/SessionDetailModal.js';
 import type { Session } from '@git-agent-harness/contracts';
+import { readNavigation, updateNavigation, type Page } from './lib/navigationState.js';
 
 const WorkPage = lazy(() => import('./pages/WorkPage.js').then((module) => ({ default: module.WorkPage })));
 const TelemetryPage = lazy(() => import('./pages/TelemetryPage.js').then((module) => ({ default: module.TelemetryPage })));
@@ -17,10 +18,11 @@ const ManagerChatPage = lazy(() => import('./pages/ManagerChatPage.js').then((mo
 const GitPage = lazy(() => import('./pages/GitPage.js').then((module) => ({ default: module.GitPage })));
 const NodesPage = lazy(() => import('./pages/NodesPage.js').then((module) => ({ default: module.NodesPage })));
 
-export type Page = 'overview' | 'work' | 'telemetry' | 'quota' | 'events' | 'settings' | 'chat' | 'git' | 'nodes';
+export type { Page } from './lib/navigationState.js';
 
 export function App() {
-  const [currentPage, setCurrentPage] = useState<Page>('overview');
+  const [currentPage, setCurrentPage] = useState<Page>(() => readNavigation().page);
+  useEffect(() => updateNavigation({ page: currentPage }), [currentPage]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const { isConnected, isConnecting, error: wsError, sessions, serverVersion } = useWebSocket();
 
@@ -55,7 +57,7 @@ export function App() {
   };
 
   return (
-    <div className="min-h-screen bg-page lg:flex">
+    <div className="app-shell min-h-dvh bg-page lg:flex">
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 bg-card text-primary p-3 rounded-md">Skip to content</a>
       <Navbar currentPage={currentPage} onPageChange={setCurrentPage} />
 

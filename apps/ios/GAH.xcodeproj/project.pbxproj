@@ -1,0 +1,41 @@
+// !$*UTF8*$!
+{archiveVersion = 1; classes = {}; objectVersion = 56; objects = {
+1BD7A96DD9BC8188E6182AD6 = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>";};
+AA400DFD4219F700A8EA7668 = {isa = PBXBuildFile; fileRef = 1BD7A96DD9BC8188E6182AD6;};
+636838303EE2C9101A30E0EB = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GAHApp.swift; sourceTree = "<group>";};
+AD3C5BFDA776D46ED223AF83 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerAddress.swift; sourceTree = "<group>";};
+8A4653088CDBA3C17095276A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScanner.swift; sourceTree = "<group>";};
+7B594B6DB375E1BF3F23CDD6 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>";};
+C51973800196C913E40E529A = {isa = PBXBuildFile; fileRef = 636838303EE2C9101A30E0EB;};
+9177A70006A236EF30457363 = {isa = PBXBuildFile; fileRef = AD3C5BFDA776D46ED223AF83;};
+1FBA503AF7EAE9E3DE76BF97 = {isa = PBXBuildFile; fileRef = 8A4653088CDBA3C17095276A;};
+0737EA6EC0BFFCE3B6433C78 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControllerTests.swift; sourceTree = "<group>";};
+FEB796F1922FB7C90131D455 = {isa = PBXBuildFile; fileRef = 0737EA6EC0BFFCE3B6433C78;};
+B1F859A586EB90675067851D = {isa = PBXBuildFile; fileRef = AD3C5BFDA776D46ED223AF83;};
+8BCD5BC4CDFDF0918087C782 = {isa = PBXFileReference; explicitFileType = wrapper.application; path = GAH.app; sourceTree = BUILT_PRODUCTS_DIR;};
+F219C0274590DA45E4BEF1EA = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = GAHTests.xctest; sourceTree = BUILT_PRODUCTS_DIR;};
+69F8D45498D7E20DA99BB780 = {isa = PBXGroup; children = (1BD7A96DD9BC8188E6182AD6,636838303EE2C9101A30E0EB,AD3C5BFDA776D46ED223AF83,8A4653088CDBA3C17095276A,7B594B6DB375E1BF3F23CDD6,); path = GAH; sourceTree = "<group>";};
+BFC937463906E5DB7A02A37C = {isa = PBXGroup; children = (0737EA6EC0BFFCE3B6433C78,); path = GAHTests; sourceTree = "<group>";};
+FBDC4F23F93125BBEEAE800C = {isa = PBXGroup; children = (8BCD5BC4CDFDF0918087C782,F219C0274590DA45E4BEF1EA,); name = Products; sourceTree = "<group>";};
+F97E10D1020E3BEF961AF77B = {isa = PBXGroup; children = (69F8D45498D7E20DA99BB780,BFC937463906E5DB7A02A37C,FBDC4F23F93125BBEEAE800C,); sourceTree = "<group>";};
+971ED9D05B25DB6C4D7680D4 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C51973800196C913E40E529A,9177A70006A236EF30457363,1FBA503AF7EAE9E3DE76BF97,); runOnlyForDeploymentPostprocessing = 0;};
+78AE8C6BEB2A40A6D824CCEE = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+364863F9F2E558B0F50473FC = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (AA400DFD4219F700A8EA7668,); runOnlyForDeploymentPostprocessing = 0;};
+E9B2E96ABC5F6856F2BE79CF = {isa = XCBuildConfiguration; buildSettings = {SWIFT_VERSION = 5.0; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic; PRODUCT_BUNDLE_IDENTIFIER = com.kh1ng.gah.controller; PRODUCT_NAME = GAH; INFOPLIST_FILE = GAH/Info.plist; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ENABLE_PREVIEWS = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;}; name = Debug;};
+5A8C91857F674E16E2724F47 = {isa = XCBuildConfiguration; buildSettings = {SWIFT_VERSION = 5.0; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic; PRODUCT_BUNDLE_IDENTIFIER = com.kh1ng.gah.controller; PRODUCT_NAME = GAH; INFOPLIST_FILE = GAH/Info.plist; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ENABLE_PREVIEWS = YES; SWIFT_OPTIMIZATION_LEVEL = "-O";}; name = Release;};
+8A8642C6B28662881237D956 = {isa = XCConfigurationList; buildConfigurations = (E9B2E96ABC5F6856F2BE79CF,5A8C91857F674E16E2724F47,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+87578F7D47DE44A504256C73 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (FEB796F1922FB7C90131D455,B1F859A586EB90675067851D,); runOnlyForDeploymentPostprocessing = 0;};
+32BD75FE04B3CDF992A510FD = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+1544DFBBD36E4A0D68754A27 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0;};
+0F3D67935A4F199E058A017A = {isa = XCBuildConfiguration; buildSettings = {SWIFT_VERSION = 5.0; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic; PRODUCT_BUNDLE_IDENTIFIER = com.kh1ng.gah.controller.tests; PRODUCT_NAME = GAHTests; GENERATE_INFOPLIST_FILE = YES; TEST_TARGET_NAME = GAH; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;}; name = Debug;};
+20B70E15FDC36C625E57F658 = {isa = XCBuildConfiguration; buildSettings = {SWIFT_VERSION = 5.0; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic; PRODUCT_BUNDLE_IDENTIFIER = com.kh1ng.gah.controller.tests; PRODUCT_NAME = GAHTests; GENERATE_INFOPLIST_FILE = YES; TEST_TARGET_NAME = GAH; SWIFT_OPTIMIZATION_LEVEL = "-O";}; name = Release;};
+543C3B0A949D06459825C125 = {isa = XCConfigurationList; buildConfigurations = (0F3D67935A4F199E058A017A,20B70E15FDC36C625E57F658,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+D799BAE6088A90139B415FCC = {isa = PBXContainerItemProxy; containerPortal = 98F54143AB4E86B28C3AFEE0; proxyType = 1; remoteGlobalIDString = C13732C8E715C9BEE4FA51C9; remoteInfo = GAH;};
+DE58E2B17C19600779694943 = {isa = PBXTargetDependency; target = C13732C8E715C9BEE4FA51C9; targetProxy = D799BAE6088A90139B415FCC;};
+C13732C8E715C9BEE4FA51C9 = {isa = PBXNativeTarget; buildConfigurationList = 8A8642C6B28662881237D956; buildPhases = (971ED9D05B25DB6C4D7680D4,78AE8C6BEB2A40A6D824CCEE,364863F9F2E558B0F50473FC,); buildRules = (); dependencies = (); name = GAH; productName = GAH; productReference = 8BCD5BC4CDFDF0918087C782; productType = "com.apple.product-type.application";};
+EB441FB4F42650CB3146523A = {isa = PBXNativeTarget; buildConfigurationList = 543C3B0A949D06459825C125; buildPhases = (87578F7D47DE44A504256C73,32BD75FE04B3CDF992A510FD,1544DFBBD36E4A0D68754A27,); buildRules = (); dependencies = (DE58E2B17C19600779694943,); name = GAHTests; productName = GAHTests; productReference = F219C0274590DA45E4BEF1EA; productType = "com.apple.product-type.bundle.ui-testing";};
+89E1FD6268CC0F221A2BE178 = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; ENABLE_TESTABILITY = YES; SWIFT_EMIT_LOC_STRINGS = YES;}; name = Debug;};
+E6DE6C99132752C914FEF632 = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; ENABLE_TESTABILITY = YES; SWIFT_EMIT_LOC_STRINGS = YES;}; name = Release;};
+49EA05A46B1A86EA7E413B43 = {isa = XCConfigurationList; buildConfigurations = (89E1FD6268CC0F221A2BE178,E6DE6C99132752C914FEF632,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+98F54143AB4E86B28C3AFEE0 = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 2600; TargetAttributes = {C13732C8E715C9BEE4FA51C9 = {CreatedOnToolsVersion = 26.6;};EB441FB4F42650CB3146523A = {CreatedOnToolsVersion = 26.6; TestTargetID = C13732C8E715C9BEE4FA51C9;};};}; buildConfigurationList = 49EA05A46B1A86EA7E413B43; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; knownRegions = (en,Base,); mainGroup = F97E10D1020E3BEF961AF77B; productRefGroup = FBDC4F23F93125BBEEAE800C; projectDirPath = ""; projectRoot = ""; targets = (C13732C8E715C9BEE4FA51C9,EB441FB4F42650CB3146523A,);};
+}; rootObject = 98F54143AB4E86B28C3AFEE0;}

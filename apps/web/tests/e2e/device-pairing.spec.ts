@@ -46,7 +46,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const ownerContext = await browser.newContext();
-  const deviceContext = await browser.newContext();
+  const deviceContext = await browser.newContext({ hasTouch: true, viewport: { width: 320, height: 568 } });
   const owner = await ownerContext.newPage();
   const phone = await deviceContext.newPage();
   let closedDeviceSockets = 0;
@@ -67,11 +67,15 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     await expect(phone.getByText(/permits unencrypted HTTP/)).toBeVisible();
     expect(new URL(phone.url()).hash).toBe('');
     expect((await deviceContext.cookies()).some(cookie => cookie.name === 'gah_device')).toBe(false);
-    await phone.setViewportSize({ width: 390, height: 844 });
     const pairing = phone.getByRole('region', { name: 'Device pairing' });
-    await expect.poll(() => pairing.locator('button, input').evaluateAll(elements => elements.every(element => element.getBoundingClientRect().height >= 44))).toBe(true);
-    expect(await phone.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    await phone.screenshot({ path: testInfo.outputPath('pairing-confirm-mobile.png') });
+    for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 844, height: 390 }]) {
+      await phone.setViewportSize(viewport);
+      await expect.poll(() => pairing.locator('button, input').evaluateAll(elements => elements.every(element => element.getBoundingClientRect().height >= 44))).toBe(true);
+      await expect(phone.getByLabel('Device name', { exact: true })).toHaveCSS('font-size', '16px');
+      expect(await phone.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await phone.screenshot({ path: testInfo.outputPath(`pairing-confirm-${viewport.width}.png`) });
+    }
+    await phone.setViewportSize({ width: 320, height: 568 });
     await phone.getByLabel('Device name', { exact: true }).fill('Test phone');
     await phone.getByRole('button', { name: 'Confirm server and pair' }).click();
     await expect(phone.getByRole('status').filter({ hasText: 'Paired as Test phone' })).toBeVisible();

@@ -24,9 +24,9 @@ const STATUS_TONE: Record<Session['status'], StatusTone> = {
 function Field({ label, value }: { label: string; value: string | number | undefined | null }) {
   if (value === undefined || value === null || value === '') return null;
   return (
-    <div>
+    <div className="min-w-0">
       <h4 className="text-xs font-medium text-muted uppercase tracking-wide mb-1">{label}</h4>
-      <p className="text-sm text-primary">{value}</p>
+      <p className="text-sm text-primary break-words">{value}</p>
     </div>
   );
 }
@@ -72,9 +72,9 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
   const combinedOutput = [output?.stdout, output?.stderr].filter(Boolean).join('');
 
   return (
-    <dialog ref={dialog} onClose={onClose} aria-label={`Session: ${name}`} className="card p-0 text-primary max-w-3xl w-[calc(100%-2rem)] max-h-[90dvh] overflow-y-auto backdrop:bg-black/70">
-      <div className="flex flex-col">
-        <div className="flex justify-between items-center p-4 sm:p-5 border-b border-subtle">
+    <dialog ref={dialog} onClose={onClose} aria-label={`Session: ${name}`} className="session-dialog card p-0 text-primary max-w-3xl max-h-[90dvh] overflow-hidden backdrop:bg-black/70">
+      <div className="flex max-h-[90dvh] flex-col">
+        <div className="flex shrink-0 justify-between items-center gap-2 p-4 sm:p-5 border-b border-subtle">
           <div className="flex items-center gap-3 min-w-0">
             <Icon size={20} className="text-muted shrink-0" aria-hidden="true" />
             <div className="min-w-0">
@@ -85,13 +85,13 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
 
           <div className="flex items-center gap-3 shrink-0">
             <StatusBadge tone={STATUS_TONE[session.status]} label={session.status} />
-            <button onClick={onClose} className="text-muted hover:text-primary" aria-label="Close">
+            <button onClick={onClose} className="inline-flex min-h-11 min-w-11 items-center justify-center text-muted hover:text-primary" aria-label="Close">
               <X size={18} />
             </button>
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 sm:p-5">
+        <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-5">
             <Field label="Provider" value={session.providerKind} />
             <Field label="Session ID" value={session.id} />
@@ -125,7 +125,7 @@ export function SessionDetailModal({ session, onClose }: SessionDetailModalProps
           </div>
         </div>
 
-        <div className="flex flex-col sm:flex-row sm:items-center gap-3 p-4 sm:p-5 border-t border-subtle bg-raised">
+        <div className="flex shrink-0 flex-col sm:flex-row sm:items-center gap-3 p-4 sm:p-5 border-t border-subtle bg-raised">
           {isRunning && (
             <div className="flex-1 flex items-center gap-2 min-w-0">
               <input

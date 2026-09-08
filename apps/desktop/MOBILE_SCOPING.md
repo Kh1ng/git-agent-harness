@@ -1,48 +1,9 @@
-# Mobile Targets Scoping (Android / iOS)
+# Mobile targets
 
-Scoping analysis for adding Android/iOS Tauri mobile targets to `apps/desktop`.
-Related issue: #144 (parent #139). This is a scoping/PM document only — no
-mobile support is implemented here.
+The earlier Linux environment lacked Apple tooling. That assessment is obsolete for the current Mac, which has Xcode 26.6.
 
-## Conclusion
+The iPhone controller now lives in [`apps/ios`](../ios/README.md). It uses SwiftUI and WKWebView to load the central dashboard, with persistent WebKit login, a configurable central address, QR scanning, and reviewed project/chat links. It contains no worker runtime or Rust build dependency.
 
-**Mobile targets are NOT buildable in this environment. Closed without further
-action (see #144).**
+A successful simulator build does not prove physical installation or mobile network recovery. See [iPhone testing](../../docs/IOS_TESTING.md) for recorded evidence and the manual acceptance run. Issue #936 remains open until its physical-device checks pass.
 
-## Environment inventory (Debian GNU/Linux 13, x86_64)
-
-| Requirement                         | Present? | Notes                                            |
-| ----------------------------------- | -------- | ------------------------------------------------ |
-| Android SDK (`sdkmanager`, `adb`)   | No       | Not installed; `ANDROID_HOME`/`ANDROID_SDK_ROOT` unset |
-| Android NDK                         | No       | Required for native (Rust) mobile builds         |
-| JDK / `javac`                       | No       | Gradle (Android build step) requires a JDK       |
-| `cargo ndk`                         | No       | Not installed                                    |
-| `tauri` CLI (`tauri android init`)  | No       | Not installed via cargo or npx                   |
-| Rust mobile targets                 | No       | Only `x86_64-unknown-linux-gnu` installed        |
-| Signing (`keytool`)                 | No       | No keystore / signing tooling                    |
-| Xcode / `xcodebuild` / `swift`      | No       | **iOS requires macOS + Xcode**, unavailable on Linux |
-| `apps/web` production build         | N/A      | Not built locally; webview reuse unverified       |
-
-## Rationale
-
-- **iOS** cannot be targeted from Linux at all — Xcode and the iOS SDK are
-  macOS-only. There is no path to validate an iOS build in this environment.
-- **Android** would require the Android SDK + NDK, a JDK, `cargo-ndk`, and the
-  Tauri CLI (`tauri android init`), none of which are present. Installing and
-  provisioning these is out of scope for this ticket and cannot be validated
-  without the signing/SDK toolchain.
-
-## Follow-up (only if/when tooling is available)
-
-If mobile tooling is provisioned later, the work should decompose into:
-
-1. **#TBD-Android**: `tauri android init`, install Android SDK/NDK + JDK, add
-   `aarch64-linux-android`/`armv7-linux-androideabi` Rust targets, configure
-   signing, and verify a debug APK build.
-2. **#TBD-iOS**: provision a macOS runner with Xcode, `tauri ios init`, and
-   verify a simulator build.
-3. **#TBD-WebView**: confirm the existing `apps/web` build runs unmodified
-   inside the mobile webview, and enumerate any capabilities (notifications,
-   storage, deep links, permissions) needing mobile-specific handling.
-
-Until that tooling exists, neither target should be started.
+Android is also a control-only client. Native Android packaging and physical testing remain pending. The shared dashboard and pairing flow are available for browser testing on both platforms. Keep desktop worker controls in `apps/desktop`; do not add worker execution to a mobile app.

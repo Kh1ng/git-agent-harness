@@ -84,8 +84,10 @@ export function DevicePairing() {
         <p className="text-secondary">{preview.access}</p>
         {preview.server.origin.startsWith('http:') && <p className="text-warning">This server permits unencrypted HTTP. Pair only on your trusted LAN or secure tunnel.</p>}
         <label className="block space-y-1">Device name<input className="input w-full" required maxLength={80} autoComplete="off" value={deviceName} onChange={event => setDeviceName(event.target.value)} placeholder="My phone" /></label>
-        <button className="btn-primary" disabled={busy || !deviceName.trim()}>Confirm server and pair</button>
-        <button type="button" className="btn-secondary ml-2" onClick={() => { setPending(null); setPreview(null); }}>Cancel pairing</button>
+        <div className="flex flex-wrap gap-2">
+          <button className="btn-primary" disabled={busy || !deviceName.trim()}>Confirm server and pair</button>
+          <button type="button" className="btn-secondary" onClick={() => { setPending(null); setPreview(null); }}>Cancel pairing</button>
+        </div>
       </form> : pending && !error ? <p role="status">Checking pairing code…</p> : null}
       {principal === 'owner' && !pending && <>
         <form className="space-y-3" onSubmit={event => { event.preventDefault(); void run(async () => setOffer(await pairingApi.create(origin))); }}>
