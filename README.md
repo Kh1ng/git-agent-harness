@@ -72,7 +72,7 @@ gah doctor
 ## Install
 
 For the Windows Tauri app and WSL2 worker, see [Windows node setup](docs/WINDOWS_NODE_SETUP.md).
-For iOS, Android, and QR pairing requirements, see [Control surfaces](docs/CONTROL_SURFACES.md).
+For the current capability inventory, device roles, and QR pairing, see [Control surfaces](docs/CONTROL_SURFACES.md).
 
 Install the CLI and control-plane server through the deterministic host
 installer from a clean checkout of the default branch:
