@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { nodeHeaders, type RegistryService } from './registryService.js';
 import type { ManagerAdapter } from './managerChat/registry.js';
-import { parseWorkerChatEvent } from './workerChatProtocol.js';
+import { parseWorkerChatEvent, readWorkerChatReply } from './workerChatProtocol.js';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
 
 export function workerChatConnection(registry: RegistryService, nodeId: string, profile: string, project: Pick<ProfileSummary, 'repo' | 'provider' | 'web_url'>) {
@@ -36,9 +36,9 @@ export function workerChatConnection(registry: RegistryService, nodeId: string, 
   return {
     async request<T>(body: Record<string, unknown>): Promise<T> {
       const response = await post(body, AbortSignal.timeout(30_000));
-      const result = await response.json() as T;
+      const result = await readWorkerChatReply(response, { ...body, profile });
       assertRegistration();
-      return result;
+      return result as T;
     },
     adapter(backend: string, sessionId?: string): ManagerAdapter {
       let active: { requestId: string; abort: AbortController } | undefined;
@@ -71,18 +71,17 @@ export function workerChatConnection(registry: RegistryService, nodeId: string, 
                 const event = parseWorkerChatEvent(JSON.parse(buffer.slice(0, end)));
                 buffer = buffer.slice(end + 1);
                 assertRegistration();
-                if (event.type === 'chunk' && typeof event.text === 'string') input.onChunk(event.text);
-                else if (event.type === 'toolResult' && typeof event.name === 'string' && typeof event.text === 'string') input.onToolResult(event.name, event.text);
-                else if (event.type === 'toolCall' && event.tool && typeof event.tool.toolCallId === 'string') input.onToolCall?.(event.tool);
-                else if (event.type === 'permission' && typeof event.id === 'string' && event.request && Array.isArray(event.request.options)) {
+                if (event.type === 'chunk') input.onChunk(event.text);
+                else if (event.type === 'toolResult') input.onToolResult(event.name, event.text);
+                else if (event.type === 'toolCall') input.onToolCall?.(event.tool);
+                else if (event.type === 'permission') {
                   // Keep consuming the stream while the operator decides; Stop must
                   // remain responsive and the worker disconnect must close the turn.
                   void Promise.resolve(input.requestPermission?.(event.request) ?? 'cancelled').then(optionId =>
                     command('permission', { requestId, permissionId: event.id, optionId })
                   ).catch(() => abort.abort());
-                } else if (event.type === 'result' && event.result && typeof event.result.reply === 'string') return event.result;
+                } else if (event.type === 'result') return event.result;
                 else if (event.type === 'error') throw new Error('Worker agent failed or stopped. Check its backend readiness.');
-                else throw new Error('Worker returned an invalid chat event.');
               }
               if (part.done) throw new Error('Worker disconnected before completing the turn.');
             }
