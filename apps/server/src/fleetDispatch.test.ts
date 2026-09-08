@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import https from 'node:https';
+import net from 'node:net';
 import { mkdtempSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -957,48 +959,55 @@ test('fleet dispatch skips unsupported, unavailable, and saturated nodes, and ma
   }
 });
 
-test('remote dispatch and reconciliation send the registered node credential', async () => {
-  const secretDir = mkdtempSync(resolve(tmpdir(), 'gah-fleet-auth-'));
-  const { rmSync } = await import('node:fs');
-  const previousToken = process.env.GAH_FLEET_TEST_TOKEN;
-  process.env.GAH_FLEET_TEST_TOKEN = 'node-test-secret';
-  const authorizations: (string | undefined)[] = [];
-  const server = http.createServer();
-  const wss = new WebSocketServer({ server, verifyClient: (info: { req: http.IncomingMessage }) => {
-    authorizations.push(info.req.headers.authorization);
-    return info.req.headers.authorization === 'Bearer node-test-secret';
-  } });
-  const session: Session = { id: 'authenticated-session', providerKind: 'codex', instanceId: 'codex-0', repo: 'owner/repo', mode: 'improve', status: 'running', startedAt: new Date().toISOString() };
-  wss.on('connection', (socket) => socket.on('message', (raw) => {
-    const message = JSON.parse(raw.toString()) as { type: string };
-    if (message.type === 'session.start') socket.send(JSON.stringify({ type: 'session.started', session }));
-    if (message.type === 'client.hello') socket.send(JSON.stringify({ type: 'server.welcome', sessions: [session] }));
-  }));
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
-  const address = server.address();
-  assert.ok(address && typeof address !== 'string');
-  const nodeUrl = `http://127.0.0.1:${address.port}`;
-  let registeredUrl = nodeUrl;
-  const registryService = {
-    getNode: () => ({ secret_ref: 'env:GAH_FLEET_TEST_TOKEN', advertised_url: registeredUrl }),
-    getNodeObservations: async () => [makeSnapshot('worker', nodeUrl, 0, 0, 0)]
-  } as unknown as RegistryService;
-  const coordinator = createFleetDispatchCoordinator({ registryService, pushBus: { publish() {} },
-    coordinatorIdentity: { node_id: 'central', display_name: 'central', advertised_url: 'http://127.0.0.1:9999', version: '0.1.0', schema_digest: 'schema' },
-    leaseStorePath: resolve(secretDir, 'leases.json') });
-  try {
-    await coordinator.startSession({ requestId: 'auth-dispatch', nodeId: 'worker', profile: 'gah', providerKind: 'codex', instanceId: 'codex-0', repo: 'owner/repo', mode: 'improve' });
-    await coordinator.reconcileLeases('gah');
-    assert.deepEqual(authorizations, ['Bearer node-test-secret', 'Bearer node-test-secret']);
-    assert.equal(coordinator.getSession(session.id)?.leaseState, 'running');
-    registeredUrl = 'http://127.0.0.1:9998';
-    await coordinator.reconcileLeases('gah');
-    assert.equal(authorizations.length, 2, 'a stale lease must not send credentials to the old address');
-    assert.equal(coordinator.getSession(session.id)?.leaseState, 'uncertain_reconciling');
-  } finally {
-    for (const socket of wss.clients) socket.terminate();
-    await new Promise<void>((done) => wss.close(() => server.close(() => done())));
-    rmSync(secretDir, { recursive: true, force: true });
-    if (previousToken === undefined) delete process.env.GAH_FLEET_TEST_TOKEN; else process.env.GAH_FLEET_TEST_TOKEN = previousToken;
-  }
-});
+for (const protocol of ['http:', 'https:']) {
+  test(`remote dispatch and reconciliation use the ${protocol} global agent and node credential`, async (t) => {
+    const secretDir = mkdtempSync(resolve(tmpdir(), 'gah-fleet-auth-'));
+    const { rmSync } = await import('node:fs');
+    const previousToken = process.env.GAH_FLEET_TEST_TOKEN;
+    process.env.GAH_FLEET_TEST_TOKEN = 'node-test-secret';
+    const authorizations: (string | undefined)[] = [];
+    const server = http.createServer();
+    const wss = new WebSocketServer({ server, verifyClient: (info: { req: http.IncomingMessage }) => {
+      authorizations.push(info.req.headers.authorization);
+      return info.req.headers.authorization === 'Bearer node-test-secret';
+    } });
+    const session: Session = { id: 'authenticated-session', providerKind: 'codex', instanceId: 'codex-0', repo: 'owner/repo', mode: 'improve', status: 'running', startedAt: new Date().toISOString() };
+    wss.on('connection', (socket) => socket.on('message', (raw) => {
+      const message = JSON.parse(raw.toString()) as { type: string };
+      if (message.type === 'session.start') socket.send(JSON.stringify({ type: 'session.started', session }));
+      if (message.type === 'client.hello') socket.send(JSON.stringify({ type: 'server.welcome', sessions: [session] }));
+    }));
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    // Like a configured proxy, the agent can reach a worker that direct DNS cannot.
+    // Use a plain test socket for both agents; TLS validation is Node's responsibility.
+    const agent = protocol === 'https:' ? https.globalAgent : http.globalAgent;
+    const connections = t.mock.method(agent, 'createConnection', () => net.connect({ host: '127.0.0.1', port: address.port }));
+    const nodeUrl = `${protocol}//worker.invalid:${address.port}`;
+    let registeredUrl = nodeUrl;
+    const registryService = {
+      getNode: () => ({ secret_ref: 'env:GAH_FLEET_TEST_TOKEN', advertised_url: registeredUrl }),
+      getNodeObservations: async () => [makeSnapshot('worker', nodeUrl, 0, 0, 0)]
+    } as unknown as RegistryService;
+    const coordinator = createFleetDispatchCoordinator({ registryService, pushBus: { publish() {} },
+      coordinatorIdentity: { node_id: 'central', display_name: 'central', advertised_url: 'http://127.0.0.1:9999', version: '0.1.0', schema_digest: 'schema' },
+      leaseStorePath: resolve(secretDir, 'leases.json') });
+    try {
+      await coordinator.startSession({ requestId: 'auth-dispatch', nodeId: 'worker', profile: 'gah', providerKind: 'codex', instanceId: 'codex-0', repo: 'owner/repo', mode: 'improve' });
+      await coordinator.reconcileLeases('gah');
+      assert.deepEqual(authorizations, ['Bearer node-test-secret', 'Bearer node-test-secret']);
+      assert.equal(connections.mock.callCount(), 2, 'dispatch and reconciliation must both use the configured agent');
+      assert.equal(coordinator.getSession(session.id)?.leaseState, 'running');
+      registeredUrl = 'http://127.0.0.1:9998';
+      await coordinator.reconcileLeases('gah');
+      assert.equal(authorizations.length, 2, 'a stale lease must not send credentials to the old address');
+      assert.equal(coordinator.getSession(session.id)?.leaseState, 'uncertain_reconciling');
+    } finally {
+      for (const socket of wss.clients) socket.terminate();
+      await new Promise<void>((done) => wss.close(() => server.close(() => done())));
+      rmSync(secretDir, { recursive: true, force: true });
+      if (previousToken === undefined) delete process.env.GAH_FLEET_TEST_TOKEN; else process.env.GAH_FLEET_TEST_TOKEN = previousToken;
+    }
+  });
+}
