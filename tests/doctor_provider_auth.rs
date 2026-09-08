@@ -324,3 +324,82 @@ fn doctor_gitlab_no_token_no_cli_fails_closed() {
                 .and(predicate::str::contains("not found on PATH")),
         );
 }
+
+#[test]
+fn worker_doctor_uses_central_memory_but_keeps_role_and_provider_checks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    init_git_repo(&repo);
+    fs::remove_file(repo.join("docs/MANAGER_MEMORY.md")).unwrap();
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+    let original_config = fs::read_to_string(&cfg).unwrap();
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+
+    for (stored_role, override_role, provider_ready, succeeds, memory_status) in [
+        ("worker", None, true, true, Some("ok")),
+        ("central", Some("worker"), true, true, Some("ok")),
+        ("worker", Some("central"), true, false, Some("fail")),
+        ("worker", Some("invalid"), true, false, None),
+        ("worker", None, false, false, Some("ok")),
+    ] {
+        fs::write(
+            &cfg,
+            original_config.replace(
+                "[defaults]",
+                &format!("[defaults]\nnode_role = \"{stored_role}\"\nregistry_central_url = \"http://central.invalid\""),
+            ),
+        )
+        .unwrap();
+        make_fake_bin_with_body(
+            &fake_bin,
+            "gh",
+            if provider_ready {
+                "#!/bin/sh\nexit 0\n"
+            } else {
+                "#!/bin/sh\nexit 1\n"
+            },
+        );
+        let mut cmd = bin();
+        cmd.args([
+            "doctor",
+            "--profile",
+            "real",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--json",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env_remove("GAH_NODE_ROLE")
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN");
+        if let Some(role) = override_role {
+            cmd.env("GAH_NODE_ROLE", role);
+        }
+        let output = cmd.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            succeeds,
+            "stored={stored_role}, override={override_role:?}, provider={provider_ready}"
+        );
+        let snapshot: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let checks = snapshot["checks"].as_array().unwrap();
+        let memory = checks
+            .iter()
+            .find(|check| check["name"] == "manager memory");
+        assert_eq!(
+            memory.and_then(|check| check["status"].as_str()),
+            memory_status
+        );
+        if override_role == Some("invalid") {
+            assert!(checks
+                .iter()
+                .any(|check| check["name"] == "node role" && check["status"] == "fail"));
+        }
+        if !provider_ready {
+            assert!(checks
+                .iter()
+                .any(|check| check["name"] == "provider auth" && check["status"] == "fail"));
+        }
+    }
+}
