@@ -8,8 +8,17 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
   echo 'Enable systemd in WSL (/etc/wsl.conf: [boot] systemd=true), run wsl --shutdown from Windows, reopen the distribution, then rerun setup.' >&2
   exit 1
 fi
-sudo apt-get update
-sudo apt-get install -y ca-certificates curl git python3 xz-utils build-essential
+# An already provisioned distro must not need a sudo password to install the worker.
+missing_packages=()
+for package in ca-certificates curl git python3 xz-utils build-essential; do
+  if [ "$(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null || true)" != 'installed' ]; then
+    missing_packages+=("$package")
+  fi
+done
+if [ "${#missing_packages[@]}" -gt 0 ]; then
+  sudo apt-get update
+  sudo apt-get install -y "${missing_packages[@]}"
+fi
 install_dir="$HOME/.local/share/gah/worker"
 mkdir -p "$install_dir"
 chmod 700 "$install_dir"
@@ -26,7 +35,9 @@ if ! "$release_dir/bin/gah" config set --help | grep -q -- '--node-role' ||
   exit 1
 fi
 # role-cli-check:end
-if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 20 ]; then
+# WSL inherits Windows PATH entries; select Node and npm from the same Linux installation.
+node="$(node -p 'process.platform === "linux" && Number(process.versions.node.split(".")[0]) >= 20 ? process.execPath : ""' 2>/dev/null || true)"
+if [ -z "$node" ] || [ ! -x "$(dirname "$node")/npm" ]; then
   node_dir="$install_dir/node"
   mkdir -p "$node_dir"
   curl -fsSL https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt -o "$release_dir/SHASUMS256.txt"
@@ -35,8 +46,9 @@ if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split("."
   curl -fsSL "https://nodejs.org/dist/latest-v22.x/$node_archive" -o "$release_dir/$node_archive"
   (cd "$release_dir"; awk -v archive="$node_archive" '$2 == archive' SHASUMS256.txt | sha256sum --check -)
   tar -xJf "$release_dir/$node_archive" -C "$node_dir" --strip-components=1
-  export PATH="$node_dir/bin:$PATH"
+  node="$node_dir/bin/node"
 fi
+export PATH="$(dirname "$node"):$PATH"
 cd "$release_dir"
 npm ci --workspace=apps/server --workspace=packages/contracts --workspace=packages/shared --include-workspace-root --no-audit --no-fund
 npm run build:contracts
@@ -44,7 +56,7 @@ npm run build:shared
 npm run --workspace=apps/server build
 
 # Store secrets in the WSL user's private directory, never in a task's command line.
-python3 - "$stage/settings.json" "$install_dir" "$release_dir" "$(command -v node)" <<'PY'
+python3 - "$stage/settings.json" "$install_dir" "$release_dir" "$node" <<'PY'
 import json, os, pathlib, shlex, sys, uuid
 settings = json.loads(pathlib.Path(sys.argv[1]).read_text())
 root, release, node = map(pathlib.Path, sys.argv[2:])
@@ -63,7 +75,9 @@ env = {
     'GAH_BINARY': str(release / 'bin/gah'), 'HOST': '0.0.0.0', 'PORT': '3774',
 }
 env_path = root / 'worker.env'
-env_path.write_text(''.join(f'export {k}={shlex.quote(v)}\n' for k, v in env.items()) + 'export PATH=' + shlex.quote(str(release / 'bin') + ':' + str(node.parent) + ':') + '"$PATH"\n')
+agent_bins = [path for path in [pathlib.Path.home() / '.local/bin', pathlib.Path.home() / '.opencode/bin'] if path.is_dir()]
+worker_path = ':'.join(map(str, [release / 'bin', node.parent, *agent_bins]))
+env_path.write_text(''.join(f'export {k}={shlex.quote(v)}\n' for k, v in env.items()) + 'export PATH=' + shlex.quote(worker_path + ':') + '"$PATH"\n')
 env_path.chmod(0o600)
 start = root / 'start.sh'
 start.write_text('#!/usr/bin/env bash\nset -euo pipefail\nsource ' + shlex.quote(str(env_path)) + '\ncd ' + shlex.quote(str(release)) + '\nexec ' + shlex.quote(str(node)) + ' apps/server/dist/bin.js\n')
