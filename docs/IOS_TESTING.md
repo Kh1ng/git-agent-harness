@@ -4,7 +4,7 @@
 
 The Mac has Xcode 26.6. The connected iPhone 17 Pro Max runs iOS 26.6.1 and has Developer Mode enabled. The earlier Linux-only mobile tooling assessment does not apply to this Mac.
 
-The iPhone simulator build succeeds. Native XCTest checks validate server-address boundaries, secret-free saved URLs, and persistent WebKit cookies across backgrounding and app relaunch. These tests use a local fixture, not a real provider.
+The iPhone simulator build succeeds. Three native XCTest checks validate server-address boundaries, secret-free saved URLs, persistent WebKit cookies across backgrounding and app relaunch, and failed-connection recovery. A failed switch hides the previous dashboard, and Retry preserves an unused pairing code. These tests use a local fixture, not a real provider.
 
 The web changes cover phone touch targets, safe areas, session controls, and URL-based project/chat restoration. Browser emulation and simulator results do not prove physical keyboard behavior, camera scanning, cellular reconnection, or node control on an iPhone.
 

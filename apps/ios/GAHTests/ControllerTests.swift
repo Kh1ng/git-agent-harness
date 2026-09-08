@@ -17,6 +17,36 @@ final class ControllerTests: XCTestCase {
         XCTAssertThrowsError(try ServerAddress.fromDeepLink(URL(string: "gah://open?url=https://a.example&url=https://b.example")!))
     }
 
+    func testFailedSwitchHidesOldDashboardAndRetryKeepsUnusedPairingCode() throws {
+        continueAfterFailure = false
+        func control(_ path: String) {
+            let completed = expectation(description: path)
+            URLSession.shared.dataTask(with: URL(string: "http://127.0.0.1:18773/" + path)!) { _, response, error in
+                XCTAssertNil(error)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+                completed.fulfill()
+            }.resume()
+            wait(for: [completed], timeout: 10)
+        }
+        control("arm-recovery")
+        let app = XCUIApplication()
+        app.launchArguments = ["-centralURL", "http://127.0.0.1:18773/"]
+        app.launch()
+        XCTAssertTrue(app.webViews.staticTexts["GAH controller fixture"].waitForExistence(timeout: 20))
+        app.buttons["connection"].tap()
+        let field = app.descendants(matching: .any).matching(identifier: "serverAddress").firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: (field.value as? String)?.count ?? 0)
+            + "http://localhost:18773/recovery#pair=fixture-code")
+        app.buttons["connectServer"].tap()
+        XCTAssertTrue(app.buttons["Retry connection"].waitForExistence(timeout: 20))
+        XCTAssertFalse(app.webViews.staticTexts["GAH controller fixture"].exists)
+        control("allow-recovery")
+        app.buttons["Retry connection"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["Pairing fragment retained"].waitForExistence(timeout: 20))
+    }
+
     // Run the local fixture server documented in README before this test. It never contacts a provider.
     func testWebSessionPersistsAndConnectionCanRecover() throws {
         continueAfterFailure = false

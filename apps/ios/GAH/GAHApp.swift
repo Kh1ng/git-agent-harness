@@ -12,6 +12,7 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     @Published var address: ServerAddress?
     @Published var error: String?
     @Published var loading = false
+    @Published var hasCommittedPage = false
     let webView: WKWebView
     private var locationObservation: NSKeyValueObservation?
 
@@ -34,6 +35,7 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     func connect(_ target: ServerAddress) {
         webView.stopLoading()
         address = target
+        hasCommittedPage = false
         error = nil
         UserDefaults.standard.set(ServerAddress.restorationURL(target.url)?.absoluteString, forKey: "centralURL")
         webView.load(URLRequest(url: target.url))
@@ -42,9 +44,10 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     func retry() {
         error = nil
         guard let target = address else { return }
-        // Pairing fragments are one-use and must not be replayed after redemption.
-        let current = webView.url.flatMap { target.contains($0) ? $0 : nil } ?? target.url
-        webView.load(URLRequest(url: ServerAddress.restorationURL(current) ?? target.origin))
+        // Keep an unused pairing URL in memory after a failed first load. Once loaded,
+        // the dashboard removes its fragment before redemption; retry uses that current URL.
+        let current = hasCommittedPage ? webView.url.flatMap { target.contains($0) ? $0 : nil } : nil
+        webView.load(URLRequest(url: current ?? target.url))
     }
 
     func rememberLocation() {
@@ -71,6 +74,9 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) { loading = true; error = nil }
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        hasCommittedPage = webView.url.map { address?.contains($0) == true } ?? false
+    }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loading = false; rememberLocation() }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError failure: Error) { failed(failure) }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError failure: Error) { failed(failure) }
@@ -110,6 +116,9 @@ private struct ControllerView: View {
                 }
                 if controller.address != nil {
                     Dashboard(controller: controller)
+                        .opacity(controller.hasCommittedPage ? 1 : 0)
+                        .allowsHitTesting(controller.hasCommittedPage)
+                        .accessibilityHidden(!controller.hasCommittedPage)
                 } else {
                     ContentUnavailableView {
                         Label("Connect to GAH", systemImage: "network")
@@ -136,7 +145,7 @@ private struct ControllerView: View {
                     controller.connect(target)
                     proposedAddress = nil
                     showingConnection = false
-                }
+                }.id(proposedAddress)
             }
             .onOpenURL { url in
                 do {
@@ -178,7 +187,7 @@ private struct ConnectionView: View {
                 if let target = try? ServerAddress(text) {
                     Section("Connect to") {
                         Text(target.origin.absoluteString).textSelection(.enabled)
-                        if target.url.scheme == "http" {
+                        if target.origin.scheme == "http" {
                             Text("Use HTTP only over Tailscale or a trusted network.").foregroundStyle(.secondary)
                         }
                     }
