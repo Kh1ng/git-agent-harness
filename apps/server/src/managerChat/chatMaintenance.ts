@@ -13,6 +13,7 @@ import {
 } from './ManagerChatManager.js';
 import { profileStorage, type SettleDetails } from './chatSessions.js';
 import { fetchChatIssueState } from './issueChats.js';
+import { resolveChatProject } from '../projectCatalog.js';
 
 const DAY_MS = 86_400_000;
 
@@ -106,6 +107,12 @@ export async function reclaimChatSessions(
   options: { profile?: string; dryRun: boolean },
   deps: ChatMaintenanceDeps = defaultDeps
 ): Promise<ChatReclaimResult> {
+  if (options.profile?.startsWith('gah-node:')) {
+    const project = await resolveChatProject(options.profile);
+    if (!project) throw new Error('The project is no longer in the catalog.');
+    return { dryRun: options.dryRun, profiles: [await profileStorage(options.profile, project.chat_session_idle_days ?? 14)],
+      candidates: [], sessions: [], warnings: ['Archive worker conversations individually. Automatic reclaim does not inspect remote checkouts.'] };
+  }
   const allProfiles = await deps.listProfiles();
   const profiles = options.profile
     ? allProfiles.filter((profile) => profile.name === options.profile)

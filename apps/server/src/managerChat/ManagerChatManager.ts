@@ -244,7 +244,7 @@ export async function createChatSession(profile: string, backend?: string, model
   const selectedBackend = backend ?? backendForProfile(profile);
   const route = await chatRoute(profile, nodeId, selectedBackend);
   if (route.remote) {
-    const session = await route.remote.request<import('@git-agent-harness/contracts').ChatSessionSummary>({ action: 'create', backend: selectedBackend, model, title, reasoningEffort });
+    const session = await route.remote.request<import('@git-agent-harness/contracts').ChatSessionSummary>({ action: 'create', sessionId: randomUUID(), backend: selectedBackend, model, title, reasoningEffort });
     return storeSession(rememberWorkspace({ ...session, profile }, route), chatSessionStoreOptions);
   }
   const profileInfo = await findProfileInfo(route.profileName);
@@ -275,6 +275,9 @@ export async function archiveChatSession(
   details?: SettleDetails
 ) {
   if (activeProfiles.has(chatKey(profile, sessionId))) throw new Error('Stop this turn before archiving its workspaces.');
+  const key = chatKey(profile, sessionId);
+  activeProfiles.add(key);
+  try {
   const stored = getSession(profile, sessionId, chatSessionStoreOptions);
   if (stored?.workspaceNodes?.length) {
     if (stored.archivedAt !== null) return stored;
@@ -299,6 +302,7 @@ export async function archiveChatSession(
     // The worktree goes away; its preview can't be valid anymore.
     await previewProxy.clear(profile, sessionId);
   }
+  } finally { activeProfiles.delete(key); }
 }
 
 /** WP3 preview state for one session (null when none). */
@@ -584,6 +588,7 @@ export async function runTurn(
     startBackend: context.backend,
     fallbackBackends: listManagerBackends().filter((b) => b.implemented && b.id !== context.backend).map((b) => b.id),
     attempt: async (backendId) => {
+      if (context.route?.remote) await chatRoute(profile, context.route.nodeId, backendId);
       const adapter = context.route?.remote?.adapter(backendId, context.sessionId === 'default' ? undefined : context.sessionId) ?? resolveAdapter(backendId);
       active.backend = backendId;
       active.adapter = adapter;
@@ -824,7 +829,7 @@ export function sendManagerChatMessage(
     if (previousNode && !session.workspaces?.[previousNode]) session = { ...session, workspaces: { ...session.workspaces, [previousNode]: { branch: session.branch, worktreePath: session.worktreePath } } };
     if (route.remote) {
       const prepared = await route.remote.request<{ session: import('@git-agent-harness/contracts').ChatSessionSummary }>({ action: 'prepare', sessionId, backend: session.backend, model: session.model, reasoningEffort: session.reasoningEffort, title: session.title });
-      session = storeSession(rememberWorkspace({ ...session, ...prepared.session, profile, workspaces: session.workspaces }, route), chatSessionStoreOptions);
+      session = storeSession(rememberWorkspace({ ...session, branch: prepared.session.branch, worktreePath: prepared.session.worktreePath }, route), chatSessionStoreOptions);
       return { backend: session.backend, model: session.model, reasoningEffort: session.reasoningEffort, route };
     }
     const profileInfo = await findProfileInfo(route.profileName);
@@ -852,6 +857,9 @@ export function sendManagerChatMessage(
   const sessionOpts = sessionId && sessionId !== 'default' ? { ...logOptions, sessionId } : logOptions;
   const prior = turnQueueByProfile.get(key) ?? Promise.resolve();
   const turn = prior.catch(() => undefined).then(async (): Promise<ManagerChatTurnResult> => {
+    if (activeProfiles.has(key)) throw new Error('This conversation workspace is busy. Wait for its operation to finish.');
+    activeProfiles.add(key);
+    try {
     const sessionContext = await prepareSession();
     const existing = loadLog(profile, sessionOpts);
     const history = deriveModelHistory(existing);
@@ -873,7 +881,6 @@ export function sendManagerChatMessage(
       previewSets: []
     };
     activeTurns.set(key, active);
-    activeProfiles.add(key);
     appendEvents(profile, [
       ...(compaction ? [{ type: 'compaction/start' as const, seq: ++active.seq, turn: turnNo, timestamp: now }] : []),
       { type: 'turn/start', seq: ++active.seq, turn: turnNo, timestamp: now },
@@ -1150,7 +1157,7 @@ export function sendManagerChatMessage(
           { type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'cancelled' }, timestamp: Date.now() }
         ], sessionOpts);
         return {
-          turn: { role: 'assistant', text: '', backend: active.backend, model: null, usage: null, timestamp: Date.now() },
+          turn: { role: 'assistant', text: '', backend: active.backend, model: null, usage: null, timestamp: Date.now(), nodeId: sessionContext.route.nodeId, nodeName: sessionContext.route.nodeName },
           cancelled: true
         };
       }
@@ -1171,6 +1178,8 @@ export function sendManagerChatMessage(
       // the pending set() and leaks the listener.
       await Promise.allSettled(active.previewSets);
       if (sessionId && sessionId !== 'default') touchSession(profile, sessionId, chatSessionStoreOptions);
+    }
+    } finally {
       activeProfiles.delete(key);
       activeTurns.delete(key);
     }

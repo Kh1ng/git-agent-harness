@@ -428,7 +428,7 @@ async function handleManagerChatSessionList(ws: WebSocket, message: Extract<Clie
 
 async function handleManagerChatSessionCreate(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.sessionCreate' }>, requestId: string) {
   try {
-    const session = await createChatSession(message.profile, message.backend, message.model ?? null, message.title, message.reasoningEffort);
+    const session = await createChatSession(message.profile, message.backend, message.model ?? null, message.title, message.reasoningEffort, message.nodeId);
     const payload: ServerMessage = {
       type: 'manager.chat.sessionCreated',
       requestId,

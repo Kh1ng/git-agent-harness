@@ -7,6 +7,7 @@ import { runProfileList } from './gahCli.js';
 import { resolveAdapter, type ManagerAdapter } from './managerChat/registry.js';
 import { archiveSession, chatKey, createSession, getSession, resolveSessionCwd, touchSession, updateSession, type ChatSessionStoreOptions } from './managerChat/chatSessions.js';
 
+import { isUsageLimitError } from './managerChat/acpAdapter.js';
 import type { WorkerChatEvent } from './workerChatProtocol.js';
 
 interface ActiveExecution {
@@ -26,6 +27,7 @@ export function createWorkerChatRouter(deps: {
 }) {
   const router = Router();
   const active = new Map<string, ActiveExecution>();
+  const workspaceOperations = new Set<string>();
   const profiles = deps.profiles ?? runProfileList;
   const adapterFor = deps.adapter ?? resolveAdapter;
   router.post('/', async (req, res) => {
@@ -41,13 +43,18 @@ export function createWorkerChatRouter(deps: {
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(sessionId))) {
       return void res.status(400).json({ error: 'Invalid chat session identity.' });
     }
+    let workspaceKey: string | undefined;
     try {
       const profile = (await profiles()).find(candidate => candidate.name === body.profile);
       if (!profile) return void res.status(404).json({ error: 'This worker does not have that profile.' });
       if (!profile.web_url || body.repo !== profile.repo || body.provider !== profile.provider || body.origin !== new URL(profile.web_url).origin) return void res.status(409).json({ error: 'The worker profile refers to a different repository or provider host.' });
       const key = chatKey(body.profile, sessionId);
-      if (['create', 'prepare', 'archive', 'run'].includes(body.action) && [...active.values()].some(turn => turn.key === key)) {
-        return void res.status(409).json({ error: 'Stop the active turn before changing this worker workspace.' });
+      if (['create', 'prepare', 'archive', 'run'].includes(body.action)) {
+        if (workspaceOperations.has(key) || [...active.values()].some(turn => turn.key === key)) {
+          return void res.status(409).json({ error: 'Stop the active turn before changing this worker workspace.' });
+        }
+        workspaceOperations.add(key);
+        workspaceKey = key;
       }
       if (body.action === 'run' && (typeof body.requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(body.requestId)
         || typeof body.prompt !== 'string' || !Array.isArray(body.history)
@@ -66,7 +73,7 @@ export function createWorkerChatRouter(deps: {
           await execution.adapter.steerTurn(key, body.message);
         } else {
           const pending = execution.permission;
-          if (!pending || pending.id !== body.permissionId || !pending.choices.has(body.optionId)) return void res.status(409).json({ error: 'Permission is no longer available or the choice is invalid.' });
+          if (!pending || pending.id !== body.permissionId || (body.optionId !== 'cancelled' && !pending.choices.has(body.optionId))) return void res.status(409).json({ error: 'Permission is no longer available or the choice is invalid.' });
           execution.permission = undefined;
           pending.resolve(body.optionId);
         }
@@ -84,7 +91,7 @@ export function createWorkerChatRouter(deps: {
         ...(typeof body.title === 'string' ? { title: body.title } : {})
       };
       if (body.action === 'create') {
-        return void res.status(201).json(await createSession({ profile: body.profile, profileInfo: profile, ...settings }, deps.sessions));
+        return void res.status(201).json(await createSession({ profile: body.profile, profileInfo: profile, ...settings, sessionId }, deps.sessions));
       }
       if (body.action === 'archive') {
         if (!sessionId) return void res.status(400).json({ error: 'A session is required.' });
@@ -132,6 +139,8 @@ export function createWorkerChatRouter(deps: {
           onToolResult: (name, text) => emit({ type: 'toolResult', name, text }),
           onToolCall: tool => emit({ type: 'toolCall', tool }),
           requestPermission: request => new Promise<string>(resolve => {
+            if (execution.stopping) return resolve('cancelled');
+            execution.permission?.resolve('cancelled');
             const id = randomUUID();
             execution.permission = { id, choices: new Set(request.options.map(option => option.optionId)), resolve };
             emit({ type: 'permission', id, request });
@@ -144,8 +153,9 @@ export function createWorkerChatRouter(deps: {
         const result = await Promise.race([stopped, run]);
         if (sessionId) touchSession(body.profile, sessionId, deps.sessions);
         emit({ type: 'result', result });
-      } catch {
-        emit({ type: 'error', error: 'Worker agent failed or the turn was stopped. Check the worker backend readiness.' });
+      } catch (error) {
+        emit({ type: 'error', error: 'Worker agent failed or the turn was stopped. Check the worker backend readiness.',
+          ...(!execution.stopping && isUsageLimitError(error) ? { code: 'usage_limit' as const } : {}) });
       } finally {
         execution.permission?.resolve('cancelled');
         res.off('close', disconnect);
@@ -153,6 +163,8 @@ export function createWorkerChatRouter(deps: {
       }
     } catch {
       if (!res.headersSent) res.status(502).json({ error: 'Worker chat operation failed. Check the profile and backend on this worker.' });
+    } finally {
+      if (workspaceKey) workspaceOperations.delete(workspaceKey);
     }
   });
   return router;

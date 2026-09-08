@@ -371,6 +371,7 @@ export type ClientMessage =
       type: "manager.chat.sessionCreate";
       requestId: string;
       profile: string;
+      nodeId?: string;
       /** Backend to serve the session; omitted = profile default. */
       backend?: string;
       /** Model override for the session's backend; omitted = backend default. */

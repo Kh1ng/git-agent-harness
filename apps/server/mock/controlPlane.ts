@@ -1162,7 +1162,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     } satisfies ProfileSummary;
     state.profiles.push(project);
     res.status(201).json({
-      project,
+      project: { ...project, node_id: 'central', chat_profile: project.name },
       checkoutPath: project.local_path,
       checkoutStatus: 'cloned',
       detectedLanguages: ['TypeScript'],

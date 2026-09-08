@@ -23,7 +23,7 @@ test('remote agent runs only in the worker profile and streams permission, steer
   let cancelled = 0;
   let steered = '';
   let entered!: () => void;
-  let finishExecution!: () => void;
+  let finishExecution!: () => Promise<void>;
   const running = new Promise<void>(resolve => { entered = resolve; });
   const adapter: ManagerAdapter = {
     id: 'claude', displayName: 'Claude', implemented: true,
@@ -31,7 +31,10 @@ test('remote agent runs only in the worker profile and streams permission, steer
       calls++;
       assert.equal(key, 'demo#test-session');
       assert.equal(input.cwd, cwd);
-      if (input.prompt === 'wait') { entered(); return new Promise(resolve => { finishExecution = () => resolve({ reply: '', model: null, usage: null }); }); }
+      if (input.prompt === 'wait') { entered(); return new Promise(resolve => { finishExecution = async () => {
+        assert.equal(await input.requestPermission!({ title: 'Late permission', locations: [], options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }] }), 'cancelled');
+        resolve({ reply: '', model: null, usage: null });
+      }; }); }
       input.onChunk('streamed ');
       input.onToolResult('read', 'worker file');
       const choice = await input.requestPermission!({ title: 'Read worker file?', locations: [], options: [{ optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' }] });
@@ -82,7 +85,7 @@ test('remote agent runs only in the worker profile and streams permission, steer
     await stopped;
     assert.equal(cancelled, 1);
     await assert.rejects(connection.request({ action: 'prepare', backend: 'claude', sessionId: 'test-session' }), /409/, 'Stop must not free a workspace while its process is still running');
-    finishExecution();
+    await finishExecution();
     await new Promise(resolve => setImmediate(resolve));
     await connection.request({ action: 'prepare', backend: 'claude', sessionId: 'test-session' });
     assert.throws(() => workerChatConnection(registry, 'worker', 'not-declared', profile), /not registered/);
