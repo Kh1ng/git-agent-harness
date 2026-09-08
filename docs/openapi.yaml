@@ -34,6 +34,9 @@ tags:
   - name: registry
     description: Multi-node fleet registration (auth-gated via authMiddleware)
 
+# Trusted direct-local requests may omit the token; remote API requests may not.
+security: [{ nodeAuth: [] }]
+
 paths:
   /api/pm/plans:
     get:
@@ -101,6 +104,7 @@ paths:
         "422": { description: Plan unavailable or fingerprint no longer matches }
   /health:
     get:
+      security: []
       tags: [health]
       summary: Liveness/readiness check
       responses:
@@ -804,7 +808,7 @@ components:
       type: apiKey
       in: header
       name: Authorization
-      description: Bearer token, enforced by authMiddleware for /api/registry/* only
+      description: Bearer token for all /api routes outside trusted direct-local access; remote transport also requires TLS or explicit HTTP opt-in.
   responses:
     GahError:
       description: The underlying gah CLI call failed

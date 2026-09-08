@@ -11,8 +11,43 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { archiveSession, createSession } from './managerChat/chatSessions.js';
+import { withFixtureServer } from './fixtureGahHarness.js';
 
 const gitFixtures = resolve(dirname(fileURLToPath(import.meta.url)), '../tests/fixtures');
+
+test('all API routes require remote authentication while health and trusted local access remain usable', async () => {
+  const saved = { COORDINATOR_TOKEN: process.env.COORDINATOR_TOKEN, GAH_ALLOW_INSECURE_HTTP: process.env.GAH_ALLOW_INSECURE_HTTP };
+  process.env.COORDINATOR_TOKEN = 'test-api-token';
+  process.env.GAH_ALLOW_INSECURE_HTTP = '1';
+  const remote = { 'X-Forwarded-For': '198.51.100.1' };
+  try {
+    await withFixtureServer(async base => {
+      // Start with a harmless fixture read so the pre-fix negative control has no side effects.
+      for (const path of ['/api/profiles', '/api/config', '/api/manager-chat/sessions', '/api/dispatch', '/api/loop/start', '/api/ledger/clear-attempts', '/api/hold/set', '/api/availability/clear', '/api/git/pr', '/api/not-yet-implemented']) {
+        const response = await fetch(base + path, { headers: remote });
+        assert.equal(response.status, 401, path);
+      }
+      for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+        assert.equal((await fetch(`${base}/api/not-yet-implemented`, { method, headers: remote })).status, 401, method);
+      }
+      assert.equal((await fetch(`${base}/api/dispatch`, { method: 'POST', headers: { ...remote, 'Content-Type': 'application/json' }, body: '{}' })).status, 401);
+      assert.equal((await fetch(`${base}/api/profiles`, { headers: { ...remote, Authorization: 'Bearer incorrect' } })).status, 401);
+      const authenticated = { ...remote, Authorization: 'Bearer test-api-token' };
+      assert.equal((await fetch(`${base}/api/profiles`, { headers: authenticated })).status, 200);
+      assert.equal((await fetch(`${base}/api/dispatch`, { method: 'POST', headers: { ...authenticated, 'Content-Type': 'application/json' }, body: '{}' })).status, 400, 'Valid authentication reaches dispatch validation');
+      assert.equal((await fetch(`${base}/api/not-yet-implemented`, { headers: authenticated })).status, 404);
+      assert.equal((await fetch(`${base}/api/profiles`)).status, 200);
+      assert.equal((await fetch(`${base}/health`, { headers: remote })).status, 200);
+      delete process.env.GAH_ALLOW_INSECURE_HTTP;
+      assert.equal((await fetch(`${base}/api/profiles`, { headers: authenticated })).status, 403);
+      assert.equal((await fetch(`${base}/api/profiles`, { headers: { ...authenticated, 'X-Forwarded-Proto': 'https' } })).status, 200);
+    });
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
 
 function profilePayload(profile: string): ConfigProfileSummary {
   return {
