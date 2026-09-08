@@ -1,5 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import http from 'node:http';
+import https from 'node:https';
 import WebSocket from 'ws';
 import { generateRequestId, GAHError } from '@git-agent-harness/shared';
 import type {
@@ -89,14 +91,19 @@ function sessionIsTerminal(session: Session): boolean {
   return session.status === 'stopped' || session.status === 'error';
 }
 
-function toWsUrl(advertisedUrl: string): string {
+// ws supplies createConnection, which bypasses Node's implicit global agent.
+// Select it explicitly so dispatch and reconciliation honor configured proxies.
+function openNodeSocket(advertisedUrl: string, headers: Record<string, string>): WebSocket {
   const url = new URL('/ws', advertisedUrl);
   if (url.protocol === 'https:') {
     url.protocol = 'wss:';
   } else if (url.protocol === 'http:') {
     url.protocol = 'ws:';
   }
-  return url.toString();
+  return new WebSocket(url, {
+    headers,
+    agent: url.protocol === 'wss:' ? https.globalAgent : http.globalAgent
+  });
 }
 
 function leaseStorePath(defaultPath: string): string {
@@ -419,7 +426,7 @@ class RemoteNodeTransport implements NodeDispatchTransport {
     if (profileHint) {
       this.profile = profileHint;
     }
-    const socket = new WebSocket(toWsUrl(this.node.advertisedUrl), { headers: this.headers });
+    const socket = openNodeSocket(this.node.advertisedUrl, this.headers);
     this.socket = socket;
     await new Promise<void>((resolve, reject) => {
       const handleOpen = () => {
@@ -1117,7 +1124,7 @@ export class FleetDispatchCoordinator {
     }
     let socket: WebSocket | undefined;
     try {
-      const connection = new WebSocket(toWsUrl(nodeUrl), { headers: nodeAuthHeaders(this.registryService, nodeId, nodeUrl) });
+      const connection = openNodeSocket(nodeUrl, nodeAuthHeaders(this.registryService, nodeId, nodeUrl));
       socket = connection;
       const sessions = await new Promise<Session[]>((resolve, reject) => {
         const timer = setTimeout(() => {
