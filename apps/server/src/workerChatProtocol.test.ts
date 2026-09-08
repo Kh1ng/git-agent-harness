@@ -145,3 +145,50 @@ test('only the typed usage-limit code permits remote handoff and raw worker erro
     });
   }
 });
+
+test('revocation, endpoint changes and secret rotation abort an idle worker stream and invalidate its connection', { timeout: 5000 }, async t => {
+  const root = mkdtempSync(join(tmpdir(), 'gah-worker-revoke-'));
+  let requests = 0;
+  const server = createServer((req, res) => {
+    requests++;
+    req.resume();
+    res.setHeader('Content-Type', 'application/x-ndjson');
+    res.write(JSON.stringify({ type: 'chunk', text: 'before change' }) + '\n');
+    // A broken invalidation completes with an obsolete result, so this test
+    // fails promptly instead of waiting for the adapter's one-hour deadline.
+    const deadline = setTimeout(() => res.end(JSON.stringify({ type: 'result', result: { reply: 'obsolete result', model: null, usage: null } }) + '\n'), 1000);
+    res.once('close', () => clearTimeout(deadline));
+  });
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const registry = new RegistryService(join(root, 'registry.json'));
+  const node = { node_id: 'worker', display_name: 'Worker', advertised_url: `http://127.0.0.1:${address.port}`,
+    version: '0.1.0', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback' as const,
+    secret_ref: 'env:WORKER_CHAT_TEST_TOKEN', profiles: ['demo'] };
+  for (const action of ['revoke', 'repoint', 'rotate']) {
+    registry.registerNode({ ...node });
+    const before = registry.getNode('worker');
+    const connection = workerChatConnection(registry, 'worker', 'demo', { repo: 'owner/repo', provider: 'github', web_url: 'https://github.com/owner/repo' });
+    const chunks: string[] = [];
+    await assert.rejects(connection.adapter('claude').runTurn('demo', {
+      prompt: 'hello', history: [], onToolResult() {},
+      onChunk(chunk) {
+        chunks.push(chunk);
+        if (action === 'revoke') registry.revokeNode('worker');
+        else if (action === 'repoint') registry.registerNode({ ...node, advertised_url: `http://127.0.0.1:${address.port === 65535 ? 65534 : address.port + 1}` });
+        else registry.rotateSecret('worker', 'env:WORKER_CHAT_ROTATED_TOKEN');
+      }
+    }), /abort|registration changed/i, action);
+    assert.deepEqual(chunks, ['before change']);
+    assert.notEqual(registry.getNode('worker'), before, 'credential/endpoint changes replace the registration identity');
+    const beforeRequest = requests;
+    await assert.rejects(connection.request({ action: 'commands', backend: 'claude' }), /registration changed/);
+    assert.equal(requests, beforeRequest, 'obsolete connection rejects before another HTTP request');
+  }
+});

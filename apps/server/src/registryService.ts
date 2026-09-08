@@ -776,8 +776,11 @@ export class RegistryService {
     if (!secretRef || (!secretRef.startsWith('env:') && !secretRef.startsWith('file:'))) {
       throw new Error('Secret reference must use references (starting with env: or file:), not raw credentials');
     }
-    node.secret_ref = secretRef;
+    this.nodes.set(nodeId, { ...node, secret_ref: secretRef });
+    this.observations.delete(nodeId);
+    this.observationRequests.delete(nodeId);
     this.save();
+    this.changed();
   }
 
   /** Run readiness on one declared worker profile, without changing fleet health or routing eligibility. */
