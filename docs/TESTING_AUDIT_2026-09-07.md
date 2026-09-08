@@ -52,3 +52,20 @@ separate investigation.
 
 Use one local Rust compiler job on the development Mac. Final CI must pass on
 the exact revision merged; earlier green runs do not validate later changes.
+
+## Follow-up, 8 September 2026
+
+At revision `a31b2e1`, full Rust tests, Clippy, Windows NSIS packaging, macOS
+packaging, production typechecks, and CodeQL passed. Browser CI found one
+stale quota mock missing the required profile. The test now uses the shared
+fixture; all nine freshness and availability checks pass without retries.
+
+A security review reproduced coordinator-token exposure through the inherited
+loopback auth exemption. Proxied requests, unrelated browser origins, and DNS
+rebinding hosts now require authenticated access. The fix lives in shared HTTP
+auth middleware. Its regression fails against the old middleware; 45 focused
+server checks pass with the fix. Central WebSocket authentication remains a
+separate existing gap under #532 and is being reviewed.
+
+The final combined revision must pass CI before merge. Native installer
+artifacts provide build evidence, not physical Windows or macOS acceptance.
