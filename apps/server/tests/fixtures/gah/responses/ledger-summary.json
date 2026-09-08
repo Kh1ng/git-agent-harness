@@ -1,0 +1,71 @@
+{
+  "ledger_path": "/fixture/ledger.jsonl",
+  "entries": 1,
+  "success": 1,
+  "failed": 0,
+  "by_mode": {
+    "implementation": 1
+  },
+  "by_requested_backend": {
+    "codex": 1
+  },
+  "by_backend": {
+    "codex": 1
+  },
+  "by_model": {},
+  "by_failure_class": {},
+  "fallback_count": 0,
+  "validation_pass": 0,
+  "push_success": 0,
+  "auto_backend_routing_failures": 0,
+  "mr_count": 0,
+  "human_required_count": 0,
+  "attempts_started": null,
+  "attempts_completed": null,
+  "attempts_started_unknown": 1,
+  "attempts_completed_unknown": 1,
+  "average_duration_seconds": null,
+  "usage_input_tokens": null,
+  "usage_output_tokens": null,
+  "usage_reasoning_tokens": null,
+  "usage_cache_read_tokens": null,
+  "usage_cache_write_tokens": null,
+  "usage_total_tokens": null,
+  "usage_requests_count": null,
+  "estimated_cost_usd": null,
+  "actual_cost_usd": null,
+  "last_run": "2099-07-19T00:00:00Z fixture implementation codex",
+  "grouped_by_backend_difficulty": [
+    {
+      "group_key": "codex :: hard",
+      "entries": 1,
+      "attempts": 1,
+      "attempts_started": null,
+      "attempts_completed": null,
+      "attempts_started_unknown": 1,
+      "attempts_completed_unknown": 1,
+      "validation_pass": 0,
+      "success_rate": 0.0,
+      "review_verdict_distribution": {},
+      "total_cost_usd": null,
+      "actual_cost_usd": null,
+      "estimated_cost_usd": null,
+      "average_cost_usd": null,
+      "average_duration_seconds": null,
+      "cost_per_approve_strong": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "reasoning_tokens": null,
+      "cache_read_tokens": null,
+      "cache_write_tokens": null,
+      "total_tokens": null,
+      "memory_gateway_capture_l0_recorded": null,
+      "requests_count": null,
+      "tokens_per_success": null,
+      "requests_per_success": null,
+      "predicted_average_cost_usd": null,
+      "predicted_average_duration_seconds": null,
+      "predicted_difficulty_match_rate": null
+    }
+  ]
+}

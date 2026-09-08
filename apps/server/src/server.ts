@@ -41,6 +41,7 @@ import {
   type ProfileRemoveOptions,
   type ConfigSetOptions
 } from './gahCli.js';
+import { REPORT_GROUP_BY_VALUES } from '@git-agent-harness/contracts';
 import type {
   ReportGroupBy,
   ReportSeriesData,
@@ -165,6 +166,10 @@ export function initializeSkillBank(node: NodeRoleStatus = { role: 'central', ce
 /** Same hardcoded default as wsServer.ts's welcome message, until Settings
  * gains real profile switching (see apps/web Settings page). */
 const DEFAULT_PROFILE = 'gah';
+
+function isReportGroupBy(value: unknown): value is ReportGroupBy {
+  return REPORT_GROUP_BY_VALUES.some(groupBy => groupBy === value);
+}
 
 function observedSkills(profile: string, backend: string, sessionId?: string): { id: string; version: string }[] | null {
   const options = sessionId && sessionId !== 'default' ? { sessionId } : {};
@@ -651,9 +656,11 @@ export function createServer(
   app.get('/api/report', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
     const since = typeof req.query.since === 'string' ? req.query.since : undefined;
-    const groupByRaw = typeof req.query.groupBy === 'string' ? req.query.groupBy : undefined;
-    const groupBy: ReportGroupBy | undefined =
-      groupByRaw === 'model' || groupByRaw === 'backend' ? groupByRaw : undefined;
+    const groupBy = req.query.groupBy;
+    if (groupBy !== undefined && !isReportGroupBy(groupBy)) {
+      res.status(400).json({ error: 'Invalid groupBy', message: `groupBy must be one of: ${REPORT_GROUP_BY_VALUES.join(', ')}` });
+      return;
+    }
     try {
       const report = await runReport({ profile, since, groupBy });
       res.json(report);
@@ -707,8 +714,11 @@ export function createServer(
   app.get('/api/ledger/summary', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
     const since = typeof req.query.since === 'string' ? req.query.since : undefined;
-    const groupByRaw = typeof req.query.groupBy === 'string' ? req.query.groupBy : undefined;
-    const groupBy = groupByRaw === 'backend' || groupByRaw === 'model' ? groupByRaw : undefined;
+    const groupBy = req.query.groupBy;
+    if (groupBy !== undefined && !isReportGroupBy(groupBy)) {
+      res.status(400).json({ error: 'Invalid groupBy', message: `groupBy must be one of: ${REPORT_GROUP_BY_VALUES.join(', ')}` });
+      return;
+    }
     try {
       res.json(await runLedgerSummary({ profile, since, groupBy }));
     } catch (error) {

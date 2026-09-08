@@ -9,7 +9,7 @@ depending on a built `gah` binary, a configured profile, or network access.
 
 ## Provenance
 
-The files under `responses/` are **real captured output** from the actual
+The original five files under `responses/` are **real captured output** from the actual
 Rust `gah` binary built at commit `a19292b2a85b4b1db0ef90fd748da41bb21594f5`
 of this repo, run against a synthetic profile (`repo =
 "Kh1ng/git-agent-harness"`, i.e. this repo itself) with an isolated, empty
@@ -27,6 +27,26 @@ was modified.
 | `responses/report.json` | `gah report --json --since 7d --group-by backend` |
 | `responses/config-show.json` | `gah config show --json` |
 | `responses/profile-list.json` | `gah profile list --json` |
+
+The report-query parity patch adds `ledger-summary.json` and
+`report-series.json`, captured from the native CLI on 2026-09-08 with the
+synthetic `inputs/report-query-ledger.jsonl`. The entry has unknown usage
+and attempt counters, one GitLab work item, and a future timestamp so it
+remains within relative lookback windows. Only `ledger_path` was normalized
+to `/fixture/ledger.jsonl` after capture. With the isolated config/state
+setup below, these commands reproduce the responses:
+
+```sh
+export GAH_LEDGER_PATH="$PWD/apps/server/tests/fixtures/gah/inputs/report-query-ledger.jsonl"
+gah ledger summary --json --group-by backend-difficulty
+gah report --json --series --bucket daily
+```
+
+`GAH_FIXTURE_QUERY_LOG=<path>` records report and ledger-summary argv as
+JSONL. `reportQuery.test.ts` checks every supported grouping and relative
+window independently against that log, then compares the complete replayed
+response. The fixture does not recalculate aggregates for different queries;
+Rust aggregation correctness remains covered by the Rust tests.
 
 ## Recapturing
 
@@ -70,7 +90,7 @@ already got.
 
 ## Forcing a failure
 
-Set `GAH_FIXTURE_FAIL=<name>` (one of `status`/`quota`/`report`/`config-show`/
+Set `GAH_FIXTURE_FAIL=<name>` (one of `status`/`quota`/`report`/`report-series`/`ledger-summary`/`config-show`/
 `profile-list`) before spawning the server process to make that one
 subcommand exit non-zero instead of replaying its recorded response --
 this is how the 5xx/stderr-propagation tests work. Optional

@@ -4,6 +4,14 @@
 Reviewed `ac544db` and PM plan work `57d4246`, including its integration at
 `d8a6078`. This audit covers CLI/API parity, not MCP or device pairing.
 
+The report-query follow-up on `2f5aef5` closes the grouping and series-default
+gaps. Report and ledger-summary routes now accept all five Clap grouping
+values through one shared vocabulary. Invalid scalar or structured values
+return 400 before spawning the CLI. An omitted series window now uses `7d`.
+The web chart still requests `14d` explicitly; existing web and MCP
+`backend`/`model` requests remain valid. Ledger group arrays and nullable
+counters now have shared TypeScript types.
+
 The API already exposes status, quota snapshots, doctor, reports/series,
 work history, sync, ledger summaries, availability, events, profiles, and
 config projections. The PM change adds plan list/detail and publication
@@ -46,12 +54,9 @@ Remaining acceptance gaps also affect existing routes:
   manual updates alongside Rust. A generated manifest alone does not satisfy
   the generated-contract criterion. `remote_available` currently includes
   operations with no HTTP route.
-- [server.ts](../apps/server/src/server.ts) accepts only `backend` and `model`
-  for report grouping, silently defaulting other inputs. The CLI also accepts
-  `none`, `difficulty`, and `backend-difficulty`. Ledger summary has a similar
-  restriction. [gahCli.ts](../apps/server/src/gahCli.ts) defaults report series
-  to 14 days; the CLI defaults to 7 days. Events and doctor force a default
-  profile while their CLI commands permit an omitted profile.
+- Events and doctor still force a default profile while their CLI commands
+  permit an omitted profile. Report/ledger `since` supports relative windows
+  such as `7d` and `24h`; absolute date bounds belong to `telemetry.aggregate`.
 - Array responses such as work history, sync, events, and profiles have no
   response metadata. Other payloads provide only some of node identity, schema
   version, and source timestamp. PM responses add version/time fields but no
@@ -64,17 +69,10 @@ Remaining acceptance gaps also affect existing routes:
   checks selected fields against a fixture executable. Neither proves all
   CLI/API values, filters, unknowns, and provider differences match.
 
-The smallest coherent next batch is existing report-query parity:
-
-1. Record each manifest read operation as implemented, partial, or unavailable
-   with a concrete reason. Test that the inventory covers the generated
-   manifest so future reads cannot disappear silently.
-2. Share the complete CLI grouping vocabulary across report and ledger-summary
-   request types, validate unsupported inputs, and align series defaults.
-   Keep execution in the existing fixed-argv `runJsonCommand` path.
-3. Compare CLI JSON and HTTP results from identical isolated fixtures for
-   every grouping, default/explicit date window, and optional profile.
-   Include null/unknown fields and invalid-input failures.
+The next inventory task is to record each manifest read operation as
+implemented, partial, or unavailable with a concrete reason. Test that the
+inventory covers the generated manifest so future reads cannot disappear
+silently. The report-query patch adds no new endpoints or response envelopes.
 
 The next missing endpoint should be `telemetry.aggregate`: it already has a
 structured result and configured-ledger reads. Reuse the existing subprocess
@@ -83,7 +81,11 @@ Resolve payload generation and versioned response metadata before claiming
 the remaining #519 criteria. Replacing legacy arrays requires a coordinated
 client migration or an additive versioned API.
 
-Verification for this audit was read-only source and issue inspection. No
-runtime parity suite, provider command, maintenance operation, or benchmark
-was run. Implementation validation still needs the issue's `gah_cli`, Rust,
-TypeScript, and build checks, plus the focused value-parity tests above.
+The original audit used read-only source and issue inspection. The follow-up
+adds [reportQuery.test.ts](../apps/server/src/reportQuery.test.ts), which
+checks exact child argv and complete replayed JSON for all groupings,
+default/explicit relative windows, and optional profiles. Invalid groupings
+include repeated and structured query parameters. A separate local check
+compared 39 native CLI JSON results with HTTP responses using an isolated
+synthetic ledger. It made no provider calls. Fixture tests replay captures;
+they do not run the native CLI or prove every #519 acceptance criterion.

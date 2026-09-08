@@ -293,7 +293,7 @@ export async function runReportSeries(
   } = {}
 ): Promise<ReportSeriesData> {
   const args = ['report', '--json', '--series'];
-  args.push('--since', options.since ?? '14d');
+  args.push('--since', options.since ?? '7d');
   args.push('--bucket', options.bucket ?? 'daily');
   if (options.profile) {
     args.push('--profile', options.profile);
@@ -334,7 +334,7 @@ export async function runSync(options: { profile: string; config?: string }): Pr
  * (success/fail, by-mode/backend/model, token usage) over a time window.
  */
 export async function runLedgerSummary(
-  options: { since?: string; profile?: string; groupBy?: 'none' | 'backend' | 'model'; config?: string } = {}
+  options: { since?: string; profile?: string; groupBy?: ReportGroupBy; config?: string } = {}
 ): Promise<LedgerSummary> {
   const args = ['ledger', 'summary', '--json'];
   args.push('--since', options.since ?? '7d');
