@@ -6,6 +6,7 @@ Install the native GAH desktop, a WSL2 headless worker, or both.
 Settings > Add a Node supplies CentralUrl and CoordinatorToken. Worker setup
 requires an elevated PowerShell session and an initialized Ubuntu WSL2 user.
 Without CentralUrl this retains the standalone GitHub desktop installer.
+TestArtifactDirectory accepts verified unpublished bundles from one Desktop workflow run.
 #>
 [CmdletBinding()]
 param(
@@ -14,7 +15,8 @@ param(
     [string]$CentralUrl = '',
     [string]$CoordinatorToken = '',
     [ValidateSet('desktop', 'worker', 'both')][string]$Role = 'desktop',
-    [string]$WslDistribution = 'Ubuntu'
+    [string]$WslDistribution = 'Ubuntu',
+    [string]$TestArtifactDirectory = ''
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -24,7 +26,47 @@ function Assert-NativeSuccess([string]$Action) {
     if ($LASTEXITCODE -ne 0) { throw "$Action failed (exit $LASTEXITCODE)." }
 }
 function Download-SetupFile([string]$Name, [string]$Destination) {
-    Invoke-WebRequest -UseBasicParsing -Uri "$CentralUrl/api/settings/nodes/$Name" -Headers @{ Authorization = "Bearer $CoordinatorToken" } -OutFile $Destination
+    if ($TestArtifactDirectory) {
+        if (-not $testArtifactFiles.ContainsKey($Name)) { throw "No verified test artifact for $Name." }
+        Copy-Item -LiteralPath $testArtifactFiles[$Name] -Destination $Destination
+    } else {
+        Invoke-WebRequest -UseBasicParsing -Uri "$CentralUrl/api/settings/nodes/$Name" -Headers @{ Authorization = "Bearer $CoordinatorToken" } -OutFile $Destination
+    }
+}
+
+# Validate the entire selected bundle before installing an executable or writing settings.
+function Get-TestArtifactFiles([string]$Directory, [string]$InstallRole, [string]$InstallerPath) {
+    $result = @{}
+    $revision = $null
+    $installerHash = (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $kinds = if ($InstallRole -eq 'both') { @('desktop', 'worker') } elseif ($InstallRole -eq 'worker') { @('worker') } else { @('desktop') }
+    foreach ($kind in $kinds) {
+        $json = [IO.File]::ReadAllText((Join-Path $Directory "$kind-artifact.json"))
+        if (-not $json.TrimStart().StartsWith('{')) { throw 'Artifact manifest must be a JSON object.' }
+        $manifest = ConvertFrom-Json -InputObject $json
+        if ($manifest.schema_version -ne 1 -or $manifest.revision -cnotmatch '^[a-f0-9]{40}$') { throw 'Invalid artifact manifest version or revision.' }
+        if ($revision -and $revision -cne $manifest.revision) { throw 'Desktop and worker artifact revisions do not match.' }
+        $revision = $manifest.revision
+        $names = @($manifest.files.PSObject.Properties.Name)
+        $expectedCount = if ($kind -eq 'desktop') { 2 } else { 4 }
+        if ($names.Count -ne $expectedCount -or 'install-windows.ps1' -cnotin $names) { throw 'Artifact manifest has an unexpected file list.' }
+        foreach ($entry in $manifest.files.PSObject.Properties) {
+            $name = $entry.Name
+            $route = if ($name -ceq 'install-windows.ps1') { 'install.ps1' }
+                elseif ($kind -eq 'desktop' -and $name -cmatch '^[a-zA-Z0-9 ._-]+_\d+\.\d+\.\d+_x64-setup\.exe$') { 'release/desktop' }
+                elseif ($kind -eq 'worker' -and $name -ceq 'gah') { 'release/linux-cli' }
+                elseif ($kind -eq 'worker' -and $name -cin @('source.tar.gz', 'install-wsl.sh')) { $name }
+                else { throw "Unexpected artifact filename: $name" }
+            if ($entry.Value -isnot [string] -or $entry.Value -cnotmatch '^[a-f0-9]{64}$') { throw "Invalid checksum for $name." }
+            $file = Join-Path $Directory $name
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -cne $entry.Value) { throw "Artifact checksum mismatch: $name" }
+            if ($name -ceq 'install-windows.ps1' -and $hash -cne $installerHash) { throw 'Run the install-windows.ps1 from the selected test artifacts.' }
+            $result[$route] = $file
+        }
+    }
+    Write-Host "Verified unpublished test artifacts from $revision"
+    return $result
 }
 
 # Installer reruns change the connection, not the operator's desktop preferences.
@@ -41,6 +83,8 @@ function Save-DesktopConnection([string]$Path, [string]$Address, [string]$Distri
     $settings | Add-Member -NotePropertyName wsl_distribution -NotePropertyValue $Distribution -Force
     [IO.File]::WriteAllText($Path, ($settings | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
 }
+
+$testArtifactFiles = if ($TestArtifactDirectory) { Get-TestArtifactFiles $TestArtifactDirectory $Role $PSCommandPath } else { @{} }
 
 if ($CentralUrl) {
     $uri = [uri]$CentralUrl
@@ -73,7 +117,7 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 try {
     if ($Role -ne 'worker') {
         $installer = Join-Path $stage 'gah_x64-setup.exe'
-        if ($CentralUrl) { Download-SetupFile 'release/desktop' $installer }
+        if ($CentralUrl -or $TestArtifactDirectory) { Download-SetupFile 'release/desktop' $installer }
         else {
             if (-not $Token -and (Get-Command gh -ErrorAction SilentlyContinue)) { $Token = (& gh auth token | Out-String).Trim() }
             if (-not $Token) { throw 'Set GITHUB_TOKEN or run gh auth login to read the private release.' }
