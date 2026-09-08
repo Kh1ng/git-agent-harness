@@ -18,6 +18,11 @@ function canonical(value: unknown): string {
  * silently retry with a new key. No response bodies or credentials are stored.
  */
 export function mutationSafety(nodeId: string, directory = process.env.GAH_MUTATION_STORE_PATH ?? resolve('config/mutations')): (operation: Operation) => RequestHandler {
+  function syncDirectory(): void {
+    const folder = openSync(directory, 'r');
+    try { fsyncSync(folder); } finally { closeSync(folder); }
+  }
+
   function append(record: object): void {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const file = openSync(join(directory, 'audit.jsonl'), 'a+', 0o600);
@@ -29,6 +34,8 @@ export function mutationSafety(nodeId: string, directory = process.env.GAH_MUTAT
       fsyncSync(file);
     }
     finally { closeSync(file); }
+    // Persist the directory entry too when this append first creates the log.
+    syncDirectory();
   }
 
   return operation => (req, res, next) => {
@@ -64,8 +71,7 @@ export function mutationSafety(nodeId: string, directory = process.env.GAH_MUTAT
       }
       try { writeFileSync(file, JSON.stringify(record)); fsyncSync(file); }
       finally { closeSync(file); }
-      const folder = openSync(directory, 'r');
-      try { fsyncSync(folder); } finally { closeSync(folder); }
+      syncDirectory();
       append({ ...record, result: 'accepted', reason: 'authorized' });
     } catch {
       return res.status(503).json({ error: 'mutation_storage_unavailable', message: 'Cannot record this operation. No new action was started.', operationId });
