@@ -61,7 +61,10 @@ export function selectReclaimCandidates(input: {
   const idleCutoff = input.now - (input.profile.chat_session_idle_days ?? 14) * DAY_MS;
   const candidates: ChatReclaimCandidate[] = [];
   for (const session of input.sessions) {
-    if (session.outcome !== 'live' || input.activeSessionIds.has(session.id)) continue;
+    // Distributed workspaces require explicit archive; one node's provider
+    // state cannot prove every checkout is ready for automatic removal.
+    if (session.remoteWorkspace || (session.workspaceNodes?.length ?? 0) > 1
+      || session.outcome !== 'live' || input.activeSessionIds.has(session.id)) continue;
     const terminal = terminalByBranch.get(session.branch);
     if (terminal) {
       candidates.push({

@@ -400,7 +400,8 @@ export async function profileStorage(
   const idleCutoff = now - idleDays * 86_400_000;
   const sessions = [];
   for (const session of listSessions(profile, opts)) {
-    const worktreeBytes = session.worktreePath ? await allocatedBytes(session.worktreePath) : 0;
+    const worktreeBytes = session.remoteWorkspace || (session.workspaceNodes?.length ?? 0) > 1
+      ? null : session.worktreePath ? await allocatedBytes(session.worktreePath) : 0;
     sessions.push({
       sessionId: session.id,
       worktreeBytes,
@@ -411,8 +412,8 @@ export async function profileStorage(
   return {
     profile,
     idleDays,
-    worktreeBytes: sessions.reduce((sum, session) => sum + session.worktreeBytes, 0),
-    projectedReclaimBytes: sessions.reduce((sum, session) => sum + session.projectedReclaimBytes, 0),
+    worktreeBytes: sessions.some(session => session.worktreeBytes === null) ? null : sessions.reduce((sum, session) => sum + (session.worktreeBytes ?? 0), 0),
+    projectedReclaimBytes: sessions.some(session => session.projectedReclaimBytes === null) ? null : sessions.reduce((sum, session) => sum + (session.projectedReclaimBytes ?? 0), 0),
     sessions
   };
 }

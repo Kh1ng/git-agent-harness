@@ -15,6 +15,7 @@ import {
   profileStorage,
   resolveSessionCwd,
   setChatSessionStoreOptions,
+  storeSession,
   touchSession,
   updateSession
 } from './chatSessions.js';
@@ -196,7 +197,7 @@ test('profileStorage measures per-session allocation and projected reclaim', wit
   writeFileSync(join(session.worktreePath!, 'storage.bin'), Buffer.alloc(8 * 1024));
   const storage = await profileStorage('p', 14, new Set([session.id]), undefined, session.lastActiveAt + 15 * 86_400_000);
   assert.equal(storage.sessions.length, 1);
-  assert.ok(storage.sessions[0].worktreeBytes >= 8 * 1024);
+  assert.ok((storage.sessions[0].worktreeBytes ?? -1) >= 8 * 1024);
   assert.equal(storage.sessions[0].projectedReclaimBytes, storage.sessions[0].worktreeBytes);
   assert.equal(storage.sessions[0].idle, true);
   assert.equal(storage.projectedReclaimBytes, storage.worktreeBytes);
@@ -264,4 +265,13 @@ test('createSession stores the pinned model; updateSession switches backend/mode
   assert.throws(() => updateSession('p', 'missing', { backend: 'codex' }), /No chat session/);
   await archiveSession('p', session.id, env.profileInfo);
   assert.throws(() => updateSession('p', session.id, { backend: 'hermes' }), /archived/);
+}));
+
+ test('remote workspace allocation stays unknown even when its path exists on central', withEnv(async (env) => {
+  const session = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'hermes' });
+  storeSession({ ...session, remoteWorkspace: true, nodeId: 'worker' });
+  const storage = await profileStorage('p', 14, new Set([session.id]));
+  assert.equal(storage.sessions[0].worktreeBytes, null);
+  assert.equal(storage.worktreeBytes, null);
+  assert.equal(storage.projectedReclaimBytes, null);
 }));

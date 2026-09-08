@@ -7,24 +7,19 @@ import { runProfileList } from './gahCli.js';
 import { resolveAdapter, type ManagerAdapter } from './managerChat/registry.js';
 import { archiveSession, chatKey, createSession, getSession, resolveSessionCwd, touchSession, updateSession, type ChatSessionStoreOptions } from './managerChat/chatSessions.js';
 
-type TurnInput = Parameters<ManagerAdapter['runTurn']>[1];
-export type WorkerChatEvent =
-  | { type: 'chunk'; text: string }
-  | { type: 'toolResult'; name: string; text: string }
-  | { type: 'toolCall'; tool: Parameters<NonNullable<TurnInput['onToolCall']>>[0] }
-  | { type: 'permission'; id: string; request: Parameters<NonNullable<TurnInput['requestPermission']>>[0] }
-  | { type: 'result'; result: Awaited<ReturnType<ManagerAdapter['runTurn']>> }
-  | { type: 'error'; error: string };
+import type { WorkerChatEvent } from './workerChatProtocol.js';
 
 interface ActiveExecution {
   key: string;
   adapter: ManagerAdapter;
+  stopping: boolean;
   permission?: { id: string; choices: Set<string>; resolve: (choice: string) => void };
   stop: () => void;
 }
 
 export function createWorkerChatRouter(deps: {
   node: NodeRoleStatus;
+  nodeId: string;
   profiles?: () => Promise<ProfileSummary[]>;
   adapter?: typeof resolveAdapter;
   sessions?: ChatSessionStoreOptions;
@@ -36,6 +31,7 @@ export function createWorkerChatRouter(deps: {
   router.post('/', async (req, res) => {
     if (deps.node.role !== 'worker') return void res.status(409).json({ error: 'Agent execution belongs on a worker.' });
     const body = req.body;
+    if (body?.nodeId !== deps.nodeId) return void res.status(409).json({ error: 'Worker identity changed. Register this computer again.' });
     if (!body || typeof body.profile !== 'string' || !body.profile || typeof body.action !== 'string') {
       return void res.status(400).json({ error: 'A profile and worker chat action are required.' });
     }
@@ -48,7 +44,7 @@ export function createWorkerChatRouter(deps: {
     try {
       const profile = (await profiles()).find(candidate => candidate.name === body.profile);
       if (!profile) return void res.status(404).json({ error: 'This worker does not have that profile.' });
-      if (body.repo !== undefined && body.repo !== profile.repo) return void res.status(409).json({ error: 'The worker profile refers to a different repository.' });
+      if (!profile.web_url || body.repo !== profile.repo || body.provider !== profile.provider || body.origin !== new URL(profile.web_url).origin) return void res.status(409).json({ error: 'The worker profile refers to a different repository or provider host.' });
       const key = chatKey(body.profile, sessionId);
       if (['create', 'prepare', 'archive', 'run'].includes(body.action) && [...active.values()].some(turn => turn.key === key)) {
         return void res.status(409).json({ error: 'Stop the active turn before changing this worker workspace.' });
@@ -61,6 +57,7 @@ export function createWorkerChatRouter(deps: {
       if (['cancel', 'steer', 'permission'].includes(body.action)) {
         const execution = active.get(body.requestId);
         if (!execution || execution.key !== key) return void res.status(409).json({ error: 'No matching worker turn is active.' });
+        if (execution.stopping && body.action !== 'cancel') return void res.status(409).json({ error: 'The worker turn is stopping.' });
         if (body.action === 'cancel') {
           execution.stop();
           void execution.adapter.cancelTurn(key).catch(() => undefined);
@@ -110,7 +107,7 @@ export function createWorkerChatRouter(deps: {
       if (active.has(body.requestId) || [...active.values()].some(turn => turn.key === key)) return void res.status(409).json({ error: 'This worker conversation already has an active turn.' });
       let stop!: () => void;
       const stopped = new Promise<never>((_, reject) => { stop = () => reject(new Error('Worker turn stopped.')); });
-      const execution: ActiveExecution = { key, adapter, stop: () => { execution.permission?.resolve('cancelled'); stop(); } };
+      const execution: ActiveExecution = { key, adapter, stopping: false, stop: () => { execution.stopping = true; execution.permission?.resolve('cancelled'); stop(); } };
       active.set(body.requestId, execution);
       res.status(200).set({ 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
       res.flushHeaders();
@@ -129,7 +126,7 @@ export function createWorkerChatRouter(deps: {
       };
       res.once('close', disconnect);
       try {
-        const result = await Promise.race([stopped, adapter.runTurn(key, {
+        const run = Promise.resolve().then(() => adapter.runTurn(key, {
           prompt: body.prompt, history: body.history, cwd, model: settings.model, reasoningEffort: settings.reasoningEffort,
           onChunk: text => emit({ type: 'chunk', text }),
           onToolResult: (name, text) => emit({ type: 'toolResult', name, text }),
@@ -139,14 +136,18 @@ export function createWorkerChatRouter(deps: {
             execution.permission = { id, choices: new Set(request.options.map(option => option.optionId)), resolve };
             emit({ type: 'permission', id, request });
           })
-        })]);
+        }));
+        // A cancellation acknowledgement is not proof the process stopped. Keep
+        // the workspace fenced until the adapter's actual execution settles.
+        const release = () => { if (active.get(body.requestId) === execution) active.delete(body.requestId); };
+        void run.then(release, release);
+        const result = await Promise.race([stopped, run]);
         if (sessionId) touchSession(body.profile, sessionId, deps.sessions);
         emit({ type: 'result', result });
       } catch {
         emit({ type: 'error', error: 'Worker agent failed or the turn was stopped. Check the worker backend readiness.' });
       } finally {
         execution.permission?.resolve('cancelled');
-        active.delete(body.requestId);
         res.off('close', disconnect);
         res.end();
       }

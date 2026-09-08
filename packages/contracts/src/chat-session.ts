@@ -96,6 +96,8 @@ export interface ChatAssistantMessage {
   model: string | null;
   usage: ChatUsage | null;
   timestamp: number;
+  nodeId?: string;
+  nodeName?: string;
 }
 
 export interface ChatUsage {
@@ -324,6 +326,7 @@ export interface ChatSessionSummary {
   nodeId?: string;
   workspaceNodes?: string[];
   workspaces?: Record<string, { branch: string; worktreePath: string | null }>;
+  remoteWorkspace?: boolean;
   profile: string;
   /** Pull request identity for PR chats; absent for legacy, issue, and general sessions. */
   prNumber?: number;
@@ -362,16 +365,18 @@ export interface ChatSessionProjectGroup {
 
 export interface ChatSessionStorage {
   sessionId: string;
-  worktreeBytes: number;
-  projectedReclaimBytes: number;
+  /** Unknown when workspaces live on another node. */
+  worktreeBytes: number | null;
+  projectedReclaimBytes: number | null;
   idle: boolean;
 }
 
 export interface ChatProfileStorage {
   profile: string;
   idleDays: number;
-  worktreeBytes: number;
-  projectedReclaimBytes: number;
+  /** Unknown when workspaces live on another node. */
+  worktreeBytes: number | null;
+  projectedReclaimBytes: number | null;
   sessions: ChatSessionStorage[];
 }
 

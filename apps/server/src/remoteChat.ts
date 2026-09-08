@@ -3,9 +3,12 @@
 import { randomUUID } from 'node:crypto';
 import { nodeHeaders, type RegistryService } from './registryService.js';
 import type { ManagerAdapter } from './managerChat/registry.js';
-import type { WorkerChatEvent } from './workerChat.js';
+import { parseWorkerChatEvent } from './workerChatProtocol.js';
+import type { ProfileSummary } from '@git-agent-harness/contracts';
 
-export function workerChatConnection(registry: RegistryService, nodeId: string, profile: string, repo?: string) {
+export function workerChatConnection(registry: RegistryService, nodeId: string, profile: string, project: Pick<ProfileSummary, 'repo' | 'provider' | 'web_url'>) {
+  if (!project.web_url) throw new Error('Project provider URL is missing. Refresh its import before using worker chat.');
+  const origin = new URL(project.web_url).origin;
   const node = registry.getNode(nodeId);
   if (!node || !node.profiles?.includes(profile)) throw new Error('Worker is not registered for this project.');
   const endpoint = new URL('/api/worker-chat', node.advertised_url);
@@ -21,7 +24,7 @@ export function workerChatConnection(registry: RegistryService, nodeId: string, 
     const response = await fetch(endpoint, {
       method: 'POST', redirect: 'error', signal,
       headers: { ...nodeHeaders(node), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, profile, repo })
+      body: JSON.stringify({ ...body, profile, repo: project.repo, provider: project.provider, origin, nodeId })
     });
     assertRegistration();
     if (!response.ok) {
@@ -65,7 +68,7 @@ export function workerChatConnection(registry: RegistryService, nodeId: string, 
               if (buffer.length > 2_000_000) throw new Error('Worker chat event exceeds the supported size.');
               let end: number;
               while ((end = buffer.indexOf('\n')) >= 0) {
-                const event = JSON.parse(buffer.slice(0, end)) as WorkerChatEvent;
+                const event = parseWorkerChatEvent(JSON.parse(buffer.slice(0, end)));
                 buffer = buffer.slice(end + 1);
                 assertRegistration();
                 if (event.type === 'chunk' && typeof event.text === 'string') input.onChunk(event.text);

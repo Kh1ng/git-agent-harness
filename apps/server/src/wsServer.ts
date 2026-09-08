@@ -325,7 +325,7 @@ async function handleSendCommand(ws: WebSocket, message: Extract<ClientMessage, 
 
 async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessage, { type: 'manager.chat.send' }>, requestId: string) {
   try {
-    const { turn, cancelled } = await sendManagerChatMessage(message.profile, message.message, requestId, message.sessionId);
+    const { turn, cancelled } = await sendManagerChatMessage(message.profile, message.message, requestId, message.sessionId, undefined, message.nodeId);
 
     // Send a reply for both outcomes: a cancelled turn reports its partial
     // text plus `cancelled: true` so the client can resolve its in-flight
@@ -339,6 +339,7 @@ async function handleManagerChatSend(ws: WebSocket, message: Extract<ClientMessa
       profile: message.profile,
       ...(message.sessionId ? { sessionId: message.sessionId } : {}),
       reply: turn.text,
+      nodeId: turn.nodeId, nodeName: turn.nodeName,
       backend: turn.backend!,
       model: turn.model ?? null,
       usage: turn.usage,

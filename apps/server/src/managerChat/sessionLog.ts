@@ -196,7 +196,7 @@ export function deriveModelHistory(events: ChatSessionEvent[]): ChatTranscriptTu
         timestamp: event.timestamp,
         backend: event.backend,
         model: event.model,
-        usage: event.usage
+        usage: event.usage, nodeId: event.nodeId, nodeName: event.nodeName
       });
     } else if (event.type === 'tool/call') {
       // Slice 3: the latest event per toolCallId wins -- pending first,
@@ -328,7 +328,7 @@ export function foldSession(
           timestamp: e.timestamp,
           backend: e.backend,
           model: e.model,
-          usage: e.usage
+          usage: e.usage, nodeId: e.nodeId, nodeName: e.nodeName
         });
         partialText = '';
         break;

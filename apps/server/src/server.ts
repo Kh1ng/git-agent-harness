@@ -86,6 +86,8 @@ import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
 import { listAllChatSessions, resolveSessionCwd, chatSessionStoreOptions } from './managerChat/chatSessions.js';
 import { usageRollup } from './managerChat/usageRollup.js';
 import { projectRoutes } from './projectRoutes.js';
+import { chatNodes, configureChatRouting } from './chatRouting.js';
+import { createWorkerChatRouter } from './workerChat.js';
 import { getGitStatusCached, getGitBranchesCached, getGitLogCached, commitGitChanges, cliInDir } from './gitCache.js';
 import {
   addCanonicalSkillBinding,
@@ -271,6 +273,8 @@ export function createServer(
   // Direct same-origin loopback access remains local; /health stays public.
   app.use('/api', authMiddleware);
   app.use(workerRouteGuard(node));
+  if (node.role === 'central') configureChatRouting(registryService, () => getCoordinatorIdentity(undefined, coordinatorPort));
+  app.use('/api/worker-chat', createWorkerChatRouter({ node, nodeId: getCoordinatorIdentity(undefined, coordinatorPort).node_id }));
   app.use('/api/worker-memory', workerMemoryRouter());
   app.use('/api/pm', pmPlansRouter());
   app.use('/api/settings/nodes', nodeSetupRouter());
@@ -1295,7 +1299,7 @@ export function createServer(
   app.get('/api/manager-chat/commands', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     try {
-      const commands = await listManagerChatCommands(profile);
+      const commands = await listManagerChatCommands(profile, typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined);
       res.json({ commands });
     } catch (error) {
       res.status(502).json({
@@ -1314,8 +1318,8 @@ export function createServer(
     const backend = typeof req.query.backend === 'string' ? req.query.backend : undefined;
     try {
       const summary = backend
-        ? await listManagerChatModelsForBackend(profile, backend)
-        : await listManagerChatModels(profile);
+        ? await listManagerChatModelsForBackend(profile, backend, typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined)
+        : await listManagerChatModels(profile, typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined);
       res.json(summary);
     } catch (error) {
       res.status(502).json({
@@ -1333,7 +1337,7 @@ export function createServer(
       return;
     }
     try {
-      await setManagerChatModel(profile, modelId);
+      await setManagerChatModel(profile, modelId, typeof req.body.nodeId === 'string' ? req.body.nodeId : undefined);
       res.json({ success: true });
     } catch (error) {
       res.status(502).json({
@@ -1353,7 +1357,7 @@ export function createServer(
       return;
     }
     try {
-      await setManagerChatReasoningEffort(profile, effortId);
+      await setManagerChatReasoningEffort(profile, effortId, typeof req.body.nodeId === 'string' ? req.body.nodeId : undefined);
       res.json({ success: true });
     } catch (error) {
       res.status(502).json({
@@ -1363,29 +1367,11 @@ export function createServer(
     }
   });
 
-  // The new-chat flow's node step. Chat runs on the central node today;
-  // registered workers are listed for fleet visibility but marked not yet
-  // chat-capable (worker-side chat dispatch is future work).
-  app.get('/api/manager-chat/nodes', (_req, res) => {
-    const identity = getCoordinatorIdentity(undefined, coordinatorPort);
-    const central: ChatNodeInfo = {
-      nodeId: identity.node_id,
-      displayName: identity.display_name,
-      role: 'central',
-      chatCapable: true,
-      lastSeenAt: null
-    };
-    const workers: ChatNodeInfo[] = registryService
-      .getNodesSummary()
-      .filter((node) => node.node_id !== identity.node_id)
-      .map((node) => ({
-        nodeId: node.node_id,
-        displayName: node.display_name,
-        role: 'worker' as const,
-        chatCapable: false,
-        lastSeenAt: node.last_seen_at ?? null
-      }));
-    res.json({ nodes: [central, ...workers] });
+  // Reuse the existing fleet observations; a selector request never polls workers.
+  app.get('/api/manager-chat/nodes', async (req, res) => {
+    try {
+      res.json({ nodes: await chatNodes(typeof req.query.profile === 'string' ? req.query.profile : undefined, typeof req.query.backend === 'string' ? req.query.backend : undefined) });
+    } catch { res.status(502).json({ error: 'Unable to read worker availability for this project.' }); }
   });
 
   // WP2 chat sessions: a session is one conversation bound to one worktree.
@@ -1450,7 +1436,7 @@ export function createServer(
     const model = typeof req.body?.model === 'string' ? req.body.model : null;
     const title = typeof req.body?.title === 'string' ? req.body.title : undefined;
     try {
-      const session = await createChatSession(profile, backend, model, title);
+      const session = await createChatSession(profile, backend, model, title, typeof req.body.reasoningEffort === 'string' ? req.body.reasoningEffort : null, typeof req.body.nodeId === 'string' ? req.body.nodeId : undefined);
       res.status(201).json(session);
     } catch (error) {
       res.status(502).json({

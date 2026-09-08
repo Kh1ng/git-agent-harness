@@ -18,7 +18,7 @@ export async function chatNodes(profile?: string, backend?: string): Promise<Cha
   const local = identity();
   const project = profile ? await resolveChatProject(profile) : null;
   const localProfiles = profile && project?.node_id !== local.node_id ? await runProfileList() : [];
-  const localEligible = !profile || !project || project.node_id === local.node_id || localProfiles.some(candidate => candidate.name === project.name && candidate.repo === project.repo);
+  const localEligible = !profile || !!project && (project.node_id === local.node_id || localProfiles.some(candidate => candidate.name === project.name && sameRepository(candidate, project)));
   const nodes: ChatNodeInfo[] = [{ nodeId: local.node_id, displayName: local.display_name, role: 'central', chatCapable: localEligible, eligible: localEligible, reason: localEligible ? null : 'This project has no checkout on central.', state: 'healthy', observedAt: null, lastSeenAt: null }];
   for (const node of registry?.getNodesSummary() ?? []) {
     if (node.node_id === local.node_id) continue;
@@ -51,20 +51,26 @@ export async function chatRoute(profile: string, nodeId?: string, backend?: stri
     if (!target?.eligible) throw new Error(target?.reason ?? 'This worker is no longer registered.');
   }
   if (targetId === local.node_id) {
-    const match = (await runProfileList()).find(candidate => candidate.name === project.name && candidate.repo === project.repo);
+    const match = (await runProfileList()).find(candidate => candidate.name === project.name && sameRepository(candidate, project));
     if (!match) throw new Error('This project has no matching checkout on central.');
     return { nodeId: local.node_id, nodeName: local.display_name, profileName: match.name, remote: undefined };
   }
   const node = registry.getNode(targetId);
   if (!node) throw new Error('This worker is no longer registered.');
-  return { nodeId: targetId, nodeName: node.display_name, profileName: project.name, remote: workerChatConnection(registry, targetId, project.name, project.repo) };
+  return { nodeId: targetId, nodeName: node.display_name, profileName: project.name, remote: workerChatConnection(registry, targetId, project.name, project) };
+}
+
+function sameRepository(a: { repo: string; provider: string; web_url: string | null }, b: { repo: string; provider: string; web_url: string | null }): boolean {
+  if (!a.web_url || !b.web_url) return false;
+  try { return a.repo === b.repo && a.provider === b.provider && new URL(a.web_url).origin === new URL(b.web_url).origin; }
+  catch { return false; }
 }
 
 export type ChatRoute = Awaited<ReturnType<typeof chatRoute>>;
 export function rememberWorkspace(session: ChatSessionSummary, route: ChatRoute): ChatSessionSummary {
   const workspaces = { ...session.workspaces };
   if (route.nodeId) workspaces[route.nodeId] = { branch: session.branch, worktreePath: session.worktreePath };
-  return { ...session, nodeId: route.nodeId, workspaces, workspaceNodes: Object.keys(workspaces) };
+  return { ...session, nodeId: route.nodeId, remoteWorkspace: !!route.remote, workspaces, workspaceNodes: Object.keys(workspaces) };
 }
 
 export function localChatNodeId(): string | undefined { return registry ? identity().node_id : undefined; }

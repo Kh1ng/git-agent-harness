@@ -274,7 +274,24 @@ export async function archiveChatSession(
   settlement?: { reason: 'merged' | 'closed' | 'delivered' },
   details?: SettleDetails
 ) {
-  const profileInfo = await findProfileInfo(profile);
+  if (activeProfiles.has(chatKey(profile, sessionId))) throw new Error('Stop this turn before archiving its workspaces.');
+  const stored = getSession(profile, sessionId, chatSessionStoreOptions);
+  if (stored?.workspaceNodes?.length) {
+    if (stored.archivedAt !== null) return stored;
+    const localId = localChatNodeId();
+    for (const target of stored.workspaceNodes.filter(id => id !== localId)) {
+      const route = await chatRoute(profile, target, stored.backend, false);
+      await route.remote!.request({ action: 'archive', sessionId, backend: stored.backend });
+    }
+    const localWorkspace = localId ? stored.workspaces?.[localId] : undefined;
+    if (!localWorkspace) {
+      const at = Date.now();
+      return storeSession({ ...stored, archivedAt: at, worktreePath: null, outcome: settlement ? 'settled' : 'archived', settledAt: settlement ? at : null, settledReason: settlement?.reason ?? null }, chatSessionStoreOptions);
+    }
+    storeSession({ ...stored, ...localWorkspace, remoteWorkspace: false }, chatSessionStoreOptions);
+  }
+  const route = await chatRoute(profile, localChatNodeId(), undefined, false);
+  const profileInfo = await findProfileInfo(route.profileName);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   try {
     return await archiveSession(profile, sessionId, profileInfo, chatSessionStoreOptions, settlement, details);
@@ -286,11 +303,13 @@ export async function archiveChatSession(
 
 /** WP3 preview state for one session (null when none). */
 export function getChatPreview(profile: string, sessionId: string) {
+  if (getSession(profile, sessionId, chatSessionStoreOptions)?.remoteWorkspace) return null;
   return previewProxy.get(profile, sessionId);
 }
 
 /** WP3: point a session's preview at a dev port manually (null clears). */
 export async function setChatPreview(profile: string, sessionId: string, port: number | null) {
+  if (getSession(profile, sessionId, chatSessionStoreOptions)?.remoteWorkspace) throw new Error('Worker previews are not available through the central loopback proxy.');
   if (port === null) {
     await previewProxy.clear(profile, sessionId);
     return null;
@@ -300,6 +319,7 @@ export async function setChatPreview(profile: string, sessionId: string, port: n
 
 /** Issue → chat (issue-to-workflow): open issues for the profile's repo. */
 export async function listChatIssuesForProfile(profile: string) {
+  if (profile.startsWith('gah-node:')) throw new Error('Start a blank chat for this worker project. Remote issue-seeded chats are not available yet.');
   const profileInfo = await findProfileInfo(profile);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   const { listChatIssues } = await import('./issueChats.js');
@@ -314,6 +334,7 @@ export async function startChatFromIssue(
   backend?: string,
   model?: string | null
 ) {
+  if (profile.startsWith('gah-node:')) throw new Error('Start a blank chat for this worker project. Remote issue and MR seeded chats are not available yet.');
   const profileInfo = await findProfileInfo(profile);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   const { startIssueChat } = await import('./issueChats.js');
@@ -328,6 +349,7 @@ export async function startChatFromIssue(
 
 /** PR → chat: open PRs for the profile's repo. */
 export async function listChatPrsForProfile(profile: string) {
+  if (profile.startsWith('gah-node:')) throw new Error('Start a blank chat for this worker project. Remote MR-seeded chats are not available yet.');
   const profileInfo = await findProfileInfo(profile);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   const { listChatPrs } = await import('./prChats.js');
@@ -342,6 +364,7 @@ export async function startChatFromPr(
   backend?: string,
   model?: string | null
 ) {
+  if (profile.startsWith('gah-node:')) throw new Error('Start a blank chat for this worker project. Remote issue and MR seeded chats are not available yet.');
   const profileInfo = await findProfileInfo(profile);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   const { startPrChat } = await import('./prChats.js');
@@ -354,9 +377,10 @@ export async function startChatFromPr(
   });
 }
 
-export function listCommandsForProfile(profile: string): Promise<ManagerCommandInfo[]> {
+export async function listCommandsForProfile(profile: string, nodeId?: string): Promise<ManagerCommandInfo[]> {
   const backendId = backendForProfile(profile);
-  return resolveAdapter(backendId).listCommands(profile);
+  const route = await chatRoute(profile, nodeId, backendId, false);
+  return (route.remote?.adapter(backendId) ?? resolveAdapter(backendId)).listCommands(profile);
 }
 
 // The ACP connection itself only remembers the current model in memory
@@ -367,7 +391,7 @@ export function listCommandsForProfile(profile: string): Promise<ManagerCommandI
 // fresh) connection reports as current, rather than trusting the connection
 // to remember across its own lifetime.
 export async function listModelsForProfile(
-  profile: string
+  profile: string, nodeId?: string
 ): Promise<{
   models: ManagerModelInfo[];
   currentModelId: string | null;
@@ -376,6 +400,8 @@ export async function listModelsForProfile(
   contextUsage: { size: number; used: number } | null;
 }> {
   const backendId = backendForProfile(profile);
+  const route = await chatRoute(profile, nodeId, backendId, false);
+  if (route.remote) return listModelsForBackend(profile, backendId, nodeId);
   const adapter = resolveAdapter(backendId);
   let summary = await adapter.listModels(profile);
   const modelOverride = modelOverrideForProfile(profile, backendId);
@@ -399,15 +425,23 @@ export async function listModelsForProfile(
   return summary;
 }
 
-export async function setModelForProfile(profile: string, modelId: string): Promise<void> {
+export async function setModelForProfile(profile: string, modelId: string, nodeId?: string): Promise<void> {
   const backendId = backendForProfile(profile);
-  await resolveAdapter(backendId).setModel(profile, modelId);
+  const route = await chatRoute(profile, nodeId, backendId, false);
+  if (route.remote) {
+    const models = await route.remote.adapter(backendId).listModels(profile);
+    if (!models.models.some(model => model.id === modelId)) throw new Error('The worker backend does not advertise that model.');
+  } else await resolveAdapter(backendId).setModel(profile, modelId);
   setModelOverrideForProfile(profile, backendId, modelId);
 }
 
-export async function setReasoningEffortForProfile(profile: string, effortId: string): Promise<void> {
+export async function setReasoningEffortForProfile(profile: string, effortId: string, nodeId?: string): Promise<void> {
   const backendId = backendForProfile(profile);
-  await resolveAdapter(backendId).setReasoningEffort(profile, effortId);
+  const route = await chatRoute(profile, nodeId, backendId, false);
+  if (route.remote) {
+    const models = await route.remote.adapter(backendId).listModels(profile);
+    if (!models.reasoningEfforts.some(effort => effort.id === effortId)) throw new Error('The worker backend does not advertise that reasoning effort.');
+  } else await resolveAdapter(backendId).setReasoningEffort(profile, effortId);
   setReasoningEffortOverrideForProfile(profile, backendId, effortId);
 }
 
@@ -417,15 +451,17 @@ export async function setReasoningEffortForProfile(profile: string, effortId: st
  * listModelsForProfile does for the default. */
 export async function listModelsForBackend(
   profile: string,
-  backendId: string
+  backendId: string, nodeId?: string
 ): ReturnType<typeof listModelsForProfile> {
-  const adapter = resolveAdapter(backendId);
+  const route = await chatRoute(profile, nodeId, backendId, false);
+  const adapter = route.remote?.adapter(backendId) ?? resolveAdapter(backendId);
   const summary = await adapter.listModels(profile);
   const override = modelOverrideForProfile(profile, backendId);
-  if (override && override !== summary.currentModelId && summary.models.some((model) => model.id === override)) {
-    return { ...summary, currentModelId: override };
-  }
-  return summary;
+  const effort = reasoningEffortOverrideForProfile(profile, backendId);
+  return { ...summary,
+    ...(override && summary.models.some(model => model.id === override) ? { currentModelId: override } : {}),
+    ...(effort && summary.reasoningEfforts.some(item => item.id === effort) ? { currentReasoningEffortId: effort } : {})
+  };
 }
 
 interface HandoffInfo {
@@ -516,6 +552,7 @@ export interface RunTurnContext {
    * Same scoping rule as model: applies to the session's own backend only. */
   reasoningEffort?: string | null;
   route?: ChatRoute;
+  sessionId?: string;
 }
 
 export async function runTurn(
@@ -547,7 +584,7 @@ export async function runTurn(
     startBackend: context.backend,
     fallbackBackends: listManagerBackends().filter((b) => b.implemented && b.id !== context.backend).map((b) => b.id),
     attempt: async (backendId) => {
-      const adapter = context.route?.remote?.adapter(backendId, context.key.includes('#') ? context.key.slice(context.key.lastIndexOf('#') + 1) : undefined) ?? resolveAdapter(backendId);
+      const adapter = context.route?.remote?.adapter(backendId, context.sessionId === 'default' ? undefined : context.sessionId) ?? resolveAdapter(backendId);
       active.backend = backendId;
       active.adapter = adapter;
       const attempt = async () => {
@@ -768,8 +805,8 @@ export function sendManagerChatMessage(
   message: string,
   requestId?: string,
   sessionId?: string,
-  backendOverride?: string
-  , nodeId?: string
+  backendOverride?: string,
+  nodeId?: string
 ): Promise<ManagerChatTurnResult> {
   // Session-bound turns (WP2): resolve the session's worktree cwd (re-
   // materializing it from the branch if prune reclaimed the idle worktree)
@@ -812,7 +849,8 @@ export function sendManagerChatMessage(
   };
 
   const key = chatKey(profile, sessionId);
-  const sessionOpts = sessionId && sessionId !== 'default' ? { ...logOptions, sessionId } : logOptions;  const prior = turnQueueByProfile.get(key) ?? Promise.resolve();
+  const sessionOpts = sessionId && sessionId !== 'default' ? { ...logOptions, sessionId } : logOptions;
+  const prior = turnQueueByProfile.get(key) ?? Promise.resolve();
   const turn = prior.catch(() => undefined).then(async (): Promise<ManagerChatTurnResult> => {
     const sessionContext = await prepareSession();
     const existing = loadLog(profile, sessionOpts);
@@ -1028,7 +1066,7 @@ export function sendManagerChatMessage(
           detectPreview(text);
         },
         active,
-        { key, backend: sessionContext.backend, cwd: sessionContext.cwd, model: sessionContext.model, reasoningEffort: sessionContext.reasoningEffort, route: sessionContext.route },
+        { key, sessionId, backend: sessionContext.backend, cwd: sessionContext.cwd, model: sessionContext.model, reasoningEffort: sessionContext.reasoningEffort, route: sessionContext.route },
         onToolCall
       );
       // A cancel is a barrier for the queue: once we've sent session/cancel
@@ -1050,8 +1088,8 @@ export function sendManagerChatMessage(
         backend,
         model,
         usage,
-        timestamp: Date.now()
-        , nodeId: sessionContext.route.nodeId, nodeName: sessionContext.route.nodeName
+        timestamp: Date.now(),
+        nodeId: sessionContext.route.nodeId, nodeName: sessionContext.route.nodeName
       };
       const done: ChatSessionEvent[] = active.cancelled
         ? [{ type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'cancelled' }, timestamp: Date.now() }]

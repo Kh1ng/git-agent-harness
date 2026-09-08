@@ -18,10 +18,12 @@ test('remote agent runs only in the worker profile and streams permission, steer
   const cwd = join(root, 'worker-checkout');
   mkdirSync(cwd);
   const profile: ProfileSummary = { ...JSON.parse(readFileSync(new URL('../tests/fixtures/gah/responses/profile-list.json', import.meta.url), 'utf8'))[0], name: 'demo', local_path: cwd, worktree_base: '' };
+  assert.ok(profile.web_url);
   let calls = 0;
   let cancelled = 0;
   let steered = '';
   let entered!: () => void;
+  let finishExecution!: () => void;
   const running = new Promise<void>(resolve => { entered = resolve; });
   const adapter: ManagerAdapter = {
     id: 'claude', displayName: 'Claude', implemented: true,
@@ -29,7 +31,7 @@ test('remote agent runs only in the worker profile and streams permission, steer
       calls++;
       assert.equal(key, 'demo#test-session');
       assert.equal(input.cwd, cwd);
-      if (input.prompt === 'wait') { entered(); return new Promise(() => {}); }
+      if (input.prompt === 'wait') { entered(); return new Promise(resolve => { finishExecution = () => resolve({ reply: '', model: null, usage: null }); }); }
       input.onChunk('streamed ');
       input.onToolResult('read', 'worker file');
       const choice = await input.requestPermission!({ title: 'Read worker file?', locations: [], options: [{ optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' }] });
@@ -44,7 +46,7 @@ test('remote agent runs only in the worker profile and streams permission, steer
   };
   const app = express();
   app.use(express.json());
-  app.use('/api/worker-chat', createWorkerChatRouter({ node: { role: 'worker', central_url: 'https://central.test' }, profiles: async () => [profile], adapter: () => adapter, sessions: { stateDir: join(root, 'worker-state') } }));
+  app.use('/api/worker-chat', createWorkerChatRouter({ node: { role: 'worker', central_url: 'https://central.test' }, nodeId: 'worker', profiles: async () => [profile], adapter: () => adapter, sessions: { stateDir: join(root, 'worker-state') } }));
   const server = createServer(app);
   t.after(async () => {
     server.closeAllConnections();
@@ -57,9 +59,9 @@ test('remote agent runs only in the worker profile and streams permission, steer
   const url = `http://127.0.0.1:${address.port}`;
   const registry = new RegistryService(join(root, 'central-registry.json'));
   registry.registerNode({ node_id: 'worker', display_name: 'Worker', advertised_url: url, version: '0.1.0', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback', secret_ref: 'env:WORKER_CHAT_TEST_TOKEN', profiles: ['demo'] });
-  const connection = workerChatConnection(registry, 'worker', 'demo');
+  const connection = workerChatConnection(registry, 'worker', 'demo', profile);
   const remote = connection.adapter('claude', 'test-session');
-    const bad = await fetch(`${url}/api/worker-chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'run', profile: 'demo', sessionId: 'bad-turn', backend: 'claude', prompt: 'bad' }) });
+    const bad = await fetch(`${url}/api/worker-chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nodeId: 'worker', action: 'run', profile: 'demo', repo: profile.repo, provider: profile.provider, origin: new URL(profile.web_url).origin, sessionId: 'bad-turn', backend: 'claude', prompt: 'bad' }) });
     assert.equal(bad.status, 400);
     assert.equal(getSession('demo', 'bad-turn', { stateDir: join(root, 'worker-state') }), null, 'invalid input must not create a workspace');
     const chunks: string[] = [];
@@ -79,5 +81,10 @@ test('remote agent runs only in the worker profile and streams permission, steer
     await remote.cancelTurn('central-conversation-key');
     await stopped;
     assert.equal(cancelled, 1);
-    assert.throws(() => workerChatConnection(registry, 'worker', 'not-declared'), /not registered/);
+    await assert.rejects(connection.request({ action: 'prepare', backend: 'claude', sessionId: 'test-session' }), /409/, 'Stop must not free a workspace while its process is still running');
+    finishExecution();
+    await new Promise(resolve => setImmediate(resolve));
+    await connection.request({ action: 'prepare', backend: 'claude', sessionId: 'test-session' });
+    assert.throws(() => workerChatConnection(registry, 'worker', 'not-declared', profile), /not registered/);
+    await assert.rejects(workerChatConnection(registry, 'worker', 'demo', { ...profile, web_url: 'https://other-gitlab.test/team/repo' }).request({ action: 'prepare', backend: 'claude', sessionId: 'test-session' }), /409/);
 });
