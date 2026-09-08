@@ -1812,11 +1812,26 @@ export function createServer(
   });
   
   // Error handler
-  app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    console.error('Server error:', err);
+  app.use((err: Error & { type?: string }, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) return next(err);
+    // Body-parser errors can contain the complete request body, including
+    // credentials. Return fixed client errors without logging that payload.
+    switch (err.type) {
+      case 'entity.parse.failed':
+      case 'request.aborted':
+      case 'request.size.invalid':
+        return res.status(400).json({ error: 'Bad Request', message: 'Invalid request body' });
+      case 'entity.too.large':
+        return res.status(413).json({ error: 'Payload Too Large', message: 'Request body exceeds the size limit' });
+      case 'encoding.unsupported':
+      case 'charset.unsupported':
+        return res.status(415).json({ error: 'Unsupported Media Type', message: 'Unsupported request encoding' });
+    }
+    // Unexpected exceptions can also embed CLI output or request credentials.
+    console.error('Server error: an unexpected request failure occurred');
     res.status(500).json({
       error: 'Internal Server Error',
-      message: err.message || 'An unexpected error occurred'
+      message: 'An unexpected error occurred'
     });
   });
   
