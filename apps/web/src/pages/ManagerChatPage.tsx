@@ -788,6 +788,9 @@ export function ManagerChatPage() {
     setModels([]);
     setCurrentModelId(null);
     setModelsLoaded(false);
+    setReasoningEfforts([]);
+    setCurrentReasoningEffortId(null);
+    setContextUsage(null);
     if (!chosenNode || !nodeReady || !skillBackend) return;
     // Real commands from the active backend's own registry (e.g. Hermes's
     // live ACP available-commands push) -- not something GAH invents. Fetched
@@ -1157,28 +1160,7 @@ export function ManagerChatPage() {
         setModelsLoaded(false);
         setReasoningEfforts([]);
         setCurrentReasoningEffortId(null);
-        // Refresh the new backend's command palette + model list (the
-        // settings effect only re-runs on profile change, not backend change).
-        gahApi.getManagerChatCommands(requestedProfile)
-          .then(({ commands }) => setCommands(commands))
-          .catch(() => setCommands([]));
-        gahApi.getManagerChatModels(requestedProfile, chosenNode || undefined)
-          .then(({ models, currentModelId, reasoningEfforts: advertisedEfforts, currentReasoningEffortId: effortId, contextUsage: usage }) => {
-            setModels(models);
-            setCurrentModelId(currentModelId);
-            setReasoningEfforts(advertisedEfforts ?? []);
-            setCurrentReasoningEffortId(effortId ?? null);
-            setContextUsage(usage ?? null);
-            setModelsLoaded(true);
-          })
-          .catch(() => {
-            setModels([]);
-            setCurrentModelId(null);
-            setReasoningEfforts([]);
-            setCurrentReasoningEffortId(null);
-            setContextUsage(null);
-            setModelsLoaded(true);
-          });
+
       }
     } catch (err) {
       if (activeProfileRef.current === requestedProfile) {
@@ -1228,7 +1210,7 @@ export function ManagerChatPage() {
         reasoningEfforts: sessionEfforts,
         currentReasoningEffortId: activeSession.reasoningEffort,
         modelsLoaded: sessionModelsLoaded,
-        busy: turnBusy || sessionSelectionChanging,
+        busy: turnBusy || !nodeReady || sessionSelectionChanging,
         onSelect: applySessionSelection
       };
     }
@@ -1242,7 +1224,7 @@ export function ManagerChatPage() {
       reasoningEfforts,
       currentReasoningEffortId,
       modelsLoaded,
-      busy: turnBusy || backendChanging || modelChanging || reasoningEffortChanging,
+      busy: turnBusy || !nodeReady || backendChanging || modelChanging || reasoningEffortChanging,
       onSelect: applyProfileSelection
     };
   })();
@@ -1834,7 +1816,7 @@ export function ManagerChatPage() {
         </div>
 
         <div className="mt-3 space-y-2 border-t border-subtle pt-3">
-          <ChatNodePicker {...nodeSnapshot} value={chosenNode} disabled={turnBusy || !isConnected}
+          <ChatNodePicker {...nodeSnapshot} value={chosenNode} disabled={turnBusy || !isConnected || backendChanging || modelChanging || reasoningEffortChanging || sessionSelectionChanging}
             onChange={nodeId => setNodeChoice({ profile, sessionId, nodeId })} />
           <p className="text-sm text-secondary">Each node uses its own checkout; files do not move.</p>
           {remoteSession && <p className="text-sm text-secondary">Preview is unavailable for a chat running on another node.</p>}

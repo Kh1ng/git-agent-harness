@@ -54,7 +54,10 @@ test('the composer picker switches the harness and persists a per-profile overri
       selectedReasoningEffort = (route.request().postDataJSON() as { effortId: string }).effortId;
       return route.fulfill({ json: { success: true } });
     }
-    if (url.pathname === '/api/manager-chat/commands') return route.fulfill({ json: { commands: [] } });
+    if (url.pathname === '/api/manager-chat/commands') {
+      expect(url.searchParams.get('nodeId')).toBeTruthy();
+      return route.fulfill({ json: { commands: [] } });
+    }
     if (url.pathname === '/api/manager-chat/models') {
       if (selectedBackend === 'claude') {
         return route.fulfill({ json: {
