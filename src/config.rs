@@ -193,14 +193,14 @@ pub struct Profile {
     #[serde(default)]
     pub agy_path: Option<String>,
     /// Extra CLI args appended to `vibe -p` (e.g. `--max-turns 40 --max-price 2`).
-    /// Worker/fix backend only -- not wired into review.
+    /// Applied to worker/fix and review execution.
     #[serde(default)]
     pub vibe_args: Vec<String>,
     /// Optional absolute/relative path to the Mistral Vibe CLI executable.
     #[serde(default)]
     pub vibe_path: Option<String>,
-    /// Role-agnostic `opencode run` args; GAH owns and filters `--agent` selection.
-    /// Worker/fix backend only -- not wired into review.
+    /// Role-agnostic `opencode run` args for worker/fix and review execution;
+    /// GAH owns and filters agent and model selection.
     #[serde(default)]
     pub opencode_args: Vec<String>,
     /// Optional absolute/relative path to the OpenCode CLI executable.
