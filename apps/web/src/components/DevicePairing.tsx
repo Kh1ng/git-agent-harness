@@ -66,7 +66,7 @@ export function DevicePairing() {
     finally { setBusy(false); }
   };
   const url = offer ? `${offer.server.origin}/#pair=${offer.code}&server=${offer.server.id}` : '';
-  return <section className="mt-3 text-sm" aria-label="Device pairing">
+  return <section className="mt-3 text-sm max-sm:[&_button]:min-h-11 max-sm:[&_input]:min-h-11" aria-label="Device pairing">
     <button type="button" className="btn-secondary" aria-expanded={open} onClick={() => setOpen(!open)}>{principal === 'owner' ? 'Pair a device' : 'Pair this device'}</button>
     {open && <div className="mt-3 max-w-2xl space-y-4 rounded-md border border-subtle bg-raised p-4">
       {error && <p role="alert" className="text-critical">{error}</p>}

@@ -4,7 +4,7 @@
  */
 
 import { WebSocket, WebSocketServer } from 'ws';
-import { requiresFleetAuthentication, trustedLanWebSocketMode } from './webSocketAuth.js';
+import { requiresFleetAuthentication, trustedLanWebSocketMode, webSocketAccessValid } from './webSocketAuth.js';
 import { SERVER_VERSION } from './server.js';
 import { createServerPushBus } from './serverPushBus.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
@@ -108,6 +108,7 @@ export function createWebSocketHandler(
     }
     
     ws.on('message', async (data: WebSocket.RawData) => {
+      if (!webSocketAccessValid(ws)) return;
       try {
         const message = JSON.parse(data.toString()) as ClientMessage;
         if (deps.node?.role === 'worker' && message.type.startsWith('manager.chat.')) {

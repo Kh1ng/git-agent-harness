@@ -67,6 +67,9 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     expect(new URL(phone.url()).hash).toBe('');
     expect((await deviceContext.cookies()).some(cookie => cookie.name === 'gah_device')).toBe(false);
     await phone.setViewportSize({ width: 390, height: 844 });
+    const pairing = phone.getByRole('region', { name: 'Device pairing' });
+    await expect.poll(() => pairing.locator('button, input').evaluateAll(elements => elements.every(element => element.getBoundingClientRect().height >= 44))).toBe(true);
+    expect(await phone.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await phone.screenshot({ path: testInfo.outputPath('pairing-confirm-mobile.png') });
     await phone.getByLabel('Device name', { exact: true }).fill('Test phone');
     await phone.getByRole('button', { name: 'Confirm server and pair' }).click();
