@@ -768,10 +768,7 @@ test('Server endpoints enforce loopback check and authentication', async () => {
   const app = createServer({ registryService: registry });
   const server = http.createServer(app);
 
-  // Bind 0.0.0.0 so genuinely non-loopback connections are possible. The
-  // authMiddleware trusts only the TCP socket address (authMiddleware.ts), so a
-  // spoofed X-Forwarded-For from a loopback socket can no longer simulate a
-  // remote client the way it did before the socket-only change.
+  // Bind 0.0.0.0 to also verify direct non-loopback connections.
   await new Promise<void>((resolve) => {
     server.listen(0, '0.0.0.0', () => resolve());
   });
@@ -796,15 +793,13 @@ test('Server endpoints enforce loopback check and authentication', async () => {
     // X-Forwarded-Proto: https and defeat the TLS requirement below.
     assert.equal(app.get('trust proxy'), 'loopback');
 
-    // 2. A loopback socket stays trusted even when it forges proxy headers --
-    // this is the Caddy reverse-proxy path, where the real client IP arrives
-    // in X-Forwarded-For.
+    // 2. A reverse proxy must not grant remote clients its loopback trust.
     const forgedHeaders = {
       'X-Forwarded-For': '8.8.8.8',
       'X-Forwarded-Proto': 'https'
     };
     const proxyPathRes = await makeRequest(loopbackUrl, '/api/registry/nodes', 'GET', undefined, forgedHeaders);
-    assert.equal(proxyPathRes.status, 200);
+    assert.equal(proxyPathRes.status, 401);
 
     // 3. Genuinely non-loopback connection: no TLS -> 403 Forbidden. Forged
     // X-Forwarded-Proto is ignored because trust proxy is 'loopback', so the
@@ -1038,7 +1033,7 @@ test('authMiddleware rejects non-loopback requests with spoofed X-Forwarded-Prot
   assert.equal(jsonCalledWith?.error, 'Forbidden');
   assert.equal(
     jsonCalledWith?.message,
-    'Non-loopback endpoints require TLS unless GAH_ALLOW_INSECURE_HTTP=1'
+    'Remote or cross-origin access requires TLS unless GAH_ALLOW_INSECURE_HTTP=1'
   );
   
   delete process.env.COORDINATOR_TOKEN;
@@ -1153,7 +1148,7 @@ test('authMiddleware does not treat spoofed loopback headers as local on a remot
   assert.equal(nextCalled, false);
   assert.equal(statusCalledWith, 401);
   assert.equal(jsonCalledWith?.error, 'Unauthorized');
-  assert.equal(jsonCalledWith?.message, 'Authentication token required for non-loopback access');
+  assert.equal(jsonCalledWith?.message, 'Authentication token required for remote or cross-origin access');
 
   delete process.env.COORDINATOR_TOKEN;
 });

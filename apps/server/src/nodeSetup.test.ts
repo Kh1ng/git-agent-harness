@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import express from 'express';
+import cors from 'cors';
 import { windowsSetupCommand, nodeSetupRouter, isSupportedWindowsInstaller } from './nodeSetup.js';
 import { authMiddleware } from './authMiddleware.js';
 
@@ -75,5 +76,85 @@ test('setup rate limits installer reads and archive generation through one share
     }
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+
+test('setup credentials require auth through proxies, cross-origin browsers, and rebound hosts', async () => {
+  const previous = { token: process.env.COORDINATOR_TOKEN, insecure: process.env.GAH_ALLOW_INSECURE_HTTP };
+  const token = 'test-setup-origin-token';
+  process.env.COORDINATOR_TOKEN = token;
+  process.env.GAH_ALLOW_INSECURE_HTTP = '1';
+  const app = express();
+  app.set('trust proxy', 'loopback');
+  app.use(cors());
+  app.use(express.json());
+  app.use('/api/settings/nodes', authMiddleware, nodeSetupRouter());
+  const server = createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const origin = `http://127.0.0.1:${address.port}`;
+    const request = (headers: Record<string, string>, path = 'command') => new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
+      // fetch overwrites Host; use the HTTP transport to exercise rebinding.
+      const outgoing = httpRequest(`${origin}/api/settings/nodes/${path}`, {
+        method: path === 'command' ? 'POST' : 'GET',
+        headers: { 'Content-Type': 'application/json', ...headers },
+      }, (response) => {
+        let body = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => { body += chunk; });
+        response.on('end', () => resolve({ status: response.statusCode, body }));
+        response.on('error', reject);
+      });
+      outgoing.on('error', reject);
+      outgoing.end(path === 'command' ? JSON.stringify({ role: 'desktop', centralUrl: 'https://central.test' }) : undefined);
+    });
+    // Preserve local CLI and the locally hosted native/browser dashboard.
+    const trusted: Record<string, string>[] = [{}, { Origin: origin }, { Host: 'localhost', Origin: 'http://localhost' }];
+    for (const headers of trusted) {
+      const response = await request(headers);
+      assert.equal(response.status, 200);
+      assert.match(response.body, /test-setup-origin-token/);
+    }
+    const untrusted: Record<string, string>[] = [
+      { 'X-Forwarded-For': '198.51.100.50', 'X-Forwarded-Proto': 'https' },
+      { Forwarded: 'for=198.51.100.50;proto=https' },
+      { 'X-Forwarded-Host': 'central.example' },
+      { 'X-Forwarded-Port': '443' },
+      { 'X-Forwarded-For': '127.0.0.1' },
+      { Origin: 'https://untrusted.example' },
+      { Origin: 'null' },
+      { Origin: 'http://127.0.0.1:1' },
+      { Host: 'rebound.example', Origin: 'http://rebound.example' },
+      { Host: 'rebound.example' },
+      { Host: '127.rebound.example', Origin: 'http://127.rebound.example' },
+      { Host: '127.rebound.example' },
+      { Host: 'localhost.rebound.example' },
+    ];
+    for (const headers of untrusted) {
+      const response = await request(headers);
+      assert.equal(response.status, 401, JSON.stringify(headers));
+      assert.ok(!(response.body).includes(token));
+    }
+    // A valid bearer token permits each transport; an incorrect one does not.
+    for (const headers of untrusted) {
+      const authenticated = await request({ ...headers, Authorization: `Bearer ${token}` });
+      assert.equal(authenticated.status, 200, JSON.stringify(headers));
+      assert.match(authenticated.body, /test-setup-origin-token/);
+    }
+    const invalid = await request({ ...untrusted[0], Authorization: 'Bearer incorrect-token' });
+    assert.equal(invalid.status, 401);
+    assert.ok(!invalid.body.includes(token));
+    // The wildcard CORS response cannot turn an unauthenticated browser read
+    // into credential access, including an originless GET after DNS rebinding.
+    const reboundRead = await request({ Host: 'rebound.example' }, 'install.ps1');
+    assert.equal(reboundRead.status, 401);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (previous.token === undefined) delete process.env.COORDINATOR_TOKEN; else process.env.COORDINATOR_TOKEN = previous.token;
+    if (previous.insecure === undefined) delete process.env.GAH_ALLOW_INSECURE_HTTP; else process.env.GAH_ALLOW_INSECURE_HTTP = previous.insecure;
   }
 });

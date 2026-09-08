@@ -1330,7 +1330,7 @@ export function AddNodeSection() {
           <option value="worker">Headless WSL worker only</option>
         </select>
       </label>
-      <label className="block text-xs text-secondary mb-3">Central access token (required for direct LAN access)
+      <label className="block text-xs text-secondary mb-3">Central access token (required for remote access)
         <input disabled={busy} type="password" autoComplete="off" className="input w-full mt-1" value={token} onChange={(event) => { setToken(event.target.value); setCommand(''); }} />
       </label>
       <p className="text-xs text-muted mb-3">The access token stays in this tab’s session. The generated command contains the central access token; use it only on a computer you trust.</p>

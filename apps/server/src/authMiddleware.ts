@@ -1,13 +1,13 @@
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
+import { isIP } from 'node:net';
 
 export function isLocalAddress(ip: string): boolean {
   if (!ip) return false;
   return (
-    ip === '127.0.0.1' ||
     ip === '::1' ||
     ip === '::ffff:127.0.0.1' ||
-    ip.startsWith('127.') ||
+    (isIP(ip) === 4 && ip.startsWith('127.')) ||
     ip === 'localhost'
   );
 }
@@ -24,30 +24,35 @@ export function coordinatorTokenMatches(token: string): boolean {
   return crypto.timingSafeEqual(tokenHash, expectedHash);
 }
 
-function isLoopbackRequest(req: Request): boolean {
-  // Trust the TCP socket address only, not req.ip (which with trust proxy:loopback
-  // reflects X-Forwarded-For, making Caddy-proxied LAN requests look non-local).
-  // The socket source is tamper-proof; X-Forwarded-For spoofing is already blocked
-  // by Express only honoring it when the socket itself comes from loopback.
-  const socketAddress = req.socket.remoteAddress || '';
-  return isLocalAddress(socketAddress);
+/** Local CLI and same-origin browser requests may omit the token. A proxy
+ * hop or an unrelated browser origin never inherits the socket's local trust. */
+function isTrustedLocalRequest(req: Request): boolean {
+  if (!isLocalAddress(req.socket.remoteAddress || '')) return false;
+  if (Object.keys(req.headers).some((name) => name === 'forwarded' || name.startsWith('x-forwarded-'))) return false;
+  try {
+    const target = new URL(`${req.protocol}://${req.headers.host}`);
+    // Checking Host also rejects DNS rebinding, including GETs without Origin.
+    if (!isLocalAddress(target.hostname.replace(/^\[|\]$/g, ''))) return false;
+    const origin = req.headers.origin;
+    return origin === undefined || new URL(origin).origin === target.origin;
+  } catch {
+    return false;
+  }
 }
 
 export function authMiddleware(req: Request, res: Response, next: NextFunction) {
-  // Only skip auth for direct loopback requests. If a proxy sits in front of
-  // the server, forwarded headers must not be enough to claim localhost access.
-  if (isLoopbackRequest(req)) {
+  if (isTrustedLocalRequest(req)) {
     return next();
   }
 
-  // Non-loopback endpoints require TLS plus authenticated node/client identity
+  // Requests outside the local exemption require TLS and authenticated identity
   // Rely on Express's req.secure, which only trusts proxy headers if 'trust proxy' is configured.
   const isTls = req.secure;
 
   if (!isTls && process.env.GAH_ALLOW_INSECURE_HTTP !== '1') {
     return res.status(403).json({
       error: 'Forbidden',
-      message: 'Non-loopback endpoints require TLS unless GAH_ALLOW_INSECURE_HTTP=1'
+      message: 'Remote or cross-origin access requires TLS unless GAH_ALLOW_INSECURE_HTTP=1'
     });
   }
 
@@ -56,7 +61,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({
       error: 'Unauthorized',
-      message: 'Authentication token required for non-loopback access'
+      message: 'Authentication token required for remote or cross-origin access'
     });
   }
 
