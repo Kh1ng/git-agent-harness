@@ -36,17 +36,19 @@ cargo run --bin gah -- update --repo "$repo_root" --role "$role"
 # interface address) before running this script on first install to seed it;
 # 0.0.0.0 remains the application default when unset.
 server_env_file=/etc/gah/server.env
-if [ ! -f "$server_env_file" ]; then
-  sudo install -d -m 0755 /etc/gah
-  if [ -n "${GAH_SERVER_HOST:-}" ]; then
-    printf 'HOST=%s\n' "$GAH_SERVER_HOST" | sudo tee "$server_env_file" >/dev/null
-    sudo chmod 0644 "$server_env_file"
+if [ "$role" = "central" ]; then
+  if [ ! -f "$server_env_file" ]; then
+    sudo install -d -m 0755 /etc/gah
+    if [ -n "${GAH_SERVER_HOST:-}" ]; then
+      printf 'HOST=%s\n' "$GAH_SERVER_HOST" | sudo tee "$server_env_file" >/dev/null
+      sudo chmod 0644 "$server_env_file"
+    else
+      sudo install -m 0644 /dev/null "$server_env_file"
+    fi
+    echo "Created $server_env_file (set HOST= there to change the bind address without editing the unit)"
   else
-    sudo install -m 0644 /dev/null "$server_env_file"
+    echo "Preserving existing $server_env_file"
   fi
-  echo "Created $server_env_file (set HOST= there to change the bind address without editing the unit)"
-else
-  echo "Preserving existing $server_env_file"
 fi
 
 # Memory gateway placement (issue #880). Opt-in: GAH_GATEWAY_MODE unset (the

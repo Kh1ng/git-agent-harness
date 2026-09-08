@@ -87,6 +87,9 @@ jobs:
       - name: Check CI test selection
         run: bash scripts/test-ci-test-scope.sh
 
+      - name: Check worker installer scripts
+        run: python3 scripts/test-worker-installers.py
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:

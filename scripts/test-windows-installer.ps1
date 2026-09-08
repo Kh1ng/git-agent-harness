@@ -52,3 +52,75 @@ $releases = @(
 $selected = & ([scriptblock]::Create($selector.Right.Extent.Text))
 if ($selected.id -ne 6) { throw 'Release selector must choose the supported stable Tauri NSIS asset.' }
 Write-Host 'Windows installer checks passed: syntax, settings preservation, stable supported NSIS selection.'
+
+# Exercise artifact validation and download selection only. Never run the installer body.
+foreach ($name in @('Get-TestArtifactFiles', 'Download-SetupFile')) {
+    $definition = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+    if (-not $definition) { throw "Missing installer helper: $name" }
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
+function Write-TestManifest([string]$Directory, [string]$Kind, [string]$Revision, [string[]]$Names) {
+    $files = @{}
+    foreach ($name in $Names) { $files[$name] = (Get-FileHash -LiteralPath (Join-Path $Directory $name) -Algorithm SHA256).Hash.ToLowerInvariant() }
+    @{ schema_version = 1; revision = $Revision; files = $files } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Directory "$Kind-artifact.json")
+}
+function Assert-TestArtifactRejected([scriptblock]$Action, [string]$Reason) {
+    $rejected = $false
+    try { & $Action | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw "Invalid test artifacts were accepted: $Reason" }
+}
+$bundle = Join-Path ([IO.Path]::GetTempPath()) ('gah-artifact-check-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $bundle | Out-Null
+try {
+    $desktopFiles = @('install-windows.ps1', 'GAH Worker_0.1.1_x64-setup.exe')
+    $workerFiles = @('install-windows.ps1', 'gah', 'source.tar.gz', 'install-wsl.sh')
+    foreach ($name in ($desktopFiles + $workerFiles | Select-Object -Unique)) { Set-Content -LiteralPath (Join-Path $bundle $name) -Value "test bytes for $name" }
+    $installerPath = Join-Path $bundle 'install-windows.ps1'
+    $revision = 'a' * 40
+    Write-TestManifest $bundle desktop $revision $desktopFiles
+    Write-TestManifest $bundle worker $revision $workerFiles
+    $testArtifactFiles = Get-TestArtifactFiles $bundle both $installerPath
+    if ($testArtifactFiles.Count -ne 5) { throw 'Both artifacts must resolve exactly five installer routes.' }
+    $TestArtifactDirectory = $bundle
+    $copied = Join-Path $bundle 'copied-gah'
+    Download-SetupFile 'release/linux-cli' $copied
+    if ([IO.File]::ReadAllText($copied) -ne [IO.File]::ReadAllText((Join-Path $bundle 'gah'))) { throw 'Test mode did not copy the verified artifact.' }
+    Assert-TestArtifactRejected { Download-SetupFile 'unknown' $copied } 'unknown route'
+
+    Write-TestManifest $bundle worker ('b' * 40) $workerFiles
+    Assert-TestArtifactRejected { Get-TestArtifactFiles $bundle both $installerPath } 'mixed revisions'
+    # Desktop-only validation does not require a worker manifest.
+    Remove-Item -LiteralPath (Join-Path $bundle 'worker-artifact.json')
+    [void](Get-TestArtifactFiles $bundle desktop $installerPath)
+    Assert-TestArtifactRejected { Get-TestArtifactFiles $bundle worker $installerPath } 'missing manifest'
+    Write-TestManifest $bundle worker $revision $workerFiles
+    $manifestPath = Join-Path $bundle 'worker-artifact.json'
+    $validManifest = [IO.File]::ReadAllText($manifestPath)
+    foreach ($invalid in @('[]', '[{}]', '{broken', '{}', '{"schema_version":1,"revision":"invalid","files":{}}')) {
+        Set-Content -LiteralPath $manifestPath -Value $invalid
+        Assert-TestArtifactRejected { Get-TestArtifactFiles $bundle worker $installerPath } 'malformed manifest'
+    }
+    Set-Content -LiteralPath $manifestPath -Value $validManifest
+    $malicious = $validManifest.Replace('"gah"', '"../gah"')
+    Set-Content -LiteralPath $manifestPath -Value $malicious
+    Assert-TestArtifactRejected { Get-TestArtifactFiles $bundle worker $installerPath } 'path traversal'
+    Set-Content -LiteralPath $manifestPath -Value $validManifest
+    Set-Content -LiteralPath (Join-Path $bundle 'gah') -Value 'changed bytes'
+    Assert-TestArtifactRejected { Get-TestArtifactFiles $bundle worker $installerPath } 'checksum mismatch'
+    Write-TestManifest $bundle worker $revision $workerFiles
+    Assert-TestArtifactRejected { Get-TestArtifactFiles $bundle worker $path } 'executing installer from another bundle'
+
+    # Online mode keeps its original authenticated URL and never reads local artifacts.
+    $TestArtifactDirectory = ''
+    $CentralUrl = 'https://central.test'
+    $CoordinatorToken = 'test-coordinator-token'
+    function Invoke-WebRequest { param([switch]$UseBasicParsing, $Uri, $Headers, $OutFile)
+        if ($Uri -ne 'https://central.test/api/settings/nodes/release/linux-cli' -or $Headers.Authorization -ne 'Bearer test-coordinator-token' -or $OutFile -ne $copied) { throw 'Online setup request changed.' }
+        $script:downloadObserved = $true
+    }
+    $script:downloadObserved = $false
+    Download-SetupFile 'release/linux-cli' $copied
+    if (-not $script:downloadObserved) { throw 'Online setup did not use its normal download helper.' }
+    Remove-Item Function:\Invoke-WebRequest
+} finally { Remove-Item -LiteralPath $bundle -Recurse -Force }
+Write-Host 'Artifact checks passed: matching revisions, checksums, malformed bundles, local copies, unchanged online downloads.'

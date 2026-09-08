@@ -69,11 +69,61 @@ A Claude-only node is valid. Other agent CLIs are optional.
 Native Windows CLI dispatch is not implemented by this change. Windows executable discovery is informational.
 The current worker executes agents inside WSL. Native execution needs separate process, filesystem, and cancellation tests.
 
+## Test without publishing a release
+
+The Desktop workflow can build a matching Windows installer and Linux worker bundle from one revision.
+Its Linux job runs only for a manual workflow dispatch. It uploads Actions artifacts and does not publish a release.
+
+After the tested branch is available on GitHub, dispatch it and record the successful run ID and commit:
+
+```sh
+gh workflow run desktop.yml --ref BRANCH -R Kh1ng/git-agent-harness
+gh run list --workflow desktop.yml --event workflow_dispatch --limit 5 -R Kh1ng/git-agent-harness
+gh run watch RUN_ID --exit-status -R Kh1ng/git-agent-harness
+gh run view RUN_ID --json headSha -R Kh1ng/git-agent-harness
+```
+
+Deploy that revision on central before the worker acceptance test. The local bundle does not update central.
+On Windows, use authenticated `gh` downloads from the same successful run. In PowerShell:
+
+```powershell
+$run = 'RUN_ID'
+$root = Join-Path $env:TEMP "gah-test-$run"
+gh run download $run -R Kh1ng/git-agent-harness -n gah-worker-windows-nsis -D "$root\desktop"
+gh run download $run -R Kh1ng/git-agent-harness -n gah-worker-linux-test -D "$root\worker"
+$bundle = Join-Path $root 'bundle'
+New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+Copy-Item "$root\desktop\*" $bundle
+Copy-Item "$root\worker\*" $bundle -Force
+```
+
+Open PowerShell as administrator with your normal Windows account. Set the central URL and read its token without echoing it:
+
+```powershell
+$central = 'http://CENTRAL_LAN_IP:3773'
+$secret = Read-Host 'Central access token' -AsSecureString
+$credential = New-Object System.Management.Automation.PSCredential('gah', $secret)
+$token = $credential.GetNetworkCredential().Password
+& "$bundle\install-windows.ps1" -TestArtifactDirectory $bundle -CentralUrl $central -CoordinatorToken $token -Role both
+Remove-Variable token, credential, secret
+```
+
+Set `$bundle` again in the elevated shell if it did not inherit your earlier variables.
+Use `-Role worker` for headless-only testing. Desktop-only testing needs only the desktop artifact and accepts `-Role desktop`.
+
+The installer verifies both revision manifests, all file hashes, and its own script before it installs anything.
+Mixed revisions, missing files, changed files, and a script from another bundle fail validation.
+Checksums establish bundle consistency; they are not publisher signatures. Download through authenticated GitHub access.
+
+This option replaces release downloads with verified local files. The same installer still configures WSL, forwarding, the firewall, and the logon task.
+It registers the worker with central. Complete the readiness and acceptance steps below.
+This test does not prove the online release-download path. Run the normal Add a Node command after a matching release is approved.
+
 ## Windows acceptance test
 
 Use a disposable repository for dispatch tests. Record the installer filename, Windows version, WSL version, and selected distribution.
 
-1. Build the NSIS installer from this branch.
+1. Build or download the NSIS installer and matching worker test bundle from the accepted revision.
 2. Install it on Windows without an existing GAH desktop configuration.
 3. Open the app from the Start menu.
 4. Check that a visible connection window opens without a console window.
@@ -116,3 +166,13 @@ A Chromium smoke test checked the desktop form, separate tool environments, visi
 
 Actual Windows launch, WSL installation, Windows logon, LAN forwarding, and a real backend dispatch remain untested.
 No release was published. Native iOS/Android builds and QR pairing remain separate work.
+
+## Installer checks
+
+`node scripts/test-node-test-artifacts.mjs` verifies revision and checksum manifests,
+tracked source export, and rejection of ambiguous installers or stale output directories.
+Windows CI runs `scripts/test-windows-installer.ps1` against malformed and mixed bundles.
+
+`python3 scripts/test-worker-installers.py` executes the Linux and macOS shell entrypoints
+in a scratch home. Strict command substitutes verify setup order and prohibit privileged
+or central setup on workers. This does not prove a Cargo installation or service startup.
