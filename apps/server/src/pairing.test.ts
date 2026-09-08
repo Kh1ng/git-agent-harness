@@ -107,7 +107,7 @@ test('real HTTP/WS pairing confirms access, rejects CSRF and owner exports, and 
       { ...httpBrowser, 'Sec-Fetch-Site': 'cross-site' },
       { ...httpBrowser, 'Sec-Fetch-Site': 'same-site' },
       { ...httpBrowser, 'Sec-Fetch-Site': 'none' },
-    ]) assert.equal((await fetch(base + '/api/info', { headers })).status, 401, 'Referer cannot override absent or conflicting origin evidence');
+    ]) assert.equal((await fetch(base + '/api/info', { headers })).status, 401, 'Referer cannot override conflicting or invalid origin evidence');
     assert.equal((await post('/api/config', {}, httpBrowser)).status, 401, 'Mutations still require Origin');
     assert.equal((await post('/api/pairing/logout', {}, httpBrowser)).status, 403, 'Pairing mutations still require Origin');
     assert.equal((await fetch(base + '/api/info', { headers: { Cookie: cookie } })).status, 401, 'Cookie access without browser origin evidence is denied');
