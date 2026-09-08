@@ -56,3 +56,10 @@ Add `--dry-run` to validate without publication; no fingerprint is required for 
 
 The existing local command `gah pm publish --profile P --plan PATH [--dry-run]` keeps
 its text output. HTTP never exposes that arbitrary-path option.
+
+## Integration checks
+
+The integrated PM API and common HTTP guard pass all 337 server checks and full
+workspace typechecks. Rust contract drift, CLI capabilities, and all 23 source-structure
+checks pass. The worker regression confirms `/api/pm/plans` is central-only.
+Generated capability metadata was checked against the combined Rust implementation.
