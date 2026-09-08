@@ -763,6 +763,7 @@ fn all_rust_modules_are_reachable_from_crate_roots() {
 
     // Collect all tracked .rs files under src/ and nested integration-test module directories
     let all_rust_files = tracked_rust_files(&repo_root);
+    let reachable = compute_reachable(&repo_root, &all_rust_files);
     let mut orphaned = Vec::new();
 
     for path in &all_rust_files {
@@ -776,7 +777,7 @@ fn all_rust_modules_are_reachable_from_crate_roots() {
             continue;
         }
 
-        if !is_reachable_from_crate(path, &repo_root, &all_rust_files) {
+        if !reachable.contains(&repo_root.join(path)) {
             let relative = path.strip_prefix(&repo_root).unwrap_or(path);
             let relative_str = relative.to_string_lossy().to_string();
             orphaned.push((relative_str, find_expected_declaration(path, &repo_root)));
