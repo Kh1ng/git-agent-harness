@@ -11,7 +11,6 @@ use clap::Parser;
 // Bring the parser structs/enums and `parse_wake_autonomy` into scope.
 use crate::cli::args::*;
 use crate::init;
-use crate::{config, controller, dispatch};
 
 pub mod args;
 pub mod capabilities;
@@ -225,19 +224,7 @@ pub fn run() -> Result<()> {
             skip_validation_gate,
         })?,
 
-        Commands::Pm { command } => match command {
-            PmCommands::Publish {
-                profile,
-                plan,
-                config_path,
-                dry_run,
-            } => {
-                let cfg = config::load(config_path.as_deref())?;
-                let resolved_config_path = config::resolve_config_path(config_path.as_deref());
-                let _lock = controller::acquire_profile_lock(&profile, &resolved_config_path)?;
-                dispatch::publish_pm_plan(&cfg, &profile, &plan, dry_run)?;
-            }
-        },
+        Commands::Pm { command } => commands::pm::run(command)?,
 
         Commands::Tui {
             profile,

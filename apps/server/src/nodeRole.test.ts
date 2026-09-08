@@ -36,7 +36,7 @@ test('worker role reports central identity and permits execution without hosting
   try {
     const health = await (await fetch(`${url}/health`)).json() as { node: unknown };
     assert.deepEqual(health.node, worker);
-    for (const path of ['/api/settings/nodes/command', '/api/skills', '/api/claims/acquire', '/api/registry/nodes', '/api/manager-chat/sessions', '/api/worker-memory/recall']) {
+    for (const path of ['/api/settings/nodes/command', '/api/skills', '/api/claims/acquire', '/api/registry/nodes', '/api/manager-chat/sessions', '/api/worker-memory/recall', '/api/pm/plans']) {
       const response = await fetch(url + path);
       assert.equal(response.status, 409, path);
       assert.equal((await response.json() as { central_url: string }).central_url, worker.central_url);

@@ -15,6 +15,7 @@ pub mod init;
 pub mod ledger;
 pub mod network;
 pub mod node;
+pub mod pm;
 pub mod policy;
 pub mod price_guard;
 pub mod profile;

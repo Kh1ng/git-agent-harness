@@ -594,6 +594,27 @@ pub(super) fn add_dispatch_operations(manifest: &mut CapabilityManifest) {
 }
 
 pub(super) fn add_pm_operations(manifest: &mut CapabilityManifest) {
+    for (id, command, rust_type, ts_type) in [
+        ("pm.plans.list", "gah pm plans", "PlanList", "PmPlanList"),
+        ("pm.plans.show", "gah pm show", "PlanDetail", "PmPlanDetail"),
+    ] {
+        manifest.add_operation(OperationDefinition {
+            operation_id: id.to_string(),
+            display_name: format!("Read PM plans ({command})"),
+            class: OperationClass::Read,
+            profile_scope: ProfileScope::ProfileRequired,
+            request_schema: None,
+            response_schema: Some(SchemaReference { rust_type: rust_type.to_string(), ts_type: Some(ts_type.to_string()), is_primitive: false }),
+            streaming: StreamingBehavior::None,
+            idempotency: Idempotency::Idempotent,
+            secret_fields: vec![],
+            remote_disposition: RemoteDisposition::RemoteAvailable,
+            local_only_reason: None,
+            documentation: Some("Read bounded artifacts within a configured profile; IDs never accept filesystem paths.".to_string()),
+            cli_command_path: command.to_string(),
+            is_stable: true,
+        });
+    }
     // gah pm publish
     manifest.add_operation(OperationDefinition {
         operation_id: "pm.publish".to_string(),
@@ -608,7 +629,7 @@ pub(super) fn add_pm_operations(manifest: &mut CapabilityManifest) {
         remote_disposition: RemoteDisposition::RemoteAvailable,
         local_only_reason: None,
         documentation: Some(
-            "Publish a validated PM plan artifact as native provider issues".to_string(),
+            "Publish native provider issues. Remote callers must use a profile-scoped plan ID and reviewed fingerprint; --plan paths remain local-only.".to_string(),
         ),
         cli_command_path: "gah pm publish".to_string(),
         is_stable: true,

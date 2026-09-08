@@ -160,7 +160,7 @@ fn run_publish(
         state_path: &state_path,
         child_depth: 1,
     };
-    publish_with_provider(&context, state, fake, dry_run)
+    publish_with_provider(&context, state, fake, dry_run).map(|_| ())
 }
 
 fn initial_state(provider_profile: &Profile, artifact: &PmPlanArtifact) -> PublicationState {

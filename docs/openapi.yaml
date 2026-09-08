@@ -35,6 +35,70 @@ tags:
     description: Multi-node fleet registration (auth-gated via authMiddleware)
 
 paths:
+  /api/pm/plans:
+    get:
+      operationId: pm.plans.list
+      summary: List saved PM plan summaries for a configured profile
+      description: Version 1 contract in packages/contracts/src/pm-plan.ts. See docs/PM_PLAN_API.md for authentication, pagination, and errors.
+      parameters:
+        - { name: profile, in: query, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200": { description: PmPlanList, including per-plan errors and next_cursor }
+        "422": { description: Profile or artifact directory unavailable }
+  /api/pm/plans/{planId}:
+    get:
+      operationId: pm.plans.show
+      summary: Read a saved plan, dependency graph, publication state, and failures
+      parameters:
+        - { name: profile, in: query, required: true, schema: { type: string } }
+        - { name: planId, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: PmPlanDetail }
+        "422": { description: Invalid profile, foreign artifact, or unreadable plan }
+  /api/pm/plans/{planId}/dry-run:
+    post:
+      operationId: pm.plans.dry-run
+      summary: Validate publication with the configured provider without writes
+      parameters:
+        - { name: planId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [profile]
+              properties:
+                profile: { type: string }
+      responses:
+        "200": { description: PmPlanOperation with proposed actions }
+        "409": { description: PmPlanOperation with validation failure and saved state }
+  /api/pm/plans/{planId}/publish:
+    post:
+      operationId: pm.plans.publish
+      summary: Approve the reviewed fingerprint and publish under existing backend policy
+      parameters:
+        - { name: planId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [profile, approve, plan_fingerprint]
+              properties:
+                profile: { type: string }
+                approve: { type: boolean, const: true }
+                plan_fingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+      responses:
+        "200": { description: PmPlanOperation after publication }
+        "400": { description: Explicit approval and reviewed fingerprint required }
+        "409": { description: PmPlanOperation with publication failure and partial state }
+        "422": { description: Plan unavailable or fingerprint no longer matches }
   /health:
     get:
       tags: [health]

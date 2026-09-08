@@ -2,6 +2,7 @@ import express from 'express';
 import type { NodeRoleStatus } from '@git-agent-harness/contracts';
 import { workerRouteGuard, validateNodeRole } from './nodeRole.js';
 import { workerMemoryRouter } from './workerMemory.js';
+import { pmPlansRouter } from './pmPlans.js';
 import { nodeSetupRouter } from './nodeSetup.js';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -270,6 +271,7 @@ export function createServer(
   // of the API (loop start/stop, legacy config mutation, etc.) is
   // unauthenticated pending #532; applying this globally would silently change
   // that pre-existing contract.
+  app.use('/api/pm', authMiddleware, pmPlansRouter());
   app.use('/api/registry', authMiddleware);
   app.use('/api/claims', authMiddleware);
   // /api/settings/gateway includes an explicit endpoint that reveals a
@@ -359,6 +361,7 @@ export function createServer(
         info: '/api/info',
         status: '/api/status',
         fleet: '/api/registry/fleet',
+        pmPlans: '/api/pm/plans',
         quota: '/api/quota',
         doctor: '/api/doctor',
         report: '/api/report',
