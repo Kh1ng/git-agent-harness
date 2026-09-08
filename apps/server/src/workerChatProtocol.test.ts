@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createServer } from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { RegistryService } from './registryService.js';
+import { COORDINATOR_SCHEMA_DIGEST } from './coordinatorIdentity.js';
+import { workerChatConnection } from './remoteChat.js';
+import { isUsageLimitError } from './managerChat/acpAdapter.js';
 import { parseWorkerChatEvent, parseWorkerChatReply, readWorkerChatReply, type WorkerChatEvent } from './workerChatProtocol.js';
 
 const usage = { input_tokens: 3, output_tokens: 2, total_tokens: 5, estimated_cost_usd: 0.01, duration_seconds: 0.5 };
@@ -103,4 +111,37 @@ test('worker JSON reads enforce a byte limit and cancel oversized streams withou
   await assert.rejects(readWorkerChatReply(new Response(body, { headers: { 'Content-Type': 'application/json', 'Content-Length': '1' } }), create), /exceeds the supported size/);
   assert.equal(cancelled, true);
   assert.ok(reads <= 3, 'does not buffer the entire response');
+});
+
+test('only the typed usage-limit code permits remote handoff and raw worker errors stay redacted', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'gah-worker-error-'));
+  let event: unknown;
+  const server = createServer((req, res) => {
+    req.resume();
+    res.setHeader('Content-Type', 'application/x-ndjson');
+    res.end(JSON.stringify(event) + '\n');
+  });
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const registry = new RegistryService(join(root, 'registry.json'));
+  registry.registerNode({ node_id: 'worker', display_name: 'Worker', advertised_url: `http://127.0.0.1:${address.port}`,
+    version: '0.1.0', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback',
+    secret_ref: 'env:WORKER_CHAT_TEST_TOKEN', profiles: ['demo'] });
+  const adapter = workerChatConnection(registry, 'worker', 'demo', { repo: 'owner/repo', provider: 'github', web_url: 'https://github.com/owner/repo' }).adapter('claude');
+  for (const code of ['usage_limit', undefined, 'unknown']) {
+    event = { type: 'error', error: 'Quota exceeded; private-token=do-not-copy', ...(code ? { code } : {}) };
+    await assert.rejects(adapter.runTurn('demo', { prompt: 'hello', history: [], onChunk() {}, onToolResult() {} }), error => {
+      assert.ok(error instanceof Error);
+      assert.equal(isUsageLimitError(error), code === 'usage_limit');
+      assert.doesNotMatch(error.message, /private-token|do-not-copy/);
+      if (code === 'usage_limit') assert.equal(error.message, 'Worker agent usage limit reached.');
+      return true;
+    });
+  }
 });

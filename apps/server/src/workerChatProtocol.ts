@@ -7,7 +7,7 @@ export type WorkerChatEvent =
   | { type: 'toolCall'; tool: Parameters<NonNullable<TurnInput['onToolCall']>>[0] }
   | { type: 'permission'; id: string; request: Parameters<NonNullable<TurnInput['requestPermission']>>[0] }
   | { type: 'result'; result: Awaited<ReturnType<ManagerAdapter['runTurn']>> }
-  | { type: 'error'; error: string };
+  | { type: 'error'; error: string; code?: 'usage_limit' };
 
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every((entry) => typeof entry === 'string');
@@ -20,7 +20,9 @@ const measurement = (value: unknown, integral = false): value is number | null =
 export function parseWorkerChatEvent(value: unknown): WorkerChatEvent {
   if (object(value)) {
     if (value.type === 'chunk' && typeof value.text === 'string') return { type: 'chunk', text: value.text };
-    if (value.type === 'error' && typeof value.error === 'string') return { type: 'error', error: value.error };
+    if (value.type === 'error' && typeof value.error === 'string' && (value.code === undefined || value.code === 'usage_limit')) {
+      return { type: 'error', error: value.error, ...(value.code === 'usage_limit' ? { code: value.code } : {}) };
+    }
     if (value.type === 'toolResult' && typeof value.name === 'string' && typeof value.text === 'string') return { type: 'toolResult', name: value.name, text: value.text };
     if (value.type === 'toolCall' && object(value.tool)) {
       const tool = value.tool;

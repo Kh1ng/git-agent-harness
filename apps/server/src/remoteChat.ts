@@ -81,7 +81,9 @@ export function workerChatConnection(registry: RegistryService, nodeId: string, 
                     command('permission', { requestId, permissionId: event.id, optionId })
                   ).catch(() => abort.abort());
                 } else if (event.type === 'result') return event.result;
-                else if (event.type === 'error') throw new Error('Worker agent failed or stopped. Check its backend readiness.');
+                else if (event.type === 'error') throw new Error(event.code === 'usage_limit'
+                  ? 'Worker agent usage limit reached.'
+                  : 'Worker agent failed or stopped. Check its backend readiness.');
               }
               if (part.done) throw new Error('Worker disconnected before completing the turn.');
             }
