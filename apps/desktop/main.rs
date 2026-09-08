@@ -232,6 +232,17 @@ struct WorkerStatus {
     note: String,
 }
 
+// Use the worker's installed environment for every WSL tool; before installation,
+// report tools available to the login shell. Only the exit status leaves WSL.
+#[cfg(any(windows, test))]
+const WSL_TOOL_PROBE: &str = r#"
+worker_env="${2:-$HOME/.local/share/gah/worker/worker.env}"
+if [ -e "$worker_env" ]; then
+    source "$worker_env" >/dev/null 2>&1 || exit 1
+fi
+command -v "$1" >/dev/null 2>&1
+"#;
+
 #[tauri::command]
 async fn worker_status(
     window: tauri::WebviewWindow,
@@ -260,7 +271,9 @@ async fn worker_status(
                     "--exec",
                     "bash",
                     "-lc",
-                    &format!("command -v {name} >/dev/null"),
+                    WSL_TOOL_PROBE,
+                    "gah-tool-probe",
+                    name,
                 ])
                 .output()
                 .is_ok_and(|out| out.status.success());
@@ -514,6 +527,50 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn wsl_readiness_uses_worker_path_without_printing_credentials() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "gah-tool-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let tool = dir.join("gah-readiness-regression-tool");
+        std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let env = dir.join("worker.env");
+        let probe = |name: &str| {
+            let output = Command::new("bash")
+                .args(["-lc", WSL_TOOL_PROBE, "gah-tool-probe", name])
+                .arg(&env)
+                .output()
+                .unwrap();
+            assert!(output.stdout.is_empty() && output.stderr.is_empty());
+            output.status.success()
+        };
+        assert!(!probe("gah-readiness-regression-tool"));
+        assert!(probe("git")); // A machine without a worker still reports login-shell tools.
+        std::fs::write(
+            &env,
+            format!(
+                "export COORDINATOR_TOKEN='private-test-token'\necho \"$COORDINATOR_TOKEN\"\nexport PATH='{}':\"$PATH\"\n",
+                dir.to_string_lossy().replace('\'', "'\\''")
+            ),
+        )
+        .unwrap();
+        assert!(probe("gah-readiness-regression-tool"));
+        assert!(!probe("gah-readiness-missing-tool"));
+        std::fs::write(&env, "return 1\n").unwrap();
+        assert!(!probe("git")); // Do not fall back when an installed environment is broken.
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn presence_defaults_migrate_and_every_combination_is_recoverable() {
