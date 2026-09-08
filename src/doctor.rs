@@ -159,7 +159,7 @@ fn check_profile(defaults: &Defaults, profile: &Profile) -> bool {
     if !defaults.worktree_base.trim().is_empty() {
         failed |= !check_writable_path("worktree_base", Path::new(&defaults.worktree_base));
     }
-    failed |= !check_manager_memory(profile);
+    failed |= !check_manager_memory(defaults, profile);
     failed |= !check_candidate_model_consistency(defaults, profile);
     failed |= !check_backend_instance_config(defaults, profile);
     failed |= !check_generated_artifact_policy(profile);
@@ -546,7 +546,23 @@ fn check_writable_path(label: &str, path: &Path) -> bool {
     }
 }
 
-fn check_manager_memory(profile: &Profile) -> bool {
+fn check_manager_memory(defaults: &Defaults, profile: &Profile) -> bool {
+    let node = match crate::node_role::NodeRoleStatus::resolve(defaults) {
+        Ok(node) => node,
+        Err(error) => {
+            print_check(CheckStatus::Fail, "node role", &format!("{error:#}"));
+            return false;
+        }
+    };
+    // Worker execution uses central memory; it must not require a local manager store.
+    if node.role == crate::node_role::NodeRole::Worker {
+        print_check(
+            CheckStatus::Pass,
+            "manager memory",
+            "managed by central; no local manager memory required",
+        );
+        return true;
+    }
     let path = Path::new(&profile.local_path).join("docs/MANAGER_MEMORY.md");
     if path.exists() {
         print_check(
