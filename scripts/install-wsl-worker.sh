@@ -19,6 +19,13 @@ tar -xzf "$stage/source.tar.gz" -C "$release_dir"
 mkdir -p "$release_dir/bin"
 install -m 755 "$stage/gah" "$release_dir/bin/gah"
 "$release_dir/bin/gah" --version
+# role-cli-check:start -- also exercised without installing a service.
+if ! "$release_dir/bin/gah" config set --help | grep -q -- '--node-role' ||
+   ! "$release_dir/bin/gah" status --help | grep -q -- '--role'; then
+  echo 'The downloaded GAH CLI is too old for this worker installer. Publish/install a matching CLI release with config --node-role and status --role support. The existing worker service and settings have not changed.' >&2
+  exit 1
+fi
+# role-cli-check:end
 if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 20 ]; then
   node_dir="$install_dir/node"
   mkdir -p "$node_dir"
@@ -51,7 +58,7 @@ identity.update(display_name=settings['display_name'], advertised_url=settings['
 identity_path.write_text(json.dumps(identity))
 env = {
     'COORDINATOR_TOKEN': settings['token'], 'GAH_ALLOW_INSECURE_HTTP': '1',
-    'GAH_NODE_ROLE': 'worker', 'GAH_COORDINATOR_IDENTITY_PATH': str(identity_path),
+    'GAH_COORDINATOR_IDENTITY_PATH': str(identity_path),
     'GAH_CONFIG_PATH': str(config), 'GAH_CONFIG': str(config),
     'GAH_BINARY': str(release / 'bin/gah'), 'HOST': '0.0.0.0', 'PORT': '3774',
 }
@@ -75,6 +82,9 @@ unit_path.parent.mkdir(parents=True, exist_ok=True)
 quoted_start = str(start).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%')
 unit_path.write_text('[Unit]\nDescription=GAH headless WSL worker\nAfter=network-online.target\n\n[Service]\nExecStart=/bin/bash --login "' + quoted_start + '"\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n')
 PY
+# Persist role beside profiles. Do not pin it in worker.env: re-flagging config survives restart.
+central_url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["central_url"])' "$stage/settings.json")"
+"$release_dir/bin/gah" config set --node-role worker --registry-central-url "$central_url" --config "$HOME/.config/gah/config.toml"
 systemctl --user daemon-reload
 systemctl --user enable gah-worker.service
 systemctl --user restart gah-worker.service

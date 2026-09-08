@@ -1,4 +1,7 @@
 import express from 'express';
+import type { NodeRoleStatus } from '@git-agent-harness/contracts';
+import { workerRouteGuard, validateNodeRole } from './nodeRole.js';
+import { workerMemoryRouter } from './workerMemory.js';
 import { nodeSetupRouter } from './nodeSetup.js';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -120,6 +123,7 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   registryService?: RegistryService;
   claimsService?: ClaimsService;
   coordinatorPort?: number;
+  node?: NodeRoleStatus;
   getPendingCommits?: typeof getPendingCommits;
   startAdminUpdate?: typeof startAdminUpdate;
   readAdminUpdateState?: typeof readAdminUpdateState;
@@ -132,7 +136,8 @@ const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
 };
 
 /** Validate and seed the central skill bank before the HTTP server starts. */
-export function initializeSkillBank(): void {
+export function initializeSkillBank(node: NodeRoleStatus = { role: 'central', central_url: null }): void {
+  if (node.role === 'worker') throw new Error('A worker must not initialize a local skill bank.');
   listSkills();
   const docsPath = process.env.GAH_SKILL_DOCS_PATH
     || fileURLToPath(new URL('../../../docs/gah-manager-skill.md', import.meta.url));
@@ -242,11 +247,12 @@ export function createServer(
     };
   };
 
+  const node = validateNodeRole(configDeps.node ?? { role: 'central', central_url: null });
   const registryService =
     configDeps.registryService ||
-    new RegistryService(undefined, getCoordinatorIdentity(undefined, coordinatorPort).advertised_url, coordinatorPort);
-  const claimsService = configDeps.claimsService || new ClaimsService();
-
+    new RegistryService(node.role === 'worker' ? null : undefined, getCoordinatorIdentity(undefined, coordinatorPort).advertised_url, coordinatorPort);
+  let claimsService = configDeps.claimsService;
+  const centralClaims = () => claimsService ??= new ClaimsService();
   const app = express();
   // Trust X-Forwarded-* only when the immediate hop is loopback (a TLS-terminating
   // reverse proxy on this same host). `true` would trust those headers from any
@@ -257,6 +263,9 @@ export function createServer(
   // Middleware
   app.use(cors());
   app.use(express.json());
+  if (node.role === 'worker') app.use('/api', authMiddleware);
+  app.use(workerRouteGuard(node));
+  app.use('/api/worker-memory', authMiddleware, workerMemoryRouter());
   // authMiddleware guards new, narrowly scoped sensitive surfaces. The rest
   // of the API (loop start/stop, legacy config mutation, etc.) is
   // unauthenticated pending #532; applying this globally would silently change
@@ -268,7 +277,6 @@ export function createServer(
   // the same gate as registry/claims rather than the unauthenticated default.
   app.use('/api/settings', authMiddleware);
   app.use('/api/settings/nodes', nodeSetupRouter());
-  if (process.env.GAH_NODE_ROLE === 'worker') app.use('/api', authMiddleware);
   app.use('/api/projects', authMiddleware);
   // /api/skills (issue #963/#964): the central skill bank mutates the
   // versioned store, so it gets the same narrow auth gate as projects.
@@ -321,13 +329,14 @@ export function createServer(
 
     res.json({
       status,
+      node,
       node_id: identity.node_id,
       display_name: identity.display_name,
       advertised_url: identity.advertised_url,
       version: identity.version,
       schema_digest: identity.schema_digest,
       timestamp: Date.now(),
-      checks: readiness.checks
+      checks: { ...readiness.checks, nodeRole: { name: 'nodeRole', ready: true } }
     });
   });
 
@@ -486,7 +495,7 @@ export function createServer(
       res.json({
         nodes: registryService.getNodesSummary(),
         observations: registryService.getCachedObservations(),
-        leases: claimsService.getLeases()
+        leases: centralClaims().getLeases()
       });
     } catch (error) {
       res.status(500).json({ error: 'Failed to read fleet', message: error instanceof Error ? error.message : String(error) });
@@ -540,7 +549,7 @@ export function createServer(
   app.post('/api/claims/acquire', (req, res) => {
     try {
       const { nodeId, profile, workId } = authorizeClaimRequest(req.body.node_id, req.body.profile, req.body.work_id);
-      const lease = claimsService.acquire(nodeId, profile, workId, req.body.lease_seconds);
+      const lease = centralClaims().acquire(nodeId, profile, workId, req.body.lease_seconds);
       res.status(200).json(lease);
     } catch (error) {
       if (error instanceof ClaimConflictError) {
@@ -554,7 +563,7 @@ export function createServer(
   app.post('/api/claims/renew', (req, res) => {
     try {
       const { nodeId, profile, workId } = authorizeClaimRequest(req.body.node_id, req.body.profile, req.body.work_id);
-      const lease = claimsService.renew(nodeId, profile, workId, req.body.lease_seconds);
+      const lease = centralClaims().renew(nodeId, profile, workId, req.body.lease_seconds);
       res.status(200).json(lease);
     } catch (error) {
       if (error instanceof ClaimConflictError) {
@@ -568,7 +577,7 @@ export function createServer(
   app.post('/api/claims/release', (req, res) => {
     try {
       const { nodeId, profile, workId } = authorizeClaimRequest(req.body.node_id, req.body.profile, req.body.work_id);
-      claimsService.release(nodeId, profile, workId);
+      centralClaims().release(nodeId, profile, workId);
       res.status(200).json({ success: true });
     } catch (error) {
       res.status(400).json({ error: 'Bad Request', message: error instanceof Error ? error.message : String(error) });
@@ -589,11 +598,12 @@ export function createServer(
     try {
       const [status, nodes] = await Promise.all([
         runStatus(profile),
-        registryService.getNodeObservations(profile)
+        node.role === 'worker' ? Promise.resolve([]) : registryService.getNodeObservations(profile)
       ]);
       const identity = getCoordinatorIdentity(undefined, coordinatorPort);
       const enriched = {
         ...status,
+        node,
         node_id: identity.node_id,
         display_name: identity.display_name,
         advertised_url: identity.advertised_url,
@@ -644,7 +654,7 @@ export function createServer(
     }
   });
 
-  app.get('/api/doctor', async (req, res) => {
+  app.get('/api/doctor', authMiddleware, async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     try {
       res.json(await configEffectiveDeps.runDoctor(profile));

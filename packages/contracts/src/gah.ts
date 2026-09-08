@@ -356,7 +356,14 @@ export interface PmParentStatus {
   reconciled: boolean;
 }
 
+export interface NodeRoleStatus {
+  role: 'central' | 'worker';
+  central_url: string | null;
+}
+
 export interface StatusSnapshot {
+  /** Host role added in #938; absent on older CLIs. */
+  node?: NodeRoleStatus;
   schema_version: number;
   review_contract_version: number;
   generated_at: string;
@@ -836,6 +843,7 @@ export type SettingsConfigProfileSummary = Omit<ConfigProfileSummary, 'notificat
 
 /** Versioned allowlisted response from `gah config show --json --full`. */
 export interface ConfigShowFull {
+  node?: NodeRoleStatus;
   schema_version: number;
   config_path: string;
   current_manager: string | null;

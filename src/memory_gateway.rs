@@ -25,6 +25,7 @@
 //! -- this codebase has none today, and the dispatch pipeline is
 //! synchronous throughout.
 
+use crate::node_role::NodeRole;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::io::Write;
@@ -125,12 +126,33 @@ struct CaptureResponse {
     message: String,
 }
 
-fn gateway_url() -> String {
-    std::env::var("TDAI_GATEWAY_URL").unwrap_or_else(|_| DEFAULT_GATEWAY_URL.to_string())
-}
-
-fn gateway_api_key() -> Option<String> {
-    std::env::var("TDAI_GATEWAY_API_KEY").ok()
+/// Workers always use central's authenticated relay, including when a caller used --config.
+fn gateway_connection(
+    defaults: &crate::config::Defaults,
+) -> Result<(String, Option<String>, NodeRole)> {
+    let node = crate::node_role::NodeRoleStatus::resolve(defaults)?;
+    if node.role == NodeRole::Worker {
+        let token = std::env::var("COORDINATOR_TOKEN")
+            .context("worker memory requires COORDINATOR_TOKEN")?;
+        if token.trim().is_empty() || token.chars().any(char::is_control) {
+            anyhow::bail!(
+                "worker memory requires a nonempty COORDINATOR_TOKEN without control characters"
+            );
+        }
+        return Ok((
+            format!(
+                "{}/api/worker-memory",
+                node.central_url.unwrap().trim_end_matches('/')
+            ),
+            Some(token),
+            node.role,
+        ));
+    }
+    Ok((
+        std::env::var("TDAI_GATEWAY_URL").unwrap_or_else(|_| DEFAULT_GATEWAY_URL.to_string()),
+        std::env::var("TDAI_GATEWAY_API_KEY").ok(),
+        node.role,
+    ))
 }
 
 /// Same normalization as `memoryGatewayClient.ts`'s `normalizeRemoteUrl`:
@@ -213,12 +235,14 @@ pub(crate) fn session_key_for_ticket(
 /// as an optional prompt section; nothing downstream treats its absence as
 /// a failure.
 pub fn recall_for_ticket(
+    defaults: &crate::config::Defaults,
     profile_name: &str,
     local_path: &str,
     work_id: &str,
     query: &str,
 ) -> Option<String> {
     recall_for_ticket_with_transport(
+        defaults,
         &CurlMemoryGatewayTransport,
         profile_name,
         local_path,
@@ -228,6 +252,7 @@ pub fn recall_for_ticket(
 }
 
 fn recall_for_ticket_with_transport(
+    defaults: &crate::config::Defaults,
     transport: &dyn MemoryGatewayTransport,
     profile_name: &str,
     local_path: &str,
@@ -235,9 +260,19 @@ fn recall_for_ticket_with_transport(
     query: &str,
 ) -> Option<String> {
     let session_key = session_key_for_ticket(profile_name, local_path, work_id);
-    let url = format!("{}/recall", gateway_url());
-    let body = serde_json::json!({ "query": query, "session_key": session_key }).to_string();
-    let token = gateway_api_key();
+    let (base_url, token, role) = match gateway_connection(defaults) {
+        Ok(connection) => connection,
+        Err(error) => {
+            eprintln!("[gah] memory recall unavailable: {error:#}");
+            return None;
+        }
+    };
+    let url = format!("{}/recall", base_url.trim_end_matches('/'));
+    let mut body = serde_json::json!({ "query": query, "session_key": session_key });
+    if role == NodeRole::Worker {
+        body["profile"] = profile_name.into();
+    }
+    let body = body.to_string();
 
     let (status, response_body) =
         match transport.post(&url, &body, token.as_deref(), RECALL_TIMEOUT_SECONDS) {
@@ -283,6 +318,7 @@ fn recall_for_ticket_with_transport(
 /// response, or degraded. Caller logs the result; nothing downstream treats its
 /// absence as a failure.
 pub fn capture_for_ticket(
+    defaults: &crate::config::Defaults,
     profile_name: &str,
     local_path: &str,
     work_id: &str,
@@ -290,6 +326,7 @@ pub fn capture_for_ticket(
     assistant_content: &str,
 ) -> Option<u64> {
     capture_for_ticket_with_transport(
+        defaults,
         &CurlMemoryGatewayTransport,
         profile_name,
         local_path,
@@ -300,6 +337,7 @@ pub fn capture_for_ticket(
 }
 
 fn capture_for_ticket_with_transport(
+    defaults: &crate::config::Defaults,
     transport: &dyn MemoryGatewayTransport,
     profile_name: &str,
     local_path: &str,
@@ -308,14 +346,23 @@ fn capture_for_ticket_with_transport(
     assistant_content: &str,
 ) -> Option<u64> {
     let session_key = session_key_for_ticket(profile_name, local_path, work_id);
-    let url = format!("{}/capture", gateway_url());
-    let body = serde_json::json!({
+    let (base_url, token, role) = match gateway_connection(defaults) {
+        Ok(connection) => connection,
+        Err(error) => {
+            eprintln!("[gah] memory capture unavailable: {error:#}");
+            return None;
+        }
+    };
+    let url = format!("{}/capture", base_url.trim_end_matches('/'));
+    let mut body = serde_json::json!({
         "user_content": user_content,
         "assistant_content": assistant_content,
         "session_key": session_key
-    })
-    .to_string();
-    let token = gateway_api_key();
+    });
+    if role == NodeRole::Worker {
+        body["profile"] = profile_name.into();
+    }
+    let body = body.to_string();
 
     let (status, response_body) =
         match transport.post(&url, &body, token.as_deref(), RECALL_TIMEOUT_SECONDS) {
@@ -355,6 +402,7 @@ fn capture_for_ticket_with_transport(
 
 /// Issue #915: Convenience function to capture attempt results and update ledger
 pub fn capture_attempt_and_update_ledger(
+    defaults: &crate::config::Defaults,
     profile_name: &str,
     local_path: &str,
     work_id: &str,
@@ -363,6 +411,7 @@ pub fn capture_attempt_and_update_ledger(
     ledger: &mut crate::ledger::LedgerEntry,
 ) -> Option<u64> {
     let l0_recorded = capture_for_ticket(
+        defaults,
         profile_name,
         local_path,
         work_id,
@@ -448,16 +497,71 @@ mod tests {
     }
 
     #[test]
+    fn worker_capture_uses_central_relay_and_coordinator_token() {
+        // Exercise real environment precedence in a child so other tests keep their environment.
+        if std::env::var_os("GAH_MEMORY_ROLE_TEST_CHILD").is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "memory_gateway::tests::worker_capture_uses_central_relay_and_coordinator_token", "--nocapture"])
+                .env("GAH_MEMORY_ROLE_TEST_CHILD", "1")
+                .env("GAH_NODE_ROLE", "worker")
+                .env("COORDINATOR_TOKEN", "worker-token")
+                .env("TDAI_GATEWAY_URL", "https://wrong-gateway.test")
+                .env("TDAI_GATEWAY_API_KEY", "wrong-gateway-key")
+                .output().unwrap();
+            assert!(
+                result.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        let defaults = crate::config::Defaults {
+            registry_central_url: Some("https://central.test".into()),
+            ..Default::default()
+        };
+        let transport = FakeTransport::queue(vec![(200, r#"{"l0_recorded":1,"code":0}"#)]);
+        assert_eq!(
+            capture_for_ticket_with_transport(
+                &defaults,
+                &transport,
+                "project",
+                "/nonexistent/gah-memory-test",
+                "#1",
+                "task",
+                "result"
+            ),
+            Some(1)
+        );
+        let calls = transport.calls.borrow();
+        assert_eq!(calls[0].0, "https://central.test/api/worker-memory/capture");
+        assert_eq!(calls[0].2.as_deref(), Some("worker-token"));
+        let body: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(body["profile"], "project");
+    }
+
+    #[test]
     fn recall_returns_context_on_success() {
         let t = FakeTransport::queue(vec![(
             200,
             r#"{"context":"relevant history","memory_count":2,"code":0,"message":""}"#,
         )]);
-        let result =
-            recall_for_ticket_with_transport(&t, "gah", "/tmp", "#362", "checkpoint resume");
+        let result = recall_for_ticket_with_transport(
+            &crate::config::Defaults::default(),
+            &t,
+            "gah",
+            "/tmp",
+            "#362",
+            "checkpoint resume",
+        );
         assert_eq!(result, Some("relevant history".to_string()));
         assert_eq!(t.calls.borrow().len(), 1);
         assert!(t.calls.borrow()[0].0.ends_with("/recall"));
+        let body: serde_json::Value = serde_json::from_str(&t.calls.borrow()[0].1).unwrap();
+        assert!(
+            body.get("profile").is_none(),
+            "Direct gateway requests keep their existing contract"
+        );
     }
 
     #[test]
@@ -466,16 +570,28 @@ mod tests {
             responses: RefCell::new(vec![Err("connection refused".to_string())].into()),
             calls: RefCell::new(Vec::new()),
         };
-        let result =
-            recall_for_ticket_with_transport(&t, "gah", "/tmp", "#362", "checkpoint resume");
+        let result = recall_for_ticket_with_transport(
+            &crate::config::Defaults::default(),
+            &t,
+            "gah",
+            "/tmp",
+            "#362",
+            "checkpoint resume",
+        );
         assert_eq!(result, None);
     }
 
     #[test]
     fn recall_returns_none_on_non_200_status() {
         let t = FakeTransport::queue(vec![(401, r#"{"error":"unauthorized"}"#)]);
-        let result =
-            recall_for_ticket_with_transport(&t, "gah", "/tmp", "#362", "checkpoint resume");
+        let result = recall_for_ticket_with_transport(
+            &crate::config::Defaults::default(),
+            &t,
+            "gah",
+            "/tmp",
+            "#362",
+            "checkpoint resume",
+        );
         assert_eq!(result, None);
     }
 
@@ -485,8 +601,14 @@ mod tests {
             200,
             r#"{"context":"","memory_count":0,"code":1,"message":"degraded"}"#,
         )]);
-        let result =
-            recall_for_ticket_with_transport(&t, "gah", "/tmp", "#362", "checkpoint resume");
+        let result = recall_for_ticket_with_transport(
+            &crate::config::Defaults::default(),
+            &t,
+            "gah",
+            "/tmp",
+            "#362",
+            "checkpoint resume",
+        );
         assert_eq!(result, None);
     }
 
@@ -496,8 +618,14 @@ mod tests {
             200,
             r#"{"context":"   ","memory_count":0,"code":0,"message":""}"#,
         )]);
-        let result =
-            recall_for_ticket_with_transport(&t, "gah", "/tmp", "#362", "checkpoint resume");
+        let result = recall_for_ticket_with_transport(
+            &crate::config::Defaults::default(),
+            &t,
+            "gah",
+            "/tmp",
+            "#362",
+            "checkpoint resume",
+        );
         assert_eq!(result, None);
     }
 
@@ -508,6 +636,7 @@ mod tests {
             r#"{"l0_recorded":2,"scheduler_notified":true,"code":0,"message":""}"#,
         )]);
         let result = capture_for_ticket_with_transport(
+            &crate::config::Defaults::default(),
             &t,
             "gah",
             "/tmp",
@@ -527,6 +656,7 @@ mod tests {
             calls: RefCell::new(Vec::new()),
         };
         let result = capture_for_ticket_with_transport(
+            &crate::config::Defaults::default(),
             &t,
             "gah",
             "/tmp",
@@ -541,6 +671,7 @@ mod tests {
     fn capture_returns_none_on_non_200_status() {
         let t = FakeTransport::queue(vec![(401, r#"{"error":"unauthorized"}"#)]);
         let result = capture_for_ticket_with_transport(
+            &crate::config::Defaults::default(),
             &t,
             "gah",
             "/tmp",
@@ -558,6 +689,7 @@ mod tests {
             r#"{"l0_recorded":0,"scheduler_notified":false,"code":1,"message":"degraded"}"#,
         )]);
         let result = capture_for_ticket_with_transport(
+            &crate::config::Defaults::default(),
             &t,
             "gah",
             "/tmp",

@@ -63,18 +63,13 @@ pub struct GahConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
 pub struct Defaults {
-    #[serde(default)]
     pub artifact_root: String,
-    #[serde(default)]
     pub worktree_base: String,
-    #[serde(default)]
     pub llm_base_url: String,
-    #[serde(default)]
     pub llm_model_local: String,
-    #[serde(default)]
     pub llm_model_cloud: String,
-    #[serde(default)]
     pub routing: RoutingPolicy,
     /// Which agent CLI ("claude" | "codex" | "hermes") is currently acting
     /// as the operator's manager across all profiles/projects. Read by the
@@ -83,20 +78,17 @@ pub struct Defaults {
     /// per-profile -- "who's on call" is a cross-project fact, unlike
     /// autonomy bounds. `None`/unrecognized values mean no wake happens
     /// even if a profile has autonomy enabled.
-    #[serde(default)]
     pub current_manager: Option<String>,
     /// See `crate::network_exposure` module docs (issue #879).
-    #[serde(default)]
     pub network_exposure: crate::network_exposure::NetworkExposureLevel,
     /// See `crate::network_exposure` module docs.
-    #[serde(default)]
     pub lan_cidrs: Vec<String>,
     /// See `crate::network_exposure` module docs.
     #[serde(default = "crate::network_exposure::default_tailscale_cidr")]
     pub tailscale_cidr: Option<String>,
-    #[serde(default)]
     pub registry_central_url: Option<String>,
-    #[serde(default)]
+    /// Host responsibility. Worker services keep execution local and central state remote.
+    pub node_role: crate::node_role::NodeRole,
     pub registry_preflight_mode: crate::fleet_preflight::PreflightMode,
 }
 

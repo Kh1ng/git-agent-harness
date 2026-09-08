@@ -22,7 +22,8 @@ pub struct EventsArgs {
 }
 
 pub struct StatusArgs {
-    pub profile: String,
+    pub profile: Option<String>,
+    pub role: bool,
     pub json: bool,
     pub config_path: Option<String>,
 }
@@ -236,7 +237,26 @@ pub fn run_events(args: EventsArgs) -> Result<()> {
 
 pub fn run_status(args: StatusArgs) -> Result<()> {
     let cfg = config::load(args.config_path.as_deref())?;
-    status::run(&cfg, &args.profile, args.json)?;
+    if args.role {
+        let node = crate::node_role::NodeRoleStatus::resolve(&cfg.defaults)?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&node)?);
+        } else {
+            println!(
+                "Role: {:?}\nCentral URL: {}",
+                node.role,
+                node.central_url.as_deref().unwrap_or("(unset)")
+            );
+        }
+    } else {
+        status::run(
+            &cfg,
+            args.profile
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--profile is required unless --role is used"))?,
+            args.json,
+        )?;
+    }
     Ok(())
 }
 

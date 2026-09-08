@@ -305,7 +305,7 @@ export class RegistryService {
   private observationRequests = new Map<string, number>();
   private observations = new Map<string, NodeObservationSnapshot>();
   private listeners = new Set<() => void>();
-  private configPath: string;
+  private configPath: string | null;
   private nodes: Map<string, RegisteredNode> = new Map();
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
   private consecutiveBadChecks: Map<string, number> = new Map();
@@ -317,15 +317,16 @@ export class RegistryService {
   private selfUrl: string | null;
   private listenerPort: number | null;
 
-  constructor(configPath?: string, selfEndpoint?: string, listenerPort?: number) {
-    this.configPath = configPath || process.env.GAH_REGISTRY_CONFIG_PATH || resolve(process.cwd(), 'config/registry-config.json');
+  constructor(configPath?: string | null, selfEndpoint?: string, listenerPort?: number) {
+    // A worker uses local session transport without reading or writing a central registry.
+    this.configPath = configPath === null ? null : configPath || process.env.GAH_REGISTRY_CONFIG_PATH || resolve(process.cwd(), 'config/registry-config.json');
     this.selfUrl = selfEndpoint ?? null;
     this.listenerPort = listenerPort ?? (selfEndpoint ? urlPort(new URL(selfEndpoint)) : null);
     this.load();
   }
 
   private load() {
-    if (existsSync(this.configPath)) {
+    if (this.configPath && existsSync(this.configPath)) {
       try {
         const data = JSON.parse(readFileSync(this.configPath, 'utf8'));
         if (Array.isArray(data.nodes)) {
@@ -340,6 +341,7 @@ export class RegistryService {
   }
 
   private save() {
+    if (!this.configPath) throw new Error('Workers cannot persist a central registry.');
     try {
       const dir = dirname(this.configPath);
       if (!existsSync(dir)) {

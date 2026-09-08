@@ -21,10 +21,12 @@ case "$role" in
   *) echo "ERROR: unknown GAH_NODE_ROLE='$role' (expected 'central' or 'worker')" >&2; exit 1 ;;
 esac
 
+
 # Fresh installs and routine upgrades use the same Rust update implementation.
 # --bin gah is required: Cargo.toml declares a second [[bin]]
 # (generate-cli-capabilities) with no default-run set, so a bare
 # `cargo run` is ambiguous and errors instead of picking one.
+bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --bin gah --
 cargo run --bin gah -- update --repo "$repo_root" --role "$role"
 
 # Persistent server bind-host override (issue #643). Created only on first
@@ -96,7 +98,7 @@ upsert_gateway_env_line() {
 case "${GAH_GATEWAY_MODE:-}" in
   remote)
     # gateway-url-default:start -- extracted verbatim by
-    # tests/source_structure.rs::install_scripts_default_gateway_url_to_central_host.
+    # tests/source_structure.rs::install_linux_defaults_gateway_url_to_central_host.
     # Issue #947: use the already-configured central host; `tailscale ip -4`
     # would return this worker's own address, not the remote gateway's.
     if [ -z "${GAH_GATEWAY_URL:-}" ]; then

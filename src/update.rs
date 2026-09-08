@@ -13,25 +13,7 @@ use std::fs::{copy, create_dir_all, read_dir, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-/// Whether this host runs the control plane (`apps/server`, `gah-server.service`)
-/// or is just a worker that dispatches jobs. A worker never needs the Node
-/// server built or started -- only the CLI and (when systemd is present) the
-/// dispatch-loop unit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostRole {
-    Central,
-    Worker,
-}
-
-impl HostRole {
-    pub fn parse(value: &str) -> Result<Self> {
-        match value {
-            "central" => Ok(HostRole::Central),
-            "worker" => Ok(HostRole::Worker),
-            other => bail!("invalid --role '{other}' (expected 'central' or 'worker')"),
-        }
-    }
-}
+pub use crate::node_role::NodeRole as HostRole;
 
 pub struct UpdateArgs {
     pub repo: Option<PathBuf>,

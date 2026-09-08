@@ -66,6 +66,7 @@ pub(super) fn record_failed_validation_attempt(
     });
     if let Some(work_id) = ledger.work_id.clone() {
         crate::memory_gateway::capture_attempt_and_update_ledger(
+            &cfg.defaults,
             profile_name,
             &profile.local_path,
             &work_id,
@@ -81,6 +82,7 @@ pub(super) fn record_failed_validation_attempt(
 /// Issue #915: best-effort capture of a successful attempt; failures are
 /// swallowed inside memory_gateway and never affect dispatch.
 pub(super) fn capture_successful_attempt(
+    cfg: &GahConfig,
     profile_name: &str,
     local_path: &str,
     attempt: u32,
@@ -90,6 +92,7 @@ pub(super) fn capture_successful_attempt(
         return;
     };
     crate::memory_gateway::capture_attempt_and_update_ledger(
+        &cfg.defaults,
         profile_name,
         local_path,
         &work_id,

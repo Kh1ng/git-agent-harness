@@ -10,7 +10,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { RegistryService } from './registryService.js';
 import { COORDINATOR_SCHEMA_DIGEST, getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { createWebSocketHandler } from './wsServer.js';
-import type { ServerMessage } from '@git-agent-harness/contracts';
+import type { NodeRoleStatus, ServerMessage } from '@git-agent-harness/contracts';
 
 // Hermetic: welcome is pushed only after gahCli.runStatus() spawns a real
 // `gah status` child. A cold call of the repo's release binary takes ~21s
@@ -31,10 +31,10 @@ process.env.GAH_BINARY = fileURLToPath(new URL('../tests/fixtures/gah/gah', impo
  * against real `ws` sockets to ground that assumption in the real
  * server/client boundary.
  */
-async function withWsServer(testFn: (wsUrl: string) => Promise<void>) {
+async function withWsServer(testFn: (wsUrl: string) => Promise<void>, node?: NodeRoleStatus) {
   const server = http.createServer();
   const wss = new WebSocketServer({ server });
-  createWebSocketHandler(wss);
+  createWebSocketHandler(wss, { node });
 
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const { port } = server.address() as AddressInfo;
@@ -197,4 +197,18 @@ test('registry changes push only an invalidation over the existing websocket', a
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(dir, { recursive: true });
   }
+});
+
+
+test('worker websocket permits execution handshake but rejects manager chat', { timeout: 5000 }, async () => {
+  await withWsServer(async (wsUrl) => {
+    const ws = await connectAndAwaitWelcome(wsUrl);
+    try {
+      const rejected = new Promise<{ type: string; error: string }>((resolve) => ws.once('message', (data) => resolve(JSON.parse(data.toString()))));
+      ws.send(JSON.stringify({ type: 'manager.chat.sessionList', profile: 'gah' }));
+      const response = await rejected;
+      assert.equal(response.type, 'error');
+      assert.match(response.error, /only available on the central node/);
+    } finally { ws.close(); }
+  }, { role: 'worker', central_url: 'https://central.test' });
 });
