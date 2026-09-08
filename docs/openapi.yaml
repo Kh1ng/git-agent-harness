@@ -198,18 +198,21 @@ paths:
   /api/report:
     get:
       tags: [status]
-      summary: Usage/cost report, optionally grouped by backend or model
+      summary: Usage/cost report with CLI grouping
       parameters:
         - name: profile
           in: query
           schema: { type: string }
         - name: since
           in: query
-          schema: { type: string }
+          description: Relative duration such as 7d or 24h
+          schema: { type: string, default: 7d }
         - name: groupBy
           in: query
-          schema: { type: string, enum: [model, backend] }
+          schema: { type: string, enum: [none, backend, model, difficulty, backend-difficulty], default: backend }
       responses:
+        "400":
+          description: groupBy is unsupported or is not a single value
         "200":
           description: ReportData
           content:
@@ -227,7 +230,8 @@ paths:
           schema: { type: string }
         - name: since
           in: query
-          schema: { type: string }
+          description: Relative duration such as 7d or 24h
+          schema: { type: string, default: 7d }
         - name: bucket
           in: query
           schema: { type: string }
@@ -285,8 +289,10 @@ paths:
           schema: { type: string, default: 7d }
         - name: groupBy
           in: query
-          schema: { type: string, enum: [backend, model] }
+          schema: { type: string, enum: [none, backend, model, difficulty, backend-difficulty], default: none }
       responses:
+        "400":
+          description: groupBy is unsupported or is not a single value
         "200":
           description: LedgerSummary
           content:
