@@ -4,6 +4,8 @@ import { Navbar } from '../../src/components/Navbar.js';
 import { SessionDetailModal } from '../../src/components/SessionDetailModal.js';
 import { WebSocketProvider } from '../../src/ws/WebSocketContext.js';
 
+test.use({ hasTouch: true });
+
 test('mobile navigation contains focus, closes with Escape, selection, backdrop, and desktop resize', async ({ mount, page }, testInfo) => {
   await page.emulateMedia({ colorScheme: 'dark', reducedMotion: 'reduce' });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -36,10 +38,51 @@ test('mobile navigation contains focus, closes with Escape, selection, backdrop,
   await page.mouse.click(380, 400);
   await expect(dialog).not.toBeVisible();
   await opener.click();
+  for (const button of await dialog.getByRole('navigation').getByRole('button').all()) {
+    expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  }
   await page.screenshot({ path: testInfo.outputPath('gah-audit-mobile-dark.png') });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await expect(dialog).not.toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('gah-audit-desktop-dark.png') });
+});
+
+test('session controls stay reachable on small phones, landscape, and desktop', async ({ mount, page }, testInfo) => {
+  const sent: { type: string; command?: string; sessionId?: string }[] = [];
+  const session = { id: 'session-very-long-identifier-without-breaks-012345678901234567890', providerKind: 'claude' as const, status: 'running' as const, repo: 'owner/repository-with-a-long-name', mode: 'improve', target: '#1112', backend: 'claude', branch: 'feature/mobile-controller-with-a-long-branch-name', model: 'claude-model-long-identifier', startedAt: '2026-09-08T10:00:00.000Z' };
+  await page.routeWebSocket('**/ws', ws => {
+    ws.onMessage(raw => {
+      const message = JSON.parse(String(raw));
+      sent.push(message);
+      if (message.type === 'client.hello') {
+        ws.send(JSON.stringify({ type: 'server.welcome', serverVersion: 'test', serverProviderCatalog: { providers: [] }, sessions: [session], providers: {} }));
+        ws.send(JSON.stringify({ type: 'session.stdout', sessionId: session.id, data: 'Long output line '.repeat(50) }));
+      }
+    });
+  });
+  await page.reload();
+  await mount(<WebSocketProvider><SessionDetailModal session={session} onClose={() => {}} /></WebSocketProvider>);
+  const modal = page.getByRole('dialog', { name: 'Session: Improve #1112' });
+  await modal.getByRole('textbox', { name: 'Session command' }).fill('show status');
+  for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 844, height: 390 }, { width: 1440, height: 900 }]) {
+    await page.setViewportSize(viewport);
+    await expect(modal).toBeVisible();
+    expect(await modal.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    for (const control of await modal.locator('button, input').all()) {
+      const bounds = (await control.boundingBox())!;
+      expect(bounds.height).toBeGreaterThanOrEqual(44);
+      expect(bounds.y).toBeGreaterThanOrEqual(0);
+      expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height);
+    }
+    await expect(modal.getByRole('textbox', { name: 'Session command' })).toHaveCSS('font-size', '16px');
+    await expect(modal.getByRole('textbox', { name: 'Session command' })).toHaveValue('show status');
+    await page.screenshot({ path: testInfo.outputPath(`session-${viewport.width}x${viewport.height}.png`) });
+  }
+  await page.setViewportSize({ width: 320, height: 568 });
+  await modal.getByRole('button', { name: 'Send', exact: true }).click();
+  await expect.poll(() => sent.some(message => message.type === 'session.sendCommand' && message.command === 'show status' && message.sessionId === session.id)).toBe(true);
+  await modal.getByRole('button', { name: 'Stop', exact: true }).click();
+  await expect.poll(() => sent.some(message => message.type === 'session.stop' && message.sessionId === session.id)).toBe(true);
 });
 
 test('semantic text and badges retain contrast in explicit and system themes', async ({ mount, page }, testInfo) => {

@@ -8,6 +8,7 @@ import { ChatNodePicker } from '../components/ChatNodePicker.js';
 import { useChatNodes } from '../hooks/useChatNodes.js';
 import { NewChatModal, type ChatProfile } from '../components/NewChatModal.js';
 import { formatChatName } from '../lib/format.js';
+import { readNavigation, updateNavigation } from '../lib/navigationState.js';
 import { ProviderPicker, type ProviderSelection, type ProviderPickerProps } from '../components/ProviderPicker.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
@@ -545,7 +546,14 @@ export function ManagerChatPage() {
 
   /** WP2 sessions: null = the profile's default conversation; otherwise a
    * session bound to its own worktree. */
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [selection, setSelection] = useState(() => {
+    const saved = readNavigation();
+    return { profile, sessionId: saved.profile === profile ? saved.chat : null };
+  });
+  // A profile change must not request the previous project's conversation.
+  const sessionId = selection.profile === profile ? selection.sessionId : null;
+  const setSessionId = (sessionId: string | null) => setSelection({ profile, sessionId });
+  useEffect(() => updateNavigation({ profile, chat: sessionId }), [profile, sessionId]);
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const [sessionsError, setSessionsError] = useState(false);
   /** A new chat created for another project lands in the same render batch
@@ -690,14 +698,11 @@ export function ManagerChatPage() {
   useEffect(() => {
     const pendingSession = pendingSessionRef.current;
     pendingSessionRef.current = null;
+    setSessions([]);
+    setStorage(null);
+    setSelectedSessionIds(new Set());
+    if (selection.profile !== profile || pendingSession !== null) setSessionId(pendingSession);
     refreshSessions(profile);
-    if (pendingSession !== null) setSessionId(pendingSession);
-    return () => {
-      setSessions([]);
-      setSessionId(null);
-      setStorage(null);
-      setSelectedSessionIds(new Set());
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile]);
 

@@ -126,6 +126,27 @@
 }
 
 @layer components {
+  .app-shell {
+    padding-right: env(safe-area-inset-right);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+  }
+
+  .mobile-app-header {
+    min-height: calc(3.5rem + env(safe-area-inset-top));
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .mobile-drawer {
+    padding-top: max(0.75rem, env(safe-area-inset-top));
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+    padding-left: max(0.75rem, env(safe-area-inset-left));
+  }
+
+  .session-dialog {
+    width: calc(100vw - 2rem - env(safe-area-inset-left) - env(safe-area-inset-right));
+  }
+
   .input {
     @apply rounded-md border border-subtle bg-raised px-3 py-2 text-sm text-primary placeholder:text-muted disabled:opacity-50;
   }
@@ -268,6 +289,18 @@
   .chat-markdown pre code {
     @apply bg-transparent p-0;
     font-size: inherit;
+  }
+}
+
+@media (pointer: coarse) {
+  .btn, .btn-primary, .btn-secondary, .nav-link {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  input:not([type='checkbox']):not([type='radio']), select, textarea {
+    min-height: 44px;
+    font-size: 16px; /* Keep text entry readable without iOS focus zoom. */
   }
 }
 
