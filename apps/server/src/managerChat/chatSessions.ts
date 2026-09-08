@@ -98,6 +98,16 @@ function writeIndex(profile: string, sessions: ChatSessionSummary[], opts?: Chat
   renameSync(temporaryPath, path);
 }
 
+/** Persist coordinator metadata without touching a worker's checkout paths. */
+export function storeSession(session: ChatSessionSummary, opts?: ChatSessionStoreOptions): ChatSessionSummary {
+  const sessions = readIndex(session.profile, opts);
+  const index = sessions.findIndex(candidate => candidate.id === session.id);
+  if (index < 0) sessions.push(session);
+  else sessions[index] = session;
+  writeIndex(session.profile, sessions, opts);
+  return session;
+}
+
 function newSessionId(): string {
   return randomBytes(4).toString('hex');
 }
@@ -141,6 +151,8 @@ async function isDirty(worktreePath: string): Promise<boolean> {
 
 export interface CreateSessionInput {
   profile: string;
+  /** Coordinator-issued identity when materializing this conversation on another worker. */
+  sessionId?: string;
   /** The profile's config facts (repo_id, local_path, worktree_base). */
   profileInfo: Pick<ProfileSummary, 'repo_id' | 'local_path' | 'worktree_base'>;
   /** Pull request identity for PR chats; omitted for issue and general sessions. */
@@ -170,7 +182,9 @@ export async function createSession(input: CreateSessionInput, opts?: ChatSessio
   if (!existsSync(profileInfo.local_path)) {
     throw new Error(`Profile checkout not found at ${profileInfo.local_path}; cannot start a chat session`);
   }
-  const sessionId = newSessionId();
+  const sessionId = input.sessionId ?? newSessionId();
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(sessionId)) throw new Error('Invalid chat session identity');
+  if (getSession(profile, sessionId, opts)) throw new Error('Chat session already exists');
   const now = Date.now();
   const record: ChatSessionSummary = {
     id: sessionId,
@@ -190,17 +204,24 @@ export async function createSession(input: CreateSessionInput, opts?: ChatSessio
     settledReason: null
   };
 
-  if (input.worktree !== false && profileInfo.worktree_base.trim().length > 0) {
-    const dir = join(profileInfo.worktree_base, worktreeDirName(profileInfo.repo_id, sessionId));
-    mkdirSync(profileInfo.worktree_base, { recursive: true });
-    await git(profileInfo.local_path, 'worktree', 'add', '-b', record.branch, dir);
-    record.worktreePath = dir;
-  }
+  if (input.worktree !== false) await createWorkspace(record, profileInfo);
 
   const sessions = readIndex(profile, opts);
   sessions.push(record);
   writeIndex(profile, sessions, opts);
   return record;
+}
+
+/** Materialize a new node-local branch without replacing conversation metadata. */
+export async function createWorkspace(record: ChatSessionSummary, profileInfo: Pick<ProfileSummary, 'local_path' | 'worktree_base' | 'repo_id'>): Promise<void> {
+  if (!existsSync(profileInfo.local_path)) throw new Error('Profile checkout is not available on this node.');
+  if (profileInfo.worktree_base.trim().length > 0) {
+    const sessionId = record.id;
+    const dir = join(profileInfo.worktree_base, worktreeDirName(profileInfo.repo_id, sessionId));
+    mkdirSync(profileInfo.worktree_base, { recursive: true });
+    await git(profileInfo.local_path, 'worktree', 'add', '-b', record.branch, dir);
+    record.worktreePath = dir;
+  }
 }
 
 export function listSessions(profile: string, opts?: ChatSessionStoreOptions): ChatSessionSummary[] {

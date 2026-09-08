@@ -266,6 +266,8 @@ export interface ChatTranscriptTurn {
   role: 'user' | 'assistant' | 'system' | 'tool';
   text: string;
   timestamp: number;
+  nodeId?: string;
+  nodeName?: string;
   /** Present on assistant turns: which backend + model produced this reply. */
   backend?: string;
   model?: string | null;
@@ -318,6 +320,10 @@ export interface ChatSessionView {
  */
 export interface ChatSessionSummary {
   id: string;
+  /** Node selected for the next turn; workspaces stay on their owning nodes. */
+  nodeId?: string;
+  workspaceNodes?: string[];
+  workspaces?: Record<string, { branch: string; worktreePath: string | null }>;
   profile: string;
   /** Pull request identity for PR chats; absent for legacy, issue, and general sessions. */
   prNumber?: number;
@@ -394,6 +400,11 @@ export interface ChatNodeInfo {
   role: 'central' | 'worker';
   chatCapable: boolean;
   lastSeenAt: string | null;
+  state?: import('./registry.js').NodeObservationState | 'unknown';
+  observedAt?: string | null;
+  eligible?: boolean;
+  reason?: string | null;
+  profiles?: string[];
 }
 
 /** WP3: a live session preview — the dedicated port proxying the dev

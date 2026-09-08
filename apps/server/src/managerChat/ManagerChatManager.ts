@@ -48,6 +48,9 @@ import { randomUUID } from 'node:crypto';
 import type { ChatSessionEvent, ChatTranscriptTurn, ChatUsage, Skill } from '@git-agent-harness/contracts';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
 import { resolveSkillBindings } from '../skillBank.js';
+import { chatRoute, localChatNodeId, rememberWorkspace, type ChatRoute } from '../chatRouting.js';
+import { createWorkspace, getSession, sessionBranchName, storeSession } from './chatSessions.js';
+import type { ManagerAdapter } from './registry.js';
 
 // Serializes turns per profile -- without this, two concurrent messages for
 // the same profile (e.g. two open browser tabs) would both prompt the same
@@ -158,6 +161,7 @@ interface ActiveTurn {
   requestId: string;
   /** Adapter currently serving this turn (updated on quota handoff). */
   backend: string;
+  adapter?: ManagerAdapter;
   turnNo: number;
   seq: number;
   chunkWriter: ReturnType<typeof createEventWriter> | undefined;
@@ -236,13 +240,20 @@ export function listChatSessions(profile: string) {
 
 /** Creates a chat session bound to a fresh worktree (WP2). The backend
  * resolves at create time: explicit request, else the profile default. */
-export async function createChatSession(profile: string, backend?: string, model?: string | null, title?: string, reasoningEffort?: string | null) {
-  const profileInfo = await findProfileInfo(profile);
+export async function createChatSession(profile: string, backend?: string, model?: string | null, title?: string, reasoningEffort?: string | null, nodeId?: string) {
+  const selectedBackend = backend ?? backendForProfile(profile);
+  const route = await chatRoute(profile, nodeId, selectedBackend);
+  if (route.remote) {
+    const session = await route.remote.request<import('@git-agent-harness/contracts').ChatSessionSummary>({ action: 'create', backend: selectedBackend, model, title, reasoningEffort });
+    return storeSession(rememberWorkspace({ ...session, profile }, route), chatSessionStoreOptions);
+  }
+  const profileInfo = await findProfileInfo(route.profileName);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
-  return createSession(
+  const session = await createSession(
     { profile, profileInfo, backend: backend ?? backendForProfile(profile), model: model ?? null, reasoningEffort: reasoningEffort ?? null, title },
     chatSessionStoreOptions
   );
+  return storeSession(rememberWorkspace(session, route), chatSessionStoreOptions);
 }
 
 /** Changes a live session's backend/model/reasoning effort/title; the
@@ -504,6 +515,7 @@ export interface RunTurnContext {
   /** Per-conversation reasoning effort (WP2 sessions); undefined = none.
    * Same scoping rule as model: applies to the session's own backend only. */
   reasoningEffort?: string | null;
+  route?: ChatRoute;
 }
 
 export async function runTurn(
@@ -535,8 +547,9 @@ export async function runTurn(
     startBackend: context.backend,
     fallbackBackends: listManagerBackends().filter((b) => b.implemented && b.id !== context.backend).map((b) => b.id),
     attempt: async (backendId) => {
-      const adapter = resolveAdapter(backendId);
+      const adapter = context.route?.remote?.adapter(backendId, context.key.includes('#') ? context.key.slice(context.key.lastIndexOf('#') + 1) : undefined) ?? resolveAdapter(backendId);
       active.backend = backendId;
+      active.adapter = adapter;
       const attempt = async () => {
         // Model override applies to the session's own backend only -- a
         // handoff fallback backend uses its own default (the override is
@@ -673,7 +686,7 @@ export async function cancelManagerChatTurn(profile: string, sessionId?: string)
     // caller within CANCEL_SETTLE_TIMEOUT_MS regardless of whether the
     // adapter ever acknowledges.
     await Promise.race([
-      resolveAdapter(active.backend).cancelTurn(key),
+      (active.adapter ?? resolveAdapter(active.backend)).cancelTurn(key),
       new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, CANCEL_SETTLE_TIMEOUT_MS);
         timer.unref?.();
@@ -696,7 +709,7 @@ export async function steerManagerChatTurn(
   const active = activeTurns.get(key);
   if (!active) throw new Error('No turn is in flight for this conversation.');
 
-  const result = await resolveAdapter(active.backend).steerTurn(key, message);
+  const result = await (active.adapter ?? resolveAdapter(active.backend)).steerTurn(key, message);
   const sessionOpts = sessionId && sessionId !== 'default' ? { ...logOptions, sessionId } : logOptions;
   appendEvents(profile, [{
     type: 'user/message',
@@ -756,19 +769,37 @@ export function sendManagerChatMessage(
   requestId?: string,
   sessionId?: string,
   backendOverride?: string
+  , nodeId?: string
 ): Promise<ManagerChatTurnResult> {
   // Session-bound turns (WP2): resolve the session's worktree cwd (re-
   // materializing it from the branch if prune reclaimed the idle worktree)
   // and serve the turn from the session's own backend. Unknown or archived
   // sessions fail loudly rather than silently landing in the default log.
-  const prepareSession = async (): Promise<{ cwd?: string; backend: string; model?: string | null; reasoningEffort?: string | null }> => {
+  const prepareSession = async (): Promise<{ cwd?: string; backend: string; model?: string | null; reasoningEffort?: string | null; route: ChatRoute }> => {
     if (!sessionId || sessionId === 'default') {
-      return { backend: backendOverride ?? backendForProfile(profile) };
+      const backend = backendOverride ?? backendForProfile(profile);
+      return { backend, model: modelOverrideForProfile(profile, backend), reasoningEffort: reasoningEffortOverrideForProfile(profile, backend), route: await chatRoute(profile, nodeId, backend) };
     }
-    const profileInfo = await findProfileInfo(profile);
+    let session = getSession(profile, sessionId, chatSessionStoreOptions);
+    if (!session || session.archivedAt !== null) throw new Error('Chat session is unavailable or archived.');
+    const route = await chatRoute(profile, nodeId ?? session.nodeId, session.backend);
+    const previousNode = session.nodeId ?? localChatNodeId();
+    if (previousNode && !session.workspaces?.[previousNode]) session = { ...session, workspaces: { ...session.workspaces, [previousNode]: { branch: session.branch, worktreePath: session.worktreePath } } };
+    if (route.remote) {
+      const prepared = await route.remote.request<{ session: import('@git-agent-harness/contracts').ChatSessionSummary }>({ action: 'prepare', sessionId, backend: session.backend, model: session.model, reasoningEffort: session.reasoningEffort, title: session.title });
+      session = storeSession(rememberWorkspace({ ...session, ...prepared.session, profile, workspaces: session.workspaces }, route), chatSessionStoreOptions);
+      return { backend: session.backend, model: session.model, reasoningEffort: session.reasoningEffort, route };
+    }
+    const profileInfo = await findProfileInfo(route.profileName);
     if (!profileInfo) {
       throw new Error(`Profile '${profile}' not found for chat session '${sessionId}'`);
     }
+    if (route.nodeId && session.nodeId !== route.nodeId && previousNode !== route.nodeId) {
+      const existing = session.workspaces?.[route.nodeId];
+      session = { ...session, ...(existing ?? { branch: sessionBranchName(profileInfo.repo_id, sessionId, session.title ?? undefined), worktreePath: null }) };
+      if (!existing) await createWorkspace(session, profileInfo);
+    }
+    storeSession(rememberWorkspace(session, route), chatSessionStoreOptions);
     const resolved = await resolveSessionCwd(profile, sessionId, profileInfo, chatSessionStoreOptions);
     if (!resolved) {
       throw new Error(`No active chat session '${sessionId}' for profile '${profile}'`);
@@ -777,7 +808,7 @@ export function sendManagerChatMessage(
       const title = chatTitleFromText(message);
       if (title) updateSession(profile, sessionId, { title }, chatSessionStoreOptions);
     }
-    return { cwd: resolved.cwd, backend: resolved.session.backend, model: resolved.session.model, reasoningEffort: resolved.session.reasoningEffort };
+    return { cwd: resolved.cwd, backend: resolved.session.backend, model: resolved.session.model, reasoningEffort: resolved.session.reasoningEffort, route };
   };
 
   const key = chatKey(profile, sessionId);
@@ -912,6 +943,7 @@ export function sendManagerChatMessage(
       // WP3: watch agent tool output for a dev-server port; when one shows
       // up in a session turn, point the session's preview at it and push.
       const detectPreview = (text: string): void => {
+        if (sessionContext.route.remote) return;
         if (!sessionId || sessionId === 'default') return;
         const devPort = detectDevPort(text);
         if (devPort === null) return;
@@ -996,7 +1028,7 @@ export function sendManagerChatMessage(
           detectPreview(text);
         },
         active,
-        { key, backend: sessionContext.backend, cwd: sessionContext.cwd, model: sessionContext.model, reasoningEffort: sessionContext.reasoningEffort },
+        { key, backend: sessionContext.backend, cwd: sessionContext.cwd, model: sessionContext.model, reasoningEffort: sessionContext.reasoningEffort, route: sessionContext.route },
         onToolCall
       );
       // A cancel is a barrier for the queue: once we've sent session/cancel
@@ -1019,6 +1051,7 @@ export function sendManagerChatMessage(
         model,
         usage,
         timestamp: Date.now()
+        , nodeId: sessionContext.route.nodeId, nodeName: sessionContext.route.nodeName
       };
       const done: ChatSessionEvent[] = active.cancelled
         ? [{ type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'cancelled' }, timestamp: Date.now() }]
@@ -1031,6 +1064,7 @@ export function sendManagerChatMessage(
               backend,
               model,
               usage,
+              nodeId: sessionContext.route.nodeId, nodeName: sessionContext.route.nodeName,
               timestamp: assistant.timestamp
             },
             ...(handoff ? [{
