@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createAuthorizedWebSocketServer } from './webSocketAuth.js';
+import { DeviceAccess } from './deviceAccess.js';
 import { createServer as createExpressServer, initializeSkillBank } from './server.js';
 import { createServer as createHttpServer } from 'http';
 import { createWebSocketHandler } from './wsServer.js';
@@ -41,12 +42,14 @@ async function main() {
   if (node.role === 'central') initializeSkillBank(node);
 
   const coordinatorIdentity = getCoordinatorIdentity(undefined, PORT);
+  const deviceAccess = node.role === 'central' ? new DeviceAccess() : undefined;
   const registryService = new RegistryService(node.role === 'worker' ? null : undefined, coordinatorIdentity.advertised_url, PORT);
 
   // Create Express app
   const app = createExpressServer({
     coordinatorPort: PORT,
     node,
+    deviceAccess,
     registryService
   });
   
@@ -54,7 +57,7 @@ async function main() {
   const server = createHttpServer(app);
   
   // Create WebSocket server
-  const wss = createAuthorizedWebSocketServer(server, node.role);
+  const wss = createAuthorizedWebSocketServer(server, node.role, deviceAccess);
   
   // Check GAH CLI availability (real status/dispatch data is loaded
   // on-demand per WebSocket connection in wsServer.ts's sendWelcomeMessage,

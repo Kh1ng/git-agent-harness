@@ -1,4 +1,5 @@
 import { coordinatorToken } from './coordinatorToken.js';
+import type { PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harness/contracts';
 /**
  * Typed data-source client for GAH's pull-data REST endpoints.
  *
@@ -82,6 +83,16 @@ export class GahApiError extends Error {
     this.name = 'GahApiError';
   }
 }
+
+export const pairingApi = {
+  session: () => getJson<{ principal: { kind: 'owner' | 'device'; id?: string } }>('/api/pairing/session'),
+  devices: () => getJson<{ devices: PairedDevice[] }>('/api/pairing/devices'),
+  create: (origin: string) => postJson<PairingOffer, { origin: string }>('/api/pairing/offers', { origin }),
+  inspect: (code: string, server_id: string) => postJson<PairingPreview, { code: string; server_id: string }>('/api/pairing/inspect', { code, server_id }),
+  redeem: (code: string, server_id: string, name: string) => postJson<{ device: PairedDevice }, { code: string; server_id: string; name: string; confirm: true }>('/api/pairing/redeem', { code, server_id, name, confirm: true }),
+  revoke: (id: string) => deleteJson(`/api/pairing/devices/${encodeURIComponent(id)}`),
+  logout: () => postJson('/api/pairing/logout', {})
+};
 
 async function getJson<T>(path: string, params?: Record<string, string | undefined>): Promise<T> {
   const url = new URL(path, SERVER_URL);
