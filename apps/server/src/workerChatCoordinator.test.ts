@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
 import { createWorkerChatRouter } from './workerChat.js';
 import { authMiddleware } from './authMiddleware.js';
@@ -92,7 +93,7 @@ test('central keeps history and skills while authenticated turns move between wo
     };
     const node = { role: 'worker' as const, central_url: 'https://central.test' };
     const app = express();
-    app.use(express.json(), authMiddleware, workerRouteGuard(node));
+    app.use(express.json(), rateLimit({ windowMs: 60_000, limit: 200, validate: false }), authMiddleware, workerRouteGuard(node));
     app.get('/api/status', (_req, res) => res.json({ node_id: nodeId, generated_at: new Date().toISOString(), profile: { profile: profile.name }, backend_configured: { claude: true }, backend_instances: [], availability: [] }));
     app.use('/api/worker-chat', createWorkerChatRouter({ node, nodeId, profiles: async () => [profile], adapter: () => adapter, sessions: { stateDir: join(root, `${nodeId}-state`) } }));
     const url = await listen(createServer(app));

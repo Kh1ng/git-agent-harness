@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import type { ProfileSummary, ProjectImportResult, RegisteredNode } from '@git-agent-harness/contracts';
 import { authMiddleware } from './authMiddleware.js';
 import { COORDINATOR_SCHEMA_DIGEST } from './coordinatorIdentity.js';
@@ -44,7 +45,7 @@ test('central import clones and adds the profile only on its authenticated worke
   const workerRole = { role: 'worker', central_url: 'https://central.test' } as const;
   const worker = express();
   worker.use(express.json());
-  worker.use('/api', authMiddleware);
+  worker.use('/api', rateLimit({ windowMs: 60_000, limit: 200, validate: false }), authMiddleware);
   worker.use(workerRouteGuard(workerRole));
   worker.get('/health', (_req, res) => redirectHealth ? res.redirect('/unexpected') : res.json({ node_id: healthNodeId, node: workerRole, status: 'healthy' }));
   worker.get('/unexpected', (_req, res) => { unexpectedRequests += 1; res.sendStatus(200); });
@@ -78,7 +79,7 @@ test('central import clones and adds the profile only on its authenticated worke
   centralRegistry.registerNode(registration);
   const central = express();
   central.use(express.json());
-  central.use('/api', authMiddleware);
+  central.use('/api', rateLimit({ windowMs: 60_000, limit: 200, validate: false }), authMiddleware);
   central.use('/api', projectRoutes({ node: { role: 'central', central_url: null }, registry: centralRegistry, localNodeId: 'central',
     listProfiles: async () => { centralProfileCalls += 1; return []; }, addProfile: async () => { throw new Error('Central must never create this profile'); } }));
   const centralServer = createServer(central);
