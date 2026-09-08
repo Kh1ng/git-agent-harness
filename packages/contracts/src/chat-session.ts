@@ -96,6 +96,8 @@ export interface ChatAssistantMessage {
   model: string | null;
   usage: ChatUsage | null;
   timestamp: number;
+  nodeId?: string;
+  nodeName?: string;
 }
 
 export interface ChatUsage {
@@ -266,6 +268,8 @@ export interface ChatTranscriptTurn {
   role: 'user' | 'assistant' | 'system' | 'tool';
   text: string;
   timestamp: number;
+  nodeId?: string;
+  nodeName?: string;
   /** Present on assistant turns: which backend + model produced this reply. */
   backend?: string;
   model?: string | null;
@@ -318,6 +322,11 @@ export interface ChatSessionView {
  */
 export interface ChatSessionSummary {
   id: string;
+  /** Node selected for the next turn; workspaces stay on their owning nodes. */
+  nodeId?: string;
+  workspaceNodes?: string[];
+  workspaces?: Record<string, { branch: string; worktreePath: string | null }>;
+  remoteWorkspace?: boolean;
   profile: string;
   /** Pull request identity for PR chats; absent for legacy, issue, and general sessions. */
   prNumber?: number;
@@ -356,16 +365,18 @@ export interface ChatSessionProjectGroup {
 
 export interface ChatSessionStorage {
   sessionId: string;
-  worktreeBytes: number;
-  projectedReclaimBytes: number;
+  /** Unknown when workspaces live on another node. */
+  worktreeBytes: number | null;
+  projectedReclaimBytes: number | null;
   idle: boolean;
 }
 
 export interface ChatProfileStorage {
   profile: string;
   idleDays: number;
-  worktreeBytes: number;
-  projectedReclaimBytes: number;
+  /** Unknown when workspaces live on another node. */
+  worktreeBytes: number | null;
+  projectedReclaimBytes: number | null;
   sessions: ChatSessionStorage[];
 }
 
@@ -394,6 +405,11 @@ export interface ChatNodeInfo {
   role: 'central' | 'worker';
   chatCapable: boolean;
   lastSeenAt: string | null;
+  state?: import('./registry.js').NodeObservationState | 'unknown';
+  observedAt?: string | null;
+  eligible?: boolean;
+  reason?: string | null;
+  profiles?: string[];
 }
 
 /** WP3: a live session preview — the dedicated port proxying the dev

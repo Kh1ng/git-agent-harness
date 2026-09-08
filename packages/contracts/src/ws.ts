@@ -190,6 +190,8 @@ export type ServerMessage =
     }
   | {
       type: "manager.chat.reply";
+      nodeId?: string;
+      nodeName?: string;
       requestId: string;
       profile: string;
       sessionId?: string;
@@ -318,6 +320,7 @@ export type ClientMessage =
     }
   | {
       type: "manager.chat.send";
+      nodeId?: string;
       requestId: string;
       profile: string;
       message: string;
@@ -368,6 +371,7 @@ export type ClientMessage =
       type: "manager.chat.sessionCreate";
       requestId: string;
       profile: string;
+      nodeId?: string;
       /** Backend to serve the session; omitted = profile default. */
       backend?: string;
       /** Model override for the session's backend; omitted = backend default. */

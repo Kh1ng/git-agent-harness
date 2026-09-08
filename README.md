@@ -67,7 +67,7 @@ gah doctor
   - `openhands`
 - Provider tooling:
   - GitHub: `gh`
-  - GitLab: `glab` for PM MR preflight, plus token env vars for push/MR creation
+  - GitLab: `glab` for provider API access, plus token env vars for pushes
 
 ## Install
 
@@ -412,9 +412,14 @@ Set:
 
 ```toml
 provider_api_base = "https://gitlab.example.com/api/v4"
+provider_project_id = "12345"
 ```
 
-GAH derives pushes from that base, including self-hosted domains.
+Use the numeric GitLab project ID and set `repo` to the full namespace, such as
+`group/subgroup/project`. GAH derives project links and push hosts from that base.
+Use a GitLab installation on an HTTPS root host; subpath installations are not supported.
+`glab` authenticates API operations on that host. Git pushes use `GITLAB_PAT2` or
+`GITLAB_PAT`, in that order, so a successful API readiness check does not verify push access.
 
 ## Onboarding
 
@@ -428,7 +433,8 @@ gah init \
   --repo group/project \
   --local-path /path/to/repo \
   --default-target-branch main \
-  --provider-api-base https://gitlab.example.com/api/v4
+  --provider-api-base https://gitlab.example.com/api/v4 \
+  --provider-project-id 12345
 ```
 
 Preview without writing:

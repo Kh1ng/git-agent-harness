@@ -48,6 +48,7 @@ import type {
   SkillSummary,
   SkillBindingSummary,
   SkillBindingUpdate,
+  ProjectSummary,
   ProjectImportData,
   ProjectImportResult,
   ChatSessionSummary,
@@ -229,9 +230,9 @@ export interface GahDataSource {
   getEvents(params?: { profile?: string; since?: string }): Promise<ControllerEvent[]>;
   getControllerActivity(params?: { profile?: string; since?: string }): Promise<ControllerActivity[]>;
   getProfiles(): Promise<ProfileSummary[]>;
-  getProjects(): Promise<ProfileSummary[]>;
-  addProject(profile: string): Promise<ProfileSummary>;
-  removeProject(profile: string): Promise<{ removed: boolean }>;
+  getProjects(): Promise<ProjectSummary[]>;
+  addProject(profile: string): Promise<ProjectSummary>;
+  removeProject(profile: string, nodeId?: string): Promise<{ removed: boolean }>;
   importProject(data: ProjectImportData): Promise<ProjectImportResult>;
   addProfile(data: ProfileAddData): Promise<{ success: boolean; message: string }>;
   updateProfile(name: string, data: ProfileUpdateData): Promise<{ success: boolean; message: string }>;
@@ -260,20 +261,20 @@ export interface GahDataSource {
   getGitPrs(profile: string): Promise<{ prs: ChatPrSummary[]; warning?: string }>;
   createGitPr(profile: string, data: { title: string; body?: string; base?: string; draft?: boolean }): Promise<{ url: string }>;
   createGitCommit(profile: string, message: string, sessionId?: string): Promise<{ hash: string }>;
-  getManagerChatCommands(profile: string): Promise<{ commands: ManagerCommandInfo[] }>;
-  getManagerChatModels(profile: string): Promise<ManagerModelsSummary>;
-  setManagerChatModel(profile: string, modelId: string): Promise<{ success: boolean }>;
-  setManagerChatReasoningEffort(profile: string, effortId: string): Promise<{ success: boolean }>;
+  getManagerChatCommands(profile: string, nodeId?: string): Promise<{ commands: ManagerCommandInfo[] }>;
+  getManagerChatModels(profile: string, nodeId?: string): Promise<ManagerModelsSummary>;
+  setManagerChatModel(profile: string, modelId: string, nodeId?: string): Promise<{ success: boolean }>;
+  setManagerChatReasoningEffort(profile: string, effortId: string, nodeId?: string): Promise<{ success: boolean }>;
   getChatSessions(profile: string): Promise<{ sessions: ChatSessionSummary[] }>;
   getAllChatSessions(): Promise<{ projects: ChatSessionProjectGroup[] }>;
-  createChatSession(profile: string, backend?: string, model?: string | null, title?: string): Promise<ChatSessionSummary>;
+  createChatSession(profile: string, backend?: string, model?: string | null, title?: string, nodeId?: string): Promise<ChatSessionSummary>;
   updateChatSession(profile: string, sessionId: string, patch: { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string }): Promise<ChatSessionSummary>;
   archiveChatSession(profile: string, sessionId: string): Promise<ChatSessionSummary>;
   bulkArchiveChatSessions(profile: string, sessionIds: string[]): Promise<{ sessions: ChatSessionSummary[] }>;
   getChatStorage(profile: string): Promise<ChatReclaimResult>;
   reclaimChatSessions(profile: string, dryRun: boolean): Promise<ChatReclaimResult>;
-  getChatNodes(): Promise<{ nodes: ChatNodeInfo[] }>;
-  getManagerChatModelsForBackend(profile: string, backend: string): Promise<ManagerModelsSummary>;
+  getChatNodes(profile?: string, backend?: string): Promise<{ nodes: ChatNodeInfo[] }>;
+  getManagerChatModelsForBackend(profile: string, backend: string, nodeId?: string): Promise<ManagerModelsSummary>;
   getChatPreview(profile: string, sessionId: string): Promise<{ preview: ChatPreviewInfo | null }>;
   setChatPreview(profile: string, sessionId: string, port: number | null): Promise<{ preview: ChatPreviewInfo | null }>;
   getChatIssues(profile: string): Promise<{ issues: ChatIssueSummary[] }>;
@@ -422,13 +423,13 @@ export const gahApi: GahDataSource = {
     return getJson<ProfileSummary[]>('/api/profiles');
   },
   getProjects() {
-    return getJson<ProfileSummary[]>('/api/projects');
+    return getJson<ProjectSummary[]>('/api/projects');
   },
   addProject(profile) {
-    return postJson<ProfileSummary, { profile: string }>('/api/projects', { profile });
+    return postJson<ProjectSummary, { profile: string }>('/api/projects', { profile });
   },
-  removeProject(profile) {
-    return deleteJson<{ removed: boolean }>(`/api/projects/${encodeURIComponent(profile)}`);
+  removeProject(profile, nodeId) {
+    return deleteJson<{ removed: boolean }>(`/api/projects/${encodeURIComponent(profile)}${nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : ''}`);
   },
   importProject(data) {
     return postJson<ProjectImportResult, ProjectImportData>('/api/projects/import', data);
@@ -541,19 +542,19 @@ export const gahApi: GahDataSource = {
     if (sessionId) query.set('sessionId', sessionId);
     return postJson(`/api/git/commit?${query.toString()}`, { message });
   },
-  getManagerChatCommands(profile) {
-    return getJson<{ commands: ManagerCommandInfo[] }>('/api/manager-chat/commands', { profile });
+  getManagerChatCommands(profile, nodeId) {
+    return getJson<{ commands: ManagerCommandInfo[] }>('/api/manager-chat/commands', { profile, nodeId });
   },
-  getManagerChatModels(profile) {
-    return getJson<ManagerModelsSummary>('/api/manager-chat/models', { profile });
+  getManagerChatModels(profile, nodeId) {
+    return getJson<ManagerModelsSummary>('/api/manager-chat/models', { profile, nodeId });
   },
-  setManagerChatModel(profile, modelId) {
-    return postJson<{ success: boolean }, { profile: string; modelId: string }>('/api/manager-chat/model', { profile, modelId });
+  setManagerChatModel(profile, modelId, nodeId) {
+    return postJson<{ success: boolean }, { profile: string; modelId: string; nodeId?: string }>('/api/manager-chat/model', { profile, modelId, nodeId });
   },
-  setManagerChatReasoningEffort(profile, effortId) {
-    return postJson<{ success: boolean }, { profile: string; effortId: string }>(
+  setManagerChatReasoningEffort(profile, effortId, nodeId) {
+    return postJson<{ success: boolean }, { profile: string; effortId: string; nodeId?: string }>(
       '/api/manager-chat/reasoning-effort',
-      { profile, effortId }
+      { profile, effortId, nodeId }
     );
   },
   getChatSessions(profile) {
@@ -562,8 +563,8 @@ export const gahApi: GahDataSource = {
   getAllChatSessions() {
     return getJson<{ projects: ChatSessionProjectGroup[] }>('/api/manager-chat/sessions/all');
   },
-  createChatSession(profile, backend, model, title) {
-    return postJson<ChatSessionSummary, { profile: string; backend?: string; model?: string | null; title?: string }>('/api/manager-chat/sessions', { profile, backend, model, title });
+  createChatSession(profile, backend, model, title, nodeId) {
+    return postJson<ChatSessionSummary, { profile: string; backend?: string; model?: string | null; title?: string; nodeId?: string }>('/api/manager-chat/sessions', { profile, backend, model, title, nodeId });
   },
   updateChatSession(profile, sessionId, patch) {
     return postJson<ChatSessionSummary, { profile: string; sessionId: string } & { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string }>('/api/manager-chat/sessions/update', { profile, sessionId, ...patch });
@@ -580,11 +581,11 @@ export const gahApi: GahDataSource = {
   reclaimChatSessions(profile, dryRun) {
     return postJson<ChatReclaimResult, { profile: string; dryRun: boolean }>('/api/manager-chat/reclaim', { profile, dryRun });
   },
-  getChatNodes() {
-    return getJson<{ nodes: ChatNodeInfo[] }>('/api/manager-chat/nodes');
+  getChatNodes(profile, backend) {
+    return getJson<{ nodes: ChatNodeInfo[] }>('/api/manager-chat/nodes', { profile, backend });
   },
-  getManagerChatModelsForBackend(profile, backend) {
-    return getJson<ManagerModelsSummary>('/api/manager-chat/models', { profile, backend });
+  getManagerChatModelsForBackend(profile, backend, nodeId) {
+    return getJson<ManagerModelsSummary>('/api/manager-chat/models', { profile, backend, nodeId });
   },
   getChatPreview(profile, sessionId) {
     return getJson<{ preview: ChatPreviewInfo | null }>('/api/manager-chat/preview', { profile, sessionId });

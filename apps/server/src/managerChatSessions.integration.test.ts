@@ -181,12 +181,13 @@ test('a chat session runs its turn inside its worktree and archives safely', { t
       request(ws, 'manager.chat.reply', 'turn2', {
         type: 'manager.chat.send', requestId: 'turn2', profile, message: 'report cwd', sessionId: session.id
       } satisfies ClientMessage),
-      /No active chat session/
+      /Chat session is unavailable or archived/
     );
 
     ws.close();
     await once(ws, 'close');
   } finally {
+    for (const client of wss.clients) client.terminate();
     wss.close();
     await new Promise<void>((done) => server.close(() => done()));
     await new Promise<void>((done) => gateway.close(() => done()));
@@ -288,6 +289,7 @@ test('a session serves turns on its pinned model and switches model/backend in p
     ws.close();
     await once(ws, 'close');
   } finally {
+    for (const client of wss.clients) client.terminate();
     wss.close();
     await new Promise<void>((done) => server.close(() => done()));
     await new Promise<void>((done) => gateway.close(() => done()));
@@ -402,6 +404,7 @@ test('a session pins its reasoning effort, serves turns on it, and switches it i
     ws.close();
     await once(ws, 'close');
   } finally {
+    for (const client of wss.clients) client.terminate();
     wss.close();
     await new Promise<void>((done) => server.close(() => done()));
     await new Promise<void>((done) => gateway.close(() => done()));
@@ -524,11 +527,8 @@ test('tool calls stream as structured events and permissions round-trip through 
     client.close();
     await once(client, 'close');
   } finally {
-    // Close the test client first: server.close() waits for open sockets,
-    // so an assertion failure above (ws never closed in the try) would
-    // otherwise wedge the finally forever and mask the real error.
-    try { ws?.close(); } catch { /* already closed */ }
-    await new Promise((r) => setTimeout(r, 300));
+    // Failed assertions must release fixture sockets before awaiting server.close.
+    for (const client of wss.clients) client.terminate();
     wss.close();
     await new Promise<void>((done) => server.close(() => done()));
     await new Promise<void>((done) => gateway.close(() => done()));
@@ -659,6 +659,7 @@ test('a session preview auto-detects the dev-server port and proxies it', { time
     ws.close();
     await once(ws, 'close');
   } finally {
+    for (const client of wss.clients) client.terminate();
     wss.close();
     await new Promise<void>((done) => server.close(() => done()));
     await new Promise<void>((done) => gateway.close(() => done()));
@@ -669,5 +670,3 @@ test('a session preview auto-detects the dev-server port and proxies it', { time
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
-
-// Debug-only: if the process is still alive 5s after tests, dump handles.

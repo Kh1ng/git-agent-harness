@@ -49,8 +49,6 @@ import type {
   SettingsConfigProfileSummary,
   DoctorSnapshot,
   ProfileSummary,
-  ProjectImportData,
-  ProjectImportResult,
   ChatNodeInfo,
   ChatSessionEvent
 } from '@git-agent-harness/contracts';
@@ -89,8 +87,11 @@ import {
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
 import { listAllChatSessions, resolveSessionCwd, chatSessionStoreOptions } from './managerChat/chatSessions.js';
 import { usageRollup } from './managerChat/usageRollup.js';
-import { addProject, importGitProject, listProjects, parseGitUrl, removeProject } from './projectCatalog.js';
+import { projectRoutes } from './projectRoutes.js';
+import { chatNodes, configureChatRouting } from './chatRouting.js';
+import { createWorkerChatRouter } from './workerChat.js';
 import { getGitStatusCached, getGitBranchesCached, getGitLogCached, commitGitChanges, cliInDir } from './gitCache.js';
+import { createGitLabMergeRequest } from './gitPullRequest.js';
 import {
   addCanonicalSkillBinding,
   clearProfileSkillBindings,
@@ -280,6 +281,8 @@ export function createServer(
   // Direct same-origin loopback access remains local; /health stays public.
   app.use('/api', authMiddleware);
   app.use(workerRouteGuard(node));
+  if (node.role === 'central') configureChatRouting(registryService, () => getCoordinatorIdentity(undefined, coordinatorPort));
+  app.use('/api/worker-chat', createWorkerChatRouter({ node, nodeId: getCoordinatorIdentity(undefined, coordinatorPort).node_id }));
   app.use('/api/worker-memory', workerMemoryRouter());
   app.use('/api/pm', pmPlansRouter());
   app.use('/api/settings/nodes', requireOwner, nodeSetupRouter());
@@ -293,12 +296,7 @@ export function createServer(
     }
     next();
   });
-  app.use('/api/projects/import', rateLimit({
-    windowMs: 60_000,
-    limit: 10,
-    standardHeaders: true,
-    legacyHeaders: false
-  }));
+  app.use('/api', projectRoutes({ node, registry: registryService, listProfiles, addProfile, localNodeId: getCoordinatorIdentity(undefined, coordinatorPort).node_id }));
   // Issue #882 (CodeQL: js/missing-rate-limiting) -- these routes are
   // authenticated but called frequently by design (a renewal every
   // lease/3, ~5 min, per in-flight dispatch), so the limit is generous for
@@ -910,83 +908,6 @@ export function createServer(
     }
   });
 
-  app.get('/api/projects', async (_req, res) => {
-    try {
-      res.json(listProjects(await listProfiles()));
-    } catch (error) {
-      res.status(502).json({
-        error: 'Failed to load projects',
-        message: error instanceof Error ? error.message : String(error)
-      });
-    }
-  });
-
-  app.post('/api/projects', async (req, res) => {
-    const profile = typeof req.body?.profile === 'string' ? req.body.profile.trim() : '';
-    if (!profile) {
-      res.status(400).json({ error: 'Invalid project', message: 'profile is required' });
-      return;
-    }
-    try {
-      res.status(201).json(addProject(profile, await listProfiles()));
-    } catch (error) {
-      res.status(400).json({
-        error: 'Failed to add project',
-        message: error instanceof Error ? error.message : String(error)
-      });
-    }
-  });
-
-  app.post('/api/projects/import', async (req, res) => {
-    const gitUrl = typeof req.body?.gitUrl === 'string' ? req.body.gitUrl.trim() : '';
-    if (!gitUrl) {
-      res.status(400).json({ error: 'Invalid project import', message: 'gitUrl is required' });
-      return;
-    }
-    try {
-      parseGitUrl(gitUrl);
-    } catch (error) {
-      res.status(400).json({
-        error: 'Invalid project import',
-        message: error instanceof Error ? error.message : String(error)
-      });
-      return;
-    }
-    try {
-      const input: ProjectImportData = { gitUrl, reclone: req.body?.reclone === true };
-      const imported = await importGitProject(input, { listProfiles, addProfile });
-      const project = addProject(imported.profileName, await listProfiles());
-      const result: ProjectImportResult = {
-        project,
-        checkoutPath: imported.checkoutPath,
-        checkoutStatus: imported.checkoutStatus,
-        detectedLanguages: imported.detectedLanguages,
-        validationCommands: imported.validationCommands
-      };
-      res.status(201).json(result);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const conflict = message.includes('uncommitted changes')
-        || message.includes('checkout origin')
-        || message.includes('managed checkouts');
-      res.status(conflict ? 409 : 502).json({
-        error: 'Failed to import project',
-        message
-      });
-    }
-  });
-
-  app.delete('/api/projects/:profile', (req, res) => {
-    try {
-      res.json({ removed: removeProject(req.params.profile) });
-    } catch (error) {
-      res.status(502).json({
-        error: 'Failed to remove project',
-        message: error instanceof Error ? error.message : String(error)
-      });
-    }
-  });
-
   // ── Skill bank (issue #963/#964) ───────────────────────────────────────
 
   app.get('/api/skills', (_req, res) => {
@@ -1386,7 +1307,7 @@ export function createServer(
   app.get('/api/manager-chat/commands', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     try {
-      const commands = await listManagerChatCommands(profile);
+      const commands = await listManagerChatCommands(profile, typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined);
       res.json({ commands });
     } catch (error) {
       res.status(502).json({
@@ -1405,8 +1326,8 @@ export function createServer(
     const backend = typeof req.query.backend === 'string' ? req.query.backend : undefined;
     try {
       const summary = backend
-        ? await listManagerChatModelsForBackend(profile, backend)
-        : await listManagerChatModels(profile);
+        ? await listManagerChatModelsForBackend(profile, backend, typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined)
+        : await listManagerChatModels(profile, typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined);
       res.json(summary);
     } catch (error) {
       res.status(502).json({
@@ -1424,7 +1345,7 @@ export function createServer(
       return;
     }
     try {
-      await setManagerChatModel(profile, modelId);
+      await setManagerChatModel(profile, modelId, typeof req.body.nodeId === 'string' ? req.body.nodeId : undefined);
       res.json({ success: true });
     } catch (error) {
       res.status(502).json({
@@ -1444,7 +1365,7 @@ export function createServer(
       return;
     }
     try {
-      await setManagerChatReasoningEffort(profile, effortId);
+      await setManagerChatReasoningEffort(profile, effortId, typeof req.body.nodeId === 'string' ? req.body.nodeId : undefined);
       res.json({ success: true });
     } catch (error) {
       res.status(502).json({
@@ -1454,29 +1375,11 @@ export function createServer(
     }
   });
 
-  // The new-chat flow's node step. Chat runs on the central node today;
-  // registered workers are listed for fleet visibility but marked not yet
-  // chat-capable (worker-side chat dispatch is future work).
-  app.get('/api/manager-chat/nodes', (_req, res) => {
-    const identity = getCoordinatorIdentity(undefined, coordinatorPort);
-    const central: ChatNodeInfo = {
-      nodeId: identity.node_id,
-      displayName: identity.display_name,
-      role: 'central',
-      chatCapable: true,
-      lastSeenAt: null
-    };
-    const workers: ChatNodeInfo[] = registryService
-      .getNodesSummary()
-      .filter((node) => node.node_id !== identity.node_id)
-      .map((node) => ({
-        nodeId: node.node_id,
-        displayName: node.display_name,
-        role: 'worker' as const,
-        chatCapable: false,
-        lastSeenAt: node.last_seen_at ?? null
-      }));
-    res.json({ nodes: [central, ...workers] });
+  // Reuse the existing fleet observations; a selector request never polls workers.
+  app.get('/api/manager-chat/nodes', async (req, res) => {
+    try {
+      res.json({ nodes: await chatNodes(typeof req.query.profile === 'string' ? req.query.profile : undefined, typeof req.query.backend === 'string' ? req.query.backend : undefined) });
+    } catch { res.status(502).json({ error: 'Unable to read worker availability for this project.' }); }
   });
 
   // WP2 chat sessions: a session is one conversation bound to one worktree.
@@ -1541,7 +1444,7 @@ export function createServer(
     const model = typeof req.body?.model === 'string' ? req.body.model : null;
     const title = typeof req.body?.title === 'string' ? req.body.title : undefined;
     try {
-      const session = await createChatSession(profile, backend, model, title);
+      const session = await createChatSession(profile, backend, model, title, typeof req.body.reasoningEffort === 'string' ? req.body.reasoningEffort : null, typeof req.body.nodeId === 'string' ? req.body.nodeId : undefined);
       res.status(201).json(session);
     } catch (error) {
       res.status(502).json({
@@ -1847,14 +1750,26 @@ export function createServer(
 
   app.post('/api/git/pr', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
-    const { title, body = '', base, draft = false } = req.body as { title?: string; body?: string; base?: string; draft?: boolean };
-    if (!title) return res.status(400).json({ error: 'title required' });
-    const cwd = await resolveLocalPath(profile);
-    if (!cwd) return res.status(404).json({ error: 'Profile not found' });
+    const { title, body = '', base, draft = false } = req.body ?? {};
+    if (typeof title !== 'string' || !title.trim()) return res.status(400).json({ error: 'title required' });
+    if (typeof body !== 'string' || typeof draft !== 'boolean'
+      || (base !== undefined && (typeof base !== 'string' || !base.trim()))) {
+      return res.status(400).json({ error: 'Invalid pull request fields' });
+    }
+    const profileInfo = await resolveProfileInfo(profile);
+    if (!profileInfo?.local_path) return res.status(404).json({ error: 'Profile not found' });
+    if (profileInfo.provider === 'gitlab') {
+      try {
+        return res.json({ url: await createGitLabMergeRequest(profileInfo, { title, body, base, draft }) });
+      } catch {
+        return res.status(502).json({ error: 'GitLab merge request creation failed' });
+      }
+    }
+    if (profileInfo.provider !== 'github') return res.status(400).json({ error: 'Unsupported repository provider' });
     const args = ['pr', 'create', '--title', title, '--body', body];
     if (base) args.push('--base', base);
     if (draft) args.push('--draft');
-    const { ok, out } = cliInDir('gh', args, cwd);
+    const { ok, out } = cliInDir('gh', args, profileInfo.local_path);
     if (!ok) return res.status(502).json({ error: 'gh pr create failed' });
     res.json({ url: out.trim() });
   });
@@ -1904,11 +1819,26 @@ export function createServer(
   });
   
   // Error handler
-  app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    console.error('Server error:', err);
+  app.use((err: Error & { type?: string }, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) return next(err);
+    // Body-parser errors can contain the complete request body, including
+    // credentials. Return fixed client errors without logging that payload.
+    switch (err.type) {
+      case 'entity.parse.failed':
+      case 'request.aborted':
+      case 'request.size.invalid':
+        return res.status(400).json({ error: 'Bad Request', message: 'Invalid request body' });
+      case 'entity.too.large':
+        return res.status(413).json({ error: 'Payload Too Large', message: 'Request body exceeds the size limit' });
+      case 'encoding.unsupported':
+      case 'charset.unsupported':
+        return res.status(415).json({ error: 'Unsupported Media Type', message: 'Unsupported request encoding' });
+    }
+    // Unexpected exceptions can also embed CLI output or request credentials.
+    console.error('Server error: an unexpected request failure occurred');
     res.status(500).json({
       error: 'Internal Server Error',
-      message: err.message || 'An unexpected error occurred'
+      message: 'An unexpected error occurred'
     });
   });
   

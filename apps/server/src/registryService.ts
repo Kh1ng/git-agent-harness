@@ -220,7 +220,7 @@ async function fetchWithTimeout(url: string, headers: Record<string, string>, ti
 }
 
 /** All registered-node requests use the same transport and secret-reference rules. */
-function nodeHeaders(node: RegisteredNode): Record<string, string> {
+export function nodeHeaders(node: RegisteredNode): Record<string, string> {
   const headers: Record<string, string> = { Accept: 'application/json', 'User-Agent': 'GAH-Coordinator/0.1.0' };
   if (node.transport_mode === 'authenticated_remote' || (node.transport_mode === 'trusted_lan' && !isLoopback(node.advertised_url))) {
     headers.Authorization = `Bearer ${resolveSecret(node.secret_ref)}`;
@@ -740,9 +740,9 @@ export class RegistryService {
     // ownership check for existing nodes lives in the POST /api/registry/nodes
     // ROUTE (apps/server/src/server.ts), which requires the coordinator token
     // before registerNode is called for an existing node_id. This method has
-    // exactly one caller today; if a second caller appears, it MUST preserve
-    // that gate, or any caller that can reach registerNode with a known
-    // node_id can hijack the node.
+    // endpoint-changing callers must preserve that gate. The authenticated
+    // project import route may append declared profiles after worker identity
+    // verification; it preserves the registered URL and secret reference.
     //
     // By the time we're here a duplicate node_id is either a legitimate,
     // authenticated reconciliation or a brand-new node. Store the incoming
@@ -776,8 +776,11 @@ export class RegistryService {
     if (!secretRef || (!secretRef.startsWith('env:') && !secretRef.startsWith('file:'))) {
       throw new Error('Secret reference must use references (starting with env: or file:), not raw credentials');
     }
-    node.secret_ref = secretRef;
+    this.nodes.set(nodeId, { ...node, secret_ref: secretRef });
+    this.observations.delete(nodeId);
+    this.observationRequests.delete(nodeId);
     this.save();
+    this.changed();
   }
 
   /** Run readiness on one declared worker profile, without changing fleet health or routing eligibility. */

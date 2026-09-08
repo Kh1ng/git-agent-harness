@@ -30,6 +30,7 @@ interface ProviderPr {
   iid?: number;
   title: string;
   body?: string | null;
+  description?: string | null;
   state: string;
   url?: string | null;
   web_url?: string | null;
@@ -47,7 +48,7 @@ function normalizePr(raw: ProviderPr): ChatPrSummary & { body: string | null; st
   return {
     number: raw.number ?? raw.iid ?? 0,
     title: raw.title,
-    body: raw.body ?? null,
+    body: raw.body ?? raw.description ?? null,
     state: raw.state,
     url: raw.url ?? raw.web_url ?? null,
     author: raw.author?.login ?? raw.author?.username ?? null,

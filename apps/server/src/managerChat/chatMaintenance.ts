@@ -13,6 +13,7 @@ import {
 } from './ManagerChatManager.js';
 import { profileStorage, type SettleDetails } from './chatSessions.js';
 import { fetchChatIssueState } from './issueChats.js';
+import { resolveChatProject } from '../projectCatalog.js';
 
 const DAY_MS = 86_400_000;
 
@@ -61,7 +62,10 @@ export function selectReclaimCandidates(input: {
   const idleCutoff = input.now - (input.profile.chat_session_idle_days ?? 14) * DAY_MS;
   const candidates: ChatReclaimCandidate[] = [];
   for (const session of input.sessions) {
-    if (session.outcome !== 'live' || input.activeSessionIds.has(session.id)) continue;
+    // Distributed workspaces require explicit archive; one node's provider
+    // state cannot prove every checkout is ready for automatic removal.
+    if (session.remoteWorkspace || (session.workspaceNodes?.length ?? 0) > 1
+      || session.outcome !== 'live' || input.activeSessionIds.has(session.id)) continue;
     const terminal = terminalByBranch.get(session.branch);
     if (terminal) {
       candidates.push({
@@ -103,6 +107,12 @@ export async function reclaimChatSessions(
   options: { profile?: string; dryRun: boolean },
   deps: ChatMaintenanceDeps = defaultDeps
 ): Promise<ChatReclaimResult> {
+  if (options.profile?.startsWith('gah-node:')) {
+    const project = await resolveChatProject(options.profile);
+    if (!project) throw new Error('The project is no longer in the catalog.');
+    return { dryRun: options.dryRun, profiles: [await profileStorage(options.profile, project.chat_session_idle_days ?? 14)],
+      candidates: [], sessions: [], warnings: ['Archive worker conversations individually. Automatic reclaim does not inspect remote checkouts.'] };
+  }
   const allProfiles = await deps.listProfiles();
   const profiles = options.profile
     ? allProfiles.filter((profile) => profile.name === options.profile)
