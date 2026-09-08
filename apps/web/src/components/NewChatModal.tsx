@@ -1,14 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
-import { FolderGit2, Server, Cpu, X, CircleDot, GitPullRequest } from 'lucide-react';
-import type { ChatIssueSummary, ChatNodeInfo, ChatPrSummary, ManagerModelInfo, ProfileSummary } from '@git-agent-harness/contracts';
+import { FolderGit2, Cpu, X, CircleDot, GitPullRequest } from 'lucide-react';
+import type { ChatIssueSummary, ChatPrSummary, ManagerModelInfo, ProfileSummary, ProjectSummary } from '@git-agent-harness/contracts';
+import { ChatNodePicker } from './ChatNodePicker.js';
+import { useChatNodes } from '../hooks/useChatNodes.js';
 import { BoundedCollection } from './BoundedCollection.js';
 import { gahApi } from '../api/client.js';
 import type { ManagerBackendInfo } from '@git-agent-harness/contracts';
 
+export type ChatProfile = ProfileSummary & Partial<Pick<ProjectSummary, 'node_id' | 'chat_profile'>> & { remote?: boolean; catalogName?: string };
+
 interface NewChatModalProps {
   open: boolean;
   currentProfile: string;
-  profiles: ProfileSummary[];
+  profiles: ChatProfile[];
+  nodesRefreshKey?: string;
   backends: ManagerBackendInfo[];
   onClose: () => void;
   /** Blank chat: (profile, sessionId). Issue/PR chat: same shape — the
@@ -19,7 +24,7 @@ interface NewChatModalProps {
 /**
  * The T3-style new-chat flow: choose a project, choose a node, choose a
  * provider/model. The created conversation is bound to a fresh worktree —
- * every backend in that session runs in the same directory, and the branch
+ * each node retains its own checkout when the conversation moves. The branch
  * survives archive/reclaim.
  *
  * "From issue" grabs a provider issue instead: the session branches for the
@@ -29,10 +34,10 @@ interface NewChatModalProps {
  * "From PR" opens a read-only chat seeded with a pull request — no branch,
  * no worktree, nothing at the provider is touched.
  */
-export function NewChatModal({ open, currentProfile, profiles, backends, onClose, onCreated }: NewChatModalProps) {
+export function NewChatModal({ open, currentProfile, profiles, backends, onClose, onCreated, nodesRefreshKey = '' }: NewChatModalProps) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [project, setProject] = useState(currentProfile);
-  const [nodes, setNodes] = useState<ChatNodeInfo[]>([]);
+  const [nodeChoice, setNodeChoice] = useState<{ project: string; nodeId: string } | null>(null);
   const [backend, setBackend] = useState<string>('');
   const [models, setModels] = useState<ManagerModelInfo[]>([]);
   const [model, setModel] = useState<string | null>(null);
@@ -52,6 +57,14 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
   const [sourceRetry, setSourceRetry] = useState(0);
   const [pr, setPr] = useState<ChatPrSummary | null>(null);
 
+  const nodeSnapshot = useChatNodes(project, backend || null, open, nodesRefreshKey);
+  const projectInfo = profiles.find(candidate => candidate.name === project);
+  const remoteProject = projectInfo?.remote ?? false;
+  const nodeId = mode !== 'blank' ? nodeSnapshot.nodes.find(node => node.role === 'central')?.nodeId ?? ''
+    : nodeChoice?.project === project ? nodeChoice.nodeId
+    : projectInfo?.node_id ?? nodeSnapshot.nodes.find(node => node.role === 'central')?.nodeId ?? '';
+  const selectedNode = nodeSnapshot.nodes.find(node => node.nodeId === nodeId);
+  const nodeReady = !nodeSnapshot.loading && !nodeSnapshot.error && !!(selectedNode?.eligible ?? selectedNode?.chatCapable);
   const implementedBackends = backends.filter((b) => b.implemented);
 
   useEffect(() => {
@@ -67,15 +80,13 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
     setQuery('');
     setModel(null);
     setMode('blank');
-    gahApi
-      .getChatNodes()
-      .then(({ nodes }) => setNodes(nodes))
-      .catch(() => setNodes([]));
+    setNodeChoice(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   // A different source discards its selection; retrying the same source does not.
   useEffect(() => {
+    setNodeChoice(null);
     setIssues([]);
     setIssue(null);
     setPrs([]);
@@ -114,19 +125,22 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
 
   useEffect(() => {
     if (!open) return;
+    let cancelled = false;
     // Default to the profile's configured backend, else the first implemented one.
     gahApi
       .getManagerChatSettings()
       .then((settings) => {
+        if (cancelled) return;
         const preferred = settings.profileOverrides[project] ?? settings.defaultBackend;
         setBackend(implementedBackends.some((b) => b.id === preferred) ? preferred : implementedBackends[0]?.id ?? '');
       })
-      .catch(() => setBackend(implementedBackends[0]?.id ?? ''));
+      .catch(() => { if (!cancelled) setBackend(implementedBackends[0]?.id ?? ''); });
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, project]);
 
   useEffect(() => {
-    if (!open || !backend) {
+    if (!open || !backend || !nodeId || !nodeReady) {
       setModels([]);
       setModel(null);
       return;
@@ -135,7 +149,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
     setModels([]);
     setModel(null);
     gahApi
-      .getManagerChatModelsForBackend(project, backend)
+      .getManagerChatModelsForBackend(project, backend, nodeId || undefined)
       .then(({ models, currentModelId }) => {
         if (cancelled) return;
         setModels(models);
@@ -149,15 +163,11 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
       });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, project, backend]);
-
+  }, [open, project, backend, nodeId, nodeReady]);
   if (!open) return null;
 
-  const central = nodes.find((n) => n.role === 'central' && n.chatCapable);
-  const workers = nodes.filter((n) => n !== central);
-
   const create = async () => {
-    if (!backend) return;
+    if (!backend || (mode === 'blank' && !nodeReady) || (mode !== 'blank' && remoteProject)) return;
     setCreating(true);
     setError(null);
     try {
@@ -170,7 +180,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
         const { session } = await gahApi.startChatFromPr(project, pr.number, backend, model);
         onCreated(project, session.id);
       } else {
-        const session = await gahApi.createChatSession(project, backend, model, title.trim() || undefined);
+        const session = await gahApi.createChatSession(project, backend, model, title.trim() || undefined, nodeId);
         onCreated(project, session.id);
       }
       dialog.current?.close();
@@ -202,7 +212,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
             role="tab"
             aria-selected={mode === 'blank'}
             onClick={() => setMode('blank')}
-            className={`flex-1 rounded-md px-2 py-1.5 text-xs ${mode === 'blank' ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-white/5'}`}
+            className={`flex-1 disabled:opacity-50 rounded-md px-2 py-1.5 text-xs ${mode === 'blank' ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-white/5'}`}
           >
             Blank chat
           </button>
@@ -210,8 +220,9 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
             type="button"
             role="tab"
             aria-selected={mode === 'issue'}
+            disabled={remoteProject}
             onClick={() => setMode('issue')}
-            className={`flex-1 rounded-md px-2 py-1.5 text-xs inline-flex items-center justify-center gap-1.5 ${mode === 'issue' ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-white/5'}`}
+            className={`flex-1 disabled:opacity-50 rounded-md px-2 py-1.5 text-xs inline-flex items-center justify-center gap-1.5 ${mode === 'issue' ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-white/5'}`}
           >
             <CircleDot size={12} aria-hidden="true" /> From issue
           </button>
@@ -219,13 +230,15 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
             type="button"
             role="tab"
             aria-selected={mode === 'pr'}
+            disabled={remoteProject}
             onClick={() => setMode('pr')}
-            className={`flex-1 rounded-md px-2 py-1.5 text-xs inline-flex items-center justify-center gap-1.5 ${mode === 'pr' ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-white/5'}`}
+            className={`flex-1 disabled:opacity-50 rounded-md px-2 py-1.5 text-xs inline-flex items-center justify-center gap-1.5 ${mode === 'pr' ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-white/5'}`}
           >
             <GitPullRequest size={12} aria-hidden="true" /> From PR
           </button>
         </div>
 
+        {remoteProject && <p className="text-sm text-secondary">Use a blank chat for projects on another node. Issue and PR chat setup runs on the central node.</p>}
         {mode !== 'blank' && (
           <label className="block space-y-1 text-sm text-secondary">
             <span>Filter {mode === 'issue' ? 'issues' : 'pull requests'}</span>
@@ -341,29 +354,11 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
           </div>
         </section>
 
-        <section className="space-y-2">
-          <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
-            <Server size={13} aria-hidden="true" /> Node
-          </h3>
-          {central && (
-            <div className="rounded-md border border-accent/40 bg-accent/10 px-3 py-2 flex items-center justify-between">
-              <div>
-                <span className="block text-sm font-medium text-primary">{central.displayName}</span>
-                <span className="block text-[11px] text-muted">central node · chat runs here</span>
-              </div>
-              <span className="text-[10px] uppercase tracking-wide rounded bg-accent/20 text-primary px-1.5 py-0.5">selected</span>
-            </div>
-          )}
-          {workers.map((n) => (
-            <div key={n.nodeId} className="rounded-md border border-subtle px-3 py-2 flex items-center justify-between opacity-60">
-              <div>
-                <span className="block text-sm font-medium text-secondary">{n.displayName}</span>
-                <span className="block text-[11px] text-muted">worker · chat on workers coming soon</span>
-              </div>
-            </div>
-          ))}
-          {!central && <p className="text-xs text-muted">Central node unavailable — chat will still start on this server.</p>}
-        </section>
+        {mode === 'blank' ? <>
+          <ChatNodePicker {...nodeSnapshot} value={nodeId} disabled={creating}
+            onChange={nodeId => setNodeChoice({ project, nodeId })} />
+          <p className="text-sm text-secondary">Each node uses its own checkout; files do not move.</p>
+        </> : <p className="text-sm text-secondary">Issue and PR chat setup runs on the central node.</p>}
 
         <section className="space-y-2">
           <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
@@ -408,7 +403,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
               onChange={(e) => setTitle(e.target.value)}
               placeholder="e.g. Fix the retry loop"
               required
-              className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-xs text-primary"
+              className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-base text-primary"
             />
           </section>
         )}
@@ -420,7 +415,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
           <button
             type="button"
             onClick={create}
-            disabled={creating || !backend || profiles.length === 0 || (mode === 'blank' && !title.trim()) || (mode === 'issue' && !issue) || (mode === 'pr' && !pr)}
+            disabled={creating || !backend || profiles.length === 0 || (mode === 'blank' && (!title.trim() || !nodeReady)) || (mode !== 'blank' && remoteProject) || (mode === 'issue' && !issue) || (mode === 'pr' && !pr)}
             className="btn-primary text-xs"
           >
             {creating ? 'Creating…' : 'Start chat'}

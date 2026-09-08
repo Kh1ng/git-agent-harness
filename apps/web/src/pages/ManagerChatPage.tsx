@@ -4,7 +4,9 @@ import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAl
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
-import { NewChatModal } from '../components/NewChatModal.js';
+import { ChatNodePicker } from '../components/ChatNodePicker.js';
+import { useChatNodes } from '../hooks/useChatNodes.js';
+import { NewChatModal, type ChatProfile } from '../components/NewChatModal.js';
 import { formatChatName } from '../lib/format.js';
 import { ProviderPicker, type ProviderSelection, type ProviderPickerProps } from '../components/ProviderPicker.js';
 import { ProjectRail } from '../components/ProjectRail.js';
@@ -17,7 +19,6 @@ import type {
   ManagerCommandInfo,
   ManagerModelInfo,
   ManagerReasoningEffortInfo,
-  ProfileSummary,
   ManagerBackendInfo,
   ChatSessionSummary,
   ChatPreviewInfo,
@@ -33,6 +34,8 @@ interface ChatTurn {
   /** Present on assistant turns: which backend + model produced this reply. */
   backend?: string;
   model?: string | null;
+  nodeId?: string;
+  nodeName?: string;
   /** Optimistic mid-turn steer, removed again if the backend rejects it. */
   steeringRequestId?: string;
   /** Present on tool turns (slice 3): structured info for the activity card. */
@@ -50,6 +53,8 @@ interface ChatTurn {
 interface PendingRequest {
   id: string;
   profile: string;
+  nodeId: string;
+  nodeName?: string;
 }
 
 interface StreamingTurn {
@@ -82,6 +87,8 @@ function fromServerTurn(turn: ManagerChatTurn): ChatTurn {
     text: turn.text,
     backend: turn.backend,
     model: turn.model,
+    nodeId: turn.nodeId,
+    nodeName: turn.nodeName,
     tool: turn.tool
   };
 }
@@ -465,7 +472,10 @@ export function ManagerChatPage() {
   const profileOverride = useUiStore((s) => s.profileOverride);
   const setProfileOverride = useUiStore((s) => s.setProfileOverride);
   const profile = profileOverride ?? wsProfile ?? 'gah';
-  const [availableProfiles, setAvailableProfiles] = useState<ProfileSummary[]>([]);
+  const [availableProfiles, setAvailableProfiles] = useState<ChatProfile[]>([]);
+  const [nodeChoice, setNodeChoice] = useState<{ profile: string; sessionId: string | null; nodeId: string } | null>(null);
+  const fleetChange = [...messages].reverse().find(({ message }) => message.type === 'fleet.changed')?.id ?? 0;
+  const nodesRefreshKey = `${reconnectSeq}:${fleetChange}`;
   const currentProfileInfo = availableProfiles.find((p) => p.name === profile);
 
   const [turns, setTurns] = useState<ChatTurn[]>([]);
@@ -550,7 +560,15 @@ export function ManagerChatPage() {
     () => sessions.find((s) => s.id === sessionId) ?? null,
     [sessions, sessionId]
   );
+  useEffect(() => { setNodeChoice(null); }, [profile, sessionId]);
   const skillBackend = activeSession?.backend ?? activeBackendId;
+  const nodeSnapshot = useChatNodes(profile, skillBackend, isConnected, nodesRefreshKey);
+  const centralNodeId = nodeSnapshot.nodes.find(node => node.role === 'central')?.nodeId;
+  const chosenNode = nodeChoice?.profile === profile && nodeChoice.sessionId === sessionId ? nodeChoice.nodeId
+    : activeSession?.nodeId ?? currentProfileInfo?.node_id ?? centralNodeId ?? '';
+  const selectedNode = nodeSnapshot.nodes.find(node => node.nodeId === chosenNode);
+  const nodeReady = !nodeSnapshot.loading && !nodeSnapshot.error && !!(selectedNode?.eligible ?? selectedNode?.chatCapable);
+  const remoteSession = !!activeSession && (!!currentProfileInfo?.remote || (!!activeSession.nodeId && activeSession.nodeId !== centralNodeId));
   const [skillBinding, setSkillBinding] = useState<SkillBindingSummary | null>(null);
   const [skillBindingChanging, setSkillBindingChanging] = useState(false);
 
@@ -576,9 +594,18 @@ export function ManagerChatPage() {
 
   useEffect(() => {
     let cancelled = false;
-    gahApi.getProfiles().then((profiles) => { if (!cancelled) setAvailableProfiles(profiles); }).catch(() => {});
+    Promise.allSettled([gahApi.getProfiles(), gahApi.getProjects()]).then(([local, catalog]) => {
+      if (cancelled) return;
+      setAvailableProfiles(previous => {
+        const localProfiles = local.status === 'fulfilled' ? local.value : previous.filter(item => !item.remote);
+        const projects = catalog.status === 'fulfilled'
+          ? catalog.value.map(project => ({ ...project, name: project.chat_profile ?? project.name, catalogName: project.name, remote: !!project.chat_profile && project.chat_profile !== project.name }))
+          : previous.filter(item => item.remote);
+        return [...new Map([...localProfiles, ...projects].map(project => [project.name, project])).values()];
+      });
+    });
     return () => { cancelled = true; };
-  }, [reconnectSeq]);
+  }, [reconnectSeq, fleetChange]);
 
   const loadGitData = async () => {
     const requestId = ++gitRequestIdRef.current;
@@ -650,9 +677,9 @@ export function ManagerChatPage() {
   // conversation shows the meter, so skip the request while a session owns
   // the composer settings.
   useAutoRefresh(() => {
-    if (activeSession) return;
+    if (activeSession || !skillBackend || !chosenNode || !nodeReady) return;
     const requestedProfile = profile;
-    gahApi.getManagerChatModels(profile)
+    gahApi.getManagerChatModelsForBackend(profile, skillBackend, chosenNode)
       .then(({ contextUsage: usage }) => {
         if (activeProfileRef.current === requestedProfile) setContextUsage(usage ?? null);
       })
@@ -751,18 +778,28 @@ export function ManagerChatPage() {
         }
       })
       .catch(() => { if (!cancelled) setActiveBackendId(null); });
+    return () => { cancelled = true; };
+  }, [profile, reconnectSeq]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCommands([]);
+    setModels([]);
+    setCurrentModelId(null);
+    setModelsLoaded(false);
+    if (!chosenNode || !nodeReady || !skillBackend) return;
     // Real commands from the active backend's own registry (e.g. Hermes's
     // live ACP available-commands push) -- not something GAH invents. Fetched
     // eagerly so the "/" palette has data the moment the user types it;
     // this also happens to be what warms up the backend's session.
     gahApi
-      .getManagerChatCommands(profile)
+      .getManagerChatCommands(profile, chosenNode || undefined)
       .then(({ commands }) => { if (!cancelled) setCommands(commands); })
       .catch(() => { if (!cancelled) setCommands([]); });
     // Real selectable models and reasoning efforts from the backend's own
     // ACP session state. Empty means no corresponding picker renders.
     gahApi
-      .getManagerChatModels(profile)
+      .getManagerChatModelsForBackend(profile, skillBackend, chosenNode)
       .then(({ models, currentModelId, reasoningEfforts: advertisedEfforts, currentReasoningEffortId: effortId, contextUsage: usage }) => {
         if (!cancelled) {
           setModels(models);
@@ -784,7 +821,7 @@ export function ManagerChatPage() {
         }
       });
     return () => { cancelled = true; };
-  }, [profile, reconnectSeq]);
+  }, [profile, reconnectSeq, chosenNode, nodeReady, skillBackend]);
 
   // Session-scoped model list: when a session is active, the composer's
   // provider picker needs that session's backend models, and changes go to
@@ -798,9 +835,9 @@ export function ManagerChatPage() {
     setSessionModels([]);
     setSessionModelsLoaded(false);
     setSessionEfforts([]);
-    if (!activeSession || !isConnected) return;
+    if (!activeSession || !isConnected || !chosenNode || !nodeReady) return;
     gahApi
-      .getManagerChatModelsForBackend(profile, activeSession.backend)
+      .getManagerChatModelsForBackend(profile, activeSession.backend, chosenNode || undefined)
       .then(({ models, reasoningEfforts: advertisedEfforts }) => {
         if (!cancelled) {
           setSessionModels(models);
@@ -811,7 +848,7 @@ export function ManagerChatPage() {
       .catch(() => { if (!cancelled) { setSessionModels([]); setSessionModelsLoaded(true); } });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile, sessionId, activeSession?.backend, isConnected, reconnectSeq]);
+  }, [profile, sessionId, activeSession?.backend, isConnected, reconnectSeq, chosenNode, nodeReady]);
 
   /** Composer provider picker, session variant: one PATCH carries the full
    *  desired selection. A backend switch resets model + effort (the picker
@@ -842,8 +879,8 @@ export function ManagerChatPage() {
     setModelChanging(true);
     const requestedProfile = profile;
     try {
-      await gahApi.setManagerChatModel(requestedProfile, modelId);
-      const summary = await gahApi.getManagerChatModels(requestedProfile);
+      await gahApi.setManagerChatModel(requestedProfile, modelId, chosenNode || undefined);
+      const summary = await gahApi.getManagerChatModels(requestedProfile, chosenNode || undefined);
       if (activeProfileRef.current === requestedProfile) {
         setModels(summary.models);
         setCurrentModelId(summary.currentModelId);
@@ -865,7 +902,7 @@ export function ManagerChatPage() {
     setReasoningEffortChanging(true);
     const requestedProfile = profile;
     try {
-      await gahApi.setManagerChatReasoningEffort(requestedProfile, effortId);
+      await gahApi.setManagerChatReasoningEffort(requestedProfile, effortId, chosenNode || undefined);
       if (activeProfileRef.current === requestedProfile) setCurrentReasoningEffortId(effortId);
     } catch (err) {
       if (activeProfileRef.current === requestedProfile) {
@@ -1045,7 +1082,9 @@ export function ManagerChatPage() {
             role: 'assistant',
             text: last.reply,
             backend: last.backend,
-            model: last.model
+            model: last.model,
+            nodeId: pendingRequest.nodeId,
+            nodeName: pendingRequest.nodeName
           }]);
         }
       } else if (last.type === 'error') {
@@ -1059,7 +1098,7 @@ export function ManagerChatPage() {
   }, [messages, pendingRequest, profile, sessionId]);
 
   const turnBusy = pendingRequest !== null || remoteTurnBusy || streaming !== null;
-  const sendBlocked = !historyLoaded;
+  const sendBlocked = !historyLoaded || (!turnBusy && !nodeReady);
 
   const refreshSkillBinding = async () => {
     if (!skillBackend) return;
@@ -1122,7 +1161,7 @@ export function ManagerChatPage() {
         gahApi.getManagerChatCommands(requestedProfile)
           .then(({ commands }) => setCommands(commands))
           .catch(() => setCommands([]));
-        gahApi.getManagerChatModels(requestedProfile)
+        gahApi.getManagerChatModels(requestedProfile, chosenNode || undefined)
           .then(({ models, currentModelId, reasoningEfforts: advertisedEfforts, currentReasoningEffortId: effortId, contextUsage: usage }) => {
             setModels(models);
             setCurrentModelId(currentModelId);
@@ -1250,11 +1289,12 @@ export function ManagerChatPage() {
       });
       return;
     }
-    setPendingRequest({ id: requestId, profile });
+    setPendingRequest({ id: requestId, profile, nodeId: chosenNode, nodeName: selectedNode?.displayName });
     sendMessage({
       type: 'manager.chat.send',
       requestId,
       profile,
+      nodeId: chosenNode,
       message: text,
       ...(sessionId ? { sessionId } : {})
     });
@@ -1451,7 +1491,7 @@ export function ManagerChatPage() {
                 composer's provider pill (t3-style picker with favorites). */}
             <button
               onClick={() => setPreviewOpen((v) => !v)}
-              disabled={turnBusy && !preview}
+              disabled={remoteSession || (turnBusy && !preview)}
               className={`inline-flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs disabled:opacity-50 ${
                 preview
                   ? 'border-accent/40 bg-accent/15 text-primary'
@@ -1574,14 +1614,15 @@ export function ManagerChatPage() {
         currentProfile={profile}
         profiles={availableProfiles}
         backends={availableBackends}
+        nodesRefreshKey={nodesRefreshKey}
         onClose={() => setNewChatOpen(false)}
         onCreated={handleChatCreated}
       />
 
-      <div className={`grid min-w-0 gap-4 ${previewOpen && activeSession ? 'xl:grid-cols-[14rem_minmax(0,1fr)_minmax(0,26rem)]' : 'xl:grid-cols-[14rem_minmax(0,1fr)]'}`}>
+      <div className={`grid min-w-0 gap-4 ${previewOpen && activeSession && !remoteSession ? 'xl:grid-cols-[14rem_minmax(0,1fr)_minmax(0,26rem)]' : 'xl:grid-cols-[14rem_minmax(0,1fr)]'}`}>
         <ProjectRail
           currentProfile={profile}
-          profiles={availableProfiles}
+          profiles={availableProfiles.map(project => ({ ...project, name: project.catalogName ?? project.name }))}
           sessions={sessions}
           selectedSessionId={sessionId}
           onSelect={setProfileOverride}
@@ -1589,14 +1630,14 @@ export function ManagerChatPage() {
           sessionsError={sessionsError}
           onRetrySessions={() => refreshSessions(profile)}
           onProjectAdded={(project) => {
-            setAvailableProfiles((profiles) => [...profiles.filter((profile) => profile.name !== project.name), project]);
+            setAvailableProfiles((profiles) => [...profiles.filter((profile) => profile.name !== project.chat_profile), { ...project, name: project.chat_profile ?? project.name, catalogName: project.name, remote: !!project.chat_profile && project.chat_profile !== project.name }]);
           }}
         />
 
       {/* WP3 preview panel: the session's dev server through the node's
           dedicated preview port. Auto-detect lights it up mid-turn; the
           port can also be set manually. */}
-      {previewOpen && activeSession && (
+      {previewOpen && activeSession && !remoteSession && (
         <div className="card-padded flex min-w-0 flex-col h-[65vh] order-3 xl:order-none">
           <div className="flex items-center justify-between gap-2 pb-2">
             <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
@@ -1730,10 +1771,11 @@ export function ManagerChatPage() {
                   <MarkdownMessage text={turn.text} />
                 </div>
               )}
-              {turn.role === 'assistant' && turn.backend && (
+              {turn.role === 'assistant' && (turn.backend || turn.nodeId) && (
                 <span className="mt-0.5 px-1.5 py-0.5 rounded bg-raised border border-subtle text-[10px] text-muted font-mono">
                   {turn.backend}
                   {turn.model ? ` / ${turn.model}` : ''}
+                  {turn.nodeId ? ` · ${turn.nodeName ?? turn.nodeId}` : ''}
                 </span>
               )}
             </div>
@@ -1790,6 +1832,12 @@ export function ManagerChatPage() {
           <div ref={scrollAnchorRef} />
         </div>
 
+        <div className="mt-3 space-y-2 border-t border-subtle pt-3">
+          <ChatNodePicker {...nodeSnapshot} value={chosenNode} disabled={turnBusy || !isConnected}
+            onChange={nodeId => setNodeChoice({ profile, sessionId, nodeId })} />
+          <p className="text-sm text-secondary">Each node uses its own checkout; files do not move.</p>
+          {remoteSession && <p className="text-sm text-secondary">Preview is unavailable for a chat running on another node.</p>}
+        </div>
         <div className="relative grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2 border-t border-subtle pt-3 mt-3 sm:flex">
           {(composerPicker || (!activeSession && contextUsage)) && (
             <div className="col-span-2 flex min-w-0 items-end gap-2 sm:col-span-1">
