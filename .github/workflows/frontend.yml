@@ -38,6 +38,9 @@ jobs:
       - name: Typecheck mock control plane
         run: npm run typecheck:mock --workspace=apps/server
 
+      - name: Test MCP HTTP integration
+        run: npm test --workspace=apps/mcp-server
+
       - name: Build frontend
         run: npm run build:web
 

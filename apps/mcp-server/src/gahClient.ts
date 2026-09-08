@@ -7,6 +7,7 @@
  */
 
 import { Agent } from 'undici';
+import { randomUUID } from 'node:crypto';
 
 const BASE_URL = (process.env.GAH_SERVER_URL ?? 'http://127.0.0.1:3773').replace(/\/$/, '');
 const SERVER_TOKEN = process.env.GAH_SERVER_TOKEN;
@@ -29,6 +30,7 @@ async function request<T>(
   waitForDispatch = false
 ): Promise<T> {
   const headers = new Headers();
+  if (method === 'POST') headers.set('Idempotency-Key', randomUUID());
   if (body !== undefined) headers.set('Content-Type', 'application/json');
   if (SERVER_TOKEN) headers.set('Authorization', `Bearer ${SERVER_TOKEN}`);
   const init: RequestInit & { dispatcher?: Agent } = {

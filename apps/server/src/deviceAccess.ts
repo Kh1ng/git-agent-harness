@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import type { PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harness/contracts';
 
 export const DEVICE_COOKIE = 'gah_device';
-export const DEVICE_ACCESS = 'Dashboard control: read projects and chats, run agent work, and change settings. Pairing management and credential export require the owner.';
+export const DEVICE_ACCESS = 'Dashboard control: read projects and chats, run agent work, and choose chat models. The owner controls pairing, credentials, worker registration, global settings, and destructive administration.';
 const CODE_LIFETIME = 5 * 60_000;
 export const DEVICE_LIFETIME = 30 * 24 * 60 * 60_000;
 type StoredDevice = PairedDevice & { token_hash: string };

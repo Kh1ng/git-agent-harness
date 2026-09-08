@@ -16,10 +16,11 @@ async function connectedPair() {
 test('lists usage and orchestration tools and forwards their HTTP calls', async () => {
   const originalFetch = globalThis.fetch;
   const requests: Array<{ url: string; init?: RequestInit & { dispatcher?: unknown } }> = [];
+  let responseStatus = 200;
   globalThis.fetch = async (input, init) => {
     requests.push({ url: String(input), init });
-    return new Response(JSON.stringify({ ok: true }), {
-      status: 200,
+    return new Response(JSON.stringify(responseStatus === 200 ? { ok: true } : { message: 'Operation already accepted. Refresh status.' }), {
+      status: responseStatus,
       headers: { 'content-type': 'application/json' }
     });
   };
@@ -70,6 +71,22 @@ test('lists usage and orchestration tools and forwards their HTTP calls', async 
       waitForCompletion: true,
       waitTimeoutSeconds: 3_600
     });
+
+    for (let i = 0; i < 2; i++) {
+      await client.callTool({ name: 'gah_hold_set', arguments: { profile: 'gah', workId: '532' } });
+    }
+    const mutations = requests.filter(request => request.init?.method === 'POST');
+    const keys = mutations.map(request => new Headers(request.init?.headers).get('Idempotency-Key'));
+    for (const key of keys) assert.match(key ?? '', /^[A-Za-z0-9_-]{16,128}$/, 'Every MCP mutation supplies a valid key');
+    assert.equal(new Set(keys).size, mutations.length, 'Separate tool calls use separate operation keys');
+    assert.equal(new Headers(requests[0].init?.headers).has('Idempotency-Key'), false, 'Reads do not reserve mutation keys');
+
+    responseStatus = 409;
+    const beforeConflict = requests.length;
+    const conflict = await client.callTool({ name: 'gah_hold_clear', arguments: { profile: 'gah', workId: '532' } });
+    assert.equal(conflict.isError, true);
+    assert.match(JSON.stringify(conflict), /Refresh status/);
+    assert.equal(requests.length, beforeConflict + 1, 'A duplicate conflict reaches the caller without an automatic retry');
   } finally {
     await client.close();
     await server.close();

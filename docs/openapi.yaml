@@ -13,6 +13,12 @@ info:
     dispatch/sync/ledger-summary/availability/hold gap that used to be
     documented here.
 
+    Issue #532 is partially implemented. Loop start/stop, hold set/clear,
+    availability clear, and ledger clear-attempts require Idempotency-Key.
+    These six HTTP operations keep durable receipts and append-only audit
+    records. Repeated keys return 409 without executing again, including
+    after a restart. Other mutation routes do not yet share this protection.
+
     Response schemas are typed at the field-name/type level for the
     endpoints most likely to be consumed programmatically (status, profiles,
     config); several less-critical endpoints use a looser `object` schema
@@ -304,6 +310,9 @@ paths:
     post:
       tags: [status]
       summary: Append a tombstone ledger entry so a work_id becomes dispatchable again
+      description: Requires owner access; paired devices cannot clear attempt history.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -318,6 +327,9 @@ paths:
       responses:
         "200": { description: "{ ok: true }" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Owner access required }
+        "409": { $ref: "#/components/responses/MutationConflict" }
+        "503": { $ref: "#/components/responses/MutationStorageUnavailable" }
         "502": { $ref: "#/components/responses/GahError" }
 
   /api/availability:
@@ -336,6 +348,8 @@ paths:
     post:
       tags: [status]
       summary: Override a stale unavailable record once the backend is confirmed healthy again
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -351,6 +365,8 @@ paths:
       responses:
         "200": { description: "{ ok: true }" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/MutationConflict" }
+        "503": { $ref: "#/components/responses/MutationStorageUnavailable" }
         "502": { $ref: "#/components/responses/GahError" }
 
   /api/hold:
@@ -377,6 +393,8 @@ paths:
     post:
       tags: [status]
       summary: Mark a work_id as under active out-of-band manager review
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -391,12 +409,16 @@ paths:
       responses:
         "200": { description: "{ ok: true }" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/MutationConflict" }
+        "503": { $ref: "#/components/responses/MutationStorageUnavailable" }
         "502": { $ref: "#/components/responses/GahError" }
 
   /api/hold/clear:
     post:
       tags: [status]
       summary: Release a previously set review hold on a work_id
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -410,6 +432,8 @@ paths:
       responses:
         "200": { description: "{ ok: true }" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/MutationConflict" }
+        "503": { $ref: "#/components/responses/MutationStorageUnavailable" }
         "502": { $ref: "#/components/responses/GahError" }
 
   /api/dispatch:
@@ -664,6 +688,8 @@ paths:
     post:
       tags: [loop]
       summary: Start the loop unit for a profile
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         content:
           application/json:
@@ -672,13 +698,22 @@ paths:
               properties: { profile: { type: string } }
       responses:
         "200": { description: Started }
-        "409": { description: Already running / conflict }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409":
+          description: >-
+            Already running, a lifecycle conflict, or a previously accepted key.
+            A repeated key never executes again. A key reused with different input
+            returns idempotency_conflict. Refresh status before another action;
+            do not automatically retry with a new key.
+        "503": { $ref: "#/components/responses/MutationStorageUnavailable" }
         "502": { $ref: "#/components/responses/GahError" }
 
   /api/loop/stop:
     post:
       tags: [loop]
       summary: Stop the loop unit for a profile
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         content:
           application/json:
@@ -687,7 +722,14 @@ paths:
               properties: { profile: { type: string } }
       responses:
         "200": { description: Stopped }
-        "409": { description: Not running / conflict }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409":
+          description: >-
+            A lifecycle conflict or a previously accepted key. A repeated key
+            never executes again. A key reused with different input returns
+            idempotency_conflict. Refresh status before another action;
+            do not automatically retry with a new key.
+        "503": { $ref: "#/components/responses/MutationStorageUnavailable" }
 
   /api/events:
     get:
@@ -809,6 +851,21 @@ paths:
         "500": { description: Internal error }
 
 components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        Unique key for one intended operation, scoped to the authenticated actor,
+        node, and operation. Preserve it when checking a request after connection
+        loss. A duplicate returns 409 without replaying a response or executing
+        again. Inspect current state before deliberately starting another action.
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+        pattern: '^[A-Za-z0-9_-]{16,128}$'
   securitySchemes:
     nodeAuth:
       type: apiKey
@@ -816,13 +873,31 @@ components:
       name: Authorization
       description: Bearer token for all /api routes outside trusted direct-local access; remote transport also requires TLS or explicit HTTP opt-in.
   responses:
+    MutationConflict:
+      description: >-
+        mutation_already_accepted means the key already has a durable receipt;
+        no action executes again, including after restart. idempotency_conflict
+        means the same key was used with different input. Refresh current state
+        before another action; never automatically retry with a new key.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    MutationStorageUnavailable:
+      description: >-
+        mutation_storage_unavailable means no new action started because durable
+        recording failed. mutation_outcome_unknown means the action may have
+        completed but its outcome could not be recorded. Inspect current state;
+        never automatically retry with a new key.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
     GahError:
       description: The underlying gah CLI call failed
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
     BadRequest:
-      description: Invalid request
+      description: Invalid request, including a missing or invalid Idempotency-Key where required
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -832,6 +907,7 @@ components:
       properties:
         error: { type: string }
         message: { type: string }
+        operationId: { type: string, description: Opaque operation receipt identifier when available }
     ProfileSummary:
       type: object
       description: Mirrors packages/contracts/src/gah.ts ProfileSummary
