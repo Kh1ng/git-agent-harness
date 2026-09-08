@@ -12,7 +12,7 @@ const repo = 'Kh1ng/git-agent-harness';
 
 function psQuote(value: string): string { return `'${value.replaceAll("'", "''")}'`; }
 
-export function windowsSetupCommand(centralUrl: string, role: string, token: string): string {
+function remoteOrigin(centralUrl: string): string {
   const url = new URL(centralUrl);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== '/') {
     throw new Error('Enter the central node origin, for example http://192.168.1.10:3773.');
@@ -20,9 +20,36 @@ export function windowsSetupCommand(centralUrl: string, role: string, token: str
   if (['localhost', '127.0.0.1', '[::1]', '0.0.0.0'].includes(url.hostname) || url.hostname.startsWith('127.')) {
     throw new Error('Use the central node’s LAN or VPN address. Loopback addresses point to the new computer.');
   }
+  return url.origin;
+}
+
+export function windowsSetupCommand(centralUrl: string, role: string, token: string): string {
+  const origin = remoteOrigin(centralUrl);
   if (!['desktop', 'worker', 'both'].includes(role)) throw new Error('Choose desktop, worker, or both.');
   if (!token || /[\r\n]/.test(token)) throw new Error('Configure COORDINATOR_TOKEN on the central server first.');
-  return `$u=${psQuote(url.origin)};$t=${psQuote(token)};& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -Headers @{Authorization="Bearer $t"} -Uri "$u/api/settings/nodes/install.ps1").Content)) -CentralUrl $u -CoordinatorToken $t -Role ${psQuote(role)}`;
+  return `$u=${psQuote(origin)};$t=${psQuote(token)};& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -Headers @{Authorization="Bearer $t"} -Uri "$u/api/settings/nodes/install.ps1").Content)) -CentralUrl $u -CoordinatorToken $t -Role ${psQuote(role)}`;
+}
+
+const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+
+/** Generate a Unix bootstrap command without exporting stored gateway or coordinator secrets. */
+export function unixSetupCommand(os: string, role: string, centralUrl: string, gatewayUrl?: string): string {
+  if (!['linux', 'macos'].includes(os)) throw new Error('Choose Linux, macOS, or Windows.');
+  if (!['central', 'worker'].includes(role)) throw new Error('Choose central or worker.');
+  if (os === 'macos' && role === 'central') throw new Error('macOS central installation is not available yet. Choose a macOS worker or a Linux central node.');
+  const settings = [`GAH_NODE_ROLE=${shellQuote(role)}`];
+  let credential = '';
+  if (role === 'worker') {
+    if (gatewayUrl) throw new Error('Workers use the central memory relay. Configure the gateway on the central node.');
+    settings.push(`GAH_CENTRAL_URL=${shellQuote(remoteOrigin(centralUrl))}`);
+    credential = 'COORDINATOR_TOKEN';
+  } else if (gatewayUrl) {
+    settings.push('GAH_GATEWAY_MODE=remote', `GAH_GATEWAY_URL=${shellQuote(remoteOrigin(gatewayUrl))}`);
+    credential = 'GAH_GATEWAY_API_KEY';
+  }
+  // Read from the terminal, because curl owns stdin. The credential stays out of the pasted command.
+  const prompt = credential ? `read -rsp ${shellQuote(credential === 'COORDINATOR_TOKEN' ? 'Central access token: ' : 'Gateway API key: ')} ${credential} </dev/tty; printf "\\n"; test -n "$${credential}"; export ${credential}; ` : '';
+  return `bash -c ${shellQuote(`set -euo pipefail; ${prompt}curl -fsSL https://raw.githubusercontent.com/${repo}/main/scripts/bootstrap.sh | ${settings.join(' ')} bash`)}`;
 }
 
 export function isSupportedWindowsInstaller(name: string): boolean {
@@ -48,6 +75,9 @@ export function nodeSetupRouter(): Router {
     message: { message: 'Too many setup requests. Retry in a minute.' } }));
   router.post('/command', (req, res) => {
     try {
+      if (req.body.os && req.body.os !== 'windows') {
+        return res.json({ command: unixSetupCommand(req.body.os, req.body.role, req.body.centralUrl, req.body.gatewayUrl) });
+      }
       if (req.body.role !== 'desktop' && process.env.GAH_ALLOW_INSECURE_HTTP !== '1') {
         return res.status(409).json({ message: 'WSL worker enrollment currently uses trusted LAN transport. Set GAH_ALLOW_INSECURE_HTTP=1 on the central server for a trusted LAN/VPN, or install the desktop only.' });
       }

@@ -21,6 +21,8 @@ on:
       - 'scripts/install-macos.sh'
       - 'scripts/configure-node-role.sh'
       - 'scripts/test-worker-installers.py'
+      - 'scripts/test-macos-install.sh'
+      - 'src/update.rs'
       - 'packages/**'
       - 'package.json'
       - 'package-lock.json'
@@ -172,3 +174,18 @@ jobs:
           name: gah-worker-linux-test
           path: node-test-worker/*
           if-no-files-found: error
+
+  macos-worker-install:
+    name: macOS worker installation
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run the real macOS installer and verify installed files
+        run: bash scripts/test-macos-install.sh

@@ -2,9 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
 import express from 'express';
+import { execFileSync } from 'node:child_process';
 import rateLimit from 'express-rate-limit';
 import cors from 'cors';
-import { windowsSetupCommand, nodeSetupRouter, isSupportedWindowsInstaller } from './nodeSetup.js';
+import { windowsSetupCommand, unixSetupCommand, nodeSetupRouter, isSupportedWindowsInstaller } from './nodeSetup.js';
 import { authMiddleware } from './authMiddleware.js';
 
 test('Windows setup preserves quoted values and rejects unusable origins and roles', () => {
@@ -39,6 +40,12 @@ test('setup refuses unsupported worker transport and keeps credential responses 
     assert.equal(desktop.headers.get('cache-control'), 'no-store');
     const body = await desktop.json() as { command: string };
     assert.match(body.command, /test-enrollment-token/);
+    const unix = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ os: 'macos', role: 'worker', centralUrl: 'https://central.test' }) });
+    assert.equal(unix.status, 200);
+    assert.equal(unix.headers.get('cache-control'), 'no-store');
+    const unixBody = await unix.json() as { command: string };
+    assert.match(unixBody.command, /COORDINATOR_TOKEN/);
+    assert.ok(!unixBody.command.includes('test-enrollment-token'));
     process.env.GAH_ALLOW_INSECURE_HTTP = '1';
     assert.equal((await request('both')).status, 200);
   } finally {
@@ -158,4 +165,32 @@ test('setup credentials require auth through proxies, cross-origin browsers, and
     if (previous.token === undefined) delete process.env.COORDINATOR_TOKEN; else process.env.COORDINATOR_TOKEN = previous.token;
     if (previous.insecure === undefined) delete process.env.GAH_ALLOW_INSECURE_HTTP; else process.env.GAH_ALLOW_INSECURE_HTTP = previous.insecure;
   }
+});
+
+
+test('Unix bootstrap commands select supported roles, quote origins, and prompt for credentials', () => {
+  for (const os of ['linux', 'macos']) {
+    const command = unixSetupCommand(os, 'worker', 'https://central.example.com:8443');
+    assert.match(command, /GAH_NODE_ROLE=/);
+    assert.match(command, /GAH_CENTRAL_URL=/);
+    assert.match(command, /central.example.com:8443/);
+    assert.match(command, /read -rsp/);
+    assert.match(command, /COORDINATOR_TOKEN/);
+    assert.ok(!command.includes('GAH_GATEWAY_API_KEY'));
+    execFileSync('bash', ['-n', '-c', command]);
+  }
+  const central = unixSetupCommand('linux', 'central', '', 'https://memory.example.com:8420');
+  assert.match(central, /GAH_GATEWAY_MODE=remote/);
+  assert.match(central, /memory.example.com:8420/);
+  assert.match(central, /read -rsp/);
+  assert.match(central, /GAH_GATEWAY_API_KEY/);
+  execFileSync('bash', ['-n', '-c', central]);
+  const standalone = unixSetupCommand('linux', 'central', '');
+  assert.ok(!standalone.includes('read -rsp'));
+  assert.ok(!standalone.includes('GAH_GATEWAY'));
+  for (const args of [
+    ['macos', 'central', ''], ['linux', 'both', ''], ['unknown', 'worker', 'https://central.test'],
+    ['linux', 'worker', 'http://localhost'], ['linux', 'worker', 'https://central.test', 'https://gateway.test'],
+    ['linux', 'central', '', 'https://user:secret@gateway.test'], ['linux', 'central', '', 'https://gateway.test/path'],
+  ]) assert.throws(() => unixSetupCommand(args[0], args[1], args[2], args[3]));
 });
