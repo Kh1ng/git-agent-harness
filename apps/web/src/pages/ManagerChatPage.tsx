@@ -69,7 +69,8 @@ interface LivePermission {
   locations: string[];
 }
 
-function formatBytes(bytes: number): string {
+function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null) return 'Unknown';
   if (bytes < 1024) return `${bytes} B`;
   const units = ['KiB', 'MiB', 'GiB', 'TiB'];
   let value = bytes / 1024;
@@ -1083,8 +1084,8 @@ export function ManagerChatPage() {
             text: last.reply,
             backend: last.backend,
             model: last.model,
-            nodeId: pendingRequest.nodeId,
-            nodeName: pendingRequest.nodeName
+            nodeId: last.nodeId ?? pendingRequest.nodeId,
+            nodeName: last.nodeName ?? (last.nodeId && last.nodeId !== pendingRequest.nodeId ? undefined : pendingRequest.nodeName)
           }]);
         }
       } else if (last.type === 'error') {
@@ -1595,9 +1596,9 @@ export function ManagerChatPage() {
                     <span className="min-w-0 flex-1 truncate text-primary">{formatChatName(session)}</span>
                     {item?.idle && <span className="text-warning">idle</span>}
                     {candidate && <span className="text-accent">{candidate.outcome === 'settled' ? `settle · ${candidate.reason}` : 'archive · idle'}</span>}
-                    <span className="font-mono text-muted">{formatBytes(item?.worktreeBytes ?? 0)}</span>
+                    <span className="font-mono text-muted">{formatBytes(item?.worktreeBytes)}</span>
                     {(item?.projectedReclaimBytes ?? 0) > 0 && (
-                      <span className="font-mono text-accent">→ {formatBytes(item?.projectedReclaimBytes ?? 0)}</span>
+                      <span className="font-mono text-accent">→ {formatBytes(item?.projectedReclaimBytes)}</span>
                     )}
                   </label>
                 );

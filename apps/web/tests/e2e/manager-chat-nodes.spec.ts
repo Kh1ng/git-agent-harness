@@ -17,6 +17,10 @@ test('chat sends on the chosen node, locks it during a turn, and refreshes readi
         { nodeId: 'worker', displayName: 'Windows workstation', role: 'worker', eligible: !stale, chatCapable: !stale, reason: stale ? 'Observation is stale' : null, lastSeenAt: null }
       ] } });
     }
+    if (path === '/api/manager-chat/storage') return route.fulfill({ json: {
+      profiles: [{ profile: 'alpha', worktreeBytes: null, projectedReclaimBytes: null, idleDays: 7, sessions: [] }],
+      candidates: [], warnings: []
+    } });
     if (path === '/api/manager-chat/sessions') return route.fulfill({ json: { sessions: [] } });
     if (path === '/api/manager-chat/settings') return route.fulfill({ json: {
       defaultBackend: 'codex', profileOverrides: {}, availableBackends: [{ id: 'codex', displayName: 'Codex', implemented: true }]
@@ -43,13 +47,16 @@ test('chat sends on the chosen node, locks it during a turn, and refreshes readi
   const picker = page.getByRole('combobox', { name: 'Run on node' });
   await expect(picker).toHaveValue('central');
   await picker.selectOption('worker');
+  await page.getByRole('button', { name: 'Storage', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Chat storage' })).toContainText('Unknown in worktrees · Unknown projected reclaim');
+  await page.getByRole('button', { name: 'Storage', exact: true }).click();
   await page.getByPlaceholder(/Message the manager/).fill('Check the worker checkout');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect.poll(() => sent.length).toBe(1);
   expect(sent[0].nodeId).toBe('worker');
   await expect(picker).toBeDisabled();
-  socket!.send(JSON.stringify({ type: 'manager.chat.reply', requestId: sent[0].requestId, profile: 'alpha', reply: 'Worker checked', backend: 'codex', model: null }));
-  await expect(page.getByText('codex · Windows workstation', { exact: true })).toBeVisible();
+  socket!.send(JSON.stringify({ type: 'manager.chat.reply', requestId: sent[0].requestId, profile: 'alpha', reply: 'Worker checked', backend: 'codex', model: null, nodeId: 'worker', nodeName: 'Worker execution host' }));
+  await expect(page.getByText('codex · Worker execution host', { exact: true })).toBeVisible();
   await expect(picker).toBeEnabled();
   const readsBefore = nodeReads;
   stale = true;

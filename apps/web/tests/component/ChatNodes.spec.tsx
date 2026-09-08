@@ -57,6 +57,7 @@ test('node readiness retries, unavailable workers stay disabled, and remote crea
   await page.screenshot({ path: testInfo.outputPath('chat-nodes-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
   await picker.scrollIntoViewIfNeeded();
+  expect((await picker.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   expect(await modal.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('chat-nodes-mobile.png') });
   await modal.getByRole('button', { name: 'Start chat' }).click();
