@@ -26,19 +26,17 @@ export function isLoopbackBindHost(host: string): boolean {
   return host === '127.0.0.1' || host === '::1' || host.startsWith('127.');
 }
 
-/** Mutation routes (profiles, config, loop start/stop) have no
- * authentication yet -- that's issue #532. Binding non-loopback makes this
- * host reachable to whoever can reach the interface, so surface it loudly
- * instead of leaving the exposure implicit. */
-export function unauthenticatedExposureWarning(host: string): string | null {
+/** Remind operators of the remote authentication and network boundary when
+ * the server listens beyond loopback. */
+export function networkExposureWarning(host: string): string | null {
   if (isLoopbackBindHost(host)) {
     return null;
   }
   return (
     `WARNING: gah-server is bound to ${host}, which is reachable beyond this host. ` +
-    `The server has no built-in authentication yet (see issue #532), so anyone who can ` +
-    `reach this address can call its mutating API routes (profile writes, config changes, ` +
-    `loop start/stop). Restrict network access (firewall/VPN/Tailscale) or set HOST=127.0.0.1 ` +
-    `in /etc/gah/server.env until #532 ships. See docs/OPERATIONS.md.`
+    `Remote API access requires COORDINATOR_TOKEN. TLS is required unless GAH_ALLOW_INSECURE_HTTP=1. ` +
+    `GAH_WS_AUTH_MODE=trusted_lan permits limited unauthenticated WebSocket access. ` +
+    `Restrict network access (firewall/VPN/Tailscale) or set HOST=127.0.0.1 ` +
+    `in /etc/gah/server.env. See docs/WEBSOCKET_AUTH_532.md.`
   );
 }

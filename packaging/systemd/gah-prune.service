@@ -27,6 +27,10 @@ WorkingDirectory=/home/khing/workspace/agent-lab/repos/github/Kh1ng/git-agent-ha
 Environment=GAH_CONFIG_PATH=/home/khing/.config/gah/config.toml
 Environment=PATH=/home/khing/.cargo/bin:/home/khing/.nvm/versions/node/v22.23.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=PORT=3773
+# The maintenance HTTP request uses HOST/PORT and sends COORDINATOR_TOKEN.
+# Wildcard HOST values use loopback, which needs no token. A specific remote
+# interface requires the token and explicit GAH_ALLOW_INSECURE_HTTP=1 because
+# this command connects directly over HTTP, not through a TLS reverse proxy.
 EnvironmentFile=-/etc/gah/server.env
 ExecStart=/usr/local/bin/gah prune
 ExecStart=/usr/bin/env node apps/server/dist/chatMaintenanceCli.js
