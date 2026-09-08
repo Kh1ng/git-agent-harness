@@ -8,7 +8,7 @@ export function CoordinatorConnection() {
   const [token, setToken] = useState(coordinatorToken);
   const [error, setError] = useState('');
   return <div className="mb-4">
-    {trustedLanMode && <p role="status" className="mb-3 rounded-md border border-warning p-3 text-sm text-warning">Trusted-LAN mode is enabled. Live status and local chat allow browsers without a token. Node setup and session operations still require authentication.</p>}
+    {trustedLanMode && <p role="status" className="mb-3 rounded-md border border-warning p-3 text-sm text-warning">Trusted-LAN mode is enabled. Live connections may work without a token. Remote dashboard data, node setup, and session operations require an access token.</p>}
     <details className="text-sm" open={!isConnected || undefined}>
       <summary className="cursor-pointer text-secondary">Central access token</summary>
       <form className="mt-2 flex max-w-xl flex-wrap items-end gap-2" onSubmit={event => {

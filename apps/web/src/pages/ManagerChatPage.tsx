@@ -572,11 +572,13 @@ export function ManagerChatPage() {
       .then((binding) => { if (!cancelled) setSkillBinding(binding); })
       .catch(() => { if (!cancelled) setSkillBinding(null); });
     return () => { cancelled = true; };
-  }, [profile, skillBackend, sessionId, turns.length]);
+  }, [profile, skillBackend, sessionId, turns.length, reconnectSeq]);
 
   useEffect(() => {
-    gahApi.getProfiles().then(setAvailableProfiles).catch(() => {});
-  }, []);
+    let cancelled = false;
+    gahApi.getProfiles().then((profiles) => { if (!cancelled) setAvailableProfiles(profiles); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [reconnectSeq]);
 
   const loadGitData = async () => {
     const requestId = ++gitRequestIdRef.current;
@@ -621,6 +623,7 @@ export function ManagerChatPage() {
     setGitPrs([]);
     void loadGitData();
   }, [profile, sessionId]);
+  useWsReconnectRefresh(() => { void loadGitData(); });
 
   const refreshSessions = (forProfile: string) => {
     gahApi
@@ -689,7 +692,7 @@ export function ManagerChatPage() {
   useEffect(() => {
     if (storageOpen) void refreshStorage(profile);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [storageOpen, profile]);
+  }, [storageOpen, profile, reconnectSeq]);
 
   // Restore history on mount, on profile change, on session change, and
   // after a reconnect -- otherwise leaving the page (or a dropped
@@ -781,7 +784,7 @@ export function ManagerChatPage() {
         }
       });
     return () => { cancelled = true; };
-  }, [profile]);
+  }, [profile, reconnectSeq]);
 
   // Session-scoped model list: when a session is active, the composer's
   // provider picker needs that session's backend models, and changes go to
@@ -808,7 +811,7 @@ export function ManagerChatPage() {
       .catch(() => { if (!cancelled) { setSessionModels([]); setSessionModelsLoaded(true); } });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile, sessionId, activeSession?.backend]);
+  }, [profile, sessionId, activeSession?.backend, isConnected, reconnectSeq]);
 
   /** Composer provider picker, session variant: one PATCH carries the full
    *  desired selection. A backend switch resets model + effort (the picker

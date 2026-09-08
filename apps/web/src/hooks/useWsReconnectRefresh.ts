@@ -1,13 +1,9 @@
 import { useEffect, useRef } from 'react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 
-/**
- * Re-triggers `refresh` whenever the WebSocket reconnects after having
- * dropped -- a restored connection is otherwise no signal at all that
- * REST-backed panels are current, so a page can sit stale until its own
- * poll timer or a manual navigation happens to fire. Does not fire on the
- * initial connect (the page's own mount effect already covers that).
- */
+/** Refresh mounted REST data after a reconnect or credential change succeeds.
+ * This includes the first authorized connection when initial reads were rejected.
+ * Ordinary initial connections are covered by each page's mount effect. */
 export function useWsReconnectRefresh(refresh: () => void): void {
   const { reconnectSeq } = useWebSocket();
   const refreshRef = useRef(refresh);
