@@ -166,3 +166,13 @@ A Chromium smoke test checked the desktop form, separate tool environments, visi
 
 Actual Windows launch, WSL installation, Windows logon, LAN forwarding, and a real backend dispatch remain untested.
 No release was published. Native iOS/Android builds and QR pairing remain separate work.
+
+## Installer checks
+
+`node scripts/test-node-test-artifacts.mjs` verifies revision and checksum manifests,
+tracked source export, and rejection of ambiguous installers or stale output directories.
+Windows CI runs `scripts/test-windows-installer.ps1` against malformed and mixed bundles.
+
+`python3 scripts/test-worker-installers.py` executes the Linux and macOS shell entrypoints
+in a scratch home. Strict command substitutes verify setup order and prohibit privileged
+or central setup on workers. This does not prove a Cargo installation or service startup.
