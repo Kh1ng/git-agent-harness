@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory(prefix='gah-wsl-check-') as temp:
 print('WSL config check passed: private credentials, shell quoting, stable identity, service paths.')
 
 # An old downloaded CLI must fail before the installer rewrites live worker files.
-role_check = script.split('# role-cli-check:start', 1)[1].split('# role-cli-check:end', 1)[0].split('\n', 1)[1]
+role_check = script.split('install -m 755 "$stage/gah" "$release_dir/bin/gah"\n', 1)[1].split('# role-cli-check:end', 1)[0]
 assert script.index('# role-cli-check:end') < script.index("<<'PY'\n")
 with tempfile.TemporaryDirectory(prefix='gah-role-install-') as temp:
     root = Path(temp)
@@ -54,11 +54,12 @@ with tempfile.TemporaryDirectory(prefix='gah-role-install-') as temp:
     cli = root / 'bin/gah'
     cli.write_text('#!/bin/sh\necho "old CLI help"\n')
     cli.chmod(0o755)
-    result = subprocess.run(['bash', '-c', role_check], env={**os.environ, 'release_dir': str(root)}, capture_output=True, text=True)
+    result = subprocess.run(['bash', '-ec', role_check], env={**os.environ, 'release_dir': str(root)}, capture_output=True, text=True)
     assert result.returncode != 0 and 'too old' in result.stderr
-    cli.write_text('#!/bin/sh\necho "--node-role --role"\n')
-    assert subprocess.run(['bash', '-c', role_check], env={**os.environ, 'release_dir': str(root)}).returncode == 0
+    cli.write_text('#!/bin/sh\ncase "$*" in "config set --help"|"status --help") echo "--node-role --role";; *) exit 2;; esac\n')
+    assert subprocess.run(['bash', '-ec', role_check], env={**os.environ, 'release_dir': str(root)}).returncode == 0
 
+    cli.write_text('#!/bin/sh\necho "--node-role --role"\n')
     # Shared Linux/macOS bootstrap preserves other env settings and safely quotes secrets.
     home = root / 'home'
     home.mkdir()

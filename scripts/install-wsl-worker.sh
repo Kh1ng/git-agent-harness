@@ -27,7 +27,6 @@ release_dir="$(mktemp -d "$install_dir/release.XXXXXXXX")"
 tar -xzf "$stage/source.tar.gz" -C "$release_dir"
 mkdir -p "$release_dir/bin"
 install -m 755 "$stage/gah" "$release_dir/bin/gah"
-"$release_dir/bin/gah" --version
 # role-cli-check:start -- also exercised without installing a service.
 if ! "$release_dir/bin/gah" config set --help | grep -q -- '--node-role' ||
    ! "$release_dir/bin/gah" status --help | grep -q -- '--role'; then
