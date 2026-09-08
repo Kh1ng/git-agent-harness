@@ -121,7 +121,7 @@ pub fn run(command: QuotaCommands) -> Result<()> {
             let path = store_arg
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(quota_store::store_path);
-            let records = quota_store::load(&path).unwrap_or_default();
+            let records = quota_store::load(&path)?;
             if json {
                 println!("{}", serde_json::to_string(&records)?);
             } else if records.is_empty() {
