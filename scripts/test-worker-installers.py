@@ -60,3 +60,25 @@ else:
         assert credential.read_text() == 'COORDINATOR_TOKEN="installer-test-token"\n'
         assert not (home / '.config/systemd').exists()
 print('Worker installers passed: Linux and macOS entrypoints, config before update, private credentials, no privileged or central commands.')
+
+# Exercise only the environment writer, without any installer, sudo, or user files.
+linux = (source / 'install-linux.sh').read_text()
+writer = linux[linux.index('upsert_env_line() {'):linux.index('# Used by both the remote')]
+with tempfile.TemporaryDirectory(prefix='gah-gateway-env-') as directory:
+    root = Path(directory)
+    target = root / 'gateway.env'
+    marker = root / 'must-not-exist'
+    token = 'a&b|c"d\\e $VALUE $(touch ' + str(marker) + ') `touch ' + str(marker) + '`'
+    target.write_text('HOST=127.0.0.1\nTDAI_GATEWAY_API_KEY=old\n')
+    command = writer + '\nupsert_env_line "$1" TDAI_GATEWAY_API_KEY "$2" ""\nsource "$1"\nprintf "%s" "$TDAI_GATEWAY_API_KEY"'
+    result = subprocess.run(['bash', '-euc', command, 'env-test', str(target), token], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == token
+    assert not marker.exists(), 'Sourcing credentials must not execute their contents'
+    assert target.read_text().startswith('HOST=127.0.0.1\n')
+    assert target.stat().st_mode & 0o777 == 0o600
+    previous = target.read_bytes()
+    rejected = subprocess.run(['bash', '-euc', command, 'env-test', str(target), 'bad\nkey'], capture_output=True)
+    assert rejected.returncode != 0
+    assert target.read_bytes() == previous, 'An invalid credential must preserve the old file'
+print('Gateway credentials round-trip literally, retain unrelated settings, and reject control characters before writing.')
