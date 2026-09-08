@@ -54,7 +54,7 @@ test('worker role reports central identity and permits execution without hosting
 });
 
 test('central memory relay preserves gateway contracts without forwarding worker credentials or arbitrary destinations', async () => {
-  const previous = { url: process.env.TDAI_GATEWAY_URL, key: process.env.TDAI_GATEWAY_API_KEY, settings: process.env.GAH_GATEWAY_SETTINGS_PATH };
+  const previous = { url: process.env.TDAI_GATEWAY_URL, key: process.env.TDAI_GATEWAY_API_KEY, settings: process.env.GAH_GATEWAY_SETTINGS_PATH, token: process.env.COORDINATOR_TOKEN };
   const directory = mkdtempSync(join(tmpdir(), 'gah-relay-'));
   const received: { path?: string; authorization?: string; body?: unknown }[] = [];
   const gateway = express();
@@ -66,6 +66,7 @@ test('central memory relay preserves gateway contracts without forwarding worker
   const gatewayServer = createHttpServer(gateway);
   process.env.TDAI_GATEWAY_URL = await listen(gatewayServer);
   process.env.TDAI_GATEWAY_API_KEY = 'central-gateway-key';
+  process.env.COORDINATOR_TOKEN = 'worker-token';
   process.env.GAH_GATEWAY_SETTINGS_PATH = join(directory, 'settings.json');
   const app = express();
   app.use(express.json());
@@ -98,7 +99,7 @@ test('central memory relay preserves gateway contracts without forwarding worker
     await close(server);
     await close(gatewayServer);
     rmSync(directory, { recursive: true });
-    for (const [key, value] of Object.entries({ TDAI_GATEWAY_URL: previous.url, TDAI_GATEWAY_API_KEY: previous.key, GAH_GATEWAY_SETTINGS_PATH: previous.settings })) {
+    for (const [key, value] of Object.entries({ TDAI_GATEWAY_URL: previous.url, TDAI_GATEWAY_API_KEY: previous.key, GAH_GATEWAY_SETTINGS_PATH: previous.settings, COORDINATOR_TOKEN: previous.token })) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
   }

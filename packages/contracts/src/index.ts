@@ -5,3 +5,5 @@ export * from './claims.js';
 export * from './chat-session.js';
 
 export * from './pm-plan.js';
+
+export * from './pairing.js';

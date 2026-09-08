@@ -1,12 +1,18 @@
-import { useState } from 'react';
-import { coordinatorToken, saveCoordinatorToken } from '../api/coordinatorToken.js';
+import { useEffect, useState } from 'react';
+import { coordinatorToken, saveCoordinatorToken, TOKEN_CHANGED_EVENT } from '../api/coordinatorToken.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
+import { DevicePairing } from './DevicePairing.js';
 
 /** Available before authenticated dashboard data loads, including in the native webview. */
 export function CoordinatorConnection() {
   const { trustedLanMode, isConnected } = useWebSocket();
   const [token, setToken] = useState(coordinatorToken);
   const [error, setError] = useState('');
+  useEffect(() => {
+    const changed = () => setToken(coordinatorToken());
+    window.addEventListener(TOKEN_CHANGED_EVENT, changed);
+    return () => window.removeEventListener(TOKEN_CHANGED_EVENT, changed);
+  }, []);
   return <div className="mb-4">
     {trustedLanMode && <p role="status" className="mb-3 rounded-md border border-warning p-3 text-sm text-warning">Trusted-LAN mode is enabled. Live connections may work without a token. Remote dashboard data, node setup, and session operations require an access token.</p>}
     <details className="text-sm" open={!isConnected || undefined}>
@@ -24,5 +30,6 @@ export function CoordinatorConnection() {
         {error && <p role="alert" className="w-full text-xs text-critical">{error}</p>}
       </form>
     </details>
+    <DevicePairing />
   </div>;
 }

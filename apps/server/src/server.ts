@@ -57,7 +57,9 @@ import type {
 import { getFleetDispatch } from './wsServer.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
 import { deriveControllerActivity } from './controllerActivity.js';
-import { authMiddleware, coordinatorTokenMatches } from './authMiddleware.js';
+import { authMiddleware, coordinatorTokenMatches, requireOwner } from './authMiddleware.js';
+import { DeviceAccess } from './deviceAccess.js';
+import { pairingRouter } from './pairing.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { RegistryService, NodeDoctorError } from './registryService.js';
 import { ClaimsService, ClaimConflictError } from './claimsService.js';
@@ -125,6 +127,7 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   registryService?: RegistryService;
   claimsService?: ClaimsService;
   coordinatorPort?: number;
+  deviceAccess?: DeviceAccess;
   node?: NodeRoleStatus;
   getPendingCommits?: typeof getPendingCommits;
   startAdminUpdate?: typeof startAdminUpdate;
@@ -260,6 +263,7 @@ export function createServer(
   let claimsService = configDeps.claimsService;
   const centralClaims = () => claimsService ??= new ClaimsService();
   const app = express();
+  if (node.role === 'central') app.locals.deviceAccess = configDeps.deviceAccess ?? new DeviceAccess();
   // Trust X-Forwarded-* only when the immediate hop is loopback (a TLS-terminating
   // reverse proxy on this same host). `true` would trust those headers from any
   // direct peer, letting a remote attacker forge `X-Forwarded-Proto: https` and
@@ -269,13 +273,16 @@ export function createServer(
   // Middleware
   app.use(cors());
   app.use(express.json());
+  // Pairing only exempts one-time code inspection/redemption; its management
+  // routes enforce owner authentication inside the router. Workers cannot pair.
+  if (node.role === 'central') app.use('/api/pairing', pairingRouter(app.locals.deviceAccess, getCoordinatorIdentity(undefined, coordinatorPort)));
   // All API reads and mutations share one boundary, including future routes.
   // Direct same-origin loopback access remains local; /health stays public.
   app.use('/api', authMiddleware);
   app.use(workerRouteGuard(node));
   app.use('/api/worker-memory', workerMemoryRouter());
   app.use('/api/pm', pmPlansRouter());
-  app.use('/api/settings/nodes', nodeSetupRouter());
+  app.use('/api/settings/nodes', requireOwner, nodeSetupRouter());
   // Updating the running service also requires the existing operator opt-in.
   app.use('/api/admin', (req, res, next) => {
     if (process.env.GAH_ENABLE_ADMIN_UPDATE !== '1') {
@@ -1318,7 +1325,7 @@ export function createServer(
     res.json(await gatewaySettingsSummary());
   });
 
-  app.post('/api/settings/gateway/bootstrap-command', async (_req, res) => {
+  app.post('/api/settings/gateway/bootstrap-command', requireOwner, async (_req, res) => {
     res.set('Cache-Control', 'no-store');
     const apiKey = gatewayApiKey();
     if (!apiKey) {

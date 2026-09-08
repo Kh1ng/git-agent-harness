@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { isIP } from 'node:net';
 import type { IncomingHttpHeaders } from 'node:http';
+import { deviceCookie, type DeviceAccess } from './deviceAccess.js';
 
 export function isLocalAddress(ip: string): boolean {
   if (!ip) return false;
@@ -42,15 +43,13 @@ export function isTrustedLocalRequest(req: { socket: { remoteAddress?: string };
 }
 
 export function authMiddleware(req: Request, res: Response, next: NextFunction) {
-  if (isTrustedLocalRequest(req)) {
-    return next();
-  }
+  const local = isTrustedLocalRequest(req);
 
   // Requests outside the local exemption require TLS and authenticated identity
   // Rely on Express's req.secure, which only trusts proxy headers if 'trust proxy' is configured.
   const isTls = req.secure;
 
-  if (!isTls && process.env.GAH_ALLOW_INSECURE_HTTP !== '1') {
+  if (!local && !isTls && process.env.GAH_ALLOW_INSECURE_HTTP !== '1') {
     return res.status(403).json({
       error: 'Forbidden',
       message: 'Remote or cross-origin access requires TLS unless GAH_ALLOW_INSECURE_HTTP=1'
@@ -59,6 +58,21 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 
   // Authenticated node/client identity: check Bearer token
   const authHeader = req.headers.authorization;
+  const cookie = deviceCookie(req.headers.cookie);
+  // A revoked/expired supplied device credential must not inherit local trust.
+  // Explicit owner credentials can replace an old paired session in this browser.
+  if (authHeader === undefined && cookie !== undefined) {
+    try {
+      const access: DeviceAccess | undefined = req.app?.locals.deviceAccess;
+      const device = sameOriginRequest(req) ? access?.authenticate(cookie) : null;
+      if (device) { res.locals.authPrincipal = { kind: 'device', id: device.id }; return next(); }
+    } catch { /* Invalid/unreadable credential storage fails closed. */ }
+    return res.status(401).json({ error: 'Unauthorized', message: 'Device access is unavailable, expired, or revoked. Pair this device again.' });
+  }
+  if (authHeader === undefined && local) {
+    res.locals.authPrincipal = { kind: 'owner' };
+    return next();
+  }
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({
       error: 'Unauthorized',
@@ -83,5 +97,22 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
     });
   }
 
+  res.locals.authPrincipal = { kind: 'owner' };
+  next();
+}
+
+/** Cookie credentials are ambient: require the browser's exact origin, not a
+ * same-site subdomain. Same-origin GET fetches may omit Origin. */
+export function sameOriginRequest(req: { headers: IncomingHttpHeaders; protocol: string; method?: string }): boolean {
+  try {
+    const target = new URL(`${req.protocol}://${req.headers.host}`);
+    if (req.headers.origin !== undefined) return new URL(req.headers.origin).origin === target.origin;
+    return (req.method === 'GET' || req.method === 'HEAD') && req.headers['sec-fetch-site'] === 'same-origin';
+  } catch { return false; }
+}
+
+/** Device grants cannot mint more grants or export owner/worker credentials. */
+export function requireOwner(_req: Request, res: Response, next: NextFunction) {
+  if (res.locals.authPrincipal?.kind !== 'owner') return res.status(403).json({ error: 'Forbidden', message: 'Use owner access for pairing management or credential export.' });
   next();
 }

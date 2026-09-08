@@ -1,10 +1,21 @@
-import type { IncomingMessage, Server } from 'node:http';
+import type { IncomingHttpHeaders, IncomingMessage, Server } from 'node:http';
 import { isIP } from 'node:net';
 import { WebSocket, WebSocketServer } from 'ws';
-import { coordinatorTokenMatches, isLocalAddress, isTrustedLocalRequest } from './authMiddleware.js';
+import { coordinatorTokenMatches, isLocalAddress, isTrustedLocalRequest, sameOriginRequest } from './authMiddleware.js';
+import { deviceCookie, type DeviceAccess } from './deviceAccess.js';
 
 const compatibilityClients = new WeakSet<WebSocket>();
 const compatibilityWarnings = new WeakSet<WebSocket>();
+const deviceClients = new WeakMap<WebSocket, { access: DeviceAccess; id: string }>();
+
+/** Check before dispatching each message, including messages already buffered
+ * when revocation terminated the transport. Revocation never stops accepted work. */
+export function webSocketAccessValid(ws: WebSocket): boolean {
+  const device = deviceClients.get(ws);
+  if (!device || device.access.active(device.id)) return true;
+  ws.terminate();
+  return false;
+}
 
 /** Compatibility browsers may manage local chat, but cannot invoke the fleet coordinator. */
 export function requiresFleetAuthentication(ws: WebSocket, messageType: string): boolean {
@@ -24,7 +35,7 @@ function requestProtocol(req: IncomingMessage): string {
 
 /** Browser origins must target a literal/local address or an explicitly configured origin.
  * Host equality alone would let an attacker's domain rebind to the local server. */
-function browserOriginAllowed(req: IncomingMessage, protocol: string): boolean {
+export function browserOriginAllowed(req: { headers: IncomingHttpHeaders }, protocol: string): boolean {
   try {
     if (req.headers.origin === undefined) return true;
     const target = new URL(`${protocol}://${req.headers.host}`);
@@ -50,8 +61,9 @@ function browserToken(req: IncomingMessage): string | null {
 
 /** Reject unauthorized upgrades before a socket can receive welcome data or invoke handlers.
  * Native fleet clients retain Authorization; browsers send a non-echoed credential protocol. */
-export function createAuthorizedWebSocketServer(server: Server, role?: 'central' | 'worker'): WebSocketServer {
+export function createAuthorizedWebSocketServer(server: Server, role?: 'central' | 'worker', access?: DeviceAccess): WebSocketServer {
   const compatibilityRequests = new WeakSet<IncomingMessage>();
+  const deviceRequests = new WeakMap<IncomingMessage, { id: string; expires_at: string }>();
   const wss = new WebSocketServer({
     server,
     handleProtocols: protocols => protocols.has('gah.v1') ? 'gah.v1' : false,
@@ -60,13 +72,22 @@ export function createAuthorizedWebSocketServer(server: Server, role?: 'central'
       if (!browserOriginAllowed(req, protocol)) return done(false, 403, 'WebSocket origin or host is not allowed');
       const worker = (role ?? process.env.GAH_NODE_ROLE) === 'worker';
       const local = isTrustedLocalRequest({ socket: req.socket, headers: req.headers, protocol });
-      if (!worker && local) return done(true);
       if (!local && protocol !== 'https' && process.env.GAH_ALLOW_INSECURE_HTTP !== '1') return done(false, 403, 'Remote WebSockets require TLS');
       const authorization = req.headers.authorization;
       const token = authorization?.startsWith('Bearer ') ? authorization.slice(7) : browserToken(req);
       if (token && coordinatorTokenMatches(token)) return done(true);
+      const suppliedToken = authorization !== undefined || req.headers['sec-websocket-protocol']?.includes('gah-auth.');
+      const cookie = deviceCookie(req.headers.cookie);
+      if (!suppliedToken && cookie !== undefined) {
+        try {
+          const device = !worker && sameOriginRequest({ headers: req.headers, protocol, method: req.method }) ? access?.authenticate(cookie) : null;
+          if (device) { deviceRequests.set(req, device); return done(true); }
+        } catch { /* Corrupt credential storage must not authorize an upgrade. */ }
+        return done(false, 401, 'Device access expired or revoked');
+      }
+      if (!worker && local && !suppliedToken) return done(true);
       // A bad supplied credential is not silently downgraded into compatibility mode.
-      if (token === null && !authorization && !req.headers['sec-websocket-protocol']?.includes('gah-auth.') && req.headers.origin && !worker && process.env.GAH_WS_AUTH_MODE === 'trusted_lan') {
+      if (token === null && !suppliedToken && cookie === undefined && req.headers.origin && !worker && process.env.GAH_WS_AUTH_MODE === 'trusted_lan') {
         compatibilityRequests.add(req);
         return done(true);
       }
@@ -74,6 +95,20 @@ export function createAuthorizedWebSocketServer(server: Server, role?: 'central'
     }
   });
   wss.on('connection', (ws, req) => {
+    const device = deviceRequests.get(req);
+    if (device && access) {
+      deviceClients.set(ws, { access, id: device.id });
+      const unsubscribe = access.onRevoke(id => { if (id === device.id) ws.terminate(); });
+      let expiry: ReturnType<typeof setTimeout>;
+      const expire = () => {
+        const remaining = Date.parse(device.expires_at) - Date.now();
+        if (remaining <= 0) { ws.terminate(); return; }
+        expiry = setTimeout(expire, Math.min(remaining, 2_147_483_647));
+        expiry.unref();
+      };
+      expire();
+      ws.once('close', () => { clearTimeout(expiry); unsubscribe(); });
+    }
     if (compatibilityRequests.has(req)) compatibilityClients.add(ws);
     if ((role ?? process.env.GAH_NODE_ROLE) !== 'worker' && process.env.GAH_WS_AUTH_MODE === 'trusted_lan') compatibilityWarnings.add(ws);
   });
