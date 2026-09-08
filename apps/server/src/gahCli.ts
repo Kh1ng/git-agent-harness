@@ -1481,3 +1481,25 @@ export function isGahCliAvailable(): Promise<boolean> {
     child.on('close', (code) => resolvePromise(code === 0));
   });
 }
+
+/** Fixed CLI operations for the profile-scoped PM API; never accepts a path or raw argv. */
+export interface PmPlanCommand {
+  operation: 'list' | 'show' | 'dry-run' | 'publish';
+  profile: string;
+  planId?: string;
+  cursor?: string;
+  limit?: number;
+  fingerprint?: string;
+}
+export async function runPmPlanCommand(options: PmPlanCommand): Promise<import('@git-agent-harness/contracts').PmPlanList | import('@git-agent-harness/contracts').PmPlanDetail | import('@git-agent-harness/contracts').PmPlanOperation> {
+  const action = options.operation === 'list' ? 'plans' : options.operation === 'show' ? 'show' : 'publish';
+  const args = ['pm', action, `--profile=${options.profile}`, '--json'];
+  if (options.planId !== undefined) args.push(`--plan-id=${options.planId}`);
+  if (options.cursor !== undefined) args.push(`--cursor=${options.cursor}`);
+  if (options.limit !== undefined) args.push(`--limit=${options.limit}`);
+  if (options.fingerprint !== undefined) args.push(`--expected-fingerprint=${options.fingerprint}`);
+  if (options.operation === 'dry-run') args.push('--dry-run');
+  const config = getConfigPath();
+  if (config) args.push('--config', config);
+  return runJsonCommand(args, config);
+}

@@ -5,7 +5,7 @@ import {
   InvalidBindHostError,
   isLoopbackBindHost,
   resolveBindHost,
-  unauthenticatedExposureWarning,
+  networkExposureWarning,
   validateBindHost
 } from './bindHost.js';
 
@@ -59,18 +59,19 @@ test('isLoopbackBindHost recognizes loopback addresses only', () => {
   assert.equal(isLoopbackBindHost('10.0.0.5'), false);
 });
 
-test('unauthenticatedExposureWarning is silent on loopback', () => {
-  assert.equal(unauthenticatedExposureWarning('127.0.0.1'), null);
-  assert.equal(unauthenticatedExposureWarning('::1'), null);
+test('networkExposureWarning is silent on loopback', () => {
+  assert.equal(networkExposureWarning('127.0.0.1'), null);
+  assert.equal(networkExposureWarning('::1'), null);
 });
 
-test('unauthenticatedExposureWarning fires for the 0.0.0.0 default and other interfaces', () => {
-  const defaultWarning = unauthenticatedExposureWarning('0.0.0.0');
+test('networkExposureWarning explains remote authentication and explicit compatibility mode', () => {
+  const defaultWarning = networkExposureWarning('0.0.0.0');
   assert.ok(defaultWarning);
-  assert.match(defaultWarning, /#532/);
+  assert.match(defaultWarning, /requires COORDINATOR_TOKEN\. TLS is required unless GAH_ALLOW_INSECURE_HTTP=1/);
+  assert.match(defaultWarning, /GAH_WS_AUTH_MODE=trusted_lan/);
   assert.match(defaultWarning, /0\.0\.0\.0/);
 
-  const interfaceWarning = unauthenticatedExposureWarning('10.0.0.5');
+  const interfaceWarning = networkExposureWarning('10.0.0.5');
   assert.ok(interfaceWarning);
   assert.match(interfaceWarning, /10\.0\.0\.5/);
 });

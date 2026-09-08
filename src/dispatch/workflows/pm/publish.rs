@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const PUBLICATION_SCHEMA_VERSION: u32 = 1;
@@ -61,7 +62,7 @@ impl IssuePublisher for CliIssuePublisher<'_> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct PublishedChild {
+pub(crate) struct PublishedChild {
     key: String,
     issue_id: String,
     issue_number: String,
@@ -73,15 +74,15 @@ struct PublishedChild {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PublicationState {
-    schema_version: u32,
-    plan_fingerprint: String,
-    profile: String,
-    repo: String,
-    source_issue_number: String,
-    status: String,
+pub(crate) struct PublicationState {
+    pub(super) schema_version: u32,
+    pub(super) plan_fingerprint: String,
+    pub(super) profile: String,
+    pub(super) repo: String,
+    pub(super) source_issue_number: String,
+    pub(super) status: String,
     #[serde(default)]
-    children: BTreeMap<String, PublishedChild>,
+    pub(super) children: BTreeMap<String, PublishedChild>,
 }
 
 struct PublishContext<'a> {
@@ -104,6 +105,7 @@ pub(crate) struct PmPublicationSummary {
     pub(crate) child_issue_numbers: Vec<String>,
     pub(crate) child_depth: u32,
     pub(crate) already_published: bool,
+    pub(crate) output: Vec<String>,
 }
 
 struct MutationLedgerContext<'a> {
@@ -119,16 +121,9 @@ pub(crate) fn publish_plan(
     profile: &Profile,
     plan_path: &Path,
     dry_run: bool,
+    expected_fingerprint: Option<&str>,
 ) -> Result<PmPublicationSummary> {
-    let bytes = fs::read(plan_path)
-        .with_context(|| format!("reading PM plan artifact: {}", plan_path.display()))?;
-    if bytes.len() > MAX_ARTIFACT_BYTES {
-        anyhow::bail!("PM plan artifact exceeds {MAX_ARTIFACT_BYTES} bytes");
-    }
-    let artifact: PmPlanArtifact = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing PM plan artifact: {}", plan_path.display()))?;
-    validate_publication_contract(profile, &artifact)?;
-    validate_plan(&artifact.plan)?;
+    let artifact = read_artifact(plan_path, profile)?;
     anyhow::ensure!(
         artifact.plan.tickets.len() <= profile.publishing.pm_max_children(),
         "PM plan contains {} children, exceeding configured pm_max_children={}",
@@ -141,6 +136,12 @@ pub(crate) fn publish_plan(
 
     let source_issue_number = parse_issue_number(&artifact.target)?;
     let fingerprint = plan_fingerprint(&artifact)?;
+    if let Some(expected) = expected_fingerprint {
+        anyhow::ensure!(
+            expected == fingerprint,
+            "PM plan changed after approval; review the current fingerprint"
+        );
+    }
     let order = topological_order(&artifact.plan.tickets)?;
     let state_path = publication_state_path(plan_path)?;
     let mut state = load_or_initialize_state(
@@ -173,7 +174,7 @@ pub(crate) fn publish_plan(
         state_path: &state_path,
         child_depth,
     };
-    publish_with_provider(&context, &mut state, &mut publisher, dry_run)?;
+    let output = publish_with_provider(&context, &mut state, &mut publisher, dry_run)?;
     let summary = PmPublicationSummary {
         plan_fingerprint: fingerprint,
         state_path,
@@ -185,6 +186,7 @@ pub(crate) fn publish_plan(
             .collect(),
         child_depth,
         already_published,
+        output,
     };
     if !dry_run {
         append_parent_publication_ledger(cfg, profile_name, profile, &summary)?;
@@ -251,7 +253,7 @@ fn publish_with_provider(
     state: &mut PublicationState,
     publisher: &mut dyn IssuePublisher,
     dry_run: bool,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let cfg = context.cfg;
     let profile_name = context.profile_name;
     let profile = context.profile;
@@ -274,11 +276,12 @@ fn publish_with_provider(
         .collect::<BTreeMap<_, _>>();
     let mut provider_issues = publisher.list_issues()?;
 
+    let mut output = Vec::new();
     if dry_run {
-        println!(
+        output.push(format!(
             "PM publish dry run: profile={} repo={} source=#{} fingerprint={}",
             profile_name, profile.repo, source_issue_number, fingerprint
-        );
+        ));
     }
 
     for &index in order {
@@ -303,13 +306,13 @@ fn publish_with_provider(
                 .first()
                 .map(|issue| format!("existing {}", issue.url))
                 .unwrap_or_else(|| "would create".to_string());
-            println!(
+            output.push(format!(
                 "- {}: {} [{}] labels={}",
                 ticket_key,
                 ticket.title,
                 disposition,
                 configured_labels.join(",")
-            );
+            ));
             continue;
         }
 
@@ -525,19 +528,39 @@ fn publish_with_provider(
     }
 
     if dry_run {
-        return Ok(());
+        return Ok(output);
     }
     state.status = "complete".to_string();
     write_state_atomic(state_path, state)?;
-    println!(
+    output.push(format!(
         "Published {} idempotent child issue(s); state: {}",
         state.children.len(),
         state_path.display()
-    );
-    Ok(())
+    ));
+    Ok(output)
 }
 
-fn validate_publication_contract(profile: &Profile, artifact: &PmPlanArtifact) -> Result<()> {
+/// Read and validate the exact bounded artifact that publication will use.
+pub(super) fn read_artifact(path: &Path, profile: &Profile) -> Result<PmPlanArtifact> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take((MAX_ARTIFACT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_ARTIFACT_BYTES,
+        "PM plan artifact exceeds {MAX_ARTIFACT_BYTES} bytes"
+    );
+    let artifact: PmPlanArtifact =
+        serde_json::from_slice(&bytes).context("invalid PM plan artifact")?;
+    validate_publication_contract(profile, &artifact)?;
+    validate_plan(&artifact.plan)?;
+    Ok(artifact)
+}
+
+pub(super) fn validate_publication_contract(
+    profile: &Profile,
+    artifact: &PmPlanArtifact,
+) -> Result<()> {
     if artifact.schema_version != 1 {
         anyhow::bail!(
             "unsupported PM plan schema_version {} (expected 1)",
@@ -564,7 +587,7 @@ fn validate_publication_contract(profile: &Profile, artifact: &PmPlanArtifact) -
     Ok(())
 }
 
-fn parse_issue_number(target: &str) -> Result<String> {
+pub(super) fn parse_issue_number(target: &str) -> Result<String> {
     let candidate = target
         .trim()
         .trim_end_matches('/')
@@ -596,7 +619,7 @@ fn ensure_source_open(publisher: &mut dyn IssuePublisher, number: &str) -> Resul
     Ok(source)
 }
 
-fn plan_fingerprint(artifact: &PmPlanArtifact) -> Result<String> {
+pub(super) fn plan_fingerprint(artifact: &PmPlanArtifact) -> Result<String> {
     let canonical = serde_json::to_vec(artifact)?;
     Ok(format!("{:x}", Sha256::digest(canonical)))
 }
@@ -767,7 +790,7 @@ fn topological_order(tickets: &[PlannerWorkPacket]) -> Result<Vec<usize>> {
     Ok(order)
 }
 
-fn publication_state_path(plan_path: &Path) -> Result<PathBuf> {
+pub(super) fn publication_state_path(plan_path: &Path) -> Result<PathBuf> {
     let file_name = plan_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -775,7 +798,7 @@ fn publication_state_path(plan_path: &Path) -> Result<PathBuf> {
     Ok(plan_path.with_file_name(format!("{file_name}.publication-v1.json")))
 }
 
-fn load_or_initialize_state(
+pub(super) fn load_or_initialize_state(
     path: &Path,
     profile_name: &str,
     profile: &Profile,

@@ -112,7 +112,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
       "secret_fields": [],
       "remote_disposition": "remote_available",
       "local_only_reason": null,
-      "documentation": "Publish a validated PM plan artifact as native provider issues",
+      "documentation": "Publish native provider issues. Remote callers must use a profile-scoped plan ID and reviewed fingerprint; --plan paths remain local-only.",
       "cli_command_path": "gah pm publish",
       "is_stable": true
     },
@@ -447,7 +447,6 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
       "cli_command_path": "gah loop",
       "is_stable": true
     },
-
     "node.register": {
       "operation_id": "node.register",
       "display_name": "Register Worker Node",
@@ -932,6 +931,46 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
       "documentation": "Show telemetry repository status",
       "cli_command_path": "gah telemetry status",
       "is_stable": true
+    },
+    "pm.plans.show": {
+      "operation_id": "pm.plans.show",
+      "display_name": "Read PM plans (gah pm show)",
+      "class": "read",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": {
+        "rust_type": "PlanDetail",
+        "ts_type": "PmPlanDetail",
+        "is_primitive": false
+      },
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Read bounded artifacts within a configured profile; IDs never accept filesystem paths.",
+      "cli_command_path": "gah pm show",
+      "is_stable": true
+    },
+    "pm.plans.list": {
+      "operation_id": "pm.plans.list",
+      "display_name": "Read PM plans (gah pm plans)",
+      "class": "read",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": {
+        "rust_type": "PlanList",
+        "ts_type": "PmPlanList",
+        "is_primitive": false
+      },
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Read bounded artifacts within a configured profile; IDs never accept filesystem paths.",
+      "cli_command_path": "gah pm plans",
+      "is_stable": true
     }
   },
   "command_path_to_operation_id": {
@@ -982,7 +1021,9 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "gah ledger work": "ledger.work",
     "gah external-approval revoke": "external_approval.revoke",
     "gah hold clear": "hold.clear",
-    "gah ledger repair-tail": "ledger.repair_tail"
+    "gah ledger repair-tail": "ledger.repair_tail",
+    "gah pm plans": "pm.plans.list",
+    "gah pm show": "pm.plans.show"
   },
   "remote_operations": [
     "availability.get",
@@ -1007,6 +1048,8 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "status.get",
     "sync.classify",
     "dispatch.run",
+    "pm.plans.list",
+    "pm.plans.show",
     "pm.publish",
     "config.show",
     "config.set",

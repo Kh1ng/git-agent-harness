@@ -39,7 +39,31 @@ function respond(name) {
 const args = process.argv.slice(2);
 const [command, sub] = args;
 
-if (command === 'status') {
+if (command === 'pm') {
+  if (process.env.GAH_FIXTURE_PM_LOG) fs.appendFileSync(process.env.GAH_FIXTURE_PM_LOG, JSON.stringify(args) + '\n');
+  const profile = args.find(value => value.startsWith('--profile='))?.slice('--profile='.length);
+  const provider = profile === 'github-project' ? 'github' : profile === 'gitlab-project' ? 'gitlab' : null;
+  if (!provider || !args.includes('--json') || args.some(value => value.startsWith('--plan='))) process.exit(2);
+  const fixturePath = path.resolve(__dirname, '../../../../../packages/contracts/src/fixtures', `pm-plan-${provider}.json`);
+  const plan = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+  let result = plan;
+  if (sub === 'plans') result = {
+    schema_version: 1, generated_at: plan.generated_at, profile, next_cursor: null, errors: [],
+    plans: [{ id: plan.id, title: plan.artifact.plan.title, source_work_id: plan.source_work_id,
+      ticket_count: plan.artifact.ticket_count, updated_at: plan.updated_at,
+      publication_status: plan.publication.status, plan_fingerprint: plan.publication.plan_fingerprint }]
+  };
+  else if (!args.includes('--plan-id=plan-1')) process.exit(2);
+  if (sub === 'publish') {
+    const dryRun = args.includes('--dry-run');
+    if (!dryRun && !args.includes(`--expected-fingerprint=${plan.publication.plan_fingerprint}`)) process.exit(2);
+    result = { schema_version: 1, generated_at: plan.generated_at, dry_run: dryRun,
+      success: dryRun, plan, output: dryRun ? ['would create child'] : [],
+      error: dryRun ? null : 'Fixture provider stopped after the first child.' };
+  } else if (!['plans', 'show'].includes(sub)) process.exit(2);
+  process.stdout.write(JSON.stringify(result));
+  process.exit(0);
+} else if (command === 'status') {
   if (args.includes('--role')) {
     process.stdout.write(JSON.stringify({ role: 'central', central_url: null }));
     process.exit(0);

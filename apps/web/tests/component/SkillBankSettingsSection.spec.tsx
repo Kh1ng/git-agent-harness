@@ -1,3 +1,4 @@
+import { WebSocketProvider } from '../../src/ws/WebSocketContext.js';
 import { test, expect } from '@playwright/experimental-ct-react';
 import { SkillBankSettingsSection } from '../../src/pages/SettingsPage.js';
 import React from 'react';
@@ -15,6 +16,8 @@ backends: [hermes, codex]
 # Role: GAH Manager
 `;
 
+test.beforeEach(async ({ page }) => { await page.routeWebSocket('**/ws*', socket => socket.close()); });
+
 test.describe('SkillBankSettingsSection', () => {
   test('renders the read-only inventory from GET /api/skills', async ({ mount, page }) => {
     await page.route('**/api/skills', (route) => {
@@ -30,7 +33,7 @@ test.describe('SkillBankSettingsSection', () => {
       });
     });
 
-    const component = await mount(<SkillBankSettingsSection />);
+    const component = await mount(<WebSocketProvider><SkillBankSettingsSection /></WebSocketProvider>);
     await expect(component.getByText('gah-manager@1.0.0')).toBeVisible();
     await expect(component.getByRole('button', { name: 'Upload SKILL.md' })).toBeVisible();
   });
@@ -58,7 +61,7 @@ test.describe('SkillBankSettingsSection', () => {
       return route.continue();
     });
 
-    const component = await mount(<SkillBankSettingsSection />);
+    const component = await mount(<WebSocketProvider><SkillBankSettingsSection /></WebSocketProvider>);
     await expect(component.getByText('No skills installed')).toBeVisible();
 
     await component.locator('input[type="file"]').setInputFiles({
@@ -90,7 +93,7 @@ test.describe('SkillBankSettingsSection', () => {
       return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ ...postedBody, createdAt: 1, updatedAt: 1 }) });
     });
 
-    const component = await mount(<SkillBankSettingsSection />);
+    const component = await mount(<WebSocketProvider><SkillBankSettingsSection /></WebSocketProvider>);
     await component.locator('input[type="file"]').setInputFiles({
       name: 'SKILL.md',
       mimeType: 'text/markdown',
@@ -111,7 +114,7 @@ test.describe('SkillBankSettingsSection', () => {
       return route.fulfill({ status: 201, contentType: 'application/json', body: '{}' });
     });
 
-    const component = await mount(<SkillBankSettingsSection />);
+    const component = await mount(<WebSocketProvider><SkillBankSettingsSection /></WebSocketProvider>);
     await component.locator('input[type="file"]').setInputFiles({
       name: 'no-frontmatter.md',
       mimeType: 'text/markdown',
@@ -135,7 +138,7 @@ test.describe('SkillBankSettingsSection', () => {
       });
     });
 
-    const component = await mount(<SkillBankSettingsSection />);
+    const component = await mount(<WebSocketProvider><SkillBankSettingsSection /></WebSocketProvider>);
     await component.locator('input[type="file"]').setInputFiles({
       name: 'SKILL.md',
       mimeType: 'text/markdown',

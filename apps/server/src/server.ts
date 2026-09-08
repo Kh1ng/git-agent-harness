@@ -2,6 +2,7 @@ import express from 'express';
 import type { NodeRoleStatus } from '@git-agent-harness/contracts';
 import { workerRouteGuard, validateNodeRole } from './nodeRole.js';
 import { workerMemoryRouter } from './workerMemory.js';
+import { pmPlansRouter } from './pmPlans.js';
 import { nodeSetupRouter } from './nodeSetup.js';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -263,34 +264,14 @@ export function createServer(
   // Middleware
   app.use(cors());
   app.use(express.json());
-  if (node.role === 'worker') app.use('/api', authMiddleware);
+  // All API reads and mutations share one boundary, including future routes.
+  // Direct same-origin loopback access remains local; /health stays public.
+  app.use('/api', authMiddleware);
   app.use(workerRouteGuard(node));
-  app.use('/api/worker-memory', authMiddleware, workerMemoryRouter());
-  // authMiddleware guards new, narrowly scoped sensitive surfaces. The rest
-  // of the API (loop start/stop, legacy config mutation, etc.) is
-  // unauthenticated pending #532; applying this globally would silently change
-  // that pre-existing contract.
-  app.use('/api/registry', authMiddleware);
-  app.use('/api/claims', authMiddleware);
-  // /api/settings/gateway includes an explicit endpoint that reveals a
-  // credential-bearing bootstrap command, so the whole narrow surface gets
-  // the same gate as registry/claims rather than the unauthenticated default.
-  app.use('/api/settings', authMiddleware);
+  app.use('/api/worker-memory', workerMemoryRouter());
+  app.use('/api/pm', pmPlansRouter());
   app.use('/api/settings/nodes', nodeSetupRouter());
-  app.use('/api/projects', authMiddleware);
-  // /api/skills (issue #963/#964): the central skill bank mutates the
-  // versioned store, so it gets the same narrow auth gate as projects.
-  app.use('/api/skills', authMiddleware);
-  // /api/admin/update (issue #989) shells out to `gah update`, which runs
-  // arbitrary build commands and restarts the control-plane service -- the
-  // same auth gate as registry/claims/settings, plus an explicit opt-in env
-  // flag so this surface doesn't exist at all unless an operator enables it.
-  app.use('/api/admin', authMiddleware);
-  app.use('/api/manager-chat/wake', authMiddleware);
-  // /api/git/commit mutates a checkout on disk (git add -A + git commit),
-  // so it gets the same narrow auth gate as projects/skills/admin rather
-  // than the unauthenticated default the read-only git endpoints keep.
-  app.use('/api/git/commit', authMiddleware);
+  // Updating the running service also requires the existing operator opt-in.
   app.use('/api/admin', (req, res, next) => {
     if (process.env.GAH_ENABLE_ADMIN_UPDATE !== '1') {
       return res.status(404).json({
@@ -359,6 +340,7 @@ export function createServer(
         info: '/api/info',
         status: '/api/status',
         fleet: '/api/registry/fleet',
+        pmPlans: '/api/pm/plans',
         quota: '/api/quota',
         doctor: '/api/doctor',
         report: '/api/report',
@@ -593,7 +575,7 @@ export function createServer(
   // `/api/status` fans out to registered nodes and returns an aggregated
   // fleet snapshot, so it must be auth-gated even though loopback callers may
   // still access it without credentials via authMiddleware's local exemption.
-  app.get('/api/status', authMiddleware, async (req, res) => {
+  app.get('/api/status', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     try {
       const [status, nodes] = await Promise.all([
@@ -654,7 +636,7 @@ export function createServer(
     }
   });
 
-  app.get('/api/doctor', authMiddleware, async (req, res) => {
+  app.get('/api/doctor', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     try {
       res.json(await configEffectiveDeps.runDoctor(profile));

@@ -26,6 +26,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+pub(crate) mod plans;
 mod publish;
 pub(crate) use publish::{publish_plan, validate_source_depth, PmPublicationSummary};
 

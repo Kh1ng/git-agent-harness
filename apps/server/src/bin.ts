@@ -14,7 +14,7 @@ import { markReadinessCheck } from './serverReadiness.js';
 import {
   InvalidBindHostError,
   resolveBindHost,
-  unauthenticatedExposureWarning,
+  networkExposureWarning,
   validateBindHost
 } from './bindHost.js';
 import { startChatMaintenanceScheduler, stopChatMaintenanceScheduler } from './managerChat/chatMaintenance.js';
@@ -102,7 +102,7 @@ async function main() {
     console.log(`Git Agent Harness server listening on ${HOST}:${PORT}`);
     console.log(`WebSocket server available on ws://${HOST}:${PORT}`);
     console.log(`Health check available on http://${HOST}:${PORT}/health`);
-    const warning = unauthenticatedExposureWarning(HOST);
+    const warning = networkExposureWarning(HOST);
     if (warning) {
       console.warn(warning);
     }

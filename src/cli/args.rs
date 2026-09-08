@@ -48,13 +48,46 @@ pub enum PmCommands {
         #[arg(long)]
         profile: String,
         /// Path to the `pm-plan-v1.json` artifact produced by PM dispatch.
+        #[arg(long, required_unless_present = "plan_id", conflicts_with = "plan_id")]
+        plan: Option<PathBuf>,
+        /// Profile-scoped session ID, for remote clients. Never a filesystem path.
         #[arg(long)]
-        plan: PathBuf,
+        plan_id: Option<String>,
+        /// Fingerprint returned by pm show; required to publish a remotely selected plan.
+        #[arg(long, requires = "plan_id")]
+        expected_fingerprint: Option<String>,
+        /// Emit the versioned operation result instead of human-readable output.
+        #[arg(long, requires = "plan_id")]
+        json: bool,
         #[arg(long = "config", visible_alias = "config-path")]
         config_path: Option<String>,
         /// Resolve and validate the publication without provider writes.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+    },
+    /// List PM artifacts within a configured profile, without provider requests.
+    Plans {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 25, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one PM plan and its saved publication state without provider requests.
+    Show {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        plan_id: String,
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 

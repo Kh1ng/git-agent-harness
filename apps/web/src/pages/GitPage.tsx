@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { GitBranch, GitCommit, GitPullRequest, RefreshCw, Plus, ExternalLink } from 'lucide-react';
+import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -58,6 +59,7 @@ export function GitPage() {
 
   useEffect(() => { load(); }, [profile]);
   useEffect(() => { fetchProfiles(); }, [fetchProfiles]);
+  useWsReconnectRefresh(() => { void load(); void fetchProfiles({ force: true }); });
 
   const createPr = async () => {
     if (!prTitle) return;

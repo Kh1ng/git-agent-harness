@@ -77,6 +77,49 @@ esac
         .path()
         .join("pm-plan-v1.json.publication-v1.json")
         .exists());
+    // Remote clients select the same artifact by ID; JSON must contain no CLI log preamble.
+    let configured = git_agent_harness::config::load(Some(cfg.to_str().unwrap())).unwrap();
+    let session =
+        std::path::Path::new(&configured.profiles["real"].artifact_root).join("sessions/api-plan");
+    fs::create_dir_all(&session).unwrap();
+    let mut artifact: serde_json::Value =
+        serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+    artifact["plan"]["summary"] = "Authorization: Bearer fake-pm-secret".into();
+    fs::write(
+        session.join("pm-plan-v1.json"),
+        serde_json::to_vec(&artifact).unwrap(),
+    )
+    .unwrap();
+    let output = bin()
+        .args([
+            "pm",
+            "publish",
+            "--profile",
+            "real",
+            "--plan-id",
+            "api-plan",
+            "--json",
+            "--config",
+            cfg.to_str().unwrap(),
+            "--dry-run",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!String::from_utf8_lossy(&output).contains("fake-pm-secret"));
+    let response: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(response["success"], true);
+    assert_eq!(response["dry_run"], true);
+    assert_eq!(response["plan"]["source_work_id"], "#42");
+    assert!(response["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|line| line.as_str().unwrap().contains("would create")));
+    assert!(!session.join("pm-plan-v1.json.publication-v1.json").exists());
 }
 
 #[test]

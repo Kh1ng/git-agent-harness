@@ -20,7 +20,10 @@ async function main(): Promise<void> {
   // a standalone process could mistake a long turn for an idle session.
   const response = await fetch(maintenanceUrl(), {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      ...(process.env.COORDINATOR_TOKEN ? { Authorization: `Bearer ${process.env.COORDINATOR_TOKEN}` } : {})
+    },
     body: JSON.stringify({ dryRun: false })
   });
   const body = await response.text();

@@ -210,7 +210,8 @@ pub(super) fn execute(
         )?;
     }
     let plan_path = plan_path.context("PM planning succeeded without an artifact path")?;
-    let summary = match crate::dispatch::publish_pm_plan(cfg, profile_name, &plan_path, false) {
+    let summary = match crate::dispatch::publish_pm_plan(cfg, profile_name, &plan_path, false, None)
+    {
         Ok(summary) => summary,
         Err(error) => {
             execution.append_failure(

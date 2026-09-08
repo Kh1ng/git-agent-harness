@@ -1,6 +1,9 @@
+import { WebSocketProvider } from '../../src/ws/WebSocketContext.js';
 import { test, expect } from '@playwright/experimental-ct-react';
 import { AdminUpdateSection } from '../../src/pages/SettingsPage.js';
 import React from 'react';
+
+test.beforeEach(async ({ page }) => { await page.routeWebSocket('**/ws*', socket => socket.close()); });
 
 test.describe('AdminUpdateSection', () => {
   test('renders nothing when the server reports admin update disabled', async ({ mount, page }) => {
@@ -11,7 +14,7 @@ test.describe('AdminUpdateSection', () => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'idle' }) })
     );
 
-    const component = await mount(<AdminUpdateSection />);
+    const component = await mount(<WebSocketProvider><AdminUpdateSection /></WebSocketProvider>);
     await expect(component).toBeEmpty();
   });
 
@@ -63,7 +66,7 @@ test.describe('AdminUpdateSection', () => {
       });
     });
 
-    const component = await mount(<AdminUpdateSection />);
+    const component = await mount(<WebSocketProvider><AdminUpdateSection /></WebSocketProvider>);
     await expect(component.getByText('2 commit(s) behind: aaa → bbb')).toBeVisible();
 
     const button = component.getByRole('button', { name: 'Update now' });

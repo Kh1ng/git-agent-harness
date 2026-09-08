@@ -45,13 +45,21 @@ pub(crate) fn publish_pm_plan(
     profile_name: &str,
     plan_path: &std::path::Path,
     dry_run: bool,
+    expected_fingerprint: Option<&str>,
 ) -> Result<PmPublicationSummary> {
     let profile = config::get_profile(cfg, profile_name)?;
     environment::export_profile_env(profile, false);
-    workflows::run_pm_publish(cfg, profile_name, profile, plan_path, dry_run)
+    workflows::run_pm_publish(
+        cfg,
+        profile_name,
+        profile,
+        plan_path,
+        dry_run,
+        expected_fingerprint,
+    )
 }
 
-pub(crate) use self::workflows::PmPublicationSummary;
+pub(crate) use self::workflows::{pm_plans, PmPublicationSummary};
 
 pub(crate) fn validate_pm_source_depth(
     cfg: &GahConfig,

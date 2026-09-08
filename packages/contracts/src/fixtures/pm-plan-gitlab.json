@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-08T00:00:00+00:00",
+  "profile": "gitlab-project",
+  "id": "plan-1",
+  "provider": "gitlab",
+  "repo": "owner/gitlab",
+  "source_work_id": "#42",
+  "updated_at": "2026-09-08T00:00:00+00:00",
+  "artifact": {
+    "schema_version": 1,
+    "profile": "PM project",
+    "repo": "owner/gitlab",
+    "target": "#42",
+    "open_issue_count": 1,
+    "open_mr_count": 0,
+    "merged_mr_count": 0,
+    "ticket_count": 2,
+    "plan": {
+      "title": "PM plan",
+      "summary": "Shared plan",
+      "tickets": [
+        {
+          "key": "base",
+          "title": "base child",
+          "summary": "Summary",
+          "objective": "Build the change",
+          "task_class": "feature",
+          "difficulty": "easy",
+          "risk": "low",
+          "execution_disposition": "autonomous",
+          "recommended_routing": {
+            "capability": "edit",
+            "min_tier": "standard"
+          },
+          "affected_areas": [
+            "core"
+          ],
+          "affected_files": [
+            "src/base.rs"
+          ],
+          "acceptance_criteria": [
+            "Change works"
+          ],
+          "verification_commands": [
+            "cargo test"
+          ],
+          "depends_on": [],
+          "duplicate_evidence": [
+            "No matching issue"
+          ],
+          "uncovered_reason": "No existing work covers it"
+        },
+        {
+          "key": "child",
+          "title": "child child",
+          "summary": "Summary",
+          "objective": "Build the change",
+          "task_class": "feature",
+          "difficulty": "easy",
+          "risk": "low",
+          "execution_disposition": "autonomous",
+          "recommended_routing": {
+            "capability": "edit",
+            "min_tier": "standard"
+          },
+          "affected_areas": [
+            "core"
+          ],
+          "affected_files": [
+            "src/child.rs"
+          ],
+          "acceptance_criteria": [
+            "Change works"
+          ],
+          "verification_commands": [
+            "cargo test"
+          ],
+          "depends_on": [
+            "base"
+          ],
+          "duplicate_evidence": [
+            "No matching issue"
+          ],
+          "uncovered_reason": "No existing work covers it"
+        }
+      ]
+    }
+  },
+  "publication": {
+    "schema_version": 1,
+    "plan_fingerprint": "ebd86f1c7f6a7a040396d5c9c0054d5d27974cba8efa2fe4f9a69eec8b9aadde",
+    "profile": "gitlab-project",
+    "repo": "owner/gitlab",
+    "source_issue_number": "42",
+    "status": "partial",
+    "children": {
+      "base": {
+        "key": "base",
+        "issue_id": "100",
+        "issue_number": "10",
+        "url": "https://gitlab.example/owner/gitlab/-/issues/10",
+        "parent_linked": false,
+        "linked_dependencies": []
+      }
+    }
+  },
+  "failures": []
+}
