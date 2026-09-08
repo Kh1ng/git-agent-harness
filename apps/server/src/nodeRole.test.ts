@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -70,7 +71,7 @@ test('central memory relay preserves gateway contracts without forwarding worker
   process.env.GAH_GATEWAY_SETTINGS_PATH = join(directory, 'settings.json');
   const app = express();
   app.use(express.json());
-  app.use('/api/worker-memory', authMiddleware, workerMemoryRouter());
+  app.use('/api/worker-memory', rateLimit({ windowMs: 60_000, limit: 100 }), authMiddleware, workerMemoryRouter());
   const server = createHttpServer(app);
   const url = await listen(server);
   try {

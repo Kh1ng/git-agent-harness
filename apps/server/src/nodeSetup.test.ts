@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import cors from 'cors';
 import { windowsSetupCommand, nodeSetupRouter, isSupportedWindowsInstaller } from './nodeSetup.js';
 import { authMiddleware } from './authMiddleware.js';
@@ -24,7 +25,7 @@ test('setup refuses unsupported worker transport and keeps credential responses 
   delete process.env.GAH_ALLOW_INSECURE_HTTP;
   const app = express();
   app.use(express.json());
-  app.use('/api/settings/nodes', authMiddleware, nodeSetupRouter());
+  app.use('/api/settings/nodes', rateLimit({ windowMs: 60_000, limit: 100 }), authMiddleware, nodeSetupRouter());
   const server = createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
@@ -89,7 +90,7 @@ test('setup credentials require auth through proxies, cross-origin browsers, and
   app.set('trust proxy', 'loopback');
   app.use(cors());
   app.use(express.json());
-  app.use('/api/settings/nodes', authMiddleware, nodeSetupRouter());
+  app.use('/api/settings/nodes', rateLimit({ windowMs: 60_000, limit: 100 }), authMiddleware, nodeSetupRouter());
   const server = createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {

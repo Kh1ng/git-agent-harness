@@ -31,7 +31,8 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
   // Serve the same Vite application at this fixture origin. Only auth is real;
   // all dashboard/provider data still belongs to the in-memory mock above.
   app.use((req, res) => {
-    const proxied = http.request(new URL(req.url, baseURL), { headers: req.headers }, upstream => {
+    const vite = new URL(baseURL!);
+    const proxied = http.request({ hostname: vite.hostname, port: vite.port, path: req.url, headers: req.headers }, upstream => {
       res.writeHead(upstream.statusCode ?? 502, upstream.headers);
       upstream.pipe(res);
     });
