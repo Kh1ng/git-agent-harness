@@ -101,6 +101,13 @@ export function createEventWriter(profile: string, opts: SessionLogOptions = {})
       if (failure) throw failure;
       stream.write(`${JSON.stringify(event)}\n`);
     },
+    /** Make all preceding events readable before publishing actionable state. */
+    flush(): Promise<void> {
+      if (failure) return Promise.reject(failure);
+      return new Promise<void>((resolve, reject) => {
+        stream.write('', (error) => error ? reject(error) : resolve());
+      });
+    },
     close(): Promise<void> {
       if (failure) return Promise.reject(failure);
       closePromise ??= new Promise<void>((resolve, reject) => {

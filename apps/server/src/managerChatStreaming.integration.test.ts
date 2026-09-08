@@ -1,17 +1,18 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, WriteStream } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { ClientMessage, ServerMessage } from '@git-agent-harness/contracts';
 import { createWebSocketHandler } from './wsServer.js';
 import { readLog } from './managerChat/sessionLog.js';
 import { writeGatewaySettings } from './gatewaySettingsStore.js';
+import { cancelManagerChatTurn } from './managerChat/ManagerChatManager.js';
 
 const fixtures = resolve(dirname(fileURLToPath(import.meta.url)), '../tests/fixtures');
 
@@ -20,18 +21,12 @@ function nextMessage<T extends ServerMessage['type']>(
   type: T,
   predicate: (message: Extract<ServerMessage, { type: T }>) => boolean = () => true
 ): Promise<Extract<ServerMessage, { type: T }>> {
-  return new Promise((resolveMessage, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timed out waiting for ${type}`)), 10_000);
-    const onMessage = (raw: WebSocket.RawData) => {
-      const message = JSON.parse(raw.toString()) as ServerMessage;
-      if (message.type === type && predicate(message as Extract<ServerMessage, { type: T }>)) {
-        clearTimeout(timer);
-        ws.off('message', onMessage);
-        resolveMessage(message as Extract<ServerMessage, { type: T }>);
-      }
-    };
-    ws.on('message', onMessage);
-  });
+  const pending = collectUntil(ws, type, (messages) => messages.some(predicate))
+    .then((messages) => messages.find(predicate)!);
+  // An earlier assertion can abandon a pre-registered reply waiter. Awaiting
+  // it still rejects, but cleanup must not create an unhandled rejection.
+  void pending.catch(() => undefined);
+  return pending;
 }
 
 async function connect(url: string, profile: string): Promise<WebSocket> {
@@ -57,29 +52,37 @@ async function closeSocket(ws: WebSocket): Promise<void> {
 }
 
 /** Collect every message of the given type that arrives while a send is in flight. */
-async function collectUntil<T extends ServerMessage['type']>(
+function collectUntil<T extends ServerMessage['type']>(
   ws: WebSocket,
   type: T,
   until: (messages: Extract<ServerMessage, { type: T }>[]) => boolean,
   timeoutMs = 10_000
 ): Promise<Extract<ServerMessage, { type: T }>[]> {
   const collected: Extract<ServerMessage, { type: T }>[] = [];
-  return new Promise((resolveCollection, reject) => {
-    const timer = setTimeout(() => {
+  const pending = new Promise<Extract<ServerMessage, { type: T }>[]>((resolveCollection, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
       ws.off('message', onMessage);
+      ws.off('close', onClose);
+    };
+    const onClose = () => { cleanup(); reject(new Error(`socket closed collecting ${type}`)); };
+    const timer = setTimeout(() => {
+      cleanup();
       reject(new Error(`timed out collecting ${type}; got ${collected.length}`));
     }, timeoutMs);
     const onMessage = (raw: WebSocket.RawData) => {
       const message = JSON.parse(raw.toString()) as ServerMessage;
       if (message.type === type) collected.push(message as Extract<ServerMessage, { type: T }>);
       if (until(collected)) {
-        clearTimeout(timer);
-        ws.off('message', onMessage);
+        cleanup();
         resolveCollection(collected);
       }
     };
     ws.on('message', onMessage);
+    ws.once('close', onClose);
   });
+  void pending.catch(() => undefined);
+  return pending;
 }
 
 interface ChatHarness {
@@ -134,15 +137,18 @@ async function withChatHarness(
   const wss = new WebSocketServer({ server });
   createWebSocketHandler(wss);
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const profile = `e2e-${Date.now()}`;
 
   try {
     await run({
       wsUrl: `ws://127.0.0.1:${(server.address() as AddressInfo).port}`,
-      profile: `e2e-${Date.now()}`,
+      profile,
       stateDir,
       captureCount: () => captures
     });
   } finally {
+    await cancelManagerChatTurn(profile);
+    for (const client of wss.clients) client.terminate();
     wss.close();
     // Guard against a test leaving a socket open: server.close() waits for
     // connections, so bound it -- a hung teardown must never mask a real
@@ -225,7 +231,33 @@ test('assistant chunks stream to every client subscribed to the profile, in orde
   });
 });
 
-test('live tool and permission state stays profile-scoped and an actionable permission survives reconnect', { timeout: 30_000 }, async () => {
+/** Hold the actual journal write, including batches, while websocket IO runs. */
+function delayPermissionWrite(t: TestContext, failure?: Error): Promise<void> {
+  let writing!: () => void;
+  const started = new Promise<void>((resolve) => { writing = resolve; });
+  let held = false;
+  t.after(() => assert.ok(held, 'the test intercepted a permission journal write'));
+  const write = WriteStream.prototype._write;
+  const writev = WriteStream.prototype._writev;
+  assert.ok(writev);
+  t.after(() => { WriteStream.prototype._writev = writev; });
+  t.mock.method(WriteStream.prototype, '_write', function(this: WriteStream, chunk: Buffer, encoding: BufferEncoding, callback: (error?: Error | null) => void) {
+    if (!chunk.toString().includes('"type":"permission/request"')) return write.call(this, chunk, encoding, callback);
+    held = true;
+    writing();
+    setTimeout(() => failure ? callback(failure) : write.call(this, chunk, encoding, callback), 250);
+  });
+  WriteStream.prototype._writev = function(chunks, callback) {
+    if (!chunks.some(({ chunk }) => chunk.toString().includes('"type":"permission/request"'))) return writev.call(this, chunks, callback);
+    held = true;
+    writing();
+    setTimeout(() => failure ? callback(failure) : writev.call(this, chunks, callback), 250);
+  };
+  return started;
+}
+
+test('live tool and permission state stays profile-scoped and an actionable permission survives reconnect', { timeout: 30_000 }, async (t) => {
+  delayPermissionWrite(t);
   await withChatHarness(async ({ wsUrl, profile }) => {
     const sender = await connect(wsUrl, profile);
     const observer = await connect(wsUrl, profile);
@@ -304,6 +336,65 @@ test('live tool and permission state stays profile-scoped and an actionable perm
     await closeSocket(reconnected);
     await closeSocket(foreign);
   });
+});
+
+test('a failed permission journal write fails the turn without publishing an actionable permission', { timeout: 30_000 }, async (t) => {
+  delayPermissionWrite(t, new Error('fixture permission journal unavailable'));
+  await withChatHarness(async ({ wsUrl, profile }) => {
+    const ws = await connect(wsUrl, profile);
+    const permissions: ServerMessage[] = [];
+    ws.on('message', (raw) => {
+      const message = JSON.parse(raw.toString()) as ServerMessage;
+      if (message.type === 'manager.chat.permission') permissions.push(message);
+    });
+    const failed = nextMessage(ws, 'error', (message) => message.requestId === 'permission-failure');
+    ws.send(JSON.stringify({
+      type: 'manager.chat.send', requestId: 'permission-failure', profile, message: 'do a dangerous thing'
+    } satisfies ClientMessage));
+    assert.ok((await failed).error, 'journal failure must return an error instead of leaving the turn blocked');
+    assert.deepEqual(permissions, [], 'unwritten permission must never be actionable');
+    const history = nextMessage(ws, 'manager.chat.history');
+    ws.send(JSON.stringify({ type: 'manager.chat.historyRequest', requestId: 'after-failure', profile } satisfies ClientMessage));
+    assert.equal((await history).streaming, null, 'journal failure releases the active turn');
+  });
+});
+
+test('cancelling during a permission journal write never publishes the cancelled request', { timeout: 30_000 }, async (t) => {
+  const writing = delayPermissionWrite(t);
+  await withChatHarness(async ({ wsUrl, profile }) => {
+    const ws = await connect(wsUrl, profile);
+    const permissions: ServerMessage[] = [];
+    ws.on('message', (raw) => {
+      const message = JSON.parse(raw.toString()) as ServerMessage;
+      if (message.type === 'manager.chat.permission') permissions.push(message);
+    });
+    const reply = nextMessage(ws, 'manager.chat.reply', (message) => message.requestId === 'cancel-writing');
+    ws.send(JSON.stringify({
+      type: 'manager.chat.send', requestId: 'cancel-writing', profile, message: 'do a dangerous thing'
+    } satisfies ClientMessage));
+    await writing;
+    ws.send(JSON.stringify({ type: 'manager.chat.cancel', requestId: 'cancel', profile } satisfies ClientMessage));
+    assert.equal((await reply).cancelled, true);
+    assert.deepEqual(permissions, [], 'a late write must not revive cancelled permission UI');
+  });
+});
+
+test('harness cleanup closes sockets and reply waiters after a failed permission assertion', { timeout: 30_000 }, async () => {
+  let closed: Promise<unknown> | undefined;
+  let reply: Promise<unknown> | undefined;
+  await assert.rejects(withChatHarness(async ({ wsUrl, profile }) => {
+    const ws = await connect(wsUrl, profile);
+    closed = once(ws, 'close');
+    const permission = nextMessage(ws, 'manager.chat.permission');
+    reply = nextMessage(ws, 'manager.chat.reply');
+    ws.send(JSON.stringify({
+      type: 'manager.chat.send', requestId: 'abandoned-permission', profile, message: 'do a dangerous thing'
+    } satisfies ClientMessage));
+    await permission;
+    throw new Error('fixture assertion failure');
+  }), /fixture assertion failure/);
+  await closed;
+  await Promise.allSettled([reply]);
 });
 
 test('cancelling a mid-turn reply closes the turn as cancelled and keeps the partial text', { timeout: 30_000 }, async () => {

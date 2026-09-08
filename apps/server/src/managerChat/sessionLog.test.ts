@@ -161,12 +161,17 @@ test('a completed compaction makes its turn the new history boundary', () => {
   assert.deepEqual(deriveModelHistory(events).map((turn) => turn.text), ['Conversation reset.']);
 });
 
-test('streamed events are durably appended in order', async () => {
+test('flushing streamed events makes them readable in order and leaves the writer open', async () => {
   const dir = tempStateDir();
   try {
     const writer = createEventWriter('gah', { stateDir: dir });
     for (let seq = 1; seq <= 100; seq++) {
       writer.append({ type: 'assistant/chunk', seq, turn: 1, text: String(seq), timestamp: seq });
+      if (seq === 50) {
+        await writer.flush();
+        assert.deepEqual(readLog('gah', { stateDir: dir }).map((event) => event.seq),
+          Array.from({ length: 50 }, (_, index) => index + 1));
+      }
     }
     await writer.close();
 
