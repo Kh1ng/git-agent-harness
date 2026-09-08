@@ -37,11 +37,16 @@ final class ControllerTests: XCTestCase {
         let field = app.descendants(matching: .any).matching(identifier: "serverAddress").firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()
-        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: (field.value as? String)?.count ?? 0)
-            + "http://localhost:18773/recovery#pair=fixture-code")
+        field.typeKey("a", modifierFlags: .command)
+        field.typeText("http://localhost:18773/recovery#pair=fixture-code")
+        XCTAssertEqual(field.value as? String, "http://localhost:18773/recovery#pair=fixture-code")
         app.buttons["connectServer"].tap()
         XCTAssertTrue(app.buttons["Retry connection"].waitForExistence(timeout: 20))
-        XCTAssertFalse(app.webViews.staticTexts["GAH controller fixture"].exists)
+        let hidden = XCTAttachment(screenshot: app.screenshot())
+        hidden.name = "Failed switch hides previous dashboard"
+        hidden.lifetime = .keepAlways
+        add(hidden)
+        XCTAssertFalse(app.webViews.buttons["Remember test session"].isHittable)
         control("allow-recovery")
         app.buttons["Retry connection"].tap()
         XCTAssertTrue(app.webViews.staticTexts["Pairing fragment retained"].waitForExistence(timeout: 20))
@@ -66,7 +71,8 @@ final class ControllerTests: XCTestCase {
         let field = app.descendants(matching: .any).matching(identifier: "serverAddress").firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()
-        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: (field.value as? String)?.count ?? 0) + "javascript:alert(1)")
+        field.typeKey("a", modifierFlags: .command)
+        field.typeText("javascript:alert(1)")
         app.buttons["connectServer"].tap()
         XCTAssertTrue(app.staticTexts["connectionError"].waitForExistence(timeout: 5))
         let screenshot = XCTAttachment(screenshot: app.screenshot())

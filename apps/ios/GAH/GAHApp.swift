@@ -12,7 +12,13 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     @Published var address: ServerAddress?
     @Published var error: String?
     @Published var loading = false
-    @Published var hasCommittedPage = false
+    private var hasCommittedPage = false {
+        didSet {
+            webView.isHidden = !hasCommittedPage
+            webView.isUserInteractionEnabled = hasCommittedPage
+            webView.accessibilityElementsHidden = !hasCommittedPage
+        }
+    }
     let webView: WKWebView
     private var locationObservation: NSKeyValueObservation?
 
@@ -21,6 +27,7 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         configuration.websiteDataStore = .default()
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
+        webView.isHidden = true
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
@@ -93,8 +100,22 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
 
 private struct Dashboard: UIViewRepresentable {
     let controller: Controller
-    func makeUIView(context: Context) -> WKWebView { controller.webView }
-    func updateUIView(_ view: WKWebView, context: Context) {}
+    func makeUIView(context: Context) -> UIView {
+        // SwiftUI manages the host's visibility. The controller hides its child web view
+        // independently while a server switch has not committed a new document.
+        let host = UIView()
+        let webView = controller.webView
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(webView)
+        NSLayoutConstraint.activate([
+            webView.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            webView.topAnchor.constraint(equalTo: host.topAnchor),
+            webView.bottomAnchor.constraint(equalTo: host.bottomAnchor)
+        ])
+        return host
+    }
+    func updateUIView(_ view: UIView, context: Context) {}
 }
 
 private struct ControllerView: View {
@@ -116,9 +137,6 @@ private struct ControllerView: View {
                 }
                 if controller.address != nil {
                     Dashboard(controller: controller)
-                        .opacity(controller.hasCommittedPage ? 1 : 0)
-                        .allowsHitTesting(controller.hasCommittedPage)
-                        .accessibilityHidden(!controller.hasCommittedPage)
                 } else {
                     ContentUnavailableView {
                         Label("Connect to GAH", systemImage: "network")
