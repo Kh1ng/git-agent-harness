@@ -57,6 +57,7 @@ import type { SessionOptions } from './sessions/SessionManager.js';
 import { deriveControllerActivity } from './controllerActivity.js';
 import { authMiddleware, coordinatorTokenMatches, requireOwner } from './authMiddleware.js';
 import { DeviceAccess } from './deviceAccess.js';
+import { mutationSafety } from './mutationSafety.js';
 import { pairingRouter } from './pairing.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { RegistryService, NodeDoctorError } from './registryService.js';
@@ -280,6 +281,7 @@ export function createServer(
   // All API reads and mutations share one boundary, including future routes.
   // Direct same-origin loopback access remains local; /health stays public.
   app.use('/api', authMiddleware);
+  const mutation = mutationSafety(getCoordinatorIdentity(undefined, coordinatorPort).node_id);
   app.use(workerRouteGuard(node));
   if (node.role === 'central') configureChatRouting(registryService, () => getCoordinatorIdentity(undefined, coordinatorPort));
   app.use('/api/worker-chat', createWorkerChatRouter({ node, nodeId: getCoordinatorIdentity(undefined, coordinatorPort).node_id }));
@@ -400,16 +402,16 @@ export function createServer(
     }
   });
 
-  app.post('/api/registry/nodes', (req, res) => {
+  app.post('/api/registry/nodes', requireOwner, (req, res) => {
     try {
       const nodeId = (req.body as { node_id?: unknown } | undefined)?.node_id;
       // Ownership check (#951 review): creating a NEW node is how a worker
-      // self-registers, so it stays as open as authMiddleware already allows.
+      // self-registers using the coordinator token; paired devices cannot
+      // change the central node's trust registry.
       // UPDATING an existing node_id repoints where the central polls
       // (advertised_url) and how it authenticates (secret_ref), so it must
-      // prove it knows the coordinator token -- authMiddleware alone can't
-      // gate this because a reverse-proxied LAN peer appears loopback to
-      // Express and skips auth entirely.
+      // prove it knows the coordinator token, even for a locally trusted
+      // owner request without an explicit credential.
       if (typeof nodeId === 'string' && registryService.getNode(nodeId)) {
         const authHeader = req.headers.authorization ?? '';
         const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
@@ -434,7 +436,7 @@ export function createServer(
     }
   });
 
-  app.delete('/api/registry/nodes/:nodeId', (req, res) => {
+  app.delete('/api/registry/nodes/:nodeId', requireOwner, (req, res) => {
     try {
       const revoked = registryService.revokeNode(req.params.nodeId);
       if (!revoked) {
@@ -506,7 +508,7 @@ export function createServer(
     }
   });
 
-  app.post('/api/registry/nodes/:nodeId/rotate-secret', (req, res) => {
+  app.post('/api/registry/nodes/:nodeId/rotate-secret', requireOwner, (req, res) => {
     try {
       const { secret_ref } = req.body;
       registryService.rotateSecret(req.params.nodeId, secret_ref);
@@ -734,7 +736,7 @@ export function createServer(
     }
   });
 
-  app.post('/api/ledger/clear-attempts', async (req, res) => {
+  app.post('/api/ledger/clear-attempts', mutation('ledger.clear_attempts'), async (req, res) => {
     const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
     const workId = typeof req.body?.workId === 'string' ? req.body.workId : undefined;
     const dryRun = req.body?.dryRun === true;
@@ -764,7 +766,7 @@ export function createServer(
     }
   });
 
-  app.post('/api/availability/clear', async (req, res) => {
+  app.post('/api/availability/clear', mutation('availability.clear'), async (req, res) => {
     const backend = typeof req.body?.backend === 'string' ? req.body.backend : undefined;
     const backendInstance = typeof req.body?.backendInstance === 'string' ? req.body.backendInstance : undefined;
     const model = typeof req.body?.model === 'string' ? req.body.model : undefined;
@@ -800,7 +802,7 @@ export function createServer(
     }
   });
 
-  app.post('/api/hold/set', async (req, res) => {
+  app.post('/api/hold/set', mutation('hold.set'), async (req, res) => {
     const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
     const workId = typeof req.body?.workId === 'string' ? req.body.workId : undefined;
     const reason = typeof req.body?.reason === 'string' ? req.body.reason : undefined;
@@ -819,7 +821,7 @@ export function createServer(
     }
   });
 
-  app.post('/api/hold/clear', async (req, res) => {
+  app.post('/api/hold/clear', mutation('hold.clear'), async (req, res) => {
     const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
     const workId = typeof req.body?.workId === 'string' ? req.body.workId : undefined;
     if (!workId) {
@@ -1059,7 +1061,7 @@ export function createServer(
   });
 
   // Profile CRUD operations for Issue #148
-  app.post('/api/profiles', async (req, res) => {
+  app.post('/api/profiles', requireOwner, async (req, res) => {
     // Issue #635 AC3: a missing required field must fail closed with 4xx
     // before ever reaching the CLI, not surface as an opaque 502 once
     // `gah profile add` itself rejects it.
@@ -1104,7 +1106,7 @@ export function createServer(
     }
   });
 
-  app.patch('/api/profiles/:name', async (req, res) => {
+  app.patch('/api/profiles/:name', requireOwner, async (req, res) => {
     try {
       const options: ProfileSetOptions = {
         name: req.params.name,
@@ -1120,7 +1122,7 @@ export function createServer(
     }
   });
 
-  app.delete('/api/profiles/:name', async (req, res) => {
+  app.delete('/api/profiles/:name', requireOwner, async (req, res) => {
     try {
       const options: ProfileRemoveOptions = {
         name: req.params.name,
@@ -1152,7 +1154,7 @@ export function createServer(
     }
   });
 
-  app.post('/api/config', async (req, res) => {
+  app.post('/api/config', requireOwner, async (req, res) => {
     try {
       const options: ConfigSetOptions = {
         current_manager: req.body.current_manager,
@@ -1189,7 +1191,7 @@ export function createServer(
     res.json({ ...readManagerChatSettings(), availableBackends: listManagerBackends() });
   });
 
-  app.post('/api/manager-chat/settings', (req, res) => {
+  app.post('/api/manager-chat/settings', requireOwner, (req, res) => {
     try {
       const current = readManagerChatSettings();
       const defaultBackend = typeof req.body?.defaultBackend === 'string' ? req.body.defaultBackend : current.defaultBackend;
@@ -1266,7 +1268,7 @@ export function createServer(
     res.json({ command });
   });
 
-  app.put('/api/settings/gateway', async (req, res) => {
+  app.put('/api/settings/gateway', requireOwner, async (req, res) => {
     const { url, apiKey, enabled, disabledProfiles, contextPolicy, contextPolicies } = req.body as {
       url?: string | null;
       apiKey?: string | null;
@@ -1425,7 +1427,7 @@ export function createServer(
     }
   });
 
-  app.post('/api/manager-chat/reclaim', async (req, res) => {
+  app.post('/api/manager-chat/reclaim', requireOwner, async (req, res) => {
     const profile = typeof req.body?.profile === 'string' ? req.body.profile : undefined;
     const dryRun = req.body?.dryRun !== false;
     try {
@@ -1614,7 +1616,7 @@ export function createServer(
     res.json(getLoopStatus(profile));
   });
 
-  app.post('/api/loop/start', async (req, res) => {
+  app.post('/api/loop/start', mutation('loop.start'), async (req, res) => {
     const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
     try {
       const result = await startLoop(profile);
@@ -1631,7 +1633,7 @@ export function createServer(
     }
   });
 
-  app.post('/api/loop/stop', (req, res) => {
+  app.post('/api/loop/stop', mutation('loop.stop'), (req, res) => {
     const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
     const result = stopLoop(profile);
     if (!result.stopped) {
@@ -1800,7 +1802,7 @@ export function createServer(
     res.json(pending);
   });
 
-  app.post('/api/admin/update', (req, res) => {
+  app.post('/api/admin/update', requireOwner, (req, res) => {
     const result: StartAdminUpdateResult = startAdminUpdateFn();
     res.status(result.started ? 202 : 409).json(result.state);
   });

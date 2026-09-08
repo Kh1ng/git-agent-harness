@@ -111,8 +111,9 @@ export function sameOriginRequest(req: { headers: IncomingHttpHeaders; protocol:
   } catch { return false; }
 }
 
-/** Device grants cannot mint more grants or export owner/worker credentials. */
+/** Paired devices may control work, but cannot change host trust, credentials,
+ * global configuration, or perform destructive administration. */
 export function requireOwner(_req: Request, res: Response, next: NextFunction) {
-  if (res.locals.authPrincipal?.kind !== 'owner') return res.status(403).json({ error: 'Forbidden', message: 'Use owner access for pairing management or credential export.' });
+  if (res.locals.authPrincipal?.kind !== 'owner') return res.status(403).json({ error: 'Forbidden', message: 'This operation requires owner access.' });
   next();
 }

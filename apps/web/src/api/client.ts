@@ -286,11 +286,18 @@ export interface GahDataSource {
   startAdminUpdate(): Promise<AdminUpdateState>;
 }
 
+// getRandomValues also works on explicitly enabled HTTP LAN hosts, where
+// randomUUID is unavailable. Each operator action gets one key; no blind retry.
+function mutationHeaders(): Record<string, string> {
+  const key = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+  return { ...authHeaders(), 'Content-Type': 'application/json', 'Idempotency-Key': key };
+}
+
 async function postJson<T, U>(path: string, body: U): Promise<T> {
   const url = new URL(path, SERVER_URL);
   const res = await fetch(url.toString(), {
     method: 'POST',
-    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    headers: mutationHeaders(),
     body: JSON.stringify(body)
   });
   if (!res.ok) {
@@ -454,19 +461,23 @@ export const gahApi: GahDataSource = {
     const url = new URL('/api/loop/start', SERVER_URL);
     const res = await fetch(url.toString(), {
       method: 'POST',
-      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      headers: mutationHeaders(),
       body: JSON.stringify({ profile })
     });
-    return (await res.json()) as StartLoopResult;
+    const result = await res.json();
+    if (!res.ok && !(res.status === 409 && typeof result.started === 'boolean')) throw new GahApiError(result.message ?? 'Failed to start loop', res.status, '/api/loop/start');
+    return result as StartLoopResult;
   },
   async stopLoop(profile) {
     const url = new URL('/api/loop/stop', SERVER_URL);
     const res = await fetch(url.toString(), {
       method: 'POST',
-      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      headers: mutationHeaders(),
       body: JSON.stringify({ profile })
     });
-    return (await res.json()) as StopLoopResult;
+    const result = await res.json();
+    if (!res.ok && !(res.status === 409 && typeof result.stopped === 'boolean')) throw new GahApiError(result.message ?? 'Failed to stop loop', res.status, '/api/loop/stop');
+    return result as StopLoopResult;
   },
   async getConfig() {
     return getJson<ConfigSummary>('/api/config');
