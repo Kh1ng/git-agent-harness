@@ -16,6 +16,11 @@ on:
       - 'scripts/test-wsl-worker-config.py'
       - 'scripts/stage-node-test-artifacts.mjs'
       - 'scripts/test-node-test-artifacts.mjs'
+      - 'scripts/install.sh'
+      - 'scripts/install-linux.sh'
+      - 'scripts/install-macos.sh'
+      - 'scripts/configure-node-role.sh'
+      - 'scripts/test-worker-installers.py'
       - 'packages/**'
       - 'package.json'
       - 'package-lock.json'
@@ -123,6 +128,9 @@ jobs:
         run: |
           bash -n scripts/install-wsl-worker.sh
           python3 scripts/test-wsl-worker-config.py
+
+      - name: Check worker installer scripts
+        run: python3 scripts/test-worker-installers.py
 
       - name: Build local connection screen
         working-directory: apps/desktop
