@@ -43,13 +43,19 @@ test('the first token restores mounted Chat projects, provider choices, git, and
   let protectReads = false;
   const rejected = new Set<string>();
   const authenticated = new Set<string>();
+  const providerNodes = new Map<string, string | null>();
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
     if (protectReads && route.request().headers().authorization !== 'Bearer chat-secret') {
       rejected.add(path);
       return route.fulfill({ status: 401, json: { message: 'Coordinator token required' } });
     }
-    if (protectReads) authenticated.add(path);
+    if (protectReads) {
+      authenticated.add(path);
+      if (path === '/api/manager-chat/commands' || path === '/api/manager-chat/models') {
+        providerNodes.set(path, new URL(route.request().url()).searchParams.get('nodeId'));
+      }
+    }
     return route.continue();
   });
   await page.addInitScript(() => {
@@ -70,8 +76,12 @@ test('the first token restores mounted Chat projects, provider choices, git, and
   protectReads = true;
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
   await page.getByRole('button', { name: 'Storage', exact: true }).click();
-  const initialPaths = ['/api/profiles', '/api/manager-chat/settings', '/api/manager-chat/commands', '/api/manager-chat/models', '/api/git/status', '/api/manager-chat/issues', '/api/manager-chat/prs', '/api/manager-chat/storage'];
-  await expect.poll(() => initialPaths.every(path => rejected.has(path))).toBe(true);
+  const initialPaths = ['/api/profiles', '/api/projects', '/api/manager-chat/nodes', '/api/manager-chat/settings', '/api/git/status', '/api/manager-chat/issues', '/api/manager-chat/prs', '/api/manager-chat/storage'];
+  const providerPaths = ['/api/manager-chat/commands', '/api/manager-chat/models'];
+  await expect.poll(() => initialPaths.filter(path => !rejected.has(path))).toEqual([]);
+  // Provider discovery waits for an authenticated node readiness result.
+  await expect(page.getByLabel('Run on node', { exact: true })).toBeDisabled();
+  expect(providerPaths.filter(path => rejected.has(path))).toEqual([]);
   await expect(page.getByRole('navigation', { name: 'Projects', exact: true }).getByRole('button')).toHaveCount(0);
   await page.getByLabel('Access token', { exact: true }).fill('chat-secret');
   await page.getByRole('button', { name: 'Save and reconnect' }).click();
@@ -80,7 +90,13 @@ test('the first token restores mounted Chat projects, provider choices, git, and
   await expect(page.getByText('feat/mock-control-plane-1087', { exact: true })).toBeVisible();
   await expect(page.getByText(/projected reclaim · idle after/)).toBeVisible();
   await expect(page.getByLabel('Project skills', { exact: true })).toBeVisible();
-  await expect.poll(() => [...initialPaths, '/api/skills/bindings'].every(path => authenticated.has(path))).toBe(true);
+  await expect(page.getByLabel('Run on node', { exact: true })).toBeEnabled();
+  await expect(page.getByLabel('Run on node', { exact: true })).toHaveValue('mock-central');
+  await expect.poll(() => [...initialPaths, ...providerPaths, '/api/skills/bindings'].filter(path => !authenticated.has(path))).toEqual([]);
+  expect(providerPaths.map(path => providerNodes.get(path))).toEqual(['mock-central', 'mock-central']);
+  await page.getByPlaceholder('Message the manager… (try "/")').fill('/sta');
+  await expect(page.getByRole('button', { name: '/status Show mock status', exact: true })).toBeVisible();
+  await page.getByPlaceholder('Message the manager… (try "/")').fill('');
   await expect(page.getByText('Coordinator token required', { exact: true })).toHaveCount(0);
   // The session backend has its own model loader, independent of the default composer.
   await page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ }).click();
