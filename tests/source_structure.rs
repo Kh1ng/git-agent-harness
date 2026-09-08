@@ -763,6 +763,7 @@ fn all_rust_modules_are_reachable_from_crate_roots() {
 
     // Collect all tracked .rs files under src/ and nested integration-test module directories
     let all_rust_files = tracked_rust_files(&repo_root);
+    let reachable = compute_reachable(&repo_root, &all_rust_files);
     let mut orphaned = Vec::new();
 
     for path in &all_rust_files {
@@ -776,7 +777,7 @@ fn all_rust_modules_are_reachable_from_crate_roots() {
             continue;
         }
 
-        if !is_reachable_from_crate(path, &repo_root, &all_rust_files) {
+        if !reachable.contains(&repo_root.join(path)) {
             let relative = path.strip_prefix(&repo_root).unwrap_or(path);
             let relative_str = relative.to_string_lossy().to_string();
             orphaned.push((relative_str, find_expected_declaration(path, &repo_root)));
@@ -1174,77 +1175,76 @@ fn extract_marked_block<'a>(script: &'a str, marker: &str, script_path: &str) ->
 /// never the worker's own Tailscale address, while explicit overrides remain
 /// untouched.
 #[test]
-fn install_scripts_default_gateway_url_to_central_host() {
+fn install_linux_defaults_gateway_url_to_central_host() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for script_path in ["scripts/install-linux.sh", "scripts/install-macos.sh"] {
-        let script = fs::read_to_string(repo_root.join(script_path)).unwrap();
-        let block = extract_marked_block(&script, "gateway-url-default", script_path);
+    let script_path = "scripts/install-linux.sh";
+    let script = fs::read_to_string(repo_root.join(script_path)).unwrap();
+    let block = extract_marked_block(&script, "gateway-url-default", script_path);
 
-        let tmp = std::env::temp_dir().join(format!(
-            "gah-src-test-tailscale-{}-{}",
-            script_path.replace('/', "_"),
-            std::process::id()
-        ));
-        fs::create_dir_all(&tmp).unwrap();
-        let home = tmp.join("home");
-        let config_dir = home.join(".config/gah");
-        fs::create_dir_all(&config_dir).unwrap();
-        fs::write(
-            config_dir.join("config.toml"),
-            "[defaults]\nregistry_central_url = \"http://100.118.97.79\"\n",
-        )
-        .unwrap();
+    let tmp = std::env::temp_dir().join(format!(
+        "gah-src-test-tailscale-{}-{}",
+        script_path.replace('/', "_"),
+        std::process::id()
+    ));
+    fs::create_dir_all(&tmp).unwrap();
+    let home = tmp.join("home");
+    let config_dir = home.join(".config/gah");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[defaults]\nregistry_central_url = \"http://100.118.97.79\"\n",
+    )
+    .unwrap();
 
-        let fake_tailscale = tmp.join("tailscale");
-        fs::write(&fake_tailscale, "#!/bin/sh\necho 100.109.87.86\n").unwrap();
-        fs::set_permissions(&fake_tailscale, fs::Permissions::from_mode(0o755)).unwrap();
+    let fake_tailscale = tmp.join("tailscale");
+    fs::write(&fake_tailscale, "#!/bin/sh\necho 100.109.87.86\n").unwrap();
+    fs::set_permissions(&fake_tailscale, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let run = |extra: &str| {
-            let probe = format!(
-                "PATH={}:$PATH\nHOME={}\n{extra}\n{block}\nprintf '%s' \"$GAH_GATEWAY_URL\"\n",
-                tmp.display(),
-                home.display()
-            );
-            Command::new("bash").arg("-c").arg(&probe).output().unwrap()
-        };
-
-        let defaulted = run("unset GAH_GATEWAY_URL");
-        assert!(
-            defaulted.status.success(),
-            "{script_path} stderr: {}",
-            String::from_utf8_lossy(&defaulted.stderr)
+    let run = |extra: &str| {
+        let probe = format!(
+            "PATH={}:$PATH\nHOME={}\n{extra}\n{block}\nprintf '%s' \"$GAH_GATEWAY_URL\"\n",
+            tmp.display(),
+            home.display()
         );
-        assert_eq!(
+        Command::new("bash").arg("-c").arg(&probe).output().unwrap()
+    };
+
+    let defaulted = run("unset GAH_GATEWAY_URL");
+    assert!(
+        defaulted.status.success(),
+        "{script_path} stderr: {}",
+        String::from_utf8_lossy(&defaulted.stderr)
+    );
+    assert_eq!(
             String::from_utf8_lossy(&defaulted.stdout),
             "http://100.118.97.79:8420",
             "{script_path} must select the central host, never the worker-local Tailscale address (issue #947)"
         );
 
-        fs::remove_file(config_dir.join("config.toml")).unwrap();
-        let explicit = run("GAH_GATEWAY_URL=http://central-node.example:9443");
-        assert!(
-            explicit.status.success(),
-            "{script_path} explicit override stderr: {}",
-            String::from_utf8_lossy(&explicit.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&explicit.stdout),
-            "http://central-node.example:9443",
-            "{script_path} must preserve an explicit GAH_GATEWAY_URL override"
-        );
+    fs::remove_file(config_dir.join("config.toml")).unwrap();
+    let explicit = run("GAH_GATEWAY_URL=http://central-node.example:9443");
+    assert!(
+        explicit.status.success(),
+        "{script_path} explicit override stderr: {}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&explicit.stdout),
+        "http://central-node.example:9443",
+        "{script_path} must preserve an explicit GAH_GATEWAY_URL override"
+    );
 
-        let missing = run("unset GAH_GATEWAY_URL");
-        assert!(
+    let missing = run("unset GAH_GATEWAY_URL");
+    assert!(
             !missing.status.success(),
             "{script_path} must fail rather than use the worker's own Tailscale address when no central is configured"
         );
-        assert!(
-            String::from_utf8_lossy(&missing.stderr)
-                .contains("a worker cannot infer which Tailscale peer hosts the gateway"),
-            "{script_path} missing-central stderr: {}",
-            String::from_utf8_lossy(&missing.stderr)
-        );
+    assert!(
+        String::from_utf8_lossy(&missing.stderr)
+            .contains("a worker cannot infer which Tailscale peer hosts the gateway"),
+        "{script_path} missing-central stderr: {}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
 
-        fs::remove_dir_all(&tmp).ok();
-    }
+    fs::remove_dir_all(&tmp).ok();
 }

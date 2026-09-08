@@ -1110,6 +1110,7 @@ pub(crate) fn improve(
                     cli_version: result.agy_version.clone(),
                 });
                 attempt_bookkeeping::capture_successful_attempt(
+                    cfg,
                     &args.profile,
                     &profile.local_path,
                     attempt,

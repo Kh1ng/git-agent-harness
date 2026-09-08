@@ -69,3 +69,31 @@ separate existing gap under #532 and is being reviewed.
 
 The final combined revision must pass CI before merge. Native installer
 artifacts provide build evidence, not physical Windows or macOS acceptance.
+
+## Worker and authentication integration
+
+PR #1137 merged as `8d4cfee` after every check passed, including both native
+builds, full Rust tests, Clippy, browser suites, and CodeQL.
+
+The next integration adds persisted worker roles, a central memory relay,
+remote profile readiness, and authenticated WebSocket upgrades. It passed
+333 server checks, all 38 component checks, and three focused browser checks.
+Server and web typechecks passed. The worker WebSocket integration test uses
+the production upgrade gate: missing credentials fail before welcome, valid
+credentials permit the handshake, and manager chat remains central-only.
+
+The first successful authenticated connection now refreshes mounted REST
+panels that previously failed without a token. A negative control with that
+refresh removed fails the regression. The single token editor also remains
+usable when browser storage reads fail.
+
+The source-structure test rebuilt the same module graph for each of 330
+checked files. It now computes that graph once without changing parsing,
+resolution, exclusions, or diagnostics. All 23 structure checks passed in
+0.58 seconds locally. The earlier CI run took 278.23 seconds on different
+hardware, so these timings are not a measured cross-version speedup ratio.
+
+Worker installation still needs a matching CLI release and device acceptance.
+The WSL installer rejects an old CLI before overwriting active settings.
+WebSocket authentication does not finish #532's legacy REST authorization,
+capability, audit, idempotency, or per-device credential requirements.

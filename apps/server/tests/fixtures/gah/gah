@@ -40,6 +40,10 @@ const args = process.argv.slice(2);
 const [command, sub] = args;
 
 if (command === 'status') {
+  if (args.includes('--role')) {
+    process.stdout.write(JSON.stringify({ role: 'central', central_url: null }));
+    process.exit(0);
+  }
   respond('status');
 } else if (command === 'quota' && sub === 'snapshot') {
   respond('quota');

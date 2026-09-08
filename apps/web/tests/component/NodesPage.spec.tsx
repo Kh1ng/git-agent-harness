@@ -102,3 +102,71 @@ test('registry failure preserves the reason and supports retry', async ({ mount,
   await expect(component.getByText(/No registered nodes/)).toBeVisible();
   await expect(component.getByRole('alert')).toHaveCount(0);
 });
+
+test('readiness is explicit, profile-scoped, and ignores a previous profile response', async ({ mount, page }, testInfo) => {
+  await connectSocket(page);
+  await page.route('**/api/registry/fleet/snapshot', (route) => route.fulfill({ json: {
+    nodes: [{ ...node('one'), profiles: ['other', 'gah'] }, { ...node('empty'), profiles: [] }], observations: [], leases: []
+  } }));
+  await page.route('**/api/registry/nodes/*/health', (route) => route.fulfill({ json: { node_id: 'one', status: 'healthy', state: 'healthy', timestamp: Date.now() } }));
+  let requests = 0;
+  let release = () => {};
+  const oldRequest = new Promise<void>((resolve) => { release = resolve; });
+  await page.route('**/api/registry/nodes/one/doctor?*', async (route) => {
+    requests++;
+    const profile = new URL(route.request().url()).searchParams.get('profile');
+    if (profile === 'other') await oldRequest;
+    await route.fulfill({ json: { schema_version: 1, generated_at: new Date().toISOString(), overall_status: 'fail',
+      checks: [{ name: 'provider auth', status: 'fail', detail: profile === 'other' ? 'OLD PROFILE RESULT' : 'Run gh auth login on this worker.', profile }] } });
+  });
+  const component = await mount(<WebSocketProvider><NodesPage /></WebSocketProvider>);
+  await component.getByRole('button', { name: 'Worker one', exact: true }).click();
+  const readiness = component.getByRole('region', { name: 'Worker readiness' });
+  await expect(readiness.getByText('Not checked for this worker and profile.')).toBeVisible();
+  expect(requests).toBe(0);
+  await expect(readiness.getByRole('combobox', { name: 'Worker profile' })).toHaveValue('other');
+  await readiness.getByRole('button', { name: 'Check readiness' }).click();
+  await expect(readiness.getByRole('button', { name: 'Checking readiness…' })).toBeDisabled();
+  await readiness.getByRole('combobox').selectOption('gah');
+  await expect(readiness.getByText('Not checked for this worker and profile.')).toBeVisible();
+  await readiness.getByRole('button', { name: 'Check readiness' }).click();
+  await expect(readiness.getByText('Run gh auth login on this worker.')).toBeVisible();
+  await expect(readiness.getByRole('status')).toContainText('Readiness checks: fail');
+  const oldResponse = page.waitForResponse((response) => response.url().includes('/doctor?profile=other'));
+  release();
+  await oldResponse;
+  await expect(readiness.getByText('OLD PROFILE RESULT')).toHaveCount(0);
+  await expect(readiness.getByRole('combobox')).toHaveValue('gah');
+  await page.screenshot({ path: testInfo.outputPath('readiness-desktop.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: testInfo.outputPath('readiness-mobile.png'), fullPage: true });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await component.getByRole('button', { name: 'Worker empty', exact: true }).click();
+  await expect(readiness.getByText(/Configure or import a repository profile on this worker/)).toBeVisible();
+  await expect(readiness.getByRole('button', { name: 'Check readiness' })).toHaveCount(0);
+  expect(requests).toBe(2);
+});
+
+test('remote readiness errors remain unknown and retry distinguishes fresh from stale success', async ({ mount, page }) => {
+  await connectSocket(page);
+  await page.route('**/api/registry/fleet/snapshot', (route) => route.fulfill({ json: { nodes: [node('one')], observations: [], leases: [] } }));
+  await page.route('**/api/registry/nodes/one/health', (route) => route.fulfill({ json: { node_id: 'one', status: 'unhealthy', state: 'unreachable', timestamp: Date.now() } }));
+  let requests = 0;
+  await page.route('**/api/registry/nodes/one/doctor?*', (route) => {
+    requests++;
+    return requests === 1 ? route.fulfill({ status: 502, json: { message: 'NETWORK: Cannot reach worker.' } })
+      : route.fulfill({ json: { schema_version: 1, generated_at: requests === 2 ? new Date().toISOString() : '2020-01-01T00:00:00Z', overall_status: 'ok',
+        checks: [{ profile: 'gah', name: 'backend executable', status: 'ok', detail: 'claude: /worker/bin/claude' }] } });
+  });
+  const component = await mount(<WebSocketProvider><NodesPage /></WebSocketProvider>);
+  await component.getByRole('button', { name: 'Worker one', exact: true }).click();
+  const readiness = component.getByRole('region', { name: 'Worker readiness' });
+  await readiness.getByRole('button', { name: 'Check readiness' }).click();
+  await expect(readiness.getByRole('alert')).toContainText('Readiness unknown. NETWORK: Cannot reach worker.');
+  await readiness.getByRole('button', { name: 'Check readiness' }).click();
+  await expect(readiness.getByRole('alert')).toHaveCount(0);
+  await expect(readiness.getByRole('status')).toContainText('Readiness checks: ok');
+  await expect(readiness.getByText('claude: /worker/bin/claude')).toBeVisible();
+  await readiness.getByRole('button', { name: 'Check readiness' }).click();
+  await expect(readiness.getByRole('status')).toContainText('Stale readiness result: ok');
+});

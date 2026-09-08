@@ -251,8 +251,11 @@ pub enum Commands {
     },
     /// Provide a single machine-readable controller snapshot of all state
     Status {
+        #[arg(long, required_unless_present = "role")]
+        profile: Option<String>,
+        /// Report this host's role and central URL without querying a repository.
         #[arg(long)]
-        profile: String,
+        role: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
         #[arg(long, name = "config")]
@@ -469,6 +472,11 @@ pub enum ConfigCommands {
         /// across all profiles/projects (the manager-wake "who's on call").
         #[arg(long)]
         current_manager: Option<String>,
+        /// Persist this host's role. Restart an existing execution/control service to apply it.
+        #[arg(long, value_enum)]
+        node_role: Option<crate::node_role::NodeRole>,
+        #[arg(long)]
+        registry_central_url: Option<String>,
         /// Clear the specified field(s).
         #[arg(long, value_delimiter = ',')]
         clear: Vec<String>,

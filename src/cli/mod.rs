@@ -161,10 +161,12 @@ pub fn run() -> Result<()> {
 
         Commands::Status {
             profile,
+            role,
             json,
             config_path,
         } => commands::controller::run_status(commands::controller::StatusArgs {
             profile,
+            role,
             json,
             config_path,
         })?,

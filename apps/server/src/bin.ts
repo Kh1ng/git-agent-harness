@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
-import { coordinatorTokenMatches } from './authMiddleware.js';
+import { createAuthorizedWebSocketServer } from './webSocketAuth.js';
 import { createServer as createExpressServer, initializeSkillBank } from './server.js';
 import { createServer as createHttpServer } from 'http';
-import { WebSocketServer } from 'ws';
 import { createWebSocketHandler } from './wsServer.js';
+import { validateNodeRole, workerMemoryEnvironment } from './nodeRole.js';
+import { runNodeRole } from './gahCli.js';
 import { isGahCliAvailable } from './gahCli.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { RegistryService } from './registryService.js';
@@ -34,14 +35,18 @@ async function main() {
 
   console.log('Starting Git Agent Harness server...');
 
-  initializeSkillBank();
+  const node = validateNodeRole(await runNodeRole());
+  Object.assign(process.env, workerMemoryEnvironment(node, process.env.COORDINATOR_TOKEN));
+  console.log(`Node role: ${node.role}; central URL: ${node.central_url ?? '(unset)'}`);
+  if (node.role === 'central') initializeSkillBank(node);
 
   const coordinatorIdentity = getCoordinatorIdentity(undefined, PORT);
-  const registryService = new RegistryService(undefined, coordinatorIdentity.advertised_url, PORT);
+  const registryService = new RegistryService(node.role === 'worker' ? null : undefined, coordinatorIdentity.advertised_url, PORT);
 
   // Create Express app
   const app = createExpressServer({
     coordinatorPort: PORT,
+    node,
     registryService
   });
   
@@ -49,11 +54,7 @@ async function main() {
   const server = createHttpServer(app);
   
   // Create WebSocket server
-  const wss = new WebSocketServer({ server, verifyClient: (info: { req: import('node:http').IncomingMessage }) => {
-    if (process.env.GAH_NODE_ROLE !== 'worker') return true;
-    const authorization = info.req.headers.authorization;
-    return !!authorization?.startsWith('Bearer ') && coordinatorTokenMatches(authorization.slice(7));
-  } });
+  const wss = createAuthorizedWebSocketServer(server, node.role);
   
   // Check GAH CLI availability (real status/dispatch data is loaded
   // on-demand per WebSocket connection in wsServer.ts's sendWelcomeMessage,
@@ -79,7 +80,8 @@ async function main() {
   // Set up WebSocket handler
   createWebSocketHandler(wss, {
     registryService,
-    coordinatorIdentity
+    coordinatorIdentity,
+    node
   });
   markReadinessCheck('webSocket', true);
   
@@ -87,13 +89,13 @@ async function main() {
   // interval instead of only reacting to dashboard/dispatch activity, so a
   // node with nothing currently dispatching to it still gets flagged if it
   // goes dark. No-op when no nodes are registered.
-  registryService.startLivenessScheduler();
+  if (node.role === 'central') registryService.startLivenessScheduler();
 
   // Chat maintenance scheduler (#1036): settles chat sessions whose branch's
   // PR merged/closed (or whose issue closed) on a bounded interval instead
   // of only at the daily prune, so "the work shipped" is visible while it
   // still matters.
-  if (process.env.GAH_NODE_ROLE !== 'worker') startChatMaintenanceScheduler();
+  if (node.role === 'central') startChatMaintenanceScheduler();
 
   // Start HTTP server
   server.listen(PORT, HOST, () => {

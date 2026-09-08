@@ -1213,6 +1213,12 @@ export async function runConfigSet(options: ConfigSetOptions): Promise<void> {
   });
 }
 
+/** Host status needs no profile or repository/provider access. */
+export async function runNodeRole(): Promise<import('@git-agent-harness/contracts').NodeRoleStatus> {
+  const config = getConfigPath(process.env.GAH_CONFIG ?? process.env.GAH_CONFIG_PATH);
+  return runJsonCommand(['status', '--role', '--json', ...(config ? ['--config-path', config] : [])], config);
+}
+
 export async function runConfigShow(config?: string): Promise<{ current_manager: string | null }> {
   const args = ['config', 'show', '--json'];
   if (config) {

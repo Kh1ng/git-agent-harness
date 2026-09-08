@@ -4,6 +4,7 @@
  */
 
 import { WebSocket, WebSocketServer } from 'ws';
+import { requiresFleetAuthentication, trustedLanWebSocketMode } from './webSocketAuth.js';
 import { SERVER_VERSION } from './server.js';
 import { createServerPushBus } from './serverPushBus.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
@@ -69,12 +70,7 @@ class WebSocketSessionStore {
 
 const sessionStore = new WebSocketSessionStore();
 const pushBus = createServerPushBus();
-let fleetDispatch = createFleetDispatchCoordinator({
-  registryService: new RegistryService(undefined, getCoordinatorIdentity().advertised_url),
-  pushBus,
-  coordinatorIdentity: getCoordinatorIdentity(),
-  localSessionManager: getSessionManager()
-});
+let fleetDispatch: ReturnType<typeof createFleetDispatchCoordinator>;
 
 // Temporary storage for profile from query params, used before client.hello arrives
 const pendingProfiles = new Map<WebSocket, string>();
@@ -84,9 +80,10 @@ export function createWebSocketHandler(
   deps: {
     registryService?: RegistryService;
     coordinatorIdentity?: ReturnType<typeof getCoordinatorIdentity>;
+    node?: import('@git-agent-harness/contracts').NodeRoleStatus;
   } = {}
 ) {
-  const registryService = deps.registryService ?? new RegistryService();
+  const registryService = deps.registryService ?? new RegistryService(deps.node?.role === 'worker' ? null : undefined);
   const unsubscribeFleet = registryService.onChange(() => pushBus.publish({ type: 'fleet.changed' }));
   wss.once('close', unsubscribeFleet);
   fleetDispatch = createFleetDispatchCoordinator({
@@ -113,6 +110,13 @@ export function createWebSocketHandler(
     ws.on('message', async (data: WebSocket.RawData) => {
       try {
         const message = JSON.parse(data.toString()) as ClientMessage;
+        if (deps.node?.role === 'worker' && message.type.startsWith('manager.chat.')) {
+          throw new GAHError('Manager chat is only available on the central node.', 'WORKER_ROLE_RESTRICTION');
+        }
+        if (requiresFleetAuthentication(ws, message.type)) {
+          ws.send(JSON.stringify(createErrorResponse('requestId' in message ? message.requestId ?? generateRequestId() : generateRequestId(), new Error('A coordinator token is required for session operations. Trusted-LAN mode does not authorize fleet work.'))));
+          return;
+        }
         await handleClientMessage(ws, message);
       } catch (error) {
         console.error('Failed to parse WebSocket message:', error);
@@ -570,6 +574,7 @@ async function sendWelcomeMessage(ws: WebSocket) {
     } = {
       type: 'server.welcome',
       serverVersion: SERVER_VERSION,
+      trustedLanMode: trustedLanWebSocketMode(ws),
       serverProviderCatalog,
       sessions,
       providers,

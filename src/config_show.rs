@@ -163,6 +163,7 @@ pub struct ConfigShowSummary {
 
 #[derive(serde::Serialize)]
 pub struct ConfigShowFull {
+    pub node: crate::node_role::NodeRoleStatus,
     pub schema_version: u32,
     pub config_path: String,
     pub current_manager: Option<String>,
@@ -380,6 +381,7 @@ pub fn config_show_full(
     }
 
     Ok(ConfigShowFull {
+        node: crate::node_role::NodeRoleStatus::resolve(&cfg.defaults)?,
         schema_version: CONFIG_SHOW_SCHEMA_VERSION,
         config_path: config_path.to_string_lossy().into_owned(),
         current_manager: cfg.defaults.current_manager.clone(),

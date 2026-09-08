@@ -73,6 +73,8 @@ export type ServerMessage =
   | {
       type: "server.welcome";
       serverVersion: string;
+      /** Explicit unauthenticated browser compatibility is enabled on this central server. */
+      trustedLanMode?: boolean;
       serverProviderCatalog: ServerProviderCatalog;
       sessions: Session[];
       providers: Record<ProviderInstanceId, ProviderStatus>;

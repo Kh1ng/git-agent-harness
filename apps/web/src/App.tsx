@@ -4,6 +4,7 @@ import { useWebSocket } from './ws/WebSocketContext.js';
 import { OverviewPage } from './pages/OverviewPage.js';
 import { Navbar } from './components/Navbar.js';
 import { ConnectionStatus } from './components/ConnectionStatus.js';
+import { CoordinatorConnection } from './components/CoordinatorConnection.js';
 import { SessionDetailModal } from './components/SessionDetailModal.js';
 import type { Session } from '@git-agent-harness/contracts';
 
@@ -77,6 +78,7 @@ export function App() {
               serverVersion={serverVersion}
             />
           </div>
+          <CoordinatorConnection />
           <Suspense fallback={<LoadingState label="Loading page…" />}>{renderPage()}</Suspense>
         </main>
       </div>

@@ -10,7 +10,8 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { RegistryService } from './registryService.js';
 import { COORDINATOR_SCHEMA_DIGEST, getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { createWebSocketHandler } from './wsServer.js';
-import type { ServerMessage } from '@git-agent-harness/contracts';
+import { createAuthorizedWebSocketServer } from './webSocketAuth.js';
+import type { NodeRoleStatus, ServerMessage } from '@git-agent-harness/contracts';
 
 // Hermetic: welcome is pushed only after gahCli.runStatus() spawns a real
 // `gah status` child. A cold call of the repo's release binary takes ~21s
@@ -31,10 +32,10 @@ process.env.GAH_BINARY = fileURLToPath(new URL('../tests/fixtures/gah/gah', impo
  * against real `ws` sockets to ground that assumption in the real
  * server/client boundary.
  */
-async function withWsServer(testFn: (wsUrl: string) => Promise<void>) {
+async function withWsServer(testFn: (wsUrl: string) => Promise<void>, node?: NodeRoleStatus) {
   const server = http.createServer();
-  const wss = new WebSocketServer({ server });
-  createWebSocketHandler(wss);
+  const wss = createAuthorizedWebSocketServer(server, node?.role ?? 'central');
+  createWebSocketHandler(wss, { node });
 
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const { port } = server.address() as AddressInfo;
@@ -68,8 +69,8 @@ function nextWelcome(ws: WebSocket): Promise<ServerMessage & { type: 'server.wel
   });
 }
 
-async function connectAndAwaitWelcome(wsUrl: string): Promise<WebSocket> {
-  const ws = new WebSocket(wsUrl);
+async function connectAndAwaitWelcome(wsUrl: string, token?: string): Promise<WebSocket> {
+  const ws = new WebSocket(wsUrl, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
   await new Promise<void>((resolve, reject) => {
     ws.on('open', resolve);
     ws.on('error', reject);
@@ -196,5 +197,63 @@ test('registry changes push only an invalidation over the existing websocket', a
     await new Promise<void>((resolve) => wss.close(() => resolve()));
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(dir, { recursive: true });
+  }
+});
+
+
+test('worker websocket authenticates execution handshake and rejects manager chat', { timeout: 5000 }, async () => {
+  const previousToken = process.env.COORDINATOR_TOKEN;
+  process.env.COORDINATOR_TOKEN = 'worker-integration-token';
+  try { await withWsServer(async (wsUrl) => {
+    await assert.rejects(connectAndAwaitWelcome(wsUrl), /401/);
+    const ws = await connectAndAwaitWelcome(wsUrl, 'worker-integration-token');
+    try {
+      const rejected = new Promise<{ type: string; error: string }>((resolve) => ws.once('message', (data) => resolve(JSON.parse(data.toString()))));
+      ws.send(JSON.stringify({ type: 'manager.chat.sessionList', profile: 'gah' }));
+      const response = await rejected;
+      assert.equal(response.type, 'error');
+      assert.match(response.error, /only available on the central node/);
+    } finally { ws.close(); }
+  }, { role: 'worker', central_url: 'https://central.test' });
+  } finally {
+    if (previousToken === undefined) delete process.env.COORDINATOR_TOKEN; else process.env.COORDINATOR_TOKEN = previousToken;
+  }
+});
+
+test('trusted-LAN sockets receive a warning but cannot invoke session mutations', async (t) => {
+  const { getFleetDispatch } = await import('./wsServer.js');
+  const savedMode = process.env.GAH_WS_AUTH_MODE;
+  const savedHttp = process.env.GAH_ALLOW_INSECURE_HTTP;
+  process.env.GAH_WS_AUTH_MODE = 'trusted_lan';
+  process.env.GAH_ALLOW_INSECURE_HTTP = '1';
+  const server = http.createServer();
+  const wss = createAuthorizedWebSocketServer(server, 'central');
+  createWebSocketHandler(wss);
+  const fleet = getFleetDispatch();
+  const start = t.mock.method(fleet, 'startSession', async () => { throw new Error('must not start'); });
+  const stop = t.mock.method(fleet, 'stopSession', async () => { throw new Error('must not stop'); });
+  const send = t.mock.method(fleet, 'sendCommand', async () => { throw new Error('must not send'); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { host: `192.168.1.25:${port}`, origin: `http://192.168.1.25:${port}` } });
+  try {
+    const welcome = await nextWelcome(ws);
+    assert.equal(welcome.trustedLanMode, true);
+    for (const type of ['session.start', 'session.stop', 'session.sendCommand']) {
+      const reply = new Promise<ServerMessage>(resolve => ws.once('message', data => resolve(JSON.parse(data.toString()))));
+      ws.send(JSON.stringify({ type, requestId: type, profile: 'gah', nodeId: 'remote', coordinatorNodeId: 'spoof', sessionId: 'remote-session', command: 'touch forbidden' }));
+      const response = await reply;
+      assert.equal(response.type, 'error');
+      assert.match(JSON.stringify(response), /coordinator token is required/);
+    }
+    assert.equal(start.mock.callCount(), 0);
+    assert.equal(stop.mock.callCount(), 0);
+    assert.equal(send.mock.callCount(), 0);
+  } finally {
+    ws.terminate();
+    await new Promise<void>(resolve => wss.close(() => resolve()));
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    if (savedMode === undefined) delete process.env.GAH_WS_AUTH_MODE; else process.env.GAH_WS_AUTH_MODE = savedMode;
+    if (savedHttp === undefined) delete process.env.GAH_ALLOW_INSECURE_HTTP; else process.env.GAH_ALLOW_INSECURE_HTTP = savedHttp;
   }
 });

@@ -84,6 +84,10 @@
       "work_id": "TICKET-001"
     }
   ],
+  "node": {
+    "central_url": null,
+    "role": "central"
+  },
   "observations": {
     "availability": {
       "status": "ok"

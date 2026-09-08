@@ -87,3 +87,89 @@ fn full_and_profile_require_machine_readable_mode() {
         .assert()
         .failure();
 }
+
+#[test]
+fn node_role_and_central_url_survive_config_changes_and_need_no_profile() {
+    let tmp = test_tempdir();
+    let path = tmp.path().join("config.toml");
+    let config = path.to_str().unwrap();
+    bin()
+        .args([
+            "config",
+            "set",
+            "--config",
+            config,
+            "--node-role",
+            "worker",
+            "--registry-central-url",
+            "http://192.168.1.10:3773",
+        ])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "config",
+            "set",
+            "--config",
+            config,
+            "--current-manager",
+            "claude",
+        ])
+        .assert()
+        .success();
+    let output = bin()
+        .args(["status", "--role", "--json", "--config-path", config])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let node: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(node["role"], "worker");
+    let overridden = bin()
+        .env("GAH_NODE_ROLE", "central")
+        .args(["status", "--role", "--json", "--config-path", config])
+        .output()
+        .unwrap();
+    assert!(overridden.status.success());
+    let overridden: serde_json::Value = serde_json::from_slice(&overridden.stdout).unwrap();
+    assert_eq!(overridden["role"], "central");
+    bin()
+        .env("GAH_NODE_ROLE", "typo")
+        .args(["status", "--role", "--json", "--config-path", config])
+        .assert()
+        .failure();
+    assert_eq!(node["central_url"], "http://192.168.1.10:3773");
+    let before = std::fs::read(&path).unwrap();
+    bin()
+        .args([
+            "config",
+            "set",
+            "--config",
+            config,
+            "--clear",
+            "registry_central_url",
+        ])
+        .assert()
+        .failure();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    bin()
+        .args([
+            "config",
+            "set",
+            "--config",
+            config,
+            "--node-role",
+            "central",
+        ])
+        .assert()
+        .success();
+    let output = bin()
+        .args(["status", "--role", "--json", "--config-path", config])
+        .output()
+        .unwrap();
+    let node: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(node["role"], "central");
+}

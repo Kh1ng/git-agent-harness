@@ -30,6 +30,7 @@ pub mod memory_gateway;
 pub mod models;
 pub mod network_exposure;
 pub mod node_register;
+pub mod node_role;
 pub mod notifications;
 pub mod policy;
 pub mod price_guard;

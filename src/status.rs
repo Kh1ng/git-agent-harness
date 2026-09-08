@@ -982,10 +982,18 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
     let now = OffsetDateTime::now_utc();
     let snapshot = build_snapshot(cfg, profile_name, now)?;
 
+    let node = crate::node_role::NodeRoleStatus::resolve(&cfg.defaults)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        let mut output = serde_json::to_value(&snapshot)?;
+        output["node"] = serde_json::to_value(&node)?;
+        println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("Status for Profile: {}", profile_name);
+        println!(
+            "Role: {:?} | Central URL: {}",
+            node.role,
+            node.central_url.as_deref().unwrap_or("(unset)")
+        );
         println!(
             "Observations: Sync={}, Availability={}, Ledger={}",
             snapshot.observations.sync.status,

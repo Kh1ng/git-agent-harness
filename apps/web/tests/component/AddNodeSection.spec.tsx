@@ -12,16 +12,14 @@ test('Windows setup reveals the selected role explicitly and sends only the tab 
   });
   const component = await mount(<AddNodeSection />);
   const address = component.getByLabel('Central LAN or VPN address');
-  const credential = component.getByLabel('Central access token', { exact: false });
   const role = component.getByRole('combobox', { name: 'Install', exact: true });
   const reveal = component.getByRole('button', { name: 'Reveal Windows install command' });
   const command = component.getByRole('textbox', { name: 'Windows install command' });
   await expect(command).toHaveCount(0);
   expect(requests).toEqual([]);
   await address.fill('https://central.example.com');
-  await credential.fill(token);
-  await expect(credential).toHaveAttribute('type', 'password');
-  expect(await page.evaluate(() => sessionStorage.getItem('gah.coordinatorToken'))).toBeNull();
+  // Token was saved in the connection panel after AddNode had already mounted.
+  await page.evaluate(token => sessionStorage.setItem('gah.coordinatorToken', token), token);
   for (const installRole of ['both', 'desktop', 'worker']) {
     await role.selectOption(installRole);
     await expect(command).toHaveCount(0);
@@ -31,8 +29,7 @@ test('Windows setup reveals the selected role explicitly and sends only the tab 
   }
   expect(await page.evaluate(() => sessionStorage.getItem('gah.coordinatorToken'))).toBe(token);
   expect(await page.evaluate(() => localStorage.getItem('gah.coordinatorToken'))).toBeNull();
-  await credential.clear();
-  await expect(command).toHaveCount(0);
+  await page.evaluate(() => sessionStorage.removeItem('gah.coordinatorToken'));
   await reveal.click();
   await expect(command).toBeVisible();
   expect(requests.at(-1)?.authorization).toBeUndefined();
@@ -61,7 +58,6 @@ test('pending setup locks its inputs; server and clipboard failures leave a reco
   await expect(component.getByRole('button', { name: 'Preparing…' })).toBeDisabled();
   await expect(component.getByLabel('Central LAN or VPN address')).toBeDisabled();
   await expect(component.getByRole('combobox', { name: 'Install', exact: true })).toBeDisabled();
-  await expect(component.getByLabel('Central access token', { exact: false })).toBeDisabled();
   expect(attempts).toBe(1);
   release();
   await expect(component.getByRole('alert')).toHaveText('Windows installer unavailable');

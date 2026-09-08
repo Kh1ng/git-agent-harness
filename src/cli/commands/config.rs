@@ -40,14 +40,34 @@ pub fn run(command: ConfigCommands) -> Result<()> {
         ConfigCommands::Set {
             config_path,
             current_manager,
+            node_role,
+            registry_central_url,
             clear,
         } => {
-            let mut cfg = config::load(config_path.as_deref())?;
+            let mut cfg = if config::resolve_config_path(config_path.as_deref()).exists() {
+                config::load(config_path.as_deref())?
+            } else {
+                config::GahConfig {
+                    defaults: Default::default(),
+                    profiles: Default::default(),
+                    context: Default::default(),
+                }
+            };
             if let Some(v) = current_manager {
                 cfg.defaults.current_manager = Some(v);
             } else if clear.contains(&"current_manager".to_string()) {
                 cfg.defaults.current_manager = None;
             }
+            if let Some(role) = node_role {
+                cfg.defaults.node_role = role;
+            }
+            if let Some(url) = registry_central_url {
+                cfg.defaults.registry_central_url = Some(url);
+            }
+            if clear.contains(&"registry_central_url".to_string()) {
+                cfg.defaults.registry_central_url = None;
+            }
+            crate::node_role::NodeRoleStatus::with_override(&cfg.defaults, None)?;
             config::save(&cfg, config_path.as_deref())?;
             println!("Updated global config");
         }

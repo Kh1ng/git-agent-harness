@@ -1,3 +1,4 @@
+import { coordinatorToken } from './coordinatorToken.js';
 /**
  * Typed data-source client for GAH's pull-data REST endpoints.
  *
@@ -66,7 +67,7 @@ const SERVER_URL =
   (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000');
 
 function authHeaders(): Record<string, string> {
-  const token = typeof window === 'undefined' ? null : window.sessionStorage.getItem('gah.coordinatorToken');
+  const token = coordinatorToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -206,6 +207,7 @@ export interface StopLoopResult {
 export interface GahDataSource {
   getFleetSnapshot(): Promise<FleetSnapshot>;
   checkNodeHealth(nodeId: string): Promise<NodeHealthCheckResult>;
+  getNodeDoctor(nodeId: string, profile: string): Promise<DoctorSnapshot>;
   getStatus(profile?: string): Promise<StatusSnapshot>;
   getQuota(params?: { profile?: string; since?: string }): Promise<QuotaSnapshot>;
   getUsageRollup(profile?: string, days?: number): Promise<UsageRollupSummary>;
@@ -352,6 +354,9 @@ async function deleteJson<T>(path: string, params?: Record<string, string | unde
 }
 
 export const gahApi: GahDataSource = {
+  getNodeDoctor(nodeId, profile) {
+    return getJson<DoctorSnapshot>(`/api/registry/nodes/${encodeURIComponent(nodeId)}/doctor`, { profile });
+  },
   getFleetSnapshot() {
     return getJson<FleetSnapshot>('/api/registry/fleet/snapshot');
   },
