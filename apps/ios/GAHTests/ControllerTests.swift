@@ -78,7 +78,9 @@ final class ControllerTests: XCTestCase {
         app.webViews.buttons["Settings"].tap()
         for label in ["Request scan from subframe", "Request scan from other origin"] {
             app.webViews.buttons[label].tap()
-            XCTAssertTrue(app.webViews.staticTexts[label + " sent"].waitForExistence(timeout: 5))
+            let acknowledged = app.webViews.staticTexts[label + " sent"].waitForExistence(timeout: 5)
+            if !acknowledged { print("FIXTURE TEXT", app.webViews.staticTexts.allElementsBoundByIndex.map { $0.label }) }
+            XCTAssertTrue(acknowledged)
             XCTAssertFalse(scanner.waitForExistence(timeout: 1))
         }
         app.webViews.buttons["Scan pairing QR code"].tap()

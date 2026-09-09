@@ -17,6 +17,7 @@ class Fixture(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
+        print('Fixture GET', path, flush=True)
         if path == "/arm-recovery":
             Fixture.recovery_unavailable = True
         if path == "/allow-recovery":
@@ -30,7 +31,7 @@ class Fixture(BaseHTTPRequestHandler):
             self.send_header('Set-Cookie', 'gah_test=retained; HttpOnly; SameSite=Strict; Max-Age=3600; Path=/')
         self.end_headers()
         if path == "/frame":
-            self.wfile.write(b"<script>window.webkit.messageHandlers.gahController.postMessage('scanPairingCode');parent.postMessage('frame-sent','*')</script>")
+            self.wfile.write(b"<script>try{window.webkit.messageHandlers.gahController.postMessage('scanPairingCode');parent.postMessage('frame-sent','*')}catch(e){parent.postMessage('frame-error '+e.message,'*')}</script>")
             return
         retained = urlsplit(self.path).path == '/remember' or 'gah_test=retained' in self.headers.get('Cookie', '')
         body = '<p>Session retained</p>' if retained else '<p>No test session</p>'
@@ -42,7 +43,7 @@ class Fixture(BaseHTTPRequestHandler):
 <button onclick="history.replaceState(null,'','?page=overview&page=settings');scan();statusText.textContent='Duplicate page request sent'">Request scan with duplicate page</button>
 <button onclick="history.replaceState(null,'','?page=settings');this.focus()">Settings</button>
 <label>Draft <textarea></textarea></label>
-<button onclick="requestFrame(false)">Request scan from subframe</button>
+<button onclick="try{statusText.textContent='Frame started';requestFrame(false)}catch(e){statusText.textContent='Frame error '+e.message}">Request scan from subframe</button>
 <button onclick="requestFrame(true)">Request scan from other origin</button>
 <button onclick="scan()">Scan pairing QR code</button>
 <a href="http://localhost:18773/recovery#pair=abcdefghijklmnopqrstuvwxyzABCDEF&server=e58dbf8c-9c0d-4bd4-b0f9-be02d42e16a8">Open test pairing server</a>
@@ -53,7 +54,8 @@ function requestFrame(otherOrigin) {
  const frame = document.createElement('iframe'); frame.hidden = true;
  const label = otherOrigin ? 'Request scan from other origin' : 'Request scan from subframe';
  window.addEventListener('message', function sent(event) {
-  if (event.source !== frame.contentWindow || event.data !== 'frame-sent') return;
+  if (event.source !== frame.contentWindow) return;
+  if (event.data !== 'frame-sent') { statusText.textContent = String(event.data); return; }
   statusText.textContent = label + ' sent'; window.removeEventListener('message', sent); frame.remove();
  });
  frame.src = (otherOrigin ? 'http://localhost:18773' : '') + '/frame'; document.body.append(frame);
