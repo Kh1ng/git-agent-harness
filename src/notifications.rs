@@ -189,6 +189,9 @@ pub fn format_message(event: &NotifyEvent) -> String {
                     route_label(&alternative.backend, alternative.model.as_deref().unwrap_or("default")),
                     alternative.unavailable_until.as_deref().unwrap_or("unknown"),
                 ));
+                if let Some(instance) = &alternative.backend_instance {
+                    message.push_str(&format!(" [alternative instance={instance}]"));
+                }
             }
             message
         }

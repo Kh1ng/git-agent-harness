@@ -59,6 +59,7 @@ fn notices_include_decision_context_and_are_durable_per_exact_candidate() {
     assert!(messages.contains("instance=paid-a"));
     assert!(messages.contains("policy requires operator approval"));
     assert!(messages.contains("2100-01-01T00:00:00Z"));
+    assert!(messages.contains("alternative instance=included-fast"));
     assert!(!messages.contains("2100-01-02"));
     assert!(!messages.contains("2099-01-01"));
     assert!(crate::ledger::read_entries(&cfg).unwrap().is_empty());
@@ -144,6 +145,16 @@ fn concurrent_dispatches_claim_one_notice_and_corruption_fails_closed() {
             .count()
     });
     assert_eq!(results, 1);
+    let mut other_scope = entry.clone();
+    other_scope.repo_id = "another-repo".into();
+    assert!(claim_notice(&cfg, &other_scope, "#762", &paid).unwrap());
+    assert!(claim_notice(&cfg, &entry, "#763", &paid).unwrap());
+    let mut clear = entry.clone();
+    clear.work_id = Some("#762".into());
+    clear.mode = "clear_attempts".into();
+    crate::ledger::append(&cfg, &clear).unwrap();
+    assert!(claim_notice(&cfg, &entry, "#762", &paid).unwrap());
+    assert!(!claim_notice(&cfg, &entry, "#762", &paid).unwrap());
     let path = cfg
         .defaults
         .ledger_path()

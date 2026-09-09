@@ -199,6 +199,7 @@ fn dispatch_routing_notifies_before_fallback_and_preserves_the_approval_gate() {
         backend: "opencode".into(),
         model: Some("notice-test/paid".into()),
         requires_approval: true,
+        priority: 2,
         marginal_cost_usd: Some(1.0),
         ..Default::default()
     };
