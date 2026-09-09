@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GAH — Connection &amp; Worker</title>
+    <title>GAH — Settings</title>
     <style>
       :root { color-scheme: dark; font: 15px/1.6 system-ui, sans-serif; background: #0b0e14; color: #e6e9ef; }
       body { margin: 0; }
@@ -25,14 +25,16 @@
   </head>
   <body>
     <main>
-      <h1>Connect to GAH</h1>
-      <p>Manage your projects from this computer. Enter the central node’s address; your dashboard opens in its own app window.</p>
+      <button id="back" type="button">← Back to Settings</button>
+      <h1>Settings · This computer</h1>
+      <p>Change this computer’s connection, app presence, and worker. Pair devices and manage central from the dashboard’s Settings page.</p>
+      <h2>Connection</h2>
       <form id="connection">
         <label for="central-url">Central node address</label>
         <input id="central-url" type="url" required placeholder="http://192.168.1.10:3773" spellcheck="false" />
         <label for="wsl-distribution" id="wsl-label" hidden>WSL distribution (blank uses your default)</label>
         <input id="wsl-distribution" hidden placeholder="Ubuntu" spellcheck="false" />
-        <button type="submit">Save &amp; open dashboard</button>
+        <button type="submit">Save and connect</button>
       </form>
       <p id="status" role="status"></p>
       <p id="error" role="alert"></p>
@@ -42,7 +44,7 @@
           <label class="preference" id="dock-label" hidden><input id="show-dock" type="checkbox" />Show Dock icon</label>
           <label class="preference"><input id="show-tray" type="checkbox" />Show tray icon</label>
           <label class="preference"><input id="launch-window" type="checkbox" aria-describedby="presence-recovery" />Open a window on launch</label>
-          <p id="presence-recovery" hidden>A window is required when both icons are off. Closing the connection window quits GAH; open the app again to return.</p>
+          <p id="presence-recovery" hidden>A window is required when both icons are off. Closing the app window quits GAH; open the app again to return.</p>
           <button type="submit">Save app presence</button>
           <p id="presence-status" role="status"></p>
         </form>

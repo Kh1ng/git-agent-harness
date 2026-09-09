@@ -52,11 +52,15 @@ async function refresh() {
   document.querySelector<HTMLElement>('#tools')!.hidden = false;
 }
 
+document.querySelector('#back')!.addEventListener('click', () => {
+  void perform(async () => { await invoke('open_central_settings'); });
+});
+
 document.querySelector('#connection')!.addEventListener('submit', (event) => {
   event.preventDefault();
   void perform(async () => {
     await invoke('connect_dashboard', { settings: { central_url: central.value.trim(), wsl_distribution: distribution.value.trim() } });
-    status.textContent = 'Dashboard window opened. If it cannot connect, check the address and network here, then try again.';
+    status.textContent = 'Connecting… Use Settings in the app menu if central is unavailable.';
   });
 });
 document.querySelector('#presence')!.addEventListener('submit', (event) => {
@@ -80,6 +84,7 @@ for (const [id, running] of [['start', true], ['stop', false]] as const) {
 void perform(async () => {
   const settings = await invoke<Settings>('desktop_settings');
   central.value = settings.central_url;
+  document.querySelector<HTMLButtonElement>('#back')!.hidden = !settings.central_url;
   distribution.value = settings.wsl_distribution;
   document.querySelector<HTMLElement>('#dock-label')!.hidden = !isMac;
   showPresence(settings.presence);

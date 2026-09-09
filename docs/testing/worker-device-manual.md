@@ -84,12 +84,12 @@ For headless-only coverage, repeat on a separate test machine with `-Role worker
 ## 3. Open the native desktop and check worker persistence
 
 1. Open **GAH Worker** from the Windows Start menu.
-2. Check that a visible connection window opens without a blank terminal.
-3. Open the central dashboard through the connection screen.
+2. Check that one app window opens without a blank terminal.
+3. Enter the central address and select **Save and connect**.
 4. Authenticate the dashboard with the central token or device pairing from section 7.
-5. Enter an unreachable central address in the connection screen.
-6. Check that the app shows a recoverable error.
-7. Restore the correct address.
+5. Open **Settings → This computer** in the same window. Save an unreachable central address.
+6. Use the tray’s **Settings** action to return to the local Settings page.
+7. Restore the correct address. Check **Back to Settings**, worker controls, and saved app presence preferences.
 8. Open **Nodes** on central.
 9. Select the Windows worker and select **Check health**.
 10. Record its node ID and advertised address.
@@ -99,6 +99,9 @@ For headless-only coverage, repeat on a separate test machine with `-Role worker
 14. Check worker health again.
 15. Repeat installation with the same bundle and central address.
 16. Check that the worker retains its node ID.
+
+The single-window Settings flow requires the updated native app and dashboard.
+Check that opening Settings does not create another window. Check that returning to central retains device authentication.
 
 Expected: closing the GUI does not stop the worker. The worker returns after Windows logon.
 Registration alone must not claim that every backend or repository is ready.

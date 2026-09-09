@@ -126,9 +126,9 @@ Use a disposable repository for dispatch tests. Record the installer filename, W
 1. Build or download the NSIS installer and matching worker test bundle from the accepted revision.
 2. Install it on Windows without an existing GAH desktop configuration.
 3. Open the app from the Start menu.
-4. Check that a visible connection window opens without a console window.
+4. Check that one app window opens without a console window.
 5. Enter the central address and open the dashboard.
-6. Enter an unreachable address and check that the connection screen remains available.
+6. Open **Settings → This computer**. Enter an unreachable address, then use the tray’s **Settings** action to restore the correct address.
 7. Install the worker through Add a Node.
 8. Check its registry identity and declared profiles on the central node.
 9. Authenticate Claude inside WSL and configure one repository profile.
