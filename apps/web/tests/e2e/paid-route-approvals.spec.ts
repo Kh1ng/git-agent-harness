@@ -66,3 +66,14 @@ test('unknown mutation outcomes require refreshing before another decision', asy
   await expect(approvals).toContainText('Approved routes (1)');
   await expect(approvals.getByRole('alert')).toHaveCount(0);
 });
+
+for (const status of [404, 503]) {
+  test(status === 404 ? 'older central without the approval API hides the section' : 'approval read failures remain visible', async ({ page }) => {
+    await page.route('**/api/pairing/session', route => route.fulfill({ json: { principal: { kind: 'owner' } } }));
+    await page.route('**/api/route-approvals**', route => route.fulfill({ status, json: { message: 'Approval service unavailable' } }));
+    await Promise.all([page.waitForResponse(response => response.url().includes('/api/route-approvals') && response.status() === status), page.goto('/?page=work&profile=fixture')]);
+    const approvals = page.getByRole('region', { name: 'Paid-route approvals' });
+    if (status === 404) await expect(approvals).toHaveCount(0);
+    else await expect(approvals.getByRole('alert')).toContainText('Approval service unavailable');
+  });
+}

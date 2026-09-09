@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { PaidRouteApproval, PaidRouteScope } from '@git-agent-harness/contracts';
-import { paidRouteApi, pairingApi } from '../api/client.js';
+import { GahApiError, paidRouteApi, pairingApi } from '../api/client.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 
@@ -19,7 +19,12 @@ export function PaidRouteApprovals({ profile }: { profile: string }) {
     try {
       const [rows, session] = await Promise.all([paidRouteApi.list(profile), pairingApi.session()]);
       setRoutes(rows); setOwner(session.principal.kind === 'owner'); setError(null);
-    } catch (failure) { setError(failure instanceof Error ? failure.message : 'Cannot load paid-route approvals.'); }
+    } catch (failure) {
+      // A rolling frontend update may reach an older central without this API.
+      if (failure instanceof GahApiError && failure.status === 404 && failure.endpoint === '/api/route-approvals') {
+        setRoutes([]); setNotice(null); setError(null); setConfirming(null);
+      } else setError(failure instanceof Error ? failure.message : 'Cannot load paid-route approvals.');
+    }
     finally { setLoading(false); }
   };
   useEffect(() => { void refresh(); }, [profile]);
