@@ -73,6 +73,13 @@ class MemoryHooks(unittest.TestCase):
             data = YAML().load(hermes.read_text())
             self.assertEqual(data['other'], {})
             self.assertEqual(len(data['hooks']['on_session_start']), 1)
+            hermes.write_text('hooks:\n  on_session_start: &common [{command: petdex}]\n  on_session_end: *common\n')
+            setup.install(root, ['hermes'], SOURCE)
+            data = YAML().load(hermes.read_text())['hooks']
+            for event, phase in [('on_session_start', 'recall'), ('on_session_end', 'flush')]:
+                self.assertEqual(len(data[event]), 2)
+                self.assertEqual(data[event][0]['command'], 'petdex')
+                self.assertTrue(data[event][1]['command'].endswith('--phase ' + phase))
 
     def test_invalid_input_and_write_failure_preserve_existing_files(self):
         with tempfile.TemporaryDirectory() as directory:

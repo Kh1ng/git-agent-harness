@@ -57,6 +57,7 @@ def configure(data, tool, script, python):
         entries = hooks.setdefault(event, [])
         if not isinstance(entries, list):
             raise ValueError(f'{tool} {event} hooks must contain a list')
+        entries = hooks[event] = copy.deepcopy(entries)
         suffix = [str(script), '--tool', tool, '--phase', phase]
         command = shlex.join([python, *suffix])
         found = False
