@@ -85,7 +85,19 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     expect(await phone.evaluate(() => document.cookie)).not.toContain('gah_device');
     expect(await phone.evaluate(() => sessionStorage.getItem('gah.coordinatorToken'))).toBeNull();
     await phone.reload();
-    await expect(phone.getByRole('button', { name: 'Pair this device', exact: true })).toBeVisible();
+    await expect(phone.getByRole('status').filter({ hasText: 'Paired device · Dashboard access enabled' })).toBeVisible();
+    await expect(phone.getByRole('button', { name: 'Pair this device', exact: true })).toHaveCount(0);
+    await phone.getByRole('button', { name: 'Manage pairing', exact: true }).click();
+    await expect(phone.getByText('Pairing stays signed in across app or browser restarts until it expires or the owner revokes access.')).toBeVisible();
+    await phone.getByText('Central access token', { exact: true }).click();
+    await expect(phone.getByLabel('Access token', { exact: true })).toHaveValue('');
+    await expect(phone.getByText('Optional for owner-only administration. Paired devices can use the dashboard without this token. Stored only for this tab’s session.')).toBeVisible();
+    expect(await phone.evaluate(async () => (await (await fetch('/api/pairing/session')).json()).principal.kind)).toBe('device');
+    for (const width of [320, 1280]) {
+      await phone.setViewportSize({ width, height: 844 });
+      expect(await phone.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await phone.screenshot({ path: testInfo.outputPath(`paired-device-${width}.png`) });
+    }
     expect(await phone.evaluate(async () => (await fetch('/api/profiles')).status)).toBe(200);
     await owner.getByRole('button', { name: 'Refresh devices' }).click();
     await expect(owner.getByRole('button', { name: 'Revoke Test phone', exact: true })).toBeVisible();
@@ -99,6 +111,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     // The manual paste fallback must reject the already-used code as well.
     await phone.goto(origin);
     await phone.getByRole('button', { name: 'Pair this device', exact: true }).click();
+    await expect(phone.getByText('Ask the owner for a pairing link or QR code to stay signed in on this device. An owner access token grants temporary access for this tab only.')).toBeVisible();
     await phone.getByLabel('Open a pairing link', { exact: true }).fill(link);
     await phone.getByRole('button', { name: 'Review pairing link' }).click();
     await expect(phone.getByRole('alert').filter({ hasText: 'already used' })).toBeVisible();

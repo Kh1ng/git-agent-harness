@@ -15,7 +15,7 @@ function pairingLink(value: string): { origin: string; code: string; serverId: s
   return { origin: url.origin, code, serverId };
 }
 
-/** Same-origin browser pairing. The server sets an HttpOnly session cookie;
+/** Same-origin browser pairing. The server sets a persistent HttpOnly cookie;
  * neither this component nor the QR renderer receives a device credential. */
 export function DevicePairing() {
   const { isConnected } = useWebSocket();
@@ -67,7 +67,8 @@ export function DevicePairing() {
   };
   const url = offer ? `${offer.server.origin}/#pair=${offer.code}&server=${offer.server.id}` : '';
   return <section className="mt-3 text-sm max-sm:[&_button]:min-h-11 max-sm:[&_input]:min-h-11" aria-label="Device pairing">
-    <button type="button" className="btn-secondary" aria-expanded={open} onClick={() => setOpen(!open)}>{principal === 'owner' ? 'Pair a device' : 'Pair this device'}</button>
+    {principal === 'device' && <p role="status" className="mb-2 text-good">Paired device · Dashboard access enabled</p>}
+    <button type="button" className="btn-secondary" aria-expanded={open} onClick={() => setOpen(!open)}>{principal === 'owner' ? 'Pair a device' : principal === 'device' ? 'Manage pairing' : 'Pair this device'}</button>
     {open && <div className="mt-3 max-w-2xl space-y-4 rounded-md border border-subtle bg-raised p-4">
       {error && <p role="alert" className="text-critical">{error}</p>}
       {notice && <p role="status" className="text-secondary">{notice}</p>}
@@ -113,7 +114,8 @@ export function DevicePairing() {
           </li>)}</ul>
         </div>
       </>}
-      {principal === 'device' && !pending && <div className="space-y-2"><p className="text-secondary">This browser has a paired device session. The owner can revoke it individually.</p><button type="button" className="btn-secondary" disabled={busy} onClick={() => void run(async () => { await pairingApi.logout(); saveCoordinatorToken(''); setPrincipal(null); setNotice('Device session cleared from this browser.'); })}>Disconnect this browser</button></div>}
+      {principal === 'device' && !pending && <div className="space-y-2"><p className="text-secondary">Pairing stays signed in across app or browser restarts until it expires or the owner revokes access.</p><button type="button" className="btn-secondary" disabled={busy} onClick={() => void run(async () => { await pairingApi.logout(); saveCoordinatorToken(''); setPrincipal(null); setNotice('Device session cleared from this browser.'); })}>Disconnect this browser</button></div>}
+      {principal === null && !pending && <p className="text-secondary">Ask the owner for a pairing link or QR code to stay signed in on this device. An owner access token grants temporary access for this tab only.</p>}
       {!pending && <form className="space-y-2 border-t border-subtle pt-3" onSubmit={event => { event.preventDefault(); try {
         const parsed = pairingLink(manualLink);
         if (parsed.origin !== window.location.origin) { window.location.assign(`${parsed.origin}/#pair=${parsed.code}&server=${parsed.serverId}`); return; }
