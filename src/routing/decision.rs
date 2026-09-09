@@ -715,7 +715,6 @@ where
         .cloned()
         .expect("candidate list must never be empty");
     let mut skipped = Vec::new();
-    let mut approval_backend_instance = None;
     let mut included_capacity_is_temporarily_blocked = false;
     for candidate in candidates {
         if let Some(reason) = skip_reason_for_candidate(
@@ -728,10 +727,6 @@ where
             exclude_attempted,
             candidate.requires_approval,
         )? {
-            if reason.reason == "operator_approval_required" && approval_backend_instance.is_none()
-            {
-                approval_backend_instance = Some(candidate.identity.backend_instance.clone());
-            }
             if candidate.included_in_quota
                 && (reason.reason == "max_concurrent_reached" || reason.unavailable_until.is_some())
             {
@@ -744,7 +739,7 @@ where
     }
     // A subscribed route that is busy or has a known recovery time takes
     // precedence over an unapproved paid fallback. Defer until that capacity
-    // recovers instead of creating one persistent spend request per queued
+    // recovers instead of creating a durable human gate for each queued
     // work item. Unknown-reset exhaustion and permanent failures may still
     // reach the approval gate.
     if let Some(candidate) = skipped.iter().find(|candidate| {
@@ -753,7 +748,7 @@ where
     }) {
         return Err(RouteError::ApprovalRequired {
             backend: candidate.backend.clone(),
-            backend_instance: approval_backend_instance,
+            backend_instance: candidate.backend_instance.clone(),
             model: candidate.model.clone(),
             skipped,
         }
@@ -795,6 +790,7 @@ where
     };
     if !executable_available {
         return Ok(Some(SkippedBackend {
+            backend_instance: Some(identity.backend_instance.clone()),
             backend: backend.to_string(),
             model: model.map(str::to_string),
             reason: "backend CLI not installed".into(),
@@ -814,6 +810,7 @@ where
                 || runtime.dispatch_attempted.contains(&candidate_key))
         {
             return Ok(Some(SkippedBackend {
+                backend_instance: Some(identity.backend_instance.clone()),
                 backend: backend.to_string(),
                 model: model.map(str::to_string),
                 reason: "already_attempted_after_capability_failure".into(),
@@ -822,6 +819,7 @@ where
         }
         if requires_approval && !runtime.approved.contains(&candidate_key) {
             return Ok(Some(SkippedBackend {
+                backend_instance: Some(identity.backend_instance.clone()),
                 backend: backend.to_string(),
                 model: model.map(str::to_string),
                 reason: "operator_approval_required".into(),
@@ -832,6 +830,7 @@ where
     }
 
     Ok(Some(SkippedBackend {
+        backend_instance: Some(identity.backend_instance.clone()),
         backend: backend.to_string(),
         model: model.map(str::to_string),
         reason: availability_reason(&decision),

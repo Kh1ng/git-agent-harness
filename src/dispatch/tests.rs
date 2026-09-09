@@ -9,6 +9,7 @@ fn no_eligible(reason: &str) -> anyhow::Error {
         preferred_backend: "claude".into(),
         preferred_model: Some("sonnet".into()),
         skipped: vec![SkippedBackend {
+            backend_instance: None,
             backend: "claude".into(),
             model: Some("sonnet".into()),
             reason: reason.into(),
@@ -27,10 +28,23 @@ fn capacity_deferral_is_detected_through_anyhow_context_and_not_notified() {
 }
 
 #[test]
-fn genuine_no_eligible_route_still_notifies_as_a_failure() {
-    let error = no_eligible("quota_exhausted");
+fn missing_backend_still_notifies_as_a_failure() {
+    let error = no_eligible("backend CLI not installed");
     assert!(!capacity_deferred_error(&error));
     assert!(should_notify_dispatch_failure(&error));
+}
+
+#[test]
+fn routine_quota_auth_and_approval_skips_do_not_duplicate_terminal_notices() {
+    for reason in [
+        "quota_exhausted",
+        "model-specific authentication_error",
+        "operator_approval_required",
+    ] {
+        assert!(!should_notify_dispatch_failure(
+            &no_eligible(reason).context("routing")
+        ));
+    }
 }
 
 #[test]
@@ -168,4 +182,68 @@ fn attempt_usage_leaves_behavior_unknown_without_event() {
     );
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn dispatch_routing_notifies_before_fallback_and_preserves_the_approval_gate() {
+    use crate::config::CandidateConfig;
+    use crate::routing::RouteRequest;
+    let (tmp, mut cfg) = crate::ledger::test_util::test_config();
+    let _availability =
+        crate::test_support::AvailabilityEnvGuard::set(tmp.path().join("availability.json"));
+    let output = tmp.path().join("notices.txt");
+    let mut profile = crate::ledger::test_util::profile();
+    profile.opencode_path = Some("/bin/true".into());
+    profile.notify_command = Some(format!("cat >> '{}'", output.display()));
+    let gated = CandidateConfig {
+        backend: "opencode".into(),
+        model: Some("notice-test/paid".into()),
+        requires_approval: true,
+        priority: 2,
+        marginal_cost_usd: Some(1.0),
+        ..Default::default()
+    };
+    profile.routing.pm_candidates = Some(vec![
+        gated.clone(),
+        CandidateConfig {
+            backend: "opencode".into(),
+            model: Some("notice-test/fallback".into()),
+            marginal_cost_usd: Some(2.0),
+            priority: 1,
+            ..Default::default()
+        },
+    ]);
+    cfg.profiles.insert("test".into(), profile.clone());
+    let mut entry =
+        crate::ledger::LedgerEntry::new("test", &profile, "auto", "pm", "#762", None, None);
+    entry.work_id = Some("#762".into());
+    let request = RouteRequest {
+        mode: "pm",
+        requested_backend: "auto",
+        requested_model: None,
+        recommended_backend: None,
+        recommended_model: None,
+        session_id: None,
+        usage_summary: None,
+        last_failure_class: None,
+        exact_route_required: false,
+    };
+    let route =
+        super::attempts::decide_route(&cfg, &profile, request.clone(), None, &mut entry).unwrap();
+    assert_eq!(
+        route.effective_model.as_deref(),
+        Some("notice-test/fallback")
+    );
+    assert!(!entry.human_required);
+    assert_eq!(std::fs::read_to_string(&output).unwrap().lines().count(), 1);
+    profile.routing.pm_candidates = Some(vec![gated]);
+    let error =
+        super::attempts::decide_route(&cfg, &profile, request, None, &mut entry).unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<RouteError>(),
+        Some(RouteError::ApprovalRequired { .. })
+    ));
+    assert!(entry.human_required);
+    assert!(!should_notify_dispatch_failure(&error));
+    assert_eq!(std::fs::read_to_string(&output).unwrap().lines().count(), 1);
 }

@@ -114,6 +114,7 @@ pub(super) fn reserve_backend_slot(
                     preferred_backend: identity.logical_backend.clone(),
                     preferred_model: identity.effective_model.clone(),
                     skipped: vec![crate::routing::SkippedBackend {
+                        backend_instance: None,
                         backend: identity.logical_backend.clone(),
                         model: identity.effective_model.clone(),
                         reason: "max_concurrent_reached".into(),
@@ -969,7 +970,15 @@ pub(super) fn decide_route(
         routing::decide_with_state(&cfg.defaults, profile, req, &runtime)
     };
     match decision {
-        Ok(route) => Ok(route),
+        Ok(route) => {
+            crate::ledger::notify_paid_route_skips(
+                cfg,
+                profile,
+                ledger,
+                route.routing_diagnostics.as_ref(),
+            );
+            Ok(route)
+        }
         Err(err) => {
             if let Some(route_err) = err.downcast_ref::<RouteError>() {
                 let (selected_backend, selected_model, skipped) = match route_err {
@@ -999,6 +1008,7 @@ pub(super) fn decide_route(
                         .map(
                             |(index, candidate)| crate::ledger::RoutingCandidateDiagnostic {
                                 backend: candidate.backend.clone(),
+                                backend_instance: candidate.backend_instance.clone(),
                                 model: candidate.model.clone(),
                                 consideration_order: Some(index),
                                 skip_reason: Some(candidate.reason.clone()),
@@ -1010,6 +1020,12 @@ pub(super) fn decide_route(
                     human_summary: Some(route_err.to_string()),
                     ..Default::default()
                 });
+                crate::ledger::notify_paid_route_skips(
+                    cfg,
+                    profile,
+                    ledger,
+                    ledger.routing_diagnostics.as_ref(),
+                );
                 // Transient: every candidate backend is momentarily unavailable
                 // (quota/cooldown), and this self-resolves once an
                 // `unavailable_until`/`earliest_reset` window passes -- same

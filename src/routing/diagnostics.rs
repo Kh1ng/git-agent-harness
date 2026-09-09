@@ -9,6 +9,7 @@ use crate::quota::{self, PaceBand, PacingConfig};
 /// their concrete candidate representation to diagnostics.
 pub(super) trait DiagnosticCandidate {
     fn backend(&self) -> &str;
+    fn backend_instance(&self) -> Option<&str>;
     fn model(&self) -> Option<&str>;
     fn quota_pool(&self) -> Option<&str>;
     fn priority(&self) -> i32;
@@ -69,10 +70,13 @@ pub(super) fn build_routing_diagnostics<C: DiagnosticCandidate>(
         .enumerate()
         .map(|(consideration_order, candidate)| {
             let skipped = skipped.iter().find(|skip| {
-                skip.backend == candidate.backend() && skip.model.as_deref() == candidate.model()
+                skip.backend == candidate.backend()
+                    && skip.backend_instance.as_deref() == candidate.backend_instance()
+                    && skip.model.as_deref() == candidate.model()
             });
             RoutingCandidateDiagnostic {
                 backend: candidate.backend().to_string(),
+                backend_instance: candidate.backend_instance().map(str::to_string),
                 model: candidate.model().map(str::to_string),
                 quota_pool: candidate.quota_pool().map(str::to_string),
                 default_order: Some(candidate.original_order()),
@@ -186,6 +190,9 @@ mod tests {
         fn backend(&self) -> &str {
             self.backend
         }
+        fn backend_instance(&self) -> Option<&str> {
+            None
+        }
         fn model(&self) -> Option<&str> {
             self.model
         }
@@ -235,6 +242,7 @@ mod tests {
         let selected = included_candidate();
         let candidates = vec![selected.clone()];
         let skipped = vec![SkippedBackend {
+            backend_instance: None,
             backend: "vibe".into(),
             model: Some("devstral-small".into()),
             reason: "quota_exhausted".into(),

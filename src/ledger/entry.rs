@@ -373,6 +373,8 @@ pub struct RoutingDiagnostics {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
 pub struct RoutingCandidateDiagnostic {
     pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_instance: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -1162,6 +1164,7 @@ mod tests {
             selected_cost_class: Some("included_quota".into()),
             selected_over: vec!["openhands/gpt-5.4 (paid $0.2500)".into()],
             candidates: vec![RoutingCandidateDiagnostic {
+                backend_instance: None,
                 backend: "codex".into(),
                 model: Some("gpt-5.4".into()),
                 quota_pool: Some("codex-main".into()),
