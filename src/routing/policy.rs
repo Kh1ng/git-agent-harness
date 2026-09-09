@@ -29,6 +29,10 @@ impl DiagnosticCandidate for RouteCandidate {
         &self.identity.logical_backend
     }
 
+    fn backend_instance(&self) -> Option<&str> {
+        Some(&self.identity.backend_instance)
+    }
+
     fn model(&self) -> Option<&str> {
         self.identity.effective_model.as_deref()
     }

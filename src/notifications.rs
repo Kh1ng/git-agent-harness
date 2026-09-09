@@ -62,6 +62,13 @@ pub enum NotifyEvent<'a> {
         attempt_count: Option<u32>,
         mr_url: Option<&'a str>,
     },
+    /// A candidate was skipped until an operator approves its paid route.
+    PaidRouteApprovalRequired {
+        profile: &'a str,
+        work_id: &'a str,
+        candidate: &'a crate::ledger::RoutingCandidateDiagnostic,
+        alternative: Option<&'a crate::ledger::RoutingCandidateDiagnostic>,
+    },
     /// A draft MR/PR was created/pushed.
     MrCreated {
         url: &'a str,
@@ -162,6 +169,28 @@ pub fn format_message(event: &NotifyEvent) -> String {
                 msg.push_str(&format!(" summary={summary}"));
             }
             msg
+        }
+        NotifyEvent::PaidRouteApprovalRequired {
+            profile,
+            work_id,
+            candidate,
+            alternative,
+        } => {
+            let mut message = format!(
+                "[gah] paid route approval required [profile={profile}] work_id={work_id} route={}; configured paid-route policy requires operator approval",
+                route_label(&candidate.backend, candidate.model.as_deref().unwrap_or("default")),
+            );
+            if let Some(instance) = &candidate.backend_instance {
+                message.push_str(&format!(" [instance={instance}]"));
+            }
+            if let Some(alternative) = alternative {
+                message.push_str(&format!(
+                    "; alternative {} expected to reset at {} (availability estimate)",
+                    route_label(&alternative.backend, alternative.model.as_deref().unwrap_or("default")),
+                    alternative.unavailable_until.as_deref().unwrap_or("unknown"),
+                ));
+            }
+            message
         }
         NotifyEvent::MrCreated {
             url,
@@ -340,7 +369,8 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
         // The controller owns this bounded reroute. Waking a manager for each
         // malformed intermediate opinion would recreate the notification
         // spam this event is designed to explain.
-        NotifyEvent::ReviewOutputInvalid { .. } => return None,
+        NotifyEvent::ReviewOutputInvalid { .. }
+        | NotifyEvent::PaidRouteApprovalRequired { .. } => return None,
         NotifyEvent::DispatchFailed {
             failure_class,
             failure_stage,
@@ -835,6 +865,7 @@ fn record_terminal_failure_resolved(
 fn event_name(event: &NotifyEvent<'_>) -> &'static str {
     match event {
         NotifyEvent::HumanRequired { .. } => "human_required",
+        NotifyEvent::PaidRouteApprovalRequired { .. } => "paid_route_approval_required",
         NotifyEvent::MrCreated { .. } => "mr_created",
         NotifyEvent::ReviewVerdict { .. } => "review_verdict",
         NotifyEvent::ReviewOutputInvalid { .. } => "review_output_invalid",
@@ -848,7 +879,8 @@ fn event_name(event: &NotifyEvent<'_>) -> &'static str {
 
 fn event_work_id<'a>(event: &'a NotifyEvent<'a>) -> Option<&'a str> {
     match event {
-        NotifyEvent::MrMerged { work_id, .. } => Some(work_id),
+        NotifyEvent::MrMerged { work_id, .. }
+        | NotifyEvent::PaidRouteApprovalRequired { work_id, .. } => Some(work_id),
         NotifyEvent::DispatchFailed { work_id, .. } => Some(work_id),
         NotifyEvent::DispatchFailureResolved { work_id, .. } => Some(work_id),
         NotifyEvent::HandoffCreated { ticket, .. } => Some(ticket),
@@ -867,6 +899,7 @@ fn event_run_id<'a>(event: &'a NotifyEvent<'a>) -> Option<&'a str> {
 fn event_profile<'a>(event: &'a NotifyEvent<'a>) -> Option<&'a str> {
     match event {
         NotifyEvent::DispatchFailed { profile, .. }
+        | NotifyEvent::PaidRouteApprovalRequired { profile, .. }
         | NotifyEvent::DispatchFailureResolved { profile, .. } => Some(profile),
         _ => None,
     }

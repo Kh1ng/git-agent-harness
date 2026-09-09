@@ -822,3 +822,24 @@ fn notify_event_does_not_wake_when_current_manager_unset() {
         "autonomy set but no current_manager configured must not attempt a wake"
     );
 }
+
+#[test]
+fn paid_route_notice_without_reset_does_not_invent_eta_or_wake_an_approver() {
+    let candidate = crate::ledger::RoutingCandidateDiagnostic {
+        backend: "opencode".into(),
+        model: Some("opencode/paid".into()),
+        backend_instance: Some("paid-account".into()),
+        ..Default::default()
+    };
+    let event = NotifyEvent::PaidRouteApprovalRequired {
+        profile: "repo",
+        work_id: "#762",
+        candidate: &candidate,
+        alternative: None,
+    };
+    let message = format_message(&event);
+    assert!(message.contains("route=opencode/paid"));
+    assert!(!message.contains("opencode/opencode"));
+    assert!(!message.contains("reset"));
+    assert!(format_wake_instruction(&event, WakeAutonomy::Full).is_none());
+}

@@ -795,6 +795,7 @@ where
     };
     if !executable_available {
         return Ok(Some(SkippedBackend {
+            backend_instance: Some(identity.backend_instance.clone()),
             backend: backend.to_string(),
             model: model.map(str::to_string),
             reason: "backend CLI not installed".into(),
@@ -814,6 +815,7 @@ where
                 || runtime.dispatch_attempted.contains(&candidate_key))
         {
             return Ok(Some(SkippedBackend {
+                backend_instance: Some(identity.backend_instance.clone()),
                 backend: backend.to_string(),
                 model: model.map(str::to_string),
                 reason: "already_attempted_after_capability_failure".into(),
@@ -822,6 +824,7 @@ where
         }
         if requires_approval && !runtime.approved.contains(&candidate_key) {
             return Ok(Some(SkippedBackend {
+                backend_instance: Some(identity.backend_instance.clone()),
                 backend: backend.to_string(),
                 model: model.map(str::to_string),
                 reason: "operator_approval_required".into(),
@@ -832,6 +835,7 @@ where
     }
 
     Ok(Some(SkippedBackend {
+        backend_instance: Some(identity.backend_instance.clone()),
         backend: backend.to_string(),
         model: model.map(str::to_string),
         reason: availability_reason(&decision),

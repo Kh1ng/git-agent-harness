@@ -228,6 +228,7 @@ pub(super) fn max_concurrent_skip(
     let cap = *max_concurrent.get(&concurrency_key(backend, model))?;
     if super::current_concurrent(backend, model) >= cap {
         Some(SkippedBackend {
+            backend_instance: Some(identity.backend_instance.clone()),
             backend: backend.to_string(),
             model: model.map(str::to_string),
             reason: "max_concurrent_reached".into(),

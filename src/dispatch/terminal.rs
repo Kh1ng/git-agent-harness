@@ -22,3 +22,29 @@ pub(super) fn append_ledger_entry(
     }
     crate::ledger::append(cfg, ledger).map(|_| false)
 }
+
+pub(super) fn should_notify_dispatch_failure(error: &anyhow::Error) -> bool {
+    if super::review_budget_exhausted_error(error).is_some()
+        || super::capacity_deferred_error(error)
+    {
+        return false;
+    }
+    // Approval skips have their own candidate-scoped notice. Ordinary quota
+    // and authentication backpressure needs no terminal failure alert.
+    !error
+        .downcast_ref::<crate::routing::RouteError>()
+        .is_some_and(|route| {
+            let skipped = match route {
+                crate::routing::RouteError::ApprovalRequired { .. } => return true,
+                crate::routing::RouteError::NoEligibleBackend { skipped, .. } => skipped,
+            };
+            skipped
+                .iter()
+                .any(|skip| skip.reason == "operator_approval_required")
+                || (!skipped.is_empty()
+                    && skipped.iter().all(|skip| {
+                        skip.reason.contains("quota_exhausted")
+                            || skip.reason.contains("authentication_error")
+                    }))
+        })
+}

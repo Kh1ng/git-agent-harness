@@ -3,6 +3,9 @@ mod dispatch_notify;
 mod entry;
 mod jsonl;
 mod locking;
+mod paid_route_notify;
+
+pub(crate) use paid_route_notify::notify_paid_route_skips;
 
 pub use self::approvals::{
     active_external_approval_env_vars_from_entries,

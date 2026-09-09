@@ -1,3 +1,4 @@
+use self::terminal::should_notify_dispatch_failure;
 use crate::config::{self, GahConfig};
 use crate::job_kind::{JobFamily, JobKind};
 use crate::ledger::LedgerEntry;
@@ -82,10 +83,6 @@ pub(crate) use self::claims::scan_available_tickets_with_dependencies;
 pub use self::claims::{merge_branch, MergeExecution};
 pub(crate) use self::prior_attempts::prior_attempt_context;
 pub use self::validation::{self_check_validation_gate, ValidationGateError};
-
-fn should_notify_dispatch_failure(error: &anyhow::Error) -> bool {
-    review_budget_exhausted_error(error).is_none() && !capacity_deferred_error(error)
-}
 
 fn ensure_terminal_failure_attribution(
     failure_class: &mut Option<String>,
@@ -243,9 +240,7 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         ledger.error_summary = Some(error::summarize_error(err));
     }
     let policy_approval_gate = terminal::is_policy_approval_gate(&ledger);
-    let mut new_policy_approval_transition = true;
-    let append_result = terminal::append_ledger_entry(cfg, &ledger, policy_approval_gate)
-        .map(|appended| new_policy_approval_transition = appended);
+    let append_result = terminal::append_ledger_entry(cfg, &ledger, policy_approval_gate);
     if let Err(err) = append_result {
         eprintln!("warning: failed to append ledger entry: {:#}", err);
     }
@@ -256,19 +251,12 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     // ledger outcome; export failures are retained in export health state
     // for bounded retry rather than surfaced here.
     crate::telemetry::schedule_export_after_terminal_attempt(cfg);
-    // Issue #762: a paid-route policy-approval gate IS actionable -- the
-    // operator can approve via `gah route-approval grant` (today reachable
-    // by asking Hermes to run it, since Hermes already has shell access on
-    // this host). What must not happen is re-notifying on every loop tick
-    // for the SAME unresolved gate: `new_policy_approval_transition` is only
-    // true the first time this exact (ticket, candidate) gate is recorded,
-    // so a durably-gated item pings exactly once, not every ~1 minute the
-    // controller re-evaluates it.
+    // Approval skips notify at routing time, including nonterminal fallbacks.
     if result
         .as_ref()
         .err()
         .is_some_and(should_notify_dispatch_failure)
-        && (!policy_approval_gate || new_policy_approval_transition)
+        && !policy_approval_gate
     {
         notify_terminal_failure(
             cfg,

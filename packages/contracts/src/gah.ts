@@ -129,6 +129,7 @@ export interface AvailabilityScope {
 
 export interface RoutingCandidateDiagnostic {
   backend: string;
+  backend_instance?: string | null;
   model: string | null;
   quota_pool: string | null;
   default_order: number | null;

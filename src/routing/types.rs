@@ -146,6 +146,7 @@ impl RouteDecision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkippedBackend {
     pub backend: String,
+    pub backend_instance: Option<String>,
     pub model: Option<String>,
     pub reason: String,
     pub unavailable_until: Option<String>,
@@ -276,6 +277,7 @@ mod tests {
             preferred_backend: "codex".into(),
             preferred_model: Some("gpt-5.4-mini".into()),
             skipped: vec![SkippedBackend {
+                backend_instance: None,
                 backend: "codex".into(),
                 model: Some("gpt-5.4-mini".into()),
                 reason: "quota_exhausted".into(),
@@ -311,6 +313,7 @@ mod tests {
             preferred_backend: "claude".into(),
             preferred_model: Some("sonnet".into()),
             skipped: vec![SkippedBackend {
+                backend_instance: None,
                 backend: "claude".into(),
                 model: Some("sonnet".into()),
                 reason: "max_concurrent_reached".into(),
@@ -324,6 +327,7 @@ mod tests {
             preferred_backend: "claude".into(),
             preferred_model: Some("sonnet".into()),
             skipped: vec![SkippedBackend {
+                backend_instance: None,
                 backend: "claude".into(),
                 model: Some("sonnet".into()),
                 reason: "quota_exhausted".into(),
@@ -337,6 +341,7 @@ mod tests {
             preferred_backend: "claude".into(),
             preferred_model: Some("sonnet".into()),
             skipped: vec![SkippedBackend {
+                backend_instance: None,
                 backend: "claude".into(),
                 model: Some("sonnet".into()),
                 reason: "model-specific quota_exhausted".into(),
