@@ -23,7 +23,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
   app.set('trust proxy', 'loopback');
   app.locals.deviceAccess = access;
   // Exercise the remote boundary while the hermetic listener runs on loopback.
-  app.use((req, _res, next) => { req.headers['x-forwarded-for'] = '198.51.100.9'; next(); });
+  app.use((req, _res, next) => { req.headers['x-forwarded-for'] = req.headers['x-test-client'] === 'owner' ? '198.51.100.8' : '198.51.100.9'; next(); });
   app.use(express.json());
   app.use('/api/pairing', pairingRouter(access, { node_id: '11111111-1111-1111-1111-111111111111', display_name: 'Pairing test central', advertised_url: '', version: 'test', schema_digest: 'test' }));
   app.use('/api', authMiddleware);
@@ -45,7 +45,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
   wss.on('connection', (ws, req) => mock.wss.emit('connection', ws, req));
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const ownerContext = await browser.newContext();
+  const ownerContext = await browser.newContext({ extraHTTPHeaders: { 'x-test-client': 'owner' } });
   const deviceContext = await browser.newContext({ hasTouch: true, viewport: { width: 320, height: 568 } });
   const owner = await ownerContext.newPage();
   const phone = await deviceContext.newPage();
@@ -56,8 +56,16 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     await owner.getByLabel('Access token', { exact: true }).fill('browser-owner-secret');
     await owner.getByRole('button', { name: 'Save and reconnect' }).click();
     await owner.getByRole('button', { name: 'Pair a device', exact: true }).click();
-    await owner.getByRole('button', { name: 'Generate pairing code' }).click();
+    await owner.clock.install();
+    await owner.getByRole('button', { name: 'Generate pairing QR code' }).click();
+    const expiredLink = await owner.getByLabel('Pairing link', { exact: true }).inputValue();
+    await owner.clock.fastForward(301_000);
+    await expect(owner.getByRole('img', { name: 'Scan to pair with this central server' })).toHaveCount(0);
+    await expect(owner.getByText('Pairing code expired. Generate a new code.')).toBeVisible();
+    await owner.clock.setSystemTime(new Date());
+    await owner.getByRole('button', { name: 'Generate pairing QR code' }).click();
     const link = await owner.getByLabel('Pairing link', { exact: true }).inputValue();
+    expect(link).not.toBe(expiredLink);
     expect(link).not.toContain('browser-owner-secret');
     await expect(owner.getByRole('img', { name: 'Scan to pair with this central server' })).toBeVisible();
     await expect(owner.getByText('In the GAH iPhone app, open Connection, then Scan pairing QR code.')).toBeVisible();
@@ -91,9 +99,12 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     await expect(phone.getByRole('button', { name: 'Pair this device', exact: true })).toHaveCount(0);
     await phone.getByRole('button', { name: 'Manage pairing', exact: true }).click();
     await expect(phone.getByText('Pairing stays signed in across app or browser restarts until it expires or the owner revokes access.')).toBeVisible();
-    await phone.getByText('Central access token', { exact: true }).click();
+    await expect(phone.getByRole('button', { name: 'Generate pairing QR code' })).toHaveCount(0);
+    expect(await phone.evaluate(async () => (await fetch('/api/pairing/offers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ origin: location.origin }) })).status)).toBe(403);
+    await phone.getByRole('button', { name: 'Pair another device', exact: true }).click();
+    await expect(phone.getByLabel('Access token', { exact: true })).toBeFocused();
     await expect(phone.getByLabel('Access token', { exact: true })).toHaveValue('');
-    await expect(phone.getByText('Optional for owner-only administration. Paired devices can use the dashboard without this token. Stored only for this tab’s session.')).toBeVisible();
+    await expect(phone.getByText('Owner access is required to generate pairing QR codes and administer central. Paired devices can use the dashboard without this token. Stored only for this tab’s session.')).toBeVisible();
     expect(await phone.evaluate(async () => (await (await fetch('/api/pairing/session')).json()).principal.kind)).toBe('device');
     for (const width of [320, 1280]) {
       await phone.setViewportSize({ width, height: 844 });
@@ -105,6 +116,16 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     await expect(owner.getByRole('button', { name: 'Revoke Test phone', exact: true })).toBeVisible();
     await owner.getByRole('heading', { name: 'Paired devices' }).scrollIntoViewIfNeeded();
     await owner.screenshot({ path: testInfo.outputPath('paired-devices-desktop.png') });
+    // Owner access is explicit and temporary; clearing it returns to the paired device.
+    await phone.getByLabel('Access token', { exact: true }).fill('browser-owner-secret');
+    await phone.getByRole('button', { name: 'Save and reconnect' }).click();
+    await expect(phone.getByRole('button', { name: 'Generate pairing QR code' })).toBeVisible();
+    await phone.getByRole('button', { name: 'Generate pairing QR code' }).click();
+    await expect(phone.getByRole('img', { name: 'Scan to pair with this central server' })).toBeVisible();
+    await phone.getByText('Central access token', { exact: true }).click();
+    await phone.getByLabel('Access token', { exact: true }).fill('');
+    await phone.getByRole('button', { name: 'Save and reconnect' }).click();
+    await expect(phone.getByRole('status').filter({ hasText: 'Paired device · Dashboard access enabled' })).toBeVisible();
     const closedBeforeRevocation = closedDeviceSockets;
     await owner.getByRole('button', { name: 'Revoke Test phone', exact: true }).click();
     await expect(owner.getByRole('status').filter({ hasText: 'Revoked Test phone' })).toBeVisible();

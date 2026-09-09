@@ -17,7 +17,7 @@ function pairingLink(value: string): { origin: string; code: string; serverId: s
 
 /** Same-origin browser pairing. The server sets a persistent HttpOnly cookie;
  * neither this component nor the QR renderer receives a device credential. */
-export function DevicePairing() {
+export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () => void }) {
   const { isConnected } = useWebSocket();
   const [pending, setPending] = useState(() => {
     try { return pairingLink(window.location.href); } catch { return null; }
@@ -68,7 +68,8 @@ export function DevicePairing() {
   const url = offer ? `${offer.server.origin}/#pair=${offer.code}&server=${offer.server.id}` : '';
   return <section className="mt-3 text-sm max-sm:[&_button]:min-h-11 max-sm:[&_input]:min-h-11" aria-label="Device pairing">
     {principal === 'device' && <p role="status" className="mb-2 text-good">Paired device · Dashboard access enabled</p>}
-    <button type="button" className="btn-secondary" aria-expanded={open} onClick={() => setOpen(!open)}>{principal === 'owner' ? 'Pair a device' : principal === 'device' ? 'Manage pairing' : 'Pair this device'}</button>
+    <div className="flex flex-wrap gap-2"><button type="button" className="btn-secondary" aria-expanded={open} onClick={() => setOpen(!open)}>{principal === 'owner' ? 'Pair a device' : principal === 'device' ? 'Manage pairing' : 'Pair this device'}</button>
+    {principal === 'device' && !pending && <button type="button" className="btn-secondary" onClick={requestOwnerAccess}>Pair another device</button>}</div>
     {open && <div className="mt-3 max-w-2xl space-y-4 rounded-md border border-subtle bg-raised p-4">
       {error && <p role="alert" className="text-critical">{error}</p>}
       {notice && <p role="status" className="text-secondary">{notice}</p>}
@@ -95,7 +96,7 @@ export function DevicePairing() {
           <p className="text-secondary">Give a trusted device dashboard control. Codes expire after five minutes and work once.</p>
           <label className="block space-y-1">Central server address<input className="input w-full" type="url" required value={origin} onChange={event => setOrigin(event.target.value)} /></label>
           <p className="text-xs text-secondary">Use an address the other device can reach. Do not use localhost for another computer or phone.</p>
-          <button className="btn-primary" disabled={busy}>Generate pairing code</button>
+          <button className="btn-primary" disabled={busy}>Generate pairing QR code</button>
         </form>
         {offer && <div className="space-y-2">
           <p className="break-all text-primary">{offer.server.name} · {offer.server.origin}</p>
@@ -116,7 +117,7 @@ export function DevicePairing() {
           </li>)}</ul>
         </div>
       </>}
-      {principal === 'device' && !pending && <div className="space-y-2"><p className="text-secondary">Pairing stays signed in across app or browser restarts until it expires or the owner revokes access.</p><button type="button" className="btn-secondary" disabled={busy} onClick={() => void run(async () => { await pairingApi.logout(); saveCoordinatorToken(''); setPrincipal(null); setNotice('Device session cleared from this browser.'); })}>Disconnect this browser</button></div>}
+      {principal === 'device' && !pending && <div className="space-y-2"><p className="text-secondary">Pairing stays signed in across app or browser restarts until it expires or the owner revokes access.</p><p className="text-secondary">To generate a pairing QR code for another device, sign in with the central owner token.</p><button type="button" className="btn-secondary" disabled={busy} onClick={() => void run(async () => { await pairingApi.logout(); saveCoordinatorToken(''); setPrincipal(null); setNotice('Device session cleared from this browser.'); })}>Disconnect this browser</button></div>}
       {principal === null && !pending && <p className="text-secondary">Ask the owner for a pairing link or QR code to stay signed in on this device. An owner access token grants temporary access for this tab only.</p>}
       {!pending && <form className="space-y-2 border-t border-subtle pt-3" onSubmit={event => { event.preventDefault(); try {
         const parsed = pairingLink(manualLink);
