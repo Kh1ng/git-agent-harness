@@ -18,6 +18,13 @@ import { skillFromFrontMatter, SkillFrontMatterError } from '../lib/skillFrontMa
 import { gahApi, GahApiError } from '../api/client.js';
 import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, SkillSummary, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
 
+declare global {
+  interface Window {
+    /** The desktop shell exposes navigation only; local commands stay in bundled Settings. */
+    __GAH_DESKTOP_SETTINGS__?: boolean;
+  }
+}
+
 const SETTINGS_REFRESH_MS = 60 * 1000;
 const SETTINGS_SECTIONS_KEY = 'gah.settings.openSections';
 type SettingsSectionId = 'general' | 'skills' | 'memory' | 'factory';
@@ -124,6 +131,15 @@ export function SettingsPage() {
         <p className="mt-1 mb-3 break-all text-sm text-secondary">{window.location.origin}</p>
         <ConnectionStatus isConnected={isConnected} isConnecting={isConnecting} error={connectionError} serverVersion={serverVersion} />
         <CoordinatorConnection />
+        {window.__GAH_DESKTOP_SETTINGS__ === true && (
+          <div className="mt-3 border-t border-subtle pt-2">
+            <a href="gah://settings" className="flex min-h-11 items-center justify-between gap-3 text-sm font-medium text-accent hover:underline">
+              This computer
+              <ChevronRight size={17} aria-hidden="true" />
+            </a>
+            <p className="text-xs text-muted">Server address, local worker, and app presence</p>
+          </div>
+        )}
         <p className="mt-3 text-xs text-muted" data-testid="settings-build">App {FRONTEND_BUILD}</p>
       </section>
 
