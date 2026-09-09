@@ -1,5 +1,5 @@
 """Local WKWebView session fixture. Run only for simulator tests, bound to loopback."""
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 
@@ -58,4 +58,5 @@ function requestFrame(otherOrigin) {
 
 
 if __name__ == '__main__':
-    HTTPServer(('127.0.0.1', 18773), Fixture).serve_forever()
+    # WebKit may preconnect without sending a request; keep control requests responsive.
+    ThreadingHTTPServer(('127.0.0.1', 18773), Fixture).serve_forever()
