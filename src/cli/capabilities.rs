@@ -311,6 +311,7 @@ pub fn generate_manifest() -> CapabilityManifest {
     add_doctor_operations(&mut manifest);
     add_update_operations(&mut manifest);
     add_init_operations(&mut manifest);
+    add_setup_operations(&mut manifest);
     add_prune_operations(&mut manifest);
     add_ledger_operations(&mut manifest);
     add_hold_operations(&mut manifest);

@@ -23,6 +23,7 @@ pub mod prune;
 pub mod quota;
 pub mod report;
 pub mod server;
+pub mod setup;
 pub mod skills;
 pub mod telemetry;
 pub mod tui;

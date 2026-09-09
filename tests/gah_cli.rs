@@ -38,6 +38,8 @@ mod report;
 mod review_format_retry;
 #[path = "gah_cli/route_approval.rs"]
 mod route_approval;
+#[path = "gah_cli/setup.rs"]
+mod setup;
 #[path = "gah_cli/stall_retry.rs"]
 mod stall_retry;
 mod support;

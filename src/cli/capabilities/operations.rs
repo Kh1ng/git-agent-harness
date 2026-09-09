@@ -164,6 +164,27 @@ pub(super) fn add_init_operations(manifest: &mut CapabilityManifest) {
     });
 }
 
+pub(super) fn add_setup_operations(manifest: &mut CapabilityManifest) {
+    manifest.add_operation(OperationDefinition {
+        operation_id: "setup.memory_hooks".to_string(),
+        display_name: "Set Up Agent Memory Hooks".to_string(),
+        class: OperationClass::Mutation,
+        profile_scope: ProfileScope::Global,
+        request_schema: None,
+        response_schema: None,
+        streaming: StreamingBehavior::None,
+        idempotency: Idempotency::Idempotent,
+        secret_fields: vec![],
+        remote_disposition: RemoteDisposition::LocalOnly,
+        local_only_reason: Some(LocalOnlyReason::FilesystemAccessRequired),
+        documentation: Some(
+            "Install shared memory hooks in selected local agent configurations".to_string(),
+        ),
+        cli_command_path: "gah setup memory-hooks".to_string(),
+        is_stable: true,
+    });
+}
+
 pub(super) fn add_prune_operations(manifest: &mut CapabilityManifest) {
     manifest.add_operation(OperationDefinition {
         operation_id: "prune.sessions".to_string(),

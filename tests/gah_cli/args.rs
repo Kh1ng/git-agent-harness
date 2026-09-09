@@ -34,6 +34,7 @@ fn top_level_help_lists_all_subcommands() {
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("update"))
         .stdout(predicate::str::contains("init"))
+        .stdout(predicate::str::contains("setup"))
         .stdout(predicate::str::contains("prune"))
         .stdout(predicate::str::contains("ledger"))
         .stdout(predicate::str::contains("hold"))

@@ -19,6 +19,7 @@ pub mod commands;
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Setup { command } => commands::setup::run(command)?,
         Commands::Availability { json, action } => {
             commands::availability::run(commands::availability::Args { json, action })?
         }

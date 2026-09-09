@@ -20,6 +20,7 @@ fn test_manifest_generation_includes_all_major_cli_commands() {
         "doctor",
         "update",
         "init",
+        "setup",
         "prune",
         "ledger",
         "hold",
