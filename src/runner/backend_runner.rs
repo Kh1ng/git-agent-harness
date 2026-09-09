@@ -3,14 +3,10 @@
 //! `dispatch/attempts.rs` stops hand-maintaining a `match` over six free
 //! functions in `runner::backends::*`.
 //!
-//! Migrated one backend per PR, lowest risk first. Codex is first. Each
-//! backend's existing free function (`run_<name>_with_executable`) stays as
-//! the actual implementation and the tested regression net (golden-argv
-//! unit tests in `backends/*.rs`) -- the trait impl is a thin adapter over
-//! it, not a rewrite. `RunContext` is a superset bag of every backend's
-//! parameters (`model` for codex/claude/vibe/opencode, `llm` for
-//! agy/openhands, `print_timeout_seconds` for agy only); each impl reads
-//! only the fields its underlying free function needs.
+//! All dispatch backends use this trait. Codex owns its implementation in
+//! `backends/codex.rs`; the remaining runners adapt their existing free
+//! functions until those compatibility paths are retired (#832).
+//! `RunContext` carries the parameters used by these one-shot runners.
 //!
 //! Not covered here: the review path (`runner/review.rs`/
 //! `runner/review_usage.rs`), which has a genuinely different call shape
@@ -23,6 +19,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::backend_kind::BackendKind;
+pub use crate::runner::backends::codex::CodexRunner;
 use crate::runner::{LlmConfig, RunResult};
 
 /// What a backend instance reports having, from a bounded self-report query
@@ -90,27 +87,6 @@ pub fn for_kind(kind: BackendKind) -> Box<dyn BackendRunner> {
         BackendKind::Vibe => Box::new(VibeRunner),
         BackendKind::Agy => Box::new(AgyRunner),
         BackendKind::Hermes => Box::new(HermesRunner),
-    }
-}
-
-pub struct CodexRunner;
-
-impl BackendRunner for CodexRunner {
-    fn kind(&self) -> BackendKind {
-        BackendKind::Codex
-    }
-
-    fn run(&self, ctx: &RunContext) -> Result<RunResult> {
-        crate::runner::run_codex_with_executable(
-            ctx.executable,
-            ctx.worktree,
-            ctx.task,
-            ctx.session_dir,
-            ctx.model,
-            ctx.extra_args,
-            ctx.env_vars,
-            ctx.idle_timeout_seconds,
-        )
     }
 }
 
@@ -319,15 +295,15 @@ mod tests {
     }
 
     #[test]
-    fn codex_runner_matches_the_free_function_it_wraps() {
+    fn codex_registry_runner_preserves_argv() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
-        make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
+        make_recording_bin(&f.bin_dir, "custom-codex", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
         let extra_args = vec!["--trace".to_string()];
 
         let ctx = RunContext {
-            executable: Path::new("codex"),
+            executable: &f.bin_dir.join("custom-codex"),
             worktree: &f.worktree,
             task: "the codex task",
             session_dir: &f.session_dir,
@@ -339,16 +315,21 @@ mod tests {
             print_timeout_seconds: None,
         };
 
-        let result = CodexRunner.run(&ctx).unwrap();
+        let result = for_kind(BackendKind::Codex).run(&ctx).unwrap();
 
         assert_eq!(result.exit_code, 0);
         let argv = recorded_argv(&f.record_dir);
-        assert_eq!(argv[0], "exec");
-        assert_eq!(argv[1], "--json");
-        assert!(argv.contains(&"the codex task".to_string()));
-        assert!(argv.contains(&"--trace".to_string()));
-        assert!(argv.contains(&"-m".to_string()));
-        assert!(argv.contains(&"gpt-5.4".to_string()));
+        assert_eq!(
+            argv,
+            [
+                "exec",
+                "--json",
+                "the codex task",
+                "--trace",
+                "-m",
+                "gpt-5.4"
+            ]
+        );
     }
 
     #[test]

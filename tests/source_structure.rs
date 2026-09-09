@@ -17,8 +17,7 @@ fn runner_adapter_facade_preserves_public_call_paths() {
     public(git_agent_harness::runner::run_agy_with_executable);
     public(git_agent_harness::runner::run_claude);
     public(git_agent_harness::runner::run_claude_with_executable);
-    public(git_agent_harness::runner::run_codex);
-    public(git_agent_harness::runner::run_codex_with_executable);
+    public(git_agent_harness::runner::CodexRunner);
     public(git_agent_harness::runner::extract_model_from_args);
     public(git_agent_harness::runner::extract_model_from_backend_args);
     public(git_agent_harness::runner::filtered_backend_args);
