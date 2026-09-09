@@ -5,11 +5,13 @@ import subprocess
 import sys
 import time
 import unittest
-from urllib.request import urlopen
+from urllib.request import ProxyHandler, build_opener
 
 
 class FixtureTests(unittest.TestCase):
     def test_idle_connection_does_not_block_control_requests(self):
+        # Loopback fixture requests must not inherit the runner's outbound proxy.
+        urlopen = build_opener(ProxyHandler({})).open
         fixture = subprocess.Popen([sys.executable, str(Path(__file__).with_name('fixture.py'))])
         try:
             deadline = time.monotonic() + 5
