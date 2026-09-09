@@ -36,7 +36,7 @@ class Fixture(BaseHTTPRequestHandler):
         retained = urlsplit(self.path).path == '/remember' or 'gah_test=retained' in self.headers.get('Cookie', '')
         body = '<p>Session retained</p>' if retained else '<p>No test session</p>'
         self.wfile.write(('''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GAH fixture</title><style>body{font:17px system-ui;padding:16px}button{min-height:44px}</style>
+<title>GAH fixture</title><style>body{font:17px system-ui;padding:16px}button,label,a{display:block;margin:8px 0}button{min-height:44px;font:inherit}textarea{display:block;width:100%;box-sizing:border-box;font:inherit}</style>
 <h1>GAH controller fixture</h1>''' + body + '''
 <form action="/remember"><button>Remember test session</button></form>
 <button onclick="scan(); statusText.textContent='Outside request sent'">Request scan outside Settings</button>
