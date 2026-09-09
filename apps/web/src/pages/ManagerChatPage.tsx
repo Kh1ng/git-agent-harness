@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles, GitPullRequest, GitCommit, AlertTriangle } from 'lucide-react';
+import { ChevronDown, MoreHorizontal, Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles, GitPullRequest, GitCommit, AlertTriangle } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
@@ -200,7 +200,7 @@ function SkillPicker({
         Skills · {binding?.selectedIds.length ?? 0}
         {drift && <span className="h-1.5 w-1.5 rounded-full bg-warning" title="Configured skills differ from the latest applied turn" />}
       </summary>
-      <div className="absolute right-0 z-30 mt-1 w-64 max-w-[calc(100vw-2rem)] rounded-lg border border-subtle bg-raised p-3 shadow-xl">
+      <div className="absolute left-0 z-30 mt-1 w-64 max-w-[calc(100vw-2rem)] rounded-lg border border-subtle bg-raised p-3 shadow-xl">
         <div className="mb-2 flex items-start justify-between gap-3">
           <div>
             <p className="text-sm font-medium text-primary">Project skills</p>
@@ -367,10 +367,10 @@ function GitStrip({
 
   return (
     <div className="space-y-2 text-xs">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3 truncate">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
           <GitBranch size={14} className="text-muted shrink-0" />
-          <span className="font-mono text-secondary">{status.branch}</span>
+          <span className="min-w-0 break-all font-mono text-secondary">{status.branch}</span>
           {status.readOnly ? (
             <span className="text-muted">read only</span>
           ) : clean ? (
@@ -452,7 +452,7 @@ function GitStrip({
             onChange={(e) => setCommitMessage(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') void submitCommit(); if (e.key === 'Escape') setCommitOpen(false); }}
             placeholder="Commit message"
-            className="flex-1 bg-transparent text-primary text-xs focus:outline-none"
+            className="min-w-0 flex-1 bg-transparent text-primary text-xs focus:outline-none"
           />
           <button
             onClick={submitCommit}
@@ -1362,6 +1362,15 @@ export function ManagerChatPage() {
   };
 
   const [newChatOpen, setNewChatOpen] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const navigationButton = useRef<HTMLButtonElement>(null);
+
+  // The conversation stays mounted while its mobile navigator is opened or closed.
+  const closeNavigation = () => {
+    setNavigationOpen(false);
+    if (window.matchMedia('(max-width: 1279px)').matches) navigationButton.current?.focus();
+  };
 
   useEffect(() => {
     if (!previewOpen || !preview) return;
@@ -1426,19 +1435,79 @@ export function ManagerChatPage() {
       <PageHeader
         title={currentProfileInfo?.repo ? currentProfileInfo.repo.split('/').pop() ?? 'Chat' : 'Chat'}
         description={currentProfileInfo?.repo ?? profile}
-        actions={skillBackend ? (
-          <SkillPicker
-            binding={skillBinding}
-            busy={turnBusy || skillBindingChanging}
-            onToggle={(id) => void handleSkillToggle(id)}
-            onInherit={() => void handleSkillInherit()}
-          />
-        ) : undefined}
       />
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          onClick={() => setNewChatOpen(true)}
+          disabled={!isConnected}
+          className="btn-primary text-xs inline-flex items-center gap-1"
+          title="New chat: choose project, node, and provider/model — starts in a fresh worktree"
+        >
+          <Plus size={13} aria-hidden="true" /> New chat
+        </button>
+        <button type="button" onClick={() => setToolsOpen((open) => !open)}
+          className="btn-secondary min-h-11 text-xs sm:hidden" aria-expanded={toolsOpen} aria-controls="chat-tools chat-git">
+          <MoreHorizontal size={16} aria-hidden="true" /> Chat tools
+        </button>
+        <div id="chat-tools" className={`${toolsOpen ? 'flex' : 'hidden'} w-full flex-wrap items-center gap-2 sm:flex sm:w-auto`}>
+          {skillBackend && (
+            <SkillPicker
+              binding={skillBinding}
+              busy={turnBusy || skillBindingChanging}
+              onToggle={(id) => void handleSkillToggle(id)}
+              onInherit={() => void handleSkillInherit()}
+            />
+          )}
+          <button
+            type="button"
+            onClick={() => setStorageOpen((open) => !open)}
+            className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-secondary hover:bg-white/5 inline-flex items-center gap-1"
+            aria-expanded={storageOpen}
+            title="Inspect per-session storage and preview safe reclaim"
+          >
+            <HardDrive size={13} aria-hidden="true" /> Storage
+          </button>
+          {activeSession && activeSession.archivedAt === null && (
+            <>
+              {/* Session provider/model/effort switching moved into the
+                  composer's provider pill (t3-style picker with favorites). */}
+              <button
+                onClick={() => setPreviewOpen((v) => !v)}
+                disabled={remoteSession || (turnBusy && !preview)}
+                className={`inline-flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs disabled:opacity-50 ${
+                  preview
+                    ? 'border-accent/40 bg-accent/15 text-primary'
+                    : 'border-subtle bg-raised text-secondary hover:bg-white/5'
+                }`}
+                title={preview
+                  ? `Preview live: dev server on :${preview.devPort} → ${preview.url}`
+                  : 'Open the preview panel — set the dev-server port, or let GAH auto-detect it from tool output'}
+              >
+                <MonitorPlay size={13} aria-hidden="true" />
+                Preview{preview ? ` :${preview.devPort}` : ''}
+              </button>
+              <button
+                onClick={handleArchiveSession}
+                disabled={turnBusy}
+                className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-secondary hover:bg-white/5 disabled:opacity-50 inline-flex items-center gap-1"
+                title="Archive this session (dirty work is saved as a patch; the branch survives)"
+              >
+                <Archive size={13} aria-hidden="true" /> Archive
+              </button>
+            </>
+          )}
+        </div>
+        {activeSession?.outcome !== 'live' && activeSession && (
+          <span className="text-[10px] text-muted">
+            {activeSession.outcome === 'settled' ? `settled · ${activeSession.settledReason ?? 'delivered'}` : 'archived'} — read only
+          </span>
+        )}
+      </div>
 
       {/* Git strip: compact git state for the active session's project */}
       {currentProfileInfo && (
-        <div className="card-padded">
+        <div id="chat-git" className={`card-padded ${toolsOpen || gitError ? '' : 'hidden sm:block'}`}>
           <GitStrip
             profile={profile}
             sessionId={sessionId}
@@ -1454,60 +1523,6 @@ export function ManagerChatPage() {
           />
         </div>
       )}
-
-      <div className="flex items-center gap-2 flex-wrap">
-        <button
-          onClick={() => setNewChatOpen(true)}
-          disabled={!isConnected}
-          className="btn-primary text-xs inline-flex items-center gap-1"
-          title="New chat: choose project, node, and provider/model — starts in a fresh worktree"
-        >
-          <Plus size={13} aria-hidden="true" /> New chat
-        </button>
-        <button
-          type="button"
-          onClick={() => setStorageOpen((open) => !open)}
-          className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-secondary hover:bg-white/5 inline-flex items-center gap-1"
-          aria-expanded={storageOpen}
-          title="Inspect per-session storage and preview safe reclaim"
-        >
-          <HardDrive size={13} aria-hidden="true" /> Storage
-        </button>
-        {activeSession && activeSession.archivedAt === null && (
-          <>
-            {/* Session provider/model/effort switching moved into the
-                composer's provider pill (t3-style picker with favorites). */}
-            <button
-              onClick={() => setPreviewOpen((v) => !v)}
-              disabled={remoteSession || (turnBusy && !preview)}
-              className={`inline-flex items-center gap-1 rounded-md border px-2 py-1.5 text-xs disabled:opacity-50 ${
-                preview
-                  ? 'border-accent/40 bg-accent/15 text-primary'
-                  : 'border-subtle bg-raised text-secondary hover:bg-white/5'
-              }`}
-              title={preview
-                ? `Preview live: dev server on :${preview.devPort} → ${preview.url}`
-                : 'Open the preview panel — set the dev-server port, or let GAH auto-detect it from tool output'}
-            >
-              <MonitorPlay size={13} aria-hidden="true" />
-              Preview{preview ? ` :${preview.devPort}` : ''}
-            </button>
-            <button
-              onClick={handleArchiveSession}
-              disabled={turnBusy}
-              className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-secondary hover:bg-white/5 disabled:opacity-50 inline-flex items-center gap-1"
-              title="Archive this session (dirty work is saved as a patch; the branch survives)"
-            >
-              <Archive size={13} aria-hidden="true" /> Archive
-            </button>
-          </>
-        )}
-        {activeSession?.outcome !== 'live' && activeSession && (
-          <span className="text-[10px] text-muted">
-            {activeSession.outcome === 'settled' ? `settled · ${activeSession.settledReason ?? 'delivered'}` : 'archived'} — read only
-          </span>
-        )}
-      </div>
 
       {storageOpen && (() => {
         const profileStorage = storage?.profiles[0];
@@ -1608,19 +1623,32 @@ export function ManagerChatPage() {
       />
 
       <div className={`grid min-w-0 gap-4 ${previewOpen && activeSession && !remoteSession ? 'xl:grid-cols-[14rem_minmax(0,1fr)_minmax(0,26rem)]' : 'xl:grid-cols-[14rem_minmax(0,1fr)]'}`}>
-        <ProjectRail
-          currentProfile={profile}
-          profiles={availableProfiles.map(project => ({ ...project, name: project.catalogName ?? project.name }))}
-          sessions={sessions}
-          selectedSessionId={sessionId}
-          onSelect={setProfileOverride}
-          onSessionSelect={setSessionId}
-          sessionsError={sessionsError}
-          onRetrySessions={() => refreshSessions(profile)}
-          onProjectAdded={(project) => {
-            setAvailableProfiles((profiles) => [...profiles.filter((profile) => profile.name !== project.chat_profile), { ...project, name: project.chat_profile ?? project.name, catalogName: project.name, remote: !!project.chat_profile && project.chat_profile !== project.name }]);
-          }}
-        />
+        <div className="min-w-0">
+          <button ref={navigationButton} type="button" onClick={() => setNavigationOpen((open) => !open)}
+            aria-expanded={navigationOpen} aria-controls="chat-navigation"
+            className="flex min-h-11 w-full items-center justify-between gap-3 rounded-md border border-subtle px-3 py-2 text-left xl:hidden">
+            <span className="min-w-0">
+              <span className="block text-sm font-medium text-primary">Projects &amp; chats</span>
+              <span className="block truncate text-xs text-secondary">{activeSession ? formatChatName(activeSession) : 'Default conversation'}</span>
+            </span>
+            <ChevronDown size={16} className={`shrink-0 text-secondary ${navigationOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
+          </button>
+          <div id="chat-navigation" className={`${navigationOpen ? 'mt-2' : 'hidden'} xl:mt-0 xl:block`}>
+            <ProjectRail
+              currentProfile={profile}
+              profiles={availableProfiles.map(project => ({ ...project, name: project.catalogName ?? project.name }))}
+              sessions={sessions}
+              selectedSessionId={sessionId}
+              onSelect={(selectedProfile) => { setProfileOverride(selectedProfile); closeNavigation(); }}
+              onSessionSelect={(selectedSession) => { setSessionId(selectedSession); closeNavigation(); }}
+              sessionsError={sessionsError}
+              onRetrySessions={() => refreshSessions(profile)}
+              onProjectAdded={(project) => {
+                setAvailableProfiles((profiles) => [...profiles.filter((profile) => profile.name !== project.chat_profile), { ...project, name: project.chat_profile ?? project.name, catalogName: project.name, remote: !!project.chat_profile && project.chat_profile !== project.name }]);
+              }}
+            />
+          </div>
+        </div>
 
       {/* WP3 preview panel: the session's dev server through the node's
           dedicated preview port. Auto-detect lights it up mid-turn; the
