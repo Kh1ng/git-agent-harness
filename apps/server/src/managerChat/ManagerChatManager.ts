@@ -634,7 +634,7 @@ export async function runTurn(
           model,
           reasoningEffort,
           onToolCall,
-          requestPermission: (request) => new Promise<string>((resolve) => {
+          requestPermission: (request) => new Promise<string>((resolve, reject) => {
             // One live permission at a time per turn: the backend blocks
             // until the human answers, the turn is cancelled, or the
             // timeout cancels fail-closed.
@@ -642,6 +642,7 @@ export async function runTurn(
             active.pendingPermission = {
               permissionId,
               resolve: (optionId) => {
+                clearTimeout(timeout);
                 active.pendingPermission = undefined;
                 resolve(optionId);
               }
@@ -661,7 +662,13 @@ export async function runTurn(
             // The decision event is logged by respondManagerChatPermission /
             // the cancel path; the request event is logged by the caller's
             // permission hook wrapper.
-            active.permissionSink?.({ permissionId, request }).finally(() => clearTimeout(timeout));
+            active.permissionSink?.({ permissionId, request }).catch((error) => {
+              clearTimeout(timeout);
+              if (active.pendingPermission?.permissionId === permissionId) {
+                active.pendingPermission = undefined;
+                reject(error);
+              }
+            });
           })
         });
         return r;
@@ -970,6 +977,10 @@ export function sendManagerChatMessage(
           locations: request.locations,
           timestamp: Date.now()
         });
+        await active.chunkWriter?.flush();
+        // Reconnect reads the journal; publish only after its request is
+        // readable, and never revive a request cancelled during the write.
+        if (active.pendingPermission?.permissionId !== permissionId) return;
         permissionPublisher?.({
           type: 'manager.chat.permission',
           requestId: requestId ?? '',
