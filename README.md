@@ -190,6 +190,8 @@ Provider-specific examples:
   - otherwise `defaults.artifact_root/ledger.jsonl`, if configured
   - otherwise `~/.config/gah/ledger.jsonl`
 
+For shared agent memory, see [memory hook setup](docs/MEMORY_HOOK_SETUP.md).
+
 ## Config Basics
 
 GAH loads config from:

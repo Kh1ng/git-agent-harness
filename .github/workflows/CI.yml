@@ -90,6 +90,12 @@ jobs:
       - name: Check worker installer scripts
         run: python3 scripts/test-worker-installers.py
 
+      - name: Check memory hook setup
+        run: |
+          python3 -m venv "$RUNNER_TEMP/gah-memory-hooks-python"
+          "$RUNNER_TEMP/gah-memory-hooks-python/bin/pip" install ruamel.yaml==0.18.17
+          "$RUNNER_TEMP/gah-memory-hooks-python/bin/python" scripts/test-memory-hooks.py
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
@@ -141,6 +147,22 @@ jobs:
       - name: cargo clippy
         if: steps.rust-test-scope.outputs.has_rust_changes == 'true'
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Generate CLI capability artifacts
+        if: steps.rust-test-scope.outputs.has_rust_changes == 'true'
+        run: cargo run --bin generate-cli-capabilities
+
+      - name: Upload CLI capability artifacts
+        if: steps.rust-test-scope.outputs.has_rust_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-capability-artifacts
+          path: |
+            packages/contracts/src/cli-capabilities.ts
+            packages/contracts/src/cli-capabilities.manifest.json
+            packages/contracts/schemas/cli-capabilities.v1.schema.json
+            packages/shared/src/cli-capabilities.ts
+          if-no-files-found: error
 
       - name: Check desktop application
         if: steps.rust-test-scope.outputs.has_desktop_changes == 'true'
