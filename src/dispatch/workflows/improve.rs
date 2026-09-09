@@ -473,6 +473,7 @@ pub(crate) fn improve(
                     crate::ledger::FailureStage::BackendLaunch,
                 );
                 ledger.attempts.push(crate::ledger::AttemptRecord {
+                    resources: Some(crate::ledger::AttemptResourceUsage::never_launched()),
                     attempt_number: attempt + 1,
                     backend: route.effective_backend.clone(),
                     effective_model: Some(llm.model.clone()),
@@ -575,6 +576,7 @@ pub(crate) fn improve(
                 ledger.validation_result = Some("not_run_backend_stalled_during_validation".into());
             }
             ledger.attempts.push(crate::ledger::AttemptRecord {
+                resources: Some(result.resources.clone()),
                 attempt_number: attempt + 1,
                 backend: route.effective_backend.clone(),
                 effective_model: Some(llm.model.clone()),
@@ -902,6 +904,7 @@ pub(crate) fn improve(
                     "not_run_backend_unavailable"
                 };
                 ledger.attempts.push(crate::ledger::AttemptRecord {
+                    resources: Some(result.resources.clone()),
                     attempt_number: attempt + 1,
                     backend: route.effective_backend.clone(),
                     effective_model: Some(llm.model.clone()),
@@ -975,6 +978,7 @@ pub(crate) fn improve(
                 );
             }
             ledger.attempts.push(crate::ledger::AttemptRecord {
+                resources: Some(result.resources.clone()),
                 attempt_number: attempt + 1,
                 backend: route.effective_backend.clone(),
                 effective_model: Some(llm.model.clone()),
@@ -1048,6 +1052,7 @@ pub(crate) fn improve(
         if profile.validation_commands.is_empty() {
             ledger.validation_result = Some("not_run".into());
             ledger.attempts.push(crate::ledger::AttemptRecord {
+                resources: Some(result.resources.clone()),
                 attempt_number: attempt + 1,
                 backend: route.effective_backend.clone(),
                 effective_model: Some(llm.model.clone()),
@@ -1089,6 +1094,7 @@ pub(crate) fn improve(
                 validation_failed = false;
                 ledger.validation_result = Some("passed".into());
                 ledger.attempts.push(crate::ledger::AttemptRecord {
+                    resources: Some(result.resources.clone()),
                     attempt_number: attempt + 1,
                     backend: route.effective_backend.clone(),
                     effective_model: Some(llm.model.clone()),
@@ -1148,6 +1154,7 @@ pub(crate) fn improve(
                             Some(&claude_path),
                         ),
                         result.agy_version.clone(),
+                        result.resources.clone(),
                     );
                     record_external_approval_consumption_for_last_attempt(
                         cfg,
@@ -1170,6 +1177,7 @@ pub(crate) fn improve(
                         crate::ledger::FailureStage::PostValidation,
                     );
                     ledger.attempts.push(crate::ledger::AttemptRecord {
+                        resources: Some(result.resources.clone()),
                         attempt_number: attempt + 1,
                         backend: route.effective_backend.clone(),
                         effective_model: Some(llm.model.clone()),
@@ -1277,6 +1285,7 @@ pub(crate) fn improve(
                     }
                     println!("Retrying with failure context...");
                     ledger.attempts.push(crate::ledger::AttemptRecord {
+                        resources: Some(result.resources.clone()),
                         attempt_number: attempt + 1,
                         backend: route.effective_backend.clone(),
                         effective_model: Some(llm.model.clone()),

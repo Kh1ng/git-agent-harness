@@ -92,6 +92,15 @@ pub struct GroupSummary {
     /// entries where both were recorded. `None` when no entry in the group
     /// had both fields.
     pub predicted_difficulty_match_rate: Option<f64>,
+    /// Issue #116: sum of measured per-attempt process-tree CPU time across
+    /// this group's attempts. Attempts with unknown/unsupported provenance
+    /// contribute nothing; `None` means no attempt in the group had a
+    /// measured value. Kept separate from token/cost accounting.
+    pub total_cpu_time_seconds: Option<f64>,
+    /// Issue #116: maximum measured per-attempt tree-wide peak RSS (bytes)
+    /// across this group's attempts. `None` means no attempt had a measured
+    /// value; unknown/unsupported provenance is never treated as zero.
+    pub peak_rss_bytes: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quota_observations: Vec<GroupQuotaObservation>,
 }
@@ -809,6 +818,11 @@ where
         let mut predicted_duration_count = 0usize;
         let mut predicted_difficulty_match = 0usize;
         let mut predicted_difficulty_compared = 0usize;
+        // Issue #116: measured-only resource aggregation.
+        let mut cpu_time_total = 0.0f64;
+        let mut cpu_time_seen = false;
+        let mut peak_rss_bytes: f64 = 0.0;
+        let mut peak_rss_seen = false;
         let mut input_tokens_seen = false;
         let mut output_tokens_seen = false;
         let mut reasoning_tokens_seen = false;
@@ -904,6 +918,27 @@ where
                 predicted_difficulty_compared += 1;
                 if predicted.eq_ignore_ascii_case(actual) {
                     predicted_difficulty_match += 1;
+                }
+            }
+
+            // Issue #116: only Measured provenance feeds the aggregate.
+            // Unknown/unsupported metrics are skipped (never treated as 0).
+            for attempt in &entry.attempts {
+                if let Some(resources) = &attempt.resources {
+                    if let Some(cpu) = &resources.cpu_time_seconds {
+                        if let Some(value) = cpu.value {
+                            cpu_time_total += value;
+                            cpu_time_seen = true;
+                        }
+                    }
+                    if let Some(rss) = &resources.peak_rss_bytes {
+                        if let Some(value) = rss.value {
+                            if value > peak_rss_bytes {
+                                peak_rss_bytes = value;
+                            }
+                            peak_rss_seen = true;
+                        }
+                    }
                 }
             }
         }
@@ -1094,6 +1129,8 @@ where
             predicted_average_cost_usd,
             predicted_average_duration_seconds,
             predicted_difficulty_match_rate,
+            total_cpu_time_seconds: cpu_time_seen.then_some(cpu_time_total),
+            peak_rss_bytes: peak_rss_seen.then_some(peak_rss_bytes),
             quota_observations: quota_observations.into_values().collect(),
         });
     }

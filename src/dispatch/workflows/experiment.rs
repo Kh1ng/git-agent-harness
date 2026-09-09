@@ -158,6 +158,7 @@ pub(crate) fn experiment(
                 internal_log_path: None,
                 transcript_path: None,
                 agy_version: None,
+                resources: crate::ledger::AttemptResourceUsage::never_launched(),
             }
         }
     };

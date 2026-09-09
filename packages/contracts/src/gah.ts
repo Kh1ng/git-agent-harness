@@ -555,6 +555,12 @@ export interface BackendModelComparison {
   /** Fraction 0..1 of entries where predicted_difficulty matched the
    *  entry's own difficulty, among entries where both were recorded. */
   predicted_difficulty_match_rate: number | null;
+  /** Issue #116: sum of measured per-attempt process-tree CPU time;
+   *  null when no attempt in the group had a measured value. */
+  total_cpu_time_seconds: number | null;
+  /** Issue #116: maximum measured per-attempt tree-wide peak RSS (bytes);
+   *  null when no attempt had a measured value. */
+  peak_rss_bytes: number | null;
   quota_observations: QuotaObservation[];
   /** [verdict, count] pairs, e.g. ["APPROVE_STRONG", 3]. */
   review_verdict_distribution: [string, number][];
@@ -1007,6 +1013,23 @@ export interface AttemptBehaviorMetrics {
   test_runs?: BehaviorMetric | null;
 }
 
+/** Issue #116: provenance of one per-attempt resource observation. Unknown
+ * and unsupported are explicit -- never coerced to zero. */
+export type ResourceMetricQuality = 'measured' | 'unsupported' | 'unknown';
+
+export interface ResourceMetric {
+  value: number | null;
+  quality: ResourceMetricQuality;
+  unknown_reason?: string | null;
+}
+
+/** Issue #116: per-attempt process-tree resource usage. Kept separate from
+ * token/cost accounting; `null` metric = not recorded (pre-capture lines). */
+export interface AttemptResourceUsage {
+  cpu_time_seconds?: ResourceMetric | null;
+  peak_rss_bytes?: ResourceMetric | null;
+}
+
 /** TICKET-101: usage for exactly this attempt (not the whole dispatch). An
  * all-null `usage` means "backend didn't report it," never "zero usage." */
 export interface AttemptRecord {
@@ -1020,6 +1043,8 @@ export interface AttemptRecord {
   duration_seconds: number | null;
   diff_path: string | null;
   usage: LedgerUsage;
+  /** Issue #116: `null` = ledger line predates resource capture. */
+  resources?: AttemptResourceUsage | null;
 }
 
 /** Secret-safe canonical route identity persisted for a single attempt.
@@ -1186,6 +1211,10 @@ export interface LedgerGroupSummary {
   predicted_average_cost_usd: number | null;
   predicted_average_duration_seconds: number | null;
   predicted_difficulty_match_rate: number | null;
+  /** Issue #116: measured per-attempt resource aggregates (null = no
+   *  measured observation in the group; unknown is never zero). */
+  total_cpu_time_seconds: number | null;
+  peak_rss_bytes: number | null;
   quota_observations?: QuotaObservation[];
 }
 

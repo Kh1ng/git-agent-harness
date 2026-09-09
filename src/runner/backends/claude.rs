@@ -75,7 +75,7 @@ pub fn run_claude_with_executable(
     cmd.args(filtered_backend_args("claude", extra_args));
     crate::runner::apply_child_env(&mut cmd, env_vars);
 
-    let (exit_code, duration_secs) = spawn_with_idle_watch(
+    let (exit_code, duration_secs, resources) = spawn_with_idle_watch(
         cmd,
         &log_path,
         worktree,
@@ -104,6 +104,7 @@ pub fn run_claude_with_executable(
         internal_log_path: None,
         transcript_path,
         agy_version: None,
+        resources,
     })
 }
 

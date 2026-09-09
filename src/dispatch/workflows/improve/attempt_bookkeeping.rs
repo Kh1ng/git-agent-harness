@@ -44,6 +44,7 @@ pub(super) fn record_failed_validation_attempt(
         failure_stage.as_deref().unwrap_or("unknown"),
     );
     ledger.attempts.push(AttemptRecord {
+        resources: Some(result.resources.clone()),
         attempt_number: attempt + 1,
         backend: route.effective_backend.clone(),
         effective_model: Some(llm.model.clone()),

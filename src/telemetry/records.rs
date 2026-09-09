@@ -2,7 +2,7 @@
 //!
 //! Contains all the data structures for telemetry export.
 
-use crate::ledger::BehaviorMetric;
+use crate::ledger::{BehaviorMetric, ResourceMetric};
 use serde::{Deserialize, Serialize};
 
 /// Current schema version for exported telemetry records.
@@ -22,7 +22,10 @@ use serde::{Deserialize, Serialize};
 /// serde defaults; absence is treated as unknown, never as zero.
 /// Version 9 adds canonical runner, instance, account, auth-source, quota-pool,
 /// and provider-attribution fields. All are nullable for historical data.
-pub const SCHEMA_VERSION: u32 = 9;
+/// Version 10 adds per-attempt process-tree resource usage (CPU time, peak
+/// RSS) with explicit provenance (#116). Optional with serde defaults; absence
+/// is unknown, never zero, and never mixed into token/cost accounting.
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// Record types for telemetry data (used for enum tags)
 #[allow(dead_code)]
@@ -111,6 +114,14 @@ pub struct AttemptUsageRecord {
     pub human_required: bool,
     /// Routing reason
     pub routing_reason: Option<String>,
+
+    /// Issue #116: measured/unsupported/unknown process-tree CPU time for
+    /// this attempt. `None` on records written before resource capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_time: Option<ResourceMetric>,
+    /// Issue #116: measured/unsupported/unknown tree-wide peak RSS (bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_rss: Option<ResourceMetric>,
 
     /// Usage source (where the usage data came from)
     pub usage_source: Option<String>,

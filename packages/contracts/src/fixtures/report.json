@@ -14,6 +14,7 @@
       "is_model": false,
       "memory_gateway_capture_l0_recorded": null,
       "output_tokens": 40,
+      "peak_rss_bytes": null,
       "predicted_average_cost_usd": null,
       "predicted_average_duration_seconds": null,
       "predicted_difficulty_match_rate": null,
@@ -40,6 +41,7 @@
       "success_rate": 1.0,
       "tokens_per_success": 175.0,
       "total_cost_usd": null,
+      "total_cpu_time_seconds": null,
       "total_tokens": 175,
       "validation_pass": 1
     }

@@ -445,6 +445,102 @@ fn build_grouped_summary_by_backend() {
     assert!((vibe_group.total_cost_usd.unwrap() - 0.3).abs() < f64::EPSILON);
 }
 
+/// Issue #116: only Measured resource provenance feeds group aggregates.
+/// Summed CPU time and max peak RSS skip unknown/unsupported metrics (never
+/// coerced to zero), and a group with no measured values reports `None`.
+#[test]
+fn build_grouped_summary_aggregates_measured_resources_only() {
+    let (_tmp, _cfg) = test_config();
+    let use_ledger = |resources: Option<crate::ledger::AttemptResourceUsage>, key: &str| {
+        let mut entry = LedgerEntry::new("test", &profile(), "codex", "improve", key, None, None);
+        entry.effective_backend = "codex".to_string();
+        entry.attempts.push(crate::ledger::AttemptRecord {
+            attempt_number: 1,
+            backend: "codex".into(),
+            usage: crate::ledger::LedgerUsage::default(),
+            resources,
+            ..crate::ledger::AttemptRecord::default()
+        });
+        entry
+    };
+
+    let entry1 = use_ledger(
+        Some(crate::ledger::AttemptResourceUsage {
+            cpu_time_seconds: Some(crate::ledger::ResourceMetric::measured(3.0)),
+            peak_rss_bytes: Some(crate::ledger::ResourceMetric::measured(100.0)),
+        }),
+        "measured-1",
+    );
+    let entry2 = use_ledger(
+        Some(crate::ledger::AttemptResourceUsage {
+            cpu_time_seconds: Some(crate::ledger::ResourceMetric::measured(2.5)),
+            peak_rss_bytes: Some(crate::ledger::ResourceMetric::measured(300.0)),
+        }),
+        "measured-2",
+    );
+    // Unknown/unsupported provenance must contribute nothing.
+    let entry3 = use_ledger(
+        Some(crate::ledger::AttemptResourceUsage {
+            cpu_time_seconds: Some(crate::ledger::ResourceMetric::unknown(
+                "backend process tree exited before the first resource sample",
+            )),
+            peak_rss_bytes: Some(crate::ledger::ResourceMetric::unsupported(
+                "process-tree resource sampling is only implemented on Linux",
+            )),
+        }),
+        "unknown-only",
+    );
+    let entry4 = use_ledger(None, "pre-capture");
+
+    let grouped = super::build_grouped_summary(
+        &[entry1, entry2, entry3, entry4],
+        |entry| entry.effective_backend.clone(),
+        |observed| observed.backend.to_string(),
+        |backend, _model, _difficulty| backend.to_string(),
+        true,
+    )
+    .unwrap();
+
+    let group = grouped.iter().find(|g| g.group_key == "codex").unwrap();
+    assert_eq!(group.entries, 4);
+    let cpu = group.total_cpu_time_seconds.unwrap();
+    assert!((cpu - 5.5).abs() < 1e-9, "measured cpu must sum: {cpu}");
+    let rss = group.peak_rss_bytes.unwrap();
+    assert!(
+        (rss - 300.0).abs() < 1e-9,
+        "peak rss must be the max: {rss}"
+    );
+
+    // A group with no measured values anywhere reports None, not 0.
+    let grouped_none = super::build_grouped_summary(
+        &[
+            use_ledger(
+                Some(crate::ledger::AttemptResourceUsage {
+                    cpu_time_seconds: Some(crate::ledger::ResourceMetric::unknown(
+                        "backend process tree exited before the first resource sample",
+                    )),
+                    peak_rss_bytes: Some(crate::ledger::ResourceMetric::unsupported(
+                        "process-tree resource sampling is only implemented on Linux",
+                    )),
+                }),
+                "unknown-only",
+            ),
+            use_ledger(None, "pre-capture"),
+        ],
+        |entry| entry.effective_backend.clone(),
+        |observed| observed.backend.to_string(),
+        |backend, _model, _difficulty| backend.to_string(),
+        true,
+    )
+    .unwrap();
+    let none_group = grouped_none
+        .iter()
+        .find(|g| g.group_key == "codex")
+        .unwrap();
+    assert_eq!(none_group.total_cpu_time_seconds, None);
+    assert_eq!(none_group.peak_rss_bytes, None);
+}
+
 #[test]
 fn build_grouped_summary_aggregates_memory_gateway_capture_l0_recorded() {
     let (_tmp, _cfg) = test_config();

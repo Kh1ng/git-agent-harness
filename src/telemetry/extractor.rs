@@ -158,6 +158,14 @@ pub fn extract_attempt_usage_records(
             fallback_used: entry.fallback_used,
             human_required: entry.human_required,
             routing_reason: entry.routing_reason.clone(),
+            cpu_time: attempt
+                .resources
+                .as_ref()
+                .and_then(|r| r.cpu_time_seconds.clone()),
+            peak_rss: attempt
+                .resources
+                .as_ref()
+                .and_then(|r| r.peak_rss_bytes.clone()),
             usage_source: attempt.usage.usage_source.clone(),
             usage_classification: attempt.usage.usage_classification.clone(),
             backend_instance: attempt

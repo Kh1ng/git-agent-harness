@@ -258,6 +258,7 @@ default_target_branch = "main"
         (2, &api, "api_key_backed"),
     ] {
         ledger.attempts.push(AttemptRecord {
+            resources: None,
             attempt_number,
             backend: route.effective_backend.clone(),
             effective_model: route.effective_model.clone(),
@@ -494,6 +495,7 @@ fn execution_identity_golden_fallback_substitution() {
 #[test]
 fn execution_identity_golden_fallback_substitution_attempt_attribution() {
     let attempt_1 = AttemptRecord {
+        resources: None,
         attempt_number: 1,
         backend: "claude".to_string(),
         effective_model: Some("sonnet".to_string()),
@@ -509,6 +511,7 @@ fn execution_identity_golden_fallback_substitution_attempt_attribution() {
         usage: LedgerUsage::default(),
     };
     let attempt_2 = AttemptRecord {
+        resources: None,
         attempt_number: 2,
         backend: "codex".to_string(),
         effective_model: Some("gpt-5.4".to_string()),

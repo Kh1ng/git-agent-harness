@@ -27,7 +27,7 @@
     "last_success_at": null,
     "record_count": 0,
     "retry_pending": false,
-    "schema_version": 9,
+    "schema_version": 10,
     "status": "never_run"
   },
   "fix_attempt_counts": {},
