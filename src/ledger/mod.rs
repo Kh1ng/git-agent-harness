@@ -4,6 +4,8 @@ mod entry;
 mod jsonl;
 mod locking;
 mod paid_route_notify;
+mod paid_routes;
+pub use paid_routes::{paid_route_approvals_from_entries, PaidRouteApproval};
 
 pub(crate) use paid_route_notify::notify_paid_route_skips;
 

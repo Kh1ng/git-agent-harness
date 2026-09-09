@@ -860,6 +860,13 @@ pub enum HoldCommands {
 
 #[derive(Subcommand)]
 pub enum RouteApprovalCommands {
+    /// List work-item paid-route requests and active grants as JSON.
+    List {
+        #[arg(long)]
+        profile: String,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+    },
     /// Allow one exact paid backend/model route for this work item.
     Grant {
         #[arg(long)]

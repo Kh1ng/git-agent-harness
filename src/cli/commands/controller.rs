@@ -75,6 +75,21 @@ pub fn run_hold(command: HoldCommands) -> Result<()> {
 
 pub fn run_route_approval(command: RouteApprovalCommands) -> Result<()> {
     let (profile, work_id, backend, instance, model, config_path, granted) = match command {
+        RouteApprovalCommands::List {
+            profile,
+            config_path,
+        } => {
+            let cfg = config::load(config_path.as_deref())?;
+            let prof = config::get_profile(&cfg, &profile)?;
+            let rows = ledger::paid_route_approvals_from_entries(
+                &ledger::read_entries(&cfg)?,
+                &profile,
+                prof,
+                &cfg.defaults,
+            );
+            println!("{}", serde_json::to_string(&rows)?);
+            return Ok(());
+        }
         RouteApprovalCommands::Grant {
             profile,
             work_id,
@@ -110,7 +125,8 @@ pub fn run_route_approval(command: RouteApprovalCommands) -> Result<()> {
     };
     let cfg = config::load(config_path.as_deref())?;
     let prof = config::get_profile(&cfg, &profile)?;
-    if let Some(instance_name) = instance.as_deref() {
+    // Existing grants remain revocable after an instance is removed from config.
+    if let Some(instance_name) = instance.as_deref().filter(|_| granted) {
         let routing = prof.effective_routing(&cfg.defaults);
         let declared = routing
             .backend_instances

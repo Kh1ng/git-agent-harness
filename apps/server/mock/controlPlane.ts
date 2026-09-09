@@ -1187,6 +1187,8 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   });
   app.get('/api/events', (_req, res) => res.json([]));
   app.get('/api/controller-activity', (_req, res) => res.json([]));
+  app.get('/api/route-approvals', (_req, res) => res.json([]));
+
   app.get('/api/work/:workId', (req, res) => {
     res.json([{ ...MOCK_LEDGER_ENTRY, work_id: req.params.workId }] satisfies LedgerEntry[]);
   });

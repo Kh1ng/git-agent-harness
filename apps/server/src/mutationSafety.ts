@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-type Operation = 'loop.start' | 'loop.stop' | 'hold.set' | 'hold.clear' | 'availability.clear' | 'ledger.clear_attempts';
+type Operation = 'loop.start' | 'loop.stop' | 'hold.set' | 'hold.clear' | 'availability.clear' | 'ledger.clear_attempts' | 'route_approval.grant' | 'route_approval.revoke';
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 
 // JSON object order is not part of the request's meaning; array order is.
@@ -52,7 +52,7 @@ export function mutationSafety(nodeId: string, directory = process.env.GAH_MUTAT
       return res.status(status).json({ error: code, message, operationId });
     };
     if (actor === 'unauthenticated') return reject(401, 'authentication_required', 'Authenticate before changing node state.');
-    if (operation === 'ledger.clear_attempts' && principal.kind !== 'owner') return reject(403, 'owner_required', 'Use owner access to clear attempt history.');
+    if ((operation === 'ledger.clear_attempts' || operation.startsWith('route_approval.')) && principal.kind !== 'owner') return reject(403, 'owner_required', 'This operation requires owner access.');
     if (!key || !/^[A-Za-z0-9_-]{16,128}$/.test(key)) return reject(400, 'idempotency_key_required', 'Supply an Idempotency-Key of 16–128 letters, digits, underscores, or hyphens.');
 
     try {
@@ -77,7 +77,7 @@ export function mutationSafety(nodeId: string, directory = process.env.GAH_MUTAT
       return res.status(503).json({ error: 'mutation_storage_unavailable', message: 'Cannot record this operation. No new action was started.', operationId });
     }
 
-    // These six handlers end with JSON. Record the outcome before acknowledging
+    // These handlers end with JSON. Record the outcome before acknowledging
     // it; a failed terminal write retains the receipt and cannot rerun the action.
     const json = res.json.bind(res);
     res.json = body => {
