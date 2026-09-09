@@ -107,7 +107,7 @@ pub fn run_openhands_with_executable(
         .env("LLM_API_KEY", &llm.api_key)
         .env("LLM_MODEL", &llm.model);
 
-    let (exit_code, duration_secs) = spawn_with_idle_watch(
+    let (exit_code, duration_secs, resources) = spawn_with_idle_watch(
         cmd,
         &log_path,
         worktree,
@@ -116,6 +116,7 @@ pub fn run_openhands_with_executable(
     )?;
 
     Ok(RunResult {
+        resources,
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),

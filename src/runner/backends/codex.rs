@@ -58,7 +58,7 @@ pub fn run_codex_with_executable(
         .current_dir(worktree);
     crate::runner::apply_child_env(&mut cmd, env_vars);
 
-    let (exit_code, duration_secs) = spawn_with_idle_watch(
+    let (exit_code, duration_secs, resources) = spawn_with_idle_watch(
         cmd,
         &log_path,
         worktree,
@@ -71,6 +71,7 @@ pub fn run_codex_with_executable(
         crate::runner::review_usage::find_codex_transcript(env_vars, &output_text)
             .map(|path| path.to_string_lossy().into_owned());
     Ok(RunResult {
+        resources,
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),

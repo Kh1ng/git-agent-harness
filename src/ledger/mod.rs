@@ -1,3 +1,5 @@
+mod resources;
+pub use resources::{AggregatedResources, ProcessResources};
 mod approvals;
 mod dispatch_notify;
 mod entry;

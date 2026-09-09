@@ -936,6 +936,7 @@ mod tests {
         e.profile = profile_name.to_string();
         e.validation_result = validation_result.map(String::from);
         e.attempts = vec![crate::ledger::AttemptRecord {
+            resources: crate::ledger::ProcessResources::default(),
             attempt_number: 1,
             backend: "agy".to_string(),
             effective_model: None,

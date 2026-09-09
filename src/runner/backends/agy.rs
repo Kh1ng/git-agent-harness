@@ -305,7 +305,7 @@ pub fn run_agy_with_executable(
     // that's slow but still producing output (still working) is never
     // killed for being slow; --print-timeout above stays as an outer
     // safety backstop for a truly hung process.
-    let (exit_code, duration_secs) = spawn_with_idle_watch(
+    let (exit_code, duration_secs, resources) = spawn_with_idle_watch(
         cmd,
         &log_path,
         worktree,
@@ -348,6 +348,7 @@ pub fn run_agy_with_executable(
         }
 
         return Ok(RunResult {
+            resources,
             exit_code: -1,
             duration_secs,
             log_path: log_path.to_string_lossy().into_owned(),
@@ -361,6 +362,7 @@ pub fn run_agy_with_executable(
     }
 
     Ok(RunResult {
+        resources,
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),

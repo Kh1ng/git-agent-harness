@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 /// serde defaults; absence is treated as unknown, never as zero.
 /// Version 9 adds canonical runner, instance, account, auth-source, quota-pool,
 /// and provider-attribution fields. All are nullable for historical data.
-pub const SCHEMA_VERSION: u32 = 9;
+/// Version 10 adds independent, provenance-aware host resource observations.
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// Record types for telemetry data (used for enum tags)
 #[allow(dead_code)]
@@ -55,6 +56,8 @@ pub struct TelemetryRecord {
 /// Attempt usage telemetry record
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct AttemptUsageRecord {
+    #[serde(default)]
+    pub resources: crate::ledger::ProcessResources,
     #[serde(flatten)]
     pub base: TelemetryRecord,
 

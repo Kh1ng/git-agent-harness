@@ -1009,7 +1009,27 @@ export interface AttemptBehaviorMetrics {
 
 /** TICKET-101: usage for exactly this attempt (not the whole dispatch). An
  * all-null `usage` means "backend didn't report it," never "zero usage." */
+/** Sampled host consumption; independent of tokens, prices and quotas. */
+export interface ProcessResources {
+  cpu_seconds: number | null;
+  peak_rss_bytes: number | null;
+  source: string;
+  unknown_reason: string | null;
+}
+
+/** CPU sum and maximum attempt RSS, with measurement coverage. */
+export interface AggregatedResources {
+  cpu_seconds: number | null;
+  peak_rss_bytes: number | null;
+  cpu_known_attempts: number;
+  rss_known_attempts: number;
+  unknown_attempts: number;
+  sources: Record<string, number>;
+  unknown_reasons: Record<string, number>;
+}
+
 export interface AttemptRecord {
+  resources?: ProcessResources;
   attempt_number: number;
   backend: string;
   effective_model: string | null;

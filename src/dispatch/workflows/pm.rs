@@ -189,6 +189,7 @@ pub(crate) fn pm(
                 let log_path = attempt_dir.join("backend-output.log");
                 let _ = std::fs::write(&log_path, format!("Backend error: {:#}", e));
                 runner::RunResult {
+                    resources: crate::ledger::ProcessResources::unknown("backend_not_started"),
                     exit_code: -1,
                     duration_secs: 0.0,
                     log_path: log_path.to_string_lossy().into_owned(),
@@ -205,6 +206,23 @@ pub(crate) fn pm(
             "PM backend finished: exit={} duration={:.0}s log={}",
             result.exit_code, result.duration_secs, result.log_path
         );
+        ledger.attempts.push(crate::ledger::AttemptRecord {
+            attempt_number: ledger.attempts.len() as u32 + 1,
+            backend: plan_route.effective_backend.clone(),
+            effective_model: plan_route.effective_model.clone(),
+            resources: result.resources.clone(),
+            exit_code: Some(result.exit_code),
+            duration_seconds: Some(result.duration_secs),
+            cli_version: result.agy_version.clone(),
+            usage: super::super::attempts::attempt_usage(
+                &result.log_path,
+                result.agy_cli_log_delta.as_deref(),
+                crate::usage_attribution::UsageAttribution::from_route(&plan_route),
+                result.transcript_path.as_deref(),
+                None,
+            ),
+            ..Default::default()
+        });
         ledger.backend_exit_code = Some(result.exit_code);
         ledger.validation_result = Some("not_run".into());
         record_external_approval_consumption_for_last_attempt(cfg, profile_name, profile, ledger);

@@ -74,7 +74,7 @@ pub fn run_vibe_with_executable(
         cmd.env("VIBE_ACTIVE_MODEL", model);
     }
 
-    let (exit_code, duration_secs) = spawn_with_idle_watch(
+    let (exit_code, duration_secs, resources) = spawn_with_idle_watch(
         cmd,
         &log_path,
         worktree,
@@ -92,6 +92,7 @@ pub fn run_vibe_with_executable(
         .and_then(|text| output::extract_vibe_messages_summary(&text));
 
     Ok(RunResult {
+        resources,
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),

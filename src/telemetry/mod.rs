@@ -6,6 +6,8 @@
 //! This module implements the requirements from TICKET-130 for preserving
 //! high-value execution telemetry independently of the operational ledger.
 
+mod dimensions;
+use dimensions::{dimension_key, get_dimension_value_from_attempt};
 pub mod exporter;
 pub mod extractor;
 pub mod health;
@@ -45,6 +47,7 @@ pub enum AggregationDimension {
     Account,
     Date,
     DateRange,
+    Outcome,
 }
 
 /// Telemetry aggregation report structure
@@ -67,6 +70,7 @@ pub struct TelemetryReport {
 /// Aggregated telemetry data for a specific dimension
 #[derive(Debug, Serialize, Clone)]
 pub struct AggregatedTelemetryData {
+    pub resources: crate::ledger::AggregatedResources,
     pub dimension_key: String,
     pub dimension_value: String,
     pub entries: usize,
@@ -187,6 +191,7 @@ impl std::str::FromStr for AggregationDimension {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+            "outcome" => Ok(AggregationDimension::Outcome),
             "project" => Ok(AggregationDimension::Project),
             "ticket" => Ok(AggregationDimension::Ticket),
             "executiontype" | "execution_type" => Ok(AggregationDimension::ExecutionType),
@@ -304,6 +309,7 @@ fn new_aggregated_data(
     dimension_value: &str,
 ) -> AggregatedTelemetryData {
     AggregatedTelemetryData {
+        resources: crate::ledger::AggregatedResources::default(),
         dimension_key: dimension_key(dimension),
         dimension_value: dimension_value.to_string(),
         entries: 0,
@@ -552,6 +558,11 @@ fn aggregate_by_dimension(
                     }
                 }
 
+                builder
+                    .data
+                    .resources
+                    .add(&crate::ledger::ProcessResources::default());
+
                 // Sum usage metrics from entry
                 let entry_usage = &entry.usage;
                 builder.data.input_tokens += entry_usage.input_tokens.unwrap_or(0);
@@ -642,6 +653,8 @@ fn aggregate_by_dimension(
                         }
                     }
 
+                    builder.data.resources.add(&attempt.resources);
+
                     // Sum attempt usage
                     let attempt_usage = &attempt.usage;
                     builder.data.input_tokens += attempt_usage.input_tokens.unwrap_or(0);
@@ -697,201 +710,6 @@ fn aggregate_by_dimension(
     }
 
     result
-}
-
-/// Get dimension value from ledger entry or attempt
-fn get_dimension_value_from_attempt(
-    entry: &LedgerEntry,
-    attempt: Option<&crate::ledger::AttemptRecord>,
-    dimension: AggregationDimension,
-) -> String {
-    match attempt {
-        None => match dimension {
-            AggregationDimension::Project => entry.repo_id.clone(),
-            AggregationDimension::Ticket => entry
-                .work_id
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::ExecutionType => entry.mode.clone(),
-            AggregationDimension::Runner => final_identity(entry)
-                .map(|identity| identity.runner_kind.clone())
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::Backend => entry.effective_backend.clone(),
-            AggregationDimension::BackendInstance => entry
-                .usage
-                .backend_instance
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::Provider => entry
-                .usage
-                .provider
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::AuthClass => entry
-                .usage
-                .usage_classification
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::QuotaPool => entry
-                .usage
-                .quota_pool
-                .clone()
-                .or_else(|| final_identity(entry).and_then(|identity| identity.quota_pool.clone()))
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::Model => entry.effective_model.clone().unwrap_or_else(|| {
-                entry
-                    .requested_model
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string())
-            }),
-            AggregationDimension::Account => entry
-                .usage
-                .account_label
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::Date => {
-                if let Ok(entry_time) = OffsetDateTime::parse(
-                    &entry.timestamp,
-                    &time::format_description::well_known::Rfc3339,
-                ) {
-                    entry_time
-                        .format(&time::format_description::well_known::Rfc3339)
-                        .unwrap_or_else(|_| "unknown".to_string())
-                        .split('T')
-                        .next()
-                        .unwrap_or("unknown")
-                        .to_string()
-                } else {
-                    "unknown".to_string()
-                }
-            }
-            AggregationDimension::DateRange => {
-                if let Ok(entry_time) = OffsetDateTime::parse(
-                    &entry.timestamp,
-                    &time::format_description::well_known::Rfc3339,
-                ) {
-                    format!("{}-{:02}", entry_time.year(), entry_time.month() as u8)
-                } else {
-                    "unknown".to_string()
-                }
-            }
-        },
-        Some(att) => match dimension {
-            AggregationDimension::Project => entry.repo_id.clone(),
-            AggregationDimension::Ticket => entry
-                .work_id
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::ExecutionType => entry.mode.clone(),
-            AggregationDimension::Runner => identity_for_attempt(entry, att.attempt_number)
-                .map(|identity| identity.runner_kind.clone())
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::Backend => identity_for_attempt(entry, att.attempt_number)
-                .map(|identity| identity.logical_backend.clone())
-                .unwrap_or_else(|| att.backend.clone()),
-            AggregationDimension::BackendInstance => att
-                .usage
-                .backend_instance
-                .clone()
-                .or_else(|| {
-                    identity_for_attempt(entry, att.attempt_number)
-                        .map(|identity| identity.backend_instance.clone())
-                })
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::Provider => att
-                .usage
-                .provider
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::AuthClass => att
-                .usage
-                .usage_classification
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::QuotaPool => att
-                .usage
-                .quota_pool
-                .clone()
-                .or_else(|| {
-                    identity_for_attempt(entry, att.attempt_number)
-                        .and_then(|identity| identity.quota_pool.clone())
-                })
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::Model => att
-                .usage
-                .actual_model
-                .clone()
-                .or_else(|| att.effective_model.clone())
-                .or_else(|| entry.effective_model.clone())
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::Account => att
-                .usage
-                .account_label
-                .clone()
-                .or_else(|| {
-                    identity_for_attempt(entry, att.attempt_number)
-                        .and_then(|identity| identity.account_label.clone())
-                })
-                .unwrap_or_else(|| "unknown".to_string()),
-            AggregationDimension::Date => {
-                let timestamp = att
-                    .usage
-                    .observed_at
-                    .clone()
-                    .or_else(|| Some(entry.timestamp.clone()))
-                    .unwrap_or_else(|| "unknown".to_string());
-                if let Ok(entry_time) = OffsetDateTime::parse(
-                    &timestamp,
-                    &time::format_description::well_known::Rfc3339,
-                ) {
-                    entry_time
-                        .format(&time::format_description::well_known::Rfc3339)
-                        .unwrap_or_else(|_| "unknown".to_string())
-                        .split('T')
-                        .next()
-                        .unwrap_or("unknown")
-                        .to_string()
-                } else {
-                    "unknown".to_string()
-                }
-            }
-            AggregationDimension::DateRange => {
-                let timestamp = att
-                    .usage
-                    .observed_at
-                    .clone()
-                    .or_else(|| Some(entry.timestamp.clone()))
-                    .unwrap_or_else(|| "unknown".to_string());
-                if let Ok(entry_time) = OffsetDateTime::parse(
-                    &timestamp,
-                    &time::format_description::well_known::Rfc3339,
-                ) {
-                    format!("{}-{:02}", entry_time.year(), entry_time.month() as u8)
-                } else {
-                    "unknown".to_string()
-                }
-            }
-        },
-    }
-}
-
-/// Get dimension key name
-fn dimension_key(dimension: AggregationDimension) -> String {
-    match dimension {
-        AggregationDimension::Project => "project".to_string(),
-        AggregationDimension::Ticket => "ticket".to_string(),
-        AggregationDimension::ExecutionType => "execution_type".to_string(),
-        AggregationDimension::Runner => "runner".to_string(),
-        AggregationDimension::Backend => "backend".to_string(),
-        AggregationDimension::BackendInstance => "backend_instance".to_string(),
-        AggregationDimension::Provider => "provider".to_string(),
-        AggregationDimension::AuthClass => "auth_class".to_string(),
-        AggregationDimension::QuotaPool => "quota_pool".to_string(),
-        AggregationDimension::Model => "model".to_string(),
-        AggregationDimension::Account => "account".to_string(),
-        AggregationDimension::Date => "date".to_string(),
-        AggregationDimension::DateRange => "date_range".to_string(),
-    }
 }
 
 /// Check whether usage belongs to a subscription/quota pool rather than a
@@ -1495,3 +1313,6 @@ pub mod cli {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod resource_tests;

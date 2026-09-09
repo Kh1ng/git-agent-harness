@@ -465,14 +465,13 @@ pub(crate) fn improve(
         let result = match result {
             Ok(r) => r,
             Err(e) => {
-                // The backend process itself couldn't launch (binary missing,
-                // exec failure) — this is a setup/harness problem, not the
-                // agent or backend failing at its job.
+                // An exec failure is a harness error, not a backend failure.
                 ledger.set_failure(
                     crate::ledger::FailureClass::HarnessError,
                     crate::ledger::FailureStage::BackendLaunch,
                 );
                 ledger.attempts.push(crate::ledger::AttemptRecord {
+                    resources: crate::ledger::ProcessResources::unknown("backend_not_started"),
                     attempt_number: attempt + 1,
                     backend: route.effective_backend.clone(),
                     effective_model: Some(llm.model.clone()),
@@ -501,9 +500,6 @@ pub(crate) fn improve(
                 return Err(e);
             }
         };
-        // The backend process launched and ran to an exit code, regardless
-        // of what that code was — "completed" tracks whether the attempt
-        // got a fair shot, not whether it succeeded.
         ledger.attempts_completed = Some(ledger.attempts_completed.unwrap_or(0) + 1);
         println!(
             "Backend finished: exit={} duration={:.0}s log={}",
@@ -513,10 +509,7 @@ pub(crate) fn improve(
         conflict_session.snapshot_if_unresolved(attempt + 1)?;
         shutdown::pause_after_backend_result_if_requested()?;
 
-        // SIGINT/SIGTERM is an operator lifecycle event, not a backend
-        // failure to retry. The runner already killed and reaped the backend
-        // process group; return so the controller can write the matching
-        // terminal dispatch event.
+        // The runner reaped the group. Record shutdown without retrying.
         let shutdown_after_result = crate::runner::shutdown_requested();
         if shutdown_after_result && result.exit_code == -2 {
             shutdown_ctx.record_cancelled_backend_result_and_cleanup(
@@ -536,8 +529,7 @@ pub(crate) fn improve(
         );
 
         if result.exit_code != 0 {
-            // The backend launched but exited nonzero — the backend itself
-            // failed at its job, distinct from it never starting at all.
+            // A nonzero exit differs from a failure to launch.
             let output_log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
             let log_text = failure_text_with_internal_log(
                 &output_log_text,
@@ -575,6 +567,7 @@ pub(crate) fn improve(
                 ledger.validation_result = Some("not_run_backend_stalled_during_validation".into());
             }
             ledger.attempts.push(crate::ledger::AttemptRecord {
+                resources: result.resources.clone(),
                 attempt_number: attempt + 1,
                 backend: route.effective_backend.clone(),
                 effective_model: Some(llm.model.clone()),
@@ -902,6 +895,7 @@ pub(crate) fn improve(
                     "not_run_backend_unavailable"
                 };
                 ledger.attempts.push(crate::ledger::AttemptRecord {
+                    resources: result.resources.clone(),
                     attempt_number: attempt + 1,
                     backend: route.effective_backend.clone(),
                     effective_model: Some(llm.model.clone()),
@@ -975,6 +969,7 @@ pub(crate) fn improve(
                 );
             }
             ledger.attempts.push(crate::ledger::AttemptRecord {
+                resources: result.resources.clone(),
                 attempt_number: attempt + 1,
                 backend: route.effective_backend.clone(),
                 effective_model: Some(llm.model.clone()),
@@ -1048,6 +1043,7 @@ pub(crate) fn improve(
         if profile.validation_commands.is_empty() {
             ledger.validation_result = Some("not_run".into());
             ledger.attempts.push(crate::ledger::AttemptRecord {
+                resources: result.resources.clone(),
                 attempt_number: attempt + 1,
                 backend: route.effective_backend.clone(),
                 effective_model: Some(llm.model.clone()),
@@ -1089,6 +1085,7 @@ pub(crate) fn improve(
                 validation_failed = false;
                 ledger.validation_result = Some("passed".into());
                 ledger.attempts.push(crate::ledger::AttemptRecord {
+                    resources: result.resources.clone(),
                     attempt_number: attempt + 1,
                     backend: route.effective_backend.clone(),
                     effective_model: Some(llm.model.clone()),
@@ -1148,6 +1145,7 @@ pub(crate) fn improve(
                             Some(&claude_path),
                         ),
                         result.agy_version.clone(),
+                        result.resources.clone(),
                     );
                     record_external_approval_consumption_for_last_attempt(
                         cfg,
@@ -1170,6 +1168,7 @@ pub(crate) fn improve(
                         crate::ledger::FailureStage::PostValidation,
                     );
                     ledger.attempts.push(crate::ledger::AttemptRecord {
+                        resources: result.resources.clone(),
                         attempt_number: attempt + 1,
                         backend: route.effective_backend.clone(),
                         effective_model: Some(llm.model.clone()),
@@ -1277,6 +1276,7 @@ pub(crate) fn improve(
                     }
                     println!("Retrying with failure context...");
                     ledger.attempts.push(crate::ledger::AttemptRecord {
+                        resources: result.resources.clone(),
                         attempt_number: attempt + 1,
                         backend: route.effective_backend.clone(),
                         effective_model: Some(llm.model.clone()),

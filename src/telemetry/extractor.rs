@@ -127,6 +127,7 @@ pub fn extract_attempt_usage_records(
         };
 
         let record = AttemptUsageRecord {
+            resources: attempt.resources.clone(),
             base,
             profile: entry.profile.clone(),
             repo_id: entry.repo_id.clone(),

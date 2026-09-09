@@ -7,6 +7,9 @@
 //! stall or graceful shutdown. Backend-specific argv construction, executable
 //! resolution, usage/log discovery, and review invocation stay in the facade.
 
+mod resources;
+pub(crate) use resources::ResourceSampler;
+
 use anyhow::{Context, Result};
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
@@ -257,6 +260,9 @@ struct ProcessIdentity {
 struct ProcessSnapshot {
     identity: ProcessIdentity,
     parent_pid: u32,
+    group_pid: u32,
+    cpu_ticks: u64,
+    rss_pages: u64,
     zombie: bool,
 }
 
@@ -272,6 +278,13 @@ fn linux_process_snapshot(pid: u32) -> Option<ProcessSnapshot> {
             start_ticks: fields.get(19)?.parse().ok()?,
         },
         parent_pid: fields.get(1)?.parse().ok()?,
+        group_pid: fields.get(2)?.parse().ok()?,
+        cpu_ticks: fields
+            .get(11)?
+            .parse::<u64>()
+            .ok()?
+            .saturating_add(fields.get(12)?.parse::<u64>().ok()?),
+        rss_pages: fields.get(21)?.parse::<i64>().ok()?.max(0) as u64,
         zombie: fields.first().is_some_and(|state| *state == "Z"),
     })
 }
@@ -584,7 +597,7 @@ pub(crate) fn spawn_with_idle_watch(
     worktree: &Path,
     idle_timeout_seconds: u64,
     spawn_context: &str,
-) -> Result<(i32, f64)> {
+) -> Result<(i32, f64, crate::ledger::ProcessResources)> {
     spawn_with_idle_watch_with_shutdown(
         cmd,
         log_path,
@@ -606,7 +619,7 @@ pub(crate) fn spawn_with_worktree_progress_watch(
     worktree: &Path,
     idle_timeout_seconds: u64,
     spawn_context: &str,
-) -> Result<(i32, f64)> {
+) -> Result<(i32, f64, crate::ledger::ProcessResources)> {
     spawn_with_idle_watch_with_shutdown(
         cmd,
         log_path,
@@ -626,7 +639,7 @@ fn spawn_with_idle_watch_with_shutdown(
     spawn_context: &str,
     shutdown_requested: &AtomicBool,
     output_counts_as_progress: bool,
-) -> Result<(i32, f64)> {
+) -> Result<(i32, f64, crate::ledger::ProcessResources)> {
     let start = Instant::now();
     let hard_timeout = cmd
         .get_envs()
@@ -675,7 +688,9 @@ fn spawn_with_idle_watch_with_shutdown(
     let mut killed_for_hard_timeout = false;
     let mut killed_for_shutdown = false;
     let mut cleanup_error = None;
+    let mut resources = ResourceSampler::new(process_group);
     let mut exit_code = loop {
+        resources.sample();
         match child.try_wait() {
             Ok(Some(status)) => break status.code().unwrap_or(-1),
             Ok(None) => {
@@ -824,7 +839,7 @@ fn spawn_with_idle_watch_with_shutdown(
         }
     }
 
-    Ok((exit_code, duration.as_secs_f64()))
+    Ok((exit_code, duration.as_secs_f64(), resources.finish()))
 }
 
 #[cfg(test)]

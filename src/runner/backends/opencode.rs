@@ -103,7 +103,7 @@ pub fn run_opencode_with_executable(
     cmd.current_dir(worktree);
     crate::runner::apply_child_env(&mut cmd, env_vars);
 
-    let (exit_code, duration_secs) = spawn_with_worktree_progress_watch(
+    let (exit_code, duration_secs, resources) = spawn_with_worktree_progress_watch(
         cmd,
         &log_path,
         worktree,
@@ -116,6 +116,7 @@ pub fn run_opencode_with_executable(
             .unwrap_or((None, None));
 
     Ok(RunResult {
+        resources,
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),

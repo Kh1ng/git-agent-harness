@@ -41,6 +41,7 @@ pub enum ReviewProcessOutcome {
 
 #[derive(Debug)]
 pub struct ReviewRunResult {
+    pub resources: crate::ledger::ProcessResources,
     pub outcome: ReviewProcessOutcome,
     pub duration_secs: f64,
     pub stdout: String,
@@ -109,6 +110,7 @@ pub fn run_review_backend_for_identity(
         ExecutableResolution::Found(path) => path,
         ExecutableResolution::MissingExplicitPath(_) | ExecutableResolution::MissingFromPath(_) => {
             return ReviewRunResult {
+                resources: crate::ledger::ProcessResources::unknown("backend_not_started"),
                 outcome: ReviewProcessOutcome::ExecutableUnavailable,
                 duration_secs: start.elapsed().as_secs_f64(),
                 stdout: String::new(),
@@ -122,6 +124,7 @@ pub fn run_review_backend_for_identity(
         }
         ExecutableResolution::UnknownBackend(_) => {
             return ReviewRunResult {
+                resources: crate::ledger::ProcessResources::unknown("backend_not_started"),
                 outcome: ReviewProcessOutcome::SpawnFailure,
                 duration_secs: start.elapsed().as_secs_f64(),
                 stdout: String::new(),
@@ -137,6 +140,7 @@ pub fn run_review_backend_for_identity(
 
     if let Err(err) = fs::File::create(&stdout_path) {
         return ReviewRunResult {
+            resources: crate::ledger::ProcessResources::unknown("backend_not_started"),
             outcome: ReviewProcessOutcome::SpawnFailure,
             duration_secs: start.elapsed().as_secs_f64(),
             stdout: String::new(),
@@ -150,6 +154,7 @@ pub fn run_review_backend_for_identity(
     }
     if let Err(err) = fs::File::create(&stderr_path) {
         return ReviewRunResult {
+            resources: crate::ledger::ProcessResources::unknown("backend_not_started"),
             outcome: ReviewProcessOutcome::SpawnFailure,
             duration_secs: start.elapsed().as_secs_f64(),
             stdout: String::new(),
@@ -220,6 +225,7 @@ pub fn run_review_backend_for_identity(
         }
         Some(BackendKind::Openhands) | Some(BackendKind::Hermes) | None => {
             return ReviewRunResult {
+                resources: crate::ledger::ProcessResources::unknown("backend_not_started"),
                 outcome: ReviewProcessOutcome::SpawnFailure,
                 duration_secs: start.elapsed().as_secs_f64(),
                 stdout: String::new(),
@@ -247,6 +253,7 @@ pub fn run_review_backend_for_identity(
         Ok(child) => child,
         Err(err) => {
             return ReviewRunResult {
+                resources: crate::ledger::ProcessResources::unknown("backend_not_started"),
                 outcome: ReviewProcessOutcome::SpawnFailure,
                 duration_secs: start.elapsed().as_secs_f64(),
                 stdout: String::new(),
@@ -289,7 +296,9 @@ pub fn run_review_backend_for_identity(
     let mut saw_progress = false;
     let mut cleanup_error = None;
     let mut supplemental_stderr = None;
+    let mut resources = super::process::ResourceSampler::new(process_group);
     let outcome = loop {
+        resources.sample();
         match child.try_wait() {
             Ok(Some(status)) => {
                 if status.success() {
@@ -428,6 +437,7 @@ pub fn run_review_backend_for_identity(
     };
 
     ReviewRunResult {
+        resources: resources.finish(),
         outcome,
         duration_secs: start.elapsed().as_secs_f64(),
         stdout,

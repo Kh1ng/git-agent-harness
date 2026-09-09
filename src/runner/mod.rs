@@ -99,6 +99,7 @@ pub(crate) fn apply_child_env(cmd: &mut Command, env_vars: &[(String, String)]) 
 
 #[derive(Debug)]
 pub struct RunResult {
+    pub resources: crate::ledger::ProcessResources,
     pub exit_code: i32,
     pub duration_secs: f64,
     pub log_path: String,

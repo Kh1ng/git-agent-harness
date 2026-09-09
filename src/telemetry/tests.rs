@@ -75,8 +75,8 @@ pub(crate) mod telemetry_tests {
     #[test]
     fn test_schema_version_in_record() {
         assert_eq!(
-            SCHEMA_VERSION, 9,
-            "canonical attempt identity requires telemetry export schema version 9"
+            SCHEMA_VERSION, 10,
+            "host resource observations require telemetry export schema version 10"
         );
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
@@ -86,6 +86,7 @@ pub(crate) mod telemetry_tests {
         };
 
         let record = AttemptUsageRecord {
+            resources: crate::ledger::ProcessResources::default(),
             base: base.clone(),
             profile: "test".to_string(),
             repo_id: "test".to_string(),
@@ -366,6 +367,7 @@ pub(crate) mod telemetry_tests {
         use crate::ledger::{AttemptRecord, LedgerUsage};
 
         let _attempt = AttemptRecord {
+            resources: crate::ledger::ProcessResources::default(),
             attempt_number: 1,
             backend: "test-backend".to_string(),
             effective_model: Some("test-model".to_string()),
@@ -416,6 +418,7 @@ pub(crate) mod telemetry_tests {
         let mut entry = create_test_ledger_entry();
         // Add an attempt with different usage
         let attempt = AttemptRecord {
+            resources: crate::ledger::ProcessResources::default(),
             attempt_number: 1,
             backend: "test-backend".to_string(),
             effective_model: Some("test-model".to_string()),
@@ -530,6 +533,7 @@ pub(crate) mod telemetry_tests {
         let mut entry = create_test_ledger_entry();
         entry.requested_backend = "stale-entry-value".into();
         entry.attempts = vec![crate::ledger::AttemptRecord {
+            resources: crate::ledger::ProcessResources::default(),
             attempt_number: 1,
             backend: "agy-second".into(),
             effective_model: Some("gemini-pro".into()),
@@ -1070,6 +1074,7 @@ default_target_branch = "main"
         // Attempt 2: Codex gpt-4, failed/retried, API cost
         // Attempt 3: Claude claude-3-5, successful, Quota backed
         let attempt1 = crate::ledger::AttemptRecord {
+            resources: crate::ledger::ProcessResources::default(),
             attempt_number: 1,
             backend: "codex".to_string(),
             effective_model: Some("gpt-4".to_string()),
@@ -1100,6 +1105,7 @@ default_target_branch = "main"
         };
 
         let attempt2 = crate::ledger::AttemptRecord {
+            resources: crate::ledger::ProcessResources::default(),
             attempt_number: 2,
             backend: "codex".to_string(),
             effective_model: Some("gpt-4".to_string()),
@@ -1130,6 +1136,7 @@ default_target_branch = "main"
         };
 
         let attempt3 = crate::ledger::AttemptRecord {
+            resources: crate::ledger::ProcessResources::default(),
             attempt_number: 3,
             backend: "claude".to_string(),
             effective_model: Some("claude-3-5".to_string()),

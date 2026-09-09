@@ -114,6 +114,7 @@ fn failed_backend_attempt_still_consumes_the_external_request_budget() {
     );
     dispatch.work_id = Some(work_id.to_string());
     dispatch.attempts.push(crate::ledger::AttemptRecord {
+        resources: crate::ledger::ProcessResources::default(),
         attempt_number: 1,
         backend: "opencode".to_string(),
         exit_code: Some(1),

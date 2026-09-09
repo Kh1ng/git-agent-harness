@@ -326,6 +326,7 @@ fn after_attempt(
     };
 
     ledger.attempts.push(AttemptRecord {
+        resources: result.resources.clone(),
         attempt_number: attempt,
         backend: route.effective_backend.clone(),
         effective_model: Some(model.to_string()),

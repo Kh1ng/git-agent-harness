@@ -690,6 +690,7 @@ pub(in crate::dispatch) fn review(
                     ),
                 };
             ledger.attempts.push(crate::ledger::AttemptRecord {
+                resources: attempt.resources.clone(),
                 attempt_number: attempt_index as u32,
                 backend: route.effective_backend.clone(),
                 effective_model: route.effective_model.clone(),

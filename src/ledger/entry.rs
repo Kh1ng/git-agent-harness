@@ -120,6 +120,9 @@ impl FailureStage {
 /// struct today.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct AttemptRecord {
+    /// Host resource observations, separate from provider usage. Historical rows are unknown.
+    #[serde(default)]
+    pub resources: super::ProcessResources,
     pub attempt_number: u32,
     pub backend: String,
     pub effective_model: Option<String>,
