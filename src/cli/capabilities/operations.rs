@@ -346,6 +346,22 @@ pub(super) fn add_hold_operations(manifest: &mut CapabilityManifest) {
 }
 
 pub(super) fn add_route_approval_operations(manifest: &mut CapabilityManifest) {
+    manifest.add_operation(OperationDefinition {
+        operation_id: "route_approval.list".to_string(),
+        display_name: "List Paid Route Approvals".to_string(),
+        class: OperationClass::Read,
+        profile_scope: ProfileScope::ProfileRequired,
+        request_schema: None,
+        response_schema: None,
+        streaming: StreamingBehavior::None,
+        idempotency: Idempotency::Idempotent,
+        secret_fields: vec![],
+        remote_disposition: RemoteDisposition::RemoteAvailable,
+        local_only_reason: None,
+        documentation: Some("List work-item paid-route requests and active grants".to_string()),
+        cli_command_path: "gah route-approval list".to_string(),
+        is_stable: true,
+    });
     // gah route-approval grant
     manifest.add_operation(OperationDefinition {
         operation_id: "route_approval.grant".to_string(),

@@ -1436,3 +1436,15 @@ export interface AdminUpdateState {
   pid: number | null;
   output: string;
 }
+
+/** Exact work-item scope of a paid-route request or existing operator grant. */
+export interface PaidRouteApproval {
+  profile: string;
+  work_id: string;
+  backend: string;
+  backend_instance: string | null;
+  model: string | null;
+  approved: boolean;
+  requested: boolean;
+}
+export type PaidRouteScope = Pick<PaidRouteApproval, 'profile' | 'work_id' | 'backend' | 'backend_instance' | 'model'>;
