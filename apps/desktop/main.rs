@@ -545,6 +545,10 @@ fn main() {
                 )?)?;
                 app.set_menu(native_menu)?;
             }
+            // A native Settings menu is also the offline recovery path when the
+            // user has disabled the tray icon (including window-only Windows).
+            #[cfg(not(target_os = "macos"))]
+            app.set_menu(menu.clone())?;
             apply_presence(app.handle(), settings.presence)?;
             if settings.presence.launch_window && !settings.central_url.is_empty() {
                 if let Ok(url) = central_url(&settings.central_url) {

@@ -88,7 +88,7 @@ For headless-only coverage, repeat on a separate test machine with `-Role worker
 3. Enter the central address and select **Save and connect**.
 4. Authenticate the dashboard with the central token or device pairing from section 7.
 5. Open **Settings → This computer** in the same window. Save an unreachable central address.
-6. Use the tray’s **Settings** action to return to the local Settings page.
+6. Use the app menu’s **Settings** action to return to the local Settings page.
 7. Restore the correct address. Check **Back to Settings**, worker controls, and saved app presence preferences.
 8. Open **Nodes** on central.
 9. Select the Windows worker and select **Check health**.
