@@ -173,7 +173,7 @@ fn write_transition(
         denial_reason: denial_reason.map(str::to_string),
     };
     let entry = LedgerEntry::new_external_approval(profile, prof, work_id, mode, approval);
-    let path = ledger::append(&cfg, &entry)?;
+    let (entry, path) = ledger::append_external_approval(&cfg, entry)?;
     if json {
         println!("{}", serde_json::to_string(&entry)?);
     } else {
@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(snapshot.state, "revoked");
         assert!(!snapshot.active);
 
-        run(ExternalApprovalCommands::Grant {
+        run(ExternalApprovalCommands::Request {
             profile: "test".to_string(),
             work_id: "ISSUE-43".to_string(),
             credential_label: "odds".to_string(),

@@ -169,6 +169,23 @@ pub fn append(cfg: &GahConfig, entry: &LedgerEntry) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Record a validated external approval without racing another transition.
+/// Returns the persisted grant, including bounds inherited from its request.
+pub fn append_external_approval(
+    cfg: &GahConfig,
+    mut entry: LedgerEntry,
+) -> Result<(LedgerEntry, PathBuf)> {
+    let path = cfg.defaults.ledger_path();
+    {
+        let _lock = locking::exclusive(&path)?;
+        let entries = read_entries_unlocked(&path)?;
+        super::approvals::prepare_external_approval(&entries, &mut entry)?;
+        append_locked(&path, &entry)?;
+    }
+    sync_mirror(cfg);
+    Ok((entry, path))
+}
+
 /// Atomically append a human gate only when the same work item has no active
 /// effective gate. The check and append share the ledger's cross-process lock,
 /// so concurrent controller slots cannot both observe "ungated" and write
@@ -662,7 +679,7 @@ fn effective_human_gate_for_scope(
                 gate = None;
                 continue;
             }
-            "paid_route_approval_grant" | "external_approval_grant" => {
+            "paid_route_approval_grant" => {
                 // Modern policy gates carry exact route diagnostics and must
                 // be released only after status verifies this grant against
                 // that route. Preserve legacy behavior for pre-reason-code
@@ -677,6 +694,7 @@ fn effective_human_gate_for_scope(
                 continue;
             }
             "claim"
+            | "external_approval_grant"
             | "paid_route_approval_revoke"
             | "external_approval_request"
             | "external_approval_consume"
