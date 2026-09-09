@@ -586,6 +586,7 @@ fn recent_ledger_exposes_routing_diagnostics() {
         selected_cost_class: Some("included_quota".into()),
         selected_over: vec!["openhands/gpt-5.4 (paid $0.2500)".into()],
         candidates: vec![RoutingCandidateDiagnostic {
+            backend_instance: None,
             backend: "codex".into(),
             model: Some("gpt-5.4".into()),
             quota_pool: Some("codex-main".into()),
