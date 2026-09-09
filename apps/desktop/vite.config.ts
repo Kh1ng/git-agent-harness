@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 
-// Bundle the local connection and worker controls. The dashboard opens separately.
+// Bundle the local Settings page shown in the same window as the dashboard.
 export default defineConfig({
   plugins: [
     react(),

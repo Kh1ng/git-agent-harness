@@ -9,14 +9,21 @@
       "csp": null,
       "capabilities": [
         {
-          "identifier": "main",
-          "description": "Local connection window only",
+          "identifier": "local-settings",
+          "description": "Bundled Settings page only; remote dashboards cannot operate this computer",
           "windows": [
-            "main"
+            "dashboard"
           ],
           "permissions": [
-            "core:default"
-          ]
+            "core:default",
+            "allow-desktop-settings",
+            "allow-save-presence",
+            "allow-connect-dashboard",
+            "allow-open-central-settings",
+            "allow-worker-status",
+            "allow-set-worker-running"
+          ],
+          "local": true
         }
       ]
     },

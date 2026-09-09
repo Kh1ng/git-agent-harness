@@ -145,10 +145,25 @@ fn central_url(value: &str) -> Result<tauri::Url, String> {
     Ok(url)
 }
 
-// The remotely hosted dashboard must never invoke local process controls.
+// Only the bundled Settings document may operate this computer. The dashboard
+// shares its window, but has no native command capability.
+fn is_local_settings(url: &tauri::Url) -> bool {
+    let origin = url.origin().ascii_serialization();
+    let local = (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+        || origin == "http://tauri.localhost"
+        || origin == "https://tauri.localhost"
+        || (cfg!(debug_assertions) && origin == "http://localhost:1420");
+    local
+        && matches!(url.path(), "/" | "/index.html")
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
 fn local_only(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() != "main" {
-        return Err("This command is only available in the local connection window.".into());
+    if window.label() != "dashboard"
+        || !is_local_settings(&window.url().map_err(|e| e.to_string())?)
+    {
+        return Err("This command is only available in this computer’s Settings page.".into());
     }
     Ok(())
 }
@@ -160,20 +175,33 @@ fn desktop_settings(window: tauri::WebviewWindow) -> Result<DesktopSettings, Str
 }
 
 fn open_dashboard(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("dashboard") {
-        window.navigate(url).map_err(|e| e.to_string())?;
-        window.show().map_err(|e| e.to_string())?;
-        return window.set_focus().map_err(|e| e.to_string());
-    }
-    tauri::WebviewWindowBuilder::new(app, "dashboard", tauri::WebviewUrl::External(url))
-        .title("GAH Dashboard")
-        .inner_size(1400.0, 900.0)
-        .min_inner_size(900.0, 600.0)
-        .center()
-        .visible(true)
-        .build()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    let window = app
+        .get_webview_window("dashboard")
+        .ok_or("App window is unavailable")?;
+    window.navigate(url).map_err(|e| e.to_string())?;
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_central_settings(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    local_only(&window)?;
+    let mut url = central_url(&read_settings().central_url)?;
+    url.set_query(Some("page=settings"));
+    url.set_fragment(None);
+    open_dashboard(&app, url)
+}
+
+// This navigation can only open local UI, never run a worker command.
+fn can_open_settings(from: &tauri::Url, configured: &str) -> bool {
+    central_url(configured).is_ok_and(|central| from.origin() == central.origin())
+        && from
+            .query_pairs()
+            .find(|(key, _)| key == "page")
+            .is_some_and(|(_, value)| value == "settings")
 }
 
 #[tauri::command]
@@ -386,8 +414,29 @@ async fn set_worker_running(
     Ok(())
 }
 
-fn show_connection(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+fn show_settings(app: &tauri::AppHandle) {
+    // Match WebviewUrl::App with the default (HTTP) protocol on Windows.
+    // Do not cache window.url() during construction: WebView2 can still report about:blank.
+    let url = if tauri::is_dev() {
+        app.config().build.dev_url.clone()
+    } else {
+        Some(
+            if cfg!(windows) {
+                "http://tauri.localhost/"
+            } else {
+                "tauri://localhost/"
+            }
+            .parse()
+            .unwrap(),
+        )
+    };
+    if let Some(url) = url {
+        let _ = open_dashboard(app, url);
+    }
+}
+
+fn show_app(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("dashboard") {
         let _ = window.show();
         let _ = window.set_focus();
     }
@@ -406,13 +455,13 @@ fn stop_owned_worker(app: &tauri::AppHandle) {
 
 fn menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().as_ref() {
-        "connection" => show_connection(app),
+        "connection" => show_settings(app),
         "dashboard" => {
             if central_url(&read_settings().central_url)
                 .and_then(|url| open_dashboard(app, url))
                 .is_err()
             {
-                show_connection(app);
+                show_settings(app);
             }
         }
         "quit" => app.exit(0),
@@ -427,32 +476,43 @@ fn main() {
             desktop_settings,
             save_presence,
             connect_dashboard,
+            open_central_settings,
             worker_status,
             set_worker_running
         ])
         .setup(|app| {
             let settings = read_settings();
+            let navigation_app = app.handle().clone();
             tauri::WebviewWindowBuilder::new(
                 app,
-                "main",
+                "dashboard",
                 tauri::WebviewUrl::App("index.html".into()),
             )
-            .title("GAH — Connection & Worker")
-            .inner_size(760.0, 780.0)
-            .min_inner_size(560.0, 500.0)
-            // Keep the command-capable window local, including after a navigation attempt.
-            .on_navigation(|url| {
-                url.scheme() == "tauri"
-                    || url.origin().ascii_serialization() == "http://tauri.localhost"
-                    || url.origin().ascii_serialization() == "https://tauri.localhost"
-                    || (cfg!(debug_assertions)
-                        && url.origin().ascii_serialization() == "http://localhost:1420")
+            .title("GAH")
+            .inner_size(1400.0, 900.0)
+            .min_inner_size(900.0, 600.0)
+            // An inert UI marker; remote pages still have no IPC permissions.
+            .initialization_script(
+                "if (window === window.top) window.__GAH_DESKTOP_SETTINGS__ = true;",
+            )
+            .on_navigation(move |url| {
+                if url.as_str() == "gah://settings" || url.as_str() == "gah://settings/" {
+                    let allowed = navigation_app
+                        .get_webview_window("dashboard")
+                        .and_then(|window| window.url().ok())
+                        .is_some_and(|from| can_open_settings(&from, &read_settings().central_url));
+                    if allowed {
+                        let app = navigation_app.clone();
+                        let _ = navigation_app.run_on_main_thread(move || show_settings(&app));
+                    }
+                    return false;
+                }
+                is_local_settings(url) || central_url(url.as_str()).is_ok()
             })
             .visible(settings.presence.launch_window)
             .center()
             .build()?;
-            let connection =
-                MenuItem::with_id(app, "connection", "Connection & Worker", true, None::<&str>)?;
+            let connection = MenuItem::with_id(app, "connection", "Settings", true, None::<&str>)?;
             let dashboard =
                 MenuItem::with_id(app, "dashboard", "Open Dashboard", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit GAH", true, None::<&str>)?;
@@ -470,7 +530,7 @@ fn main() {
                         ..
                     } = event
                     {
-                        show_connection(tray.app_handle());
+                        show_app(tray.app_handle());
                     }
                 })
                 .build(app)?;
@@ -485,6 +545,10 @@ fn main() {
                 )?)?;
                 app.set_menu(native_menu)?;
             }
+            // A native Settings menu is also the offline recovery path when the
+            // user has disabled the tray icon (including window-only Windows).
+            #[cfg(not(target_os = "macos"))]
+            app.set_menu(menu.clone())?;
             apply_presence(app.handle(), settings.presence)?;
             if settings.presence.launch_window && !settings.central_url.is_empty() {
                 if let Ok(url) = central_url(&settings.central_url) {
@@ -495,7 +559,7 @@ fn main() {
         })
         .on_menu_event(menu_event)
         .on_window_event(|window, event| {
-            if window.label() == "main" {
+            if window.label() == "dashboard" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     if read_settings().presence.can_hide() {
@@ -519,7 +583,7 @@ fn main() {
                 ..
             } = _event
             {
-                show_connection(_app);
+                show_app(_app);
             }
         });
 }
@@ -597,6 +661,43 @@ mod tests {
                     assert_eq!(serde_json::from_str::<Presence>(&saved).unwrap(), actual);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn local_controls_and_settings_navigation_have_separate_trust_boundaries() {
+        for value in [
+            "tauri://localhost/index.html",
+            "http://tauri.localhost/",
+            "https://tauri.localhost/index.html",
+        ] {
+            assert!(is_local_settings(&value.parse().unwrap()), "{value}");
+        }
+        for value in [
+            "https://gah.example/index.html",
+            "tauri://attacker/index.html",
+            "https://tauri.localhost/other",
+            "file:///index.html",
+            "https://tauri.localhost.evil/index.html",
+        ] {
+            assert!(!is_local_settings(&value.parse().unwrap()), "{value}");
+        }
+        let central = "https://gah.example";
+        assert!(can_open_settings(
+            &"https://gah.example/?page=settings".parse().unwrap(),
+            central
+        ));
+        for value in [
+            "https://evil.example/?page=settings",
+            "http://gah.example/?page=settings",
+            "https://gah.example:444/?page=settings",
+            "https://gah.example/?page=chat",
+            "https://gah.example/?page=chat&page=settings",
+        ] {
+            assert!(
+                !can_open_settings(&value.parse().unwrap(), central),
+                "{value}"
+            );
         }
     }
 
