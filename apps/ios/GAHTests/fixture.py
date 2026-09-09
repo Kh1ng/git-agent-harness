@@ -1,6 +1,15 @@
 """Local WKWebView session fixture. Run only for simulator tests, bound to loopback."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
+from socketserver import TCPServer
+
+
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    """Bind without reverse DNS, which can stall hosted macOS runners before listen()."""
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        self.server_name = 'localhost'
+        self.server_port = self.server_address[1]
 
 
 class Fixture(BaseHTTPRequestHandler):
@@ -59,4 +68,4 @@ function requestFrame(otherOrigin) {
 
 if __name__ == '__main__':
     # WebKit may preconnect without sending a request; keep control requests responsive.
-    ThreadingHTTPServer(('127.0.0.1', 18773), Fixture).serve_forever()
+    LoopbackHTTPServer(('127.0.0.1', 18773), Fixture).serve_forever()

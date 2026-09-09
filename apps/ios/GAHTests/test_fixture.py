@@ -9,11 +9,14 @@ from urllib.request import ProxyHandler, build_opener
 
 
 class FixtureTests(unittest.TestCase):
-    def test_idle_connection_does_not_block_control_requests(self):
+    def test_loopback_startup_and_idle_connections(self):
         # Loopback fixture requests must not inherit the runner's outbound proxy.
         urlopen = build_opener(ProxyHandler({})).open
         fixture = subprocess.Popen([sys.executable, '-c',
-            "import faulthandler, runpy, sys; faulthandler.dump_traceback_later(20); runpy.run_path(sys.argv[1], run_name='__main__')",
+            "import faulthandler, runpy, sys; from unittest.mock import patch; "
+            "faulthandler.dump_traceback_later(20); "
+            "patch('socket.getfqdn', side_effect=AssertionError('Loopback fixture must not resolve DNS')).start(); "
+            "runpy.run_path(sys.argv[1], run_name='__main__')",
             str(Path(__file__).with_name('fixture.py'))], stderr=subprocess.PIPE, text=True)
         try:
             deadline = time.monotonic() + 30
