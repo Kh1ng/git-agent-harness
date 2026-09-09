@@ -60,6 +60,8 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     const link = await owner.getByLabel('Pairing link', { exact: true }).inputValue();
     expect(link).not.toContain('browser-owner-secret');
     await expect(owner.getByRole('img', { name: 'Scan to pair with this central server' })).toBeVisible();
+    await expect(owner.getByText('In the GAH iPhone app, open Connection, then Scan pairing QR code.')).toBeVisible();
+    await expect(owner.getByText('To pair a browser, open the pairing link there. The iPhone Camera app opens Safari; pairing there signs in Safari only.')).toBeVisible();
     await phone.goto(link);
     await expect(phone.getByRole('heading', { name: 'Confirm this server' })).toBeVisible();
     await expect(phone.getByText(`Pairing test central · ${origin}`, { exact: true })).toBeVisible();
