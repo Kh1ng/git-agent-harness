@@ -14,9 +14,9 @@ export function CoordinatorConnection() {
     return () => window.removeEventListener(TOKEN_CHANGED_EVENT, changed);
   }, []);
   return <div className="mb-4">
-    {trustedLanMode && <p role="status" className="mb-3 rounded-md border border-warning p-3 text-sm text-warning">Trusted-LAN mode is enabled. Live connections may work without a token. Remote dashboard data, node setup, and session operations require an access token.</p>}
+    {trustedLanMode && <p role="status" className="mb-3 rounded-md border border-warning p-3 text-sm text-warning">Trusted-LAN mode is enabled. Live connections may work without a token. Remote dashboard data and session operations require pairing or an access token. Node setup requires owner access.</p>}
     <details className="text-sm" open={!isConnected || undefined}>
-      <summary className="cursor-pointer text-secondary">Central access token</summary>
+      <summary className="cursor-pointer text-secondary"><span>Central access token</span> <span className="text-muted">(optional owner access)</span></summary>
       <form className="mt-2 flex max-w-xl flex-wrap items-end gap-2" onSubmit={event => {
         event.preventDefault();
         try { saveCoordinatorToken(token); setError(''); }
@@ -26,7 +26,7 @@ export function CoordinatorConnection() {
           <input type="password" autoComplete="off" className="input mt-1 w-full" value={token} onChange={event => setToken(event.target.value)} />
         </label>
         <button className="btn-secondary" type="submit">Save and reconnect</button>
-        <p className="w-full text-xs text-muted">Stored only for this tab’s session. Leave empty for local access.</p>
+        <p className="w-full text-xs text-muted">Optional for owner-only administration. Paired devices can use the dashboard without this token. Stored only for this tab’s session.</p>
         {error && <p role="alert" className="w-full text-xs text-critical">{error}</p>}
       </form>
     </details>
