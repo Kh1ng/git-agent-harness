@@ -47,12 +47,18 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const ownerContext = await browser.newContext({ extraHTTPHeaders: { 'x-test-client': 'owner' } });
   const deviceContext = await browser.newContext({ hasTouch: true, viewport: { width: 320, height: 568 } });
+  await deviceContext.addInitScript(() => {
+    Object.assign(window, {
+      webkit: { messageHandlers: { gahController: { postMessage: (message: string) => sessionStorage.setItem('nativeMessage', message) } } }
+    });
+  });
   const owner = await ownerContext.newPage();
   const phone = await deviceContext.newPage();
   let closedDeviceSockets = 0;
   phone.on('websocket', socket => { if (new URL(socket.url()).pathname === '/ws') socket.on('close', () => { closedDeviceSockets++; }); });
   try {
     await owner.goto(`${origin}/?page=settings`);
+    await expect(owner.getByRole('button', { name: 'Scan pairing QR code', exact: true })).toHaveCount(0);
     await owner.getByLabel('Access token', { exact: true }).fill('browser-owner-secret');
     await owner.getByRole('button', { name: 'Save and reconnect' }).click();
     await owner.getByRole('button', { name: 'Pair a device', exact: true }).click();
@@ -68,10 +74,25 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     expect(link).not.toBe(expiredLink);
     expect(link).not.toContain('browser-owner-secret');
     await expect(owner.getByRole('img', { name: 'Scan to pair with this central server' })).toBeVisible();
-    await expect(owner.getByText('In the GAH iPhone app, open Connection, then Scan pairing QR code.')).toBeVisible();
+    await expect(owner.getByText('In the GAH iPhone app, open Settings → Connection & pairing → Scan pairing QR code.')).toBeVisible();
     await expect(owner.getByText('To pair a browser, open the pairing link there. The iPhone Camera app opens Safari; pairing there signs in Safari only.')).toBeVisible();
+    // The native scanner is available in Settings before pairing, without opening the manual form.
+    await phone.goto(`${origin}/?page=settings`);
+    const scanner = phone.getByRole('button', { name: 'Scan pairing QR code', exact: true });
+    await expect(scanner).toBeVisible();
+    await expect(phone.getByLabel('Open a pairing link', { exact: true })).toHaveCount(0);
+    await scanner.click();
+    expect(await phone.evaluate(() => sessionStorage.getItem('nativeMessage'))).toBe('scanPairingCode');
+    for (const width of [320, 390]) {
+      await phone.setViewportSize({ width, height: 844 });
+      expect(await scanner.evaluate(button => button.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+      expect(await phone.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await phone.screenshot({ path: testInfo.outputPath(`pairing-scanner-${width}.png`) });
+    }
+    // A native scan loads the same pairing URL as the browser/manual flow.
     await phone.goto(link);
     await expect(phone.getByRole('heading', { name: 'Confirm this server' })).toBeVisible();
+    await expect(scanner).toHaveCount(0);
     expect(new URL(phone.url()).searchParams.get('page')).toBe('settings');
     await expect(phone.getByText(`Pairing test central · ${origin}`, { exact: true })).toBeVisible();
     await expect(phone.getByText(/Dashboard control: read projects and chats, run agent work/)).toBeVisible();
@@ -97,6 +118,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     expect(await phone.evaluate(() => sessionStorage.getItem('gah.coordinatorToken'))).toBeNull();
     await phone.reload();
     await expect(phone.getByRole('status').filter({ hasText: 'Paired device · Dashboard access enabled' })).toBeVisible();
+    await expect(scanner).toBeVisible();
     await expect(phone.getByRole('button', { name: 'Pair this device', exact: true })).toHaveCount(0);
     await phone.getByRole('button', { name: 'Manage pairing', exact: true }).click();
     await expect(phone.getByText('Pairing stays signed in across app or browser restarts until it expires or the owner revokes access.')).toBeVisible();

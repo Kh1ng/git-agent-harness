@@ -18,6 +18,7 @@ function pairingLink(value: string): { origin: string; code: string; serverId: s
 /** Same-origin browser pairing. The server sets a persistent HttpOnly cookie;
  * neither this component nor the QR renderer receives a device credential. */
 export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () => void }) {
+  const nativeController = (window as Window & { webkit?: { messageHandlers?: { gahController?: { postMessage?: (message: string) => void } } } }).webkit?.messageHandlers?.gahController;
   const { isConnected } = useWebSocket();
   const [pending, setPending] = useState(() => {
     try { return pairingLink(window.location.href); } catch { return null; }
@@ -68,7 +69,9 @@ export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () =
   const url = offer ? `${offer.server.origin}/#pair=${offer.code}&server=${offer.server.id}` : '';
   return <section className="mt-3 text-sm max-sm:[&_button]:min-h-11 max-sm:[&_input]:min-h-11" aria-label="Device pairing">
     {principal === 'device' && <p role="status" className="mb-2 text-good">Paired device · Dashboard access enabled</p>}
-    <div className="flex flex-wrap gap-2"><button type="button" className="btn-secondary" aria-expanded={open} onClick={() => setOpen(!open)}>{principal === 'owner' ? 'Pair a device' : principal === 'device' ? 'Manage pairing' : 'Pair this device'}</button>
+    <div className="flex flex-wrap gap-2">
+    {!pending && typeof nativeController?.postMessage === 'function' && <button type="button" className="btn-primary" onClick={() => nativeController.postMessage?.('scanPairingCode')}>Scan pairing QR code</button>}
+    <button type="button" className="btn-secondary" aria-expanded={open} onClick={() => setOpen(!open)}>{principal === 'owner' ? 'Pair a device' : principal === 'device' ? 'Manage pairing' : 'Pair this device'}</button>
     {principal === 'device' && !pending && <button type="button" className="btn-secondary" onClick={requestOwnerAccess}>Pair another device</button>}</div>
     {open && <div className="mt-3 max-w-2xl space-y-4 rounded-md border border-subtle bg-raised p-4">
       {error && <p role="alert" className="text-critical">{error}</p>}
@@ -103,7 +106,7 @@ export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () =
           <p className="break-all text-secondary">Server ID: {offer.server.id}</p>
           <p className="text-secondary">{offer.access}</p>
           <QRCodeSVG value={url} size={192} marginSize={4} title="Scan to pair with this central server" />
-          <p className="text-secondary">In the GAH iPhone app, open Connection, then Scan pairing QR code.</p>
+          <p className="text-secondary">In the GAH iPhone app, open Settings → Connection &amp; pairing → Scan pairing QR code.</p>
           <p className="text-secondary">To pair a browser, open the pairing link there. The iPhone Camera app opens Safari; pairing there signs in Safari only.</p>
           <p className="text-secondary">Expires {new Date(offer.expires_at).toLocaleTimeString()}.</p>
           <label className="block space-y-1">Pairing link<input className="input w-full" readOnly value={url} onFocus={event => event.target.select()} /></label>
