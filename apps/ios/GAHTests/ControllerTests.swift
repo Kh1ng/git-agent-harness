@@ -5,6 +5,13 @@ final class ControllerTests: XCTestCase {
         for invalid in ["javascript:alert(1)", "file:///etc/passwd", "https://user:secret@example.com", "https://example.com:70000", "gah://open"] {
             XCTAssertThrowsError(try ServerAddress(invalid), invalid)
         }
+        let offer = "https://gah.example/#pair=abcdefghijklmnopqrstuvwxyzABCDEF&server=e58dbf8c-9c0d-4bd4-b0f9-be02d42e16a8"
+        XCTAssertEqual(try ServerAddress.pairing(offer).origin.absoluteString, "https://gah.example/")
+        for invalid in ["https://gah.example/", offer.replacingOccurrences(of: "abcdefghijklmnopqrstuvwxyzABCDEF", with: "short"),
+                        offer.replacingOccurrences(of: "e58dbf8c-9c0d-4bd4-b0f9-be02d42e16a8", with: "invalid"),
+                        offer + "&pair=abcdefghijklmnopqrstuvwxyzABCDEF", offer + "&server=e58dbf8c-9c0d-4bd4-b0f9-be02d42e16a8"] {
+            XCTAssertThrowsError(try ServerAddress.pairing(invalid), invalid)
+        }
         let address = try ServerAddress("http://100.118.97.79/#pair=secret&server=identity")
         XCTAssertEqual(ServerAddress.restorationURL(address.url)?.absoluteString, "http://100.118.97.79/")
         XCTAssertTrue(address.contains(URL(string: "http://100.118.97.79:80/?page=nodes")!))
@@ -33,14 +40,13 @@ final class ControllerTests: XCTestCase {
         app.launchArguments = ["-centralURL", "http://127.0.0.1:18773/"]
         app.launch()
         XCTAssertTrue(app.webViews.staticTexts["GAH controller fixture"].waitForExistence(timeout: 20))
-        app.buttons["connection"].tap()
-        let field = app.descendants(matching: .any).matching(identifier: "serverAddress").firstMatch
-        XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.tap()
-        field.typeKey("a", modifierFlags: .command)
-        field.typeText("http://localhost:18773/recovery#pair=fixture-code")
-        XCTAssertEqual(field.value as? String, "http://localhost:18773/recovery#pair=fixture-code")
-        app.buttons["connectServer"].tap()
+        XCTAssertFalse(app.buttons["connection"].exists)
+        app.webViews.links["Open test pairing server"].tap()
+        XCTAssertTrue(app.alerts["Open pairing server?"].waitForExistence(timeout: 5))
+        app.alerts.buttons["Cancel"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["GAH controller fixture"].exists)
+        app.webViews.links["Open test pairing server"].tap()
+        app.alerts.buttons["Open server"].tap()
         XCTAssertTrue(app.buttons["Retry connection"].waitForExistence(timeout: 20))
         let hidden = XCTAttachment(screenshot: app.screenshot())
         hidden.name = "Failed switch hides previous dashboard"
@@ -50,6 +56,37 @@ final class ControllerTests: XCTestCase {
         control("allow-recovery")
         app.buttons["Retry connection"].tap()
         XCTAssertTrue(app.webViews.staticTexts["Pairing fragment retained"].waitForExistence(timeout: 20))
+    }
+
+    func testOnlyDashboardSettingsCanOpenScannerWithoutLosingDraft() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-centralURL", "http://127.0.0.1:18773/"]
+        app.launch()
+        XCTAssertTrue(app.webViews.staticTexts["GAH controller fixture"].waitForExistence(timeout: 20))
+        XCTAssertFalse(app.buttons["connection"].exists)
+        let scanner = app.navigationBars["Scan pairing code"]
+        app.webViews.buttons["Request scan outside Settings"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["Outside request sent"].waitForExistence(timeout: 5))
+        XCTAssertFalse(scanner.waitForExistence(timeout: 1))
+        app.webViews.buttons["Request scan with duplicate page"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["Duplicate page request sent"].waitForExistence(timeout: 5))
+        XCTAssertFalse(scanner.waitForExistence(timeout: 1))
+        let draft = app.webViews.textViews.firstMatch
+        draft.tap()
+        draft.typeText("Keep this unsent draft")
+        app.webViews.buttons["Settings"].tap()
+        for label in ["Request scan from subframe", "Request scan from other origin"] {
+            app.webViews.buttons[label].tap()
+            XCTAssertTrue(app.webViews.staticTexts[label + " sent"].waitForExistence(timeout: 5))
+            XCTAssertFalse(scanner.waitForExistence(timeout: 1))
+        }
+        app.webViews.buttons["Scan pairing QR code"].tap()
+        XCTAssertTrue(scanner.waitForExistence(timeout: 5))
+        app.navigationBars.buttons["Cancel"].tap()
+        XCTAssertTrue(draft.waitForExistence(timeout: 5))
+        XCTAssertEqual(draft.value as? String, "Keep this unsent draft")
+        XCTAssertFalse(app.buttons["connection"].exists)
     }
 
     // Run the local fixture server documented in README before this test. It never contacts a provider.
@@ -67,6 +104,11 @@ final class ControllerTests: XCTestCase {
         app.terminate()
         app.launch()
         XCTAssertTrue(app.webViews.staticTexts["Session retained"].waitForExistence(timeout: 20))
+        XCTAssertFalse(app.buttons["connection"].exists)
+        app.terminate()
+        app.launchArguments = ["-centralURL", "http://127.0.0.1:18773/unavailable"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Retry connection"].waitForExistence(timeout: 20))
         app.buttons["connection"].tap()
         let field = app.descendants(matching: .any).matching(identifier: "serverAddress").firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))

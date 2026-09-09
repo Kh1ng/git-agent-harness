@@ -4,7 +4,6 @@ import type { PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harn
 import { GahApiError, pairingApi } from '../api/client.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { saveCoordinatorToken } from '../api/coordinatorToken.js';
-import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 
 function pairingLink(value: string): { origin: string; code: string; serverId: string } {
   const url = new URL(value);
@@ -41,7 +40,6 @@ export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () =
       }
     }); };
   useEffect(loadSession, [isConnected]);
-  useWsReconnectRefresh(loadSession);
   useEffect(() => {
     if (!pending) return;
     // Fragments never reach the HTTP server; remove them from browser history too.

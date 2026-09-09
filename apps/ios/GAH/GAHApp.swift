@@ -12,6 +12,8 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     @Published var address: ServerAddress?
     @Published var error: String?
     @Published var loading = false
+    @Published var scanning = false
+    @Published var pairingDestination: ServerAddress?
     private var hasCommittedPage = false {
         didSet {
             webView.isHidden = !hasCommittedPage
@@ -27,6 +29,7 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         configuration.websiteDataStore = .default()
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
+        configuration.userContentController.add(PairingRequestHandler(controller: self), name: "gahController")
         webView.isHidden = true
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -37,6 +40,33 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         if let saved = UserDefaults.standard.string(forKey: "centralURL"), let restored = try? ServerAddress(saved) {
             connect(restored)
         }
+    }
+
+    /// Only the configured dashboard's main Settings page can request the camera.
+    func requestPairingScan(_ message: WKScriptMessage) {
+        guard message.name == "gahController", message.body as? String == "scanPairingCode",
+              message.webView === webView, message.frameInfo.isMainFrame,
+              let address, let sender = message.frameInfo.request.url, address.contains(sender),
+              let current = webView.url, address.contains(current),
+              URLComponents(url: current, resolvingAgainstBaseURL: false)?.queryItems?.first(where: {
+                  $0.name == "page"
+              })?.value == "settings" else { return }
+        let security = message.frameInfo.securityOrigin
+        var origin = URLComponents()
+        origin.scheme = security.protocol
+        origin.host = security.host
+        if security.port != 0 { origin.port = security.port }
+        guard let source = origin.url, address.contains(source) else { return }
+        scanning = true
+    }
+
+    func scannedPairing(_ value: String) {
+        scanning = false
+        do {
+            let target = try ServerAddress.pairing(value)
+            if address?.contains(target.url) == true { connect(target) }
+            else { pairingDestination = target }
+        } catch { self.error = error.localizedDescription }
     }
 
     func connect(_ target: ServerAddress) {
@@ -72,10 +102,14 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
             else { decisionHandler(.allow) }
         } else {
             decisionHandler(.cancel)
-            if action.navigationType == .linkActivated && ["https", "http"].contains(url.scheme?.lowercased() ?? "") {
+            if action.sourceFrame.isMainFrame,
+               let source = action.sourceFrame.request.url, address?.contains(source) == true,
+               let pairing = try? ServerAddress.pairing(url.absoluteString) {
+                pairingDestination = pairing
+            } else if action.navigationType == .linkActivated && ["https", "http"].contains(url.scheme?.lowercased() ?? "") {
                 UIApplication.shared.open(url)
             } else {
-                error = "Navigation left your central server. Use Connection to review a different server address."
+                error = "Navigation left your central server. Open connection settings to review a different server address."
             }
         }
     }
@@ -95,6 +129,16 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         loading = false
         error = "The dashboard was closed by iOS. Retry to restore saved chat history. Unsent text may need to be entered again."
+    }
+}
+
+/// WebKit retains handlers, so the handler must not retain the controller and its web view.
+@MainActor
+private final class PairingRequestHandler: NSObject, WKScriptMessageHandler {
+    weak var controller: Controller?
+    init(controller: Controller) { self.controller = controller }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        controller?.requestPairingScan(message)
     }
 }
 
@@ -132,6 +176,8 @@ private struct ControllerView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(error).foregroundStyle(.primary)
                         Button("Retry connection") { controller.retry() }.frame(minHeight: 44)
+                        Button("Connection settings") { proposedAddress = nil; showingConnection = true }
+                            .frame(minHeight: 44).accessibilityIdentifier("connection")
                     }.padding().frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color(uiColor: .secondarySystemBackground))
                 }
@@ -148,15 +194,18 @@ private struct ControllerView: View {
                     }
                 }
             }
-            .navigationTitle("GAH")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Connection", systemImage: "network") {
-                        proposedAddress = nil
-                        showingConnection = true
-                    }.accessibilityIdentifier("connection")
-                }
+            .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $controller.scanning) {
+                QRScanner { controller.scannedPairing($0) }
+            }
+            .alert("Open pairing server?", isPresented: Binding(
+                get: { controller.pairingDestination != nil },
+                set: { if !$0 { controller.pairingDestination = nil } }
+            ), presenting: controller.pairingDestination) { target in
+                Button("Open server") { controller.connect(target) }
+                Button("Cancel", role: .cancel) {}
+            } message: { target in
+                Text("Open \(target.origin.absoluteString)? You will confirm this server before pairing.")
             }
             .sheet(isPresented: $showingConnection) {
                 ConnectionView(initial: proposedAddress ?? controller.address?.origin.absoluteString ?? "http://100.118.97.79") { target in
@@ -169,7 +218,7 @@ private struct ControllerView: View {
                 do {
                     proposedAddress = try ServerAddress.fromDeepLink(url).url.absoluteString
                     showingConnection = true
-                } catch { controller.error = "This GAH link is invalid. Open Connection and paste a central server or pairing link." }
+                } catch { controller.error = "This GAH link is invalid. Open connection settings and paste a central server or pairing link." }
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase != .active { controller.rememberLocation() }
@@ -199,7 +248,7 @@ private struct ConnectionView: View {
                         .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
                         .accessibilityIdentifier("serverAddress")
                     Button("Scan pairing QR code", systemImage: "qrcode.viewfinder") { scanning = true }
-                } header: { Text("Central server") } footer: {
+                } header: { Text("Connection & pairing") } footer: {
                     Text("Paste a server address or a pairing link from GAH. Review the address before connecting. Your phone controls work on the server and its nodes.")
                 }
                 if let target = try? ServerAddress(text) {
@@ -218,7 +267,7 @@ private struct ConnectionView: View {
                     }.accessibilityIdentifier("connectServer")
                 }
             }
-            .navigationTitle("Connection")
+            .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
             .sheet(isPresented: $scanning) {
