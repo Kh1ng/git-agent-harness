@@ -22,7 +22,7 @@ missed. RSS can count shared pages in more than one process. Forced termination
 of GAH itself cannot flush an unwritten ledger entry. No command arguments,
 environment contents or process names are recorded in resource telemetry.
 
-Use `gah telemetry aggregate --dimensions project,ticket,execution_type,backend_instance,model,outcome,date_range --include-failed-attempts --include-retried-attempts --json`.
+Use `gah telemetry aggregate --dimensions project,ticket,execution_type,backend_instance,model,outcome,date_range --json`.
 Apply the existing `--since` and `--until` filters to bound the report.
 CPU aggregates sum known attempts; RSS aggregates take the largest attempt peak.
 Null totals mean no observations. Coverage counters and provenance maps preserve
