@@ -495,7 +495,7 @@ mod tests {
         make_fake_bin(
             &f.bin_dir,
             "agy",
-            "#!/bin/sh\necho 'step1'\nsleep 5\necho 'step2 should never appear'\n",
+            "#!/bin/sh\necho 'step1'\nsleep 10\necho 'step2 should never appear'\n",
         );
         // Needs the real `sleep` binary reachable, not just the fake bin_dir.
         let envs = vec![(
@@ -515,7 +515,7 @@ mod tests {
             &test_llm(),
             &envs,
             None,
-            1, // idle timeout: 1s of silence is stalled
+            3, // idle timeout: 3s of silence is stalled
         )
         .unwrap();
 
@@ -524,7 +524,7 @@ mod tests {
         assert!(log.contains("step1"));
         assert!(!log.contains("step2"));
         assert!(
-            log.contains("killed after 1s with no new backend output or worktree progress"),
+            log.contains("killed after 3s with no new backend output or worktree progress"),
             "got log: {log}"
         );
     }

@@ -510,7 +510,7 @@ mod tests {
         make_fake_bin(
             &f.bin_dir,
             "opencode",
-            "#!/bin/sh\necho 'step1'\nsleep 5\necho 'step2 should never appear'\n",
+            "#!/bin/sh\necho 'step1'\nsleep 10\necho 'step2 should never appear'\n",
         );
         let envs = vec![(
             "PATH".to_string(),
@@ -529,7 +529,7 @@ mod tests {
             None,
             &[],
             &envs,
-            1, // idle timeout: 1s of silence is stalled
+            3, // idle timeout: 3s of silence is stalled
         )
         .unwrap();
 
@@ -538,7 +538,7 @@ mod tests {
         assert!(log.contains("step1"));
         assert!(!log.contains("step2"));
         assert!(
-            log.contains("killed after 1s with no new worktree progress"),
+            log.contains("killed after 3s with no new worktree progress"),
             "got log: {log}"
         );
     }
@@ -569,7 +569,7 @@ mod tests {
             None,
             &[],
             &envs,
-            1,
+            3,
         )
         .unwrap();
 
@@ -577,7 +577,7 @@ mod tests {
         let log = fs::read_to_string(&result.log_path).unwrap();
         assert!(log.contains("tool chatter with no successful edit"));
         assert!(
-            log.contains("killed after 1s with no new worktree progress"),
+            log.contains("killed after 3s with no new worktree progress"),
             "got log: {log}"
         );
     }
@@ -586,10 +586,17 @@ mod tests {
     fn run_opencode_allows_real_worktree_progress_despite_chatty_output() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
+        // The worktree watch detects progress via `git diff`, so the fixture
+        // must be a real repo (same as the vibe silent-progress test) --
+        // otherwise nothing can count as progress and the run is capped by
+        // the startup grace instead of by its own completion.
+        initialize_git_worktree(&f.worktree);
+        // Writes land every 0.6s so that under heavy machine load no poll
+        // ever observes a silent gap approaching the 3s idle window.
         make_fake_bin(
             &f.bin_dir,
             "opencode",
-            "#!/bin/sh\necho 'starting edit'; sleep 1; printf 'first\\n' > progress.txt; echo 'editing'; sleep 1; printf 'second\\n' > progress.txt; echo 'done'\n",
+            "#!/bin/sh\necho 'starting edit'\nfor i in 1 2 3 4 5; do sleep 0.6; printf \"write$i\\n\" > progress.txt; done\necho 'done'\n",
         );
         let envs = vec![(
             "PATH".to_string(),
@@ -615,7 +622,7 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert_eq!(
             fs::read_to_string(f.worktree.join("progress.txt")).unwrap(),
-            "second\n"
+            "write5\n"
         );
     }
 

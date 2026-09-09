@@ -272,7 +272,7 @@ pub fn run_review_backend_for_identity(
     // of the attempt (success, idle kill, hard timeout, or shutdown included).
     #[cfg(target_os = "linux")]
     let (resource_stop, resource_accumulator, resource_handle) =
-        crate::runner::process::spawn_resource_sampler(child.id());
+        crate::runner::resources::spawn_resource_sampler(child.id());
     let (progress_tx, progress_rx) = mpsc::channel();
     let stdout_thread = child
         .stdout
@@ -399,7 +399,7 @@ pub fn run_review_backend_for_identity(
     let review_resources = {
         #[cfg(target_os = "linux")]
         {
-            crate::runner::process::finish_resource_sampler(
+            crate::runner::resources::finish_resource_sampler(
                 resource_stop,
                 resource_accumulator,
                 resource_handle,
@@ -407,7 +407,7 @@ pub fn run_review_backend_for_identity(
         }
         #[cfg(not(target_os = "linux"))]
         {
-            crate::runner::process::finish_resource_sampler_none()
+            crate::runner::resources::finish_resource_sampler_none()
         }
     };
     // A surviving descendant may still own the inherited pipe descriptors.
@@ -493,10 +493,10 @@ mod tests {
         make_fake_bin(
             &f.bin_dir,
             "claude",
-            "#!/bin/sh\necho 'partial review'\nsleep 2\necho 'late stderr' >&2\n",
+            "#!/bin/sh\necho 'partial review'\nsleep 6\necho 'late stderr' >&2\n",
         );
         let mut profile = test_profile();
-        profile.review_timeout_seconds = Some(1);
+        profile.review_timeout_seconds = Some(3);
         let _guard = PathGuard::set(f.bin_dir.display().to_string());
 
         let result = run_review_backend(
@@ -522,7 +522,7 @@ mod tests {
         make_fake_bin(
             &f.bin_dir,
             "claude",
-            "#!/bin/sh\nfor i in $(seq 1 20); do echo \"line $i\"; sleep 0.1; done\n",
+            "#!/bin/sh\nfor i in $(seq 1 60); do echo \"line $i\"; sleep 0.1; done\n",
         );
         let mut profile = test_profile();
         profile.review_timeout_seconds = Some(1);

@@ -16,10 +16,9 @@ pub use self::approvals::{
 };
 #[allow(unused_imports)]
 pub use self::entry::{
-    review_generation, AttemptBehaviorMetrics, AttemptRecord, AttemptResourceUsage,
-    AttemptRoutingRecord, BehaviorMetric, BehaviorMetricQuality, ExternalApprovalRecord,
-    FailureClass, FailureStage, LedgerEntry, LedgerUsage, ResourceMetric, ResourceMetricQuality,
-    RoutingCandidateDiagnostic, RoutingDiagnostics, CURRENT_REVIEW_CONTRACT_VERSION,
+    review_generation, AttemptBehaviorMetrics, AttemptRecord, AttemptRoutingRecord, BehaviorMetric,
+    BehaviorMetricQuality, ExternalApprovalRecord, FailureClass, FailureStage, LedgerEntry,
+    LedgerUsage, RoutingCandidateDiagnostic, RoutingDiagnostics, CURRENT_REVIEW_CONTRACT_VERSION,
     LEDGER_SCHEMA_VERSION, REVIEW_CONTRACT_VERSION,
 };
 #[allow(unused_imports)]
@@ -51,7 +50,14 @@ pub mod sqlite_store;
 /// actually changed since the last known reconciliation.
 pub mod reconcile;
 
+/// Issue #116: per-attempt process-tree resource observations (CPU time,
+/// peak RSS) with explicit provenance.
+pub mod resources;
+
 pub mod summary;
+
+#[allow(unused_imports)]
+pub use self::resources::{AttemptResourceUsage, ResourceMetric, ResourceMetricQuality};
 #[allow(unused_imports)]
 pub use self::summary::{is_strong_model, usage_summary_for_backend, BackendUsageSummary, GroupBy};
 

@@ -193,7 +193,17 @@ fn dispatch_routing_notifies_before_fallback_and_preserves_the_approval_gate() {
         crate::test_support::AvailabilityEnvGuard::set(tmp.path().join("availability.json"));
     let output = tmp.path().join("notices.txt");
     let mut profile = crate::ledger::test_util::profile();
-    profile.opencode_path = Some("/bin/true".into());
+    // A real, existing executable must back the configured backend path:
+    // `/bin/true` is absent on newer macOS system volumes, so materialize a
+    // portable one in the test's tmp dir instead of hardcoding a host path.
+    let configured_true = tmp.path().join("configured-true");
+    std::fs::write(&configured_true, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&configured_true, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    profile.opencode_path = Some(configured_true.to_string_lossy().into_owned());
     profile.notify_command = Some(format!("cat >> '{}'", output.display()));
     let gated = CandidateConfig {
         backend: "opencode".into(),

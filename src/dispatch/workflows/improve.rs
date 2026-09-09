@@ -548,25 +548,15 @@ pub(crate) fn improve(
                 .internal_log_path
                 .as_deref()
                 .unwrap_or(&result.log_path);
-            let stalled = log_text.contains("GAH: killed after ")
-                && log_text.contains("(stalled")
-                && log_text.contains("not just slow).");
-            let stalled_before_changes = stalled && log_text.contains("stalled before changes");
-            let stalled_during_validation =
-                stalled && log_text.contains("stalled during validation with checkpointed changes");
-            let cleanup_failed = result.exit_code
-                == crate::runner::process::PROCESS_CLEANUP_FAILED_EXIT_CODE
-                || log_text.contains("GAH: harness process cleanup failed:");
-            let failure_class = if cleanup_failed {
-                crate::ledger::FailureClass::HarnessError
-            } else if stalled_before_changes {
-                crate::ledger::FailureClass::AgentNoProgress
-            } else if stalled {
-                crate::ledger::FailureClass::HarnessError
-            } else {
-                crate::ledger::FailureClass::BackendError
-            };
-            ledger.set_failure(failure_class, crate::ledger::FailureStage::AgentRun);
+            let exit_failure = stall::classify_backend_exit_failure(&log_text, result.exit_code);
+            let stalled = exit_failure.stalled;
+            let stalled_before_changes = exit_failure.stalled_before_changes;
+            let stalled_during_validation = exit_failure.stalled_during_validation;
+            let cleanup_failed = exit_failure.cleanup_failed;
+            ledger.set_failure(
+                exit_failure.failure_class,
+                crate::ledger::FailureStage::AgentRun,
+            );
             if cleanup_failed {
                 ledger.validation_result = Some("not_run_process_cleanup_failed".into());
                 ledger.error_summary = Some("backend descendant cleanup failed".into());
@@ -588,7 +578,7 @@ pub(crate) fn improve(
                         stalled_during_validation
                             .then(|| "not_run_backend_stalled_during_validation".into())
                     }),
-                failure_class: Some(failure_class.as_str().into()),
+                failure_class: Some(exit_failure.failure_class.as_str().into()),
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,

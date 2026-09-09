@@ -355,7 +355,7 @@ mod tests {
         make_fake_bin(
             &f.bin_dir,
             "vibe",
-            "#!/bin/sh\necho 'step1'\nsleep 5\necho 'step2 should never appear'\n",
+            "#!/bin/sh\necho 'step1'\nsleep 10\necho 'step2 should never appear'\n",
         );
         let envs = vec![(
             "PATH".to_string(),
@@ -366,14 +366,14 @@ mod tests {
             ),
         )];
 
-        let result = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs, 1).unwrap();
+        let result = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs, 3).unwrap();
 
         assert_eq!(result.exit_code, -1);
         let log = fs::read_to_string(&result.log_path).unwrap();
         assert!(log.contains("step1"));
         assert!(!log.contains("step2"));
         assert!(
-            log.contains("killed after 1s with no new backend output or worktree progress"),
+            log.contains("killed after 3s with no new backend output or worktree progress"),
             "got log: {log}"
         );
     }
@@ -389,7 +389,7 @@ mod tests {
         make_fake_bin(
             &f.bin_dir,
             "vibe",
-            "#!/bin/sh\nsleep 1\nprintf 'first\\n' > progress.txt\nsleep 1\nprintf 'second\\n' > progress.txt\nsleep 1\nexit 0\n",
+            "#!/bin/sh\nfor i in 1 2 3 4; do sleep 0.8; printf \"write$i\\n\" > progress.txt; done\nexit 0\n",
         );
         let envs = vec![(
             "PATH".to_string(),
@@ -412,7 +412,7 @@ mod tests {
         assert!(!log.contains("GAH: killed"), "got log: {log}");
         assert_eq!(
             fs::read_to_string(f.worktree.join("progress.txt")).unwrap(),
-            "second\n"
+            "write4\n"
         );
     }
 }

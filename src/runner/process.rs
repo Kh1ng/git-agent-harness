@@ -252,9 +252,9 @@ pub(crate) fn kill_all_supervised_children() {
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct ProcessIdentity {
-    pid: u32,
-    start_ticks: u64,
+pub(crate) struct ProcessIdentity {
+    pub(crate) pid: u32,
+    pub(crate) start_ticks: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -266,7 +266,7 @@ struct ProcessSnapshot {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_process_snapshot(pid: u32) -> Option<ProcessSnapshot> {
+pub(crate) fn linux_process_snapshot(pid: u32) -> Option<ProcessSnapshot> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let fields = stat[stat.rfind(") ")? + 2..]
         .split_whitespace()
@@ -285,7 +285,7 @@ fn linux_process_snapshot(pid: u32) -> Option<ProcessSnapshot> {
 /// launch tool commands with `setsid`, which deliberately escapes the backend
 /// process group while remaining in its process tree.
 #[cfg(target_os = "linux")]
-fn linux_descendants(root_pid: u32) -> Vec<ProcessIdentity> {
+pub(crate) fn linux_descendants(root_pid: u32) -> Vec<ProcessIdentity> {
     let snapshots = fs::read_dir("/proc")
         .into_iter()
         .flatten()
@@ -571,165 +571,6 @@ pub(crate) fn process_group_activity_advanced(
     })
 }
 
-/// Issue #116: accumulated process-tree resource totals for one supervised
-/// backend attempt. CPU time is delta-summed per process so a process that
-/// exits mid-attempt still contributes its full consumption; peak RSS is the
-/// maximum tree-wide resident total observed at any sample.
-#[cfg(target_os = "linux")]
-#[derive(Default)]
-struct ResourceAccumulator {
-    observed_any_sample: bool,
-    last_ticks_by_process: HashMap<(u32, u64), u64>,
-    cpu_ticks_total: u64,
-    peak_rss_bytes: u64,
-}
-
-#[cfg(target_os = "linux")]
-fn linux_clock_ticks_per_second() -> f64 {
-    // _SC_CLK_TCK is fixed at boot on Linux; the default of 100 is the
-    // fallback if sysconf is somehow unavailable.
-    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    if ticks > 0 {
-        ticks as f64
-    } else {
-        100.0
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn linux_rss_bytes(pid: u32, page_size: f64) -> Option<u64> {
-    let statm = fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
-    let resident_pages = statm.split_whitespace().nth(1)?.parse::<u64>().ok()?;
-    Some((resident_pages as f64 * page_size) as u64)
-}
-
-/// One sample of the whole backend process tree (root included — the ticket
-/// explicitly requires the complete tree, not only the short-lived wrapper
-/// PID). Returns `(identity, cpu_ticks, rss_bytes)` for every live member.
-#[cfg(target_os = "linux")]
-fn linux_tree_usage_sample(root_pid: u32, page_size: f64) -> Vec<((u32, u64), u64, Option<u64>)> {
-    let mut members = Vec::new();
-    if let Some(root) = linux_process_snapshot(root_pid) {
-        members.push(root.identity);
-    }
-    for identity in linux_descendants(root_pid) {
-        members.push(identity);
-    }
-    members
-        .into_iter()
-        .filter_map(|identity| {
-            let stat = fs::read_to_string(format!("/proc/{}/stat", identity.pid)).ok()?;
-            let fields = stat[stat.rfind(") ")? + 2..]
-                .split_whitespace()
-                .collect::<Vec<_>>();
-            let user_ticks = fields.get(11)?.parse::<u64>().ok()?;
-            let system_ticks = fields.get(12)?.parse::<u64>().ok()?;
-            Some((
-                identity,
-                user_ticks.saturating_add(system_ticks),
-                linux_rss_bytes(identity.pid, page_size),
-            ))
-        })
-        .collect()
-}
-
-/// Issue #116: best-effort sampler thread for one backend attempt. Samples
-/// every 250 ms until stopped; never blocks or crashes the supervised run.
-/// Started right after spawn so even a fast-exiting backend has a chance to
-/// be observed; a tree that dies before the first completed sample records
-/// an explicit unknown, never zero.
-#[cfg(target_os = "linux")]
-pub(crate) fn spawn_resource_sampler(
-    root_pid: u32,
-) -> (
-    Arc<AtomicBool>,
-    Arc<Mutex<ResourceAccumulator>>,
-    thread::JoinHandle<()>,
-) {
-    let stop = Arc::new(AtomicBool::new(false));
-    let accumulator = Arc::new(Mutex::new(ResourceAccumulator::default()));
-    let stop_for_thread = Arc::clone(&stop);
-    let accumulator_for_thread = Arc::clone(&accumulator);
-    let handle = thread::spawn(move || {
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as f64;
-        while !stop_for_thread.load(Ordering::SeqCst) {
-            let sample = linux_tree_usage_sample(root_pid, page_size);
-            if let Ok(mut accum) = accumulator_for_thread.lock() {
-                accum.observed_any_sample = true;
-                let mut tree_rss_total = 0_u64;
-                for (identity, cpu_ticks, rss_bytes) in sample {
-                    let last = accum
-                        .last_ticks_by_process
-                        .insert(identity, cpu_ticks)
-                        .unwrap_or(0);
-                    accum.cpu_ticks_total += cpu_ticks.saturating_sub(last);
-                    tree_rss_total += rss_bytes.unwrap_or(0);
-                }
-                if tree_rss_total > accum.peak_rss_bytes {
-                    accum.peak_rss_bytes = tree_rss_total;
-                }
-            }
-            thread::sleep(Duration::from_millis(250));
-        }
-    });
-    (stop, accumulator, handle)
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn finish_resource_sampler(
-    stop: Arc<AtomicBool>,
-    accumulator: Arc<Mutex<ResourceAccumulator>>,
-    handle: thread::JoinHandle<()>,
-) -> crate::ledger::AttemptResourceUsage {
-    stop.store(true, Ordering::SeqCst);
-    let _ = handle.join();
-    let accum = accumulator.lock().map(|accum| accum.clone());
-    let Ok(accum) = accum else {
-        return crate::ledger::AttemptResourceUsage {
-            cpu_time_seconds: Some(crate::ledger::ResourceMetric::unknown(
-                "resource accumulator lock poisoned",
-            )),
-            peak_rss_bytes: Some(crate::ledger::ResourceMetric::unknown(
-                "resource accumulator lock poisoned",
-            )),
-        };
-    };
-    if !accum.observed_any_sample {
-        return crate::ledger::AttemptResourceUsage {
-            cpu_time_seconds: Some(crate::ledger::ResourceMetric::unknown(
-                "backend process tree exited before the first resource sample",
-            )),
-            peak_rss_bytes: Some(crate::ledger::ResourceMetric::unknown(
-                "backend process tree exited before the first resource sample",
-            )),
-        };
-    }
-    let ticks_per_second = linux_clock_ticks_per_second();
-    crate::ledger::AttemptResourceUsage {
-        cpu_time_seconds: Some(crate::ledger::ResourceMetric::measured(
-            accum.cpu_ticks_total as f64 / ticks_per_second,
-        )),
-        peak_rss_bytes: Some(crate::ledger::ResourceMetric::measured(
-            accum.peak_rss_bytes as f64,
-        )),
-    }
-}
-
-/// Non-Linux platforms cannot measure backend process trees (/proc is the
-/// only supported mechanism), so the attempt records explicit unsupported
-/// provenance — never zero, never silently absent.
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn finish_resource_sampler_none() -> crate::ledger::AttemptResourceUsage {
-    crate::ledger::AttemptResourceUsage {
-        cpu_time_seconds: Some(crate::ledger::ResourceMetric::unsupported(
-            "process-tree resource sampling is only implemented on Linux",
-        )),
-        peak_rss_bytes: Some(crate::ledger::ResourceMetric::unsupported(
-            "process-tree resource sampling is only implemented on Linux",
-        )),
-    }
-}
-
 /// Spawn `cmd` (stdout/stderr are set to piped by this helper) and drive it
 /// to completion, killing it only once both its log and worktree have gone
 /// genuinely quiet for `idle_timeout_seconds` -- never on a flat wall-clock
@@ -818,7 +659,8 @@ fn spawn_with_idle_watch_with_shutdown(
     // hard timeout, or shutdown -- so killed/cancelled attempts keep their
     // final observed maxima. `finish_resource_sampler` below stops it.
     #[cfg(target_os = "linux")]
-    let (resource_stop, resource_accumulator, resource_handle) = spawn_resource_sampler(child.id());
+    let (resource_stop, resource_accumulator, resource_handle) =
+        crate::runner::resources::spawn_resource_sampler(child.id());
     let (progress_tx, progress_rx) = mpsc::channel();
     let stdout_thread = child.stdout.take().map(|stdout| {
         copy_stream_to_file(stdout, log_path.to_path_buf(), Some(progress_tx.clone()))
@@ -942,11 +784,15 @@ fn spawn_with_idle_watch_with_shutdown(
     let resource_sample = {
         #[cfg(target_os = "linux")]
         {
-            finish_resource_sampler(resource_stop, resource_accumulator, resource_handle)
+            crate::runner::resources::finish_resource_sampler(
+                resource_stop,
+                resource_accumulator,
+                resource_handle,
+            )
         }
         #[cfg(not(target_os = "linux"))]
         {
-            finish_resource_sampler_none()
+            crate::runner::resources::finish_resource_sampler_none()
         }
     };
     // A surviving descendant may still own the inherited pipe descriptors.
@@ -1032,8 +878,25 @@ mod tests {
         );
         let shutdown = std::sync::Arc::new(AtomicBool::new(false));
         let trigger = std::sync::Arc::clone(&shutdown);
+        let log_for_trigger = f.session_dir.join("backend-output.log");
+        // Fire shutdown only once the backend's first output is confirmed in
+        // the log: under heavy parallel-test load the shell can take longer
+        // than any fixed delay to start, and a shutdown fired before its
+        // first echo would race the log assertion below.
         let trigger_thread = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if fs::read_to_string(&log_for_trigger)
+                    .map(|log| log.contains("started"))
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
             trigger.store(true, Ordering::SeqCst);
         });
         let log_path = f.session_dir.join("backend-output.log");

@@ -6,6 +6,7 @@ pub(crate) mod backends;
 pub(crate) mod output;
 pub(crate) mod process;
 pub(crate) mod resolve;
+pub(crate) mod resources;
 pub(crate) mod review;
 pub(crate) mod review_usage;
 
