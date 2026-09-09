@@ -7,7 +7,7 @@ use super::{
 };
 use crate::config::{Defaults, Profile};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PaidRouteApproval {
@@ -37,25 +37,25 @@ pub fn paid_route_approvals_from_entries(
     defaults: &Defaults,
 ) -> Vec<PaidRouteApproval> {
     let routing = profile.effective_routing(defaults);
-    let entries: Vec<_> = entries
+    let mut by_work: BTreeMap<String, Vec<LedgerEntry>> = BTreeMap::new();
+    for entry in entries
         .iter()
         .filter(|entry| entry.profile == profile_name && entry.repo_id == profile.repo_id)
-        .cloned()
-        .collect();
-    let work_ids: BTreeSet<_> = entries
-        .iter()
-        .filter_map(|entry| entry.work_id.as_deref())
-        .map(canonical_work_id)
-        .collect();
+    {
+        if let Some(work_id) = entry.work_id.as_deref() {
+            by_work
+                .entry(canonical_work_id(work_id))
+                .or_default()
+                .push(entry.clone());
+        }
+    }
     let mut result = Vec::new();
-    for work_id in work_ids {
+    for (work_id, entries) in by_work {
         let active =
             active_paid_route_approval_destinations_from_entries(&entries, profile_name, &work_id);
         let mut routes = BTreeMap::new();
         for entry in &entries {
-            if entry.mode != "paid_route_approval_grant"
-                || entry.work_id.as_deref().map(canonical_work_id).as_deref() != Some(&work_id)
-            {
+            if entry.mode != "paid_route_approval_grant" {
                 continue;
             }
             let key = (

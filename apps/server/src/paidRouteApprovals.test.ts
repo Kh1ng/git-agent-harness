@@ -6,6 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import { authMiddleware } from './authMiddleware.js';
 import { DeviceAccess, DEVICE_COOKIE } from './deviceAccess.js';
 import { mutationSafety } from './mutationSafety.js';
@@ -20,7 +21,7 @@ async function exercise(real: boolean) {
   const access = new DeviceAccess(join(directory, 'devices.json'));
   const app = express();
   app.locals.deviceAccess = access;
-  app.use(express.json(), authMiddleware);
+  app.use(express.json(), rateLimit({ windowMs: 60_000, limit: 200, validate: false }), authMiddleware);
   let rows = [{ ...pending }, { ...pending, backend_instance: 'paid-b' }];
   let changes = 0;
   const router = real ? paidRouteApprovalsRouter(mutationSafety('test-node', join(directory, 'mutations')))

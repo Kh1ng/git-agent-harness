@@ -1506,13 +1506,18 @@ export async function runPmPlanCommand(options: PmPlanCommand): Promise<import('
 
 /** Fixed work-item paid-route operations. Rust owns the approval projection. */
 export async function runPaidRouteApprovals(profile: string): Promise<import('@git-agent-harness/contracts').PaidRouteApproval[]> {
-  return runJsonCommand(['route-approval', 'list', `--profile=${profile}`], getConfigPath(process.env.GAH_CONFIG_PATH));
+  const config = getConfigPath(process.env.GAH_CONFIG_PATH ?? process.env.GAH_CONFIG);
+  const args = ['route-approval', 'list', `--profile=${profile}`];
+  if (config) args.push(`--config-path=${config}`);
+  return runJsonCommand(args, config);
 }
 
 export async function changePaidRouteApproval(action: 'grant' | 'revoke', scope: import('@git-agent-harness/contracts').PaidRouteScope): Promise<void> {
+  const config = getConfigPath(process.env.GAH_CONFIG_PATH ?? process.env.GAH_CONFIG);
   const args = ['route-approval', action, `--profile=${scope.profile}`, `--backend=${scope.backend}`];
+  if (config) args.push(`--config-path=${config}`);
   if (scope.backend_instance !== null) args.push(`--instance=${scope.backend_instance}`);
   if (scope.model !== null) args.push(`--model=${scope.model}`);
   args.push('--', scope.work_id);
-  return runVoidCommand(args, getConfigPath(process.env.GAH_CONFIG_PATH), 'gah route-approval');
+  return runVoidCommand(args, config, 'gah route-approval');
 }
