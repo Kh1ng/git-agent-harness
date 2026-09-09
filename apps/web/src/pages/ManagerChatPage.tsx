@@ -1507,7 +1507,7 @@ export function ManagerChatPage() {
 
       {/* Git strip: compact git state for the active session's project */}
       {currentProfileInfo && (
-        <div id="chat-git" className={`card-padded max-sm:[&_button]:min-h-11 ${toolsOpen || gitError ? '' : 'hidden sm:block'}`}>
+        <div id="chat-git" className={`card-padded max-sm:[&_button]:min-h-11 max-sm:[&_button]:min-w-11 ${toolsOpen || gitError ? '' : 'hidden sm:block'}`}>
           <GitStrip
             profile={profile}
             sessionId={sessionId}

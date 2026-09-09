@@ -35,7 +35,9 @@ for (const width of [320, 390]) {
     await expect(page.getByRole('button', { name: 'Archive', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Refresh git data' })).toBeVisible();
     for (const control of await page.locator('#chat-tools button:visible, #chat-tools summary:visible, #chat-git button:visible').all()) {
-      expect((await control.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      const bounds = (await control.boundingBox())!;
+      expect(bounds.height).toBeGreaterThanOrEqual(44);
+      expect(bounds.width).toBeGreaterThanOrEqual(44);
     }
     await page.getByRole('button', { name: 'Commit', exact: true }).click();
     await expect(page.getByPlaceholder('Commit message')).toBeVisible();
