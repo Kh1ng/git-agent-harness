@@ -1450,7 +1450,7 @@ export function ManagerChatPage() {
           className="btn-secondary min-h-11 text-xs sm:hidden" aria-expanded={toolsOpen} aria-controls="chat-tools chat-git">
           <MoreHorizontal size={16} aria-hidden="true" /> Chat tools
         </button>
-        <div id="chat-tools" className={`${toolsOpen ? 'flex' : 'hidden'} w-full flex-wrap items-center gap-2 sm:flex sm:w-auto`}>
+        <div id="chat-tools" className={`max-sm:[&_button]:min-h-11 max-sm:[&_summary]:min-h-11 ${toolsOpen ? 'flex' : 'hidden'} w-full flex-wrap items-center gap-2 sm:flex sm:w-auto`}>
           {skillBackend && (
             <SkillPicker
               binding={skillBinding}
@@ -1507,7 +1507,7 @@ export function ManagerChatPage() {
 
       {/* Git strip: compact git state for the active session's project */}
       {currentProfileInfo && (
-        <div id="chat-git" className={`card-padded ${toolsOpen || gitError ? '' : 'hidden sm:block'}`}>
+        <div id="chat-git" className={`card-padded max-sm:[&_button]:min-h-11 ${toolsOpen || gitError ? '' : 'hidden sm:block'}`}>
           <GitStrip
             profile={profile}
             sessionId={sessionId}
@@ -1633,7 +1633,7 @@ export function ManagerChatPage() {
             </span>
             <ChevronDown size={16} className={`shrink-0 text-secondary ${navigationOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
           </button>
-          <div id="chat-navigation" className={`${navigationOpen ? 'mt-2' : 'hidden'} xl:mt-0 xl:block`}>
+          <div id="chat-navigation" className={`max-xl:[&_button]:!min-h-11 max-xl:[&_summary]:min-h-11 ${navigationOpen ? 'mt-2' : 'hidden'} xl:mt-0 xl:block`}>
             <ProjectRail
               currentProfile={profile}
               profiles={availableProfiles.map(project => ({ ...project, name: project.catalogName ?? project.name }))}

@@ -83,8 +83,8 @@ test('profile changes reject stale chat replies and control data', async ({ page
   });
 
   await page.goto('/');
-  await expect(page.locator('[role="status"]:visible', { hasText: 'Live' })).toBeVisible();
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'New chat', exact: true })).toBeEnabled();
   await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toBeVisible();
   const projects = page.getByRole('navigation', { name: 'Projects' });
   await expect(projects.getByRole('button', { name: 'Alpha org/alpha' })).toBeVisible();
