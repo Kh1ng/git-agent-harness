@@ -22,6 +22,19 @@ struct ServerAddress: Equatable {
         self.origin = origin
     }
 
+    /// Camera input must be a complete GAH offer, not an arbitrary destination.
+    static func pairing(_ value: String) throws -> ServerAddress {
+        let target = try ServerAddress(value)
+        let parts = URLComponents(url: target.url, resolvingAgainstBaseURL: false)
+        let fields = URLComponents(string: "?" + (parts?.percentEncodedFragment ?? ""))?.queryItems ?? []
+        let codes = fields.filter { $0.name == "pair" }
+        let servers = fields.filter { $0.name == "server" }
+        guard codes.count == 1, servers.count == 1,
+              let code = codes[0].value, code.range(of: "^[A-Za-z0-9_-]{32}$", options: .regularExpression) != nil,
+              let server = servers[0].value, UUID(uuidString: server) != nil else { throw AddressError.invalidPairing }
+        return target
+    }
+
     func contains(_ other: URL) -> Bool {
         guard let candidate = try? ServerAddress(other.absoluteString) else { return false }
         func port(_ url: URL) -> Int { url.port ?? (url.scheme == "https" ? 443 : 80) }
@@ -48,7 +61,12 @@ struct ServerAddress: Equatable {
     }
 
     enum AddressError: LocalizedError {
-        case invalid
-        var errorDescription: String? { "Enter an HTTP or HTTPS server address without an embedded username or password." }
+        case invalid, invalidPairing
+        var errorDescription: String? {
+            switch self {
+            case .invalid: "Enter an HTTP or HTTPS server address without an embedded username or password."
+            case .invalidPairing: "Scan a GAH pairing QR code, or paste its complete pairing link in Settings."
+            }
+        }
     }
 }

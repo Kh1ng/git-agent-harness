@@ -17,7 +17,11 @@ export function CoordinatorConnection() {
   }, []);
   return <div className="mt-3">
     {trustedLanMode && <p role="status" className="mb-3 rounded-md border border-warning p-3 text-sm text-warning">Trusted-LAN mode is enabled. Live connections may work without a token. Remote dashboard data and session operations require pairing or an access token. Node setup requires owner access.</p>}
-    <details ref={ownerForm} className="text-sm" open={!isConnected || undefined}>
+    <DevicePairing requestOwnerAccess={() => {
+      if (ownerForm.current) ownerForm.current.open = true;
+      tokenInput.current?.focus();
+    }} />
+    <details ref={ownerForm} className="mt-3 text-sm" open={!isConnected || undefined}>
       <summary className="cursor-pointer text-secondary"><span>Central access token</span> <span className="text-muted">(optional owner access)</span></summary>
       <form className="mt-2 flex max-w-xl flex-wrap items-end gap-2" onSubmit={event => {
         event.preventDefault();
@@ -32,9 +36,5 @@ export function CoordinatorConnection() {
         {error && <p role="alert" className="w-full text-xs text-critical">{error}</p>}
       </form>
     </details>
-    <DevicePairing requestOwnerAccess={() => {
-      if (ownerForm.current) ownerForm.current.open = true;
-      tokenInput.current?.focus();
-    }} />
   </div>;
 }

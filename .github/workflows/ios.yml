@@ -37,6 +37,7 @@ jobs:
         env:
           SIMULATOR_ID: ${{ steps.simulator.outputs.id }}
         run: |
+          python3 apps/ios/GAHTests/test_fixture.py
           python3 apps/ios/GAHTests/fixture.py &
           FIXTURE_PID=$!
           trap 'kill "$FIXTURE_PID"' EXIT
