@@ -97,6 +97,22 @@ fn grants_inherit_pending_bounds_and_cannot_expand_or_replay_them() {
         assert_eq!(approved.purpose, requested.purpose);
         assert!(append_external_approval(&cfg, grant).is_err());
     }
+    append_external_approval(&cfg, request(&profile, "#44")).unwrap();
+    let mut narrowed = transition(&profile, "#44", "external_approval_grant");
+    let scope = narrowed.external_approval.as_mut().unwrap();
+    scope.max_requests = Some(1);
+    scope.max_dollars = Some(1.0);
+    scope.expires_at = Some(
+        (OffsetDateTime::now_utc() + time::Duration::minutes(5))
+            .format(&Rfc3339)
+            .unwrap(),
+    );
+    let expected = scope.clone();
+    let (granted, _) = append_external_approval(&cfg, narrowed).unwrap();
+    let actual = granted.external_approval.unwrap();
+    assert_eq!(actual.max_requests, expected.max_requests);
+    assert_eq!(actual.max_dollars, expected.max_dollars);
+    assert_eq!(actual.expires_at, expected.expires_at);
 }
 
 #[test]

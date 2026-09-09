@@ -356,6 +356,20 @@ mod tests {
         })
         .unwrap();
 
+        run(ExternalApprovalCommands::Grant {
+            profile: "test".to_string(),
+            work_id: "ISSUE-43".to_string(),
+            credential_label: "odds".to_string(),
+            operation_kind: "external_api".to_string(),
+            max_requests: Some(2),
+            max_dollars: None,
+            expires_at: None,
+            purpose: Some("test".to_string()),
+            config_path: Some(config_path.to_string_lossy().into_owned()),
+            json: true,
+        })
+        .unwrap();
+
         run(ExternalApprovalCommands::Expire {
             profile: "test".to_string(),
             work_id: "ISSUE-43".to_string(),
