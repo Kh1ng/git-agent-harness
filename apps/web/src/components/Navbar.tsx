@@ -96,7 +96,6 @@ export function Navbar({ currentPage, onPageChange }: NavbarProps) {
       <header className="mobile-app-header lg:hidden sticky top-0 z-30 flex items-center justify-between px-4 bg-card border-b border-subtle">
         <div>
           <h1 className="text-sm font-semibold text-primary">Git Agent Harness</h1>
-          <p className="text-[10px] text-muted font-mono" data-testid="frontend-build">{FRONTEND_BUILD}</p>
         </div>
         <button
           onClick={() => setDrawerOpen(true)}

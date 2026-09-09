@@ -52,7 +52,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
   let closedDeviceSockets = 0;
   phone.on('websocket', socket => { if (new URL(socket.url()).pathname === '/ws') socket.on('close', () => { closedDeviceSockets++; }); });
   try {
-    await owner.goto(origin);
+    await owner.goto(`${origin}/?page=settings`);
     await owner.getByLabel('Access token', { exact: true }).fill('browser-owner-secret');
     await owner.getByRole('button', { name: 'Save and reconnect' }).click();
     await owner.getByRole('button', { name: 'Pair a device', exact: true }).click();
@@ -72,6 +72,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     await expect(owner.getByText('To pair a browser, open the pairing link there. The iPhone Camera app opens Safari; pairing there signs in Safari only.')).toBeVisible();
     await phone.goto(link);
     await expect(phone.getByRole('heading', { name: 'Confirm this server' })).toBeVisible();
+    expect(new URL(phone.url()).searchParams.get('page')).toBe('settings');
     await expect(phone.getByText(`Pairing test central · ${origin}`, { exact: true })).toBeVisible();
     await expect(phone.getByText(/Dashboard control: read projects and chats, run agent work/)).toBeVisible();
     await expect(phone.getByText(/permits unencrypted HTTP/)).toBeVisible();
@@ -132,7 +133,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     await expect.poll(() => phone.evaluate(async () => (await fetch('/api/profiles')).status)).toBe(401);
     await expect.poll(() => closedDeviceSockets).toBeGreaterThan(closedBeforeRevocation);
     // The manual paste fallback must reject the already-used code as well.
-    await phone.goto(origin);
+    await phone.goto(`${origin}/?page=settings`);
     await phone.getByRole('button', { name: 'Pair this device', exact: true }).click();
     await expect(phone.getByText('Ask the owner for a pairing link or QR code to stay signed in on this device. An owner access token grants temporary access for this tab only.')).toBeVisible();
     await phone.getByLabel('Open a pairing link', { exact: true }).fill(link);

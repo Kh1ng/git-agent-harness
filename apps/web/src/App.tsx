@@ -3,8 +3,6 @@ import { LoadingState } from './components/ui/EmptyState.js';
 import { useWebSocket } from './ws/WebSocketContext.js';
 import { OverviewPage } from './pages/OverviewPage.js';
 import { Navbar } from './components/Navbar.js';
-import { ConnectionStatus } from './components/ConnectionStatus.js';
-import { CoordinatorConnection } from './components/CoordinatorConnection.js';
 import { SessionDetailModal } from './components/SessionDetailModal.js';
 import type { Session } from '@git-agent-harness/contracts';
 import { readNavigation, updateNavigation, type Page } from './lib/navigationState.js';
@@ -21,10 +19,10 @@ const NodesPage = lazy(() => import('./pages/NodesPage.js').then((module) => ({ 
 export type { Page } from './lib/navigationState.js';
 
 export function App() {
-  const [currentPage, setCurrentPage] = useState<Page>(() => readNavigation().page);
+  const [currentPage, setCurrentPage] = useState<Page>(() => new URLSearchParams(window.location.hash.slice(1)).has('pair') ? 'settings' : readNavigation().page);
   useEffect(() => updateNavigation({ page: currentPage }), [currentPage]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
-  const { isConnected, isConnecting, error: wsError, sessions, serverVersion } = useWebSocket();
+  const { isConnected, isConnecting, sessions } = useWebSocket();
 
   const renderPage = () => {
     switch (currentPage) {
@@ -62,25 +60,12 @@ export function App() {
       <Navbar currentPage={currentPage} onPageChange={setCurrentPage} />
 
       <div className="flex-1 min-w-0">
-        <div className="hidden lg:flex items-center justify-end px-6 py-2 border-b border-subtle">
-          <ConnectionStatus
-            isConnected={isConnected}
-            isConnecting={isConnecting}
-            error={wsError}
-            serverVersion={serverVersion}
-          />
-        </div>
-
         <main id="main-content" tabIndex={-1} className="px-4 py-4 sm:px-6 sm:py-6 max-w-[1400px] mx-auto">
-          <div className="lg:hidden mb-4">
-            <ConnectionStatus
-              isConnected={isConnected}
-              isConnecting={isConnecting}
-              error={wsError}
-              serverVersion={serverVersion}
-            />
-          </div>
-          <CoordinatorConnection />
+          {!isConnected && !isConnecting && currentPage !== 'settings' && (
+            <p role="status" className="mb-3 text-sm text-secondary">
+              Disconnected. <button className="min-h-11 text-accent underline" onClick={() => setCurrentPage('settings')}>Open connection settings</button>
+            </p>
+          )}
           <Suspense fallback={<LoadingState label="Loading page…" />}>{renderPage()}</Suspense>
         </main>
       </div>

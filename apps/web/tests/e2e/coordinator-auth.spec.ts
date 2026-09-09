@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-test('saving the first valid token restores a mounted REST panel without navigation', async ({ page }) => {
+test('connection settings restore dashboard access after the first valid token', async ({ page }) => {
   let rejectedReads = 0;
   let authenticatedReads = 0;
   await page.route(url => url.pathname === '/api/status', async route => {
@@ -31,8 +31,11 @@ test('saving the first valid token restores a mounted REST panel without navigat
   await page.getByRole('button', { name: 'Overview', exact: true }).click();
   await expect.poll(() => rejectedReads).toBeGreaterThan(0);
   await expect(page.getByRole('alert')).toContainText('Coordinator token required');
+  await expect(page.getByLabel('Access token', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Open connection settings' }).click();
   await page.getByLabel('Access token', { exact: true }).fill('dashboard-secret');
   await page.getByRole('button', { name: 'Save and reconnect' }).click();
+  await page.getByRole('button', { name: 'Overview', exact: true }).click();
   await expect.poll(() => authenticatedReads).toBeGreaterThan(0);
   await expect(page.getByRole('alert').filter({ hasText: 'Coordinator token required' })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible();
@@ -83,8 +86,11 @@ test('the first token restores mounted Chat projects, provider choices, git, and
   await expect(page.getByLabel('Run on node', { exact: true })).toBeDisabled();
   expect(providerPaths.filter(path => rejected.has(path))).toEqual([]);
   await expect(page.getByRole('navigation', { name: 'Projects', exact: true }).getByRole('button')).toHaveCount(0);
-  await page.getByLabel('Access token', { exact: true }).fill('chat-secret');
-  await page.getByRole('button', { name: 'Save and reconnect' }).click();
+  // Exercise credential refresh with Chat still mounted; the owner form now lives in Settings.
+  await page.evaluate(() => {
+    sessionStorage.setItem('gah.coordinatorToken', 'chat-secret');
+    window.dispatchEvent(new Event('gah.coordinatorTokenChanged'));
+  });
   await expect(page.getByRole('navigation', { name: 'Projects', exact: true }).getByRole('button', { name: /Fixture/ })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex');
   await expect(page.getByText('feat/mock-control-plane-1087', { exact: true })).toBeVisible();
