@@ -24,7 +24,7 @@ use std::time::Duration;
 /// exits mid-attempt still contributes its full consumption; peak RSS is the
 /// maximum tree-wide resident total observed at any sample.
 #[cfg(target_os = "linux")]
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ResourceAccumulator {
     observed_any_sample: bool,
     last_ticks_by_process: HashMap<ProcessIdentity, u64>,

@@ -259,10 +259,10 @@ pub(crate) struct ProcessIdentity {
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug)]
-struct ProcessSnapshot {
-    identity: ProcessIdentity,
-    parent_pid: u32,
-    zombie: bool,
+pub(crate) struct ProcessSnapshot {
+    pub(crate) identity: ProcessIdentity,
+    pub(crate) parent_pid: u32,
+    pub(crate) zombie: bool,
 }
 
 #[cfg(target_os = "linux")]
