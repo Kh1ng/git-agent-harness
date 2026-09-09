@@ -5,6 +5,9 @@ import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
+import { CoordinatorConnection } from '../components/CoordinatorConnection.js';
+import { ConnectionStatus } from '../components/ConnectionStatus.js';
+import { FRONTEND_BUILD } from '../components/Navbar.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState } from '../components/ui/EmptyState.js';
 import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
@@ -26,7 +29,7 @@ const WAKE_AUTONOMY_OPTIONS: { value: WakeAutonomyValue; label: string }[] = [
 ];
 
 export function SettingsPage() {
-  const { providers, providerStatuses, sendMessage, isConnected, serverVersion, profile } = useWebSocket();
+  const { providers, providerStatuses, sendMessage, isConnected, isConnecting, error: connectionError, serverVersion, profile } = useWebSocket();
   const { theme, setTheme, profileOverride, setProfileOverride } = useUiStore();
   const profiles = useGahStore((s) => s.profiles);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
@@ -110,11 +113,19 @@ export function SettingsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Settings"
-        description="Profiles, backends, skills, memory, and node operation"
+        description="Connection, devices, and preferences"
         onRefresh={refreshAll}
         refreshing={profiles.loading || config.loading}
         lastUpdated={lastUpdated}
       />
+
+      <section className="card-padded max-w-4xl" aria-labelledby="connection-settings-title">
+        <h2 id="connection-settings-title" className="text-base font-semibold text-primary">Connection & pairing</h2>
+        <p className="mt-1 mb-3 break-all text-sm text-secondary">{window.location.origin}</p>
+        <ConnectionStatus isConnected={isConnected} isConnecting={isConnecting} error={connectionError} serverVersion={serverVersion} />
+        <CoordinatorConnection />
+        <p className="mt-3 text-xs text-muted" data-testid="settings-build">App {FRONTEND_BUILD}</p>
+      </section>
 
       <section className="card-padded max-w-4xl">
         <h3 className="text-sm font-semibold text-primary mb-2">Profile context</h3>

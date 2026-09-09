@@ -41,8 +41,16 @@ for (const scenario of [
       await page.getByRole('button', { name: scenario.pageName, exact: true }).click();
     }
     await expect.poll(() => [...rejected].sort()).toEqual([...scenario.paths].sort());
-    await page.getByLabel('Access token', { exact: true }).fill('settings-secret');
-    await page.getByRole('button', { name: 'Save and reconnect' }).click();
+    if (scenario.pageName === 'Settings') {
+      await page.getByLabel('Access token', { exact: true }).fill('settings-secret');
+      await page.getByRole('button', { name: 'Save and reconnect' }).click();
+    } else {
+      // Keep the protected page mounted while exercising the shared credential event.
+      await page.evaluate(() => {
+        sessionStorage.setItem('gah.coordinatorToken', 'settings-secret');
+        window.dispatchEvent(new Event('gah.coordinatorTokenChanged'));
+      });
+    }
     await expect.poll(() => [...authenticated].sort()).toEqual([...scenario.paths].sort());
     await expect(page.getByText(/Coordinator token required/)).toHaveCount(0);
     if (scenario.section === 'TDAI / memory') {

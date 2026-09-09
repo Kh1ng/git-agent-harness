@@ -15,7 +15,7 @@ export function CoordinatorConnection() {
     window.addEventListener(TOKEN_CHANGED_EVENT, changed);
     return () => window.removeEventListener(TOKEN_CHANGED_EVENT, changed);
   }, []);
-  return <div className="mb-4">
+  return <div className="mt-3">
     {trustedLanMode && <p role="status" className="mb-3 rounded-md border border-warning p-3 text-sm text-warning">Trusted-LAN mode is enabled. Live connections may work without a token. Remote dashboard data and session operations require pairing or an access token. Node setup requires owner access.</p>}
     <details ref={ownerForm} className="text-sm" open={!isConnected || undefined}>
       <summary className="cursor-pointer text-secondary"><span>Central access token</span> <span className="text-muted">(optional owner access)</span></summary>
