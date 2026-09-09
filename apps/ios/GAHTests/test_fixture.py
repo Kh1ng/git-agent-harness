@@ -12,7 +12,9 @@ class FixtureTests(unittest.TestCase):
     def test_idle_connection_does_not_block_control_requests(self):
         # Loopback fixture requests must not inherit the runner's outbound proxy.
         urlopen = build_opener(ProxyHandler({})).open
-        fixture = subprocess.Popen([sys.executable, str(Path(__file__).with_name('fixture.py'))], stderr=subprocess.PIPE, text=True)
+        fixture = subprocess.Popen([sys.executable, '-c',
+            "import faulthandler, runpy, sys; faulthandler.dump_traceback_later(20); runpy.run_path(sys.argv[1], run_name='__main__')",
+            str(Path(__file__).with_name('fixture.py'))], stderr=subprocess.PIPE, text=True)
         try:
             deadline = time.monotonic() + 30
             while True:
@@ -27,10 +29,11 @@ class FixtureTests(unittest.TestCase):
                                 listening = 'direct connection succeeded'
                         except OSError as error:
                             listening = str(error)
+                        listeners = subprocess.run(['lsof', '-nP', '-iTCP:18773', '-sTCP:LISTEN'], capture_output=True, text=True).stdout
                         exit_code = fixture.poll()
                         fixture.terminate()
                         _, stderr = fixture.communicate(timeout=5)
-                        self.fail(f'Fixture readiness failed: child exit={exit_code}; {listening}; stderr={stderr}')
+                        self.fail(f'Fixture readiness failed: child exit={exit_code}; {listening}; listeners={listeners}; stderr={stderr}')
                     time.sleep(0.01)
             with socket.create_connection(('127.0.0.1', 18773)):
                 with urlopen('http://127.0.0.1:18773/arm-recovery', timeout=1) as response:
