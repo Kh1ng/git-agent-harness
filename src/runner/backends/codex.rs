@@ -1,86 +1,61 @@
 use anyhow::Result;
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 
+use crate::backend_kind::BackendKind;
 use crate::runner::output;
 use crate::runner::process::{spawn_with_idle_watch, write_redacted_task};
 use crate::runner::resolve::{codex_model_args, filtered_codex_args};
-use crate::runner::RunResult;
+use crate::runner::{BackendRunner, RunContext, RunResult};
 
-/// Run Codex non-interactively via `codex exec`.
-/// extra_args come from profile.codex_args, but stale model flags are
-/// stripped so the resolved route controls the launched model.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn run_codex(
-    worktree: &Path,
-    task: &str,
-    session_dir: &Path,
-    model: Option<&str>,
-    extra_args: &[String],
-    env_vars: &[(String, String)],
-    idle_timeout_seconds: u64,
-) -> Result<RunResult> {
-    run_codex_with_executable(
-        Path::new("codex"),
-        worktree,
-        task,
-        session_dir,
-        model,
-        extra_args,
-        env_vars,
-        idle_timeout_seconds,
-    )
-}
+/// Runs a single Codex task, collecting its output, summary, and transcript.
+/// Route models override stale model flags in the supplied profile arguments.
+pub struct CodexRunner;
 
-#[allow(clippy::too_many_arguments)]
-pub fn run_codex_with_executable(
-    executable: &Path,
-    worktree: &Path,
-    task: &str,
-    session_dir: &Path,
-    model: Option<&str>,
-    extra_args: &[String],
-    env_vars: &[(String, String)],
-    idle_timeout_seconds: u64,
-) -> Result<RunResult> {
-    let log_path = session_dir.join("backend-output.log");
-    write_redacted_task(session_dir, task)?;
+impl BackendRunner for CodexRunner {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Codex
+    }
 
-    let mut cmd = Command::new(executable);
-    // Issue #152: --json produces structured JSONL output for programmatic
-    // usage extraction in parse_codex_exec_json (usage.rs).
-    cmd.arg("exec")
-        .arg("--json")
-        .arg(task)
-        .args(filtered_codex_args(extra_args))
-        .args(codex_model_args(model))
-        .current_dir(worktree);
-    crate::runner::apply_child_env(&mut cmd, env_vars);
+    fn run(&self, ctx: &RunContext) -> Result<RunResult> {
+        let log_path = ctx.session_dir.join("backend-output.log");
+        write_redacted_task(ctx.session_dir, ctx.task)?;
 
-    let (exit_code, duration_secs) = spawn_with_idle_watch(
-        cmd,
-        &log_path,
-        worktree,
-        idle_timeout_seconds,
-        "launching codex; is it installed and on PATH?",
-    )?;
+        let mut cmd = Command::new(ctx.executable);
+        // Issue #152: --json produces structured JSONL output for programmatic
+        // usage extraction in parse_codex_exec_json (usage.rs).
+        cmd.arg("exec")
+            .arg("--json")
+            .arg(ctx.task)
+            .args(filtered_codex_args(ctx.extra_args))
+            .args(codex_model_args(ctx.model))
+            .current_dir(ctx.worktree);
+        crate::runner::apply_child_env(&mut cmd, ctx.env_vars);
 
-    let output_text = fs::read_to_string(&log_path).unwrap_or_default();
-    let transcript_path =
-        crate::runner::review_usage::find_codex_transcript(env_vars, &output_text)
-            .map(|path| path.to_string_lossy().into_owned());
-    Ok(RunResult {
-        exit_code,
-        duration_secs,
-        log_path: log_path.to_string_lossy().into_owned(),
-        final_summary: output::extract_codex_jsonl_summary(&output_text),
-        agy_cli_log_delta: None,
-        internal_log_delta: None,
-        internal_log_path: None,
-        transcript_path,
-        agy_version: None,
-    })
+        let (exit_code, duration_secs) = spawn_with_idle_watch(
+            cmd,
+            &log_path,
+            ctx.worktree,
+            ctx.idle_timeout_seconds,
+            "launching codex; is it installed and on PATH?",
+        )?;
+
+        let output_text = fs::read_to_string(&log_path).unwrap_or_default();
+        let transcript_path =
+            crate::runner::review_usage::find_codex_transcript(ctx.env_vars, &output_text)
+                .map(|path| path.to_string_lossy().into_owned());
+        Ok(RunResult {
+            exit_code,
+            duration_secs,
+            log_path: log_path.to_string_lossy().into_owned(),
+            final_summary: output::extract_codex_jsonl_summary(&output_text),
+            agy_cli_log_delta: None,
+            internal_log_delta: None,
+            internal_log_path: None,
+            transcript_path,
+            agy_version: None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -88,7 +63,7 @@ mod tests {
     use super::*;
     use crate::runner::backends::test_util::*;
     use std::fs;
-    // ── run_codex ────────────────────────────────────────────────────────
+    use std::path::Path;
 
     #[test]
     fn run_codex_success_writes_stdout_and_stderr_to_log() {
@@ -97,16 +72,20 @@ mod tests {
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_codex(
-            &f.worktree,
-            "codex task",
-            &f.session_dir,
-            None,
-            &[],
-            &envs,
-            300,
-        )
-        .unwrap();
+        let result = CodexRunner
+            .run(&RunContext {
+                executable: Path::new("codex"),
+                worktree: &f.worktree,
+                task: "codex task",
+                session_dir: &f.session_dir,
+                model: None,
+                extra_args: &[],
+                env_vars: &envs,
+                idle_timeout_seconds: 300,
+                llm: None,
+                print_timeout_seconds: None,
+            })
+            .unwrap();
 
         assert_eq!(result.exit_code, 0);
         let log = fs::read_to_string(&result.log_path).unwrap();
@@ -121,7 +100,20 @@ mod tests {
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 7);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap();
+        let result = CodexRunner
+            .run(&RunContext {
+                executable: Path::new("codex"),
+                worktree: &f.worktree,
+                task: "task",
+                session_dir: &f.session_dir,
+                model: None,
+                extra_args: &[],
+                env_vars: &envs,
+                idle_timeout_seconds: 300,
+                llm: None,
+                print_timeout_seconds: None,
+            })
+            .unwrap();
 
         assert_eq!(result.exit_code, 7);
     }
@@ -133,16 +125,20 @@ mod tests {
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_codex(
-            &f.worktree,
-            "the codex task",
-            &f.session_dir,
-            None,
-            &["-c".to_string(), "model=gpt".to_string()],
-            &envs,
-            300,
-        )
-        .unwrap();
+        CodexRunner
+            .run(&RunContext {
+                executable: Path::new("codex"),
+                worktree: &f.worktree,
+                task: "the codex task",
+                session_dir: &f.session_dir,
+                model: None,
+                extra_args: &["-c".to_string(), "model=gpt".to_string()],
+                env_vars: &envs,
+                idle_timeout_seconds: 300,
+                llm: None,
+                print_timeout_seconds: None,
+            })
+            .unwrap();
 
         let argv = recorded_argv(&f.record_dir);
         assert_eq!(argv[0], "exec");
@@ -162,7 +158,20 @@ mod tests {
             ("FROM_ENV_FILE".to_string(), "codex-env-value".to_string()),
         ];
 
-        run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap();
+        CodexRunner
+            .run(&RunContext {
+                executable: Path::new("codex"),
+                worktree: &f.worktree,
+                task: "task",
+                session_dir: &f.session_dir,
+                model: None,
+                extra_args: &[],
+                env_vars: &envs,
+                idle_timeout_seconds: 300,
+                llm: None,
+                print_timeout_seconds: None,
+            })
+            .unwrap();
 
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("FROM_ENV_FILE=codex-env-value"));
@@ -173,8 +182,20 @@ mod tests {
         let f = fixture();
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let err =
-            run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap_err();
+        let err = CodexRunner
+            .run(&RunContext {
+                executable: Path::new("codex"),
+                worktree: &f.worktree,
+                task: "task",
+                session_dir: &f.session_dir,
+                model: None,
+                extra_args: &[],
+                env_vars: &envs,
+                idle_timeout_seconds: 300,
+                llm: None,
+                print_timeout_seconds: None,
+            })
+            .unwrap_err();
 
         assert!(err.to_string().contains("launching codex; is it installed"));
     }
@@ -200,7 +221,20 @@ mod tests {
             ),
         )];
 
-        let result = run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs, 1).unwrap();
+        let result = CodexRunner
+            .run(&RunContext {
+                executable: Path::new("codex"),
+                worktree: &f.worktree,
+                task: "task",
+                session_dir: &f.session_dir,
+                model: None,
+                extra_args: &[],
+                env_vars: &envs,
+                idle_timeout_seconds: 1,
+                llm: None,
+                print_timeout_seconds: None,
+            })
+            .unwrap();
 
         assert_eq!(result.exit_code, -1);
         let log = fs::read_to_string(&result.log_path).unwrap();
@@ -219,22 +253,26 @@ mod tests {
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_codex(
-            &f.worktree,
-            "task",
-            &f.session_dir,
-            Some("gpt-5.4"),
-            &[
-                "--dangerously-bypass-approvals-and-sandbox".to_string(),
-                "-m".to_string(),
-                "legacy-mini".to_string(),
-                "--model=older".to_string(),
-                "--trace".to_string(),
-            ],
-            &envs,
-            300,
-        )
-        .unwrap();
+        CodexRunner
+            .run(&RunContext {
+                executable: Path::new("codex"),
+                worktree: &f.worktree,
+                task: "task",
+                session_dir: &f.session_dir,
+                model: Some("gpt-5.4"),
+                extra_args: &[
+                    "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                    "-m".to_string(),
+                    "legacy-mini".to_string(),
+                    "--model=older".to_string(),
+                    "--trace".to_string(),
+                ],
+                env_vars: &envs,
+                idle_timeout_seconds: 300,
+                llm: None,
+                print_timeout_seconds: None,
+            })
+            .unwrap();
 
         let argv = recorded_argv(&f.record_dir);
         assert_eq!(argv[0], "exec");
