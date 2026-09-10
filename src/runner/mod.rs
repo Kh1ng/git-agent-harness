@@ -12,7 +12,7 @@ pub(crate) mod review_usage;
 
 #[allow(unused_imports)]
 pub use crate::runner::backend_runner::{
-    AgyRunner, BackendRunner, ClaudeRunner, CodexRunner, HermesRunner, OpencodeRunner,
+    for_kind, AgyRunner, BackendRunner, ClaudeRunner, CodexRunner, HermesRunner, OpencodeRunner,
     OpenhandsRunner, RunContext, VibeRunner,
 };
 #[allow(unused_imports)]
