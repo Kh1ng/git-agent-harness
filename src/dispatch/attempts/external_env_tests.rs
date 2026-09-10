@@ -14,6 +14,7 @@ fn external_env_vars_preserve_non_external_content_and_require_active_grant() {
         "odds".to_string(),
         ExternalCredentialScope {
             env_vars: vec!["ODDS_API_KEY".to_string()],
+            ..Default::default()
         },
     );
     let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
@@ -75,6 +76,7 @@ fn failed_backend_attempt_still_consumes_the_external_request_budget() {
         "odds".to_string(),
         ExternalCredentialScope {
             env_vars: vec!["ODDS_API_KEY".to_string()],
+            ..Default::default()
         },
     );
     let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());

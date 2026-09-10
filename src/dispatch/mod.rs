@@ -19,6 +19,7 @@ mod dependencies;
 mod dry_run;
 mod environment;
 mod error;
+pub(crate) mod external_approval_pause;
 mod identity;
 mod issues;
 mod metrics;

@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 pub struct ExternalCredentialScope {
     #[serde(default)]
     pub env_vars: Vec<String>,
+    /// Issue #653: bounds carried on the auto-raised external-approval
+    /// request. Both default to unbounded — the operator tightens them at
+    /// grant time if wanted.
+    #[serde(default)]
+    pub max_requests: Option<u64>,
+    #[serde(default)]
+    pub max_dollars: Option<f64>,
+    /// Why the work items in this profile need the credential; surfaces in
+    /// the notification and the request record.
+    #[serde(default)]
+    pub purpose: Option<String>,
 }
 
 impl Profile {

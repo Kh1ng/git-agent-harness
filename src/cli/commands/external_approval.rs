@@ -174,6 +174,27 @@ fn write_transition(
     };
     let entry = LedgerEntry::new_external_approval(profile, prof, work_id, mode, approval);
     let (entry, path) = ledger::append_external_approval(&cfg, entry)?;
+    // Issue #653: resolution notifications (grant/deny/revoke/expire) ride
+    // the same configured channels as the request. Denied/expired leave the
+    // hold standing; a grant releases it (gate-scan semantics).
+    if matches!(
+        mode,
+        "external_approval_grant"
+            | "external_approval_revoke"
+            | "external_approval_expire"
+            | "external_approval_deny"
+    ) {
+        crate::notifications::notify_event(
+            &cfg,
+            prof,
+            crate::notifications::NotifyEvent::ExternalApprovalResolved {
+                profile,
+                work_id,
+                credential_label,
+                state,
+            },
+        );
+    }
     if json {
         println!("{}", serde_json::to_string(&entry)?);
     } else {
@@ -262,6 +283,9 @@ mod tests {
             "odds".to_string(),
             ExternalCredentialScope {
                 env_vars: vec!["ODDS_API_KEY".to_string()],
+                max_requests: None,
+                max_dollars: None,
+                purpose: None,
             },
         )]);
         profile

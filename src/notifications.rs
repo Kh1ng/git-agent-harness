@@ -69,6 +69,24 @@ pub enum NotifyEvent<'a> {
         candidate: &'a crate::ledger::RoutingCandidateDiagnostic,
         alternative: Option<&'a crate::ledger::RoutingCandidateDiagnostic>,
     },
+    /// Issue #653: a dispatch paused before backend launch because a declared
+    /// external credential scope lacks an active grant for this work item.
+    ExternalApprovalRequested {
+        profile: &'a str,
+        work_id: &'a str,
+        credential_label: &'a str,
+        env_vars: &'a str,
+        bounds: &'a str,
+        purpose: Option<&'a str>,
+        grant_command: &'a str,
+    },
+    /// Issue #653: an external-approval request reached a terminal state.
+    ExternalApprovalResolved {
+        profile: &'a str,
+        work_id: &'a str,
+        credential_label: &'a str,
+        state: &'a str,
+    },
     /// A draft MR/PR was created/pushed.
     MrCreated {
         url: &'a str,
@@ -194,6 +212,34 @@ pub fn format_message(event: &NotifyEvent) -> String {
                 }
             }
             message
+        }
+        NotifyEvent::ExternalApprovalRequested {
+            profile,
+            work_id,
+            credential_label,
+            env_vars,
+            bounds,
+            purpose,
+            grant_command,
+        } => {
+            let mut msg = format!(
+                "[gah] external API approval required [profile={profile}] work_id={work_id} credential={credential_label} env_vars=[{env_vars}] bounds={bounds}",
+            );
+            if let Some(purpose) = purpose {
+                msg.push_str(&format!(" purpose={purpose}"));
+            }
+            msg.push_str(&format!(" approve: {grant_command}"));
+            msg
+        }
+        NotifyEvent::ExternalApprovalResolved {
+            profile,
+            work_id,
+            credential_label,
+            state,
+        } => {
+            format!(
+                "[gah] external approval {state} [profile={profile}] work_id={work_id} credential={credential_label}"
+            )
         }
         NotifyEvent::MrCreated {
             url,
@@ -374,6 +420,10 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
         // spam this event is designed to explain.
         NotifyEvent::ReviewOutputInvalid { .. }
         | NotifyEvent::PaidRouteApprovalRequired { .. } => return None,
+        // Issue #653: external approvals are operator decisions; a woken
+        // manager must never grant its own credentials.
+        NotifyEvent::ExternalApprovalRequested { .. } => return None,
+        NotifyEvent::ExternalApprovalResolved { .. } => return None,
         NotifyEvent::DispatchFailed {
             failure_class,
             failure_stage,
@@ -869,6 +919,8 @@ fn event_name(event: &NotifyEvent<'_>) -> &'static str {
     match event {
         NotifyEvent::HumanRequired { .. } => "human_required",
         NotifyEvent::PaidRouteApprovalRequired { .. } => "paid_route_approval_required",
+        NotifyEvent::ExternalApprovalRequested { .. } => "external_approval_requested",
+        NotifyEvent::ExternalApprovalResolved { .. } => "external_approval_resolved",
         NotifyEvent::MrCreated { .. } => "mr_created",
         NotifyEvent::ReviewVerdict { .. } => "review_verdict",
         NotifyEvent::ReviewOutputInvalid { .. } => "review_output_invalid",
@@ -884,6 +936,8 @@ fn event_work_id<'a>(event: &'a NotifyEvent<'a>) -> Option<&'a str> {
     match event {
         NotifyEvent::MrMerged { work_id, .. }
         | NotifyEvent::PaidRouteApprovalRequired { work_id, .. } => Some(work_id),
+        NotifyEvent::ExternalApprovalRequested { work_id, .. }
+        | NotifyEvent::ExternalApprovalResolved { work_id, .. } => Some(work_id),
         NotifyEvent::DispatchFailed { work_id, .. } => Some(work_id),
         NotifyEvent::DispatchFailureResolved { work_id, .. } => Some(work_id),
         NotifyEvent::HandoffCreated { ticket, .. } => Some(ticket),
@@ -903,6 +957,8 @@ fn event_profile<'a>(event: &'a NotifyEvent<'a>) -> Option<&'a str> {
     match event {
         NotifyEvent::DispatchFailed { profile, .. }
         | NotifyEvent::PaidRouteApprovalRequired { profile, .. }
+        | NotifyEvent::ExternalApprovalRequested { profile, .. }
+        | NotifyEvent::ExternalApprovalResolved { profile, .. }
         | NotifyEvent::DispatchFailureResolved { profile, .. } => Some(profile),
         _ => None,
     }

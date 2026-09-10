@@ -66,6 +66,13 @@ pub enum HumanRequiredReason {
     /// re-dispatching the same doomed ticket after a reboot instead of
     /// spinning on it.
     TerminalHarnessFailure,
+    /// Issue #653: the work item needs a declared external credential scope
+    /// whose env vars exist in the operator's environment but lack an active
+    /// grant. The dispatch paused before backend launch (no attempt consumed,
+    /// no backend failure); the external-approval request was raised and the
+    /// operator notified. A valid grant releases the durable hold and the
+    /// existing loop re-selects the work automatically.
+    ExternalApiApprovalRequired,
     /// Unknown reason - for historical records without a code or genuinely
     /// unclassifiable cases. Missing data is never inferred as a different reason.
     #[default]
@@ -88,6 +95,7 @@ impl HumanRequiredReason {
             Self::MergeRetryCapExceeded => "merge_retry_cap_exceeded",
             Self::StuckLoopGate => "stuck_loop_gate",
             Self::TerminalHarnessFailure => "terminal_harness_failure",
+            Self::ExternalApiApprovalRequired => "external_api_approval_required",
             Self::Unknown => "unknown",
         }
     }
@@ -109,6 +117,7 @@ impl HumanRequiredReason {
             "merge_retry_cap_exceeded" => Self::MergeRetryCapExceeded,
             "stuck_loop_gate" => Self::StuckLoopGate,
             "terminal_harness_failure" => Self::TerminalHarnessFailure,
+            "external_api_approval_required" => Self::ExternalApiApprovalRequired,
             _ => Self::Unknown,
         }
     }
@@ -129,6 +138,7 @@ impl HumanRequiredReason {
             Self::MergeRetryCapExceeded,
             Self::StuckLoopGate,
             Self::TerminalHarnessFailure,
+            Self::ExternalApiApprovalRequired,
             Self::Unknown,
         ]
     }

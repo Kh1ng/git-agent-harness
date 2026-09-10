@@ -330,6 +330,29 @@ pub fn plan_remediation(context: RemediationContext<'_>) -> RemediationPlan {
             RemediationAuthority::PaidRouteApprover,
             route_approval_actions(profile_name, work_id),
         ),
+        HumanRequiredReason::ExternalApiApprovalRequired => plan_with_authority(
+            profile_name,
+            work_id,
+            reference,
+            reason_code,
+            RemediationAuthority::Operator,
+            vec![
+                RemediationAction::command(
+                    "Grant the exact external-approval request once the operator has validated the scope",
+                    format!(
+                        "gah external-approval grant --profile {profile_name} {} --credential-label <label> --operation-kind env_credential",
+                        work_label(work_id)
+                    ),
+                ),
+                RemediationAction::inspect(
+                    "Inspect the pending external-approval request and its bounds",
+                    format!(
+                        "gah external-approval inspect --profile {profile_name} {} --credential-label <label> --operation-kind env_credential",
+                        work_label(work_id)
+                    ),
+                ),
+            ],
+        ),
         HumanRequiredReason::RetryBudgetExhausted
         | HumanRequiredReason::FixRetryCapExceeded
         | HumanRequiredReason::MergeRetryCapExceeded => plan_with_authority(

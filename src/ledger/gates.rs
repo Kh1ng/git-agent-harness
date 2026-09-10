@@ -149,8 +149,6 @@ fn effective_human_gate_for_scope(
                 continue;
             }
             "claim"
-            | "external_approval_grant"
-            | "paid_route_approval_revoke"
             | "external_approval_request"
             | "external_approval_consume"
             | "external_approval_revoke"
@@ -158,6 +156,21 @@ fn effective_human_gate_for_scope(
             | "external_approval_deny"
             | "review_hold"
             | "review_hold_release" => {
+                continue;
+            }
+            "external_approval_grant" => {
+                // Issue #653: a valid external-approval grant releases a
+                // durable hold that this flow latched
+                // ("external_api_approval_required") for the same work item —
+                // the existing loop then re-selects the work with the
+                // credential injected. Other hold reasons are unaffected.
+                if gate
+                    .as_ref()
+                    .and_then(|gate: &EffectiveHumanGate| gate.reason_code.as_deref())
+                    == Some("external_api_approval_required")
+                {
+                    gate = None;
+                }
                 continue;
             }
             _ if entry.validation_result.as_deref() == Some("deferred_capacity") => continue,

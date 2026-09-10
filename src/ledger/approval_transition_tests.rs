@@ -185,6 +185,7 @@ fn consumption_and_sparse_revoke_preserve_granted_scope_and_unrelated_holds() {
         "odds".into(),
         crate::config::ExternalCredentialScope {
             env_vars: vec!["ODDS_API_KEY".into(), "NEW_API_KEY".into()],
+            ..Default::default()
         },
     );
     let mut requested = request(&profile, "#42");

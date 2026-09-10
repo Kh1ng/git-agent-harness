@@ -585,6 +585,7 @@ mod tests {
             "odds".to_string(),
             ExternalCredentialScope {
                 env_vars: vec!["ODDS_API_KEY".to_string()],
+                ..Default::default()
             },
         )]);
         profile

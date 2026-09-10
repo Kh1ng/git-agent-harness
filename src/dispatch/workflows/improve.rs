@@ -23,6 +23,9 @@ use super::super::DispatchArgs;
 use super::already_satisfied_reconcile::AlreadySatisfiedRun;
 use crate::config::{self, GahConfig, Profile};
 use crate::controller::HumanRequiredReason;
+use crate::dispatch::external_approval_pause::{
+    notify_external_approval_request, raise_external_approval_request,
+};
 use crate::job_kind::JobKind;
 use crate::ledger::{self, LedgerEntry};
 use crate::notifications::{notify_event, NotifyEvent};
@@ -464,6 +467,37 @@ pub(crate) fn improve(
         drop(admission_guard);
         let result = match result {
             Ok(r) => r,
+            // Issue #653: a declared external credential scope is present in
+            // the environment but unapproved. Pause the work item — no attempt
+            // consumed, no backend failure — after raising/refreshing the
+            // approval request (deduped) and notifying the operator. A valid
+            // grant releases the durable hold and the loop re-selects the work.
+            Err(e)
+                if e.downcast_ref::<crate::dispatch::attempts::ExternalApprovalRequiredError>()
+                    .is_some() =>
+            {
+                let gap_error = e
+                    .downcast_ref::<crate::dispatch::attempts::ExternalApprovalRequiredError>()
+                    .expect("matched above");
+                ledger.validation_result = Some("external_api_approval_required".into());
+                ledger.human_required = true;
+                ledger.human_required_reason_code = Some(
+                    crate::controller::HumanRequiredReason::ExternalApiApprovalRequired
+                        .as_str()
+                        .to_string(),
+                );
+                ledger.failure_class =
+                    Some(crate::ledger::FailureClass::HumanBlocked.as_str().into());
+                ledger.failure_stage = None;
+                ledger.error_summary = Some(format!("{gap_error}"));
+                for gap in &gap_error.gaps {
+                    if raise_external_approval_request(cfg, &args.profile, profile, ledger, gap) {
+                        notify_external_approval_request(cfg, profile, ledger, gap);
+                    }
+                }
+                worktree::cleanup(&wt, repo);
+                return Ok(());
+            }
             Err(e) => {
                 // The backend process itself couldn't launch (binary missing,
                 // exec failure) — this is a setup/harness problem, not the
