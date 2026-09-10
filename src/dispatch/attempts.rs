@@ -9,7 +9,6 @@ use crate::routing::{
     self, CandidateIdentity, RouteDecision, RouteError, RouteRequest, RoutingRuntimeState,
     TaskRoutingContext,
 };
-use crate::runner::BackendRunner;
 use crate::usage_attribution::{normalize_attempt_usage, UsageAttribution};
 use crate::{runner, usage, worktree};
 use anyhow::{Context, Result};
@@ -444,67 +443,56 @@ pub(super) fn run_backend_with_reserved_route(
             .explicit_instance
             .then_some(identity.backend_instance.as_str()),
     )?;
-    let result = match backend_kind {
-        BackendKind::Codex => runner::CodexRunner.run(&runner::RunContext {
-            executable: &executable,
-            worktree: wt,
-            task,
-            session_dir,
+
+    // Issue #832: the runner invocation itself goes through the uniform
+    // `for_kind` constructor so dispatch no longer hand-maintains a match
+    // over backend runner implementations. What legitimately stays per-kind
+    // is the launch shape each backend reads from the profile: its args,
+    // idle timeout, and whether it takes an LLM config / print timeout.
+    struct LaunchShape<'a> {
+        model: Option<&'a str>,
+        llm: Option<&'a runner::LlmConfig>,
+        extra_args: &'a [String],
+        idle_timeout_seconds: u64,
+        print_timeout_seconds: Option<u64>,
+    }
+    let skill_args;
+    let shape = match backend_kind {
+        BackendKind::Codex => LaunchShape {
             model: effective_model,
             llm: None,
             extra_args: &profile.codex_args,
-            env_vars: &env_vars,
             idle_timeout_seconds: profile.codex_idle_timeout_seconds(),
             print_timeout_seconds: None,
-        }),
-        BackendKind::Claude => runner::ClaudeRunner.run(&runner::RunContext {
-            executable: &executable,
-            worktree: wt,
-            task,
-            session_dir,
+        },
+        BackendKind::Claude => LaunchShape {
             model: effective_model,
             llm: None,
             extra_args: &profile.claude_args,
-            env_vars: &env_vars,
             idle_timeout_seconds: profile.claude_idle_timeout_seconds(),
             print_timeout_seconds: None,
-        }),
-        BackendKind::Agy => runner::AgyRunner.run(&runner::RunContext {
-            executable: &executable,
-            worktree: wt,
-            task,
-            session_dir,
+        },
+        BackendKind::Agy => LaunchShape {
             model: None,
             llm: Some(llm),
             extra_args: &[],
-            env_vars: &env_vars,
             idle_timeout_seconds: profile.agy_idle_timeout_seconds(),
             print_timeout_seconds: profile
                 .agy_print_timeout_seconds
                 .get(llm.model.as_str())
                 .copied(),
-        }),
-        BackendKind::Vibe => runner::VibeRunner.run(&runner::RunContext {
-            executable: &executable,
-            worktree: wt,
-            task,
-            session_dir,
+        },
+        BackendKind::Vibe => LaunchShape {
             model: effective_model,
             llm: None,
             extra_args: &profile.vibe_args,
-            env_vars: &env_vars,
             idle_timeout_seconds: profile.vibe_idle_timeout_seconds(),
             print_timeout_seconds: None,
-        }),
-        BackendKind::Opencode => runner::OpencodeRunner.run(&runner::RunContext {
-            executable: &executable,
-            worktree: wt,
-            task,
-            session_dir,
+        },
+        BackendKind::Opencode => LaunchShape {
             model: effective_model,
             llm: None,
             extra_args: &profile.opencode_args,
-            env_vars: &env_vars,
             idle_timeout_seconds: effective_model
                 .and_then(|m| {
                     profile
@@ -514,46 +502,48 @@ pub(super) fn run_backend_with_reserved_route(
                 })
                 .unwrap_or_else(|| profile.opencode_idle_timeout_seconds()),
             print_timeout_seconds: None,
-        }),
+        },
         BackendKind::Openhands => {
-            let args = crate::skill_bindings::materialize_args(
+            skill_args = crate::skill_bindings::materialize_args(
                 "openhands",
                 &profile.openhands_args,
                 &skill_resolution.skills,
             );
-            runner::OpenhandsRunner.run(&runner::RunContext {
-                executable: &executable,
-                worktree: wt,
-                task,
-                session_dir,
+            LaunchShape {
                 model: None,
                 llm: Some(llm),
-                extra_args: &args,
-                env_vars: &env_vars,
+                extra_args: &skill_args,
                 idle_timeout_seconds: profile.openhands_idle_timeout_seconds(),
                 print_timeout_seconds: None,
-            })
+            }
         }
         BackendKind::Hermes => {
-            let args = crate::skill_bindings::materialize_args(
+            skill_args = crate::skill_bindings::materialize_args(
                 "hermes",
                 &profile.hermes_args,
                 &skill_resolution.skills,
             );
-            runner::HermesRunner.run(&runner::RunContext {
-                executable: &executable,
-                worktree: wt,
-                task,
-                session_dir,
+            LaunchShape {
                 model: effective_model,
                 llm: None,
-                extra_args: &args,
-                env_vars: &env_vars,
+                extra_args: &skill_args,
                 idle_timeout_seconds: profile.hermes_idle_timeout_seconds(),
                 print_timeout_seconds: None,
-            })
+            }
         }
     };
+    let result = runner::for_kind(backend_kind).run(&runner::RunContext {
+        executable: &executable,
+        worktree: wt,
+        task,
+        session_dir,
+        model: shape.model,
+        llm: shape.llm,
+        extra_args: shape.extra_args,
+        env_vars: &env_vars,
+        idle_timeout_seconds: shape.idle_timeout_seconds,
+        print_timeout_seconds: shape.print_timeout_seconds,
+    });
     if let Some(origin_before) = origin_before {
         let origin_after = worktree::git(&["remote", "get-url", "origin"], wt)
             .context("checking git origin after backend run")?;
