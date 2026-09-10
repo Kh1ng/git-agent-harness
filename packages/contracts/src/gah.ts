@@ -745,6 +745,103 @@ export interface ProjectImportResult {
 // gah config show --json (src/main.rs) -- global defaults
 // ---------------------------------------------------------------------------
 
+/** Issue #519: response of `gah telemetry aggregate --json` (HTTP adapter
+ * GET /api/telemetry/aggregate). */
+export interface TelemetryAggregateReport {
+  report_type: string;
+  generated_at: string;
+  time_range: string | null;
+  profile: string | null;
+  total_entries: number;
+  total_attempts: number;
+  successful_attempts: number;
+  failed_attempts: number;
+  total_cost_usd: number;
+  quota_backed_cost_usd: number;
+  api_cost_usd: number;
+  aggregated_data: TelemetryAggregatedData[];
+}
+
+export interface TelemetryAggregatedData {
+  dimension_key: string;
+  dimension_value: string;
+  entries: number;
+  attempts: number;
+  successful_attempts: number;
+  failed_attempts: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  requests_count: number;
+  estimated_cost_usd: number;
+  actual_cost_usd: number;
+  quota_backed_cost_usd: number;
+  api_cost_usd: number;
+  average_cost_per_attempt: number;
+  success_rate: number;
+  failure_details: Record<string, number>;
+  tool_calls: TelemetryAggregatedBehaviorMetric;
+  shell_calls: TelemetryAggregatedBehaviorMetric;
+  file_edits: TelemetryAggregatedBehaviorMetric;
+  test_runs: TelemetryAggregatedBehaviorMetric;
+}
+
+export interface TelemetryAggregatedBehaviorMetric {
+  total: number;
+  known_attempts: number;
+  unknown_attempts: number;
+  quality: string;
+}
+
+/** Issue #519: one row of `gah claims list --json` (HTTP adapter
+ * GET /api/claims). */
+export interface WorkClaimDetail {
+  work_id: string;
+  pid: number;
+  hostname: string;
+  claimed_at: string;
+  is_stale: boolean;
+}
+
+/** Issue #519: one row of `gah quota list --json` (HTTP adapter
+ * GET /api/quota/list). Persisted observations, distinct from the computed
+ * snapshot GET /api/quota returns. */
+export interface QuotaListRecord {
+  backend: string;
+  backend_instance?: string | null;
+  model?: string | null;
+  quota_pool?: string | null;
+  quota_window?: string | null;
+  quota_used_percent?: number | null;
+  quota_remaining_percent?: number | null;
+  quota_reset_at?: string | null;
+  observed_at?: string | null;
+  checked_at?: string | null;
+  check_error?: string | null;
+  usage_source?: string | null;
+}
+
+/** Issue #519: the remote projection of `gah external-approval inspect --json`.
+ * The CLI's local `ledger_path` field is deliberately dropped at the server
+ * boundary — remote callers never learn local filesystem layout. */
+export interface ExternalApprovalScope {
+  profile: string;
+  repo_id: string;
+  work_id: string;
+  credential_label: string;
+  operation_kind: string;
+  state: string;
+  active: boolean;
+  allowed_env_vars: string[];
+  max_requests: number | null;
+  max_dollars: number | null;
+  expires_at: string | null;
+  purpose: string | null;
+  consumed_requests: number;
+  consumed_dollars: number | null;
+  denial_reason: string | null;
+}
+
 export interface ConfigSummary {
   /** Which agent CLI is currently acting as the operator's manager across
    * all profiles/projects (null = unset, so no manager wake happens). */
