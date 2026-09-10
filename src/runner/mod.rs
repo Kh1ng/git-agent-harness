@@ -2,6 +2,8 @@ use std::fs;
 use std::process::Command;
 
 pub(crate) mod backend_runner;
+#[cfg(test)]
+mod backend_runner_contract_tests;
 pub(crate) mod backends;
 pub(crate) mod output;
 pub(crate) mod process;
@@ -17,22 +19,7 @@ pub use crate::runner::backend_runner::{
 };
 #[allow(unused_imports)]
 pub(crate) use crate::runner::backends::agy::log_delta;
-#[allow(unused_imports)]
-pub use crate::runner::backends::agy::{run_agy, run_agy_with_executable};
-#[allow(unused_imports)]
-pub use crate::runner::backends::claude::{run_claude, run_claude_with_executable};
-#[allow(unused_imports)]
-pub use crate::runner::backends::codex::{run_codex, run_codex_with_executable};
-#[allow(unused_imports)]
-pub use crate::runner::backends::hermes::{run_hermes, run_hermes_with_executable};
-#[allow(unused_imports)]
-pub use crate::runner::backends::opencode::{run_opencode, run_opencode_with_executable};
-#[allow(unused_imports)]
-pub use crate::runner::backends::openhands::{
-    list_oh_profiles, load_oh_profile, run_openhands, run_openhands_with_executable,
-};
-#[allow(unused_imports)]
-pub use crate::runner::backends::vibe::{run_vibe, run_vibe_with_executable};
+pub use crate::runner::backends::openhands::{list_oh_profiles, load_oh_profile};
 #[allow(unused_imports)]
 pub(crate) use crate::runner::process::{
     arm_child_pdeathsig, copy_stream_to_file, kill_process_group, prepare_process_group,

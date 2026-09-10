@@ -18,30 +18,8 @@ use crate::runner::RunResult;
 /// already runs this command with `current_dir(worktree)` pointed at its
 /// own managed worktree, and Hermes's `--worktree` flag would create a
 /// second, independent isolated worktree on top of that.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn run_hermes(
-    worktree: &Path,
-    task: &str,
-    session_dir: &Path,
-    model: Option<&str>,
-    extra_args: &[String],
-    env_vars: &[(String, String)],
-    idle_timeout_seconds: u64,
-) -> Result<RunResult> {
-    run_hermes_with_executable(
-        Path::new("hermes"),
-        worktree,
-        task,
-        session_dir,
-        model,
-        extra_args,
-        env_vars,
-        idle_timeout_seconds,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
-pub fn run_hermes_with_executable(
+pub(crate) fn run_with_executable(
     executable: &Path,
     worktree: &Path,
     task: &str,
@@ -169,7 +147,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "hermes", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_hermes(
+        let result = run_with_executable(
+            Path::new("hermes"),
             &f.worktree,
             "hermes task",
             &f.session_dir,
@@ -193,8 +172,17 @@ mod tests {
         make_recording_bin(&f.bin_dir, "hermes", &f.record_dir, 3);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result =
-            run_hermes(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap();
+        let result = run_with_executable(
+            Path::new("hermes"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
 
         assert_eq!(result.exit_code, 3);
     }
@@ -206,7 +194,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "hermes", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_hermes(
+        run_with_executable(
+            Path::new("hermes"),
             &f.worktree,
             "the hermes task",
             &f.session_dir,
@@ -238,7 +227,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "hermes", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_hermes(
+        run_with_executable(
+            Path::new("hermes"),
             &f.worktree,
             "task",
             &f.session_dir,
@@ -261,7 +251,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "hermes", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_hermes(
+        run_with_executable(
+            Path::new("hermes"),
             &f.worktree,
             "task",
             &f.session_dir,
@@ -294,7 +285,17 @@ mod tests {
             ("FROM_ENV_FILE".to_string(), "hermes-env-value".to_string()),
         ];
 
-        run_hermes(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap();
+        run_with_executable(
+            Path::new("hermes"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
 
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("FROM_ENV_FILE=hermes-env-value"));
@@ -305,8 +306,17 @@ mod tests {
         let f = fixture();
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let err =
-            run_hermes(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap_err();
+        let err = run_with_executable(
+            Path::new("hermes"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap_err();
 
         assert!(err
             .to_string()
@@ -331,7 +341,17 @@ mod tests {
             ),
         )];
 
-        let result = run_hermes(&f.worktree, "task", &f.session_dir, None, &[], &envs, 3).unwrap();
+        let result = run_with_executable(
+            Path::new("hermes"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            3,
+        )
+        .unwrap();
 
         assert_eq!(result.exit_code, -1);
         let log = fs::read_to_string(&result.log_path).unwrap();

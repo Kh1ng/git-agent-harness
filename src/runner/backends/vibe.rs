@@ -15,29 +15,8 @@ use crate::runner::RunResult;
 /// No --model flag exists on this CLI; model selection is config/env-var
 /// driven on vibe's own side (VIBE_ACTIVE_MODEL / ~/.vibe/config.toml),
 /// so GAH binds the effective route model through `VIBE_ACTIVE_MODEL`.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn run_vibe(
-    worktree: &Path,
-    task: &str,
-    session_dir: &Path,
-    extra_args: &[String],
-    env_vars: &[(String, String)],
-    idle_timeout_seconds: u64,
-) -> Result<RunResult> {
-    run_vibe_with_executable(
-        Path::new("vibe"),
-        worktree,
-        task,
-        session_dir,
-        None,
-        extra_args,
-        env_vars,
-        idle_timeout_seconds,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
-pub fn run_vibe_with_executable(
+pub(crate) fn run_with_executable(
     executable: &Path,
     worktree: &Path,
     task: &str,
@@ -203,7 +182,17 @@ mod tests {
         make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_vibe(&f.worktree, "vibe task", &f.session_dir, &[], &envs, 300).unwrap();
+        let result = run_with_executable(
+            Path::new("vibe"),
+            &f.worktree,
+            "vibe task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
 
         assert_eq!(result.exit_code, 0);
         let log = fs::read_to_string(&result.log_path).unwrap();
@@ -260,7 +249,17 @@ mod tests {
         make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 1);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs, 300).unwrap();
+        let result = run_with_executable(
+            Path::new("vibe"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
 
         assert_eq!(result.exit_code, 1);
     }
@@ -272,10 +271,12 @@ mod tests {
         make_recording_bin(&f.bin_dir, "vibe", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_vibe(
+        run_with_executable(
+            Path::new("vibe"),
             &f.worktree,
             "the vibe task",
             &f.session_dir,
+            None,
             &["--max-turns".to_string(), "40".to_string()],
             &envs,
             300,
@@ -301,7 +302,7 @@ mod tests {
             ("VIBE_ACTIVE_MODEL".to_string(), "wrong-default".to_string()),
         ];
 
-        run_vibe_with_executable(
+        run_with_executable(
             &f.bin_dir.join("vibe"),
             &f.worktree,
             "the vibe task",
@@ -328,7 +329,17 @@ mod tests {
             ("FROM_ENV_FILE".to_string(), "vibe-env-value".to_string()),
         ];
 
-        run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs, 300).unwrap();
+        run_with_executable(
+            Path::new("vibe"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
 
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("FROM_ENV_FILE=vibe-env-value"));
@@ -339,7 +350,17 @@ mod tests {
         let f = fixture();
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let err = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs, 300).unwrap_err();
+        let err = run_with_executable(
+            Path::new("vibe"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap_err();
 
         assert!(err.to_string().contains("launching vibe; is it installed"));
     }
@@ -366,7 +387,17 @@ mod tests {
             ),
         )];
 
-        let result = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs, 3).unwrap();
+        let result = run_with_executable(
+            Path::new("vibe"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            3,
+        )
+        .unwrap();
 
         assert_eq!(result.exit_code, -1);
         let log = fs::read_to_string(&result.log_path).unwrap();
@@ -400,7 +431,17 @@ mod tests {
             ),
         )];
 
-        let result = run_vibe(&f.worktree, "task", &f.session_dir, &[], &envs, 2).unwrap();
+        let result = run_with_executable(
+            Path::new("vibe"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            2,
+        )
+        .unwrap();
 
         assert_eq!(result.exit_code, 0);
         assert!(

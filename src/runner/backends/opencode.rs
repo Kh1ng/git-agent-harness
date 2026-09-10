@@ -37,28 +37,6 @@ pub(crate) fn select_agent_argv(role: AgentRole) -> Vec<String> {
 /// `extra_args` come from `profile.opencode_args` (e.g. `--format json`), but
 /// cannot override the role-selected agent or route-selected model.
 /// Unlike vibe, opencode DOES take --model, so we pass effective_model through.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn run_opencode(
-    worktree: &Path,
-    task: &str,
-    session_dir: &Path,
-    model: Option<&str>,
-    extra_args: &[String],
-    env_vars: &[(String, String)],
-    idle_timeout_seconds: u64,
-) -> Result<RunResult> {
-    run_opencode_with_executable(
-        Path::new("opencode"),
-        worktree,
-        task,
-        session_dir,
-        model,
-        extra_args,
-        env_vars,
-        idle_timeout_seconds,
-    )
-}
-
 /// Issue #170: a live dispatch hung for 3+ hours with zero output and no
 /// supervision at all -- opencode had no timeout of any kind (the previous
 /// implementation used a plain blocking `cmd.status()`). Now uses the same
@@ -67,7 +45,7 @@ pub fn run_opencode(
 /// wall-clock budget. OpenCode's own narration is not trusted as progress:
 /// only a durable worktree change resets this backend's window.
 #[allow(clippy::too_many_arguments)]
-pub fn run_opencode_with_executable(
+pub(crate) fn run_with_executable(
     executable: &Path,
     worktree: &Path,
     task: &str,
@@ -284,7 +262,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "opencode", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_opencode(
+        run_with_executable(
+            Path::new("opencode"),
             &f.worktree,
             "the opencode task",
             &f.session_dir,
@@ -323,7 +302,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "opencode", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_opencode(
+        run_with_executable(
+            Path::new("opencode"),
             &f.worktree,
             "the opencode task",
             &f.session_dir,
@@ -360,7 +340,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "opencode", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_opencode(
+        run_with_executable(
+            Path::new("opencode"),
             &f.worktree,
             "the opencode task",
             &f.session_dir,
@@ -394,7 +375,17 @@ mod tests {
             ),
         ];
 
-        run_opencode(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap();
+        run_with_executable(
+            Path::new("opencode"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
 
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("FROM_ENV_FILE=opencode-env-value"));
@@ -497,8 +488,17 @@ mod tests {
         let f = fixture();
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let err =
-            run_opencode(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap_err();
+        let err = run_with_executable(
+            Path::new("opencode"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap_err();
 
         assert!(err
             .to_string()
@@ -528,7 +528,7 @@ mod tests {
             ),
         )];
 
-        let result = run_opencode_with_executable(
+        let result = run_with_executable(
             &f.bin_dir.join("opencode"),
             &f.worktree,
             "task",
@@ -568,7 +568,7 @@ mod tests {
             ),
         )];
 
-        let result = run_opencode_with_executable(
+        let result = run_with_executable(
             &f.bin_dir.join("opencode"),
             &f.worktree,
             "task",
@@ -614,7 +614,7 @@ mod tests {
             ),
         )];
 
-        let result = run_opencode_with_executable(
+        let result = run_with_executable(
             &f.bin_dir.join("opencode"),
             &f.worktree,
             "task",
@@ -662,7 +662,7 @@ mod tests {
             ("XDG_DATA_HOME".to_string(), data_home.display().to_string()),
         ];
 
-        let result = run_opencode_with_executable(
+        let result = run_with_executable(
             &f.bin_dir.join("opencode"),
             &f.worktree,
             "task",
