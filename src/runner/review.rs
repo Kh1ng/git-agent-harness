@@ -5,10 +5,7 @@ use crate::runner::process::{
     process_group_activity_advanced, process_group_activity_snapshot, shutdown_requested,
     worktree_progress_snapshot, write_redacted_task,
 };
-use crate::runner::resolve::{
-    codex_model_args, filtered_backend_args, filtered_codex_args, resolve_backend_executable,
-    ExecutableResolution,
-};
+use crate::runner::resolve::{resolve_backend_executable, ExecutableResolution};
 use crate::runner::review_usage::ReviewUsageCapture;
 use std::fs;
 use std::io::Read;
@@ -170,7 +167,6 @@ pub fn run_review_backend_for_identity(
     }
 
     let usage_capture = ReviewUsageCapture::begin(backend, &executable, worktree, env_vars);
-    let mut cmd = Command::new(&executable);
     // agy-main/agy-second are legacy instance strings, not kinds (see
     // backend_kind.rs); fold them locally before dispatching on the kind.
     use crate::backend_kind::BackendKind;
@@ -178,54 +174,27 @@ pub fn run_review_backend_for_identity(
         "agy-main" | "agy-second" => Some(BackendKind::Agy),
         other => BackendKind::parse(other).ok(),
     };
-    match backend_kind {
-        Some(BackendKind::Claude) => {
-            cmd.args(["-p", prompt, "--output-format", "text", "--verbose"])
-                .args(&profile.claude_args);
-            if let Some(session_id) = usage_capture.claude_session_id() {
-                cmd.args(["--session-id", session_id]);
-            }
-            if let Some(model) = effective_model {
-                cmd.args(["--model", model]);
-            }
+    // Issue #833: argv/env construction lives on the BackendRunner impls,
+    // next to the worker path each backend must stay consistent with, so
+    // the review branches can no longer silently drift from dispatch.
+    let invocation = match backend_kind {
+        Some(kind) => {
+            let ctx = crate::runner::ReviewArgContext {
+                prompt,
+                effective_model,
+                claude_session_id: usage_capture.claude_session_id(),
+                profile,
+            };
+            crate::runner::for_kind(kind).review_invocation(&ctx)
         }
-        Some(BackendKind::Codex) => {
-            cmd.arg("exec")
-                .arg("--json")
-                .arg(prompt)
-                .args(filtered_codex_args(&profile.codex_args))
-                .args(codex_model_args(effective_model));
-        }
-        Some(BackendKind::Agy) => {
-            cmd.arg("--print").arg(prompt);
-            cmd.args(["--output-format", "stream-json"]);
-            if let Some(model) = effective_model {
-                cmd.args(["--model", model]);
-            }
-            cmd.arg("--dangerously-skip-permissions");
-        }
-        Some(BackendKind::Vibe) => {
-            cmd.arg("-p").arg(prompt);
-            cmd.arg("--output").arg("text");
-            cmd.arg("--trust");
-            cmd.arg("--auto-approve");
-            cmd.args(&profile.vibe_args);
-        }
-        Some(BackendKind::Opencode) => {
-            cmd.arg("run");
-            crate::runner::backends::opencode::select_agent(
-                &mut cmd,
-                crate::runner::backends::opencode::AgentRole::Reviewer,
-            );
-            if let Some(model) = effective_model {
-                cmd.args(["--model", model]);
-            }
-            // Match worker argument filtering: profile flags cannot change the
-            // tool-disabled reviewer role or the route-selected model.
-            cmd.args(filtered_backend_args("opencode", &profile.opencode_args));
-            cmd.arg(prompt);
-        }
-        Some(BackendKind::Openhands) | Some(BackendKind::Hermes) | None => {
+        None => Err(anyhow::anyhow!(
+            "backend does not support review invocation"
+        )),
+    };
+    let mut cmd = Command::new(&executable);
+    let invocation = match invocation {
+        Ok(invocation) => invocation,
+        Err(_) => {
             return ReviewRunResult {
                 outcome: ReviewProcessOutcome::SpawnFailure,
                 duration_secs: start.elapsed().as_secs_f64(),
@@ -239,16 +208,17 @@ pub fn run_review_backend_for_identity(
                 resources: crate::ledger::AttemptResourceUsage::never_launched(),
             };
         }
-    }
+    };
+    cmd.args(&invocation.argv);
     cmd.current_dir(worktree)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     prepare_process_group(&mut cmd);
     crate::runner::apply_child_env(&mut cmd, env_vars);
-    if backend == "vibe" {
-        if let Some(model) = effective_model {
-            cmd.env("VIBE_ACTIVE_MODEL", model);
-        }
+    // Backend-specific environment (vibe's route-authoritative model
+    // selector) is applied after env-file variables so the route wins.
+    for (key, value) in &invocation.env {
+        cmd.env(key, value);
     }
 
     let mut child = match cmd.spawn() {

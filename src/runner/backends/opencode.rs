@@ -18,11 +18,18 @@ pub(crate) enum AgentRole {
 }
 
 pub(crate) fn select_agent(cmd: &mut Command, role: AgentRole) {
+    cmd.args(select_agent_argv(role));
+}
+
+/// The argv that pins opencode to a dispatch role's tool-disabled agent
+/// (#833): shared by the worker and review invocation builders so both
+/// paths select the same agent.
+pub(crate) fn select_agent_argv(role: AgentRole) -> Vec<String> {
     let agent = match role {
         AgentRole::Implementer => IMPLEMENTER_AGENT,
         AgentRole::Reviewer => REVIEWER_AGENT,
     };
-    cmd.args(["--agent", agent]);
+    vec!["--agent".to_string(), agent.to_string()]
 }
 
 /// Run OpenCode CLI non-interactively via `opencode run --agent gah-implementer
