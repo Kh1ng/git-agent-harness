@@ -9,18 +9,13 @@
 
 use anyhow::{Context, Result};
 #[cfg(target_os = "linux")]
-use std::collections::HashMap;
-#[cfg(target_os = "linux")]
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(not(target_os = "linux"))]
 use std::sync::mpsc;
-#[cfg(target_os = "linux")]
-use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
