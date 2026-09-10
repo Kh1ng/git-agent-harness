@@ -539,6 +539,26 @@ pub enum ConfigCommands {
         #[arg(long, value_delimiter = ',')]
         clear: Vec<String>,
     },
+    /// Issue #822: enable or disable one backend instance for a profile.
+    ///
+    /// The instance must already be declared (in the profile, the repository
+    /// defaults, or the shared canonical registry). The full merged entry is
+    /// written into the profile's routing section with the flipped flag
+    /// (declared entries replace wholesale by name), then the profile is
+    /// revalidated before anything is saved.
+    SetBackendInstanceEnabled {
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        /// Profile whose routing should skip or use the instance.
+        #[arg(long)]
+        profile: String,
+        /// Stable backend-instance identifier (the map key).
+        #[arg(long)]
+        instance: String,
+        /// Target state: `--enabled false` disables, `--enabled true` enables.
+        #[arg(long, action = clap::ArgAction::Set)]
+        enabled: bool,
+    },
 }
 
 #[derive(Subcommand)]

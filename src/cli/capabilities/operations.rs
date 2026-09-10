@@ -401,6 +401,28 @@ pub(super) fn add_route_approval_operations(manifest: &mut CapabilityManifest) {
     });
 }
 
+pub(super) fn add_backend_instance_operations(manifest: &mut CapabilityManifest) {
+    // gah config set-backend-instance-enabled
+    manifest.add_operation(OperationDefinition {
+        operation_id: "backend_instance.set_enabled".to_string(),
+        display_name: "Set Backend Instance Enabled".to_string(),
+        class: OperationClass::Mutation,
+        profile_scope: ProfileScope::ProfileRequired,
+        request_schema: None,
+        response_schema: None,
+        streaming: StreamingBehavior::None,
+        idempotency: Idempotency::Idempotent,
+        secret_fields: vec![],
+        remote_disposition: RemoteDisposition::RemoteAvailable,
+        local_only_reason: None,
+        documentation: Some(
+            "Enable or disable one declared backend instance for a profile (#822)".to_string(),
+        ),
+        cli_command_path: "gah config set-backend-instance-enabled".to_string(),
+        is_stable: true,
+    });
+}
+
 pub(super) fn add_external_approval_operations(manifest: &mut CapabilityManifest) {
     // gah external-approval request
     manifest.add_operation(OperationDefinition {

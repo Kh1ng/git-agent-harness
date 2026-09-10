@@ -1227,6 +1227,29 @@ export async function runConfigShow(config?: string): Promise<{ current_manager:
   return runJsonCommand<{ current_manager: string | null }>(args, config);
 }
 
+/** Issue #822: enable or disable one backend instance for a profile. The
+ * CLI owns the config write path (merged-entry write, validation before
+ * save); the server only shells out with fixed arguments. */
+export async function runBackendInstanceToggle(
+  profile: string,
+  instance: string,
+  enabled: boolean,
+  config?: string
+): Promise<void> {
+  const args = [
+    'config',
+    'set-backend-instance-enabled',
+    '--profile',
+    profile,
+    '--instance',
+    instance,
+    '--enabled',
+    enabled ? 'true' : 'false',
+  ];
+  if (config) args.push('--config-path', config);
+  return runVoidCommand(args, config, 'gah config set-backend-instance-enabled');
+}
+
 export async function runConfigShowProfile(
   profile: string,
   config?: string

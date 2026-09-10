@@ -644,6 +644,11 @@ export const gahApi: GahDataSource = {
   }
 };
 
+export const backendInstancesApi = {
+  list: (profile: string) => getJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }>('/api/backend-instances', { profile }),
+  setEnabled: (profile: string, instance: string, enabled: boolean) => postJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }, { profile: string; instance: string }>(`/api/backend-instances/${enabled ? 'enable' : 'disable'}`, { profile, instance })
+};
+
 export const paidRouteApi = {
   list: (profile: string) => getJson<import('@git-agent-harness/contracts').PaidRouteApproval[]>('/api/route-approvals', { profile }),
   change: (action: 'grant' | 'revoke', scope: import('@git-agent-harness/contracts').PaidRouteScope) => postJson<import('@git-agent-harness/contracts').PaidRouteApproval[], import('@git-agent-harness/contracts').PaidRouteScope & { confirm: true }>(`/api/route-approvals/${action}`, { ...scope, confirm: true })

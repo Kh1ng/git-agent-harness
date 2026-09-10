@@ -25,6 +25,8 @@ pub struct RoutingCandidateSummary {
 pub struct BackendInstanceSummary {
     pub backend_instance: String,
     pub runner_kind: String,
+    /// Issue #822: disabled instances stay declared but routing skips them.
+    pub enabled: bool,
     pub logical_backend: String,
     pub account_label: Option<String>,
     pub auth_source_label: Option<String>,
@@ -43,6 +45,7 @@ pub(crate) fn backend_instance_summaries(
         .map(|(name, instance)| BackendInstanceSummary {
             backend_instance: name.clone(),
             runner_kind: instance.runner_kind.clone(),
+            enabled: instance.enabled,
             logical_backend: instance
                 .logical_backend
                 .clone()

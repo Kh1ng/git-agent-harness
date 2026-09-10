@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-type Operation = 'loop.start' | 'loop.stop' | 'hold.set' | 'hold.clear' | 'availability.clear' | 'ledger.clear_attempts' | 'route_approval.grant' | 'route_approval.revoke';
+type Operation = 'loop.start' | 'loop.stop' | 'hold.set' | 'hold.clear' | 'availability.clear' | 'ledger.clear_attempts' | 'route_approval.grant' | 'route_approval.revoke' | 'backend_instance.set_enabled';
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 
 // JSON object order is not part of the request's meaning; array order is.
@@ -52,7 +52,7 @@ export function mutationSafety(nodeId: string, directory = process.env.GAH_MUTAT
       return res.status(status).json({ error: code, message, operationId });
     };
     if (actor === 'unauthenticated') return reject(401, 'authentication_required', 'Authenticate before changing node state.');
-    if ((operation === 'ledger.clear_attempts' || operation.startsWith('route_approval.')) && principal.kind !== 'owner') return reject(403, 'owner_required', 'This operation requires owner access.');
+    if ((operation === 'ledger.clear_attempts' || operation.startsWith('route_approval.') || operation.startsWith('backend_instance.')) && principal.kind !== 'owner') return reject(403, 'owner_required', 'This operation requires owner access.');
     if (!key || !/^[A-Za-z0-9_-]{16,128}$/.test(key)) return reject(400, 'idempotency_key_required', 'Supply an Idempotency-Key of 16–128 letters, digits, underscores, or hyphens.');
 
     try {

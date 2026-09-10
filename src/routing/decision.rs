@@ -25,6 +25,8 @@ use time::OffsetDateTime;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_disabled;
 
 fn is_review_mode(mode: &str) -> bool {
     JobKind::parse(mode).map(|kind| kind.family()) == Ok(JobFamily::Review)
@@ -213,6 +215,7 @@ where
                     runtime,
                     exclude_attempted,
                     candidate.requires_approval,
+                    &profile.effective_routing(defaults),
                 )? {
                     if skip.reason == "operator_approval_required" {
                         return Err(RouteError::ApprovalRequired {
@@ -333,12 +336,12 @@ where
         let candidates_for_diagnostics = candidates.clone();
         let (selected, skipped) = pick_route_candidate(
             candidates,
-            state_path,
+            &evaluation,
             &profile.max_concurrent_per_model,
-            now,
             backend_available,
             runtime,
             escalate,
+            &profile.effective_routing(defaults),
         )?;
         let fallback_used = !same_destination(&selected, &preferred);
         let mut reason = format!("task routing rule #{}", rule_index + 1);
@@ -398,12 +401,12 @@ where
         let candidates_for_diagnostics = candidates.clone();
         let (selected, skipped) = pick_route_candidate(
             candidates,
-            state_path,
+            &evaluation,
             &profile.max_concurrent_per_model,
-            now,
             backend_available,
             runtime,
             escalate,
+            &profile.effective_routing(defaults),
         )?;
 
         let mut fallback_used = false;
@@ -543,12 +546,12 @@ where
     let candidates_for_diagnostics = candidates.clone();
     let (selected, skipped) = pick_route_candidate(
         candidates,
-        state_path,
+        &evaluation,
         &profile.max_concurrent_per_model,
-        now,
         backend_available,
         runtime,
         false,
+        &effective_routing,
     )?;
 
     if !same_destination(&selected, &primary) {
@@ -651,14 +654,15 @@ where
     // contract. Only auto routing may spend a different provider's quota.
     let candidates = vec![primary];
     let candidates_for_diagnostics = candidates.clone();
+    let evaluation = RouteEvaluation { state_path, now };
     let (selected, skipped) = pick_route_candidate(
         candidates,
-        state_path,
+        &evaluation,
         &profile.max_concurrent_per_model,
-        now,
         backend_available,
         runtime,
         exclude_attempted,
+        effective_routing,
     )?;
 
     let routing_diagnostics = Some(build_routing_diagnostics(
@@ -700,12 +704,12 @@ fn append_availability_reason(
 
 fn pick_route_candidate<F>(
     candidates: Vec<RouteCandidate>,
-    state_path: &Path,
+    evaluation: &RouteEvaluation<'_>,
     max_concurrent: &HashMap<String, u32>,
-    now: OffsetDateTime,
     backend_available: F,
     runtime: &RoutingRuntimeState,
     exclude_attempted: bool,
+    effective_routing: &RoutingPolicy,
 ) -> Result<(RouteCandidate, Vec<SkippedBackend>)>
 where
     F: Fn(&str) -> bool + Copy,
@@ -718,14 +722,15 @@ where
     let mut included_capacity_is_temporarily_blocked = false;
     for candidate in candidates {
         if let Some(reason) = skip_reason_for_candidate(
-            state_path,
+            evaluation.state_path,
             &candidate.identity,
             max_concurrent,
-            now,
+            evaluation.now,
             backend_available,
             runtime,
             exclude_attempted,
             candidate.requires_approval,
+            effective_routing,
         )? {
             if candidate.included_in_quota
                 && (reason.reason == "max_concurrent_reached" || reason.unavailable_until.is_some())
@@ -773,12 +778,30 @@ fn skip_reason_for_candidate<F>(
     runtime: &RoutingRuntimeState,
     exclude_attempted: bool,
     requires_approval: bool,
+    effective_routing: &RoutingPolicy,
 ) -> Result<Option<SkippedBackend>>
 where
     F: Fn(&str) -> bool + Copy,
 {
     let backend = identity.logical_backend.as_str();
     let model = identity.effective_model.as_deref();
+    // Issue #822: a disabled instance stays declared (so its identity is
+    // still resolvable for status/attribution) but routing must skip it
+    // with a typed reason instead of ever dispatching to it.
+    if identity.explicit_instance
+        && effective_routing
+            .backend_instances
+            .get(&identity.backend_instance)
+            .is_some_and(|instance| !instance.enabled)
+    {
+        return Ok(Some(SkippedBackend {
+            backend_instance: Some(identity.backend_instance.clone()),
+            backend: backend.to_string(),
+            model: model.map(str::to_string),
+            reason: "backend instance disabled".into(),
+            unavailable_until: None,
+        }));
+    }
     let configured_executable_available = identity
         .executable
         .as_deref()
