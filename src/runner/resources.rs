@@ -25,7 +25,7 @@ use std::time::Duration;
 /// maximum tree-wide resident total observed at any sample.
 #[cfg(target_os = "linux")]
 #[derive(Clone, Default)]
-struct ResourceAccumulator {
+pub(crate) struct ResourceAccumulator {
     observed_any_sample: bool,
     last_ticks_by_process: HashMap<ProcessIdentity, u64>,
     cpu_ticks_total: u64,
