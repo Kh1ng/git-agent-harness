@@ -15,6 +15,7 @@ fn attempt_record(
     model: Option<&str>,
 ) -> crate::ledger::AttemptRecord {
     crate::ledger::AttemptRecord {
+        resources: None,
         attempt_number,
         backend: backend.into(),
         effective_model: model.map(str::to_string),

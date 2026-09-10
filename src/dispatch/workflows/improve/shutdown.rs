@@ -94,6 +94,7 @@ impl<'a> ShutdownContext<'a> {
         duration_seconds: f64,
         usage: LedgerUsage,
         cli_version: Option<String>,
+        resources: crate::ledger::AttemptResourceUsage,
     ) -> Result<()> {
         record_cancelled_attempt_and_cleanup(
             ledger,
@@ -105,6 +106,7 @@ impl<'a> ShutdownContext<'a> {
             duration_seconds,
             usage,
             cli_version,
+            resources,
             self.worktree_path,
             self.repo,
             self.target_branch,
@@ -141,6 +143,7 @@ impl<'a> ShutdownContext<'a> {
             duration_seconds,
             usage,
             result.agy_version.clone(),
+            result.resources.clone(),
         )
     }
 }
@@ -156,6 +159,7 @@ pub(super) fn record_cancelled_attempt(
     duration_seconds: f64,
     usage: LedgerUsage,
     cli_version: Option<String>,
+    resources: crate::ledger::AttemptResourceUsage,
 ) {
     super::super::super::attempts::mark_shutdown_cancelled(ledger, stage, Some(exit_code));
     ledger.attempts.push(AttemptRecord {
@@ -172,6 +176,7 @@ pub(super) fn record_cancelled_attempt(
         checkpoint_sha: None,
         usage,
         cli_version,
+        resources: Some(resources),
     });
 }
 
@@ -288,6 +293,7 @@ pub(super) fn record_cancelled_attempt_and_cleanup(
     duration_seconds: f64,
     usage: LedgerUsage,
     cli_version: Option<String>,
+    resources: crate::ledger::AttemptResourceUsage,
     worktree_path: &Path,
     repo: &Path,
     target_branch: &str,
@@ -311,6 +317,7 @@ pub(super) fn record_cancelled_attempt_and_cleanup(
         checkpoint_sha: None,
         usage,
         cli_version,
+        resources: Some(resources),
     });
     checkpoint_and_cleanup_after_shutdown(
         ledger,

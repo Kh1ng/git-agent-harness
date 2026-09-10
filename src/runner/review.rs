@@ -58,6 +58,9 @@ pub struct ReviewRunResult {
     pub usage_artifact_path: Option<String>,
     /// Bytes appended to AGY's own cli.log during this exact review attempt.
     pub agy_cli_log_delta: Option<String>,
+    /// Issue #116: best-effort process-tree resource usage for this review
+    /// invocation, with explicit provenance (measured / unsupported / unknown).
+    pub resources: crate::ledger::AttemptResourceUsage,
 }
 
 pub fn run_review_backend(
@@ -118,6 +121,7 @@ pub fn run_review_backend_for_identity(
                 last_progress_secs: None,
                 usage_artifact_path: None,
                 agy_cli_log_delta: None,
+                resources: crate::ledger::AttemptResourceUsage::never_launched(),
             };
         }
         ExecutableResolution::UnknownBackend(_) => {
@@ -131,6 +135,7 @@ pub fn run_review_backend_for_identity(
                 last_progress_secs: None,
                 usage_artifact_path: None,
                 agy_cli_log_delta: None,
+                resources: crate::ledger::AttemptResourceUsage::never_launched(),
             };
         }
     };
@@ -146,6 +151,7 @@ pub fn run_review_backend_for_identity(
             last_progress_secs: None,
             usage_artifact_path: None,
             agy_cli_log_delta: None,
+            resources: crate::ledger::AttemptResourceUsage::never_launched(),
         };
     }
     if let Err(err) = fs::File::create(&stderr_path) {
@@ -159,6 +165,7 @@ pub fn run_review_backend_for_identity(
             last_progress_secs: None,
             usage_artifact_path: None,
             agy_cli_log_delta: None,
+            resources: crate::ledger::AttemptResourceUsage::never_launched(),
         };
     }
 
@@ -229,6 +236,7 @@ pub fn run_review_backend_for_identity(
                 last_progress_secs: None,
                 usage_artifact_path: None,
                 agy_cli_log_delta: None,
+                resources: crate::ledger::AttemptResourceUsage::never_launched(),
             };
         }
     }
@@ -256,9 +264,15 @@ pub fn run_review_backend_for_identity(
                 last_progress_secs: None,
                 usage_artifact_path: None,
                 agy_cli_log_delta: None,
+                resources: crate::ledger::AttemptResourceUsage::never_launched(),
             };
         }
     };
+    // Issue #116: sample the reviewer's whole process tree for the duration
+    // of the attempt (success, idle kill, hard timeout, or shutdown included).
+    #[cfg(target_os = "linux")]
+    let (resource_stop, resource_accumulator, resource_handle) =
+        crate::runner::resources::spawn_resource_sampler(child.id());
     let (progress_tx, progress_rx) = mpsc::channel();
     let stdout_thread = child
         .stdout
@@ -382,6 +396,20 @@ pub fn run_review_backend_for_identity(
             }
         }
     };
+    let review_resources = {
+        #[cfg(target_os = "linux")]
+        {
+            crate::runner::resources::finish_resource_sampler(
+                resource_stop,
+                resource_accumulator,
+                resource_handle,
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            crate::runner::resources::finish_resource_sampler_none()
+        }
+    };
     // A surviving descendant may still own the inherited pipe descriptors.
     // Do not let joining the stream-copy threads turn a bounded cleanup
     // failure into another hang; dropping the handles detaches them.
@@ -437,6 +465,7 @@ pub fn run_review_backend_for_identity(
         last_progress_secs: last_progress_elapsed_secs,
         usage_artifact_path: usage_artifacts.artifact_path,
         agy_cli_log_delta: usage_artifacts.agy_cli_log_delta,
+        resources: review_resources,
     }
 }
 
@@ -464,10 +493,10 @@ mod tests {
         make_fake_bin(
             &f.bin_dir,
             "claude",
-            "#!/bin/sh\necho 'partial review'\nsleep 2\necho 'late stderr' >&2\n",
+            "#!/bin/sh\necho 'partial review'\nsleep 6\necho 'late stderr' >&2\n",
         );
         let mut profile = test_profile();
-        profile.review_timeout_seconds = Some(1);
+        profile.review_timeout_seconds = Some(3);
         let _guard = PathGuard::set(f.bin_dir.display().to_string());
 
         let result = run_review_backend(
@@ -493,7 +522,7 @@ mod tests {
         make_fake_bin(
             &f.bin_dir,
             "claude",
-            "#!/bin/sh\nfor i in $(seq 1 20); do echo \"line $i\"; sleep 0.1; done\n",
+            "#!/bin/sh\nfor i in $(seq 1 60); do echo \"line $i\"; sleep 0.1; done\n",
         );
         let mut profile = test_profile();
         profile.review_timeout_seconds = Some(1);

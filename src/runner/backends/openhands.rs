@@ -107,7 +107,7 @@ pub fn run_openhands_with_executable(
         .env("LLM_API_KEY", &llm.api_key)
         .env("LLM_MODEL", &llm.model);
 
-    let (exit_code, duration_secs) = spawn_with_idle_watch(
+    let (exit_code, duration_secs, resources) = spawn_with_idle_watch(
         cmd,
         &log_path,
         worktree,
@@ -127,6 +127,7 @@ pub fn run_openhands_with_executable(
         internal_log_path: None,
         transcript_path: None,
         agy_version: None,
+        resources,
     })
 }
 
@@ -334,7 +335,7 @@ mod tests {
         make_fake_bin(
             &f.bin_dir,
             "openhands",
-            "#!/bin/sh\necho 'step1'\nsleep 5\necho 'step2 should never appear'\n",
+            "#!/bin/sh\necho 'step1'\nsleep 10\necho 'step2 should never appear'\n",
         );
         let envs = vec![(
             "PATH".to_string(),
@@ -352,7 +353,7 @@ mod tests {
             &test_llm(),
             &[],
             &envs,
-            1, // idle timeout: 1s of silence is stalled
+            3, // idle timeout: 3s of silence is stalled
         )
         .unwrap();
 
@@ -361,7 +362,7 @@ mod tests {
         assert!(log.contains("step1"));
         assert!(!log.contains("step2"));
         assert!(
-            log.contains("killed after 1s with no new backend output or worktree progress"),
+            log.contains("killed after 3s with no new backend output or worktree progress"),
             "got log: {log}"
         );
     }

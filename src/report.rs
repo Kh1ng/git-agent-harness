@@ -78,6 +78,9 @@ struct BackendModelComparison {
     predicted_average_cost_usd: Option<f64>,
     predicted_average_duration_seconds: Option<f64>,
     predicted_difficulty_match_rate: Option<f64>,
+    /// Issue #116: measured-only resource aggregates for this group.
+    total_cpu_time_seconds: Option<f64>,
+    peak_rss_bytes: Option<f64>,
     quota_observations: Vec<crate::ledger::summary::GroupQuotaObservation>,
     review_verdict_distribution: Vec<(String, usize)>,
 }
@@ -343,6 +346,8 @@ fn transform_to_report_format(
                 predicted_average_cost_usd: group.predicted_average_cost_usd,
                 predicted_average_duration_seconds: group.predicted_average_duration_seconds,
                 predicted_difficulty_match_rate: group.predicted_difficulty_match_rate,
+                total_cpu_time_seconds: group.total_cpu_time_seconds,
+                peak_rss_bytes: group.peak_rss_bytes,
                 quota_observations: group.quota_observations.clone(),
                 review_verdict_distribution: review_verdicts,
             });
@@ -650,6 +655,8 @@ mod tests {
             predicted_average_cost_usd: None,
             predicted_average_duration_seconds: None,
             predicted_difficulty_match_rate: None,
+            total_cpu_time_seconds: None,
+            peak_rss_bytes: None,
             quota_observations: vec![],
         });
         grouped_by_backend.push(GroupSummary {
@@ -682,6 +689,8 @@ mod tests {
             predicted_average_cost_usd: None,
             predicted_average_duration_seconds: None,
             predicted_difficulty_match_rate: None,
+            total_cpu_time_seconds: None,
+            peak_rss_bytes: None,
             quota_observations: vec![],
         });
 
@@ -852,6 +861,8 @@ mod tests {
             predicted_average_cost_usd: None,
             predicted_average_duration_seconds: None,
             predicted_difficulty_match_rate: None,
+            total_cpu_time_seconds: None,
+            peak_rss_bytes: None,
             quota_observations: vec![],
         }];
 
@@ -896,6 +907,8 @@ mod tests {
             predicted_average_cost_usd: None,
             predicted_average_duration_seconds: None,
             predicted_difficulty_match_rate: None,
+            total_cpu_time_seconds: None,
+            peak_rss_bytes: None,
             quota_observations: vec![],
         }];
 
@@ -936,6 +949,7 @@ mod tests {
         e.profile = profile_name.to_string();
         e.validation_result = validation_result.map(String::from);
         e.attempts = vec![crate::ledger::AttemptRecord {
+            resources: None,
             attempt_number: 1,
             backend: "agy".to_string(),
             effective_model: None,

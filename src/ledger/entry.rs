@@ -1,3 +1,4 @@
+use super::resources::AttemptResourceUsage;
 use crate::config::Profile;
 use crate::routing::RoutingRuntimeState;
 use serde::{Deserialize, Serialize};
@@ -153,6 +154,12 @@ pub struct AttemptRecord {
     /// still deserialize.
     #[serde(default)]
     pub usage: LedgerUsage,
+    /// Issue #116: best-effort process-tree resource usage for exactly this
+    /// attempt (CPU time, peak RSS) with explicit provenance. `None` means
+    /// the ledger line predates resource capture — unknown, never zero.
+    /// `#[serde(default)]` so historical ledger entries still deserialize.
+    #[serde(default)]
+    pub resources: Option<AttemptResourceUsage>,
 }
 
 /// Route selected for one launched attempt inside a dispatch. Unlike the

@@ -736,6 +736,8 @@ mod tests {
             predicted_average_cost_usd: None,
             predicted_average_duration_seconds: None,
             predicted_difficulty_match_rate: None,
+            total_cpu_time_seconds: None,
+            peak_rss_bytes: None,
             quota_observations: vec![],
         }
     }

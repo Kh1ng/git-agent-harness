@@ -247,21 +247,21 @@ pub(crate) fn kill_all_supervised_children() {
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct ProcessIdentity {
-    pid: u32,
-    start_ticks: u64,
+pub(crate) struct ProcessIdentity {
+    pub(crate) pid: u32,
+    pub(crate) start_ticks: u64,
 }
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug)]
-struct ProcessSnapshot {
-    identity: ProcessIdentity,
-    parent_pid: u32,
-    zombie: bool,
+pub(crate) struct ProcessSnapshot {
+    pub(crate) identity: ProcessIdentity,
+    pub(crate) parent_pid: u32,
+    pub(crate) zombie: bool,
 }
 
 #[cfg(target_os = "linux")]
-fn linux_process_snapshot(pid: u32) -> Option<ProcessSnapshot> {
+pub(crate) fn linux_process_snapshot(pid: u32) -> Option<ProcessSnapshot> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let fields = stat[stat.rfind(") ")? + 2..]
         .split_whitespace()
@@ -280,7 +280,7 @@ fn linux_process_snapshot(pid: u32) -> Option<ProcessSnapshot> {
 /// launch tool commands with `setsid`, which deliberately escapes the backend
 /// process group while remaining in its process tree.
 #[cfg(target_os = "linux")]
-fn linux_descendants(root_pid: u32) -> Vec<ProcessIdentity> {
+pub(crate) fn linux_descendants(root_pid: u32) -> Vec<ProcessIdentity> {
     let snapshots = fs::read_dir("/proc")
         .into_iter()
         .flatten()
@@ -578,13 +578,16 @@ pub(crate) fn process_group_activity_advanced(
 /// installed and on PATH?"). Returns `(exit_code, duration_secs)`; on an
 /// idle kill, exit_code is -1; failed descendant cleanup uses -3. Both append
 /// an explicit diagnostic to the log.
+/// Spawn `cmd` and run it under the idle watch, returning
+/// `(exit_code, duration_secs, resource_usage)` -- see the inner function
+/// for the resource-usage provenance (#116).
 pub(crate) fn spawn_with_idle_watch(
     cmd: Command,
     log_path: &Path,
     worktree: &Path,
     idle_timeout_seconds: u64,
     spawn_context: &str,
-) -> Result<(i32, f64)> {
+) -> Result<(i32, f64, crate::ledger::AttemptResourceUsage)> {
     spawn_with_idle_watch_with_shutdown(
         cmd,
         log_path,
@@ -606,7 +609,7 @@ pub(crate) fn spawn_with_worktree_progress_watch(
     worktree: &Path,
     idle_timeout_seconds: u64,
     spawn_context: &str,
-) -> Result<(i32, f64)> {
+) -> Result<(i32, f64, crate::ledger::AttemptResourceUsage)> {
     spawn_with_idle_watch_with_shutdown(
         cmd,
         log_path,
@@ -626,7 +629,7 @@ fn spawn_with_idle_watch_with_shutdown(
     spawn_context: &str,
     shutdown_requested: &AtomicBool,
     output_counts_as_progress: bool,
-) -> Result<(i32, f64)> {
+) -> Result<(i32, f64, crate::ledger::AttemptResourceUsage)> {
     let start = Instant::now();
     let hard_timeout = cmd
         .get_envs()
@@ -646,6 +649,13 @@ fn spawn_with_idle_watch_with_shutdown(
     // change into the baseline and later misclassify it as no progress.
     let initial_worktree_snapshot = worktree_progress_snapshot(worktree);
     let mut child = cmd.spawn().with_context(|| spawn_context.to_string())?;
+    // Issue #116: start sampling the backend's whole process tree immediately
+    // after spawn. Sampling runs for the whole attempt -- success, idle kill,
+    // hard timeout, or shutdown -- so killed/cancelled attempts keep their
+    // final observed maxima. `finish_resource_sampler` below stops it.
+    #[cfg(target_os = "linux")]
+    let (resource_stop, resource_accumulator, resource_handle) =
+        crate::runner::resources::spawn_resource_sampler(child.id());
     let (progress_tx, progress_rx) = mpsc::channel();
     let stdout_thread = child.stdout.take().map(|stdout| {
         copy_stream_to_file(stdout, log_path.to_path_buf(), Some(progress_tx.clone()))
@@ -764,6 +774,22 @@ fn spawn_with_idle_watch_with_shutdown(
         }
     };
     let duration = start.elapsed();
+    // Stop the resource sampler first so its final scan lands after the last
+    // tree state the attempt produced, then take its totals.
+    let resource_sample = {
+        #[cfg(target_os = "linux")]
+        {
+            crate::runner::resources::finish_resource_sampler(
+                resource_stop,
+                resource_accumulator,
+                resource_handle,
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            crate::runner::resources::finish_resource_sampler_none()
+        }
+    };
     // A surviving descendant may still own the inherited pipe descriptors.
     // Never turn a bounded cleanup failure into an unbounded thread join.
     if cleanup_error.is_none() {
@@ -824,7 +850,7 @@ fn spawn_with_idle_watch_with_shutdown(
         }
     }
 
-    Ok((exit_code, duration.as_secs_f64()))
+    Ok((exit_code, duration.as_secs_f64(), resource_sample))
 }
 
 #[cfg(test)]
@@ -847,8 +873,25 @@ mod tests {
         );
         let shutdown = std::sync::Arc::new(AtomicBool::new(false));
         let trigger = std::sync::Arc::clone(&shutdown);
+        let log_for_trigger = f.session_dir.join("backend-output.log");
+        // Fire shutdown only once the backend's first output is confirmed in
+        // the log: under heavy parallel-test load the shell can take longer
+        // than any fixed delay to start, and a shutdown fired before its
+        // first echo would race the log assertion below.
         let trigger_thread = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if fs::read_to_string(&log_for_trigger)
+                    .map(|log| log.contains("started"))
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
             trigger.store(true, Ordering::SeqCst);
         });
         let log_path = f.session_dir.join("backend-output.log");
@@ -1079,6 +1122,120 @@ mod tests {
                 !log.contains("GAH: killed after"),
                 "attempt {attempt} got log: {log}"
             );
+        }
+    }
+
+    /// Issue #116: a backend whose tree burns CPU with a child workload
+    /// produces measured, non-null, bounded resource observations (the whole
+    /// tree is sampled, not only the short-lived wrapper PID).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn idle_watch_reports_measured_resource_usage_for_cpu_workload() {
+        let _exec_guard = ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(
+            &f.bin_dir,
+            "backend",
+            "#!/bin/sh\n/bin/yes >/dev/null &\nworkload=$!\nsleep 2\nkill \"$workload\" 2>/dev/null\nwait 2>/dev/null\n",
+        );
+        let log_path = f.session_dir.join("backend-resources.log");
+        let shutdown = AtomicBool::new(false);
+        let (exit_code, duration, resources) = spawn_with_idle_watch_with_shutdown(
+            Command::new(f.bin_dir.join("backend")),
+            &log_path,
+            &f.worktree,
+            60,
+            "launching resource-sampling test backend",
+            &shutdown,
+            true,
+        )
+        .unwrap();
+        assert_eq!(exit_code, 0);
+
+        let cpu = resources
+            .cpu_time_seconds
+            .expect("cpu metric must be present");
+        assert_eq!(cpu.quality, crate::ledger::ResourceMetricQuality::Measured);
+        let cpu_value = cpu.value.expect("measured cpu is never null");
+        assert!(cpu_value > 0.0, "cpu-consuming tree must report cpu > 0");
+        assert!(
+            cpu_value <= duration + 5.0,
+            "cpu {cpu_value}s must be bounded by attempt duration {duration}s (+slack)"
+        );
+
+        let rss = resources
+            .peak_rss_bytes
+            .expect("rss metric must be present");
+        assert_eq!(rss.quality, crate::ledger::ResourceMetricQuality::Measured);
+        let rss_value = rss.value.expect("measured rss is never null");
+        assert!(rss_value > 0.0, "live tree must report rss > 0");
+        assert!(
+            rss_value < 8.0 * 1024.0 * 1024.0 * 1024.0,
+            "rss {rss_value} bytes must be bounded (8 GiB ceiling)"
+        );
+    }
+
+    /// Issue #116: an attempt killed for idleness still keeps its observed
+    /// maxima — provenance stays `measured`, never degraded to unknown.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn idle_kill_preserves_measured_resource_usage() {
+        let _exec_guard = ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(&f.bin_dir, "backend", "#!/bin/sh\nsleep 30\n");
+        let log_path = f.session_dir.join("backend-killed-resources.log");
+        let shutdown = AtomicBool::new(false);
+        let (exit_code, _duration, resources) = spawn_with_idle_watch_with_shutdown(
+            Command::new(f.bin_dir.join("backend")),
+            &log_path,
+            &f.worktree,
+            1,
+            "launching killed resource-sampling test backend",
+            &shutdown,
+            true,
+        )
+        .unwrap();
+        assert_eq!(exit_code, -1);
+        let cpu = resources
+            .cpu_time_seconds
+            .expect("cpu metric must be present even when killed");
+        assert_eq!(cpu.quality, crate::ledger::ResourceMetricQuality::Measured);
+        let rss = resources
+            .peak_rss_bytes
+            .expect("rss metric must be present even when killed");
+        assert_eq!(rss.quality, crate::ledger::ResourceMetricQuality::Measured);
+        assert!(rss.value.is_some_and(|value| value > 0.0));
+    }
+
+    /// Issue #116: on platforms without process-tree measurement the attempt
+    /// records explicit unsupported provenance — never zero, never absent.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn idle_watch_reports_unsupported_resources_off_linux() {
+        let _exec_guard = ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(&f.bin_dir, "backend", "#!/bin/sh\nexit 0\n");
+        let log_path = f.session_dir.join("backend-unsupported-resources.log");
+        let shutdown = AtomicBool::new(false);
+        let (exit_code, _duration, resources) = spawn_with_idle_watch_with_shutdown(
+            Command::new(f.bin_dir.join("backend")),
+            &log_path,
+            &f.worktree,
+            60,
+            "launching unsupported-platform test backend",
+            &shutdown,
+            true,
+        )
+        .unwrap();
+        assert_eq!(exit_code, 0);
+        for metric in [resources.cpu_time_seconds, resources.peak_rss_bytes] {
+            let metric = metric.expect("unsupported metric must be present");
+            assert_eq!(
+                metric.quality,
+                crate::ledger::ResourceMetricQuality::Unsupported
+            );
+            assert!(metric.value.is_none());
+            assert!(metric.unknown_reason.is_some());
         }
     }
 

@@ -75,7 +75,7 @@ pub fn run_claude_with_executable(
     cmd.args(filtered_backend_args("claude", extra_args));
     crate::runner::apply_child_env(&mut cmd, env_vars);
 
-    let (exit_code, duration_secs) = spawn_with_idle_watch(
+    let (exit_code, duration_secs, resources) = spawn_with_idle_watch(
         cmd,
         &log_path,
         worktree,
@@ -104,6 +104,7 @@ pub fn run_claude_with_executable(
         internal_log_path: None,
         transcript_path,
         agy_version: None,
+        resources,
     })
 }
 
@@ -262,7 +263,7 @@ mod tests {
         make_fake_bin(
             &f.bin_dir,
             "claude",
-            "#!/bin/sh\necho 'step1'\nsleep 5\necho 'step2 should never appear'\n",
+            "#!/bin/sh\necho 'step1'\nsleep 10\necho 'step2 should never appear'\n",
         );
         let envs = vec![(
             "PATH".to_string(),
@@ -273,14 +274,14 @@ mod tests {
             ),
         )];
 
-        let result = run_claude(&f.worktree, "task", &f.session_dir, &[], &envs, 1).unwrap();
+        let result = run_claude(&f.worktree, "task", &f.session_dir, &[], &envs, 3).unwrap();
 
         assert_eq!(result.exit_code, -1);
         let log = fs::read_to_string(&result.log_path).unwrap();
         assert!(log.contains("step1"));
         assert!(!log.contains("step2"));
         assert!(
-            log.contains("killed after 1s with no new backend output or worktree progress"),
+            log.contains("killed after 3s with no new backend output or worktree progress"),
             "got log: {log}"
         );
     }

@@ -29,6 +29,7 @@ mod behavior_metrics_tests {
         metrics: AttemptBehaviorMetrics,
     ) -> AttemptRecord {
         AttemptRecord {
+            resources: None,
             attempt_number,
             backend: backend.to_string(),
             effective_model: Some("model-x".to_string()),
@@ -50,6 +51,7 @@ mod behavior_metrics_tests {
 
     fn attempt_with_no_behavior(attempt_number: u32, backend: &str) -> AttemptRecord {
         AttemptRecord {
+            resources: None,
             attempt_number,
             backend: backend.to_string(),
             effective_model: Some("model-x".to_string()),

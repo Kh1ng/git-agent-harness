@@ -6,6 +6,7 @@ pub(crate) mod backends;
 pub(crate) mod output;
 pub(crate) mod process;
 pub(crate) mod resolve;
+pub(crate) mod resources;
 pub(crate) mod review;
 pub(crate) mod review_usage;
 
@@ -131,6 +132,10 @@ pub struct RunResult {
     /// detection fails. Used for log-path resolution and upstream log-format
     /// drift detection (TICKET-242).
     pub agy_version: Option<String>,
+    /// Issue #116: best-effort process-tree resource usage observed by the
+    /// supervision loop during this run, with explicit provenance (measured /
+    /// unsupported / unknown). Kept separate from token/cost usage.
+    pub resources: crate::ledger::AttemptResourceUsage,
 }
 
 pub struct LlmConfig {
