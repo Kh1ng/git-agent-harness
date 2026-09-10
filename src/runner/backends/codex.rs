@@ -11,30 +11,8 @@ use crate::runner::RunResult;
 /// Run Codex non-interactively via `codex exec`.
 /// extra_args come from profile.codex_args, but stale model flags are
 /// stripped so the resolved route controls the launched model.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn run_codex(
-    worktree: &Path,
-    task: &str,
-    session_dir: &Path,
-    model: Option<&str>,
-    extra_args: &[String],
-    env_vars: &[(String, String)],
-    idle_timeout_seconds: u64,
-) -> Result<RunResult> {
-    run_codex_with_executable(
-        Path::new("codex"),
-        worktree,
-        task,
-        session_dir,
-        model,
-        extra_args,
-        env_vars,
-        idle_timeout_seconds,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
-pub fn run_codex_with_executable(
+pub(crate) fn run_with_executable(
     executable: &Path,
     worktree: &Path,
     task: &str,
@@ -98,7 +76,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_codex(
+        let result = run_with_executable(
+            Path::new("codex"),
             &f.worktree,
             "codex task",
             &f.session_dir,
@@ -122,7 +101,17 @@ mod tests {
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 7);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap();
+        let result = run_with_executable(
+            Path::new("codex"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
 
         assert_eq!(result.exit_code, 7);
     }
@@ -134,7 +123,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_codex(
+        run_with_executable(
+            Path::new("codex"),
             &f.worktree,
             "the codex task",
             &f.session_dir,
@@ -163,7 +153,17 @@ mod tests {
             ("FROM_ENV_FILE".to_string(), "codex-env-value".to_string()),
         ];
 
-        run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap();
+        run_with_executable(
+            Path::new("codex"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
 
         let env = recorded_env(&f.record_dir);
         assert!(env.contains("FROM_ENV_FILE=codex-env-value"));
@@ -174,8 +174,17 @@ mod tests {
         let f = fixture();
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let err =
-            run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs, 300).unwrap_err();
+        let err = run_with_executable(
+            Path::new("codex"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap_err();
 
         assert!(err.to_string().contains("launching codex; is it installed"));
     }
@@ -201,7 +210,17 @@ mod tests {
             ),
         )];
 
-        let result = run_codex(&f.worktree, "task", &f.session_dir, None, &[], &envs, 3).unwrap();
+        let result = run_with_executable(
+            Path::new("codex"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            3,
+        )
+        .unwrap();
 
         assert_eq!(result.exit_code, -1);
         let log = fs::read_to_string(&result.log_path).unwrap();
@@ -220,7 +239,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_codex(
+        run_with_executable(
+            Path::new("codex"),
             &f.worktree,
             "task",
             &f.session_dir,

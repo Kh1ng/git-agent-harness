@@ -8,27 +8,6 @@ use crate::runner::process::{spawn_with_idle_watch, write_redacted_task};
 use crate::runner::{LlmConfig, RunResult};
 
 /// Run Antigravity CLI non-interactively via `agy --print`.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn run_agy(
-    worktree: &Path,
-    task: &str,
-    session_dir: &Path,
-    llm: &LlmConfig,
-    env_vars: &[(String, String)],
-    executable_name: &str,
-) -> Result<RunResult> {
-    run_agy_with_executable(
-        Path::new(executable_name),
-        worktree,
-        task,
-        session_dir,
-        llm,
-        env_vars,
-        None,
-        120,
-    )
-}
-
 /// AGY sometimes exits 0 with empty stdout on a provider-side failure
 /// (quota exhaustion, expired auth) instead of a non-zero exit -- shared
 /// by the worker path (run_agy_with_executable) and the review path
@@ -258,7 +237,7 @@ pub(crate) fn log_delta(log: &Option<PathBuf>, pre_offset: u64) -> Option<String
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn run_agy_with_executable(
+pub(crate) fn run_with_executable(
     executable: &Path,
     worktree: &Path,
     task: &str,
@@ -411,7 +390,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_agy(
+        let result = run_with_executable(
+            Path::new("agy"),
             &f.worktree,
             "agy task",
             &f.session_dir,
@@ -421,7 +401,8 @@ mod tests {
                 model: "gpt-5.4".into(),
             },
             &envs,
-            "agy",
+            None,
+            120,
         )
         .unwrap();
 
@@ -438,7 +419,7 @@ mod tests {
         make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_agy_with_executable(
+        run_with_executable(
             &f.bin_dir.join("agy"),
             &f.worktree,
             "task",
@@ -466,7 +447,7 @@ mod tests {
         make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_agy_with_executable(
+        run_with_executable(
             &f.bin_dir.join("agy"),
             &f.worktree,
             "task",
@@ -507,7 +488,7 @@ mod tests {
             ),
         )];
 
-        let result = run_agy_with_executable(
+        let result = run_with_executable(
             &f.bin_dir.join("agy"),
             &f.worktree,
             "task",
@@ -551,7 +532,7 @@ mod tests {
             ),
         )];
 
-        let result = run_agy_with_executable(
+        let result = run_with_executable(
             &f.bin_dir.join("agy"),
             &f.worktree,
             "task",
@@ -576,7 +557,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        run_agy(
+        run_with_executable(
+            Path::new("agy"),
             &f.worktree,
             "the agy task",
             &f.session_dir,
@@ -586,7 +568,8 @@ mod tests {
                 model: "gpt-5.4".into(),
             },
             &envs,
-            "agy",
+            None,
+            120,
         )
         .unwrap();
 
@@ -612,7 +595,8 @@ mod tests {
         );
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_agy(
+        let result = run_with_executable(
+            Path::new("agy"),
             &f.worktree,
             "the agy task",
             &f.session_dir,
@@ -622,7 +606,8 @@ mod tests {
                 model: "gpt-5.4".into(),
             },
             &envs,
-            "agy",
+            None,
+            120,
         )
         .unwrap();
 
@@ -641,7 +626,8 @@ mod tests {
         let f = fixture();
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let err = run_agy(
+        let err = run_with_executable(
+            Path::new("agy"),
             &f.worktree,
             "task",
             &f.session_dir,
@@ -651,7 +637,8 @@ mod tests {
                 model: "gpt-5.4".into(),
             },
             &envs,
-            "agy",
+            None,
+            120,
         )
         .unwrap_err();
 
@@ -695,7 +682,7 @@ mod tests {
             ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
             ("HOME".to_string(), agy_home.to_string_lossy().to_string()),
         ];
-        let result = run_agy_with_executable(
+        let result = run_with_executable(
             &f.bin_dir.join("agy"),
             &f.worktree,
             "task",
@@ -736,7 +723,7 @@ mod tests {
             ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
             ("HOME".to_string(), agy_home.to_string_lossy().to_string()),
         ];
-        let result = run_agy_with_executable(
+        let result = run_with_executable(
             &f.bin_dir.join("agy"),
             &f.worktree,
             "task",
@@ -786,7 +773,7 @@ mod tests {
             ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
             ("HOME".to_string(), agy_home.to_string_lossy().to_string()),
         ];
-        let result = run_agy_with_executable(
+        let result = run_with_executable(
             &f.bin_dir.join("agy"),
             &f.worktree,
             "task",
@@ -821,7 +808,8 @@ mod tests {
         make_recording_bin(&f.bin_dir, "agy", &f.record_dir, 0);
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
 
-        let result = run_agy(
+        let result = run_with_executable(
+            Path::new("agy"),
             &f.worktree,
             "normal task",
             &f.session_dir,
@@ -831,7 +819,8 @@ mod tests {
                 model: "gpt-5.4".into(),
             },
             &envs,
-            "agy",
+            None,
+            120,
         )
         .unwrap();
         assert_eq!(result.exit_code, 0);
@@ -980,13 +969,15 @@ mod tests {
             "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'antigravity-cli version 1.0.16'; else echo 'stdout-marker-agy'; fi\n",
         );
         let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
-        let result = run_agy(
+        let result = run_with_executable(
+            Path::new("agy"),
             &f.worktree,
             "test task",
             &f.session_dir,
             &test_llm(),
             &envs,
-            "agy",
+            None,
+            120,
         )
         .unwrap();
         assert_eq!(result.agy_version.as_deref(), Some("1.0.16"));
@@ -1016,13 +1007,15 @@ mod tests {
             ("HOME".to_string(), home.to_str().unwrap().to_string()),
         ];
 
-        let result = run_agy(
+        let result = run_with_executable(
+            Path::new("agy"),
             &f.worktree,
             "test task",
             &f.session_dir,
             &test_llm(),
             &envs,
-            "agy",
+            None,
+            120,
         )
         .unwrap();
 
@@ -1057,13 +1050,15 @@ mod tests {
             ("HOME".to_string(), home.to_str().unwrap().to_string()),
         ];
 
-        let result = run_agy(
+        let result = run_with_executable(
+            Path::new("agy"),
             &f.worktree,
             "test task",
             &f.session_dir,
             &test_llm(),
             &envs,
-            "agy",
+            None,
+            120,
         )
         .unwrap();
 

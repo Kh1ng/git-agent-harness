@@ -13,22 +13,22 @@ const DEFAULT_MAX_LINES: usize = 1500;
 fn runner_adapter_facade_preserves_public_call_paths() {
     fn public<T>(_item: T) {}
 
-    public(git_agent_harness::runner::run_agy);
-    public(git_agent_harness::runner::run_agy_with_executable);
-    public(git_agent_harness::runner::run_claude);
-    public(git_agent_harness::runner::run_claude_with_executable);
-    public(git_agent_harness::runner::run_codex);
-    public(git_agent_harness::runner::run_codex_with_executable);
+    // Issue #832: the runner facade is now the BackendRunner abstraction.
+    // The per-backend free functions were retired; each backend's spawn path
+    // lives in its runner impl, constructed uniformly via `for_kind`.
+    public(git_agent_harness::runner::for_kind);
+    public(git_agent_harness::runner::AgyRunner);
+    public(git_agent_harness::runner::ClaudeRunner);
+    public(git_agent_harness::runner::CodexRunner);
+    public(git_agent_harness::runner::HermesRunner);
+    public(git_agent_harness::runner::OpencodeRunner);
+    public(git_agent_harness::runner::OpenhandsRunner);
+    public(git_agent_harness::runner::VibeRunner);
     public(git_agent_harness::runner::extract_model_from_args);
     public(git_agent_harness::runner::extract_model_from_backend_args);
     public(git_agent_harness::runner::filtered_backend_args);
     public(git_agent_harness::runner::list_oh_profiles);
     public(git_agent_harness::runner::load_oh_profile);
-    public(git_agent_harness::runner::run_openhands);
-    public(git_agent_harness::runner::run_opencode);
-    public(git_agent_harness::runner::run_opencode_with_executable);
-    public(git_agent_harness::runner::run_vibe);
-    public(git_agent_harness::runner::run_vibe_with_executable);
 }
 
 #[test]

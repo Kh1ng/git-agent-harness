@@ -148,7 +148,7 @@ impl BackendRunner for CodexRunner {
     }
 
     fn run(&self, ctx: &RunContext) -> Result<RunResult> {
-        crate::runner::run_codex_with_executable(
+        crate::runner::backends::codex::run_with_executable(
             ctx.executable,
             ctx.worktree,
             ctx.task,
@@ -190,7 +190,7 @@ impl BackendRunner for ClaudeRunner {
     }
 
     fn run(&self, ctx: &RunContext) -> Result<RunResult> {
-        crate::runner::run_claude_with_executable(
+        crate::runner::backends::claude::run_with_executable(
             ctx.executable,
             ctx.worktree,
             ctx.task,
@@ -211,7 +211,7 @@ impl BackendRunner for HermesRunner {
     }
 
     fn run(&self, ctx: &RunContext) -> Result<RunResult> {
-        crate::runner::run_hermes_with_executable(
+        crate::runner::backends::hermes::run_with_executable(
             ctx.executable,
             ctx.worktree,
             ctx.task,
@@ -261,7 +261,7 @@ impl BackendRunner for VibeRunner {
     }
 
     fn run(&self, ctx: &RunContext) -> Result<RunResult> {
-        crate::runner::run_vibe_with_executable(
+        crate::runner::backends::vibe::run_with_executable(
             ctx.executable,
             ctx.worktree,
             ctx.task,
@@ -303,7 +303,7 @@ impl BackendRunner for OpencodeRunner {
     }
 
     fn run(&self, ctx: &RunContext) -> Result<RunResult> {
-        crate::runner::run_opencode_with_executable(
+        crate::runner::backends::opencode::run_with_executable(
             ctx.executable,
             ctx.worktree,
             ctx.task,
@@ -325,7 +325,7 @@ impl BackendRunner for OpenhandsRunner {
 
     fn run(&self, ctx: &RunContext) -> Result<RunResult> {
         let llm = ctx.llm.context("openhands requires an LlmConfig")?;
-        crate::runner::run_openhands_with_executable(
+        crate::runner::backends::openhands::run_with_executable(
             ctx.executable,
             ctx.worktree,
             ctx.task,
@@ -364,7 +364,7 @@ impl BackendRunner for AgyRunner {
 
     fn run(&self, ctx: &RunContext) -> Result<RunResult> {
         let llm = ctx.llm.context("agy requires an LlmConfig")?;
-        crate::runner::run_agy_with_executable(
+        crate::runner::backends::agy::run_with_executable(
             ctx.executable,
             ctx.worktree,
             ctx.task,
