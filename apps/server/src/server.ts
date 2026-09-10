@@ -41,7 +41,11 @@ import {
   type ProfileAddOptions,
   type ProfileSetOptions,
   type ProfileRemoveOptions,
-  type ConfigSetOptions
+  type ConfigSetOptions,
+  runTelemetryAggregate,
+  runClaimsList,
+  runQuotaList,
+  runExternalApprovalInspect,
 } from './gahCli.js';
 import { REPORT_GROUP_BY_VALUES } from '@git-agent-harness/contracts';
 import type {
@@ -629,6 +633,107 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to load gah quota snapshot',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Issue #519: HTTP adapters for the four JSON-ready read operations from
+  // the read-API audit. Fixed argv; the CLI owns parsing and validation.
+  const QUERY_TEXT_LIMITS: Record<string, number> = {
+    profile: 128,
+    since: 64,
+    until: 64,
+    project: 128,
+    ticket: 512,
+    execution_type: 64,
+    backend_instance: 128,
+    provider: 128,
+    model: 512,
+    account: 128,
+    work_id: 512,
+    credential_label: 128,
+    operation_kind: 64,
+  };
+  const readQueryText = (query: express.Request['query'], key: string): string | undefined => {
+    const raw = query[key];
+    if (raw === undefined) return undefined;
+    if (typeof raw !== 'string') return undefined;
+    const limit = QUERY_TEXT_LIMITS[key];
+    if (!limit || raw.length > limit || raw.trim() !== raw || /[\x00-\x1f\x7f]/.test(raw)) return undefined;
+    return raw;
+  };
+
+  app.get('/api/telemetry/aggregate', async (req, res) => {
+    const rawDimensions = req.query.dimensions;
+    const dimensions = typeof rawDimensions === 'string' && rawDimensions.trim() !== ''
+      ? rawDimensions.split(',').map(d => d.trim()).filter(d => d !== '')
+      : [];
+    if (dimensions.length === 0) {
+      return res.status(400).json({ error: 'dimensions_required', message: 'Provide at least one aggregation dimension.' });
+    }
+    try {
+      const report = await runTelemetryAggregate({
+        dimensions,
+        since: readQueryText(req.query, 'since'),
+        until: readQueryText(req.query, 'until'),
+        profile: readQueryText(req.query, 'profile'),
+        project: readQueryText(req.query, 'project'),
+        ticket: readQueryText(req.query, 'ticket'),
+        executionType: readQueryText(req.query, 'execution_type'),
+        backendInstance: readQueryText(req.query, 'backend_instance'),
+        provider: readQueryText(req.query, 'provider'),
+        model: readQueryText(req.query, 'model'),
+        account: readQueryText(req.query, 'account'),
+      });
+      return res.json(report);
+    } catch (error) {
+      return res.status(502).json({
+        error: 'telemetry_aggregate_unavailable',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/claims', async (req, res) => {
+    const profile = readQueryText(req.query, 'profile');
+    try {
+      const claims = await runClaimsList(profile);
+      return res.json(claims);
+    } catch (error) {
+      return res.status(502).json({
+        error: 'claims_unavailable',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/quota/list', async (_req, res) => {
+    try {
+      const records = await runQuotaList();
+      return res.json(records);
+    } catch (error) {
+      return res.status(502).json({
+        error: 'quota_list_unavailable',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.get('/api/external-approval/inspect', async (req, res) => {
+    const profile = readQueryText(req.query, 'profile');
+    const workId = readQueryText(req.query, 'work_id');
+    const credentialLabel = readQueryText(req.query, 'credential_label');
+    const operationKind = readQueryText(req.query, 'operation_kind');
+    if (!profile || !workId || !credentialLabel || !operationKind) {
+      return res.status(400).json({ error: 'scope_required', message: 'Provide profile, work_id, credential_label, and operation_kind.' });
+    }
+    try {
+      const scope = await runExternalApprovalInspect({ profile, workId, credentialLabel, operationKind });
+      return res.json(scope);
+    } catch (error) {
+      return res.status(502).json({
+        error: 'external_approval_unavailable',
         message: error instanceof Error ? error.message : String(error)
       });
     }

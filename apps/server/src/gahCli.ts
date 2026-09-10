@@ -1231,6 +1231,97 @@ export async function runNodeRole(): Promise<import('@git-agent-harness/contract
   return runJsonCommand(['status', '--role', '--json', ...(config ? ['--config-path', config] : [])], config);
 }
 
+/** Issue #519: HTTP adapters for the four JSON-ready read operations the
+ * read-API audit (docs/READ_API_AUDIT_2026-09-08.md) identified. All use
+ * fixed argv; the CLI owns parsing and validation. */
+
+export interface TelemetryAggregateParams {
+  dimensions: string[];
+  since?: string;
+  until?: string;
+  profile?: string;
+  project?: string;
+  ticket?: string;
+  executionType?: string;
+  backendInstance?: string;
+  provider?: string;
+  model?: string;
+  account?: string;
+}
+
+export async function runTelemetryAggregate(
+  params: TelemetryAggregateParams,
+  config?: string
+): Promise<import('@git-agent-harness/contracts').TelemetryAggregateReport> {
+  const args = ['telemetry', 'aggregate', '--json', '--dimensions', params.dimensions.join(',')];
+  if (params.since) args.push('--since', params.since);
+  if (params.until) args.push('--until', params.until);
+  if (params.profile) args.push('--profile', params.profile);
+  if (params.project) args.push('--project', params.project);
+  if (params.ticket) args.push('--ticket', params.ticket);
+  if (params.executionType) args.push('--execution-type', params.executionType);
+  if (params.backendInstance) args.push('--backend-instance', params.backendInstance);
+  if (params.provider) args.push('--provider', params.provider);
+  if (params.model) args.push('--model', params.model);
+  if (params.account) args.push('--account', params.account);
+  if (config) args.push('--config', config);
+  return runJsonCommand(args, config);
+}
+
+export async function runClaimsList(
+  profile: string | undefined,
+  config?: string
+): Promise<import('@git-agent-harness/contracts').WorkClaimDetail[]> {
+  const args = ['claims', 'list', '--json'];
+  if (profile) args.push('--profile', profile);
+  if (config) args.push('--config', config);
+  return runJsonCommand(args, config);
+}
+
+export async function runQuotaList(
+  config?: string
+): Promise<import('@git-agent-harness/contracts').QuotaListRecord[]> {
+  // No --store from clients: the server reads its own configured store.
+  // (`quota list` has no --config flag; the store path resolves from the
+  // server's own environment.)
+  const args = ['quota', 'list', '--json'];
+  return runJsonCommand(args, config);
+}
+
+export interface ExternalApprovalScopeParams {
+  profile: string;
+  workId: string;
+  credentialLabel: string;
+  operationKind: string;
+}
+
+/** Returns the approval scope only — the CLI's local `ledger_path` field is
+ * dropped here so remote callers never learn filesystem layout. */
+export async function runExternalApprovalInspect(
+  params: ExternalApprovalScopeParams,
+  config?: string
+): Promise<import('@git-agent-harness/contracts').ExternalApprovalScope> {
+  const args = [
+    'external-approval',
+    'inspect',
+    '--json',
+    '--profile',
+    params.profile,
+    '--work-id',
+    params.workId,
+    '--credential-label',
+    params.credentialLabel,
+    '--operation-kind',
+    params.operationKind,
+  ];
+  if (config) args.push('--config', config);
+  const raw = await runJsonCommand<{
+    scope: import('@git-agent-harness/contracts').ExternalApprovalScope;
+    ledger_path?: string;
+  }>(args, config);
+  return raw.scope;
+}
+
 export async function runConfigShow(
   config?: string
 ): Promise<{ current_manager: string | null; notifications?: import('@git-agent-harness/contracts').NotificationSettingsSummary }> {
