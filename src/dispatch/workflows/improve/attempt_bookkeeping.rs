@@ -12,7 +12,7 @@ use crate::config::{GahConfig, Profile};
 use crate::ledger::{AttemptRecord, LedgerEntry};
 use crate::routing::RouteDecision;
 use crate::runner::{self, RunResult};
-use crate::usage_attribution::UsageAttribution;
+use crate::usage_attribution::{normalize_attempt_usage, UsageAttribution};
 use anyhow::Result;
 
 #[allow(clippy::too_many_arguments)]
@@ -101,4 +101,40 @@ pub(super) fn capture_successful_attempt(
         &format!("Attempt {} passed validation", attempt + 1),
         ledger,
     );
+}
+
+/// Issue #653 support: record a dispatch attempt whose backend never
+/// launched (binary missing, exec failure). Extracted from the improve
+/// workflow's launch-error branch.
+pub(crate) fn record_backend_launch_failure(
+    ledger: &mut LedgerEntry,
+    route: &crate::routing::RouteDecision,
+    attempt: u32,
+    llm: &crate::runner::LlmConfig,
+    duration_seconds: f64,
+) {
+    ledger.set_failure(
+        crate::ledger::FailureClass::HarnessError,
+        crate::ledger::FailureStage::BackendLaunch,
+    );
+    ledger.attempts.push(AttemptRecord {
+        resources: Some(crate::ledger::AttemptResourceUsage::never_launched()),
+        attempt_number: attempt + 1,
+        backend: route.effective_backend.clone(),
+        effective_model: Some(llm.model.clone()),
+        exit_code: None,
+        validation_result: None,
+        failure_class: Some(crate::ledger::FailureClass::HarnessError.as_str().into()),
+        failure_stage: Some(crate::ledger::FailureStage::BackendLaunch.as_str().into()),
+        duration_seconds: Some(duration_seconds),
+        diff_path: None,
+        checkpoint_branch: None,
+        checkpoint_sha: None,
+        cli_version: None,
+        usage: normalize_attempt_usage(
+            crate::ledger::LedgerUsage::default(),
+            UsageAttribution::from_route(route).with_fallback_model(&llm.model),
+            false,
+        ),
+    });
 }

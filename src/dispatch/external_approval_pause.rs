@@ -3,6 +3,7 @@
 //! credential scope lacks an active grant.
 
 use crate::config::{GahConfig, Profile};
+use crate::dispatch::attempts::ExternalApprovalRequiredError;
 use crate::ledger::{self, ExternalApprovalRecord, LedgerEntry};
 use crate::notifications::{notify_event, NotifyEvent};
 
@@ -109,4 +110,36 @@ pub(crate) fn notify_external_approval_request(
             ),
         },
     );
+}
+
+/// Issue #653: match a pause error and latch the durable work-item hold.
+/// Returns `true` when the error was an external-approval pause and the
+/// ledger entry now carries the hold — the workflow then skips the backend
+/// launch (no attempt consumed) and ends the dispatch cleanly.
+pub(crate) fn latch_external_approval_hold(
+    cfg: &GahConfig,
+    profile_name: &str,
+    profile: &Profile,
+    ledger: &mut LedgerEntry,
+    error: &anyhow::Error,
+) -> bool {
+    let Some(gap_error) = error.downcast_ref::<ExternalApprovalRequiredError>() else {
+        return false;
+    };
+    ledger.validation_result = Some("external_api_approval_required".into());
+    ledger.human_required = true;
+    ledger.human_required_reason_code = Some(
+        crate::controller::HumanRequiredReason::ExternalApiApprovalRequired
+            .as_str()
+            .to_string(),
+    );
+    ledger.failure_class = Some(crate::ledger::FailureClass::HumanBlocked.as_str().into());
+    ledger.failure_stage = None;
+    ledger.error_summary = Some(format!("{gap_error}"));
+    for gap in &gap_error.gaps {
+        if raise_external_approval_request(cfg, profile_name, profile, ledger, gap) {
+            notify_external_approval_request(cfg, profile, ledger, gap);
+        }
+    }
+    true
 }

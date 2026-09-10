@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::ExternalCredentialScope;
 use crate::config::RoutingPolicy;
+use crate::dispatch::attempts::external_approval_gap::external_approval_gaps_for_work_item;
 use crate::dispatch::external_approval_pause::raise_external_approval_request;
 use crate::dispatch::test_util::{gah_config_with_ledger, profile};
 use std::fs;
