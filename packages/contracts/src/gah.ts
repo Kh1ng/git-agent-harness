@@ -767,6 +767,8 @@ export interface RoutingCandidateSummary {
 export interface BackendInstanceSummary {
   backend_instance: string;
   runner_kind: string;
+  /** Issue #822: disabled instances stay declared but routing skips them. */
+  enabled: boolean;
   logical_backend: string;
   account_label: string | null;
   auth_source_label: string | null;

@@ -15,7 +15,7 @@ import { ProfileEditor } from '../components/ProfileEditor.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
 import { skillFromFrontMatter, SkillFrontMatterError } from '../lib/skillFrontMatter.js';
-import { gahApi, GahApiError } from '../api/client.js';
+import { gahApi, backendInstancesApi, GahApiError } from '../api/client.js';
 import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, SkillSummary, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
 
 declare global {
@@ -645,6 +645,10 @@ export function ProfileConfigViewerSection({ selectedName, profileConfig }: Prof
         <CandidateTable title="Review candidates" candidates={effective.review_candidates} />
       </div>
 
+      <div className="mt-3">
+        <BackendInstancesCard profileName={selectedName} effective={effective} />
+      </div>
+
       <div className="mt-3 card-padded border border-subtle">
         <h4 className="text-xs font-semibold text-primary mb-2">Task routing rules</h4>
         {effective.task_routing_rules.length === 0 ? (
@@ -706,6 +710,82 @@ export function ProfileConfigViewerSection({ selectedName, profileConfig }: Prof
         <p className="text-xs text-muted mt-1">Command contents and credentials are intentionally excluded.</p>
       </div>
     </section>
+  );
+}
+
+/** Issue #822: per-instance enable/disable. Disabled instances stay declared
+ * (status/attribution keep working) but routing skips them with a typed
+ * reason. Toggles shell out to the fixed CLI command through the server's
+ * owner-gated mutation API; the merged-entry write and validation live in
+ * Rust. */
+function BackendInstancesCard({ profileName, effective }: { profileName: string; effective: SettingsConfigProfileSummary }) {
+  const declared = effective.backend_instances;
+  const [instances, setInstances] = useState(declared ?? []);
+  const [pendingInstance, setPendingInstance] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loadedFor, setLoadedFor] = useState(profileName);
+
+  useEffect(() => {
+    if (declared) {
+      setInstances(declared);
+      setLoadedFor(profileName);
+      setError(null);
+    }
+  }, [declared, profileName]);
+
+  if (!declared || declared.length === 0) {
+    return (
+      <div className="card-padded border border-subtle">
+        <h4 className="text-xs font-semibold text-primary mb-2">Backend instances</h4>
+        <p className="text-xs text-muted">No backend instances declared. Add one under [defaults.routing.backend_instances] or the profile's routing section.</p>
+      </div>
+    );
+  }
+
+  const toggle = async (instance: string, enabled: boolean) => {
+    setPendingInstance(instance);
+    setError(null);
+    try {
+      const response = await backendInstancesApi.setEnabled(profileName, instance, enabled);
+      setInstances(response.backend_instances);
+    } catch (failure) {
+      setError(failure instanceof GahApiError ? failure.message : 'Toggle failed. Refresh and retry.');
+    } finally {
+      setPendingInstance(null);
+    }
+  };
+
+  return (
+    <div className="card-padded border border-subtle">
+      <h4 className="text-xs font-semibold text-primary mb-2">Backend instances</h4>
+      <p className="text-xs text-muted mb-2">
+        Disabled instances stay configured for status and attribution, but routing never selects them.
+        Re-enabling validates the executable binding again.
+      </p>
+      {error && <p className="text-xs text-critical mb-2">{error}</p>}
+      <ul className="space-y-2">
+        {instances.map((instance) => (
+          <li key={instance.backend_instance} className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-primary">
+                <span className="font-mono">{instance.backend_instance}</span>
+                <span className="text-muted"> · {instance.logical_backend}</span>
+                {!instance.enabled && <span className="ml-2 text-critical">disabled</span>}
+              </p>
+              {!instance.executable_configured && <p className="text-xs text-critical">No executable binding configured.</p>}
+            </div>
+            <button
+              type="button"
+              disabled={pendingInstance !== null || loadedFor !== profileName}
+              onClick={() => toggle(instance.backend_instance, !instance.enabled)}
+              className={instance.enabled ? 'btn-secondary text-xs' : 'btn-primary text-xs'}
+            >
+              {pendingInstance === instance.backend_instance ? 'Saving…' : instance.enabled ? 'Disable' : 'Enable'}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

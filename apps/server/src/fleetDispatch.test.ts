@@ -642,7 +642,8 @@ test('fleet dispatch deduplicates concurrent starts for the same work identity a
               quota_pool: null,
               supported_models: ['gpt-4.1'],
               executable_configured: true,
-              isolated_state_configured: true
+              isolated_state_configured: true,
+              enabled: true
             }
           ],
           availability: [
@@ -731,7 +732,8 @@ test('fleet dispatch allows redispatch after terminal completion and keeps backe
               quota_pool: null,
               supported_models: ['gpt-4.1'],
               executable_configured: true,
-              isolated_state_configured: true
+              isolated_state_configured: true,
+              enabled: true
             },
             {
               backend_instance: 'claude-main',
@@ -742,7 +744,8 @@ test('fleet dispatch allows redispatch after terminal completion and keeps backe
               quota_pool: null,
               supported_models: ['sonnet-4.1'],
               executable_configured: true,
-              isolated_state_configured: true
+              isolated_state_configured: true,
+              enabled: true
             }
           ]
         })
@@ -837,7 +840,8 @@ test('fleet dispatch skips unsupported, unavailable, and saturated nodes, and ma
               quota_pool: null,
               supported_models: ['gpt-4.1'],
               executable_configured: true,
-              isolated_state_configured: true
+              isolated_state_configured: true,
+              enabled: true
             }
           ],
           availability: [
@@ -866,7 +870,8 @@ test('fleet dispatch skips unsupported, unavailable, and saturated nodes, and ma
               quota_pool: null,
               supported_models: ['gpt-4.1'],
               executable_configured: true,
-              isolated_state_configured: true
+              isolated_state_configured: true,
+              enabled: true
             }
           ]
         }),
@@ -881,7 +886,8 @@ test('fleet dispatch skips unsupported, unavailable, and saturated nodes, and ma
               quota_pool: null,
               supported_models: ['gpt-5.4'],
               executable_configured: true,
-              isolated_state_configured: true
+              isolated_state_configured: true,
+              enabled: true
             }
           ]
         }),
@@ -896,7 +902,8 @@ test('fleet dispatch skips unsupported, unavailable, and saturated nodes, and ma
               quota_pool: null,
               supported_models: ['gpt-5.4'],
               executable_configured: true,
-              isolated_state_configured: true
+              isolated_state_configured: true,
+              enabled: true
             }
           ],
           availability: [

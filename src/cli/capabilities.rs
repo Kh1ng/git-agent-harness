@@ -316,6 +316,7 @@ pub fn generate_manifest() -> CapabilityManifest {
     add_ledger_operations(&mut manifest);
     add_hold_operations(&mut manifest);
     add_route_approval_operations(&mut manifest);
+    add_backend_instance_operations(&mut manifest);
     add_external_approval_operations(&mut manifest);
     add_loop_operations(&mut manifest);
     add_events_operations(&mut manifest);

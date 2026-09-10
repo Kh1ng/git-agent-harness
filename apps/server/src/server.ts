@@ -3,6 +3,7 @@ import type { NodeRoleStatus } from '@git-agent-harness/contracts';
 import { workerRouteGuard, validateNodeRole } from './nodeRole.js';
 import { workerMemoryRouter } from './workerMemory.js';
 import { paidRouteApprovalsRouter } from './paidRouteApprovals.js';
+import { backendInstancesRouter } from './backendInstances.js';
 import { pmPlansRouter } from './pmPlans.js';
 import { nodeSetupRouter } from './nodeSetup.js';
 import cors from 'cors';
@@ -289,6 +290,7 @@ export function createServer(
   app.use('/api/worker-memory', workerMemoryRouter());
   app.use('/api/pm', pmPlansRouter());
   app.use('/api/route-approvals', paidRouteApprovalsRouter(mutation));
+  app.use('/api/backend-instances', backendInstancesRouter(mutation));
   app.use('/api/settings/nodes', requireOwner, nodeSetupRouter());
   // Updating the running service also requires the existing operator opt-in.
   app.use('/api/admin', (req, res, next) => {

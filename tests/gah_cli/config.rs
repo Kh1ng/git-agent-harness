@@ -173,3 +173,145 @@ fn node_role_and_central_url_survive_config_changes_and_need_no_profile() {
     let node: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(node["role"], "central");
 }
+
+#[test]
+fn set_backend_instance_enabled_writes_merged_entry_and_flips_state() {
+    let (tmp, config) = config_with_profile();
+    let config_path = config.to_str().unwrap();
+    // Declare the instance at the repo-defaults level; the profile-level
+    // toggle must preserve every declared field (entries replace wholesale).
+    // Append the shared-instance declaration as its own table (distinct
+    // table names keep TOML order-independent).
+    std::fs::write(
+        &config,
+        format!(
+            "{}\n[defaults.routing.backend_instances.codex-paid]\n\
+             runner_kind = \"codex\"\n\
+             logical_backend = \"codex\"\n\
+             executable = \"{}\"\n\
+             account_label = \"team-api\"\n\
+             supported_models = [\"openai/gpt-5\"]\n",
+            std::fs::read_to_string(&config).unwrap(),
+            std::env::current_exe().unwrap().display()
+        ),
+    )
+    .unwrap();
+
+    // Unknown instance is rejected.
+    bin()
+        .args([
+            "config",
+            "set-backend-instance-enabled",
+            "--config",
+            config_path,
+            "--profile",
+            "test",
+            "--instance",
+            "does-not-exist",
+            "--enabled",
+            "false",
+        ])
+        .assert()
+        .failure();
+
+    bin()
+        .args([
+            "config",
+            "set-backend-instance-enabled",
+            "--config",
+            config_path,
+            "--profile",
+            "test",
+            "--instance",
+            "codex-paid",
+            "--enabled",
+            "false",
+        ])
+        .assert()
+        .success();
+
+    let saved = std::fs::read_to_string(&config).unwrap();
+    // The profile-level override entry (not the defaults one) carries the
+    // flipped flag, and the merged entry preserves every declared field.
+    assert!(
+        saved.contains("[profiles.test.routing.backend_instances.codex-paid]"),
+        "profile-level override entry must be written, got: {saved}"
+    );
+    let profile_section = saved
+        .split("[profiles.test.routing.backend_instances.codex-paid]")
+        .nth(1)
+        .expect("profile-level entry written");
+    assert!(
+        profile_section.contains("enabled = false"),
+        "flag must be flipped, got: {saved}"
+    );
+    assert!(
+        profile_section.contains(&format!(
+            "executable = \"{}\"",
+            std::env::current_exe().unwrap().display()
+        )),
+        "merged entry must preserve declared fields, got: {saved}"
+    );
+
+    // Already in the target state: idempotent success.
+    bin()
+        .args([
+            "config",
+            "set-backend-instance-enabled",
+            "--config",
+            config_path,
+            "--profile",
+            "test",
+            "--instance",
+            "codex-paid",
+            "--enabled",
+            "false",
+        ])
+        .assert()
+        .success();
+
+    // Flip back on.
+    bin()
+        .args([
+            "config",
+            "set-backend-instance-enabled",
+            "--config",
+            config_path,
+            "--profile",
+            "test",
+            "--instance",
+            "codex-paid",
+            "--enabled",
+            "true",
+        ])
+        .assert()
+        .success();
+    let saved = std::fs::read_to_string(&config).unwrap();
+    let profile_section = saved
+        .split("[profiles.test.routing.backend_instances.codex-paid]")
+        .nth(1)
+        .expect("profile-level entry still present");
+    assert!(
+        profile_section.contains("enabled = true"),
+        "flag must flip back, got: {saved}"
+    );
+
+    // Unknown profile is rejected.
+    bin()
+        .args([
+            "config",
+            "set-backend-instance-enabled",
+            "--config",
+            config_path,
+            "--profile",
+            "missing",
+            "--instance",
+            "codex-paid",
+            "--enabled",
+            "false",
+        ])
+        .assert()
+        .failure();
+
+    let _ = tmp;
+}

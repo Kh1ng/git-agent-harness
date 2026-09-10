@@ -71,6 +71,67 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             config::save(&cfg, config_path.as_deref())?;
             println!("Updated global config");
         }
+        ConfigCommands::SetBackendInstanceEnabled {
+            config_path,
+            profile,
+            instance,
+            enabled,
+        } => {
+            let mut cfg = config::load(config_path.as_deref())?;
+            let state_word = if enabled { "enabled" } else { "disabled" };
+            {
+                let profile_config = cfg
+                    .profiles
+                    .get_mut(&profile)
+                    .ok_or_else(|| anyhow::anyhow!("profile '{}' is not configured", profile))?;
+                // Resolve the fully merged entry (canonical -> repo defaults ->
+                // profile) so the profile-level override written here preserves
+                // every declared field, not just the flag (entries replace
+                // wholesale by name).
+                let merged = profile_config.effective_routing(&cfg.defaults);
+                let mut entry = merged
+                    .backend_instances
+                    .get(&instance)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "backend instance '{}' is not declared for profile '{}'",
+                            instance,
+                            profile
+                        )
+                    })?;
+                if entry.enabled == enabled {
+                    println!(
+                        "Backend instance '{}' already {} for profile '{}'",
+                        instance, state_word, profile
+                    );
+                    return Ok(());
+                }
+                entry.enabled = enabled;
+                profile_config
+                    .routing
+                    .backend_instances
+                    .insert(instance.clone(), entry);
+                // Validate before saving: the profile must still satisfy the
+                // backend-instance contract with the new flag in place.
+                if let Err(errors) =
+                    config::check_profile_backend_instances(&cfg.defaults, profile_config)
+                {
+                    anyhow::bail!(
+                        "backend instance '{}' cannot be {} for profile '{}': {}",
+                        instance,
+                        state_word,
+                        profile,
+                        errors.join("; ")
+                    );
+                }
+            }
+            config::save(&cfg, config_path.as_deref())?;
+            println!(
+                "Backend instance '{}' {} for profile '{}'",
+                instance, state_word, profile
+            );
+        }
     }
     Ok(())
 }

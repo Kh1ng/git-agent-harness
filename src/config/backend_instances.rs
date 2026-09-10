@@ -6,9 +6,15 @@ use std::path::{Path, PathBuf};
 /// Provider-neutral declaration of one concrete runner/account binding.
 /// Map keys are stable backend-instance identifiers. Credentials are never
 /// stored here; executable/state paths remain runtime-only identity inputs.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct BackendInstanceConfig {
     pub runner_kind: String,
+    /// Issue #822: a disabled instance stays fully declared but routing
+    /// must skip it with a typed reason. Defaults to enabled so legacy
+    /// config lines (written before this field existed) deserialize
+    /// unchanged.
+    #[serde(default = "default_instance_enabled")]
+    pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,6 +178,13 @@ fn validate_instance(
             "instance '{name}': unsupported runner kind '{}'",
             instance.runner_kind
         ));
+    }
+    // Issue #822: a disabled instance must stay saveable even while its
+    // executable is broken or removed -- taking a misbehaving backend out
+    // of rotation without deleting its declaration is the point of the
+    // toggle. Its identity fields are still validated above.
+    if !instance.enabled {
+        return;
     }
     match instance
         .executable
@@ -369,6 +382,7 @@ mod tests {
                 auth_source_label: Some("env-openai-key".into()),
                 quota_pool: Some("openai-api".into()),
                 supported_models: vec!["openai/gpt-5".into()],
+                enabled: true,
             },
         );
         let identity = routing.execution_identity_for_candidate(&CandidateConfig {
@@ -422,5 +436,91 @@ mod tests {
             .join("\n");
         assert!(errors.contains("share state_root"));
         assert!(errors.contains("requires instance 'opencode-api' auth_source_label"));
+    }
+}
+
+fn default_instance_enabled() -> bool {
+    true
+}
+
+/// `enabled` defaults to true: a hand-built instance (tests, programmatic
+/// config) must never silently mean "disabled".
+impl Default for BackendInstanceConfig {
+    fn default() -> Self {
+        BackendInstanceConfig {
+            runner_kind: String::new(),
+            enabled: true,
+            logical_backend: None,
+            executable: None,
+            state_root: None,
+            account_label: None,
+            auth_source_label: None,
+            quota_pool: None,
+            supported_models: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod enabled_flag_tests {
+    use super::*;
+
+    /// Issue #822: legacy config lines written before `enabled` existed must
+    /// deserialize as enabled (never as disabled).
+    #[test]
+    fn legacy_instance_line_without_enabled_deserializes_as_enabled() {
+        let legacy: BackendInstanceConfig = toml::from_str(
+            "runner_kind = \"codex\"\n\
+             logical_backend = \"codex\"\n\
+             executable = \"/bin/ls\"\n",
+        )
+        .unwrap();
+        assert!(legacy.enabled, "absence of the field must mean enabled");
+
+        let explicit_false: BackendInstanceConfig = toml::from_str(
+            "runner_kind = \"codex\"\n\
+             logical_backend = \"codex\"\n\
+             executable = \"/bin/ls\"\n\
+             enabled = false\n",
+        )
+        .unwrap();
+        assert!(!explicit_false.enabled);
+
+        // Default-constructed instances (tests, programmatic config) are
+        // enabled: disabled must never be an implicit default.
+        assert!(BackendInstanceConfig::default().enabled);
+    }
+
+    /// Issue #822: a disabled instance must stay saveable even while its
+    /// executable is missing -- taking a misbehaving backend out of rotation
+    /// without deleting its declaration is the point of the toggle. Re-enabling
+    /// it without a valid executable must fail validation.
+    #[test]
+    fn disabled_instance_survives_validation_with_missing_executable() {
+        let mut profile = crate::ledger::test_util::profile();
+        profile.routing.backend_instances.insert(
+            "broken".into(),
+            BackendInstanceConfig {
+                runner_kind: "codex".into(),
+                logical_backend: Some("codex".into()),
+                executable: Some("/nonexistent/gah-test-wrapper".into()),
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        let defaults = crate::config::Defaults::default();
+        assert!(check_profile_backend_instances(&defaults, &profile).is_ok());
+
+        if let Some(instance) = profile.routing.backend_instances.get_mut("broken") {
+            instance.enabled = true;
+        }
+        let errors = check_profile_backend_instances(&defaults, &profile)
+            .expect_err("enabled instance with a missing executable must fail validation");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("missing or not executable")),
+            "expected the executable check, got: {errors:?}"
+        );
     }
 }
