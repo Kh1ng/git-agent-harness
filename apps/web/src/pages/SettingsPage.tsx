@@ -16,6 +16,7 @@ import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
 import { skillFromFrontMatter, SkillFrontMatterError } from '../lib/skillFrontMatter.js';
 import { gahApi, backendInstancesApi, GahApiError } from '../api/client.js';
+import type { ConfigSetData, NotificationSettingsSummary } from '@git-agent-harness/contracts';
 import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, SkillSummary, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
 
 declare global {
@@ -274,6 +275,12 @@ export function SettingsPage() {
       </section>
 
       <GlobalManagerSection
+        config={config}
+        setConfig={setConfig}
+        clearConfigErrors={clearConfigErrors}
+      />
+
+      <NotificationChannelSection
         config={config}
         setConfig={setConfig}
         clearConfigErrors={clearConfigErrors}
@@ -545,8 +552,15 @@ function DispatchSettingsSection({
 }
 
 interface GlobalManagerSectionProps {
-  config: { data: { current_manager: string | null } | null; loading: boolean; error: string | null };
-  setConfig: (data: { current_manager?: string | null; clear?: string[] }) => Promise<void>;
+  config: {
+    data: {
+      current_manager: string | null;
+      notifications?: NotificationSettingsSummary;
+    } | null;
+    loading: boolean;
+    error: string | null;
+  };
+  setConfig: (data: ConfigSetData) => Promise<void>;
   clearConfigErrors: () => void;
 }
 
@@ -869,6 +883,103 @@ function GlobalManagerSection({ config, setConfig, clearConfigErrors }: GlobalMa
       >
         {config.loading ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}
         {config.loading ? 'Saving…' : 'Save global manager'}
+      </button>
+    </section>
+  );
+}
+
+const NOTIFICATION_CHANNELS: { value: 'none' | 'telegram' | 'discord'; label: string; hint: string }[] = [
+  { value: 'none', label: 'None', hint: 'No channel delivery; per-profile notify_command still applies.' },
+  { value: 'telegram', label: 'Telegram', hint: 'Bot API sendMessage. Requires TELEGRAM_BOT_TOKEN in the server environment.' },
+  { value: 'discord', label: 'Discord', hint: 'Incoming webhook. Requires DISCORD_WEBHOOK_URL in the server environment.' }
+];
+
+/** Issue #653: where notify-worthy events (terminal failures, paid-route and
+ * external-approval requests, review verdicts) are delivered in addition to
+ * any per-profile notify_command. Credentials live in the server environment
+ * (TELEGRAM_BOT_TOKEN / DISCORD_WEBHOOK_URL) — never in config or this UI. */
+function NotificationChannelSection({ config, setConfig, clearConfigErrors }: GlobalManagerSectionProps) {
+  const notifications = config.data?.notifications;
+  const [channel, setChannel] = useState<'none' | 'telegram' | 'discord'>('none');
+  const [chatId, setChatId] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setChannel(notifications?.channel ?? 'none');
+    setChatId(notifications?.telegram_chat_id ?? '');
+  }, [notifications?.channel, notifications?.telegram_chat_id]);
+
+  const selected = NOTIFICATION_CHANNELS.find((entry) => entry.value === channel);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await setConfig({
+        notification_channel: channel,
+        telegram_chat_id: channel === 'telegram' && chatId.trim() !== '' ? chatId.trim() : null,
+        clear: channel === 'telegram' ? [] : ['telegram_chat_id'],
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="card-padded max-w-md">
+      <h3 className="text-sm font-semibold text-primary mb-1">Notification channel</h3>
+      <p className="text-xs text-muted mb-3">
+        Where notify-worthy events are delivered in addition to any per-profile
+        notify_command. Messages are the same redacted one-liners the dashboard
+        events page records; delivery failures are visible there and never block dispatch.
+      </p>
+
+      <label className="block text-xs font-medium text-secondary mb-1">Channel</label>
+      <select
+        value={channel}
+        onChange={(e) => setChannel(e.target.value as 'none' | 'telegram' | 'discord')}
+        className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
+      >
+        {NOTIFICATION_CHANNELS.map((entry) => (
+          <option key={entry.value} value={entry.value}>
+            {entry.label}
+          </option>
+        ))}
+      </select>
+      {selected && <p className="text-xs text-muted mt-1">{selected.hint}</p>}
+
+      {channel === 'telegram' && (
+        <>
+          <label className="block text-xs font-medium text-secondary mb-1 mt-3">
+            Telegram chat ID
+          </label>
+          <input
+            type="text"
+            value={chatId}
+            onChange={(e) => setChatId(e.target.value)}
+            placeholder="e.g. 123456789 (from @userinfobot)"
+            className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
+          />
+          <p className="text-xs text-muted mt-1">
+            Non-secret. The bot token must be set as TELEGRAM_BOT_TOKEN in the server environment — it is never stored in config or shown here.
+          </p>
+        </>
+      )}
+
+      {channel !== 'none' && notifications?.credential_env && (
+        <p className="text-xs text-critical mt-2">
+          Requires {notifications.credential_env} in the server environment; without it, delivery failures appear on the Events page.
+        </p>
+      )}
+
+      {config.error && <p className="mt-3 text-xs text-critical">Error: {config.error}</p>}
+
+      <button
+        onClick={handleSave}
+        disabled={config.loading || saving}
+        className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {saving || config.loading ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}
+        {saving || config.loading ? 'Saving…' : 'Save notification channel'}
       </button>
     </section>
   );

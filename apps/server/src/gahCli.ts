@@ -1166,6 +1166,9 @@ export async function runProfileRemove(options: ProfileRemoveOptions): Promise<v
 
 export interface ConfigSetOptions {
   current_manager?: string | null;
+  /** Issue #653: none | telegram | discord. */
+  notification_channel?: string;
+  telegram_chat_id?: string | null;
   clear?: string[];
   config?: string;
 }
@@ -1177,6 +1180,15 @@ export function buildConfigSetArgs(options: ConfigSetOptions): string[] {
     args.push('--current-manager', options.current_manager);
   } else if (options.clear?.includes('current_manager')) {
     args.push('--clear', 'current_manager');
+  }
+
+  if (options.notification_channel !== undefined && options.notification_channel !== null) {
+    args.push('--notification-channel', options.notification_channel);
+  }
+  if (options.telegram_chat_id !== undefined && options.telegram_chat_id !== null) {
+    args.push('--telegram-chat-id', options.telegram_chat_id);
+  } else if (options.clear?.includes('telegram_chat_id')) {
+    args.push('--telegram-chat-id', '');
   }
 
   appendClearArgs(args, options.clear, new Set(['current_manager']));
@@ -1219,12 +1231,21 @@ export async function runNodeRole(): Promise<import('@git-agent-harness/contract
   return runJsonCommand(['status', '--role', '--json', ...(config ? ['--config-path', config] : [])], config);
 }
 
-export async function runConfigShow(config?: string): Promise<{ current_manager: string | null }> {
-  const args = ['config', 'show', '--json'];
+export async function runConfigShow(
+  config?: string
+): Promise<{ current_manager: string | null; notifications?: import('@git-agent-harness/contracts').NotificationSettingsSummary }> {
+  // The bare `config show --json` response is a locked one-field
+  // compatibility shape, so notification settings come from the versioned
+  // full projection instead.
+  const args = ['config', 'show', '--json', '--full'];
   if (config) {
     args.push('--config', config);
   }
-  return runJsonCommand<{ current_manager: string | null }>(args, config);
+  const full = await runJsonCommand<{
+    current_manager: string | null;
+    notifications?: import('@git-agent-harness/contracts').NotificationSettingsSummary;
+  }>(args, config);
+  return { current_manager: full.current_manager, notifications: full.notifications };
 }
 
 /** Issue #822: enable or disable one backend instance for a profile. The

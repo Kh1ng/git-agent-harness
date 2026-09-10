@@ -749,6 +749,18 @@ export interface ConfigSummary {
   /** Which agent CLI is currently acting as the operator's manager across
    * all profiles/projects (null = unset, so no manager wake happens). */
   current_manager: string | null;
+  /** Issue #653: notification channel settings (no secrets — credentials
+   * live in the environment). Optional while schema-v1 clients may still
+   * be connected to an older server. */
+  notifications?: NotificationSettingsSummary;
+}
+
+/** Issue #653: notification channel settings projection. */
+export interface NotificationSettingsSummary {
+  channel: 'none' | 'telegram' | 'discord';
+  telegram_chat_id: string | null;
+  /** The environment variable the operator must supply for this channel. */
+  credential_env: string | null;
 }
 
 export interface RoutingCandidateSummary {
@@ -887,6 +899,10 @@ export interface ConfigShowFull {
  * clears the field. */
 export interface ConfigSetData {
   current_manager?: string | null;
+  /** Issue #653: none | telegram | discord. Credentials come from the
+   * environment (TELEGRAM_BOT_TOKEN / DISCORD_WEBHOOK_URL), never config. */
+  notification_channel?: 'none' | 'telegram' | 'discord';
+  telegram_chat_id?: string | null;
   /** Field names to clear (e.g. "current_manager"). */
   clear?: string[];
 }
