@@ -315,3 +315,68 @@ fn set_backend_instance_enabled_writes_merged_entry_and_flips_state() {
 
     let _ = tmp;
 }
+
+#[test]
+fn notification_channel_settings_round_trip_and_validate() {
+    let (tmp, config) = config_with_profile();
+    let config_path = config.to_str().unwrap();
+
+    // Invalid channel is rejected with the expected vocabulary.
+    bin()
+        .args([
+            "config",
+            "set",
+            "--config",
+            config_path,
+            "--notification-channel",
+            "slack",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("expected none|telegram|discord"));
+
+    bin()
+        .args([
+            "config",
+            "set",
+            "--config",
+            config_path,
+            "--notification-channel",
+            "telegram",
+            "--telegram-chat-id",
+            "123456789",
+        ])
+        .assert()
+        .success();
+
+    let saved = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        saved.contains("notification_channel = \"telegram\""),
+        "got: {saved}"
+    );
+    assert!(
+        saved.contains("telegram_chat_id = \"123456789\""),
+        "got: {saved}"
+    );
+
+    // Clearing the chat id works; the channel persists.
+    bin()
+        .args([
+            "config",
+            "set",
+            "--config",
+            config_path,
+            "--telegram-chat-id",
+            "",
+        ])
+        .assert()
+        .success();
+    let saved = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        saved.contains("notification_channel = \"telegram\""),
+        "got: {saved}"
+    );
+    assert!(!saved.contains("telegram_chat_id ="), "got: {saved}");
+
+    let _ = tmp;
+}

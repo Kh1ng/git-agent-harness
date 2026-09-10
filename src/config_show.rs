@@ -170,7 +170,33 @@ pub struct ConfigShowFull {
     pub schema_version: u32,
     pub config_path: String,
     pub current_manager: Option<String>,
+    /// Issue #653: notification channel settings (no secrets — tokens and
+    /// webhook URLs live in the environment).
+    pub notifications: NotificationSettingsSummary,
     pub profiles: BTreeMap<String, ConfigProfileSummary>,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct NotificationSettingsSummary {
+    pub channel: crate::notify_channels::NotificationChannel,
+    pub telegram_chat_id: Option<String>,
+    /// Which credential the operator must supply in the environment for
+    /// this channel, so the UI can show a precise setup hint.
+    pub credential_env: Option<&'static str>,
+}
+
+impl NotificationSettingsSummary {
+    fn from_defaults(defaults: &crate::config::Defaults) -> Self {
+        NotificationSettingsSummary {
+            channel: defaults.notification_channel,
+            telegram_chat_id: defaults.telegram_chat_id.clone(),
+            credential_env: match defaults.notification_channel {
+                crate::notify_channels::NotificationChannel::None => None,
+                crate::notify_channels::NotificationChannel::Telegram => Some("TELEGRAM_BOT_TOKEN"),
+                crate::notify_channels::NotificationChannel::Discord => Some("DISCORD_WEBHOOK_URL"),
+            },
+        }
+    }
 }
 
 fn to_summary(candidate: &config::CandidateConfig) -> RoutingCandidateSummary {
@@ -388,6 +414,7 @@ pub fn config_show_full(
         schema_version: CONFIG_SHOW_SCHEMA_VERSION,
         config_path: config_path.to_string_lossy().into_owned(),
         current_manager: cfg.defaults.current_manager.clone(),
+        notifications: NotificationSettingsSummary::from_defaults(&cfg.defaults),
         profiles,
     })
 }

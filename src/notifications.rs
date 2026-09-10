@@ -1055,6 +1055,42 @@ where
             );
         }
     }
+
+    // Issue #653: deliver the same redacted message through the configured
+    // channel (Telegram today, Discord webhook). Failures are visible via
+    // the recorded delivery-failure event and never block the operation
+    // that raised the notification — unknown delivery must not bypass
+    // approval, it must only be observable. Dedup stays the caller's job:
+    // notify paths that would repeat (e.g. paid-route skips) already
+    // notify once per occurrence through `claim_notice`.
+    if cfg.defaults.notification_channel != crate::notify_channels::NotificationChannel::None {
+        let message = crate::redact::redact(&format_message(&event));
+        if let Err(err) = crate::notify_channels::deliver_channel_message(
+            cfg,
+            &message,
+            &crate::notify_channels::CurlNotifyTransport,
+        ) {
+            eprintln!("[gah] notification channel delivery failed (swallowed): {err:#}");
+            let event_profile = event_profile(&event).unwrap_or(profile.display_name.as_str());
+            if let Err(record_err) = events::record(
+                cfg,
+                events::EventType::NotificationDeliveryFailed,
+                Some(event_profile),
+                event_work_id(&event),
+                json!({
+                    "event_name": event_name(&event),
+                    "profile": event_profile,
+                    "work_id": event_work_id(&event),
+                    "run_id": event_run_id(&event),
+                    "channel": cfg.defaults.notification_channel.as_str(),
+                    "error": format!("{err:#}"),
+                })
+                .to_string(),
+            ) {
+                eprintln!("[gah] failed to record channel delivery failure event (swallowed): {record_err:#}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -90,6 +90,15 @@ pub struct Defaults {
     /// Host responsibility. Worker services keep execution local and central state remote.
     pub node_role: crate::node_role::NodeRole,
     pub registry_preflight_mode: crate::fleet_preflight::PreflightMode,
+    /// Issue #653: where notify-worthy events are delivered in addition to
+    /// any per-profile `notify_command`. Credentials never live here: the
+    /// Telegram bot token comes from `TELEGRAM_BOT_TOKEN`, the Discord
+    /// webhook URL from `DISCORD_WEBHOOK_URL`, both read at send time.
+    #[serde(default)]
+    pub notification_channel: crate::notify_channels::NotificationChannel,
+    /// Telegram chat to deliver to when the channel is `telegram`.
+    #[serde(default)]
+    pub telegram_chat_id: Option<String>,
 }
 
 impl Defaults {

@@ -550,6 +550,15 @@ pub enum ConfigCommands {
         /// Clear the specified field(s).
         #[arg(long, value_delimiter = ',')]
         clear: Vec<String>,
+        /// Issue #653: notification channel for notify-worthy events
+        /// (in addition to any per-profile notify_command). Credentials
+        /// come from the environment (TELEGRAM_BOT_TOKEN /
+        /// DISCORD_WEBHOOK_URL), never from config or argv.
+        #[arg(long)]
+        notification_channel: Option<String>,
+        /// Telegram chat id for the telegram channel (non-secret).
+        #[arg(long)]
+        telegram_chat_id: Option<String>,
     },
     /// Issue #822: enable or disable one backend instance for a profile.
     ///

@@ -43,6 +43,8 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             node_role,
             registry_central_url,
             clear,
+            notification_channel,
+            telegram_chat_id,
         } => {
             let mut cfg = if config::resolve_config_path(config_path.as_deref()).exists() {
                 config::load(config_path.as_deref())?
@@ -66,6 +68,23 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             }
             if clear.contains(&"registry_central_url".to_string()) {
                 cfg.defaults.registry_central_url = None;
+            }
+            if let Some(raw) = &notification_channel {
+                let channel = crate::notify_channels::NotificationChannel::parse(raw)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "unrecognized notification channel '{raw}' (expected none|telegram|discord)"
+                        )
+                    })?;
+                cfg.defaults.notification_channel = channel;
+            }
+            if let Some(chat_id) = &telegram_chat_id {
+                let trimmed = chat_id.trim();
+                if trimmed.is_empty() {
+                    cfg.defaults.telegram_chat_id = None;
+                } else {
+                    cfg.defaults.telegram_chat_id = Some(trimmed.to_string());
+                }
             }
             crate::node_role::NodeRoleStatus::with_override(&cfg.defaults, None)?;
             config::save(&cfg, config_path.as_deref())?;
