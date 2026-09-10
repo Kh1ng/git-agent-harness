@@ -115,6 +115,13 @@ pub fn run() -> Result<()> {
             config_path,
         })?,
 
+        Commands::TailscaleIp { config_path, json } => {
+            commands::network::tailscale_ip(commands::network::TailscaleIpArgs {
+                config_path,
+                json,
+            })?
+        }
+
         Commands::WatchdogCheck {
             profile,
             config_path,

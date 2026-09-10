@@ -313,7 +313,13 @@ MagicDNS name)**, not a LAN IP. A LAN IP only works while the worker stays on
 that LAN; roaming makes recall/capture unreachable and hard-blocks manager
 chat and dispatch under issue #878's policy. It must also never be derived
 from `tailscale ip -4` on the worker: that is the worker's own address, not
-the gateway's. When the URL is unset, both installers reuse the host from
+the gateway's. To discover a device's own tailnet address (the central node's,
+for pasting into `registry_central_url`, pairing, or the setup command), run
+`gah tailscale-ip` (#943): it prefers `tailscale ip -4` and falls back to
+scanning local interfaces for an address inside `[defaults].tailscale_cidr`
+(default `100.64.0.0/10`), failing closed with an actionable error when the
+device is not on a tailnet. `--json` emits `{"tailscale_ip": "...", "cidr":
+"..."}` for scripting. When the URL is unset, both installers reuse the host from
 `GAH_CONFIG` or `~/.config/gah/config.toml`'s `registry_central_url` and the
 default gateway port `8420`. A truly new machine has no way to identify which
 tailnet peer is the gateway, so use the Settings **Reveal setup command**
