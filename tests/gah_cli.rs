@@ -43,6 +43,8 @@ mod setup;
 #[path = "gah_cli/stall_retry.rs"]
 mod stall_retry;
 mod support;
+#[path = "gah_cli/tailscale.rs"]
+mod tailscale;
 #[path = "gah_cli/telemetry.rs"]
 mod telemetry;
 #[path = "gah_cli/validation_gate.rs"]

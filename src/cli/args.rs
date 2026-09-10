@@ -239,6 +239,18 @@ pub enum Commands {
         #[arg(long, name = "config")]
         config_path: Option<String>,
     },
+    /// Print this device's tailnet IPv4 address (#943), so operators paste a
+    /// discovered address into `registry_central_url`, pairing, and setup
+    /// commands instead of hardcoding one. Prefers the authoritative
+    /// `tailscale ip -4`, falling back to scanning local interfaces for an
+    /// address inside the configured tailscale CIDR.
+    TailscaleIp {
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        /// Emit {"tailscale_ip": "..."} for scripting.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Alert-only health check for gah-loop@<profile>.service units.
     /// Observation only: never starts, restarts, or enables a loop.
     WatchdogCheck {
