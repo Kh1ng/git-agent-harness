@@ -2,8 +2,9 @@
 //! ledger. HTTP clients consume this view rather than interpreting control rows.
 
 use super::{
-    active_paid_route_approval_destinations_from_entries, effective_human_gate_from_entries,
-    work_id_aliases, LedgerEntry,
+    active_paid_route_approval_destinations_from_entries,
+    gates::{effective_human_gate_from_entries, work_id_aliases},
+    LedgerEntry,
 };
 use crate::config::{Defaults, Profile};
 use serde::Serialize;

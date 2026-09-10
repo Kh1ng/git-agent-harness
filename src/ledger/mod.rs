@@ -25,11 +25,11 @@ pub use self::entry::{
 pub use self::jsonl::{
     active_paid_route_approvals, active_paid_route_approvals_from_entries,
     active_review_hold_work_ids, active_review_hold_work_ids_from_entries, append,
-    append_human_gate_if_transition, backfill_review_verdict, effective_human_gate_from_entries,
-    effective_human_gate_from_index, entries_for_work_id, index_entries_by_work_id, is_entry_stale,
-    read_entries, repair_truncated_tail, review_already_exists, work_id_aliases,
-    EffectiveHumanGate, LedgerEntriesByWorkId, ReviewVerdictBackfill, TailRepair,
-    REVIEW_HOLD_STALE_AFTER_HOURS,
+    append_external_approval, append_human_gate_if_transition, backfill_review_verdict,
+    effective_human_gate_from_entries, effective_human_gate_from_index, entries_for_work_id,
+    index_entries_by_work_id, is_entry_stale, read_entries, repair_truncated_tail,
+    review_already_exists, work_id_aliases, EffectiveHumanGate, LedgerEntriesByWorkId,
+    ReviewVerdictBackfill, TailRepair, REVIEW_HOLD_STALE_AFTER_HOURS,
 };
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -48,6 +48,7 @@ pub mod sqlite_store;
 /// separate log from `ledger.jsonl` -- never rewrites dispatch history,
 /// only ever appends a new entry when a work item's classified state
 /// actually changed since the last known reconciliation.
+pub mod gates;
 pub mod reconcile;
 
 /// Issue #116: per-attempt process-tree resource observations (CPU time,
