@@ -66,6 +66,24 @@ function query(params: Record<string, string | number | boolean | undefined>): s
   return qs ? `?${qs}` : '';
 }
 
+interface PaidRouteApproval {
+  profile: string;
+  work_id: string;
+  backend: string;
+  backend_instance: string | null;
+  model: string | null;
+  requested: boolean;
+  approved: boolean;
+}
+
+interface PaidRouteScope {
+  profile: string;
+  work_id: string;
+  backend: string;
+  backend_instance: string | null;
+  model: string | null;
+}
+
 export const gah = {
   info: () => request('GET', '/api/info'),
   status: (profile: string) => request('GET', `/api/status${query({ profile })}`),
@@ -85,6 +103,11 @@ export const gah = {
   availability: () => request('GET', '/api/availability'),
   availabilityClear: (backend: string, backendInstance?: string, model?: string, quotaPool?: string) =>
     request('POST', '/api/availability/clear', { backend, backendInstance, model, quotaPool }),
+  routeApprovals: (profile: string) =>
+    request<PaidRouteApproval[]>('GET', `/api/route-approvals${query({ profile })}`),
+  routeApprovalChange: (action: 'grant' | 'revoke', scope: PaidRouteScope) =>
+    request<PaidRouteApproval[]>('POST', `/api/route-approvals/${action}`, { ...scope, confirm: true }),
+
   hold: (profile: string) => request('GET', `/api/hold${query({ profile })}`),
   holdSet: (profile: string, workId: string, reason?: string) =>
     request('POST', '/api/hold/set', { profile, workId, reason }),

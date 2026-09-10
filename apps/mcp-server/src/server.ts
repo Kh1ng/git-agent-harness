@@ -257,5 +257,50 @@ export function createGahMcpServer(): McpServer {
     (args) => tool(() => gah.dispatch({ ...args, profile: args.profile ?? DEFAULT_PROFILE }))
   );
 
+  // Issue #525: paid-route approval tools — a manager agent can see stuck
+  // approval requests and grant/revoke the exact scope through the same
+  // owner-gated mutation API the dashboard uses (confirm carries the exact
+  // work item, backend, account, and model).
+  server.registerTool(
+    'gah_route_approvals',
+    {
+      title: 'GAH paid-route approvals',
+      description:
+        'List pending and active paid-route approval requests for a profile (state, exact scope, consumption).',
+      inputSchema: { profile: profileArg }
+    },
+    ({ profile }) => tool(() => gah.routeApprovals(profile ?? DEFAULT_PROFILE))
+  );
+
+  for (const action of ['grant', 'revoke'] as const) {
+    server.registerTool(
+      `gah_route_approval_${action}`,
+      {
+        title: `GAH paid-route approval ${action}`,
+        description:
+          action === 'grant'
+            ? 'Grant one exact paid backend/model route for one work item. The scope must match the pending request exactly — it cannot be broadened here.'
+            : 'Revoke a previously granted paid-route approval for one exact scope.',
+        inputSchema: {
+          profile: z.string().describe('GAH profile name'),
+          work_id: z.string().describe('Exact work item the approval applies to, e.g. "#123"'),
+          backend: z.string().describe('Logical backend, e.g. "opencode"'),
+          backend_instance: z.string().nullable().optional().describe('Backend instance qualifier, if the request carried one'),
+          model: z.string().nullable().optional().describe('Exact model the request named, if any')
+        }
+      },
+      ({ profile, work_id, backend, backend_instance, model }) =>
+        tool(() =>
+          gah.routeApprovalChange(action, {
+            profile,
+            work_id,
+            backend,
+            backend_instance: backend_instance ?? null,
+            model: model ?? null
+          })
+        )
+    );
+  }
+
   return server;
 }
