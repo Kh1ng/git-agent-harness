@@ -3,6 +3,7 @@ import { LoadingState } from './components/ui/EmptyState.js';
 import { useWebSocket } from './ws/WebSocketContext.js';
 import { OverviewPage } from './pages/OverviewPage.js';
 import { Navbar } from './components/Navbar.js';
+import { PwaStatusBars } from './components/PwaStatusBars.js';
 import { SessionDetailModal } from './components/SessionDetailModal.js';
 import type { Session } from '@git-agent-harness/contracts';
 import { readNavigation, updateNavigation, type Page } from './lib/navigationState.js';
@@ -57,6 +58,7 @@ export function App() {
   return (
     <div className="app-shell min-h-dvh bg-page lg:flex">
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 bg-card text-primary p-3 rounded-md">Skip to content</a>
+      <PwaStatusBars />
       <Navbar currentPage={currentPage} onPageChange={setCurrentPage} />
 
       <div className="flex-1 min-w-0">
