@@ -5,7 +5,7 @@
 //! wholesale — nothing inherited is lost), validates, then saves. The
 //! printed order is the pre-save preview.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 use crate::cli::args::RoutingCandidateCommands;
 use crate::config::{self, CandidateConfig};
@@ -47,31 +47,12 @@ impl CandidateList {
             Self::Escalatory => policy.escalatory_reviewers = list,
         }
     }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Pm => "pm",
-            Self::Improve => "improve",
-            Self::Review => "review",
-            Self::Escalatory => "escalatory",
-        }
-    }
 }
 
 pub(crate) fn parse_list(raw: &str) -> Result<CandidateList> {
     CandidateList::parse(raw).ok_or_else(|| {
         anyhow::anyhow!("unrecognized list '{raw}' (expected pm|improve|review|escalatory)")
     })
-}
-
-fn effective_list(
-    cfg: &config::GahConfig,
-    profile_name: &str,
-    list: CandidateList,
-) -> Result<Vec<CandidateConfig>> {
-    let profile = config::get_profile(cfg, profile_name)?;
-    let routing = profile.effective_routing(&cfg.defaults);
-    Ok(list.get(&routing).unwrap_or_default())
 }
 
 fn print_order(list: &[CandidateConfig], json: bool) {
@@ -281,15 +262,4 @@ pub(crate) fn run(command: RoutingCandidateCommands) -> Result<()> {
             )
         }
     }
-}
-
-/// Context for callers that only need the projection: unused today, kept for
-/// the test seam.
-pub(crate) fn preview(
-    cfg: &config::GahConfig,
-    profile_name: &str,
-    list: CandidateList,
-) -> Result<Vec<CandidateConfig>> {
-    effective_list(cfg, profile_name, list)
-        .with_context(|| format!("profile '{profile_name}' is not configured"))
 }
