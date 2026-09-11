@@ -90,6 +90,11 @@ pub fn generate_json_schema() -> serde_json::Value {
                 "additionalProperties": {
                     "$ref": "#/definitions/LocalOnlyReason"
                 }
+            },
+            "request_schemas": {
+                "type": "object",
+                "description": "Embedded request JSON schemas per operation (issue #525)",
+                "additionalProperties": { "type": "object" }
             }
         },
         "definitions": {
@@ -266,6 +271,7 @@ export interface CapabilityManifest {
     command_path_to_operation_id: Record<string, string>;
     remote_operations: string[];
     local_only_operations: Record<string, LocalOnlyReason>;
+    request_schemas?: Record<string, Record<string, unknown>>;
 }
 
 export type OperationClass = 'read' | 'mutation' | 'admin';

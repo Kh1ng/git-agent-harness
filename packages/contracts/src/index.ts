@@ -7,3 +7,4 @@ export * from './chat-session.js';
 export * from './pm-plan.js';
 
 export * from './pairing.js';
+export * from './cli-capabilities.js';
