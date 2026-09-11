@@ -19,6 +19,7 @@ import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
 import { StatTile } from '../components/ui/StatTile.js';
 import { StatusBadge, classificationTone } from '../components/ui/StatusBadge.js';
+import { BlockedWorkItems } from '../components/BlockedWorkItems.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { SessionCard } from '../components/SessionCard.js';
@@ -187,15 +188,14 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
                 </span>
               </li>
             ))}
-            {blockedWorkItems.map((b, i) => (
-              <li key={`work-${i}`} className="flex items-start gap-2 text-sm">
-                <StatusBadge tone="warning" label="Human required" />
-                <span className="text-secondary">
-                  {b.source_reference ?? 'Unknown work item'}
-                  {b.message ? ` — ${b.message}` : ''}
-                </span>
+            {blockedWorkItems.length > 0 && (
+              <li>
+                <p className="text-xs font-medium text-secondary mb-2">
+                  Blocked work items — each carries its remediation plan:
+                </p>
+                <BlockedWorkItems blockers={blockedWorkItems} />
               </li>
-            ))}
+            )}
             {reviewHeldWorkIds.map((workId) => (
               <li key={`review-hold-${workId}`} className="flex items-start gap-2 text-sm">
                 <StatusBadge tone="warning" label="Review hold" />

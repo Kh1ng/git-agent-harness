@@ -243,6 +243,9 @@ export interface GahDataSource {
   getConfig(): Promise<ConfigSummary>;
   getProfileConfig(profile: string): Promise<SettingsConfigProfileSummary>;
   setConfig(data: ConfigSetData): Promise<{ success: boolean; message: string }>;
+  ledgerClearAttempts(params: { profile?: string; work_id: string; dry_run?: boolean }): Promise<unknown>;
+  holdSet(params: { profile: string; work_id: string; reason?: string }): Promise<unknown>;
+  holdClear(params: { profile: string; work_id: string }): Promise<unknown>;
   getManagerChatSettings(): Promise<ManagerChatSettingsSummary>;
   setManagerChatSettings(data: ManagerChatSettingsUpdate): Promise<{ success: boolean }>;
   getGatewaySettings(): Promise<GatewaySettingsSummary>;
@@ -485,6 +488,29 @@ export const gahApi: GahDataSource = {
   getProfileConfig(profile) {
     return getJson<SettingsConfigProfileSummary>('/api/config/effective', { profile });
   },
+  async ledgerClearAttempts(params) {
+    return postJson('/api/ledger/clear-attempts', {
+      profile: params.profile,
+      work_id: params.work_id,
+      ...(params.dry_run === undefined ? {} : { dry_run: params.dry_run }),
+    });
+  },
+
+  async holdSet(params) {
+    return postJson('/api/hold/set', {
+      profile: params.profile,
+      work_id: params.work_id,
+      ...(params.reason === undefined ? {} : { reason: params.reason }),
+    });
+  },
+
+  async holdClear(params) {
+    return postJson('/api/hold/clear', {
+      profile: params.profile,
+      work_id: params.work_id,
+    });
+  },
+
   async setConfig(data) {
     return postJson<{ success: boolean; message: string }, ConfigSetData>('/api/config', data);
   },
