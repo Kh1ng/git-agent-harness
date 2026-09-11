@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { ArrowLeft, ChevronRight, ListChecks, FileText, Rocket } from 'lucide-react';
 import type { Session } from '@git-agent-harness/contracts';
 import { generateProviderInstanceId } from '@git-agent-harness/shared';
+import { gahApi, GahApiError } from '../api/client.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -179,6 +180,34 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
   const issueIntakeRejections = status.data?.issue_intake_rejections ?? [];
   const activeClaims = status.data?.active_claims ?? [];
   const heldWorkIds = new Set(status.data?.review_held_work_ids ?? []);
+  // Issue #503: hold/release safe controls — the same authorization the CLI
+  // enforces, via the owner-gated mutation API.
+  const [holdPending, setHoldPending] = useState<string | null>(null);
+  const [holdError, setHoldError] = useState<string | null>(null);
+  const setHold = async (workId: string, reason: string) => {
+    setHoldPending(workId);
+    setHoldError(null);
+    try {
+      await gahApi.holdSet({ profile: profile ?? 'gah', work_id: workId, reason });
+      await refresh();
+    } catch (failure) {
+      setHoldError(failure instanceof GahApiError ? failure.message : 'Hold failed.');
+    } finally {
+      setHoldPending(null);
+    }
+  };
+  const clearHold = async (workId: string) => {
+    setHoldPending(workId);
+    setHoldError(null);
+    try {
+      await gahApi.holdClear({ profile: profile ?? 'gah', work_id: workId });
+      await refresh();
+    } catch (failure) {
+      setHoldError(failure instanceof GahApiError ? failure.message : 'Release failed.');
+    } finally {
+      setHoldPending(null);
+    }
+  };
 
   const formatClaimAge = (ageSeconds: number): string => {
     const minutes = Math.floor(ageSeconds / 60);
@@ -323,6 +352,27 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                       <div className="flex flex-wrap gap-1">
                         {t.work_id && heldWorkIds.has(t.work_id) && (
                           <StatusBadge tone="warning" label="Review hold" />
+                        )}
+                        {t.work_id && (
+                          heldWorkIds.has(t.work_id) ? (
+                            <button
+                              type="button"
+                              disabled={holdPending !== null}
+                              onClick={() => clearHold(t.work_id as string)}
+                              className="px-2 py-0.5 border border-subtle rounded text-xs text-secondary hover:text-primary"
+                            >
+                              {holdPending === t.work_id ? '…' : 'Release'}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={holdPending !== null}
+                              onClick={() => setHold(t.work_id as string, 'operator review hold from dashboard')}
+                              className="px-2 py-0.5 border border-subtle rounded text-xs text-secondary hover:text-primary"
+                            >
+                              {holdPending === t.work_id ? '…' : 'Hold'}
+                            </button>
+                          )
                         )}
                         {t.human_required ? (
                           <StatusBadge tone="warning" label="Human required" />

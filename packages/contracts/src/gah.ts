@@ -1043,6 +1043,7 @@ export type HumanRequiredReasonCode =
   | 'fix_retry_cap_exceeded'
   | 'merge_retry_cap_exceeded'
   | 'stuck_loop_gate'
+  | 'external_api_approval_required'
   | 'unknown';
 
 export type ControllerActivityStatus = 'running' | 'finished' | 'failed';
