@@ -15,7 +15,7 @@ import { ProfileEditor } from '../components/ProfileEditor.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
 import { skillFromFrontMatter, SkillFrontMatterError } from '../lib/skillFrontMatter.js';
-import { gahApi, backendInstancesApi, GahApiError } from '../api/client.js';
+import { gahApi, backendInstancesApi, routingCandidatesApi, GahApiError } from '../api/client.js';
 import type { ConfigSetData, NotificationSettingsSummary } from '@git-agent-harness/contracts';
 import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, SkillSummary, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
 
@@ -329,6 +329,7 @@ export function SettingsPage() {
           <ProfileConfigViewerSection
             selectedName={selectedName}
             profileConfig={profileConfig}
+            onRefresh={() => fetchProfileConfig(selectedName, { force: true })}
           />
           <section>
             <ProfileEditor />
@@ -571,9 +572,11 @@ interface ProfileConfigViewerSectionProps {
     loading: boolean;
     error: string | null;
   };
+  /** Issue #149: refetch after a routing-candidate mutation. */
+  onRefresh: () => void;
 }
 
-export function ProfileConfigViewerSection({ selectedName, profileConfig }: ProfileConfigViewerSectionProps) {
+export function ProfileConfigViewerSection({ selectedName, profileConfig, onRefresh }: ProfileConfigViewerSectionProps) {
   if (!selectedName) {
     return (
       <section className="card-padded max-w-3xl">
@@ -654,9 +657,9 @@ export function ProfileConfigViewerSection({ selectedName, profileConfig }: Prof
       </div>
 
       <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
-        <CandidateTable title="PM candidates" candidates={effective.pm_candidates} />
-        <CandidateTable title="Improve candidates" candidates={effective.improve_candidates} />
-        <CandidateTable title="Review candidates" candidates={effective.review_candidates} />
+        <EditableCandidateList title="PM candidates" listKey="pm" profile={selectedName} candidates={effective.pm_candidates} onMutate={onRefresh} />
+        <EditableCandidateList title="Improve candidates" listKey="improve" profile={selectedName} candidates={effective.improve_candidates} onMutate={onRefresh} />
+        <EditableCandidateList title="Review candidates" listKey="review" profile={selectedName} candidates={effective.review_candidates} onMutate={onRefresh} />
       </div>
 
       <div className="mt-3">
@@ -826,6 +829,152 @@ function CandidateTable({ title, candidates }: { title: string; candidates: Rout
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+const ROUTING_LISTS = ['pm', 'improve', 'review', 'escalatory'] as const;
+type RoutingListKey = (typeof ROUTING_LISTS)[number];
+
+/** Issue #149: ordered routing-candidate editing. Mutations shell out to the
+ * fixed `gah config routing-candidate` commands through the owner-gated
+ * mutation API; the CLI resolves the effective list, validates, and writes
+ * the profile-level list wholesale. On success the caller refetches. */
+function EditableCandidateList({ title, listKey, profile, candidates, onMutate }: {
+  title: string;
+  listKey: RoutingListKey;
+  profile: string;
+  candidates: RoutingCandidateSummary[];
+  onMutate: () => void;
+}) {
+  const [pending, setPending] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [newBackend, setNewBackend] = useState('');
+  const [newModel, setNewModel] = useState('');
+
+  const runMutation = async (key: string, mutation: () => Promise<unknown>) => {
+    setPending(key);
+    setError(null);
+    try {
+      await mutation();
+      onMutate();
+    } catch (failure) {
+      setError(failure instanceof GahApiError ? failure.message : 'Mutation failed. Refresh and retry.');
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const add = () => {
+    const backend = newBackend.trim();
+    if (!backend) return;
+    setAdding(false);
+    void runMutation('add', () =>
+      routingCandidatesApi.add(profile, {
+        list: listKey,
+        backend,
+        ...(newModel.trim() !== '' ? { model: newModel.trim() } : {}),
+      }));
+    setNewBackend('');
+    setNewModel('');
+  };
+
+  return (
+    <div className="card-padded border border-subtle">
+      <h4 className="text-xs font-semibold text-primary mb-2">{title}</h4>
+      {error && <p className="text-xs text-critical mb-2">{error}</p>}
+      {candidates.length === 0 ? (
+        <p className="text-xs text-muted mb-2">No candidates configured.</p>
+      ) : (
+        <ul className="space-y-1.5">
+          {candidates.map((candidate, index) => (
+            <li key={`${candidate.backend}-${candidate.model ?? 'none'}-${index}`} className="flex items-center justify-between gap-2 text-xs">
+              <span className="text-secondary min-w-0 truncate">
+                {formatCandidateLabel(candidate)}
+                <span className="text-muted">
+                  {' '}· priority {candidate.priority}
+                  {candidate.requires_approval ? ' · requires approval' : ''}
+                </span>
+              </span>
+              <span className="inline-flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  title="Move up"
+                  disabled={pending !== null || index === 0}
+                  onClick={() => runMutation(`up-${index}`, () => routingCandidatesApi.move(profile, index, index - 1))}
+                  className="px-1.5 py-0.5 border border-subtle rounded text-secondary hover:text-primary disabled:opacity-40"
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  title="Move down"
+                  disabled={pending !== null || index === candidates.length - 1}
+                  onClick={() => runMutation(`down-${index}`, () => routingCandidatesApi.move(profile, index, index + 1))}
+                  className="px-1.5 py-0.5 border border-subtle rounded text-secondary hover:text-primary disabled:opacity-40"
+                >
+                  ↓
+                </button>
+                <button
+                  type="button"
+                  title="Remove"
+                  disabled={pending !== null}
+                  onClick={() => runMutation(`rm-${index}`, () => routingCandidatesApi.remove(profile, index))}
+                  className="px-1.5 py-0.5 border border-critical/40 rounded text-critical hover:bg-critical/10 disabled:opacity-40"
+                >
+                  ✕
+                </button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {adding ? (
+        <div className="mt-2 space-y-1.5">
+          <input
+            type="text"
+            autoFocus
+            value={newBackend}
+            onChange={(e) => setNewBackend(e.target.value)}
+            placeholder="backend, e.g. codex"
+            className="w-full bg-raised border border-subtle rounded px-2 py-1 text-xs text-primary"
+          />
+          <input
+            type="text"
+            value={newModel}
+            onChange={(e) => setNewModel(e.target.value)}
+            placeholder="model (optional)"
+            className="w-full bg-raised border border-subtle rounded px-2 py-1 text-xs text-primary"
+          />
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={add}
+              disabled={newBackend.trim() === '' || pending !== null}
+              className="px-2 py-1 bg-accent text-white rounded text-xs font-medium disabled:opacity-50"
+            >
+              Add
+            </button>
+            <button
+              type="button"
+              onClick={() => setAdding(false)}
+              className="px-2 py-1 border border-subtle rounded text-xs text-secondary"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setAdding(true)}
+          disabled={pending !== null}
+          className="mt-2 px-2 py-1 border border-subtle rounded text-xs text-secondary hover:text-primary disabled:opacity-40"
+        >
+          + Add candidate
+        </button>
+      )}
     </div>
   );
 }

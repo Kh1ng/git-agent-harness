@@ -560,6 +560,15 @@ pub enum ConfigCommands {
         #[arg(long)]
         telegram_chat_id: Option<String>,
     },
+    /// Issue #149: ordered routing-candidate editing for a profile. The
+    /// lists are `pm` / `improve` / `review` / `escalatory`. Every mutation
+    /// writes the full effective list into the profile section (lists
+    /// replace wholesale), validates before saving, and prints the resulting
+    /// order as the pre-save preview.
+    RoutingCandidate {
+        #[command(subcommand)]
+        command: RoutingCandidateCommands,
+    },
     /// Issue #822: enable or disable one backend instance for a profile.
     ///
     /// The instance must already be declared (in the profile, the repository
@@ -579,6 +588,73 @@ pub enum ConfigCommands {
         /// Target state: `--enabled false` disables, `--enabled true` enables.
         #[arg(long, action = clap::ArgAction::Set)]
         enabled: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum RoutingCandidateCommands {
+    /// Append a candidate to the list.
+    Add {
+        #[arg(long)]
+        profile: String,
+        /// Which ordered list: pm | improve | review | escalatory.
+        #[arg(long)]
+        list: String,
+        #[arg(long)]
+        backend: String,
+        #[arg(long)]
+        instance: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        quota_pool: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        priority: i32,
+        #[arg(long, default_value_t = false)]
+        included_in_quota: bool,
+        #[arg(long)]
+        marginal_cost_usd: Option<f64>,
+        #[arg(long, default_value_t = false)]
+        requires_approval: bool,
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        /// Print the resulting order without saving.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Remove the candidate at a 0-based index of the effective list.
+    Remove {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        list: String,
+        #[arg(long)]
+        index: usize,
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Move a candidate from one 0-based index to another.
+    Move {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        list: String,
+        #[arg(long)]
+        from: usize,
+        #[arg(long)]
+        to: usize,
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
 

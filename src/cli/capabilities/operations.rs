@@ -401,6 +401,44 @@ pub(super) fn add_route_approval_operations(manifest: &mut CapabilityManifest) {
     });
 }
 
+pub(super) fn add_routing_candidate_operations(manifest: &mut CapabilityManifest) {
+    // gah config routing-candidate {add,remove,move}
+    for (op, display, doc) in [
+        (
+            "add",
+            "Add Routing Candidate",
+            "Append a candidate to a profile's ordered routing list",
+        ),
+        (
+            "remove",
+            "Remove Routing Candidate",
+            "Remove one candidate from a profile's ordered routing list",
+        ),
+        (
+            "move",
+            "Move Routing Candidate",
+            "Reorder one candidate within a profile's ordered routing list",
+        ),
+    ] {
+        manifest.add_operation(OperationDefinition {
+            operation_id: format!("config.routing_candidate.{op}"),
+            display_name: display.to_string(),
+            class: OperationClass::Mutation,
+            profile_scope: ProfileScope::ProfileRequired,
+            request_schema: None,
+            response_schema: None,
+            streaming: StreamingBehavior::None,
+            idempotency: Idempotency::Idempotent,
+            secret_fields: vec![],
+            remote_disposition: RemoteDisposition::RemoteAvailable,
+            local_only_reason: None,
+            documentation: Some(doc.to_string()),
+            cli_command_path: format!("gah config routing-candidate {op}"),
+            is_stable: true,
+        });
+    }
+}
+
 pub(super) fn add_backend_instance_operations(manifest: &mut CapabilityManifest) {
     // gah config set-backend-instance-enabled
     manifest.add_operation(OperationDefinition {

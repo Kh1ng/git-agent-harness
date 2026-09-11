@@ -380,3 +380,183 @@ fn notification_channel_settings_round_trip_and_validate() {
 
     let _ = tmp;
 }
+
+#[test]
+fn routing_candidate_add_remove_move_round_trip_with_preview_and_validation() {
+    let (tmp, config) = config_with_profile();
+    let config_path = config.to_str().unwrap();
+
+    // Add two candidates (one paid, approval-gated).
+    bin()
+        .args([
+            "config",
+            "routing-candidate",
+            "add",
+            "--config",
+            config_path,
+            "--profile",
+            "test",
+            "--list",
+            "improve",
+            "--backend",
+            "codex",
+            "--model",
+            "gpt-5.4-mini",
+        ])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "config",
+            "routing-candidate",
+            "add",
+            "--config",
+            config_path,
+            "--profile",
+            "test",
+            "--list",
+            "improve",
+            "--backend",
+            "vibe",
+            "--requires-approval",
+        ])
+        .assert()
+        .success();
+
+    let output = bin()
+        .args([
+            "config",
+            "routing-candidate",
+            "add",
+            "--config",
+            config_path,
+            "--profile",
+            "test",
+            "--list",
+            "improve",
+            "--backend",
+            "claude",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let preview: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        preview.as_array().unwrap().len(),
+        3,
+        "dry-run previews three entries"
+    );
+    // Dry-run must not have saved.
+    let saved = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        !saved.contains("\"claude\""),
+        "dry-run must not persist, got: {saved}"
+    );
+
+    // Reorder: move claude's slot (would-be index 2 doesn't exist; move 1 -> 0).
+    bin()
+        .args([
+            "config",
+            "routing-candidate",
+            "move",
+            "--config",
+            config_path,
+            "--profile",
+            "test",
+            "--list",
+            "improve",
+            "--from",
+            "1",
+            "--to",
+            "0",
+        ])
+        .assert()
+        .success();
+    let saved = std::fs::read_to_string(&config).unwrap();
+    let profile_section = saved
+        .split("[profiles.test.routing.improve_candidates]")
+        .nth(1)
+        .map(|section| section.split("\n\n").next().unwrap_or(section));
+    assert!(profile_section.is_some(), "profile-level list written");
+
+    // Remove the first entry.
+    bin()
+        .args([
+            "config",
+            "routing-candidate",
+            "remove",
+            "--config",
+            config_path,
+            "--profile",
+            "test",
+            "--list",
+            "improve",
+            "--index",
+            "0",
+        ])
+        .assert()
+        .success();
+
+    // Out-of-range index fails with a descriptive error.
+    bin()
+        .args([
+            "config",
+            "routing-candidate",
+            "remove",
+            "--config",
+            config_path,
+            "--profile",
+            "test",
+            "--list",
+            "improve",
+            "--index",
+            "9",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("out of range"));
+
+    // Invalid list name fails with the expected vocabulary.
+    bin()
+        .args([
+            "config",
+            "routing-candidate",
+            "add",
+            "--config",
+            config_path,
+            "--profile",
+            "test",
+            "--list",
+            "squads",
+            "--backend",
+            "codex",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "expected pm|improve|review|escalatory",
+        ));
+
+    // Unknown profile fails.
+    bin()
+        .args([
+            "config",
+            "routing-candidate",
+            "add",
+            "--config",
+            config_path,
+            "--profile",
+            "missing",
+            "--list",
+            "pm",
+            "--backend",
+            "codex",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not configured"));
+
+    let _ = tmp;
+}

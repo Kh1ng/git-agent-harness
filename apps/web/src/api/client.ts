@@ -670,6 +670,12 @@ export const gahApi: GahDataSource = {
   }
 };
 
+export const routingCandidatesApi = {
+  add: (profile: string, body: Record<string, unknown>) => postJson<unknown, Record<string, unknown>>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/add`, body),
+  remove: (profile: string, index: number) => postJson<unknown, { index: number }>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/remove`, { index }),
+  move: (profile: string, from: number, to: number) => postJson<unknown, { from: number; to: number }>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/move`, { from, to }),
+};
+
 export const backendInstancesApi = {
   list: (profile: string) => getJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }>('/api/backend-instances', { profile }),
   setEnabled: (profile: string, instance: string, enabled: boolean) => postJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }, { profile: string; instance: string }>(`/api/backend-instances/${enabled ? 'enable' : 'disable'}`, { profile, instance })

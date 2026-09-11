@@ -90,6 +90,9 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             config::save(&cfg, config_path.as_deref())?;
             println!("Updated global config");
         }
+        ConfigCommands::RoutingCandidate { command } => {
+            return super::routing_candidates::run(command);
+        }
         ConfigCommands::SetBackendInstanceEnabled {
             config_path,
             profile,
