@@ -77,7 +77,7 @@ test('lists usage and orchestration tools and forwards their HTTP calls', async 
     });
 
     for (let i = 0; i < 2; i++) {
-      await client.callTool({ name: 'gah_hold_set', arguments: { profile: 'gah', workId: '532' } });
+      await client.callTool({ name: 'gah_hold_set', arguments: { profile: 'gah', work_id: '532' } });
     }
     const mutations = requests.filter(request => request.init?.method === 'POST');
     const keys = mutations.map(request => new Headers(request.init?.headers).get('Idempotency-Key'));
@@ -87,7 +87,7 @@ test('lists usage and orchestration tools and forwards their HTTP calls', async 
 
     responseStatus = 409;
     const beforeConflict = requests.length;
-    const conflict = await client.callTool({ name: 'gah_hold_clear', arguments: { profile: 'gah', workId: '532' } });
+    const conflict = await client.callTool({ name: 'gah_hold_clear', arguments: { profile: 'gah', work_id: '532' } });
     assert.equal(conflict.isError, true);
     assert.match(JSON.stringify(conflict), /Refresh status/);
     assert.equal(requests.length, beforeConflict + 1, 'A duplicate conflict reaches the caller without an automatic retry');

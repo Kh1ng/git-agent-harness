@@ -209,6 +209,13 @@
       },
       "type": "array"
     },
+    "request_schemas": {
+      "additionalProperties": {
+        "type": "object"
+      },
+      "description": "Embedded request JSON schemas per operation (issue #525)",
+      "type": "object"
+    },
     "schema_version": {
       "description": "Schema version of this manifest",
       "minimum": 1,

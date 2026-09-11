@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 mod operations;
+mod request_schemas;
 use operations::*;
 
 /// Current manifest schema version. Increment when the manifest structure changes.
@@ -177,6 +178,13 @@ pub struct CapabilityManifest {
     pub remote_operations: Vec<String>,
     /// Operations that are local-only with reasons
     pub local_only_operations: HashMap<String, LocalOnlyReason>,
+    /// Issue #525: embedded JSON-Schema request payloads, authored next to
+    /// each operation and generated into the shipped manifest so clients
+    /// (the MCP server) derive their tool input schemas from the manifest
+    /// instead of hand-maintaining a second copy. Only operations that a
+    /// client can invoke directly carry one.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub request_schemas: HashMap<String, serde_json::Value>,
 }
 
 impl Default for CapabilityManifest {
@@ -195,10 +203,17 @@ impl CapabilityManifest {
             command_path_to_operation_id: HashMap::new(),
             remote_operations: Vec::new(),
             local_only_operations: HashMap::new(),
+            request_schemas: HashMap::new(),
         }
     }
 
     /// Add an operation to the manifest
+    /// Issue #525: attach a request JSON schema to an operation.
+    pub fn set_request_schema(&mut self, operation_id: &str, schema: serde_json::Value) {
+        self.request_schemas
+            .insert(operation_id.to_string(), schema);
+    }
+
     pub fn add_operation(&mut self, operation: OperationDefinition) {
         let op_id = operation.operation_id.clone();
         let cmd_path = operation.cli_command_path.clone();
@@ -318,6 +333,7 @@ pub fn generate_manifest() -> CapabilityManifest {
     add_route_approval_operations(&mut manifest);
     add_backend_instance_operations(&mut manifest);
     add_routing_candidate_operations(&mut manifest);
+    request_schemas::add_request_schemas(&mut manifest);
     add_external_approval_operations(&mut manifest);
     add_loop_operations(&mut manifest);
     add_events_operations(&mut manifest);
