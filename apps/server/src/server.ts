@@ -46,6 +46,8 @@ import {
   runClaimsList,
   runQuotaList,
   runExternalApprovalInspect,
+
+  runRoutingCandidateMutation,
 } from './gahCli.js';
 import { REPORT_GROUP_BY_VALUES } from '@git-agent-harness/contracts';
 import type {
@@ -295,6 +297,60 @@ export function createServer(
   app.use('/api/pm', pmPlansRouter());
   app.use('/api/route-approvals', paidRouteApprovalsRouter(mutation));
   app.use('/api/backend-instances', backendInstancesRouter(mutation));
+
+  // Issue #149: ordered routing-candidate editing. Mutations wrap the fixed
+  // `gah config routing-candidate` commands (the CLI owns effective-list
+  // resolution, validation before save, and the profile-level write);
+  // reads come from the config projection the Settings page already loads.
+  const routingCandidateText = (value: unknown, max: number): value is string =>
+    typeof value === 'string' && value.length > 0 && value.length <= max && value.trim() === value && !/[\x00-\x1f\x7f]/.test(value);
+  const routingCandidateNum = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+  for (const action of ['add', 'remove', 'move'] as const) {
+    app.post(`/api/profiles/:profile/routing-candidates/${action}`, mutation(`config.routing_candidate.${action}`), async (req, res) => {
+      const profile = req.params.profile;
+      if (!routingCandidateText(profile, 128)) {
+        return res.status(400).json({ error: 'invalid_profile', message: 'Choose a configured profile.' });
+      }
+      const body = req.body ?? {};
+      const allowed = ['profile', 'list', 'backend', 'instance', 'model', 'quota_pool', 'priority', 'included_in_quota', 'requires_approval', 'marginal_cost_usd', 'index', 'from', 'to'];
+      if (Object.keys(body).some(key => !allowed.includes(key)) || !routingCandidateText(body.list, 16)) {
+        return res.status(400).json({ error: 'invalid_request', message: 'Invalid routing-candidate mutation.' });
+      }
+      const params: Record<string, unknown> = { profile, list: body.list };
+      if (action === 'add') {
+        if (!routingCandidateText(body.backend, 128)) return res.status(400).json({ error: 'invalid_request', message: 'backend is required.' });
+        params.backend = body.backend;
+        for (const key of ['instance', 'model', 'quota_pool'] as const) {
+          if (body[key] !== undefined && !routingCandidateText(body[key], 512)) return res.status(400).json({ error: 'invalid_request', message: `Invalid ${key}.` });
+          if (body[key] !== undefined) params[key] = body[key];
+        }
+        if (body.priority !== undefined && !routingCandidateNum(body.priority)) return res.status(400).json({ error: 'invalid_request', message: 'Invalid priority.' });
+        if (body.priority !== undefined) params.priority = body.priority;
+        if (body.included_in_quota !== undefined) params.included_in_quota = body.included_in_quota === true;
+        if (body.requires_approval !== undefined) params.requires_approval = body.requires_approval === true;
+        if (body.marginal_cost_usd !== undefined && !routingCandidateNum(body.marginal_cost_usd)) return res.status(400).json({ error: 'invalid_request', message: 'Invalid marginal cost.' });
+        if (body.marginal_cost_usd !== undefined) params.marginal_cost_usd = body.marginal_cost_usd;
+      }
+      if (action === 'remove') {
+        if (!routingCandidateNum(body.index) || body.index < 0) return res.status(400).json({ error: 'invalid_request', message: 'index is required.' });
+        params.index = body.index;
+      }
+      if (action === 'move') {
+        if (!routingCandidateNum(body.from) || !routingCandidateNum(body.to) || body.from < 0 || body.to < 0) return res.status(400).json({ error: 'invalid_request', message: 'from and to are required.' });
+        params.from = body.from;
+        params.to = body.to;
+      }
+      try {
+        await runRoutingCandidateMutation(action, params as Parameters<typeof runRoutingCandidateMutation>[1]);
+        return res.json({ success: true });
+      } catch (error) {
+        return res.status(502).json({
+          error: 'routing_candidate_outcome_unknown',
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+  }
   app.use('/api/settings/nodes', requireOwner, nodeSetupRouter());
   // Updating the running service also requires the existing operator opt-in.
   app.use('/api/admin', (req, res, next) => {

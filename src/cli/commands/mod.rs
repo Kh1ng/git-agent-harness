@@ -22,6 +22,7 @@ pub mod profile;
 pub mod prune;
 pub mod quota;
 pub mod report;
+pub mod routing_candidates;
 pub mod server;
 pub mod setup;
 pub mod skills;

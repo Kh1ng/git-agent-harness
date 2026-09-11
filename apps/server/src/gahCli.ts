@@ -1339,6 +1339,49 @@ export async function runConfigShow(
   return { current_manager: full.current_manager, notifications: full.notifications };
 }
 
+/** Issue #149: ordered routing-candidate editing. The CLI owns config
+ * writes (effective-list resolution, validation before save); the server
+ * shells out with fixed arguments. */
+export async function runRoutingCandidateMutation(
+  action: 'add' | 'remove' | 'move',
+  params: {
+    profile: string;
+    list: string;
+    backend?: string;
+    instance?: string;
+    model?: string;
+    quota_pool?: string;
+    priority?: number;
+    marginal_cost_usd?: number;
+    included_in_quota?: boolean;
+    requires_approval?: boolean;
+    index?: number;
+    from?: number;
+    to?: number;
+  },
+  config?: string
+): Promise<void> {
+  const args = ['config', 'routing-candidate', action, '--profile', params.profile, '--list', params.list];
+  if (action === 'add') {
+    if (!params.backend) throw new Error('backend is required for add');
+    args.push('--backend', params.backend);
+    if (params.instance) args.push('--instance', params.instance);
+    if (params.model) args.push('--model', params.model);
+    if (params.quota_pool) args.push('--quota-pool', params.quota_pool);
+    args.push('--priority', String(params.priority ?? 0));
+    if (params.included_in_quota) args.push('--included-in-quota');
+    if (params.requires_approval) args.push('--requires-approval');
+    if (params.marginal_cost_usd !== undefined) args.push('--marginal-cost-usd', String(params.marginal_cost_usd));
+  }
+  if (action === 'remove' && params.index !== undefined) args.push('--index', String(params.index));
+  if (action === 'move') {
+    if (params.from === undefined || params.to === undefined) throw new Error('from and to are required for move');
+    args.push('--from', String(params.from), '--to', String(params.to));
+  }
+  if (config) args.push('--config', config);
+  return runVoidCommand(args, config, 'gah config routing-candidate');
+}
+
 /** Issue #822: enable or disable one backend instance for a profile. The
  * CLI owns the config write path (merged-entry write, validation before
  * save); the server only shells out with fixed arguments. */
