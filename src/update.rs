@@ -57,6 +57,21 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         println!("Installed OpenCode agent: {}", agent.display());
     }
 
+    if cfg!(target_os = "macos") && args.role == HostRole::Worker {
+        run_command(
+            &repo,
+            "npm",
+            &[
+                "ci",
+                "--include=dev",
+                "--legacy-peer-deps",
+                "--prefer-offline",
+                "--no-audit",
+                "--no-fund",
+            ],
+        )?;
+    }
+
     if args.role == HostRole::Central {
         // The control-plane server is part of the MVP; web/desktop/mobile
         // clients intentionally have independent release workflows. A
@@ -117,20 +132,47 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         // something this repo ships -- an operator MUST point it at wherever
         // the host actually serves the dashboard from, and the deploy prints
         // the chosen root so a mismatch is visible.
-        match deploy_web_ui(&repo)? {
-            Some(root) => println!("Deployed web UI to {}", root.display()),
-            None => println!("GAH_WEB_DEPLOY_ROOT is empty: skipping web UI deploy."),
+        if cfg!(target_os = "macos") {
+            run_command(&repo, "npm", WEB_BUILD_ARGS)?;
+            println!(
+                "Built web UI for the macOS control-plane service: {}",
+                repo.join("apps/web/dist").display()
+            );
+        } else {
+            match deploy_web_ui(&repo)? {
+                Some(root) => println!("Deployed web UI to {}", root.display()),
+                None => println!("GAH_WEB_DEPLOY_ROOT is empty: skipping web UI deploy."),
+            }
         }
     } else {
         println!("Role is 'worker': skipping control-plane server build.");
     }
 
+    if cfg!(target_os = "macos") {
+        let script = repo.join("scripts/install-macos-desktop.sh");
+        run_command(
+            &repo,
+            "bash",
+            &[
+                script.to_string_lossy().as_ref(),
+                repo.to_string_lossy().as_ref(),
+            ],
+        )?;
+    }
+
+    if let Some(agent) = install_macos_launch_agent(&repo, args.role)? {
+        println!("Installed macOS LaunchAgent: {}", agent.display());
+    }
+
     match install_loop_unit_template(&repo)? {
         Some(loop_unit) => println!("Installed loop unit: {}", loop_unit.display()),
+        None if cfg!(target_os = "macos") => {
+            println!("macOS worker lifecycle is owned by its LaunchAgent.")
+        }
         None => println!(
             "systemd not available on this host: skipping gah-loop@.service install. \
              Run `gah loop --profile <p>` directly, or wire it into whatever this host \
-             uses for supervised long-running processes (e.g. launchd on macOS)."
+             uses for supervised long-running processes."
         ),
     }
     match install_watchdog_unit_template(&repo)? {
@@ -161,7 +203,15 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         }
     }
 
-    if args.restart_server {
+    if args.restart_server && cfg!(target_os = "macos") {
+        let script = repo.join("scripts/macos-launchd.sh");
+        run_command(
+            &repo,
+            "bash",
+            &[script.to_string_lossy().as_ref(), "start", "central"],
+        )?;
+        println!("Restarted macOS control-plane LaunchAgent.");
+    } else if args.restart_server {
         run_command(&repo, "sudo", &["systemctl", "daemon-reload"])?;
         run_command(
             &repo,
@@ -174,12 +224,61 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             &["is-active", "--quiet", &args.server_service],
         )?;
         println!("Restarted service: {}", args.server_service);
-    } else if args.role == HostRole::Central {
+    } else if args.role == HostRole::Central && !cfg!(target_os = "macos") {
         println!(
             "Server not restarted; pass --restart-server when this host serves the control plane."
         );
     }
     Ok(())
+}
+
+/// Install the one role-appropriate macOS service definition from the same
+/// updater used by first install and the desktop role control.
+fn install_macos_launch_agent(repo: &Path, role: HostRole) -> Result<Option<PathBuf>> {
+    if !cfg!(target_os = "macos") {
+        return Ok(None);
+    }
+    let script = repo.join("scripts/macos-launchd.sh");
+    if !script.is_file() {
+        bail!("macOS launchd installer is missing: {}", script.display());
+    }
+    let profile = if role == HostRole::Worker {
+        crate::config::load(None)
+            .ok()
+            .and_then(|config| {
+                let mut names: Vec<String> = config.profiles.into_keys().collect();
+                names.sort_unstable();
+                names.into_iter().next()
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let role_name = match role {
+        HostRole::Central => "central",
+        HostRole::Worker => "worker",
+    };
+    run_command(
+        repo,
+        "bash",
+        &[
+            script.to_string_lossy().as_ref(),
+            "install",
+            role_name,
+            repo.to_string_lossy().as_ref(),
+            &profile,
+        ],
+    )?;
+    let label = match role {
+        HostRole::Central => "dev.git-agent-harness.server.plist",
+        HostRole::Worker => "dev.git-agent-harness.worker.plist",
+    };
+    let target = env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME is required to install a macOS LaunchAgent")?
+        .join("Library/LaunchAgents")
+        .join(label);
+    Ok(target.is_file().then_some(target))
 }
 
 /// Best-effort probe, not a hard dependency check: a missing `systemctl`

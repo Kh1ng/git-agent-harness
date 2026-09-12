@@ -19,9 +19,13 @@ on:
       - 'scripts/install.sh'
       - 'scripts/install-linux.sh'
       - 'scripts/install-macos.sh'
+      - 'scripts/install-macos-desktop.sh'
+      - 'scripts/macos-launchd.sh'
       - 'scripts/configure-node-role.sh'
       - 'scripts/test-worker-installers.py'
       - 'scripts/test-macos-install.sh'
+      - 'scripts/test-macos-desktop-install.py'
+      - 'scripts/test-macos-launchd.py'
       - 'src/update.rs'
       - 'packages/**'
       - 'package.json'
@@ -132,7 +136,10 @@ jobs:
           python3 scripts/test-wsl-worker-config.py
 
       - name: Check worker installer scripts
-        run: python3 scripts/test-worker-installers.py
+        run: |
+          python3 scripts/test-worker-installers.py
+          python3 scripts/test-macos-desktop-install.py
+          python3 scripts/test-macos-launchd.py
 
       - name: Build local connection screen
         working-directory: apps/desktop
@@ -181,6 +188,10 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

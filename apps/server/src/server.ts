@@ -11,7 +11,7 @@ import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import os from 'node:os';
 import { statfsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getServerReadiness } from './serverReadiness.js';
 import {
@@ -2015,6 +2015,21 @@ export function createServer(
     const state: AdminUpdateState = readAdminUpdateStateFn();
     res.json(state);
   });
+
+  // macOS central mode serves the same built web app as every other control
+  // surface. Linux keeps using its configured Caddy/static root unless this
+  // explicit path is set by the service owner.
+  const webRoot = process.env.GAH_WEB_ROOT;
+  if (webRoot) {
+    const absoluteWebRoot = resolve(webRoot);
+    app.use(express.static(absoluteWebRoot, { index: false }));
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/') || req.path === '/api' || !req.accepts('html')) return next();
+      res.sendFile(join(absoluteWebRoot, 'index.html'), error => {
+        if (error) next(error);
+      });
+    });
+  }
 
   // 404 handler
   app.use((req, res) => {

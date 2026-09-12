@@ -5,22 +5,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>GAH — Settings</title>
     <style>
-      :root { color-scheme: dark; font: 15px/1.6 system-ui, sans-serif; background: #0b0e14; color: #e6e9ef; }
+      :root { color-scheme: dark; font: 16px/1.6 system-ui, sans-serif; background: #0b0e14; color: #e6e9ef; scrollbar-color: #536078 #11151f; }
+      ::selection { background: #354e73; color: #fff; }
       body { margin: 0; }
       main { max-width: 42rem; margin: auto; padding: 2rem; }
-      h1 { font-size: 1.5rem; margin: 0; } h2 { font-size: 1.1rem; }
+      h1 { font-size: 1.75rem; margin: 0; } h2 { font-size: 1.25rem; }
       p { color: #b4bdcc; } label { display: block; margin-top: 1rem; }
       input, button { font: inherit; border-radius: .35rem; border: 1px solid #536078; padding: .55rem .75rem; }
-      input { display: block; box-sizing: border-box; width: 100%; background: #11151f; color: inherit; }
-      button { background: #283c5b; color: white; cursor: pointer; margin-top: 1rem; }
+      input { display: block; box-sizing: border-box; width: 100%; background: #11151f; color: inherit; caret-color: #8ab4ff; }
+      button { background: #283c5b; color: white; cursor: pointer; margin-top: 1rem; transition: background-color 140ms cubic-bezier(.16, 1, .3, 1); }
       input[type="checkbox"] { display: inline-block; width: 1.1rem; height: 1.1rem; margin: 0 .6rem 0 0; vertical-align: middle; accent-color: #8ab4ff; }
       .preference { min-height: 2.75rem; display: flex; align-items: center; margin: 0; cursor: pointer; }
       button:hover:not(:disabled) { background: #354e73; } button:active:not(:disabled) { background: #20314a; }
+      button[aria-pressed="true"] { background: #46648f; }
       button:disabled { opacity: .6; cursor: wait; } :focus-visible { outline: 2px solid #8ab4ff; outline-offset: 3px; }
       section { border-top: 1px solid #303849; margin-top: 2rem; padding-top: .75rem; }
-      table { width: 100%; border-collapse: collapse; font-size: .85rem; } th, td { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid #232936; }
+      table { width: 100%; border-collapse: collapse; font-size: .875rem; font-variant-numeric: tabular-nums; } th, td { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid #232936; }
       #error { color: #ffb4b4; } #status:empty, #error:empty { display: none; } [hidden] { display: none !important; }
       .actions { display: flex; gap: .75rem; flex-wrap: wrap; }
+      @media (prefers-reduced-motion: reduce) { button { transition: none; } }
     </style>
   </head>
   <body>
@@ -31,7 +34,7 @@
       <h2>Connection</h2>
       <form id="connection">
         <label for="central-url">Central node address</label>
-        <input id="central-url" type="url" required placeholder="http://192.168.1.10:3773" spellcheck="false" />
+        <input id="central-url" type="url" required placeholder="https://central.example.ts.net" spellcheck="false" />
         <label for="wsl-distribution" id="wsl-label" hidden>WSL distribution (blank uses your default)</label>
         <input id="wsl-distribution" hidden placeholder="Ubuntu" spellcheck="false" />
         <button type="submit">Save and connect</button>
@@ -48,6 +51,15 @@
           <button type="submit">Save app presence</button>
           <p id="presence-status" role="status"></p>
         </form>
+      </section>
+      <section id="role-section" aria-labelledby="role-heading" hidden>
+        <h2 id="role-heading">Role on this Mac</h2>
+        <p id="role-state" role="status">Checking the launchd service…</p>
+        <p>Central mode hosts the shared dashboard and control plane on port 3774, leaving T3 Code’s port 3773 free. Worker mode connects to your saved central node. Changing roles updates the saved checkout before launchd starts the new service.</p>
+        <div class="actions">
+          <button id="central-role" type="button" aria-pressed="false">Use as central</button>
+          <button id="worker-role" type="button" aria-pressed="false">Use as worker</button>
+        </div>
       </section>
       <section aria-labelledby="worker-heading">
         <h2 id="worker-heading">Use this computer as a worker</h2>

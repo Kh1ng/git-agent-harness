@@ -21,6 +21,8 @@ try {
         central_url: 'http://central.test', wsl_distribution: '',
         presence: { dock: false, tray: true, launch_window: true },
       };
+      if (command === 'node_role_status') return { role: 'worker', running: false, supported: true };
+      if (command === 'set_node_role') return { role: args.role, running: true, supported: true };
       if (command === 'save_presence') return args.presence;
       if (command === 'worker_status') return { running: false, note: 'Fixture only', tools: [] };
       if (command === 'set_worker_running') throw new Error('Worker unavailable');
@@ -40,6 +42,10 @@ try {
   assert(await page.getByLabel('Open a window on launch').isChecked());
   await page.getByRole('button', { name: 'Save app presence' }).click();
   await page.getByText('Saved. Icon changes apply now;', { exact: false }).waitFor();
+  await page.getByText('Worker mode · stopped.', { exact: false }).waitFor();
+  await page.getByRole('button', { name: 'Use as central' }).click();
+  await page.getByText('Central mode · running.', { exact: false }).waitFor();
+  assert.deepEqual(await page.evaluate(() => window.calls.at(-1)), ['set_node_role', { role: 'central' }]);
   await page.getByRole('button', { name: 'Check worker' }).click();
   await page.getByText('Worker is stopped or has not been installed.').waitFor();
   await page.getByRole('button', { name: 'Start worker', exact: true }).click();

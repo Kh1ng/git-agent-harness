@@ -5,6 +5,8 @@ fn main() {
             "save_presence",
             "connect_dashboard",
             "open_central_settings",
+            "node_role_status",
+            "set_node_role",
             "worker_status",
             "set_worker_running",
         ]),

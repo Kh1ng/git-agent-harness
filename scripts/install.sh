@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # OS-detecting entrypoint. The actual install logic lives in two genuinely
-# separate scripts -- install-linux.sh (systemd, control-plane server, full
-# central-node install) and install-macos.sh (CLI + worker only, no
-# systemd/sudo) -- because patching one Linux-shaped script to silently skip
+# separate scripts. install-linux.sh uses systemd. install-macos.sh uses
+# launchd and does not use sudo. Patching one Linux-shaped script to skip
 # steps on macOS produced a script that looked like it worked on both and
 # didn't (2026-08-08/09). Run the OS-specific script directly if you know
 # which one you want; this just picks for you.

@@ -83,13 +83,14 @@ mkdir -p ~/.config/gah
 cp config/gah-config.example.toml ~/.config/gah/config.toml
 ```
 
-`scripts/install.sh` detects the OS and runs `scripts/install-linux.sh` (full
-central-node install: systemd units, the control-plane server) or
-`scripts/install-macos.sh` (CLI + worker only -- macOS has no systemd, so
-there's no control-plane server or supervised loop unit on that platform
-yet). Run the OS-specific script directly if you already know which one you
-want. `GAH_NODE_ROLE=worker scripts/install-linux.sh` gets a Linux worker
-node without the control-plane server too.
+`scripts/install.sh` detects the OS and runs `scripts/install-linux.sh`
+(systemd) or `scripts/install-macos.sh` (launchd). Both accept
+`GAH_NODE_ROLE=central|worker`; Linux defaults to central and macOS defaults to
+worker. The macOS desktop can change the role later from Settings. Its local
+central service uses port 3774 by default so it can coexist with T3 Code on
+3773; set `GAH_DESKTOP_SERVER_PORT` during install to choose another port.
+Each macOS update also replaces `~/Applications/GAH.app` after a successful
+native build. A failed replacement restores the previous app.
 
 For a roaming worker using `GAH_GATEWAY_MODE=remote`, the gateway URL must
 name the central/gateway node by its tailnet IP or MagicDNS name, never a LAN

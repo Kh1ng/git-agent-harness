@@ -40,5 +40,9 @@ for name in ['gah-reviewer.md', 'gah-implementer.md']:
     assert (config_root / 'opencode/agents' / name).is_file(), name
 assert not (config_root / 'systemd').exists(), 'macOS must not install systemd units'
 assert not Path('/etc/gah/server.env').exists(), 'a worker must not configure a central server'
-print('Real macOS install passed: executable, worker role, relay URL, private credentials, agent configs, no central service.')
+assert (Path.home() / 'Applications/GAH.app').is_dir(), 'the deterministic update must install the desktop app'
+desktop = __import__('json').loads((config_root / 'gah/desktop.json').read_text())
+assert desktop['repository_path'].endswith('/checkout'), desktop
+assert desktop['server_port'] == 3774, desktop
+print('Real macOS install passed: executable, worker role, relay URL, private credentials, agent configs, and launchd checkout state.')
 PY

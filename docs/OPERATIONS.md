@@ -326,13 +326,9 @@ dependency at *runtime*, not install time), but nothing configures it for
 you. `scripts/install.sh` (and its per-OS `install-linux.sh`/`install-macos.sh`
 implementations) grow two opt-in modes, selected via `GAH_GATEWAY_MODE`;
 leaving it unset skips this section entirely and behaves exactly as before.
-`colocated` needs the systemd unit in `packaging/systemd/` and is Linux-only;
-`remote` works on both. On a Rust `gah loop`/dispatch worker (any `--role
-worker` install, either OS), the gateway env vars land in
-`~/.config/gah/gah-loop.env` instead of `/etc/gah/server.env` — that's the
-file `gah-loop@.service` actually reads on Linux, and on macOS (no systemd
-at all) nothing auto-loads it, so `source` it into the shell before running
-`gah` (the installer prints the exact command).
+`colocated` uses systemd on Linux and launchd on macOS. `remote` works on
+both. Worker settings go in `~/.config/gah/gah-loop.env`. The Linux and macOS
+worker services read this file.
 
 **Remote** — point this host at a gateway already running elsewhere (e.g. a
 central node):
@@ -368,10 +364,9 @@ A failure there aborts the whole install with a clear error instead of
 silently completing with an unreachable gateway — `memoryGatewayClient.ts`
 hard-blocks every manager-chat turn on a failed recall/capture, so an
 unreachable gateway found only at first real use is a much worse failure
-mode than one caught at install time. On success, `TDAI_GATEWAY_URL`/
-`TDAI_GATEWAY_API_KEY` are written into `/etc/gah/server.env` (the same
-file `GAH_SERVER_HOST` above uses, `EnvironmentFile=-`'d by
-`gah-server.service`).
+mode than one caught at install time. The installer then writes the gateway
+values to the server environment file. Linux uses `/etc/gah/server.env`.
+macOS uses `~/.config/gah/server.env`.
 
 Two things make this easier to actually do:
 - **Getting the setup command**: `GET /api/settings/gateway` reports only
@@ -408,21 +403,17 @@ This seeds `tdai-gateway.local.yaml` from the checkout's tracked
 directly for a different LLM/embedding backend, e.g. a local LiteLLM
 proxy), generates a `TDAI_GATEWAY_API_KEY` if none was given, writes both
 into `~/.config/gah/tdai-gateway.env` (`chmod 600`), installs
-`packaging/systemd/tdai-memory-gateway.service` as a `--user` unit with
-`WorkingDirectory`/`ExecStart` substituted for the checkout path and the
-`node` found on `PATH`, and enables it. The script waits for `GET /health`
-to come up before wiring `TDAI_GATEWAY_URL=http://127.0.0.1:8420` (plus the
-generated API key) into `/etc/gah/server.env`, so a broken gateway config
-fails the install rather than leaving `gah-server` pointed at nothing.
+the platform service, and enables it. Linux installs the tracked systemd
+unit. macOS generates a launchd agent from the same settings. The installer
+waits for `GET /health`. A broken gateway stops the install with an error.
 
 Bound to loopback by default; widen with `gah network-expose` (above) if
 another node needs to reach it, matching the guidance in the checked-in
 unit file.
 
-Re-running `scripts/install.sh` with different `GAH_GATEWAY_*` values
-updates just those keys in `/etc/gah/server.env` (unlike `GAH_SERVER_HOST`,
-which is create-once-then-never-touched) — an operator's own `HOST`
-override is untouched either way.
+Re-running `scripts/install.sh` with different `GAH_GATEWAY_*` values updates
+only the gateway keys. The installer does not change an existing `HOST`
+value.
 
 ### Network exposure (issue #879)
 

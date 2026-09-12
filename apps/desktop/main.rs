@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::process::{Command, Stdio};
+#[cfg(not(target_os = "macos"))]
+use std::{process::Child, sync::Mutex};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
@@ -14,6 +15,10 @@ use tauri::{
 #[serde(default)]
 struct DesktopSettings {
     central_url: String,
+    remote_central_url: String,
+    repository_path: String,
+    server_port: u16,
+    node_role: String,
     wsl_distribution: String,
     presence: Presence,
 }
@@ -49,7 +54,11 @@ impl Presence {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 struct WorkerState(Mutex<Option<Child>>);
+
+#[cfg(target_os = "macos")]
+struct WorkerState;
 
 fn config_dir() -> PathBuf {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
@@ -60,14 +69,12 @@ fn config_dir() -> PathBuf {
 
 fn read_settings() -> DesktopSettings {
     let dir = config_dir();
-    if let Ok(text) = std::fs::read_to_string(dir.join("desktop.json")) {
-        if let Ok(mut settings) = serde_json::from_str::<DesktopSettings>(&text) {
-            settings.presence = settings.presence.recoverable();
-            return settings;
-        }
-    }
+    let mut settings = std::fs::read_to_string(dir.join("desktop.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<DesktopSettings>(&text).ok())
+        .unwrap_or_default();
     let text = std::fs::read_to_string(dir.join("config.toml")).unwrap_or_default();
-    let central_url = text
+    let configured_central = text
         .lines()
         .find_map(|line| {
             let (key, value) = line.split_once('=')?;
@@ -75,10 +82,25 @@ fn read_settings() -> DesktopSettings {
                 .then(|| value.trim().trim_matches('"').to_owned())
         })
         .unwrap_or_default();
-    DesktopSettings {
-        central_url,
-        ..Default::default()
+    if settings.central_url.is_empty() {
+        settings.central_url = configured_central.clone();
     }
+    if settings.remote_central_url.is_empty() {
+        settings.remote_central_url = configured_central;
+    }
+    settings.node_role = text
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "node_role").then(|| value.trim().trim_matches('"').to_owned())
+        })
+        .filter(|role| matches!(role.as_str(), "central" | "worker"))
+        .unwrap_or_else(|| "central".into());
+    if settings.server_port == 0 {
+        settings.server_port = 3774;
+    }
+    settings.presence = settings.presence.recoverable();
+    settings
 }
 
 fn write_settings(settings: &DesktopSettings) -> Result<(), String> {
@@ -257,12 +279,13 @@ async fn connect_dashboard(
     {
         return Err("Invalid WSL distribution name.".into());
     }
-    let settings = DesktopSettings {
-        central_url: url.to_string(),
-        wsl_distribution: settings.wsl_distribution,
-        ..read_settings()
-    };
-    write_settings(&settings)?;
+    let mut saved = read_settings();
+    saved.central_url = url.to_string();
+    saved.wsl_distribution = settings.wsl_distribution;
+    if saved.node_role == "worker" || !matches!(url.host_str(), Some("127.0.0.1" | "localhost")) {
+        saved.remote_central_url = url.to_string();
+    }
+    write_settings(&saved)?;
     open_dashboard(&app, url)
 }
 
@@ -300,6 +323,199 @@ struct WorkerStatus {
     note: String,
 }
 
+#[derive(serde::Serialize)]
+struct DesktopRoleStatus {
+    role: String,
+    running: bool,
+    supported: bool,
+}
+
+fn first_profile() -> Option<String> {
+    let output = command(installed_gah().ok()?.to_string_lossy().as_ref())
+        .args(["profile", "list", "--json"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
+        .ok()?
+        .first()?
+        .get("name")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn installed_gah() -> Result<PathBuf, String> {
+    config_dir()
+        .parent()
+        .and_then(|path| path.parent())
+        .map(|home| home.join(".cargo/bin/gah"))
+        .filter(|path| path.is_file())
+        .ok_or_else(|| "GAH is not installed. Run scripts/install-macos.sh from a clean checkout first.".into())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_service(settings: &DesktopSettings, action: &str, role: &str) -> Result<(), String> {
+    let script = PathBuf::from(&settings.repository_path).join("scripts/macos-launchd.sh");
+    if !script.is_file() {
+        return Err("The saved GAH checkout is unavailable. Run scripts/install-macos.sh from the checkout again.".into());
+    }
+    let profile = first_profile().unwrap_or_default();
+    let status = command("bash")
+        .args([
+            script.to_string_lossy().as_ref(),
+            action,
+            role,
+            &settings.repository_path,
+            &profile,
+        ])
+        .env("GAH_DESKTOP_SERVER_PORT", settings.server_port.to_string())
+        .status()
+        .map_err(|error| format!("Cannot run the macOS service controller: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("The macOS {role} service command exited with {status}. Check ~/.local/state/gah/{role}.log."))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn launchd_running(role: &str) -> bool {
+    let label = if role == "central" {
+        "dev.git-agent-harness.server"
+    } else {
+        "dev.git-agent-harness.worker"
+    };
+    let uid = command("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    uid.is_some_and(|uid| {
+        command("launchctl")
+            .args(["print", &format!("gui/{uid}/{label}")])
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("state = running")
+            })
+    })
+}
+
+fn set_tray_status(app: &tauri::AppHandle, role: &str, running: bool) {
+    if let Some(tray) = app.tray_by_id("gah-tray") {
+        let state = if running { "running" } else { "stopped" };
+        let _ = tray.set_tooltip(Some(format!("GAH — {role} {state}")));
+    }
+}
+
+#[tauri::command]
+fn node_role_status(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<DesktopRoleStatus, String> {
+    local_only(&window)?;
+    let settings = read_settings();
+    #[cfg(target_os = "macos")]
+    let running = launchd_running(&settings.node_role);
+    #[cfg(not(target_os = "macos"))]
+    let running = false;
+    set_tray_status(&app, &settings.node_role, running);
+    Ok(DesktopRoleStatus {
+        role: settings.node_role,
+        running,
+        supported: cfg!(target_os = "macos"),
+    })
+}
+
+#[tauri::command]
+async fn set_node_role(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    role: String,
+) -> Result<DesktopRoleStatus, String> {
+    local_only(&window)?;
+    if !cfg!(target_os = "macos") {
+        return Err("Role switching is available in the macOS app.".into());
+    }
+    if !matches!(role.as_str(), "central" | "worker") {
+        return Err("Choose central or worker mode.".into());
+    }
+    let mut settings = read_settings();
+    if settings.repository_path.is_empty() {
+        return Err("Run scripts/install-macos.sh from a clean GAH checkout before changing roles.".into());
+    }
+    if role == "worker" && first_profile().is_none() {
+        return Err("Configure at least one profile before starting this Mac as a worker.".into());
+    }
+    let gah = installed_gah()?;
+    let mut config = command(gah.to_string_lossy().as_ref());
+    config.args(["config", "set", "--node-role", &role]);
+    if role == "worker" {
+        let remote = if settings.remote_central_url.is_empty() {
+            settings.central_url.clone()
+        } else {
+            settings.remote_central_url.clone()
+        };
+        central_url(&remote)?;
+        config.args(["--registry-central-url", &remote]);
+    }
+    let configured = config.status().map_err(|error| format!("Cannot update the node role: {error}"))?;
+    if !configured.success() {
+        return Err(format!("GAH rejected the node role change ({configured})."));
+    }
+    let updated = command(gah.to_string_lossy().as_ref())
+        .args([
+            "update",
+            "--repo",
+            &settings.repository_path,
+            "--role",
+            &role,
+        ])
+        .env("GAH_DESKTOP_SERVER_PORT", settings.server_port.to_string())
+        .status();
+    let update_error = match updated {
+        Ok(status) if status.success() => None,
+        Ok(status) => Some(format!("The {role} update exited with {status}.")),
+        Err(error) => Some(format!("Cannot update the {role} installation: {error}")),
+    };
+    if let Some(update_error) = update_error {
+        let mut rollback = command(gah.to_string_lossy().as_ref());
+        rollback.args(["config", "set", "--node-role", &settings.node_role]);
+        if settings.node_role == "worker" && !settings.remote_central_url.is_empty() {
+            rollback.args([
+                "--registry-central-url",
+                &settings.remote_central_url,
+            ]);
+        }
+        let _ = rollback.status();
+        return Err(format!("{update_error} The saved role was restored and the previous service is unchanged."));
+    }
+    #[cfg(target_os = "macos")]
+    if role == "worker" {
+        macos_service(&settings, "start", "worker")?;
+    }
+    if role == "central" {
+        if !settings.central_url.starts_with("http://127.0.0.1:") {
+            settings.remote_central_url = settings.central_url.clone();
+        }
+        settings.central_url = format!("http://127.0.0.1:{}", settings.server_port);
+    } else if !settings.remote_central_url.is_empty() {
+        settings.central_url = settings.remote_central_url.clone();
+    }
+    settings.node_role = role.clone();
+    write_settings(&settings)?;
+    let url = central_url(&settings.central_url)?;
+    open_dashboard(&app, url)?;
+    let running = launchd_running(&role);
+    set_tray_status(&app, &role, running);
+    Ok(DesktopRoleStatus {
+        role: role.clone(),
+        running,
+        supported: true,
+    })
+}
+
 // Use the worker's installed environment for every WSL tool; before installation,
 // report tools available to the login shell. Only the exit status leaves WSL.
 #[cfg(any(windows, test))]
@@ -314,6 +530,7 @@ command -v "$1" >/dev/null 2>&1
 #[tauri::command]
 async fn worker_status(
     window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
     state: tauri::State<'_, WorkerState>,
 ) -> Result<WorkerStatus, String> {
     local_only(&window)?;
@@ -365,8 +582,25 @@ async fn worker_status(
         let _ = state;
         Ok(WorkerStatus { running, tools, note: "The headless worker uses the selected WSL distribution. Windows tools are listed separately; installation does not verify login or worker compatibility. Quitting this app leaves the WSL service running.".into() })
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
+        let _ = state;
+        let settings = read_settings();
+        let running = settings.node_role == "worker" && launchd_running("worker");
+        set_tray_status(&app, &settings.node_role, if settings.node_role == "central" { launchd_running("central") } else { running });
+        Ok(WorkerStatus {
+            running,
+            tools,
+            note: if settings.node_role == "worker" {
+                "launchd owns the worker. Quitting the desktop app leaves it running.".into()
+            } else {
+                "This Mac is in central mode. Switch roles before starting its worker.".into()
+            },
+        })
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        let _ = app;
         let mut process = state.0.lock().map_err(|e| e.to_string())?;
         let running = process
             .as_mut()
@@ -401,7 +635,21 @@ async fn set_worker_running(
             return Err(format!("WSL worker service could not be changed. Install it from Settings → Add a Node. {}", String::from_utf8_lossy(&out.stderr)));
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = state;
+        let settings = read_settings();
+        if settings.node_role != "worker" {
+            return Err("Switch this Mac to worker mode first.".into());
+        }
+        if running {
+            macos_service(&settings, "install", "worker")?;
+            macos_service(&settings, "start", "worker")?;
+        } else {
+            macos_service(&settings, "stop", "worker")?;
+        }
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         let mut process = state.0.lock().map_err(|e| e.to_string())?;
         if !running {
@@ -435,11 +683,7 @@ async fn set_worker_running(
                 .append(true)
                 .open(dir.join("desktop-worker.log"))
                 .map_err(|e| e.to_string())?;
-            let gah = dir
-                .parent()
-                .and_then(|p| p.parent())
-                .ok_or("Cannot find home directory")?
-                .join(".cargo/bin/gah");
+            let gah = installed_gah()?;
             *process = Some(
                 command(gah.to_str().ok_or("Invalid worker path")?)
                     .args(["loop", "--profile", profile])
@@ -483,7 +727,7 @@ fn show_app(app: &tauri::AppHandle) {
 }
 
 // Every exit path, including the native application menu, reaps an owned worker.
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn stop_owned_worker(app: &tauri::AppHandle) {
     if let Ok(mut process) = app.state::<WorkerState>().0.lock() {
         if let Some(child) = process.as_mut() {
@@ -511,12 +755,19 @@ fn menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
 
 fn main() {
     tauri::Builder::default()
-        .manage(WorkerState(Mutex::new(None)))
+        .manage({
+            #[cfg(not(target_os = "macos"))]
+            { WorkerState(Mutex::new(None)) }
+            #[cfg(target_os = "macos")]
+            { WorkerState }
+        })
         .invoke_handler(tauri::generate_handler![
             desktop_settings,
             save_presence,
             connect_dashboard,
             open_central_settings,
+            node_role_status,
+            set_node_role,
             worker_status,
             set_worker_running
         ])
@@ -592,6 +843,12 @@ fn main() {
                 })
                 .build(app)?;
             #[cfg(target_os = "macos")]
+            set_tray_status(
+                app.handle(),
+                &settings.node_role,
+                launchd_running(&settings.node_role),
+            );
+            #[cfg(target_os = "macos")]
             {
                 let native_menu = Menu::default(app.handle())?;
                 native_menu.append(&tauri::menu::Submenu::with_items(
@@ -630,7 +887,7 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error building GAH desktop")
         .run(|_app, _event| {
-            #[cfg(not(windows))]
+            #[cfg(all(not(windows), not(target_os = "macos")))]
             if let tauri::RunEvent::Exit = _event {
                 stop_owned_worker(_app);
             }
@@ -761,7 +1018,7 @@ mod tests {
     #[test]
     fn dashboard_addresses_require_http_without_credentials() {
         for value in [
-            "http://192.168.1.8:3773",
+            "http://198.51.100.8:3773",
             "https://gah.example.test",
             "http://[::1]:3773",
         ] {

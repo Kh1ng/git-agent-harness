@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 type Presence = { dock: boolean; launch_window: boolean; tray: boolean };
 type Settings = { central_url: string; wsl_distribution: string; presence: Presence };
 type WorkerStatus = { running: boolean; note: string; tools: { name: string; environment: string; installed: boolean }[] };
+type RoleStatus = { role: 'central' | 'worker'; running: boolean; supported: boolean };
 const central = document.querySelector<HTMLInputElement>('#central-url')!;
 const distribution = document.querySelector<HTMLInputElement>('#wsl-distribution')!;
 const error = document.querySelector<HTMLElement>('#error')!;
@@ -24,6 +25,14 @@ function constrainPresence() {
   launchWindow.disabled = windowRequired;
   if (windowRequired) launchWindow.checked = true;
   document.querySelector<HTMLElement>('#presence-recovery')!.hidden = !windowRequired;
+}
+
+function showRole(result: RoleStatus) {
+  document.querySelector<HTMLElement>('#role-section')!.hidden = !result.supported;
+  document.querySelector('#role-state')!.textContent = `${result.role === 'central' ? 'Central' : 'Worker'} mode · ${result.running ? 'running' : 'stopped'}.`;
+  for (const role of ['central', 'worker'] as const) {
+    document.querySelector(`#${role}-role`)!.setAttribute('aria-pressed', String(role === result.role));
+  }
 }
 
 
@@ -81,6 +90,12 @@ for (const [id, running] of [['start', true], ['stop', false]] as const) {
     void perform(async () => { await invoke('set_worker_running', { running }); await refresh(); });
   });
 }
+for (const role of ['central', 'worker'] as const) {
+  document.querySelector(`#${role}-role`)!.addEventListener('click', () => {
+    status.textContent = `Updating this Mac for ${role} mode… This can take several minutes.`;
+    void perform(async () => { showRole(await invoke<RoleStatus>('set_node_role', { role })); });
+  });
+}
 void perform(async () => {
   const settings = await invoke<Settings>('desktop_settings');
   central.value = settings.central_url;
@@ -92,4 +107,5 @@ void perform(async () => {
     distribution.hidden = false;
     document.querySelector<HTMLElement>('#wsl-label')!.hidden = false;
   }
+  showRole(await invoke<RoleStatus>('node_role_status'));
 });

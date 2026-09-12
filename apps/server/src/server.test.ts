@@ -257,6 +257,27 @@ test('GET /api/info advertises the configured coordinator port', async () => {
   );
 });
 
+test('an explicit web root serves the shared control surface and keeps unknown API routes as JSON 404s', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gah-web-root-'));
+  const saved = process.env.GAH_WEB_ROOT;
+  writeFileSync(join(root, 'index.html'), '<!doctype html><title>GAH desktop central</title>', 'utf8');
+  writeFileSync(join(root, 'app.js'), 'window.GAH = true;', 'utf8');
+  process.env.GAH_WEB_ROOT = root;
+  try {
+    await withTestServer(async profile => profilePayload(profile), async base => {
+      assert.match(await (await fetch(base)).text(), /GAH desktop central/);
+      assert.equal(await (await fetch(`${base}/app.js`)).text(), 'window.GAH = true;');
+      assert.match(await (await fetch(`${base}/chat`, { headers: { Accept: 'text/html' } })).text(), /GAH desktop central/);
+      const missing = await fetch(`${base}/api/not-real`);
+      assert.equal(missing.status, 404);
+      assert.equal((await missing.json() as { error: string }).error, 'Not Found');
+    });
+  } finally {
+    if (saved === undefined) delete process.env.GAH_WEB_ROOT; else process.env.GAH_WEB_ROOT = saved;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('project routes expose only curated profiles', async () => {
   const savedCatalogPath = process.env.GAH_PROJECT_CATALOG_PATH;
   process.env.GAH_PROJECT_CATALOG_PATH = join(mkdtempSync(join(tmpdir(), 'gah-project-routes-')), 'projects.json');

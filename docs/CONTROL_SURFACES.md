@@ -32,6 +32,12 @@ flowchart LR
 ```
 
 The central server owns fleet registration, central claims, project ownership, chat history, and the master skill bank.
+
+On macOS, `scripts/install-macos.sh` and the desktop role control share the
+tracked `scripts/macos-launchd.sh` service owner. Central mode serves the same
+web control surface on loopback port 3774 by default; worker mode loads one
+configured profile only when the operator starts it. Switching roles unloads
+the opposite LaunchAgent, so one Mac cannot silently run both contracts.
 Workers expose an execution API and keep their own checkouts and runtime artifacts.
 The phrase "worker has no server" in older tickets conflicts with this implemented transport.
 Workers reject central administration and do not initialize central stores. The [worker contract](WORKER_ROLE.md) describes role configuration and memory access.
@@ -60,7 +66,7 @@ The [UI audit](UI_AUDIT_2026-09-07.md) records accessibility and layout findings
 | Inspect usage and failures | [Telemetry](../apps/web/src/pages/TelemetryPage.tsx) shows reports, series, chat usage, and ticket costs. [Quota](../apps/web/src/pages/QuotaPage.tsx) shows candidate eligibility and observation age. | Complete per-account billing and outcome comparisons across every backend remain under #940. Unavailable measurements are not proof of zero usage. |
 | Read activity | [Activity](../apps/web/src/pages/EventsPage.tsx) receives the high-signal controller and node-health stream over the existing WebSocket. The server persists up to 2,000 entries, replays from the client's cursor, and the client de-duplicates by event ID. | System alerts are opt-in. Browser alerts need notification permission; iPhone delivery is local while the app runs, not background APNs. |
 | Manage nodes | [Nodes](../apps/web/src/pages/NodesPage.tsx) shows cached observations, age, profiles, resources, and claims. It exposes health/readiness checks and registration guidance. | An unobserved node has unknown health. Registration does not prove that a CLI is authenticated or eligible for a particular job. |
-| Configure the installation | [Settings](../apps/web/src/pages/SettingsPage.tsx) exposes profiles, effective configuration, backend availability, gateway configuration, skills, update controls, and Windows node commands. | Complete routing editing, paid-route approvals, recovery controls, and versioned prompt policies remain separate tickets. macOS central installation is unavailable. |
+| Configure the installation | [Settings](../apps/web/src/pages/SettingsPage.tsx) exposes profiles, effective configuration, backend availability, gateway configuration, skills, update controls, and Windows node commands. The macOS app also changes the host role. | Complete versioned prompt policies remain a separate ticket. |
 | Use project chat | [Chat](../apps/web/src/pages/ManagerChatPage.tsx) provides sessions, streaming replies/tools, permissions, stop/steer, models, and node selection. An authenticated Telegram bridge maps paired identities to exact profile scopes and one-time action cards. [ProjectRail](../apps/web/src/components/ProjectRail.tsx) groups projects by owner node. | Remote issue/PR-seeded sessions and remote previews remain unsupported. Telegram rejects broad approvals, non-text attachments, and remote slash commands. |
 | Import repositories and inspect Git | [Project routes](../apps/server/src/projectRoutes.ts) import on a selected worker. [Git](../apps/web/src/pages/GitPage.tsx) exposes status, branches, log, commit, and PR/MR actions. | Import is not the resumable onboarding workflow in #539. Provider identity, preflights, validation, and loop enablement do not form one resumable transaction. |
 
@@ -114,7 +120,7 @@ The [worker contract](WORKER_ROLE.md) identifies the remaining dispatch-memory r
 
 | Destination | Remaining work | Tracking |
 | --- | --- | --- |
-| Install and manage any node | Add macOS central services and an in-app role toggle. Validate Windows installation and complete native Windows execution support. | [#937](https://github.com/Kh1ng/git-agent-harness/issues/937), [#938](https://github.com/Kh1ng/git-agent-harness/issues/938), [#942](https://github.com/Kh1ng/git-agent-harness/issues/942) |
+| Install and manage any node | Validate Windows installation and complete native Windows execution support. | [#938](https://github.com/Kh1ng/git-agent-harness/issues/938), [#942](https://github.com/Kh1ng/git-agent-harness/issues/942) |
 | One node/worker contract | Document registration, transport, lifecycle, queue semantics, and central-store ownership against the existing APIs. Complete inherited environment declarations and readiness provenance. | [#795](https://github.com/Kh1ng/git-agent-harness/issues/795), [#741](https://github.com/Kh1ng/git-agent-harness/issues/741) |
 | Work distribution between computers | Reconcile Node fleet selection with Rust reservations and local loops. Define queue depth and redistribution behavior before adding another scheduler. | [#796](https://github.com/Kh1ng/git-agent-harness/issues/796), [#835](https://github.com/Kh1ng/git-agent-harness/issues/835) |
 | One agent interface | Finish dispatch cleanup, fix review drift, and define the chat capability without discarding its streaming/permission behavior. Complete instance skills/plugins/usage coverage. | [#832](https://github.com/Kh1ng/git-agent-harness/issues/832), [#833](https://github.com/Kh1ng/git-agent-harness/issues/833), [#834](https://github.com/Kh1ng/git-agent-harness/issues/834), [#863](https://github.com/Kh1ng/git-agent-harness/issues/863), [#797](https://github.com/Kh1ng/git-agent-harness/issues/797) |
