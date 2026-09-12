@@ -129,5 +129,6 @@
   "review_contract_version": 1,
   "review_held_work_ids": [],
   "schema_version": 1,
-  "skill_inventory": []
+  "skill_inventory": [],
+  "work_waypoint_evidence": {}
 }
