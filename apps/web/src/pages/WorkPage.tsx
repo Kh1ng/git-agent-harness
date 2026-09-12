@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, ChevronRight, ListChecks, FileText, Rocket } from 'lucide-react';
-import type { Session } from '@git-agent-harness/contracts';
+import type { AvailableTicket, MergeRequest, Session, WorkWaypointEvidence } from '@git-agent-harness/contracts';
 import { generateProviderInstanceId } from '@git-agent-harness/shared';
 import { gahApi, GahApiError } from '../api/client.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
@@ -17,6 +17,13 @@ import { AttemptTimeline } from '../components/AttemptTimeline.js';
 import { PaidRouteApprovals } from '../components/PaidRouteApprovals.js';
 import { ExternalApprovals } from '../components/ExternalApprovals.js';
 import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
+import {
+  WAYPOINTS,
+  WaypointHistory,
+  WaypointStrip,
+  currentWorkWaypoint,
+  type WaypointEvidence
+} from '../components/WaypointProgress.js';
 
 const WORK_REFRESH_MS = 30 * 1000;
 
@@ -106,7 +113,92 @@ type WorkPageProps = {
   onSelectSession: (session: Session) => void;
 };
 
-function WorkDetail({ workId, onBack }: { workId: string; onBack: () => void }) {
+type ProjectWorkItem = {
+  key: string;
+  workId: string | null;
+  title: string;
+  ticket: AvailableTicket | null;
+  mergeRequest: MergeRequest | undefined;
+  session: Session | undefined;
+  ledgerEvidence: WorkWaypointEvidence | undefined;
+};
+
+function workKey(workId: string): string {
+  const trimmed = workId.trim();
+  if (/^\d+$/.test(trimmed)) return `#${Number(trimmed)}`;
+  const issue = trimmed.match(/^#0*(\d+)$/);
+  if (issue) return `#${Number(issue[1])}`;
+  const ticket = trimmed.match(/^ticket-0*(\d+)$/i);
+  if (ticket) return `#${Number(ticket[1])}`;
+  return trimmed.toLowerCase();
+}
+
+function projectWorkItems(
+  tickets: AvailableTicket[],
+  mergeRequests: MergeRequest[],
+  sessions: Session[],
+  waypointEvidence: Record<string, WorkWaypointEvidence>
+): ProjectWorkItem[] {
+  const items = new Map<string, ProjectWorkItem>();
+  const evidenceByKey = new Map(Object.entries(waypointEvidence).map(([workId, evidence]) => [workKey(workId), evidence]));
+  for (const ticket of tickets) {
+    const key = workKey(ticket.work_id ?? ticket.normalized_work_identity ?? ticket.ticket_path);
+    items.set(key, {
+      key,
+      workId: ticket.work_id,
+      title: ticket.title ?? ticket.work_id ?? ticket.ticket_path,
+      ticket,
+      mergeRequest: undefined,
+      session: undefined,
+      ledgerEvidence: evidenceByKey.get(key)
+    });
+  }
+  for (const mergeRequest of mergeRequests) {
+    if (!mergeRequest.work_id) continue;
+    const key = workKey(mergeRequest.work_id);
+    const existing = items.get(key);
+    items.set(key, {
+      key,
+      workId: mergeRequest.work_id,
+      title: existing?.title ?? mergeRequest.title ?? mergeRequest.work_id,
+      ticket: existing?.ticket ?? null,
+      mergeRequest,
+      session: existing?.session,
+      ledgerEvidence: existing?.ledgerEvidence ?? evidenceByKey.get(key)
+    });
+  }
+  for (const session of sessions) {
+    if (!session.target || !/^(?:#?\d+|ticket-\d+)$/i.test(session.target.trim())) continue;
+    const key = workKey(session.target);
+    const existing = items.get(key);
+    items.set(key, {
+      key,
+      workId: existing?.workId ?? session.target,
+      title: existing?.title ?? session.target,
+      ticket: existing?.ticket ?? null,
+      mergeRequest: existing?.mergeRequest,
+      session,
+      ledgerEvidence: existing?.ledgerEvidence ?? evidenceByKey.get(key)
+    });
+  }
+  return [...items.values()];
+}
+
+function itemEvidence(item: ProjectWorkItem): WaypointEvidence {
+  return {
+    priorAttemptCount: item.ticket?.prior_attempt_count,
+    hasActiveClaim: item.ticket?.has_active_claim,
+    hasActiveMergeRequest: item.ticket?.has_active_mr,
+    humanRequired: item.ticket?.human_required,
+    sessionStatus: item.session?.status === 'idle' || item.session?.status === 'stopping' ? undefined : item.session?.status,
+    sessionStartedAt: item.session?.startedAt,
+    ledgerEvidence: item.ledgerEvidence,
+    mergeRequest: item.mergeRequest
+  };
+}
+
+function WorkDetail({ item, onBack }: { item: ProjectWorkItem; onBack: () => void }) {
+  const workId = item.workId as string;
   const timeline = useGahStore((s) => s.workTimelines[workId]);
   const fetchWorkTimeline = useGahStore((s) => s.fetchWorkTimeline);
 
@@ -141,9 +233,15 @@ function WorkDetail({ workId, onBack }: { workId: string; onBack: () => void }) 
           onRetry={() => fetchWorkTimeline(workId, { force: true })}
         />
       ) : !timeline?.data || timeline.data.length === 0 ? (
-        <EmptyState icon={FileText} title="No ledger history for this work item yet" />
+        <div className="space-y-4">
+          <WaypointHistory evidence={itemEvidence(item)} label={workId} />
+          <EmptyState icon={FileText} title="No ledger history for this work item yet" />
+        </div>
       ) : (
-        <AttemptTimeline entries={timeline.data} />
+        <div className="space-y-4">
+          <WaypointHistory evidence={{ ...itemEvidence(item), entries: timeline.data }} label={workId} />
+          <AttemptTimeline entries={timeline.data} />
+        </div>
       )}
     </div>
   );
@@ -158,6 +256,8 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
   const profiles = useGahStore((s) => s.profiles);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
   const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
+  const [holdPending, setHoldPending] = useState<string | null>(null);
+  const [holdError, setHoldError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchStatus(profile ?? undefined);
@@ -170,21 +270,34 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
 
   const activeProfileRepo = profiles.data?.find((p) => p.name === profile)?.repo ?? null;
 
+  const projectItems = useMemo(
+    () => projectWorkItems(
+      status.data?.available_tickets ?? [],
+      status.data?.merge_requests ?? [],
+      sessions,
+      status.data?.work_waypoint_evidence ?? {}
+    ),
+    [status.data?.available_tickets, status.data?.merge_requests, status.data?.work_waypoint_evidence, sessions]
+  );
+
   if (selectedWorkId) {
-    return <WorkDetail workId={selectedWorkId} onBack={() => setSelectedWorkId(null)} />;
+    const selectedItem = projectItems.find((item) => item.workId === selectedWorkId);
+    if (selectedItem) return <WorkDetail item={selectedItem} onBack={() => setSelectedWorkId(null)} />;
   }
 
   const activeSessions = sessions.filter((s) => s.status === 'running');
   const queuedSessions = sessions.filter((s) => s.status === 'starting');
   const recentSessions = sessions.filter((s) => ['stopped', 'error'].includes(s.status)).slice(0, 5);
-  const tickets = status.data?.available_tickets ?? [];
   const issueIntakeRejections = status.data?.issue_intake_rejections ?? [];
   const activeClaims = status.data?.active_claims ?? [];
   const heldWorkIds = new Set(status.data?.review_held_work_ids ?? []);
+  const waypointCounts = new Map(WAYPOINTS.map((waypoint) => [waypoint.key, 0]));
+  for (const item of projectItems) {
+    const waypoint = currentWorkWaypoint(itemEvidence(item));
+    waypointCounts.set(waypoint.key, (waypointCounts.get(waypoint.key) ?? 0) + 1);
+  }
   // Issue #503: hold/release safe controls — the same authorization the CLI
   // enforces, via the owner-gated mutation API.
-  const [holdPending, setHoldPending] = useState<string | null>(null);
-  const [holdError, setHoldError] = useState<string | null>(null);
   const setHold = async (workId: string, reason: string) => {
     setHoldPending(workId);
     setHoldError(null);
@@ -314,7 +427,12 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
       )}
 
       <section>
-        <h3 className="text-sm font-semibold text-primary mb-3">Tickets ({tickets.length})</h3>
+        <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-primary">Project waypoints ({projectItems.length})</h3>
+            <p className="mt-1 text-xs text-muted">Current stage by ticket, derived from the queue, sessions, ledger, and provider state.</p>
+          </div>
+        </div>
         {status.loading && !status.data ? (
           <LoadingState label="Loading tickets…" />
         ) : status.error ? (
@@ -323,14 +441,24 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
             endpoint="/api/status"
             onRetry={() => fetchStatus(profile ?? undefined, { force: true })}
           />
-        ) : tickets.length === 0 ? (
-          <EmptyState icon={ListChecks} title="No tickets found" description="docs/tickets/ is empty for this profile." />
+        ) : projectItems.length === 0 ? (
+          <EmptyState icon={ListChecks} title="No tracked work" description="No ticket, session, or pull request is currently visible for this profile." />
         ) : (
-          <div className="card overflow-x-auto">
-            <table className="table-base min-w-[560px]">
+          <div className="card overflow-hidden">
+            <dl className="grid grid-cols-3 border-b border-subtle sm:grid-cols-6">
+              {WAYPOINTS.map((waypoint) => (
+                <div key={waypoint.key} className="px-3 py-2.5 text-center">
+                  <dt className="text-[11px] text-muted">{waypoint.label}</dt>
+                  <dd className="mt-0.5 text-sm font-semibold tabular-nums text-primary">{waypointCounts.get(waypoint.key) ?? 0}</dd>
+                </div>
+              ))}
+            </dl>
+            <div className="overflow-x-auto">
+            <table className="table-base min-w-[640px] sm:min-w-[900px]">
               <thead>
                 <tr>
-                  <th>Ticket</th>
+                  <th>Work item</th>
+                  <th>Waypoints</th>
                   <th>Backend / model</th>
                   <th>Attempts</th>
                   <th>Status</th>
@@ -338,24 +466,36 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                 </tr>
               </thead>
               <tbody>
-                {tickets.map((t) => (
-                  <tr key={t.ticket_path}>
+                {projectItems.map((item) => {
+                  const t = item.ticket;
+                  const evidence = itemEvidence(item);
+                  const currentWaypoint = currentWorkWaypoint(evidence);
+                  return (
+                  <tr key={item.key}>
                     <td className="text-primary">
-                      {t.work_id && <span className="font-mono text-xs text-muted mr-1.5">{t.work_id}</span>}
-                      {t.title ?? (!t.work_id ? t.ticket_path : null)}
+                      {item.workId && <span className="font-mono text-xs text-muted mr-1.5">{item.workId}</span>}
+                      {item.title !== item.workId ? item.title : null}
                     </td>
                     <td>
-                      {t.recommended_backend
+                      <div className="max-w-[470px] overflow-x-auto pb-1">
+                        <WaypointStrip evidence={evidence} label={item.workId ?? item.title} />
+                      </div>
+                    </td>
+                    <td>
+                      {t?.recommended_backend
                         ? `${t.recommended_backend}${t.recommended_model ? `/${t.recommended_model}` : ''}`
+                        : item.session?.backend
+                          ? `${item.session.backend}${item.session.model ? `/${item.session.model}` : ''}`
                         : 'Unknown'}
                     </td>
-                    <td>{t.prior_attempt_count}</td>
+                    <td>{t?.prior_attempt_count ?? '—'}</td>
                     <td>
                       <div className="flex flex-wrap gap-1">
-                        {t.work_id && heldWorkIds.has(t.work_id) && (
+                        <StatusBadge tone={evidence.humanRequired ? 'warning' : currentWaypoint.key === 'merged' ? 'good' : 'unknown'} label={currentWaypoint.label} />
+                        {item.workId && heldWorkIds.has(item.workId) && (
                           <StatusBadge tone="warning" label="Review hold" />
                         )}
-                        {t.work_id && (
+                        {t?.work_id && (
                           heldWorkIds.has(t.work_id) ? (
                             <button
                               type="button"
@@ -376,35 +516,39 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                             </button>
                           )
                         )}
-                        {t.human_required ? (
+                        {t?.human_required ? (
                           <StatusBadge tone="warning" label="Human required" />
-                        ) : t.has_active_claim ? (
+                        ) : t?.has_active_claim ? (
                           <StatusBadge tone="warning" label="Claimed" />
-                        ) : t.has_active_mr ? (
+                        ) : item.mergeRequest?.merged ? (
+                          <StatusBadge tone="good" label="Merged" />
+                        ) : t?.has_active_mr || item.mergeRequest ? (
                           <StatusBadge tone="good" label="Active MR" />
-                        ) : t.prior_attempt_count > 0 ? (
-                          <StatusBadge tone="serious" label={t.last_failure_class ?? 'Retrying'} />
+                        ) : (t?.prior_attempt_count ?? 0) > 0 ? (
+                          <StatusBadge tone="serious" label={t?.last_failure_class ?? 'Retrying'} />
                         ) : (
                           <StatusBadge tone="unknown" label="Not dispatched" />
                         )}
                       </div>
                     </td>
                     <td>
-                      {t.work_id && (
+                      {item.workId && (
                         <button
-                          onClick={() => setSelectedWorkId(t.work_id!)}
-                          className="text-accent hover:underline text-xs"
+                          onClick={() => setSelectedWorkId(item.workId)}
+                          className="inline-flex min-h-11 items-center text-xs text-accent underline-offset-4 hover:underline focus-visible:underline sm:min-h-0 sm:py-1"
                         >
-                          View timeline
+                          View history
                         </button>
                       )}
                     </td>
                   </tr>
-                ))}
+                );})}
               </tbody>
             </table>
+            </div>
           </div>
         )}
+        {holdError && <p role="alert" className="mt-2 text-xs text-critical">{holdError}</p>}
       </section>
 
       <section>

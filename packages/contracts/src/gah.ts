@@ -313,6 +313,13 @@ export interface AvailableTicket {
   human_required_reason_code?: string | null;
 }
 
+export interface WorkWaypointEvidence {
+  first_dispatch_at: string | null;
+  first_commit_at: string | null;
+  first_validation_at: string | null;
+  first_pull_request_at: string | null;
+}
+
 export type CandidateSource = 'legacy_ticket' | 'github_issue' | 'gitlab_issue';
 
 export interface CandidateExecutionPolicy {
@@ -413,6 +420,8 @@ export interface StatusSnapshot {
   dependency_blockers?: DependencyBlocker[];
   errors: StatusError[];
   available_tickets: AvailableTicket[];
+  /** Ledger-derived lifecycle evidence keyed by native work ID aliases. */
+  work_waypoint_evidence?: Record<string, WorkWaypointEvidence>;
   active_claims: ActiveClaim[];
   /** Published PM parents and the current provider-native state of their
    * exact child issue identities. */

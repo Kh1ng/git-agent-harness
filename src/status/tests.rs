@@ -6,6 +6,33 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
+fn waypoint_projection_uses_effective_repo_scoped_ledger_history() {
+    let profile = crate::ledger::test_util::profile();
+    let mut old = LedgerEntry::new("real", &profile, "codex", "fix", "#1077", None, None);
+    old.work_id = Some("#1077".into());
+    old.commit_created = true;
+    let mut clear = LedgerEntry::new_clear_attempts("real", &profile, "#1077");
+    clear.work_id = Some("#1077".into());
+    let mut current = LedgerEntry::new("real", &profile, "codex", "fix", "#1077", None, None);
+    current.work_id = Some("#1077".into());
+    current.dispatch_reason = Some("initial".into());
+    current.validation_result = Some("passed".into());
+    let index = ledger::index_entries_by_work_id(&[old, clear, current.clone()]);
+
+    let projected = project_work_waypoint_evidence(&index, &profile.repo_id);
+    let evidence = &projected["#1077"];
+    assert_eq!(
+        evidence.first_dispatch_at.as_deref(),
+        Some(current.timestamp.as_str())
+    );
+    assert_eq!(
+        evidence.first_validation_at.as_deref(),
+        Some(current.timestamp.as_str())
+    );
+    assert_eq!(evidence.first_commit_at, None);
+}
+
+#[test]
 fn pm_parent_projection_uses_provider_child_state() {
     use std::os::unix::fs::PermissionsExt;
 
