@@ -618,6 +618,75 @@ paths:
         "200": { description: Updated }
         "400": { $ref: "#/components/responses/GahError" }
 
+  /api/manager-chat/bridge/telegram:
+    post:
+      tags: [manager-chat]
+      summary: Accept one authenticated Telegram webhook update
+      security: [{ telegramWebhook: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "202": { description: New update accepted }
+        "200": { description: Duplicate update already processing or replayed safely }
+        "401": { description: Missing or invalid Telegram webhook secret }
+        "502": { description: Manager or Telegram delivery failed; retry the same update ID }
+
+  /api/manager-chat/bridge/operators:
+    get:
+      tags: [manager-chat]
+      summary: List paired and revoked messaging identities
+      responses:
+        "200": { description: Bridge operator records }
+        "403": { description: Owner access required }
+    post:
+      tags: [manager-chat]
+      summary: Pair an exact Telegram user, chat, role, and profile scope
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [externalUserId, chatId, role, profiles]
+              properties:
+                externalUserId: { type: string }
+                chatId: { type: string }
+                role: { type: string, enum: [owner, chat] }
+                profiles: { type: array, minItems: 1, maxItems: 32, items: { type: string } }
+      responses:
+        "201": { description: Identity paired }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Owner access required }
+        "409": { $ref: "#/components/responses/MutationConflict" }
+
+  /api/manager-chat/bridge/operators/revoke:
+    post:
+      tags: [manager-chat]
+      summary: Revoke one paired messaging identity
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operatorId]
+              properties:
+                operatorId: { type: string }
+      responses:
+        "200": { description: Identity revoked }
+        "403": { description: Owner access required }
+        "404": { description: Active identity not found }
+        "409": { $ref: "#/components/responses/MutationConflict" }
+
   /api/manager-chat/commands:
     get:
       tags: [manager-chat]
@@ -872,6 +941,11 @@ components:
       in: header
       name: Authorization
       description: Bearer token for all /api routes outside trusted direct-local access; remote transport also requires TLS or explicit HTTP opt-in.
+    telegramWebhook:
+      type: apiKey
+      in: header
+      name: X-Telegram-Bot-Api-Secret-Token
+      description: Exact secret set when the owner registers the Telegram webhook.
   responses:
     MutationConflict:
       description: >-

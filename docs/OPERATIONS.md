@@ -881,6 +881,54 @@ alerts only from its configured central origin. The iPhone app uses local iOS
 notifications while it is running and also shows them in the foreground. This
 does not provide background APNs delivery.
 
+### Telegram manager bridge
+
+The central server accepts authenticated Telegram webhook updates at
+`POST /api/manager-chat/bridge/telegram`. Set these environment variables on
+the central server:
+
+```bash
+TELEGRAM_BOT_TOKEN=123456:replace-me
+GAH_TELEGRAM_WEBHOOK_SECRET=replace-with-a-random-secret
+```
+
+Register the HTTPS webhook with Telegram. Set its `secret_token` to the exact
+`GAH_TELEGRAM_WEBHOOK_SECRET` value. Telegram sends that value in the
+`X-Telegram-Bot-Api-Secret-Token` header. Use 1–256 letters, digits,
+underscores, or hyphens.
+
+Pair one exact Telegram user and chat from the central host. This route needs
+owner access and the standard mutation idempotency key:
+
+```bash
+curl -X POST http://127.0.0.1:3773/api/manager-chat/bridge/operators \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: telegram-pair-0001' \
+  -d '{"externalUserId":"12345","chatId":"12345","role":"owner","profiles":["gah"]}'
+```
+
+Use role `chat` when an identity can converse but cannot approve an action.
+An owner-paired identity receives exact one-time allow or reject buttons.
+Persistent or broad approvals remain available only in the dashboard.
+
+Plain text targets the only paired profile. For multiple profiles, send
+`/chat <profile> <message>`. Other remote slash commands are rejected.
+The bridge accepts one UTF-8 text, Markdown, or JSON document up to 64 KiB.
+It rejects other attachments. It redacts common token forms before context.
+
+Revoke an identity with its returned operator ID:
+
+```bash
+curl -X POST http://127.0.0.1:3773/api/manager-chat/bridge/operators/revoke \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: telegram-revoke-0001' \
+  -d '{"operatorId":"replace-with-operator-id"}'
+```
+
+The bridge keeps receipts and a redacted audit log below the manager-chat
+state directory. A retried Telegram update reuses its stored reply. It never
+starts the manager turn or answers an action twice.
+
 ### `notify_command` (per profile)
 
 Set `notify_command` on a profile; GAH pipes a single one-line message to that

@@ -110,6 +110,10 @@ export type PermissionPublish = (event: {
 }) => void;
 let permissionPublisher: PermissionPublish | undefined;
 
+export interface ManagerChatTurnHooks {
+  onPermission?: PermissionPublish;
+}
+
 /** Durable live state changed; clients refetch the authoritative fold. */
 export type UpdatedPublish = (event: {
   type: 'manager.chat.updated';
@@ -819,7 +823,8 @@ export function sendManagerChatMessage(
   requestId?: string,
   sessionId?: string,
   backendOverride?: string,
-  nodeId?: string
+  nodeId?: string,
+  hooks: ManagerChatTurnHooks = {}
 ): Promise<ManagerChatTurnResult> {
   // Session-bound turns (WP2): resolve the session's worktree cwd (re-
   // materializing it from the branch if prune reclaimed the idle worktree)
@@ -982,7 +987,7 @@ export function sendManagerChatMessage(
         // Reconnect reads the journal; publish only after its request is
         // readable, and never revive a request cancelled during the write.
         if (active.pendingPermission?.permissionId !== permissionId) return;
-        permissionPublisher?.({
+        const permissionEvent: Parameters<PermissionPublish>[0] = {
           type: 'manager.chat.permission',
           requestId: requestId ?? '',
           profile,
@@ -992,7 +997,9 @@ export function sendManagerChatMessage(
           title: request.title,
           options: request.options,
           locations: request.locations
-        });
+        };
+        permissionPublisher?.(permissionEvent);
+        await hooks.onPermission?.(permissionEvent);
       };
       // Slice 3: structured tool-call activity -- logged (durable, replayed
       // on resume) and pushed live. Status transitions append new events;

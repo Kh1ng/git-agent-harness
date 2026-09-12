@@ -64,7 +64,7 @@ import type {
 import { getFleetDispatch } from './wsServer.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
 import { deriveControllerActivity } from './controllerActivity.js';
-import { authMiddleware, coordinatorTokenMatches, requireOwner } from './authMiddleware.js';
+import { authMiddleware, coordinatorTokenMatches, isLocalAddress, requireOwner } from './authMiddleware.js';
 import { DeviceAccess } from './deviceAccess.js';
 import { mutationSafety } from './mutationSafety.js';
 import { pairingRouter } from './pairing.js';
@@ -97,6 +97,7 @@ import {
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
 import { listAllChatSessions, resolveSessionCwd, chatSessionStoreOptions } from './managerChat/chatSessions.js';
 import { usageRollup } from './managerChat/usageRollup.js';
+import { MessagingBridge } from './managerChat/messagingBridge.js';
 import { projectRoutes } from './projectRoutes.js';
 import { chatNodes, configureChatRouting } from './chatRouting.js';
 import { createWorkerChatRouter } from './workerChat.js';
@@ -144,6 +145,7 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   startAdminUpdate?: typeof startAdminUpdate;
   readAdminUpdateState?: typeof readAdminUpdateState;
   detectTailscaleIPv4?: typeof detectTailscaleIPv4;
+  messagingBridge?: MessagingBridge;
 };
 
 const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
@@ -268,6 +270,7 @@ export function createServer(
   };
 
   const node = validateNodeRole(configDeps.node ?? { role: 'central', central_url: null });
+  const messagingBridge = configDeps.messagingBridge ?? new MessagingBridge();
   const registryService =
     configDeps.registryService ||
     new RegistryService(node.role === 'worker' ? null : undefined, getCoordinatorIdentity(undefined, coordinatorPort).advertised_url, coordinatorPort);
@@ -284,6 +287,25 @@ export function createServer(
   // Middleware
   app.use(cors());
   app.use(express.json());
+  if (node.role === 'central') {
+    app.post('/api/manager-chat/bridge/telegram', async (req, res) => {
+      if (!req.secure && !isLocalAddress(req.socket.remoteAddress ?? '')) {
+        res.status(403).json({ error: 'https_required' });
+        return;
+      }
+      if (!messagingBridge.telegramAuthenticated(req.get('X-Telegram-Bot-Api-Secret-Token'))) {
+        res.status(401).json({ error: 'authentication_required' });
+        return;
+      }
+      try {
+        const result = await messagingBridge.handleTelegram(req.body);
+        res.status(result.duplicate ? 200 : 202).json({ accepted: true, ...result });
+      } catch {
+        console.error('[messagingBridge] Telegram update failed; retry the same update id.');
+        res.status(502).json({ error: 'messaging_bridge_failed' });
+      }
+    });
+  }
   // Pairing only exempts one-time code inspection/redemption; its management
   // routes enforce owner authentication inside the router. Workers cannot pair.
   if (node.role === 'central') app.use('/api/pairing', pairingRouter(app.locals.deviceAccess, getCoordinatorIdentity(undefined, coordinatorPort)));
@@ -299,6 +321,19 @@ export function createServer(
   app.use('/api/route-approvals', paidRouteApprovalsRouter(mutation));
   app.use('/api/external-approvals', externalApprovalsRouter(mutation));
   app.use('/api/backend-instances', backendInstancesRouter(mutation));
+  if (node.role === 'central') {
+    app.get('/api/manager-chat/bridge/operators', requireOwner, (_req, res) => {
+      res.json({ operators: messagingBridge.listOperators() });
+    });
+    app.post('/api/manager-chat/bridge/operators', mutation('messaging_bridge.pair'), (req, res) => {
+      try { res.status(201).json({ operator: messagingBridge.pair(req.body ?? {}) }); }
+      catch (error) { res.status(400).json({ error: 'invalid_bridge_operator', message: error instanceof Error ? error.message : String(error) }); }
+    });
+    app.post('/api/manager-chat/bridge/operators/revoke', mutation('messaging_bridge.revoke'), (req, res) => {
+      try { res.json({ operator: messagingBridge.revoke(req.body?.operatorId) }); }
+      catch (error) { res.status(404).json({ error: 'bridge_operator_not_found', message: error instanceof Error ? error.message : String(error) }); }
+    });
+  }
 
   // Issue #149: ordered routing-candidate editing. Mutations wrap the fixed
   // `gah config routing-candidate` commands (the CLI owns effective-list
