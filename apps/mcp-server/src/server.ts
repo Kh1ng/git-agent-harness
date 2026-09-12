@@ -30,7 +30,7 @@ const REQUEST_SCHEMAS = loadRequestSchemas();
 // single source of truth. Tools backed by HTTP-only server surfaces (no CLI
 // operation) keep hand-written schemas and are listed here so the split is
 // explicit.
-const HTTP_ONLY_TOOLS = new Set(['gah_info', 'gah_usage_rollup', 'gah_controller_activity', 'gah_loop_status']);
+const HTTP_ONLY_TOOLS = new Set(['gah_info', 'gah_usage_rollup', 'gah_hold', 'gah_controller_activity', 'gah_loop_status']);
 
 const TOOL_TO_OPERATION: Record<string, string> = {
   gah_status: 'status.get',
@@ -44,7 +44,6 @@ const TOOL_TO_OPERATION: Record<string, string> = {
   gah_ledger_clear_attempts: 'ledger.clear_attempts',
   gah_availability: 'availability.get',
   gah_availability_clear: 'availability.clear',
-  gah_hold: 'hold.set',
   gah_hold_set: 'hold.set',
   gah_hold_clear: 'hold.clear',
   gah_events: 'events.list',
@@ -57,9 +56,10 @@ const TOOL_TO_OPERATION: Record<string, string> = {
 type JsonSchemaProperty = { type?: string; description?: string; default?: unknown };
 
 /// Translate the manifest's request JSON schema (the small subset this repo
-/// authors: object with string/number/boolean properties) into the zod raw
+/// authors: objects with string, number, boolean, and string-array properties) into the zod raw
 /// shape registerTool expects.
 function zodInputSchemaFor(toolName: string): Record<string, z.ZodTypeAny> | undefined {
+  if (HTTP_ONLY_TOOLS.has(toolName)) return undefined;
   const operationId = TOOL_TO_OPERATION[toolName];
   if (!operationId) return undefined;
   const schema = REQUEST_SCHEMAS[operationId];
@@ -72,6 +72,9 @@ function zodInputSchemaFor(toolName: string): Record<string, z.ZodTypeAny> | und
   for (const [name, property] of Object.entries(properties)) {
     let field: z.ZodTypeAny;
     switch (property.type) {
+      case 'array':
+        field = z.array(z.string());
+        break;
       case 'number':
         field = z.number();
         break;
@@ -216,7 +219,7 @@ export function createGahMcpServer(): McpServer {
       description: 'Append a tombstone ledger entry so a stuck work_id becomes dispatchable again.',
       inputSchema: zodInputSchemaFor('gah_ledger_clear_attempts'),
     },
-    ({ profile, workId, dryRun }) => tool(() => gah.ledgerClearAttempts(profile ?? DEFAULT_PROFILE, workId, dryRun))
+    ({ profile, work_id, dry_run }) => tool(() => gah.ledgerClearAttempts(profile ?? DEFAULT_PROFILE, work_id, dry_run))
   );
 
   server.registerTool(
@@ -256,7 +259,7 @@ export function createGahMcpServer(): McpServer {
       description: "Mark a work_id as under active out-of-band manager review; gah's auto-merge loop will skip it.",
       inputSchema: zodInputSchemaFor('gah_hold_set'),
     },
-    ({ profile, workId, reason }) => tool(() => gah.holdSet(profile ?? DEFAULT_PROFILE, workId, reason))
+    ({ profile, work_id, reason }) => tool(() => gah.holdSet(profile ?? DEFAULT_PROFILE, work_id, reason))
   );
 
   server.registerTool(
@@ -266,7 +269,7 @@ export function createGahMcpServer(): McpServer {
       description: 'Release a previously set review hold on a work_id.',
       inputSchema: zodInputSchemaFor('gah_hold_clear'),
     },
-    ({ profile, workId }) => tool(() => gah.holdClear(profile ?? DEFAULT_PROFILE, workId))
+    ({ profile, work_id }) => tool(() => gah.holdClear(profile ?? DEFAULT_PROFILE, work_id))
   );
 
   server.registerTool(
@@ -335,13 +338,7 @@ export function createGahMcpServer(): McpServer {
           action === 'grant'
             ? 'Grant one exact paid backend/model route for one work item. The scope must match the pending request exactly — it cannot be broadened here.'
             : 'Revoke a previously granted paid-route approval for one exact scope.',
-        inputSchema: {
-          profile: z.string().describe('GAH profile name'),
-          work_id: z.string().describe('Exact work item the approval applies to, e.g. "#123"'),
-          backend: z.string().describe('Logical backend, e.g. "opencode"'),
-          backend_instance: z.string().nullable().optional().describe('Backend instance qualifier, if the request carried one'),
-          model: z.string().nullable().optional().describe('Exact model the request named, if any')
-        }
+        inputSchema: zodInputSchemaFor(`gah_route_approval_${action}`),
       },
       ({ profile, work_id, backend, backend_instance, model }) =>
         tool(() =>

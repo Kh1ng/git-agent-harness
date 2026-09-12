@@ -205,6 +205,17 @@ fn test_manifest_json_serialization() {
 }
 
 #[test]
+fn test_every_remote_operation_has_a_request_schema() {
+    let manifest = generate_manifest();
+    let missing: Vec<_> = manifest
+        .remote_operations
+        .iter()
+        .filter(|operation_id| !manifest.request_schemas.contains_key(*operation_id))
+        .collect();
+    assert!(missing.is_empty(), "missing request schemas: {missing:?}");
+}
+
+#[test]
 fn test_typescript_generation() {
     let ts_types = generate_typescript_types();
 

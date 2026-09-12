@@ -76,9 +76,23 @@ test('lists usage and orchestration tools and forwards their HTTP calls', async 
       waitTimeoutSeconds: 3_600
     });
 
+    await client.callTool({
+      name: 'gah_ledger_clear_attempts',
+      arguments: { profile: 'gah', work_id: '519', dry_run: true }
+    });
+    assert.deepEqual(JSON.parse(String(requests.at(-1)?.init?.body)), {
+      profile: 'gah',
+      workId: '519',
+      dryRun: true
+    });
+
     for (let i = 0; i < 2; i++) {
       await client.callTool({ name: 'gah_hold_set', arguments: { profile: 'gah', work_id: '532' } });
     }
+    assert.deepEqual(JSON.parse(String(requests.at(-1)?.init?.body)), {
+      profile: 'gah',
+      workId: '532'
+    });
     const mutations = requests.filter(request => request.init?.method === 'POST');
     const keys = mutations.map(request => new Headers(request.init?.headers).get('Idempotency-Key'));
     for (const key of keys) assert.match(key ?? '', /^[A-Za-z0-9_-]{16,128}$/, 'Every MCP mutation supplies a valid key');

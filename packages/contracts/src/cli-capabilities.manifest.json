@@ -2,31 +2,15 @@
   "schema_version": 1,
   "manifest_version": "v1",
   "operations": {
-    "availability.clear": {
-      "operation_id": "availability.clear",
-      "display_name": "Clear Availability Status",
-      "class": "mutation",
-      "profile_scope": "global",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "non_idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Manually override stale availability",
-      "cli_command_path": "gah availability clear",
-      "is_stable": true
-    },
-    "doctor.validate": {
-      "operation_id": "doctor.validate",
-      "display_name": "Validate Config and Profile Setup",
+    "report.generate": {
+      "operation_id": "report.generate",
+      "display_name": "Generate Report",
       "class": "read",
       "profile_scope": "profile_optional",
       "request_schema": null,
       "response_schema": {
-        "rust_type": "crate::doctor::DoctorSnapshot",
-        "ts_type": "DoctorSnapshot",
+        "rust_type": "crate::report::ReportData",
+        "ts_type": "ReportData",
         "is_primitive": false
       },
       "streaming": "none",
@@ -34,47 +18,15 @@
       "secret_fields": [],
       "remote_disposition": "remote_available",
       "local_only_reason": null,
-      "documentation": "Validate configuration and profile setup",
-      "cli_command_path": "gah doctor",
+      "documentation": "Generate backend/model comparison report",
+      "cli_command_path": "gah report",
       "is_stable": true
     },
-    "update.cli": {
-      "operation_id": "update.cli",
-      "display_name": "Update GAH CLI",
+    "telemetry.export": {
+      "operation_id": "telemetry.export",
+      "display_name": "Export Telemetry",
       "class": "mutation",
-      "profile_scope": "global",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "local_only",
-      "local_only_reason": "local_backend_execution_required",
-      "documentation": "Update the installed CLI - requires local execution",
-      "cli_command_path": "gah update",
-      "is_stable": true
-    },
-    "ledger.summary": {
-      "operation_id": "ledger.summary",
-      "display_name": "Ledger Summary",
-      "class": "read",
       "profile_scope": "profile_optional",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Summarize recent ledger entries",
-      "cli_command_path": "gah ledger summary",
-      "is_stable": true
-    },
-    "setup.memory_hooks": {
-      "operation_id": "setup.memory_hooks",
-      "display_name": "Set Up Agent Memory Hooks",
-      "class": "mutation",
-      "profile_scope": "global",
       "request_schema": null,
       "response_schema": null,
       "streaming": "none",
@@ -82,152 +34,28 @@
       "secret_fields": [],
       "remote_disposition": "local_only",
       "local_only_reason": "filesystem_access_required",
-      "documentation": "Install shared memory hooks in selected local agent configurations",
-      "cli_command_path": "gah setup memory-hooks",
+      "documentation": "Export telemetry data to versioned repository - requires filesystem access",
+      "cli_command_path": "gah telemetry export",
       "is_stable": true
     },
-    "prune.sessions": {
-      "operation_id": "prune.sessions",
-      "display_name": "Prune Old Sessions",
-      "class": "mutation",
-      "profile_scope": "profile_optional",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "non_idempotent",
-      "secret_fields": [],
-      "remote_disposition": "local_only",
-      "local_only_reason": "filesystem_access_required",
-      "documentation": "Delete old GAH-owned sessions and worktrees - requires local filesystem access",
-      "cli_command_path": "gah prune",
-      "is_stable": true
-    },
-    "profile.show": {
-      "operation_id": "profile.show",
-      "display_name": "Show Profile",
-      "class": "read",
-      "profile_scope": "global",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "local_only",
-      "local_only_reason": "filesystem_access_required",
-      "documentation": "Show profile details from local configuration",
-      "cli_command_path": "gah profile show",
-      "is_stable": true
-    },
-    "tui.run": {
-      "operation_id": "tui.run",
-      "display_name": "Run TUI",
-      "class": "read",
-      "profile_scope": "profile_optional",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "local_only",
-      "local_only_reason": "interactive_terminal_required",
-      "documentation": "Interactive terminal UI - requires interactive terminal",
-      "cli_command_path": "gah tui",
-      "is_stable": true
-    },
-    "profile.remove": {
-      "operation_id": "profile.remove",
-      "display_name": "Remove Profile",
-      "class": "mutation",
-      "profile_scope": "global",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "non_idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Remove a profile",
-      "cli_command_path": "gah profile remove",
-      "is_stable": true
-    },
-    "route_approval.grant": {
-      "operation_id": "route_approval.grant",
-      "display_name": "Grant Route Approval",
-      "class": "mutation",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Allow one exact paid backend/model route for this work item",
-      "cli_command_path": "gah route-approval grant",
-      "is_stable": true
-    },
-    "sync.classify": {
-      "operation_id": "sync.classify",
-      "display_name": "Classify Merge Requests",
+    "pm.plans.show": {
+      "operation_id": "pm.plans.show",
+      "display_name": "Read PM plans (gah pm show)",
       "class": "read",
       "profile_scope": "profile_required",
       "request_schema": null,
-      "response_schema": null,
+      "response_schema": {
+        "rust_type": "PlanDetail",
+        "ts_type": "PmPlanDetail",
+        "is_primitive": false
+      },
       "streaming": "none",
       "idempotency": "idempotent",
       "secret_fields": [],
       "remote_disposition": "remote_available",
       "local_only_reason": null,
-      "documentation": "Classify open GAH-created merge requests / pull requests",
-      "cli_command_path": "gah sync",
-      "is_stable": true
-    },
-    "external_approval.grant": {
-      "operation_id": "external_approval.grant",
-      "display_name": "Grant External Approval",
-      "class": "mutation",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Grant the requested external approval scope",
-      "cli_command_path": "gah external-approval grant",
-      "is_stable": true
-    },
-    "external_approval.list": {
-      "operation_id": "external_approval.list",
-      "display_name": "List External Approvals",
-      "class": "read",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "List external approval scopes for a profile",
-      "cli_command_path": "gah external-approval list",
-      "is_stable": true
-    },
-    "external_approval.deny": {
-      "operation_id": "external_approval.deny",
-      "display_name": "Deny External Approval",
-      "class": "mutation",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Deny a pending external approval request",
-      "cli_command_path": "gah external-approval deny",
+      "documentation": "Read bounded artifacts within a configured profile; IDs never accept filesystem paths.",
+      "cli_command_path": "gah pm show",
       "is_stable": true
     },
     "external_approval.revoke": {
@@ -246,9 +74,25 @@
       "cli_command_path": "gah external-approval revoke",
       "is_stable": true
     },
-    "external_approval.inspect": {
-      "operation_id": "external_approval.inspect",
-      "display_name": "Inspect External Approval",
+    "quota.list": {
+      "operation_id": "quota.list",
+      "display_name": "List Quota Observations",
+      "class": "read",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "List persisted account-level quota observations",
+      "cli_command_path": "gah quota list",
+      "is_stable": true
+    },
+    "route_approval.list": {
+      "operation_id": "route_approval.list",
+      "display_name": "List Paid Route Approvals",
       "class": "read",
       "profile_scope": "profile_required",
       "request_schema": null,
@@ -258,8 +102,114 @@
       "secret_fields": [],
       "remote_disposition": "remote_available",
       "local_only_reason": null,
-      "documentation": "Inspect the current external approval state for one exact scope",
-      "cli_command_path": "gah external-approval inspect",
+      "documentation": "List work-item paid-route requests and active grants",
+      "cli_command_path": "gah route-approval list",
+      "is_stable": true
+    },
+    "config.routing_candidate.move": {
+      "operation_id": "config.routing_candidate.move",
+      "display_name": "Move Routing Candidate",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Reorder one candidate within a profile's ordered routing list",
+      "cli_command_path": "gah config routing-candidate move",
+      "is_stable": true
+    },
+    "quota.refresh": {
+      "operation_id": "quota.refresh",
+      "display_name": "Refresh Quota",
+      "class": "mutation",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [
+        {
+          "field_path": "backend_instance",
+          "is_secret": false,
+          "may_contain_secrets": true
+        }
+      ],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Refresh account-level quota and persist the observation",
+      "cli_command_path": "gah quota refresh",
+      "is_stable": true
+    },
+    "claims.list": {
+      "operation_id": "claims.list",
+      "display_name": "List Work Claims",
+      "class": "read",
+      "profile_scope": "profile_optional",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "List work claims",
+      "cli_command_path": "gah claims list",
+      "is_stable": true
+    },
+    "claims.clear": {
+      "operation_id": "claims.clear",
+      "display_name": "Clear Work Claim",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Clear a work claim",
+      "cli_command_path": "gah claims clear",
+      "is_stable": true
+    },
+    "config.show": {
+      "operation_id": "config.show",
+      "display_name": "Show Configuration",
+      "class": "read",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": {
+        "rust_type": "crate::config_show::ConfigShowFull",
+        "ts_type": "ConfigShowFull",
+        "is_primitive": false
+      },
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Show global defaults (e.g. current_manager)",
+      "cli_command_path": "gah config show",
+      "is_stable": true
+    },
+    "update.cli": {
+      "operation_id": "update.cli",
+      "display_name": "Update GAH CLI",
+      "class": "mutation",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "local_backend_execution_required",
+      "documentation": "Update the installed CLI - requires local execution",
+      "cli_command_path": "gah update",
       "is_stable": true
     },
     "route_approval.revoke": {
@@ -278,25 +228,45 @@
       "cli_command_path": "gah route-approval revoke",
       "is_stable": true
     },
-    "ledger.clear_attempts": {
-      "operation_id": "ledger.clear_attempts",
-      "display_name": "Clear Ledger Attempts",
-      "class": "mutation",
-      "profile_scope": "profile_required",
+    "availability.get": {
+      "operation_id": "availability.get",
+      "display_name": "Get Availability Status",
+      "class": "read",
+      "profile_scope": "global",
       "request_schema": null,
-      "response_schema": null,
+      "response_schema": {
+        "rust_type": "crate::availability::AvailabilityScope",
+        "ts_type": "AvailabilityScope[]",
+        "is_primitive": false
+      },
       "streaming": "none",
-      "idempotency": "non_idempotent",
+      "idempotency": "idempotent",
       "secret_fields": [],
       "remote_disposition": "remote_available",
       "local_only_reason": null,
-      "documentation": "Mark all prior attempts for a work_id as stale",
-      "cli_command_path": "gah ledger clear-attempts",
+      "documentation": "Get backend/model availability state",
+      "cli_command_path": "gah availability",
       "is_stable": true
     },
-    "external_approval.expire": {
-      "operation_id": "external_approval.expire",
-      "display_name": "Expire External Approval",
+    "setup.memory_hooks": {
+      "operation_id": "setup.memory_hooks",
+      "display_name": "Set Up Agent Memory Hooks",
+      "class": "mutation",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "filesystem_access_required",
+      "documentation": "Install shared memory hooks in selected local agent configurations",
+      "cli_command_path": "gah setup memory-hooks",
+      "is_stable": true
+    },
+    "hold.clear": {
+      "operation_id": "hold.clear",
+      "display_name": "Clear Review Hold",
       "class": "mutation",
       "profile_scope": "profile_required",
       "request_schema": null,
@@ -306,8 +276,170 @@
       "secret_fields": [],
       "remote_disposition": "remote_available",
       "local_only_reason": null,
-      "documentation": "Expire an external approval immediately",
-      "cli_command_path": "gah external-approval expire",
+      "documentation": "Release a previously set review hold on a work_id",
+      "cli_command_path": "gah hold clear",
+      "is_stable": true
+    },
+    "dispatch.run": {
+      "operation_id": "dispatch.run",
+      "display_name": "Dispatch Job",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "non_idempotent",
+      "secret_fields": [
+        {
+          "field_path": "model",
+          "is_secret": false,
+          "may_contain_secrets": true
+        },
+        {
+          "field_path": "oh_profile",
+          "is_secret": false,
+          "may_contain_secrets": false
+        }
+      ],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Dispatch a job to a backend (improve, pm, review, fix, experiment)",
+      "cli_command_path": "gah dispatch",
+      "is_stable": true
+    },
+    "external_approval.request": {
+      "operation_id": "external_approval.request",
+      "display_name": "Request External Approval",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [
+        {
+          "field_path": "credential_label",
+          "is_secret": false,
+          "may_contain_secrets": true
+        },
+        {
+          "field_path": "max_dollars",
+          "is_secret": false,
+          "may_contain_secrets": false
+        }
+      ],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Record a requested external operation approval for a specific profile/repo/work item and credential label",
+      "cli_command_path": "gah external-approval request",
+      "is_stable": true
+    },
+    "ledger.work": {
+      "operation_id": "ledger.work",
+      "display_name": "Ledger Work History",
+      "class": "read",
+      "profile_scope": "profile_optional",
+      "request_schema": null,
+      "response_schema": {
+        "rust_type": "crate::ledger::LedgerEntry",
+        "ts_type": "LedgerEntry[]",
+        "is_primitive": false
+      },
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Get full ledger history for one work item",
+      "cli_command_path": "gah ledger work",
+      "is_stable": true
+    },
+    "sync.classify": {
+      "operation_id": "sync.classify",
+      "display_name": "Classify Merge Requests",
+      "class": "read",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Classify open GAH-created merge requests / pull requests",
+      "cli_command_path": "gah sync",
+      "is_stable": true
+    },
+    "profile.list": {
+      "operation_id": "profile.list",
+      "display_name": "List Profiles",
+      "class": "read",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": {
+        "rust_type": "crate::config::ProfileSummary",
+        "ts_type": "ProfileSummary[]",
+        "is_primitive": false
+      },
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "List all profiles in config",
+      "cli_command_path": "gah profile list",
+      "is_stable": true
+    },
+    "ledger.repair_tail": {
+      "operation_id": "ledger.repair_tail",
+      "display_name": "Repair Ledger Tail",
+      "class": "mutation",
+      "profile_scope": "profile_optional",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Back up and remove one torn, unterminated final JSONL record",
+      "cli_command_path": "gah ledger repair-tail",
+      "is_stable": true
+    },
+    "quota.snapshot": {
+      "operation_id": "quota.snapshot",
+      "display_name": "Quota Snapshot",
+      "class": "read",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": {
+        "rust_type": "crate::quota_snapshot::QuotaSnapshot",
+        "ts_type": "QuotaSnapshot",
+        "is_primitive": false
+      },
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Build the canonical profile-scoped quota snapshot",
+      "cli_command_path": "gah quota snapshot",
+      "is_stable": true
+    },
+    "availability.clear": {
+      "operation_id": "availability.clear",
+      "display_name": "Clear Availability Status",
+      "class": "mutation",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "non_idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Manually override stale availability",
+      "cli_command_path": "gah availability clear",
       "is_stable": true
     },
     "loop.run": {
@@ -350,15 +482,15 @@
       "cli_command_path": "gah status",
       "is_stable": true
     },
-    "pm.plans.show": {
-      "operation_id": "pm.plans.show",
-      "display_name": "Read PM plans (gah pm show)",
+    "pm.plans.list": {
+      "operation_id": "pm.plans.list",
+      "display_name": "Read PM plans (gah pm plans)",
       "class": "read",
       "profile_scope": "profile_required",
       "request_schema": null,
       "response_schema": {
-        "rust_type": "PlanDetail",
-        "ts_type": "PmPlanDetail",
+        "rust_type": "PlanList",
+        "ts_type": "PmPlanList",
         "is_primitive": false
       },
       "streaming": "none",
@@ -367,18 +499,50 @@
       "remote_disposition": "remote_available",
       "local_only_reason": null,
       "documentation": "Read bounded artifacts within a configured profile; IDs never accept filesystem paths.",
-      "cli_command_path": "gah pm show",
+      "cli_command_path": "gah pm plans",
       "is_stable": true
     },
-    "config.show": {
-      "operation_id": "config.show",
-      "display_name": "Show Configuration",
+    "config.routing_candidate.remove": {
+      "operation_id": "config.routing_candidate.remove",
+      "display_name": "Remove Routing Candidate",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Remove one candidate from a profile's ordered routing list",
+      "cli_command_path": "gah config routing-candidate remove",
+      "is_stable": true
+    },
+    "ledger.summary": {
+      "operation_id": "ledger.summary",
+      "display_name": "Ledger Summary",
       "class": "read",
-      "profile_scope": "global",
+      "profile_scope": "profile_optional",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Summarize recent ledger entries",
+      "cli_command_path": "gah ledger summary",
+      "is_stable": true
+    },
+    "doctor.validate": {
+      "operation_id": "doctor.validate",
+      "display_name": "Validate Config and Profile Setup",
+      "class": "read",
+      "profile_scope": "profile_optional",
       "request_schema": null,
       "response_schema": {
-        "rust_type": "crate::config_show::ConfigShowFull",
-        "ts_type": "ConfigShowFull",
+        "rust_type": "crate::doctor::DoctorSnapshot",
+        "ts_type": "DoctorSnapshot",
         "is_primitive": false
       },
       "streaming": "none",
@@ -386,8 +550,56 @@
       "secret_fields": [],
       "remote_disposition": "remote_available",
       "local_only_reason": null,
-      "documentation": "Show global defaults (e.g. current_manager)",
-      "cli_command_path": "gah config show",
+      "documentation": "Validate configuration and profile setup",
+      "cli_command_path": "gah doctor",
+      "is_stable": true
+    },
+    "prune.sessions": {
+      "operation_id": "prune.sessions",
+      "display_name": "Prune Old Sessions",
+      "class": "mutation",
+      "profile_scope": "profile_optional",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "non_idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "filesystem_access_required",
+      "documentation": "Delete old GAH-owned sessions and worktrees - requires local filesystem access",
+      "cli_command_path": "gah prune",
+      "is_stable": true
+    },
+    "price_guard.check": {
+      "operation_id": "price_guard.check",
+      "display_name": "Check Model Price",
+      "class": "read",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "filesystem_access_required",
+      "documentation": "Check a model against a local price watchlist",
+      "cli_command_path": "gah price-guard",
+      "is_stable": true
+    },
+    "external_approval.inspect": {
+      "operation_id": "external_approval.inspect",
+      "display_name": "Inspect External Approval",
+      "class": "read",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Inspect the current external approval state for one exact scope",
+      "cli_command_path": "gah external-approval inspect",
       "is_stable": true
     },
     "profile.add": {
@@ -417,84 +629,10 @@
       "cli_command_path": "gah profile add",
       "is_stable": true
     },
-    "server.start": {
-      "operation_id": "server.start",
-      "display_name": "Start WebSocket Server",
-      "class": "mutation",
-      "profile_scope": "global",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "web_socket",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "local_only",
-      "local_only_reason": "local_backend_execution_required",
-      "documentation": "Start the WebSocket server for desktop/web interface - requires local execution",
-      "cli_command_path": "gah server",
-      "is_stable": true
-    },
-    "quota.refresh": {
-      "operation_id": "quota.refresh",
-      "display_name": "Refresh Quota",
-      "class": "mutation",
-      "profile_scope": "global",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [
-        {
-          "field_path": "backend_instance",
-          "is_secret": false,
-          "may_contain_secrets": true
-        }
-      ],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Refresh account-level quota and persist the observation",
-      "cli_command_path": "gah quota refresh",
-      "is_stable": true
-    },
-    "claims.clear": {
-      "operation_id": "claims.clear",
-      "display_name": "Clear Work Claim",
-      "class": "mutation",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Clear a work claim",
-      "cli_command_path": "gah claims clear",
-      "is_stable": true
-    },
-    "ledger.work": {
-      "operation_id": "ledger.work",
-      "display_name": "Ledger Work History",
+    "profile.show": {
+      "operation_id": "profile.show",
+      "display_name": "Show Profile",
       "class": "read",
-      "profile_scope": "profile_optional",
-      "request_schema": null,
-      "response_schema": {
-        "rust_type": "crate::ledger::LedgerEntry",
-        "ts_type": "LedgerEntry[]",
-        "is_primitive": false
-      },
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Get full ledger history for one work item",
-      "cli_command_path": "gah ledger work",
-      "is_stable": true
-    },
-    "candidates.convert": {
-      "operation_id": "candidates.convert",
-      "display_name": "Convert Gate Findings to Candidates",
-      "class": "mutation",
       "profile_scope": "global",
       "request_schema": null,
       "response_schema": null,
@@ -503,95 +641,15 @@
       "secret_fields": [],
       "remote_disposition": "local_only",
       "local_only_reason": "filesystem_access_required",
-      "documentation": "Converts gate findings into backlog candidates - requires local filesystem",
-      "cli_command_path": "gah candidates",
+      "documentation": "Show profile details from local configuration",
+      "cli_command_path": "gah profile show",
       "is_stable": true
     },
-    "telemetry.aggregate": {
-      "operation_id": "telemetry.aggregate",
-      "display_name": "Aggregate Telemetry",
-      "class": "read",
-      "profile_scope": "profile_optional",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Generate aggregated telemetry reports by routing dimensions",
-      "cli_command_path": "gah telemetry aggregate",
-      "is_stable": true
-    },
-    "hold.set": {
-      "operation_id": "hold.set",
-      "display_name": "Set Review Hold",
-      "class": "mutation",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Mark a work_id as under active out-of-band manager review",
-      "cli_command_path": "gah hold set",
-      "is_stable": true
-    },
-    "config.set": {
-      "operation_id": "config.set",
-      "display_name": "Set Configuration",
+    "profile.remove": {
+      "operation_id": "profile.remove",
+      "display_name": "Remove Profile",
       "class": "mutation",
       "profile_scope": "global",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Set one or more global default values",
-      "cli_command_path": "gah config set",
-      "is_stable": true
-    },
-    "profile.set": {
-      "operation_id": "profile.set",
-      "display_name": "Set Profile",
-      "class": "mutation",
-      "profile_scope": "global",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Set/Update fields of an existing profile",
-      "cli_command_path": "gah profile set",
-      "is_stable": true
-    },
-    "backend_instance.set_enabled": {
-      "operation_id": "backend_instance.set_enabled",
-      "display_name": "Set Backend Instance Enabled",
-      "class": "mutation",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Enable or disable one declared backend instance for a profile (#822)",
-      "cli_command_path": "gah config set-backend-instance-enabled",
-      "is_stable": true
-    },
-    "pm.publish": {
-      "operation_id": "pm.publish",
-      "display_name": "Publish PM Plan",
-      "class": "mutation",
-      "profile_scope": "profile_required",
       "request_schema": null,
       "response_schema": null,
       "streaming": "none",
@@ -599,112 +657,8 @@
       "secret_fields": [],
       "remote_disposition": "remote_available",
       "local_only_reason": null,
-      "documentation": "Publish native provider issues. Remote callers must use a profile-scoped plan ID and reviewed fingerprint; --plan paths remain local-only.",
-      "cli_command_path": "gah pm publish",
-      "is_stable": true
-    },
-    "telemetry.export": {
-      "operation_id": "telemetry.export",
-      "display_name": "Export Telemetry",
-      "class": "mutation",
-      "profile_scope": "profile_optional",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "local_only",
-      "local_only_reason": "filesystem_access_required",
-      "documentation": "Export telemetry data to versioned repository - requires filesystem access",
-      "cli_command_path": "gah telemetry export",
-      "is_stable": true
-    },
-    "quota.list": {
-      "operation_id": "quota.list",
-      "display_name": "List Quota Observations",
-      "class": "read",
-      "profile_scope": "global",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "List persisted account-level quota observations",
-      "cli_command_path": "gah quota list",
-      "is_stable": true
-    },
-    "claims.list": {
-      "operation_id": "claims.list",
-      "display_name": "List Work Claims",
-      "class": "read",
-      "profile_scope": "profile_optional",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "List work claims",
-      "cli_command_path": "gah claims list",
-      "is_stable": true
-    },
-    "ledger.repair_tail": {
-      "operation_id": "ledger.repair_tail",
-      "display_name": "Repair Ledger Tail",
-      "class": "mutation",
-      "profile_scope": "profile_optional",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Back up and remove one torn, unterminated final JSONL record",
-      "cli_command_path": "gah ledger repair-tail",
-      "is_stable": true
-    },
-    "report.generate": {
-      "operation_id": "report.generate",
-      "display_name": "Generate Report",
-      "class": "read",
-      "profile_scope": "profile_optional",
-      "request_schema": null,
-      "response_schema": {
-        "rust_type": "crate::report::ReportData",
-        "ts_type": "ReportData",
-        "is_primitive": false
-      },
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Generate backend/model comparison report",
-      "cli_command_path": "gah report",
-      "is_stable": true
-    },
-    "quota.snapshot": {
-      "operation_id": "quota.snapshot",
-      "display_name": "Quota Snapshot",
-      "class": "read",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": {
-        "rust_type": "crate::quota_snapshot::QuotaSnapshot",
-        "ts_type": "QuotaSnapshot",
-        "is_primitive": false
-      },
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Build the canonical profile-scoped quota snapshot",
-      "cli_command_path": "gah quota snapshot",
+      "documentation": "Remove a profile",
+      "cli_command_path": "gah profile remove",
       "is_stable": true
     },
     "init.create": {
@@ -734,252 +688,6 @@
       "cli_command_path": "gah init",
       "is_stable": true
     },
-    "policy.check": {
-      "operation_id": "policy.check",
-      "display_name": "Check Repo Policy",
-      "class": "read",
-      "profile_scope": "global",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "local_only",
-      "local_only_reason": "filesystem_access_required",
-      "documentation": "Check repository policy from a local configuration file",
-      "cli_command_path": "gah policy-check",
-      "is_stable": true
-    },
-    "price_guard.check": {
-      "operation_id": "price_guard.check",
-      "display_name": "Check Model Price",
-      "class": "read",
-      "profile_scope": "global",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "local_only",
-      "local_only_reason": "filesystem_access_required",
-      "documentation": "Check a model against a local price watchlist",
-      "cli_command_path": "gah price-guard",
-      "is_stable": true
-    },
-    "hold.clear": {
-      "operation_id": "hold.clear",
-      "display_name": "Clear Review Hold",
-      "class": "mutation",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Release a previously set review hold on a work_id",
-      "cli_command_path": "gah hold clear",
-      "is_stable": true
-    },
-    "events.list": {
-      "operation_id": "events.list",
-      "display_name": "List Controller Events",
-      "class": "read",
-      "profile_scope": "profile_optional",
-      "request_schema": null,
-      "response_schema": {
-        "rust_type": "crate::events::ControllerEvent",
-        "ts_type": "ControllerEvent[]",
-        "is_primitive": false
-      },
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Inspect the controller event stream",
-      "cli_command_path": "gah events",
-      "is_stable": true
-    },
-    "pm.plans.list": {
-      "operation_id": "pm.plans.list",
-      "display_name": "Read PM plans (gah pm plans)",
-      "class": "read",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": {
-        "rust_type": "PlanList",
-        "ts_type": "PmPlanList",
-        "is_primitive": false
-      },
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Read bounded artifacts within a configured profile; IDs never accept filesystem paths.",
-      "cli_command_path": "gah pm plans",
-      "is_stable": true
-    },
-    "profile.list": {
-      "operation_id": "profile.list",
-      "display_name": "List Profiles",
-      "class": "read",
-      "profile_scope": "global",
-      "request_schema": null,
-      "response_schema": {
-        "rust_type": "crate::config::ProfileSummary",
-        "ts_type": "ProfileSummary[]",
-        "is_primitive": false
-      },
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "List all profiles in config",
-      "cli_command_path": "gah profile list",
-      "is_stable": true
-    },
-    "external_approval.request": {
-      "operation_id": "external_approval.request",
-      "display_name": "Request External Approval",
-      "class": "mutation",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [
-        {
-          "field_path": "credential_label",
-          "is_secret": false,
-          "may_contain_secrets": true
-        },
-        {
-          "field_path": "max_dollars",
-          "is_secret": false,
-          "may_contain_secrets": false
-        }
-      ],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Record a requested external operation approval for a specific profile/repo/work item and credential label",
-      "cli_command_path": "gah external-approval request",
-      "is_stable": true
-    },
-    "dispatch.run": {
-      "operation_id": "dispatch.run",
-      "display_name": "Dispatch Job",
-      "class": "mutation",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "non_idempotent",
-      "secret_fields": [
-        {
-          "field_path": "model",
-          "is_secret": false,
-          "may_contain_secrets": true
-        },
-        {
-          "field_path": "oh_profile",
-          "is_secret": false,
-          "may_contain_secrets": false
-        }
-      ],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Dispatch a job to a backend (improve, pm, review, fix, experiment)",
-      "cli_command_path": "gah dispatch",
-      "is_stable": true
-    },
-    "telemetry.status": {
-      "operation_id": "telemetry.status",
-      "display_name": "Telemetry Repository Status",
-      "class": "read",
-      "profile_scope": "profile_optional",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "local_only",
-      "local_only_reason": "filesystem_access_required",
-      "documentation": "Show local telemetry repository status",
-      "cli_command_path": "gah telemetry status",
-      "is_stable": true
-    },
-    "ledger.reconcile": {
-      "operation_id": "ledger.reconcile",
-      "display_name": "Reconcile Ledger",
-      "class": "mutation",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Backfill dispatched work with later provider outcomes",
-      "cli_command_path": "gah ledger reconcile",
-      "is_stable": true
-    },
-    "availability.get": {
-      "operation_id": "availability.get",
-      "display_name": "Get Availability Status",
-      "class": "read",
-      "profile_scope": "global",
-      "request_schema": null,
-      "response_schema": {
-        "rust_type": "crate::availability::AvailabilityScope",
-        "ts_type": "AvailabilityScope[]",
-        "is_primitive": false
-      },
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Get backend/model availability state",
-      "cli_command_path": "gah availability",
-      "is_stable": true
-    },
-    "config.routing_candidate.add": {
-      "operation_id": "config.routing_candidate.add",
-      "display_name": "Add Routing Candidate",
-      "class": "mutation",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Append a candidate to a profile's ordered routing list",
-      "cli_command_path": "gah config routing-candidate add",
-      "is_stable": true
-    },
-    "claims.reclaim": {
-      "operation_id": "claims.reclaim",
-      "display_name": "Reclaim Stale Claims",
-      "class": "mutation",
-      "profile_scope": "profile_required",
-      "request_schema": null,
-      "response_schema": null,
-      "streaming": "none",
-      "idempotency": "non_idempotent",
-      "secret_fields": [],
-      "remote_disposition": "remote_available",
-      "local_only_reason": null,
-      "documentation": "Reclaim stale work claims",
-      "cli_command_path": "gah claims reclaim",
-      "is_stable": true
-    },
     "node.register": {
       "operation_id": "node.register",
       "display_name": "Register Worker Node",
@@ -1002,9 +710,253 @@
       "cli_command_path": "gah node register",
       "is_stable": true
     },
-    "route_approval.list": {
-      "operation_id": "route_approval.list",
-      "display_name": "List Paid Route Approvals",
+    "backend_instance.set_enabled": {
+      "operation_id": "backend_instance.set_enabled",
+      "display_name": "Set Backend Instance Enabled",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Enable or disable one declared backend instance for a profile (#822)",
+      "cli_command_path": "gah config set-backend-instance-enabled",
+      "is_stable": true
+    },
+    "telemetry.status": {
+      "operation_id": "telemetry.status",
+      "display_name": "Telemetry Repository Status",
+      "class": "read",
+      "profile_scope": "profile_optional",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "filesystem_access_required",
+      "documentation": "Show local telemetry repository status",
+      "cli_command_path": "gah telemetry status",
+      "is_stable": true
+    },
+    "candidates.convert": {
+      "operation_id": "candidates.convert",
+      "display_name": "Convert Gate Findings to Candidates",
+      "class": "mutation",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "filesystem_access_required",
+      "documentation": "Converts gate findings into backlog candidates - requires local filesystem",
+      "cli_command_path": "gah candidates",
+      "is_stable": true
+    },
+    "profile.set": {
+      "operation_id": "profile.set",
+      "display_name": "Set Profile",
+      "class": "mutation",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Set/Update fields of an existing profile",
+      "cli_command_path": "gah profile set",
+      "is_stable": true
+    },
+    "hold.set": {
+      "operation_id": "hold.set",
+      "display_name": "Set Review Hold",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Mark a work_id as under active out-of-band manager review",
+      "cli_command_path": "gah hold set",
+      "is_stable": true
+    },
+    "external_approval.deny": {
+      "operation_id": "external_approval.deny",
+      "display_name": "Deny External Approval",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Deny a pending external approval request",
+      "cli_command_path": "gah external-approval deny",
+      "is_stable": true
+    },
+    "telemetry.aggregate": {
+      "operation_id": "telemetry.aggregate",
+      "display_name": "Aggregate Telemetry",
+      "class": "read",
+      "profile_scope": "profile_optional",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Generate aggregated telemetry reports by routing dimensions",
+      "cli_command_path": "gah telemetry aggregate",
+      "is_stable": true
+    },
+    "policy.check": {
+      "operation_id": "policy.check",
+      "display_name": "Check Repo Policy",
+      "class": "read",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "filesystem_access_required",
+      "documentation": "Check repository policy from a local configuration file",
+      "cli_command_path": "gah policy-check",
+      "is_stable": true
+    },
+    "server.start": {
+      "operation_id": "server.start",
+      "display_name": "Start WebSocket Server",
+      "class": "mutation",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "web_socket",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "local_backend_execution_required",
+      "documentation": "Start the WebSocket server for desktop/web interface - requires local execution",
+      "cli_command_path": "gah server",
+      "is_stable": true
+    },
+    "ledger.clear_attempts": {
+      "operation_id": "ledger.clear_attempts",
+      "display_name": "Clear Ledger Attempts",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "non_idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Mark all prior attempts for a work_id as stale",
+      "cli_command_path": "gah ledger clear-attempts",
+      "is_stable": true
+    },
+    "external_approval.grant": {
+      "operation_id": "external_approval.grant",
+      "display_name": "Grant External Approval",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Grant the requested external approval scope",
+      "cli_command_path": "gah external-approval grant",
+      "is_stable": true
+    },
+    "events.list": {
+      "operation_id": "events.list",
+      "display_name": "List Controller Events",
+      "class": "read",
+      "profile_scope": "profile_optional",
+      "request_schema": null,
+      "response_schema": {
+        "rust_type": "crate::events::ControllerEvent",
+        "ts_type": "ControllerEvent[]",
+        "is_primitive": false
+      },
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Inspect the controller event stream",
+      "cli_command_path": "gah events",
+      "is_stable": true
+    },
+    "claims.reclaim": {
+      "operation_id": "claims.reclaim",
+      "display_name": "Reclaim Stale Claims",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "non_idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Reclaim stale work claims",
+      "cli_command_path": "gah claims reclaim",
+      "is_stable": true
+    },
+    "external_approval.expire": {
+      "operation_id": "external_approval.expire",
+      "display_name": "Expire External Approval",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Expire an external approval immediately",
+      "cli_command_path": "gah external-approval expire",
+      "is_stable": true
+    },
+    "route_approval.grant": {
+      "operation_id": "route_approval.grant",
+      "display_name": "Grant Route Approval",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Allow one exact paid backend/model route for this work item",
+      "cli_command_path": "gah route-approval grant",
+      "is_stable": true
+    },
+    "external_approval.list": {
+      "operation_id": "external_approval.list",
+      "display_name": "List External Approvals",
       "class": "read",
       "profile_scope": "profile_required",
       "request_schema": null,
@@ -1014,13 +966,13 @@
       "secret_fields": [],
       "remote_disposition": "remote_available",
       "local_only_reason": null,
-      "documentation": "List work-item paid-route requests and active grants",
-      "cli_command_path": "gah route-approval list",
+      "documentation": "List external approval scopes for a profile",
+      "cli_command_path": "gah external-approval list",
       "is_stable": true
     },
-    "config.routing_candidate.remove": {
-      "operation_id": "config.routing_candidate.remove",
-      "display_name": "Remove Routing Candidate",
+    "ledger.reconcile": {
+      "operation_id": "ledger.reconcile",
+      "display_name": "Reconcile Ledger",
       "class": "mutation",
       "profile_scope": "profile_required",
       "request_schema": null,
@@ -1030,13 +982,61 @@
       "secret_fields": [],
       "remote_disposition": "remote_available",
       "local_only_reason": null,
-      "documentation": "Remove one candidate from a profile's ordered routing list",
-      "cli_command_path": "gah config routing-candidate remove",
+      "documentation": "Backfill dispatched work with later provider outcomes",
+      "cli_command_path": "gah ledger reconcile",
       "is_stable": true
     },
-    "config.routing_candidate.move": {
-      "operation_id": "config.routing_candidate.move",
-      "display_name": "Move Routing Candidate",
+    "tui.run": {
+      "operation_id": "tui.run",
+      "display_name": "Run TUI",
+      "class": "read",
+      "profile_scope": "profile_optional",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "interactive_terminal_required",
+      "documentation": "Interactive terminal UI - requires interactive terminal",
+      "cli_command_path": "gah tui",
+      "is_stable": true
+    },
+    "config.set": {
+      "operation_id": "config.set",
+      "display_name": "Set Configuration",
+      "class": "mutation",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Set one or more global default values",
+      "cli_command_path": "gah config set",
+      "is_stable": true
+    },
+    "pm.publish": {
+      "operation_id": "pm.publish",
+      "display_name": "Publish PM Plan",
+      "class": "mutation",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "non_idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Publish native provider issues. Remote callers must use a profile-scoped plan ID and reviewed fingerprint; --plan paths remain local-only.",
+      "cli_command_path": "gah pm publish",
+      "is_stable": true
+    },
+    "config.routing_candidate.add": {
+      "operation_id": "config.routing_candidate.add",
+      "display_name": "Add Routing Candidate",
       "class": "mutation",
       "profile_scope": "profile_required",
       "request_schema": null,
@@ -1046,71 +1046,71 @@
       "secret_fields": [],
       "remote_disposition": "remote_available",
       "local_only_reason": null,
-      "documentation": "Reorder one candidate within a profile's ordered routing list",
-      "cli_command_path": "gah config routing-candidate move",
+      "documentation": "Append a candidate to a profile's ordered routing list",
+      "cli_command_path": "gah config routing-candidate add",
       "is_stable": true
     }
   },
   "command_path_to_operation_id": {
-    "gah claims list": "claims.list",
-    "gah node register": "node.register",
-    "gah ledger work": "ledger.work",
-    "gah ledger clear-attempts": "ledger.clear_attempts",
-    "gah config routing-candidate remove": "config.routing_candidate.remove",
-    "gah config routing-candidate move": "config.routing_candidate.move",
-    "gah config show": "config.show",
-    "gah setup memory-hooks": "setup.memory_hooks",
-    "gah route-approval revoke": "route_approval.revoke",
-    "gah availability clear": "availability.clear",
-    "gah pm publish": "pm.publish",
-    "gah config set": "config.set",
-    "gah external-approval request": "external_approval.request",
-    "gah external-approval list": "external_approval.list",
-    "gah external-approval deny": "external_approval.deny",
-    "gah pm plans": "pm.plans.list",
     "gah events": "events.list",
-    "gah hold clear": "hold.clear",
+    "gah report": "report.generate",
     "gah ledger summary": "ledger.summary",
-    "gah quota list": "quota.list",
-    "gah telemetry status": "telemetry.status",
+    "gah telemetry aggregate": "telemetry.aggregate",
+    "gah hold set": "hold.set",
+    "gah external-approval inspect": "external_approval.inspect",
     "gah price-guard": "price_guard.check",
     "gah prune": "prune.sessions",
-    "gah dispatch": "dispatch.run",
-    "gah availability": "availability.get",
-    "gah profile set": "profile.set",
-    "gah external-approval expire": "external_approval.expire",
-    "gah policy-check": "policy.check",
-    "gah claims clear": "claims.clear",
-    "gah doctor": "doctor.validate",
-    "gah claims reclaim": "claims.reclaim",
-    "gah external-approval inspect": "external_approval.inspect",
-    "gah update": "update.cli",
-    "gah candidates": "candidates.convert",
-    "gah route-approval list": "route_approval.list",
-    "gah hold set": "hold.set",
-    "gah config routing-candidate add": "config.routing_candidate.add",
-    "gah loop": "loop.run",
-    "gah status": "status.get",
     "gah external-approval grant": "external_approval.grant",
-    "gah pm show": "pm.plans.show",
-    "gah config set-backend-instance-enabled": "backend_instance.set_enabled",
-    "gah profile show": "profile.show",
-    "gah ledger reconcile": "ledger.reconcile",
-    "gah profile add": "profile.add",
-    "gah profile remove": "profile.remove",
     "gah sync": "sync.classify",
-    "gah profile list": "profile.list",
-    "gah external-approval revoke": "external_approval.revoke",
-    "gah telemetry aggregate": "telemetry.aggregate",
-    "gah route-approval grant": "route_approval.grant",
-    "gah server": "server.start",
-    "gah quota refresh": "quota.refresh",
-    "gah ledger repair-tail": "ledger.repair_tail",
-    "gah tui": "tui.run",
-    "gah report": "report.generate",
+    "gah pm plans": "pm.plans.list",
+    "gah external-approval expire": "external_approval.expire",
+    "gah setup memory-hooks": "setup.memory_hooks",
+    "gah candidates": "candidates.convert",
     "gah init": "init.create",
-    "gah telemetry export": "telemetry.export",
-    "gah quota snapshot": "quota.snapshot"
+    "gah profile add": "profile.add",
+    "gah telemetry status": "telemetry.status",
+    "gah route-approval revoke": "route_approval.revoke",
+    "gah claims clear": "claims.clear",
+    "gah profile remove": "profile.remove",
+    "gah external-approval request": "external_approval.request",
+    "gah node register": "node.register",
+    "gah doctor": "doctor.validate",
+    "gah claims list": "claims.list",
+    "gah ledger clear-attempts": "ledger.clear_attempts",
+    "gah config routing-candidate remove": "config.routing_candidate.remove",
+    "gah route-approval grant": "route_approval.grant",
+    "gah config routing-candidate add": "config.routing_candidate.add",
+    "gah route-approval list": "route_approval.list",
+    "gah quota snapshot": "quota.snapshot",
+    "gah availability clear": "availability.clear",
+    "gah claims reclaim": "claims.reclaim",
+    "gah hold clear": "hold.clear",
+    "gah profile set": "profile.set",
+    "gah quota refresh": "quota.refresh",
+    "gah ledger work": "ledger.work",
+    "gah dispatch": "dispatch.run",
+    "gah pm publish": "pm.publish",
+    "gah config set-backend-instance-enabled": "backend_instance.set_enabled",
+    "gah update": "update.cli",
+    "gah external-approval revoke": "external_approval.revoke",
+    "gah config set": "config.set",
+    "gah external-approval deny": "external_approval.deny",
+    "gah external-approval list": "external_approval.list",
+    "gah profile show": "profile.show",
+    "gah server": "server.start",
+    "gah ledger repair-tail": "ledger.repair_tail",
+    "gah config routing-candidate move": "config.routing_candidate.move",
+    "gah tui": "tui.run",
+    "gah loop": "loop.run",
+    "gah pm show": "pm.plans.show",
+    "gah policy-check": "policy.check",
+    "gah status": "status.get",
+    "gah ledger reconcile": "ledger.reconcile",
+    "gah availability": "availability.get",
+    "gah config show": "config.show",
+    "gah quota list": "quota.list",
+    "gah profile list": "profile.list",
+    "gah telemetry export": "telemetry.export"
   },
   "remote_operations": [
     "availability.get",
@@ -1130,8 +1130,8 @@
     "config.routing_candidate.add",
     "config.routing_candidate.remove",
     "config.routing_candidate.move",
-    "external_approval.request",
     "external_approval.list",
+    "external_approval.request",
     "external_approval.inspect",
     "external_approval.grant",
     "external_approval.deny",
@@ -1160,81 +1160,22 @@
     "claims.reclaim"
   ],
   "local_only_operations": {
-    "price_guard.check": "filesystem_access_required",
-    "policy.check": "filesystem_access_required",
-    "profile.show": "filesystem_access_required",
-    "telemetry.status": "filesystem_access_required",
-    "candidates.convert": "filesystem_access_required",
     "telemetry.export": "filesystem_access_required",
-    "update.cli": "local_backend_execution_required",
-    "tui.run": "interactive_terminal_required",
-    "init.create": "filesystem_access_required",
-    "prune.sessions": "filesystem_access_required",
     "loop.run": "local_backend_execution_required",
     "server.start": "local_backend_execution_required",
+    "tui.run": "interactive_terminal_required",
+    "candidates.convert": "filesystem_access_required",
+    "profile.show": "filesystem_access_required",
+    "policy.check": "filesystem_access_required",
+    "price_guard.check": "filesystem_access_required",
+    "prune.sessions": "filesystem_access_required",
+    "telemetry.status": "filesystem_access_required",
+    "update.cli": "local_backend_execution_required",
     "node.register": "security_sensitive",
+    "init.create": "filesystem_access_required",
     "setup.memory_hooks": "filesystem_access_required"
   },
   "request_schemas": {
-    "ledger.summary": {
-      "properties": {
-        "groupBy": {
-          "description": "Aggregation grouping: \"backend\" or \"model\".",
-          "type": "string"
-        },
-        "profile": {
-          "description": "GAH profile name; defaults to the configured default profile.",
-          "type": "string"
-        },
-        "since": {
-          "description": "Usage window, e.g. \"7d\".",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "quota.snapshot": {
-      "properties": {
-        "profile": {
-          "description": "GAH profile name; defaults to the configured default profile.",
-          "type": "string"
-        },
-        "since": {
-          "description": "Usage window, e.g. \"7d\".",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "doctor.validate": {
-      "properties": {
-        "profile": {
-          "description": "GAH profile name; defaults to the configured default profile.",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "hold.set": {
-      "properties": {
-        "profile": {
-          "description": "GAH profile name; defaults to the configured default profile.",
-          "type": "string"
-        },
-        "reason": {
-          "description": "Why the hold was placed; recorded in the ledger.",
-          "type": "string"
-        },
-        "work_id": {
-          "description": "Work item to hold.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "work_id"
-      ],
-      "type": "object"
-    },
     "route_approval.grant": {
       "properties": {
         "backend": {
@@ -1265,13 +1206,113 @@
       ],
       "type": "object"
     },
-    "status.get": {
+    "config.routing_candidate.remove": {
       "properties": {
+        "index": {
+          "description": "Zero-based candidate index.",
+          "type": "number"
+        },
+        "list": {
+          "description": "Routing list to edit.",
+          "type": "string"
+        },
         "profile": {
           "description": "GAH profile name; defaults to the configured default profile.",
           "type": "string"
         }
       },
+      "required": [
+        "profile",
+        "list",
+        "index"
+      ],
+      "type": "object"
+    },
+    "claims.list": {
+      "properties": {
+        "profile": {
+          "description": "Restrict to one profile's claims.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "hold.set": {
+      "properties": {
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why the hold was placed; recorded in the ledger.",
+          "type": "string"
+        },
+        "work_id": {
+          "description": "Work item to hold.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "work_id"
+      ],
+      "type": "object"
+    },
+    "ledger.summary": {
+      "properties": {
+        "groupBy": {
+          "description": "Aggregation grouping: \"backend\" or \"model\".",
+          "type": "string"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        },
+        "since": {
+          "description": "Usage window, e.g. \"7d\".",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "quota.refresh": {
+      "properties": {
+        "backend": {
+          "description": "Backend to refresh (default codex).",
+          "type": "string"
+        },
+        "backend_instance": {
+          "description": "Backend-instance qualifier.",
+          "type": "string"
+        },
+        "model": {
+          "description": "Model qualifier.",
+          "type": "string"
+        },
+        "quota_pool": {
+          "description": "Shared capacity or billing pool.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "profile.remove": {
+      "properties": {
+        "force": {
+          "description": "Remove without an interactive confirmation.",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "Profile name to remove.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "availability.get": {
+      "properties": {},
       "type": "object"
     },
     "report.generate": {
@@ -1289,6 +1330,695 @@
           "type": "string"
         }
       },
+      "type": "object"
+    },
+    "profile.set": {
+      "properties": {
+        "agy_path": {
+          "description": "Agy executable path on the node.",
+          "type": "string"
+        },
+        "agy_second_home": {
+          "description": "HOME override for agy-second.",
+          "type": "string"
+        },
+        "artifact_root": {
+          "description": "Artifact root on the control-plane node.",
+          "type": "string"
+        },
+        "auto_fix_commands": {
+          "description": "Automatic fix commands.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "claude_args": {
+          "description": "Claude CLI arguments.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "claude_path": {
+          "description": "Claude executable path on the node.",
+          "type": "string"
+        },
+        "clear": {
+          "description": "Profile fields to clear.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "codex_args": {
+          "description": "Codex CLI arguments.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "codex_path": {
+          "description": "Codex executable path on the node.",
+          "type": "string"
+        },
+        "default_target_branch": {
+          "description": "Default merge target branch.",
+          "type": "string"
+        },
+        "display_name": {
+          "description": "Human-readable profile name.",
+          "type": "string"
+        },
+        "env_file": {
+          "description": "Development environment file on the node.",
+          "type": "string"
+        },
+        "env_file_prod": {
+          "description": "Production environment file on the node.",
+          "type": "string"
+        },
+        "local_path": {
+          "description": "Repository path on the control-plane node.",
+          "type": "string"
+        },
+        "manager_wake_autonomy": {
+          "description": "Manager wake autonomy level.",
+          "type": "string"
+        },
+        "max_parallel_workers": {
+          "description": "Maximum concurrent workers.",
+          "type": "number"
+        },
+        "name": {
+          "description": "Profile name.",
+          "type": "string"
+        },
+        "notify_command": {
+          "description": "Profile notification command.",
+          "type": "string"
+        },
+        "opencode_args": {
+          "description": "OpenCode CLI arguments.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "opencode_path": {
+          "description": "OpenCode executable path on the node.",
+          "type": "string"
+        },
+        "openhands_args": {
+          "description": "OpenHands CLI arguments.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "policy_path": {
+          "description": "Profile policy path on the node.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "Repository provider.",
+          "type": "string"
+        },
+        "provider_api_base": {
+          "description": "Provider API base URL.",
+          "type": "string"
+        },
+        "provider_project_id": {
+          "description": "Provider project identifier.",
+          "type": "string"
+        },
+        "repo": {
+          "description": "Provider repository path.",
+          "type": "string"
+        },
+        "repo_id": {
+          "description": "Stable repository identifier.",
+          "type": "string"
+        },
+        "validation_commands": {
+          "description": "Validation commands.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "validation_timeout_seconds": {
+          "description": "Per-command validation timeout.",
+          "type": "number"
+        },
+        "vibe_args": {
+          "description": "Vibe CLI arguments.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "vibe_path": {
+          "description": "Vibe executable path on the node.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "external_approval.request": {
+      "properties": {
+        "credential_label": {
+          "description": "Credential scope label.",
+          "type": "string"
+        },
+        "expires_at": {
+          "description": "Approval expiry as RFC3339.",
+          "type": "string"
+        },
+        "max_dollars": {
+          "description": "Maximum approved spend in dollars.",
+          "type": "number"
+        },
+        "max_requests": {
+          "description": "Maximum approved request count.",
+          "type": "number"
+        },
+        "operation_kind": {
+          "description": "External operation kind.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        },
+        "purpose": {
+          "description": "Reason the external operation is needed.",
+          "type": "string"
+        },
+        "work_id": {
+          "description": "Exact work item the approval scopes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "work_id",
+        "credential_label",
+        "operation_kind"
+      ],
+      "type": "object"
+    },
+    "hold.clear": {
+      "properties": {
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        },
+        "work_id": {
+          "description": "Work item to release.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "work_id"
+      ],
+      "type": "object"
+    },
+    "config.set": {
+      "properties": {
+        "clear": {
+          "description": "Configuration fields to clear.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "current_manager": {
+          "description": "Default manager backend.",
+          "type": "string"
+        },
+        "notification_channel": {
+          "description": "Notification channel: none, telegram, or discord.",
+          "type": "string"
+        },
+        "telegram_chat_id": {
+          "description": "Telegram chat identifier.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ledger.clear_attempts": {
+      "properties": {
+        "dry_run": {
+          "description": "Preview what would be cleared without writing.",
+          "type": "boolean"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        },
+        "work_id": {
+          "description": "Work item whose attempt history is cleared.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "work_id"
+      ],
+      "type": "object"
+    },
+    "route_approval.revoke": {
+      "properties": {
+        "backend": {
+          "description": "Logical backend.",
+          "type": "string"
+        },
+        "backend_instance": {
+          "description": "Backend instance qualifier, if any.",
+          "type": "string"
+        },
+        "model": {
+          "description": "Exact model, if any.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        },
+        "work_id": {
+          "description": "Exact work item the approval applied to.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "work_id",
+        "backend"
+      ],
+      "type": "object"
+    },
+    "ledger.reconcile": {
+      "properties": {
+        "dry_run": {
+          "description": "Preview reconciliation without writing.",
+          "type": "boolean"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile"
+      ],
+      "type": "object"
+    },
+    "external_approval.list": {
+      "properties": {
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile"
+      ],
+      "type": "object"
+    },
+    "telemetry.aggregate": {
+      "properties": {
+        "account": {
+          "description": "Filter by account.",
+          "type": "string"
+        },
+        "backend_instance": {
+          "description": "Filter by backend instance.",
+          "type": "string"
+        },
+        "dimensions": {
+          "description": "Comma-separated aggregation dimensions (project, ticket, backend, model, ...).",
+          "type": "string"
+        },
+        "execution_type": {
+          "description": "Filter by execution type (improve, fix, review).",
+          "type": "string"
+        },
+        "model": {
+          "description": "Filter by model.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Filter by project/repo id.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "Filter by provider.",
+          "type": "string"
+        },
+        "since": {
+          "description": "Range start (RFC3339 or date).",
+          "type": "string"
+        },
+        "ticket": {
+          "description": "Filter by ticket/work id.",
+          "type": "string"
+        },
+        "until": {
+          "description": "Range end (RFC3339 or date).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dimensions"
+      ],
+      "type": "object"
+    },
+    "events.list": {
+      "properties": {
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        },
+        "since": {
+          "description": "Usage window, e.g. \"7d\".",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "external_approval.expire": {
+      "properties": {
+        "credential_label": {
+          "description": "Credential scope label.",
+          "type": "string"
+        },
+        "operation_kind": {
+          "description": "External operation kind.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        },
+        "work_id": {
+          "description": "Exact work item the approval scopes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "work_id",
+        "credential_label",
+        "operation_kind"
+      ],
+      "type": "object"
+    },
+    "backend_instance.set_enabled": {
+      "properties": {
+        "enabled": {
+          "description": "Target enabled state.",
+          "type": "boolean"
+        },
+        "instance": {
+          "description": "Configured backend-instance identifier.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "instance",
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "sync.classify": {
+      "properties": {
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "config.routing_candidate.add": {
+      "properties": {
+        "backend": {
+          "description": "Logical backend.",
+          "type": "string"
+        },
+        "included_in_quota": {
+          "description": "Whether quota includes this route.",
+          "type": "boolean"
+        },
+        "instance": {
+          "description": "Backend-instance qualifier.",
+          "type": "string"
+        },
+        "list": {
+          "description": "Routing list: pm, improve, review, or escalatory.",
+          "type": "string"
+        },
+        "marginal_cost_usd": {
+          "description": "Marginal cost in dollars.",
+          "type": "number"
+        },
+        "model": {
+          "description": "Model qualifier.",
+          "type": "string"
+        },
+        "priority": {
+          "description": "Candidate priority (default 0).",
+          "type": "number"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        },
+        "quota_pool": {
+          "description": "Shared quota pool.",
+          "type": "string"
+        },
+        "requires_approval": {
+          "description": "Whether this route requires approval.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "profile",
+        "list",
+        "backend"
+      ],
+      "type": "object"
+    },
+    "profile.add": {
+      "properties": {
+        "agy_path": {
+          "description": "Agy executable path on the node.",
+          "type": "string"
+        },
+        "agy_second_home": {
+          "description": "HOME override for agy-second.",
+          "type": "string"
+        },
+        "artifact_root": {
+          "description": "Artifact root on the control-plane node.",
+          "type": "string"
+        },
+        "auto_fix_commands": {
+          "description": "Automatic fix commands.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "claude_args": {
+          "description": "Claude CLI arguments.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "claude_path": {
+          "description": "Claude executable path on the node.",
+          "type": "string"
+        },
+        "clear": {
+          "description": "Profile fields to clear.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "codex_args": {
+          "description": "Codex CLI arguments.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "codex_path": {
+          "description": "Codex executable path on the node.",
+          "type": "string"
+        },
+        "default_target_branch": {
+          "default": "main",
+          "description": "Default merge target branch.",
+          "type": "string"
+        },
+        "display_name": {
+          "description": "Human-readable profile name.",
+          "type": "string"
+        },
+        "env_file": {
+          "description": "Development environment file on the node.",
+          "type": "string"
+        },
+        "env_file_prod": {
+          "description": "Production environment file on the node.",
+          "type": "string"
+        },
+        "local_path": {
+          "description": "Repository path on the control-plane node.",
+          "type": "string"
+        },
+        "manager_wake_autonomy": {
+          "description": "Manager wake autonomy level.",
+          "type": "string"
+        },
+        "max_parallel_workers": {
+          "description": "Maximum concurrent workers.",
+          "type": "number"
+        },
+        "name": {
+          "description": "Profile name.",
+          "type": "string"
+        },
+        "notify_command": {
+          "description": "Profile notification command.",
+          "type": "string"
+        },
+        "opencode_args": {
+          "description": "OpenCode CLI arguments.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "opencode_path": {
+          "description": "OpenCode executable path on the node.",
+          "type": "string"
+        },
+        "openhands_args": {
+          "description": "OpenHands CLI arguments.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "policy_path": {
+          "description": "Profile policy path on the node.",
+          "type": "string"
+        },
+        "provider": {
+          "description": "Repository provider.",
+          "type": "string"
+        },
+        "provider_api_base": {
+          "description": "Provider API base URL.",
+          "type": "string"
+        },
+        "provider_project_id": {
+          "description": "Provider project identifier.",
+          "type": "string"
+        },
+        "repo": {
+          "description": "Provider repository path.",
+          "type": "string"
+        },
+        "repo_id": {
+          "description": "Stable repository identifier.",
+          "type": "string"
+        },
+        "validation_commands": {
+          "description": "Validation commands.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "validation_timeout_seconds": {
+          "description": "Per-command validation timeout.",
+          "type": "number"
+        },
+        "vibe_args": {
+          "description": "Vibe CLI arguments.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "vibe_path": {
+          "description": "Vibe executable path on the node.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "display_name",
+        "repo_id",
+        "provider",
+        "repo",
+        "local_path",
+        "artifact_root"
+      ],
+      "type": "object"
+    },
+    "ledger.repair_tail": {
+      "properties": {
+        "dry_run": {
+          "description": "Inspect without modifying the ledger.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "config.routing_candidate.move": {
+      "properties": {
+        "from": {
+          "description": "Current zero-based index.",
+          "type": "number"
+        },
+        "list": {
+          "description": "Routing list to edit.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        },
+        "to": {
+          "description": "Target zero-based index.",
+          "type": "number"
+        }
+      },
+      "required": [
+        "profile",
+        "list",
+        "from",
+        "to"
+      ],
       "type": "object"
     },
     "external_approval.inspect": {
@@ -1318,36 +2048,33 @@
       ],
       "type": "object"
     },
-    "claims.list": {
+    "quota.snapshot": {
       "properties": {
-        "profile": {
-          "description": "Restrict to one profile's claims.",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "ledger.clear_attempts": {
-      "properties": {
-        "dry_run": {
-          "description": "Preview what would be cleared without writing.",
-          "type": "boolean"
-        },
         "profile": {
           "description": "GAH profile name; defaults to the configured default profile.",
           "type": "string"
         },
-        "work_id": {
-          "description": "Work item whose attempt history is cleared.",
+        "since": {
+          "description": "Usage window, e.g. \"7d\".",
           "type": "string"
         }
       },
-      "required": [
-        "work_id"
-      ],
       "type": "object"
     },
-    "availability.get": {
+    "status.get": {
+      "properties": {
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "quota.list": {
+      "properties": {},
+      "type": "object"
+    },
+    "availability.clear": {
       "properties": {},
       "type": "object"
     },
@@ -1367,8 +2094,139 @@
       ],
       "type": "object"
     },
-    "availability.clear": {
-      "properties": {},
+    "pm.plans.show": {
+      "properties": {
+        "plan_id": {
+          "description": "Profile-scoped plan identifier.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "plan_id"
+      ],
+      "type": "object"
+    },
+    "doctor.validate": {
+      "properties": {
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "pm.publish": {
+      "properties": {
+        "dry_run": {
+          "description": "Validate publication without provider writes.",
+          "type": "boolean"
+        },
+        "expected_fingerprint": {
+          "description": "Fingerprint returned by pm show.",
+          "type": "string"
+        },
+        "plan_id": {
+          "description": "Profile-scoped plan identifier; never a filesystem path.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "plan_id",
+        "expected_fingerprint"
+      ],
+      "type": "object"
+    },
+    "pm.plans.list": {
+      "properties": {
+        "cursor": {
+          "description": "Opaque pagination cursor.",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Maximum plans to return (1-100; default 25).",
+          "type": "number"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile"
+      ],
+      "type": "object"
+    },
+    "route_approval.list": {
+      "properties": {
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "external_approval.deny": {
+      "properties": {
+        "credential_label": {
+          "description": "Credential scope label.",
+          "type": "string"
+        },
+        "operation_kind": {
+          "description": "External operation kind.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        },
+        "work_id": {
+          "description": "Exact work item the approval scopes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "work_id",
+        "credential_label",
+        "operation_kind"
+      ],
+      "type": "object"
+    },
+    "external_approval.revoke": {
+      "properties": {
+        "credential_label": {
+          "description": "Credential scope label.",
+          "type": "string"
+        },
+        "operation_kind": {
+          "description": "External operation kind.",
+          "type": "string"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        },
+        "work_id": {
+          "description": "Exact work item the approval scopes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "work_id",
+        "credential_label",
+        "operation_kind"
+      ],
       "type": "object"
     },
     "dispatch.run": {
@@ -1458,18 +2316,18 @@
       ],
       "type": "object"
     },
-    "route_approval.revoke": {
+    "config.show": {
+      "properties": {},
+      "type": "object"
+    },
+    "external_approval.grant": {
       "properties": {
-        "backend": {
-          "description": "Logical backend.",
+        "credential_label": {
+          "description": "Credential scope label.",
           "type": "string"
         },
-        "backend_instance": {
-          "description": "Backend instance qualifier, if any.",
-          "type": "string"
-        },
-        "model": {
-          "description": "Exact model, if any.",
+        "operation_kind": {
+          "description": "External operation kind.",
           "type": "string"
         },
         "profile": {
@@ -1477,118 +2335,49 @@
           "type": "string"
         },
         "work_id": {
-          "description": "Exact work item the approval applied to.",
+          "description": "Exact work item the approval scopes.",
           "type": "string"
         }
       },
       "required": [
         "profile",
         "work_id",
-        "backend"
+        "credential_label",
+        "operation_kind"
       ],
       "type": "object"
     },
-    "quota.list": {
-      "properties": {},
-      "type": "object"
-    },
-    "sync.classify": {
-      "properties": {
-        "profile": {
-          "description": "GAH profile name; defaults to the configured default profile.",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "hold.clear": {
+    "claims.clear": {
       "properties": {
         "profile": {
           "description": "GAH profile name; defaults to the configured default profile.",
           "type": "string"
         },
         "work_id": {
-          "description": "Work item to release.",
+          "description": "Work claim to clear.",
           "type": "string"
         }
       },
       "required": [
+        "profile",
         "work_id"
       ],
       "type": "object"
     },
-    "route_approval.list": {
+    "claims.reclaim": {
       "properties": {
-        "profile": {
-          "description": "GAH profile name; defaults to the configured default profile.",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "telemetry.aggregate": {
-      "properties": {
-        "account": {
-          "description": "Filter by account.",
-          "type": "string"
-        },
-        "backend_instance": {
-          "description": "Filter by backend instance.",
-          "type": "string"
-        },
-        "dimensions": {
-          "description": "Comma-separated aggregation dimensions (project, ticket, backend, model, ...).",
-          "type": "string"
-        },
-        "execution_type": {
-          "description": "Filter by execution type (improve, fix, review).",
-          "type": "string"
-        },
-        "model": {
-          "description": "Filter by model.",
-          "type": "string"
+        "max_age_secs": {
+          "description": "Minimum stale age in seconds (default 3600).",
+          "type": "number"
         },
         "profile": {
           "description": "GAH profile name; defaults to the configured default profile.",
-          "type": "string"
-        },
-        "project": {
-          "description": "Filter by project/repo id.",
-          "type": "string"
-        },
-        "provider": {
-          "description": "Filter by provider.",
-          "type": "string"
-        },
-        "since": {
-          "description": "Range start (RFC3339 or date).",
-          "type": "string"
-        },
-        "ticket": {
-          "description": "Filter by ticket/work id.",
-          "type": "string"
-        },
-        "until": {
-          "description": "Range end (RFC3339 or date).",
           "type": "string"
         }
       },
       "required": [
-        "dimensions"
+        "profile"
       ],
-      "type": "object"
-    },
-    "events.list": {
-      "properties": {
-        "profile": {
-          "description": "GAH profile name; defaults to the configured default profile.",
-          "type": "string"
-        },
-        "since": {
-          "description": "Usage window, e.g. \"7d\".",
-          "type": "string"
-        }
-      },
       "type": "object"
     }
   }

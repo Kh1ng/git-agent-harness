@@ -1,5 +1,5 @@
-//! Issue #525: request JSON schemas for the operations a client can invoke
-//! directly. Authored here — next to the operations they belong to — and
+//! Issue #525: request JSON schemas for every remotely available operation.
+//! Authored here — next to the operations they belong to — and
 //! generated into the shipped manifest, so clients (the MCP server) derive
 //! their tool input schemas from the manifest instead of hand-maintaining a
 //! second copy that drifts.
@@ -27,6 +27,14 @@ fn object(properties: &[(&str, &str, bool, &str)]) -> Value {
     let mut schema = json!({ "type": "object", "properties": map });
     if !required.is_empty() {
         schema["required"] = json!(required);
+    }
+    schema
+}
+
+fn string_arrays(mut schema: Value, fields: &[&str]) -> Value {
+    for field in fields {
+        schema["properties"][field]["type"] = json!("array");
+        schema["properties"][field]["items"] = json!({ "type": "string" });
     }
     schema
 }
@@ -328,6 +336,469 @@ pub(super) fn add_request_schemas(manifest: &mut CapabilityManifest) {
                 "Backend instance qualifier, if any.",
             ),
             ("model", "string", false, "Exact model, if any."),
+        ]),
+    );
+
+    set(
+        "profile.remove",
+        object(&[
+            ("name", "string", true, "Profile name to remove."),
+            (
+                "force",
+                "boolean",
+                false,
+                "Remove without an interactive confirmation.",
+            ),
+        ]),
+    );
+
+    let external_scope = object(&[
+        ("profile", "string", true, PROFILE),
+        (
+            "work_id",
+            "string",
+            true,
+            "Exact work item the approval scopes.",
+        ),
+        (
+            "credential_label",
+            "string",
+            true,
+            "Credential scope label.",
+        ),
+        ("operation_kind", "string", true, "External operation kind."),
+    ]);
+    set(
+        "external_approval.list",
+        object(&[("profile", "string", true, PROFILE)]),
+    );
+    set(
+        "external_approval.request",
+        object(&[
+            ("profile", "string", true, PROFILE),
+            (
+                "work_id",
+                "string",
+                true,
+                "Exact work item the approval scopes.",
+            ),
+            (
+                "credential_label",
+                "string",
+                true,
+                "Credential scope label.",
+            ),
+            ("operation_kind", "string", true, "External operation kind."),
+            (
+                "max_requests",
+                "number",
+                false,
+                "Maximum approved request count.",
+            ),
+            (
+                "max_dollars",
+                "number",
+                false,
+                "Maximum approved spend in dollars.",
+            ),
+            ("expires_at", "string", false, "Approval expiry as RFC3339."),
+            (
+                "purpose",
+                "string",
+                false,
+                "Reason the external operation is needed.",
+            ),
+        ]),
+    );
+    for operation_id in [
+        "external_approval.grant",
+        "external_approval.deny",
+        "external_approval.revoke",
+        "external_approval.expire",
+    ] {
+        set(operation_id, external_scope.clone());
+    }
+
+    set(
+        "pm.plans.list",
+        object(&[
+            ("profile", "string", true, PROFILE),
+            ("cursor", "string", false, "Opaque pagination cursor."),
+            (
+                "limit",
+                "number",
+                false,
+                "Maximum plans to return (1-100; default 25).",
+            ),
+        ]),
+    );
+    set(
+        "pm.plans.show",
+        object(&[
+            ("profile", "string", true, PROFILE),
+            ("plan_id", "string", true, "Profile-scoped plan identifier."),
+        ]),
+    );
+    set(
+        "pm.publish",
+        object(&[
+            ("profile", "string", true, PROFILE),
+            (
+                "plan_id",
+                "string",
+                true,
+                "Profile-scoped plan identifier; never a filesystem path.",
+            ),
+            (
+                "expected_fingerprint",
+                "string",
+                true,
+                "Fingerprint returned by pm show.",
+            ),
+            (
+                "dry_run",
+                "boolean",
+                false,
+                "Validate publication without provider writes.",
+            ),
+        ]),
+    );
+
+    set("config.show", object(&[]));
+    set(
+        "config.set",
+        string_arrays(
+            object(&[
+                (
+                    "current_manager",
+                    "string",
+                    false,
+                    "Default manager backend.",
+                ),
+                (
+                    "notification_channel",
+                    "string",
+                    false,
+                    "Notification channel: none, telegram, or discord.",
+                ),
+                (
+                    "telegram_chat_id",
+                    "string",
+                    false,
+                    "Telegram chat identifier.",
+                ),
+                ("clear", "string", false, "Configuration fields to clear."),
+            ]),
+            &["clear"],
+        ),
+    );
+
+    let profile_fields = object(&[
+        ("name", "string", false, "Profile name."),
+        (
+            "display_name",
+            "string",
+            false,
+            "Human-readable profile name.",
+        ),
+        ("repo_id", "string", false, "Stable repository identifier."),
+        ("provider", "string", false, "Repository provider."),
+        ("repo", "string", false, "Provider repository path."),
+        (
+            "local_path",
+            "string",
+            false,
+            "Repository path on the control-plane node.",
+        ),
+        (
+            "artifact_root",
+            "string",
+            false,
+            "Artifact root on the control-plane node.",
+        ),
+        (
+            "default_target_branch",
+            "string",
+            false,
+            "Default merge target branch.",
+        ),
+        (
+            "provider_api_base",
+            "string",
+            false,
+            "Provider API base URL.",
+        ),
+        (
+            "provider_project_id",
+            "string",
+            false,
+            "Provider project identifier.",
+        ),
+        (
+            "openhands_args",
+            "string",
+            false,
+            "OpenHands CLI arguments.",
+        ),
+        ("codex_args", "string", false, "Codex CLI arguments."),
+        (
+            "codex_path",
+            "string",
+            false,
+            "Codex executable path on the node.",
+        ),
+        ("claude_args", "string", false, "Claude CLI arguments."),
+        (
+            "claude_path",
+            "string",
+            false,
+            "Claude executable path on the node.",
+        ),
+        (
+            "agy_path",
+            "string",
+            false,
+            "Agy executable path on the node.",
+        ),
+        ("vibe_args", "string", false, "Vibe CLI arguments."),
+        (
+            "vibe_path",
+            "string",
+            false,
+            "Vibe executable path on the node.",
+        ),
+        ("opencode_args", "string", false, "OpenCode CLI arguments."),
+        (
+            "opencode_path",
+            "string",
+            false,
+            "OpenCode executable path on the node.",
+        ),
+        (
+            "agy_second_home",
+            "string",
+            false,
+            "HOME override for agy-second.",
+        ),
+        (
+            "notify_command",
+            "string",
+            false,
+            "Profile notification command.",
+        ),
+        (
+            "policy_path",
+            "string",
+            false,
+            "Profile policy path on the node.",
+        ),
+        (
+            "env_file",
+            "string",
+            false,
+            "Development environment file on the node.",
+        ),
+        (
+            "env_file_prod",
+            "string",
+            false,
+            "Production environment file on the node.",
+        ),
+        (
+            "validation_commands",
+            "string",
+            false,
+            "Validation commands.",
+        ),
+        (
+            "auto_fix_commands",
+            "string",
+            false,
+            "Automatic fix commands.",
+        ),
+        (
+            "max_parallel_workers",
+            "number",
+            false,
+            "Maximum concurrent workers.",
+        ),
+        (
+            "validation_timeout_seconds",
+            "number",
+            false,
+            "Per-command validation timeout.",
+        ),
+        (
+            "manager_wake_autonomy",
+            "string",
+            false,
+            "Manager wake autonomy level.",
+        ),
+        ("clear", "string", false, "Profile fields to clear."),
+    ]);
+    let profile_fields = string_arrays(
+        profile_fields,
+        &[
+            "openhands_args",
+            "codex_args",
+            "claude_args",
+            "vibe_args",
+            "opencode_args",
+            "validation_commands",
+            "auto_fix_commands",
+            "clear",
+        ],
+    );
+    let mut profile_add = profile_fields.clone();
+    profile_add["required"] = json!([
+        "name",
+        "display_name",
+        "repo_id",
+        "provider",
+        "repo",
+        "local_path",
+        "artifact_root"
+    ]);
+    profile_add["properties"]["default_target_branch"]["default"] = json!("main");
+    set("profile.add", profile_add);
+    let mut profile_set = profile_fields;
+    profile_set["required"] = json!(["name"]);
+    set("profile.set", profile_set);
+
+    set(
+        "backend_instance.set_enabled",
+        object(&[
+            ("profile", "string", true, PROFILE),
+            (
+                "instance",
+                "string",
+                true,
+                "Configured backend-instance identifier.",
+            ),
+            ("enabled", "boolean", true, "Target enabled state."),
+        ]),
+    );
+
+    set(
+        "quota.refresh",
+        object(&[
+            (
+                "backend",
+                "string",
+                false,
+                "Backend to refresh (default codex).",
+            ),
+            (
+                "backend_instance",
+                "string",
+                false,
+                "Backend-instance qualifier.",
+            ),
+            ("model", "string", false, "Model qualifier."),
+            (
+                "quota_pool",
+                "string",
+                false,
+                "Shared capacity or billing pool.",
+            ),
+        ]),
+    );
+    set(
+        "claims.clear",
+        object(&[
+            ("profile", "string", true, PROFILE),
+            ("work_id", "string", true, "Work claim to clear."),
+        ]),
+    );
+    set(
+        "claims.reclaim",
+        object(&[
+            ("profile", "string", true, PROFILE),
+            (
+                "max_age_secs",
+                "number",
+                false,
+                "Minimum stale age in seconds (default 3600).",
+            ),
+        ]),
+    );
+    set(
+        "ledger.repair_tail",
+        object(&[(
+            "dry_run",
+            "boolean",
+            false,
+            "Inspect without modifying the ledger.",
+        )]),
+    );
+    set(
+        "ledger.reconcile",
+        object(&[
+            ("profile", "string", true, PROFILE),
+            (
+                "dry_run",
+                "boolean",
+                false,
+                "Preview reconciliation without writing.",
+            ),
+        ]),
+    );
+
+    set(
+        "config.routing_candidate.add",
+        object(&[
+            ("profile", "string", true, PROFILE),
+            (
+                "list",
+                "string",
+                true,
+                "Routing list: pm, improve, review, or escalatory.",
+            ),
+            ("backend", "string", true, "Logical backend."),
+            ("instance", "string", false, "Backend-instance qualifier."),
+            ("model", "string", false, "Model qualifier."),
+            ("quota_pool", "string", false, "Shared quota pool."),
+            (
+                "priority",
+                "number",
+                false,
+                "Candidate priority (default 0).",
+            ),
+            (
+                "included_in_quota",
+                "boolean",
+                false,
+                "Whether quota includes this route.",
+            ),
+            (
+                "marginal_cost_usd",
+                "number",
+                false,
+                "Marginal cost in dollars.",
+            ),
+            (
+                "requires_approval",
+                "boolean",
+                false,
+                "Whether this route requires approval.",
+            ),
+        ]),
+    );
+    set(
+        "config.routing_candidate.remove",
+        object(&[
+            ("profile", "string", true, PROFILE),
+            ("list", "string", true, "Routing list to edit."),
+            ("index", "number", true, "Zero-based candidate index."),
+        ]),
+    );
+    set(
+        "config.routing_candidate.move",
+        object(&[
+            ("profile", "string", true, PROFILE),
+            ("list", "string", true, "Routing list to edit."),
+            ("from", "number", true, "Current zero-based index."),
+            ("to", "number", true, "Target zero-based index."),
         ]),
     );
 }
