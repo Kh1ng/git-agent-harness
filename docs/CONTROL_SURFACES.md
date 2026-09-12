@@ -108,9 +108,9 @@ The [controller](../src/controller/mod.rs) decides work from observed state.
 [ExecutionIdentity](../src/execution_identity.rs) separates runner, logical backend, instance, account, quota pool, and requested/effective models.
 The [migration contract](BACKEND_INSTANCE_CONFIG_MIGRATION.md) preserves legacy declarations and keeps runtime paths out of durable identity.
 
-Readiness is still incomplete. [Status](../src/status.rs) uses explicit configuration markers for `backend_configured`.
-[Doctor](../src/doctor.rs) resolves executables, but these facts do not yet share the canonical environment required by #741.
-Instance overrides replace complete entries rather than individual fields.
+[Status](../src/status.rs) and [Doctor](../src/doctor.rs) use the same executable
+resolver as dispatch. Readiness keeps unresolved, unobserved, and ineligible
+states separate. Instance overrides merge by field over the canonical entry.
 
 Provider issues, dependency checks, claims, attempts, review results, and publication already feed deterministic work decisions.
 [PM plans](PM_PLAN_API.md) add persisted decomposition and publication dry-run operations.

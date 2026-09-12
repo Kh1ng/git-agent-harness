@@ -30,7 +30,7 @@ export async function chatNodes(profile?: string, backend?: string): Promise<Cha
     if (profile && (!project || !node.profiles?.includes(project.name))) reason = 'This worker has no declared profile for this project.';
     else if (state !== 'healthy') reason = state === 'stale' ? 'Worker health is stale. Check it in Nodes.' : 'Worker health is unknown or unavailable. Check it in Nodes.';
     else if (backend && !snapshot) reason = 'Backend readiness is unknown. Check this worker in Nodes.';
-    else if (backend && snapshot && !snapshot.backend_configured[backend] && !snapshot.backend_instances.some(instance => instance.logical_backend === backend && instance.executable_configured)) reason = 'The selected backend is not resolved on this worker.';
+    else if (backend && snapshot && !snapshot.backend_configured[backend] && !snapshot.backend_instances.some(instance => instance.logical_backend === backend && (instance.executable_resolved ?? instance.executable_configured))) reason = 'The selected backend is not resolved on this worker.';
     else if (backend && snapshot?.availability.some(scope => scope.backend === backend && !scope.eligible_now && scope.scope === 'backend_wide')) reason = 'The selected backend is currently unavailable on this worker.';
     nodes.push({ nodeId: node.node_id, displayName: node.display_name, role: 'worker', chatCapable: reason === null, eligible: reason === null, reason, state, observedAt, profiles: node.profiles, lastSeenAt: snapshot?.last_seen_at ?? node.last_seen_at ?? null });
   }

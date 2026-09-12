@@ -8,17 +8,22 @@ use std::path::{Path, PathBuf};
 /// stored here; executable/state paths remain runtime-only identity inputs.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct BackendInstanceConfig {
+    #[serde(default)]
     pub runner_kind: String,
     /// Issue #822: a disabled instance stays fully declared but routing
     /// must skip it with a typed reason. Defaults to enabled so legacy
     /// config lines (written before this field existed) deserialize
     /// unchanged.
-    #[serde(default = "default_instance_enabled")]
-    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable: Option<String>,
+    /// Resolve `runner_kind` on the service PATH when no explicit executable
+    /// is bound. Opt-in keeps absent explicit bindings fail-closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_from_path: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -30,6 +35,42 @@ pub struct BackendInstanceConfig {
     /// Empty preserves unrestricted legacy model behavior.
     #[serde(default)]
     pub supported_models: Vec<String>,
+}
+
+impl BackendInstanceConfig {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    pub fn resolves_from_path(&self) -> bool {
+        self.resolve_from_path.unwrap_or(false)
+    }
+}
+
+pub(crate) fn merge_instance_maps(
+    mut canonical: HashMap<String, BackendInstanceConfig>,
+    project: HashMap<String, BackendInstanceConfig>,
+) -> HashMap<String, BackendInstanceConfig> {
+    for (name, mut project) in project {
+        if let Some(canonical) = canonical.remove(&name) {
+            if project.runner_kind.is_empty() {
+                project.runner_kind = canonical.runner_kind;
+            }
+            project.enabled = project.enabled.or(canonical.enabled);
+            project.logical_backend = project.logical_backend.or(canonical.logical_backend);
+            project.executable = project.executable.or(canonical.executable);
+            project.resolve_from_path = project.resolve_from_path.or(canonical.resolve_from_path);
+            project.state_root = project.state_root.or(canonical.state_root);
+            project.account_label = project.account_label.or(canonical.account_label);
+            project.auth_source_label = project.auth_source_label.or(canonical.auth_source_label);
+            project.quota_pool = project.quota_pool.or(canonical.quota_pool);
+            if project.supported_models.is_empty() {
+                project.supported_models = canonical.supported_models;
+            }
+        }
+        canonical.insert(name, project);
+    }
+    canonical
 }
 
 impl Profile {
@@ -107,13 +148,13 @@ impl RoutingPolicy {
                 .logical_backend
                 .clone()
                 .unwrap_or_else(|| candidate.backend.clone());
-            identity.executable = Some(
-                instance
-                    .executable
-                    .as_deref()
-                    .map(PathBuf::from)
-                    .unwrap_or_default(),
-            );
+            identity.executable = match crate::runner::resolve_backend_instance_executable(instance)
+            {
+                crate::runner::ExecutableResolution::Found(path)
+                | crate::runner::ExecutableResolution::MissingExplicitPath(path) => Some(path),
+                crate::runner::ExecutableResolution::MissingFromPath(_)
+                | crate::runner::ExecutableResolution::UnknownBackend(_) => Some(PathBuf::new()),
+            };
             identity.state_root = instance.state_root.as_deref().map(PathBuf::from);
             identity.account_label = instance.account_label.clone();
             identity.auth_source_label = instance.auth_source_label.clone();
@@ -183,7 +224,7 @@ fn validate_instance(
     // executable is broken or removed -- taking a misbehaving backend out
     // of rotation without deleting its declaration is the point of the
     // toggle. Its identity fields are still validated above.
-    if !instance.enabled {
+    if !instance.enabled() {
         return;
     }
     match instance
@@ -195,6 +236,17 @@ fn validate_instance(
         Some(path) => errors.push(format!(
             "instance '{name}': executable binding '{path}' is missing or not executable"
         )),
+        None if instance.resolves_from_path() => {
+            if !matches!(
+                crate::runner::resolve_backend_instance_executable(instance),
+                crate::runner::ExecutableResolution::Found(_)
+            ) {
+                errors.push(format!(
+                    "instance '{name}': runner '{}' was not found on PATH",
+                    instance.runner_kind
+                ));
+            }
+        }
         None => errors.push(format!(
             "instance '{name}': missing explicit executable binding"
         )),
@@ -345,7 +397,6 @@ mod tests {
         profile.routing.backend_instances.insert(
             "opencode-main".into(),
             BackendInstanceConfig {
-                runner_kind: "opencode".into(),
                 executable: Some("/project/opencode-wrapper".into()),
                 ..Default::default()
             },
@@ -359,6 +410,10 @@ mod tests {
                 .executable
                 .as_deref(),
             Some("/project/opencode-wrapper")
+        );
+        assert_eq!(
+            effective.backend_instances["opencode-main"].runner_kind,
+            "opencode"
         );
         assert_eq!(
             effective.backend_instances["claude-main"]
@@ -382,7 +437,8 @@ mod tests {
                 auth_source_label: Some("env-openai-key".into()),
                 quota_pool: Some("openai-api".into()),
                 supported_models: vec!["openai/gpt-5".into()],
-                enabled: true,
+                enabled: Some(true),
+                resolve_from_path: Some(false),
             },
         );
         let identity = routing.execution_identity_for_candidate(&CandidateConfig {
@@ -439,19 +495,16 @@ mod tests {
     }
 }
 
-fn default_instance_enabled() -> bool {
-    true
-}
-
 /// `enabled` defaults to true: a hand-built instance (tests, programmatic
 /// config) must never silently mean "disabled".
 impl Default for BackendInstanceConfig {
     fn default() -> Self {
         BackendInstanceConfig {
             runner_kind: String::new(),
-            enabled: true,
+            enabled: None,
             logical_backend: None,
             executable: None,
+            resolve_from_path: None,
             state_root: None,
             account_label: None,
             auth_source_label: None,
@@ -475,7 +528,7 @@ mod enabled_flag_tests {
              executable = \"/bin/ls\"\n",
         )
         .unwrap();
-        assert!(legacy.enabled, "absence of the field must mean enabled");
+        assert!(legacy.enabled(), "absence of the field must mean enabled");
 
         let explicit_false: BackendInstanceConfig = toml::from_str(
             "runner_kind = \"codex\"\n\
@@ -484,11 +537,11 @@ mod enabled_flag_tests {
              enabled = false\n",
         )
         .unwrap();
-        assert!(!explicit_false.enabled);
+        assert!(!explicit_false.enabled());
 
         // Default-constructed instances (tests, programmatic config) are
         // enabled: disabled must never be an implicit default.
-        assert!(BackendInstanceConfig::default().enabled);
+        assert!(BackendInstanceConfig::default().enabled());
     }
 
     /// Issue #822: a disabled instance must stay saveable even while its
@@ -504,7 +557,7 @@ mod enabled_flag_tests {
                 runner_kind: "codex".into(),
                 logical_backend: Some("codex".into()),
                 executable: Some("/nonexistent/gah-test-wrapper".into()),
-                enabled: false,
+                enabled: Some(false),
                 ..Default::default()
             },
         );
@@ -512,7 +565,7 @@ mod enabled_flag_tests {
         assert!(check_profile_backend_instances(&defaults, &profile).is_ok());
 
         if let Some(instance) = profile.routing.backend_instances.get_mut("broken") {
-            instance.enabled = true;
+            instance.enabled = Some(true);
         }
         let errors = check_profile_backend_instances(&defaults, &profile)
             .expect_err("enabled instance with a missing executable must fail validation");

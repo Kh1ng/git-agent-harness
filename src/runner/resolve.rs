@@ -1,4 +1,4 @@
-use crate::config::Profile;
+use crate::config::{BackendInstanceConfig, Profile};
 use anyhow::Result;
 use std::env;
 use std::fs;
@@ -57,6 +57,32 @@ pub fn resolve_backend_executable(profile: &Profile, backend: &str) -> Executabl
         Some(path) => ExecutableResolution::Found(path),
         None => ExecutableResolution::MissingFromPath(command.to_string()),
     }
+}
+
+/// Resolve a declared backend instance with the same executable checks used
+/// by legacy dispatch. PATH lookup must be explicitly enabled on the instance.
+pub fn resolve_backend_instance_executable(
+    instance: &BackendInstanceConfig,
+) -> ExecutableResolution {
+    if let Some(explicit) = instance
+        .executable
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    {
+        let path = PathBuf::from(explicit);
+        return if is_executable_path(&path) {
+            ExecutableResolution::Found(path)
+        } else {
+            ExecutableResolution::MissingExplicitPath(path)
+        };
+    }
+    if instance.resolves_from_path() {
+        return match resolve_executable_on_path(&instance.runner_kind) {
+            Some(path) => ExecutableResolution::Found(path),
+            None => ExecutableResolution::MissingFromPath(instance.runner_kind.clone()),
+        };
+    }
+    ExecutableResolution::MissingExplicitPath(PathBuf::new())
 }
 
 pub fn codex_model_args(model: Option<&str>) -> Vec<String> {
@@ -283,6 +309,28 @@ mod tests {
         assert_eq!(
             resolved,
             ExecutableResolution::MissingExplicitPath(PathBuf::from("/definitely/missing/claude"))
+        );
+    }
+
+    #[test]
+    fn declared_instance_only_uses_path_when_policy_allows_it() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_fake_bin(&f.bin_dir, "opencode", "#!/bin/sh\nexit 0\n");
+        let _guard = PathGuard::set(f.bin_dir.display().to_string());
+        let mut instance = BackendInstanceConfig {
+            runner_kind: "opencode".into(),
+            ..BackendInstanceConfig::default()
+        };
+
+        assert_eq!(
+            resolve_backend_instance_executable(&instance),
+            ExecutableResolution::MissingExplicitPath(PathBuf::new())
+        );
+        instance.resolve_from_path = Some(true);
+        assert_eq!(
+            resolve_backend_instance_executable(&instance),
+            ExecutableResolution::Found(f.bin_dir.join("opencode"))
         );
     }
 

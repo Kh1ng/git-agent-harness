@@ -100,6 +100,29 @@ fn empty_clean_profile_snapshot() {
 }
 
 #[test]
+fn path_only_backend_is_reported_as_resolved() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _exec_guard = ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let opencode = bin.join("opencode");
+    fs::write(&opencode, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut permissions = fs::metadata(&opencode).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&opencode, permissions).unwrap();
+    let _path = PathGuard::set(&bin);
+    let cfg = make_test_cfg(&tmp);
+    let _availability_guard =
+        crate::test_support::AvailabilityEnvGuard::set(tmp.path().join("avail.json"));
+
+    let snap = build_snapshot(&cfg, "test", OffsetDateTime::now_utc()).unwrap();
+
+    assert_eq!(snap.backend_configured.get("opencode"), Some(&true));
+}
+
+#[test]
 fn effective_intake_policy_does_not_invent_a_gitlab_owner_allowlist() {
     let tmp = TempDir::new().unwrap();
     let mut cfg = make_test_cfg(&tmp);

@@ -470,9 +470,8 @@ fn load_canonical_routing() -> Result<Option<RoutingPolicy>> {
 /// so a repo declaring one backend's capabilities doesn't erase another
 /// backend's canonical-declared ones.
 fn merge_routing_policy(canonical: RoutingPolicy, mut repo: RoutingPolicy) -> RoutingPolicy {
-    let mut backend_instances = canonical.backend_instances;
-    backend_instances.extend(repo.backend_instances);
-    repo.backend_instances = backend_instances;
+    repo.backend_instances =
+        backend_instances::merge_instance_maps(canonical.backend_instances, repo.backend_instances);
     repo.default_backend = repo.default_backend.or(canonical.default_backend);
     repo.default_model = repo.default_model.or(canonical.default_model);
     repo.pm_backend = repo.pm_backend.or(canonical.pm_backend);

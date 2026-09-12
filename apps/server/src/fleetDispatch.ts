@@ -1059,7 +1059,7 @@ export class FleetDispatchCoordinator {
 
   private getConfiguredConcurrencyCap(snapshot: NodeObservationSnapshot, options: RoutedSessionOptions): number | null {
     const matchingInstances = this.relevantBackendInstances(snapshot, options).filter((instance) => {
-      if (!instance.executable_configured) {
+      if (!(instance.executable_resolved ?? instance.executable_configured)) {
         return false;
       }
       if (options.model && instance.supported_models.length > 0 && !instance.supported_models.includes(options.model)) {

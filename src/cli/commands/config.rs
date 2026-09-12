@@ -108,8 +108,8 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("profile '{}' is not configured", profile))?;
                 // Resolve the fully merged entry (canonical -> repo defaults ->
                 // profile) so the profile-level override written here preserves
-                // every declared field, not just the flag (entries replace
-                // wholesale by name).
+                // every declared field, not just the flag. This also keeps
+                // older readers compatible with field-level inheritance.
                 let merged = profile_config.effective_routing(&cfg.defaults);
                 let mut entry = merged
                     .backend_instances
@@ -122,14 +122,14 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                             profile
                         )
                     })?;
-                if entry.enabled == enabled {
+                if entry.enabled() == enabled {
                     println!(
                         "Backend instance '{}' already {} for profile '{}'",
                         instance, state_word, profile
                     );
                     return Ok(());
                 }
-                entry.enabled = enabled;
+                entry.enabled = Some(enabled);
                 profile_config
                     .routing
                     .backend_instances

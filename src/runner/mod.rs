@@ -32,7 +32,7 @@ pub use crate::runner::resolve::{
     backend_available, backend_available_for_profile, codex_model_args, extract_model_from_args,
     extract_model_from_backend_args, filtered_backend_args, filtered_codex_args,
     is_executable_path, require_backend_executable, resolve_backend_executable,
-    ExecutableResolution,
+    resolve_backend_instance_executable, ExecutableResolution,
 };
 #[allow(unused_imports)]
 pub use crate::runner::review::{

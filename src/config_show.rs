@@ -25,6 +25,7 @@ pub struct RoutingCandidateSummary {
 pub struct BackendInstanceSummary {
     pub backend_instance: String,
     pub runner_kind: String,
+    pub declared: bool,
     /// Issue #822: disabled instances stay declared but routing skips them.
     pub enabled: bool,
     pub logical_backend: String,
@@ -33,29 +34,98 @@ pub struct BackendInstanceSummary {
     pub quota_pool: Option<String>,
     pub supported_models: Vec<String>,
     pub executable_configured: bool,
+    pub executable_resolved: bool,
+    pub resolution_source: String,
+    pub resolution_error: Option<String>,
+    pub config_source: String,
+    /// Readiness facts remain nullable until the corresponding bounded probe
+    /// or routing evaluation has produced an observation.
+    pub auth_ready: Option<bool>,
+    pub healthy: Option<bool>,
+    pub observed_at: Option<String>,
+    pub eligible: Option<bool>,
     pub isolated_state_configured: bool,
 }
 
 pub(crate) fn backend_instance_summaries(
-    routing: &config::RoutingPolicy,
+    defaults: &config::Defaults,
+    profile: &config::Profile,
 ) -> Vec<BackendInstanceSummary> {
+    let routing = profile.effective_routing(defaults);
     let mut summaries = routing
         .backend_instances
         .iter()
-        .map(|(name, instance)| BackendInstanceSummary {
-            backend_instance: name.clone(),
-            runner_kind: instance.runner_kind.clone(),
-            enabled: instance.enabled,
-            logical_backend: instance
-                .logical_backend
-                .clone()
-                .unwrap_or_else(|| instance.runner_kind.clone()),
-            account_label: instance.account_label.clone(),
-            auth_source_label: instance.auth_source_label.clone(),
-            quota_pool: instance.quota_pool.clone(),
-            supported_models: instance.supported_models.clone(),
-            executable_configured: instance.executable.is_some(),
-            isolated_state_configured: instance.state_root.is_some(),
+        .map(|(name, instance)| {
+            let resolution = crate::runner::resolve_backend_instance_executable(instance);
+            let (executable_resolved, resolution_source, resolution_error) = match resolution {
+                crate::runner::ExecutableResolution::Found(_) => (
+                    true,
+                    if instance.executable.is_some() {
+                        "explicit_path"
+                    } else {
+                        "path"
+                    }
+                    .to_string(),
+                    None,
+                ),
+                crate::runner::ExecutableResolution::MissingExplicitPath(path)
+                    if path.as_os_str().is_empty() =>
+                {
+                    (
+                        false,
+                        "unresolved".to_string(),
+                        Some("missing explicit executable binding".to_string()),
+                    )
+                }
+                crate::runner::ExecutableResolution::MissingExplicitPath(path) => (
+                    false,
+                    "explicit_path".to_string(),
+                    Some(format!(
+                        "configured executable '{}' is missing or not executable",
+                        path.display()
+                    )),
+                ),
+                crate::runner::ExecutableResolution::MissingFromPath(command) => (
+                    false,
+                    "path".to_string(),
+                    Some(format!("required binary '{command}' not found on PATH")),
+                ),
+                crate::runner::ExecutableResolution::UnknownBackend(backend) => (
+                    false,
+                    "unresolved".to_string(),
+                    Some(format!("unknown backend '{backend}'")),
+                ),
+            };
+            BackendInstanceSummary {
+                backend_instance: name.clone(),
+                runner_kind: instance.runner_kind.clone(),
+                declared: true,
+                enabled: instance.enabled(),
+                logical_backend: instance
+                    .logical_backend
+                    .clone()
+                    .unwrap_or_else(|| instance.runner_kind.clone()),
+                account_label: instance.account_label.clone(),
+                auth_source_label: instance.auth_source_label.clone(),
+                quota_pool: instance.quota_pool.clone(),
+                supported_models: instance.supported_models.clone(),
+                executable_configured: instance.executable.is_some()
+                    || instance.resolves_from_path(),
+                executable_resolved,
+                resolution_source,
+                resolution_error,
+                config_source: if profile.routing.backend_instances.contains_key(name) {
+                    "profile_override"
+                } else {
+                    "canonical_environment"
+                }
+                .to_string(),
+                auth_ready: None,
+                healthy: None,
+                observed_at: None,
+                eligible: (!instance.enabled() || !executable_resolved).then_some(false),
+                isolated_state_configured: instance.state_root.is_some(),
+            }
         })
         .collect::<Vec<_>>();
     summaries.sort_by(|left, right| left.backend_instance.cmp(&right.backend_instance));
@@ -272,7 +342,7 @@ fn build_profile_summary(
 ) -> Result<ConfigProfileSummary> {
     let profile = config::get_profile(cfg, profile_name)?;
     let routing = profile.effective_routing(&cfg.defaults);
-    let backend_instances = backend_instance_summaries(&routing);
+    let backend_instances = backend_instance_summaries(&cfg.defaults, profile);
     let routine_reviewer = routing.effective_routine_reviewer();
     let escalatory_reviewers = routing.effective_escalatory_reviewers();
 
@@ -441,6 +511,8 @@ mod tests {
         WakeAutonomy,
     };
     use crate::context::{ContextConfig, ContextOverride};
+    use crate::runner::backends::test_util::make_fake_bin;
+    use crate::test_support::PathGuard;
     use serde_json::Value;
     use std::collections::HashMap;
 
@@ -584,6 +656,36 @@ mod tests {
         assert_eq!(summary.quota_usage_percent, Some(8.25));
         assert_eq!(summary.quota_days_remaining, Some(3.75));
         assert!(summary.requires_approval);
+    }
+
+    #[test]
+    fn backend_instance_summary_reports_real_path_resolution_and_source() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        make_fake_bin(dir.path(), "opencode", "#!/bin/sh\nexit 0\n");
+        let _path = PathGuard::set(dir.path().display().to_string());
+        let mut defaults = config::Defaults::default();
+        defaults.routing.backend_instances.insert(
+            "opencode-main".into(),
+            config::BackendInstanceConfig {
+                runner_kind: "opencode".into(),
+                resolve_from_path: Some(true),
+                ..Default::default()
+            },
+        );
+        let profile = sample_profile();
+
+        let summary = backend_instance_summaries(&defaults, &profile)
+            .pop()
+            .expect("declared instance");
+
+        assert!(summary.declared);
+        assert!(summary.executable_resolved);
+        assert_eq!(summary.resolution_source, "path");
+        assert_eq!(summary.resolution_error, None);
+        assert_eq!(summary.config_source, "canonical_environment");
+        assert_eq!(summary.auth_ready, None);
+        assert_eq!(summary.healthy, None);
     }
 
     #[test]

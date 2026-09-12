@@ -792,7 +792,7 @@ where
         && effective_routing
             .backend_instances
             .get(&identity.backend_instance)
-            .is_some_and(|instance| !instance.enabled)
+            .is_some_and(|instance| !instance.enabled())
     {
         return Ok(Some(SkippedBackend {
             backend_instance: Some(identity.backend_instance.clone()),

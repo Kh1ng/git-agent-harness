@@ -782,7 +782,15 @@ function BackendInstancesCard({ profileName, effective }: { profileName: string;
                 <span className="text-muted"> · {instance.logical_backend}</span>
                 {!instance.enabled && <span className="ml-2 text-critical">disabled</span>}
               </p>
-              {!instance.executable_configured && <p className="text-xs text-critical">No executable binding configured.</p>}
+              {instance.executable_resolved === false && (
+                <p className="text-xs text-critical">{instance.resolution_error ?? 'Executable is not resolved.'}</p>
+              )}
+              {instance.executable_resolved !== false && !instance.executable_configured && (
+                <p className="text-xs text-critical">No executable resolution policy configured.</p>
+              )}
+              {instance.config_source && (
+                <p className="text-xs text-muted">Source: {instance.config_source.replace('_', ' ')}</p>
+              )}
             </div>
             <button
               type="button"

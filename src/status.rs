@@ -136,15 +136,8 @@ pub struct StatusSnapshot {
     pub open_managed_mr_count: u32,
     pub inflight_implementation_count: u32,
     pub implementation_intake_paused: bool,
-    /// TICKET-157: per-backend "configured for this profile" signal. Keyed
-    /// by logical backend name. `true` means the backend has a real Rust
-    /// implementation AND is set up for the active profile (an explicit
-    /// path or profile marker is configured). This lets Settings distinguish
-    /// "implemented but not set up for this profile" from "implemented and
-    /// ready" rather than conflating "not explicitly marked unavailable" with
-    /// "available". Backends with no implementation (e.g. grok/cursor) are
-    /// simply absent from this map and should be reported as not_implemented
-    /// by the frontend.
+    /// Compatibility projection keyed by logical backend name. `true` means
+    /// the executable resolves with the same resolver dispatch uses.
     pub backend_configured: std::collections::HashMap<String, bool>,
     /// Effective provider-neutral instance identities. Runtime paths and
     /// credential values are deliberately excluded from this projection.
@@ -847,11 +840,29 @@ fn build_snapshot_inner(
     let mut backend_configured: std::collections::HashMap<String, bool> =
         std::collections::HashMap::new();
     for backend in implemented_backends {
-        let configured = profile.is_backend_configured_with_defaults(&cfg.defaults, backend);
+        let configured = crate::runner::backend_available_for_profile(profile, backend);
         backend_configured.insert(backend.to_string(), configured);
     }
     let effective_routing = profile.effective_routing(&cfg.defaults);
-    let backend_instances = crate::config_show::backend_instance_summaries(&effective_routing);
+    let mut backend_instances =
+        crate::config_show::backend_instance_summaries(&cfg.defaults, profile);
+    for instance in &mut backend_instances {
+        if instance.eligible.is_none() {
+            let observations: Vec<_> = availability_list
+                .iter()
+                .filter(|scope| {
+                    scope.backend_instance.as_deref() == Some(instance.backend_instance.as_str())
+                })
+                .collect();
+            if !observations.is_empty() {
+                instance.eligible = Some(observations.iter().any(|scope| scope.eligible_now));
+                instance.observed_at = observations
+                    .iter()
+                    .filter_map(|scope| scope.observed_at.clone())
+                    .max();
+            }
+        }
+    }
 
     // Issue #966: read-only projection -- bound resolution plus the latest
     // stored self-report per instance, never a live backend query. `gah
@@ -915,7 +926,10 @@ fn build_snapshot_inner(
         .collect();
 
     for instance in effective_routing.backend_instances.into_values() {
-        let configured = instance.executable.is_some();
+        let configured = matches!(
+            crate::runner::resolve_backend_instance_executable(&instance),
+            crate::runner::ExecutableResolution::Found(_)
+        );
         let backend = instance
             .logical_backend
             .unwrap_or_else(|| instance.runner_kind.clone());

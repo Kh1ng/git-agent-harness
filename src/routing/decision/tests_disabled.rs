@@ -18,7 +18,7 @@ fn candidate_list_skips_disabled_instances_with_typed_reason() {
             runner_kind: "codex".into(),
             logical_backend: Some("codex".into()),
             executable: Some("/bin/sh".into()),
-            enabled: false,
+            enabled: Some(false),
             ..Default::default()
         },
     );

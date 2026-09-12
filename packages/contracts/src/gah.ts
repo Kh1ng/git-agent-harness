@@ -418,11 +418,8 @@ export interface StatusSnapshot {
   open_managed_mr_count: number;
   inflight_implementation_count: number;
   implementation_intake_paused: boolean;
-  /** TICKET-157: per-backend "configured for this profile" signal, keyed by
-   * logical backend name. Only backends with a real Rust implementation are
-   * present. A `true` value means the backend is set up for the active
-   * profile (explicit path or profile marker). Backends with no
-   * implementation are absent and must be shown as not_implemented. */
+  /** Compatibility projection keyed by logical backend name. A `true` value
+   * means the executable resolves through the same resolver dispatch uses. */
   backend_configured: Record<string, boolean>;
   /** Effective normalized instance identities. Optional while schema-v1
    * clients may still be connected to an older CLI. */
@@ -885,6 +882,8 @@ export interface RoutingCandidateSummary {
 export interface BackendInstanceSummary {
   backend_instance: string;
   runner_kind: string;
+  /** Present in the effective canonical/profile environment. */
+  declared?: boolean;
   /** Issue #822: disabled instances stay declared but routing skips them. */
   enabled: boolean;
   logical_backend: string;
@@ -893,6 +892,15 @@ export interface BackendInstanceSummary {
   quota_pool: string | null;
   supported_models: string[];
   executable_configured: boolean;
+  /** Actual resolver result; optional while older schema-v1 nodes remain connected. */
+  executable_resolved?: boolean;
+  resolution_source?: 'explicit_path' | 'path' | 'wrapper' | 'remote_node' | 'unresolved';
+  resolution_error?: string | null;
+  config_source?: 'canonical_environment' | 'profile_override';
+  auth_ready?: boolean | null;
+  healthy?: boolean | null;
+  observed_at?: string | null;
+  eligible?: boolean | null;
   isolated_state_configured: boolean;
 }
 

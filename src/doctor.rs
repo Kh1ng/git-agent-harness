@@ -169,12 +169,32 @@ fn check_profile(defaults: &Defaults, profile: &Profile) -> bool {
 fn check_backend_instance_config(defaults: &Defaults, profile: &Profile) -> bool {
     match config::check_profile_backend_instances(defaults, profile) {
         Ok(()) => {
-            let count = profile.effective_routing(defaults).backend_instances.len();
+            let summaries = crate::config_show::backend_instance_summaries(defaults, profile);
+            let count = summaries.len();
             print_check(
                 CheckStatus::Pass,
                 "backend instances",
                 &format!("{count} normalized instance declaration(s) valid"),
             );
+            for instance in summaries {
+                let status = if instance.executable_resolved {
+                    CheckStatus::Pass
+                } else if instance.enabled {
+                    CheckStatus::Fail
+                } else {
+                    CheckStatus::Warn
+                };
+                print_check(
+                    status,
+                    "backend instance executable",
+                    &format!(
+                        "{}: {} ({})",
+                        instance.backend_instance,
+                        instance.resolution_error.as_deref().unwrap_or("resolved"),
+                        instance.resolution_source
+                    ),
+                );
+            }
             true
         }
         Err(errors) => {
