@@ -27,6 +27,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
+import { runConfigShowProfile } from '../gahCli.js';
 import type { ManagerAdapter, ManagerCommandInfo, ManagerModelInfo, ManagerReasoningEffortInfo } from './registry.js';
 
 export type { ManagerCommandInfo, ManagerModelInfo };
@@ -70,6 +71,9 @@ export interface HeadlessBackendSpec {
   /** Encode this turn's full prompt (history already replayed in) for the
    * backend's stdin channel. */
   encodeStdin: (prompt: string) => string;
+  /** Extra environment resolved for this GAH profile. Secret values stay in
+   * the server process and child environment; they never enter argv or API responses. */
+  spawnEnv?: (gahProfile: string) => Promise<Record<string, string>>;
   /** Extract the reply text from a finished process, or throw a
    * descriptive error. Default: trimmed stdout on exit 0, else an error
    * built from stderr. */
@@ -150,7 +154,7 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
         });
         const child = spawn(args[0], args.slice(1), {
           cwd,
-          env: { ...process.env },
+          env: { ...process.env, ...await spec.spawnEnv?.(input.profile ?? gahProfile) },
           stdio: ['pipe', 'pipe', 'pipe']
         });
         state.child = child;
@@ -368,6 +372,100 @@ export function vibeBackendSpec(overrides: { resolveInterpreter?: () => string }
     encodeStdin: (prompt) => prompt,
     decodeToolRequest: decodeVibeToolRequest
   };
+}
+
+async function resolveOpenhandsEnv(gahProfile: string): Promise<Record<string, string>> {
+  const { oh_profile: profile } = await runConfigShowProfile(gahProfile);
+  if (!profile) return {};
+  if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(profile)) {
+    throw new Error(`Invalid OpenHands profile name "${profile}".`);
+  }
+  const profilePath = path.join(process.env.HOME ?? '/root', '.openhands', 'profiles', `${profile}.json`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(profilePath, 'utf8'));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not load OpenHands profile "${profile}": ${detail}`);
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error(`OpenHands profile "${profile}" is not a JSON object.`);
+  }
+  const value = parsed as Record<string, unknown>;
+  const required = (key: 'base_url' | 'api_key' | 'model'): string => {
+    const field = value[key];
+    if (typeof field !== 'string' || field.length === 0) {
+      throw new Error(`OpenHands profile "${profile}" is missing ${key}.`);
+    }
+    return field;
+  };
+  return {
+    LLM_BASE_URL: process.env.LLM_BASE_URL ?? required('base_url'),
+    LLM_API_KEY: process.env.LLM_API_KEY ?? required('api_key'),
+    LLM_MODEL: process.env.LLM_MODEL ?? required('model'),
+    OPENHANDS_SUPPRESS_BANNER: '1'
+  };
+}
+
+/** OpenHands accepts a task file but not a raw stdin task. `/dev/stdin`
+ * keeps the replayed transcript off argv while satisfying its headless CLI. */
+export function openhandsBackendSpec(
+  overrides: { resolveEnv?: (gahProfile: string) => Promise<Record<string, string>> } = {}
+): HeadlessBackendSpec {
+  return {
+    id: 'openhands',
+    displayName: 'OpenHands',
+    turnArgs: () => [
+      'openhands',
+      '--headless',
+      '--json',
+      '--file',
+      '/dev/stdin',
+      '--exit-without-confirmation',
+      '--always-approve',
+      '--override-with-envs'
+    ],
+    encodeStdin: (prompt) => prompt,
+    spawnEnv: overrides.resolveEnv ?? resolveOpenhandsEnv,
+    parseReply: parseOpenhandsReply
+  };
+}
+
+function textParts(value: unknown): string | null {
+  if (typeof value === 'string') return value;
+  if (!Array.isArray(value)) return null;
+  const parts = value
+    .filter((part): part is { type: string; text: string } =>
+      Boolean(part) && typeof part === 'object' && (part as { type?: unknown }).type === 'text' && typeof (part as { text?: unknown }).text === 'string')
+    .map((part) => part.text);
+  return parts.length > 0 ? parts.join('\n') : null;
+}
+
+/** Extract only the final agent message from OpenHands JSONL. */
+export function parseOpenhandsReply(result: HeadlessProcessResult): string {
+  if (result.exitCode !== 0) return defaultParseReply('OpenHands')(result);
+  let reply: string | null = null;
+  for (const line of result.stdout.split('\n')) {
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (event.source === 'agent' && event.action && typeof event.action === 'object') {
+      const message = (event.action as { message?: unknown }).message;
+      if (event.tool_name === 'finish' && typeof message === 'string') reply = message;
+    }
+    if (event.source === 'agent' && event.llm_message && typeof event.llm_message === 'object') {
+      reply = textParts((event.llm_message as { content?: unknown }).content) ?? reply;
+    }
+    const role = event.role ?? (event.message as { role?: unknown } | undefined)?.role;
+    if (role === 'assistant') {
+      reply = textParts(event.content ?? (event.message as { content?: unknown } | undefined)?.content) ?? reply;
+    }
+  }
+  if (!reply?.trim()) throw new Error('OpenHands turn produced no assistant reply.');
+  return reply.trim();
 }
 
 /** Bounded servicing budget per turn (#1041): every decoded request costs

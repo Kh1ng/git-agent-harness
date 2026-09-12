@@ -134,7 +134,7 @@ export function createWorkerChatRouter(deps: {
       res.once('close', disconnect);
       try {
         const run = Promise.resolve().then(() => adapter.runTurn(key, {
-          prompt: body.prompt, history: body.history, cwd, model: settings.model, reasoningEffort: settings.reasoningEffort,
+          prompt: body.prompt, history: body.history, profile: body.profile, cwd, model: settings.model, reasoningEffort: settings.reasoningEffort,
           onChunk: text => emit({ type: 'chunk', text }),
           onToolResult: (name, text) => emit({ type: 'toolResult', name, text }),
           onToolCall: tool => emit({ type: 'toolCall', tool }),

@@ -2,7 +2,7 @@
  * Manager backend registry for the manager-chat MVP.
  *
  * Hermes and OpenCode speak ACP natively; Codex and Claude use their
- * official ACP bridge packages. Vibe and AGY use the headless adapter,
+ * official ACP bridge packages. Vibe, AGY, and OpenHands use the headless adapter,
  * which preserves transcript replay; AGY also advertises its CLI-native
  * model and reasoning-effort options.
  */
@@ -17,7 +17,7 @@ import {
   type ManagerModelInfo,
   type ManagerReasoningEffortInfo
 } from './acpAdapter.js';
-import { createHeadlessBackend, vibeBackendSpec, agyBackendSpec } from './headlessAdapter.js';
+import { createHeadlessBackend, vibeBackendSpec, agyBackendSpec, openhandsBackendSpec } from './headlessAdapter.js';
 import type { ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 
 export type { ManagerCommandInfo, ManagerModelInfo, ManagerReasoningEffortInfo };
@@ -34,6 +34,8 @@ export interface ManagerAdapter extends ManagerBackendInfo {
     input: {
       prompt: string;
       history: ChatTranscriptTurn[];
+      /** GAH config profile, separate from the adapter's composite conversation key. */
+      profile?: string;
       onChunk: (text: string) => void;
       onToolResult: (name: string, text: string) => void;
       /** Session working directory (WP2); omitted = the server's cwd. */
@@ -132,7 +134,8 @@ const REGISTRY: Record<string, ManagerAdapter> = {
   claude: acpManagerAdapter('claude', 'Claude', claudeSpawnSpec),
   opencode: acpManagerAdapter('opencode', 'OpenCode', opencodeSpawnSpec),
   vibe: { ...createHeadlessBackend(vibeBackendSpec()) } as ManagerAdapter,
-  agy: { ...createHeadlessBackend(agyBackendSpec()) } as ManagerAdapter
+  agy: { ...createHeadlessBackend(agyBackendSpec()) } as ManagerAdapter,
+  openhands: { ...createHeadlessBackend(openhandsBackendSpec()) } as ManagerAdapter
 };
 
 export const DEFAULT_BACKEND_ID = 'hermes';

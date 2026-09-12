@@ -951,6 +951,8 @@ export interface NotificationSummary {
  * for the requested profile. */
 export interface ConfigProfileSummary {
   profile: string;
+  /** Named OpenHands credential profile; credential values are never returned. */
+  oh_profile?: string | null;
   /** Effective delivery behavior for completed work. */
   delivery_mode: 'pr' | 'handoff';
   merge_policy: string;

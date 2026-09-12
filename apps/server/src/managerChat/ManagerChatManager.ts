@@ -628,6 +628,7 @@ export async function runTurn(
         const r = await adapter.runTurn(context.key, {
           prompt: attemptPrompt,
           history,
+          profile,
           onChunk,
           onToolResult,
           cwd: context.cwd,

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execPath } from 'node:process';
 import type { ChatTranscriptTurn } from '@git-agent-harness/contracts';
-import { agyBackendSpec, createHeadlessBackend, decodeVibeToolRequest, vibeBackendSpec, type HeadlessBackendSpec } from './headlessAdapter.js';
+import { agyBackendSpec, createHeadlessBackend, decodeVibeToolRequest, openhandsBackendSpec, parseOpenhandsReply, vibeBackendSpec, type HeadlessBackendSpec } from './headlessAdapter.js';
 
 /** A fake one-shot CLI: echoes its cwd marker file's content so the test
  * proves the turn ran in the session cwd, and echoes the prompt tail. The
@@ -227,6 +227,52 @@ test('Vibe argv is fixed and content-free regardless of prompt; the prompt trave
   assert.equal(args.length, 3, 'interpreter, -c, and one fixed bridge script — nothing else');
   assert.match(args[2], /sys\.argv/, 'the bridge sets sys.argv in-process rather than relying on exec argv');
   assert.equal(spec.encodeStdin('anything, arbitrarily large'), 'anything, arbitrarily large');
+});
+
+test('OpenHands reads the replayed prompt from /dev/stdin and receives profile credentials only through env', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-headless-openhands-'));
+  const originalPath = process.env.PATH;
+  try {
+    const record = join(dir, 'record.json');
+    writeFileSync(join(dir, 'openhands'), `#!/bin/sh
+node -e 'const fs=require("fs"); fs.writeFileSync(process.argv[1], JSON.stringify({argv:process.argv.slice(2), stdin:fs.readFileSync(0,"utf8"), model:process.env.LLM_MODEL, key:process.env.LLM_API_KEY}))' "${record}" "$@"
+echo '{"source":"agent","kind":"MessageEvent","llm_message":{"content":[{"type":"text","text":"openhands reply"}]}}'
+`, { mode: 0o755 });
+    process.env.PATH = `${dir}:${originalPath}`;
+    const backend = createHeadlessBackend(openhandsBackendSpec({
+      resolveEnv: async () => ({ LLM_MODEL: 'profile-model', LLM_API_KEY: 'profile-key', LLM_BASE_URL: 'http://profile' })
+    }));
+    const result = await backend.runTurn('repo#openhands', {
+      prompt: 'new question',
+      history: [{ role: 'user', text: 'old question', timestamp: 1 }],
+      onChunk: () => {},
+      onToolResult: () => {}
+    });
+    const captured = JSON.parse(readFileSync(record, 'utf8')) as { argv: string[]; stdin: string; model: string; key: string };
+    assert.equal(result.reply, 'openhands reply');
+    assert.deepEqual(captured.argv, openhandsBackendSpec().turnArgs().slice(1));
+    assert.match(captured.stdin, /old question/);
+    assert.match(captured.stdin, /new question/);
+    assert.equal(captured.model, 'profile-model');
+    assert.equal(captured.key, 'profile-key');
+    assert.ok(!captured.argv.join(' ').includes('question'));
+  } finally {
+    process.env.PATH = originalPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('OpenHands JSONL parser accepts finish actions and rejects tool-only output', () => {
+  assert.equal(parseOpenhandsReply({
+    stdout: '{"source":"agent","tool_name":"finish","action":{"message":"finished"}}\n',
+    stderr: '',
+    exitCode: 0
+  }), 'finished');
+  assert.throws(() => parseOpenhandsReply({
+    stdout: '{"source":"tool","content":"secret tool output"}\n',
+    stderr: '',
+    exitCode: 0
+  }), /no assistant reply/);
 });
 
 test('Vibe has no model/effort flag, so a session pin is silently ignored rather than threaded through (#1032 reopened)', () => {

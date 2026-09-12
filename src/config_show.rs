@@ -141,6 +141,9 @@ pub struct PmOrchestrationSummary {
 #[derive(serde::Serialize)]
 pub struct ConfigProfileSummary {
     pub profile: String,
+    /// Named OpenHands credential profile. The profile name is safe to expose;
+    /// its API key remains in ~/.openhands/profiles and is never serialized.
+    pub oh_profile: Option<String>,
     pub delivery_mode: String,
     pub merge_policy: String,
     pub max_fix_attempts_per_mr: u32,
@@ -329,6 +332,7 @@ fn build_profile_summary(
 
     Ok(ConfigProfileSummary {
         profile: profile_name.to_string(),
+        oh_profile: profile.oh_profile.clone(),
         delivery_mode: profile.delivery_mode.as_str().to_string(),
         merge_policy: routing
             .merge_policy
