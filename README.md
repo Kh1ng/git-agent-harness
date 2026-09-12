@@ -98,10 +98,9 @@ installer reuses the host from `registry_central_url`; a machine with no
 central config must use the Settings **Reveal setup command** or provide the
 URL explicitly. See `docs/OPERATIONS.md` for the gateway setup details.
 
-The control-plane server binds `0.0.0.0:3773` by default. To bind a single
-interface instead (recommended, since the server's mutation routes have no
-authentication yet — see issue #532), set `GAH_SERVER_HOST` before first
-install:
+On a fresh Linux central install, the control-plane server binds its Tailscale
+IPv4 address when one is available. Otherwise, it binds `127.0.0.1`. Override
+that choice before first install with `GAH_SERVER_HOST`:
 
 ```bash
 GAH_SERVER_HOST=127.0.0.1 scripts/install.sh
@@ -113,6 +112,14 @@ the bind address without touching the installed unit; reinstalls and `gah
 update --restart-server` never overwrite an existing `/etc/gah/server.env`.
 See `docs/OPERATIONS.md` for details, including the startup warning emitted
 whenever the server binds a non-loopback address.
+
+For the preferred tailnet setup, enable MagicDNS, name the central node
+`hermesagent`, and put Tailscale Serve in front of a loopback-bound server.
+Use the full `https://hermesagent.<tailnet-name>.ts.net` address; Tailscale
+does not issue certificates for the bare MagicDNS name. Direct HTTP to the
+detected tailnet address is an explicit compatibility mode: it requires
+`GAH_ALLOW_INSECURE_HTTP=1` and still requires a bearer token or paired-device
+credential. See [Tailscale names and HTTPS](docs/OPERATIONS.md#tailscale-names-and-https-issue-943).
 
 For every deployed upgrade, use the installed CLI to update the checkout,
 replace the executable selected by `PATH`, rebuild the server, and restart the

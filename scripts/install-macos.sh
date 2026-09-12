@@ -39,6 +39,12 @@ cd "$repo_root"
 bash "$repo_root/scripts/configure-node-role.sh" worker cargo run --bin gah --
 cargo run --bin gah -- update --repo "$repo_root" --role worker
 
+if command -v tailscale >/dev/null 2>&1; then
+  tailscale set --accept-dns=true
+else
+  echo 'WARNING: Tailscale is not installed; join the tailnet, then enable Use Tailscale DNS settings.' >&2
+fi
+
 gateway_env_file="$HOME/.config/gah/gah-loop.env"
 
 echo "GAH installed. Update with: gah update --repo $repo_root --role worker"

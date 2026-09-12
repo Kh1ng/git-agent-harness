@@ -1248,3 +1248,66 @@ fn install_linux_defaults_gateway_url_to_central_host() {
 
     fs::remove_dir_all(&tmp).ok();
 }
+
+#[test]
+fn install_linux_prefers_the_tailnet_bind_host() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script_path = "scripts/install-linux.sh";
+    let script = fs::read_to_string(repo_root.join(script_path)).unwrap();
+    let block = extract_marked_block(&script, "server-host-default", script_path);
+    let tmp = std::env::temp_dir().join(format!("gah-src-test-bind-{}", std::process::id()));
+    fs::create_dir_all(&tmp).unwrap();
+    let fake_gah = tmp.join("gah");
+    fs::write(
+        &fake_gah,
+        "#!/bin/sh\n[ \"$1\" = tailscale-ip ] && echo 100.118.97.79\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_gah, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let run = |host: Option<&str>, path: &Path| {
+        let host = host
+            .map(|value| format!("GAH_SERVER_HOST={value}"))
+            .unwrap_or_else(|| "unset GAH_SERVER_HOST".to_string());
+        Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "PATH={}:{}\n{host}\n{block}\nprintf '%s' \"$server_host\"",
+                path.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ))
+            .output()
+            .unwrap()
+    };
+
+    assert_eq!(
+        String::from_utf8_lossy(&run(None, &tmp).stdout),
+        "100.118.97.79"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run(Some("10.0.0.5"), &tmp).stdout),
+        "10.0.0.5"
+    );
+    let empty = tmp.join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    let unavailable_gah = empty.join("gah");
+    fs::write(&unavailable_gah, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&unavailable_gah, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&run(None, &empty).stdout),
+        "127.0.0.1"
+    );
+    fs::remove_dir_all(tmp).unwrap();
+}
+
+#[test]
+fn installers_enable_tailscale_dns_when_available() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for script_path in ["scripts/install-linux.sh", "scripts/install-macos.sh"] {
+        let script = fs::read_to_string(repo_root.join(script_path)).unwrap();
+        assert!(
+            script.contains("tailscale set --accept-dns=true"),
+            "{script_path} must enable the per-device MagicDNS preference"
+        );
+    }
+}

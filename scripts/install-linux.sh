@@ -29,22 +29,33 @@ esac
 bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --bin gah --
 cargo run --bin gah -- update --repo "$repo_root" --role "$role"
 
+# MagicDNS is useful only when this client accepts the tailnet DNS settings.
+# The tailnet-wide toggle still belongs to the Tailscale admin console.
+if command -v tailscale >/dev/null 2>&1; then
+  sudo tailscale set --accept-dns=true
+else
+  echo 'WARNING: Tailscale is not installed; join the tailnet, then run tailscale set --accept-dns=true.' >&2
+fi
+
 # Persistent server bind-host override (issue #643). Created only on first
 # install; every later run of this script, and every `gah update
 # --restart-server`, leaves an existing file untouched so an operator's HOST
-# choice survives reinstall/update. Set GAH_SERVER_HOST=127.0.0.1 (or another
-# interface address) before running this script on first install to seed it;
-# 0.0.0.0 remains the application default when unset.
+# choice survives reinstall/update. Set GAH_SERVER_HOST to override the fresh-
+# install default: this node's tailnet IPv4 when available, otherwise loopback.
 server_env_file=/etc/gah/server.env
 if [ "$role" = "central" ]; then
   if [ ! -f "$server_env_file" ]; then
     sudo install -d -m 0755 /etc/gah
-    if [ -n "${GAH_SERVER_HOST:-}" ]; then
-      printf 'HOST=%s\n' "$GAH_SERVER_HOST" | sudo tee "$server_env_file" >/dev/null
-      sudo chmod 0644 "$server_env_file"
-    else
-      sudo install -m 0644 /dev/null "$server_env_file"
+    # server-host-default:start -- exercised without sudo/file writes by
+    # tests/source_structure.rs::install_linux_prefers_the_tailnet_bind_host.
+    server_host="${GAH_SERVER_HOST:-}"
+    if [ -z "$server_host" ]; then
+      server_host="$(gah tailscale-ip 2>/dev/null || true)"
+      if [ -z "$server_host" ]; then server_host=127.0.0.1; fi
     fi
+    # server-host-default:end
+    printf 'HOST=%s\n' "$server_host" | sudo tee "$server_env_file" >/dev/null
+    sudo chmod 0644 "$server_env_file"
     echo "Created $server_env_file (set HOST= there to change the bind address without editing the unit)"
   else
     echo "Preserving existing $server_env_file"

@@ -109,14 +109,11 @@ of the prebuild gate issue.
 
 - **`gah-server`** — runs `apps/server/dist/bin.js`, the REST/WebSocket
   control-plane server backing the desktop/web dashboard (see "Server bind
-  host" below for `HOST`/port configuration). Its mutation routes (profile
-  writes, config changes, loop start/stop) have no app-level authentication
-  yet — that's issue #532. Until it ships, network-layer access control
-  (loopback bind, Tailscale, Cloudflare Access) is the only auth boundary;
-  keep the bind host loopback or restricted to a private interface unless
-  you've deployed one of those in front of it. The server logs its effective
-  bind address at startup and emits a warning there when it is bound
-  non-loopback.
+  host" below for `HOST`/port configuration). Remote REST and WebSocket access
+  requires the coordinator bearer token or a paired-device credential. Remote
+  transport also requires TLS unless the operator explicitly sets
+  `GAH_ALLOW_INSECURE_HTTP=1`. The server logs its effective bind address and
+  this transport requirement at startup when it is bound non-loopback.
 - **`gah-loop@<profile>`** — the recurring bounded controller. Each iteration
   is one observe → classify → decide → execute-one-action → persist cycle.
   It is a systemd *user* unit, and is the sole parent of that profile's worker
@@ -174,7 +171,9 @@ sudo systemctl enable --now gah-server
 #### Server bind host (issue #643)
 
 `apps/server` (the process this unit starts) defaults `HOST` to `0.0.0.0` and
-`PORT` to `3773`. Two ways to override, in increasing order of durability:
+`PORT` to `3773` when run directly. A fresh Linux central install writes a
+safer persistent host: its tailnet IPv4 when available, otherwise
+`127.0.0.1`. Two ways to override, in increasing order of durability:
 
 - **Direct process override**: set `HOST` in the process environment (for
   example when running `npm start` by hand). An unusable value (not a literal
@@ -190,13 +189,50 @@ sudo systemctl enable --now gah-server
   it either, so an operator's override survives every reinstall/update.
 
 The server logs its effective bind address on every startup. When that
-address is not loopback, it also logs a prominent warning: the mutation
-routes (profile writes, config changes, loop start/stop) have no
-authentication yet (issue #532), so anything that can reach a non-loopback
-bind can call them. This is not new exposure — `0.0.0.0` has always been the
-default — the warning just makes it visible instead of silent. Prefer binding
-loopback and fronting the dashboard with Tailscale/Cloudflare Access (or
-whatever your network boundary is) until #532 ships.
+address is not loopback, it also logs a prominent warning. Remote API access
+requires `COORDINATOR_TOKEN` or a paired-device credential. Plain HTTP is
+rejected unless `GAH_ALLOW_INSECURE_HTTP=1` explicitly permits it; that flag
+does not disable authentication. Prefer loopback plus an HTTPS proxy.
+
+#### Tailscale names and HTTPS (issue #943)
+
+Enable MagicDNS and HTTPS on the tailnet. Then configure the central Linux
+node and each CLI-capable client:
+
+```bash
+sudo tailscale set --hostname=hermesagent
+sudo tailscale set --accept-dns=true
+```
+
+On macOS or iOS, also confirm **Use Tailscale DNS settings** in the Tailscale
+app. Test the system resolver with `ping hermesagent`, a browser, or
+`tailscale dns query hermesagent`; `host` and `nslookup` can bypass the macOS
+system resolver.
+
+The preferred HTTPS setup keeps GAH on loopback and uses Tailscale Serve:
+
+```bash
+GAH_SERVER_HOST=127.0.0.1 scripts/install.sh
+sudo tailscale serve --bg --https=443 http://127.0.0.1:3773
+tailscale serve status
+```
+
+Use `https://hermesagent.<tailnet-name>.ts.net` for
+`registry_central_url`, pairing, and the second-node setup command. HTTPS
+certificates do not cover the bare `hermesagent` name. Enabling Tailscale
+HTTPS publishes the machine and tailnet DNS names in Certificate Transparency
+logs, although tailnet access rules still restrict the service.
+
+For the direct HTTP MVP, keep the installer's detected `HOST=100.x.y.z`, add
+`GAH_ALLOW_INSECURE_HTTP=1` to `/etc/gah/server.env`, and restart
+`gah-server`. Use `http://hermesagent:3773` or the tailnet IP. This mode still
+requires the coordinator bearer token or a paired-device credential.
+
+An existing Caddy deployment can instead serve the full `*.ts.net` name with
+a certificate from `tailscaled`. A bare-name `tls internal` setup requires
+installing Caddy's root CA on every client, including explicit full trust on
+iOS, so it is not the default. Do not use on-demand issuance for one fixed
+name. See [the source-backed comparison](TAILSCALE_HTTPS_RESEARCH_2026-09-12.md).
 
 `gah-server` (and hence the dashboard's Start/Stop buttons) drives `systemctl
 --user` for the loop, which requires that user's systemd *user* manager to be
