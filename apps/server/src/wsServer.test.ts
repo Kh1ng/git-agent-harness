@@ -11,7 +11,8 @@ import { RegistryService } from './registryService.js';
 import { COORDINATOR_SCHEMA_DIGEST, getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { createWebSocketHandler } from './wsServer.js';
 import { createAuthorizedWebSocketServer } from './webSocketAuth.js';
-import type { NodeRoleStatus, ServerMessage } from '@git-agent-harness/contracts';
+import type { ControllerEvent, NodeRoleStatus, ServerMessage } from '@git-agent-harness/contracts';
+import { ActivityFeed, activityFromController } from './activityFeed.js';
 
 // Hermetic: welcome is pushed only after gahCli.runStatus() spawns a real
 // `gah status` child. A cold call of the repo's release binary takes ~21s
@@ -197,6 +198,51 @@ test('registry changes push only an invalidation over the existing websocket', a
     await new Promise<void>((resolve) => wss.close(() => resolve()));
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(dir, { recursive: true });
+  }
+});
+
+test('activity reconnect replays only events after the client cursor', async () => {
+  const server = http.createServer();
+  const wss = new WebSocketServer({ server });
+  const events: ControllerEvent[] = [{
+    timestamp: '2026-09-12T12:00:00.000Z', event_type: 'dispatch_finished', profile: 'gah',
+    work_id: '#941', details: 'dispatch_ticket: success'
+  }];
+  createWebSocketHandler(wss, {
+    activityFeed: new ActivityFeed(null),
+    runEvents: async () => events
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `ws://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const connect = async (cursor?: string) => {
+    const ws = new WebSocket(url);
+    await new Promise<void>((resolve) => ws.once('open', resolve));
+    const replay = new Promise<Extract<ServerMessage, { type: 'activity.replay' }>>((resolve) => {
+      ws.on('message', (bytes) => {
+        const message = JSON.parse(bytes.toString()) as ServerMessage;
+        if (message.type === 'activity.replay') resolve(message);
+      });
+    });
+    ws.send(JSON.stringify({ type: 'client.hello', clientVersion: 'test', profile: 'gah', activityCursor: cursor, capabilities: {} }));
+    return { ws, replay: await replay };
+  };
+  try {
+    const first = await connect();
+    assert.equal(first.replay.events[0]?.kind, 'dispatch_completed');
+    const cursor = activityFromController(events[0])!.id;
+    first.ws.close();
+    await new Promise<void>((resolve) => first.ws.once('close', resolve));
+    events.push({
+      timestamp: '2026-09-12T12:01:00.000Z', event_type: 'dispatch_finished', profile: 'gah',
+      work_id: '#942', details: 'review_mr: success'
+    });
+    const second = await connect(cursor);
+    assert.deepEqual(second.replay.events.map((event) => event.kind), ['review_ready']);
+    second.ws.close();
+  } finally {
+    for (const socket of wss.clients) socket.terminate();
+    await new Promise<void>((resolve) => wss.close(() => resolve()));
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
 

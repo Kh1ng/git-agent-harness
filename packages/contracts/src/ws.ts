@@ -41,6 +41,29 @@ export type DispatchLeaseState =
   | "expired"
   | "uncertain_reconciling";
 
+export type ActivityKind =
+  | "dispatch_completed"
+  | "dispatch_failed"
+  | "review_ready"
+  | "node_offline"
+  | "node_back"
+  | "quota_near_limit"
+  | "gateway_down"
+  | "action_required";
+
+/** Durable, de-duplicated operator event shared by web, desktop, and mobile. */
+export interface ActivityEvent {
+  id: string;
+  occurredAt: string;
+  profile: string | null;
+  kind: ActivityKind;
+  severity: "info" | "success" | "warning" | "error";
+  title: string;
+  message: string;
+  workId?: string | null;
+  nodeId?: string | null;
+}
+
 // Session type - manually defined instead of using Effect Schema
 // to avoid version compatibility issues
 export interface Session {
@@ -69,6 +92,10 @@ export interface Session {
 export type ServerMessage =
   // Invalidation only: fleet details require the authenticated REST endpoint.
   | { type: "fleet.changed" }
+
+  | { type: "activity.replay"; events: ActivityEvent[] }
+
+  | { type: "activity.event"; event: ActivityEvent }
 
   | {
       type: "server.welcome";
@@ -269,6 +296,8 @@ export type ClientMessage =
       type: "client.hello";
       clientVersion: string;
       profile?: string;
+      /** Last rendered durable activity id, used for reconnect replay. */
+      activityCursor?: string;
       capabilities: ClientCapabilities;
     }
   | {

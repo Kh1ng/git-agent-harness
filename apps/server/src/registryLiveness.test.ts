@@ -93,7 +93,6 @@ test('a normally-responsive node never alerts across many checks', async () => {
     transport_mode: 'loopback',
     secret_ref: 'env:UNUSED'
   });
-
   const alertLog = join(mkdtempSync(join(tmpdir(), 'gah-alert-test-')), 'alerts.log');
   const originalCommand = process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND;
   process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND = `cat >> ${alertLog}`;
@@ -139,6 +138,8 @@ test('recovery resets the counter: a node that goes bad, recovers, then goes bad
     transport_mode: 'loopback',
     secret_ref: 'env:UNUSED'
   });
+  const transitions: string[] = [];
+  service.onLivenessTransition((transition) => transitions.push(transition.state));
 
   const alertLog = join(mkdtempSync(join(tmpdir(), 'gah-alert-test-')), 'alerts.log');
   const originalCommand = process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND;
@@ -151,6 +152,7 @@ test('recovery resets the counter: a node that goes bad, recovers, then goes bad
     await service.runLivenessCheck();
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(existsSync(alertLog), true, 'first outage must alert');
+    assert.deepEqual(transitions, ['offline']);
     writeFileSync(alertLog, '');
 
     // Recover: must not immediately re-alert.
@@ -158,6 +160,7 @@ test('recovery resets the counter: a node that goes bad, recovers, then goes bad
     await service.runLivenessCheck();
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(readFileSync(alertLog, 'utf8'), '', 'recovery must not itself alert');
+    assert.deepEqual(transitions, ['offline', 'back']);
 
     // Go bad again: must alert again (not permanently silenced).
     up = false;
@@ -166,6 +169,7 @@ test('recovery resets the counter: a node that goes bad, recovers, then goes bad
     await service.runLivenessCheck();
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(existsSync(alertLog), true, 'a second outage after recovery must alert again');
+    assert.deepEqual(transitions, ['offline', 'back', 'offline']);
   } finally {
     process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND = originalCommand;
     server.close();

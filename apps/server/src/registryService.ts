@@ -96,6 +96,14 @@ const LIVENESS_POLL_INTERVAL_MS = 60_000;
 const LIVENESS_ALERT_AFTER_CONSECUTIVE_BAD_CHECKS = 3;
 const LIVENESS_BAD_STATES: NodeObservationState[] = ['stale', 'unreachable', 'auth_failed', 'incompatible'];
 
+export interface NodeLivenessTransition {
+  nodeId: string;
+  displayName: string;
+  state: 'offline' | 'back';
+  occurredAt: string;
+  message: string;
+}
+
 function nowIso(ms: number = Date.now()): string {
   return new Date(ms).toISOString();
 }
@@ -305,6 +313,7 @@ export class RegistryService {
   private observationRequests = new Map<string, number>();
   private observations = new Map<string, NodeObservationSnapshot>();
   private listeners = new Set<() => void>();
+  private livenessListeners = new Set<(transition: NodeLivenessTransition) => void>();
   private configPath: string | null;
   private nodes: Map<string, RegisteredNode> = new Map();
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
@@ -373,6 +382,15 @@ export class RegistryService {
   onChange(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
+  }
+
+  onLivenessTransition(listener: (transition: NodeLivenessTransition) => void): () => void {
+    this.livenessListeners.add(listener);
+    return () => { this.livenessListeners.delete(listener); };
+  }
+
+  private livenessChanged(transition: NodeLivenessTransition): void {
+    for (const listener of this.livenessListeners) listener(transition);
   }
 
   private changed(): void {
@@ -849,17 +867,32 @@ export class RegistryService {
     for (const obs of observations) {
       const isBad = LIVENESS_BAD_STATES.includes(obs.state);
       if (!isBad) {
+        const recovered = this.alreadyAlerted.delete(obs.node_id);
         this.consecutiveBadChecks.delete(obs.node_id);
-        this.alreadyAlerted.delete(obs.node_id);
+        if (recovered) {
+          this.livenessChanged({
+            nodeId: obs.node_id,
+            displayName: obs.display_name,
+            state: 'back',
+            occurredAt: obs.observed_at,
+            message: `Node recovered and answered its liveness check at ${obs.observed_at}.`
+          });
+        }
         continue;
       }
       const count = (this.consecutiveBadChecks.get(obs.node_id) ?? 0) + 1;
       this.consecutiveBadChecks.set(obs.node_id, count);
       if (count >= LIVENESS_ALERT_AFTER_CONSECUTIVE_BAD_CHECKS && !this.alreadyAlerted.has(obs.node_id)) {
         this.alreadyAlerted.add(obs.node_id);
-        sendLivenessAlert(
-          `Node "${obs.display_name}" (${obs.node_id}) has been ${obs.state} for ${count} consecutive checks (last seen: ${obs.last_seen_at ?? 'never'}).`
-        );
+        const message = `Node "${obs.display_name}" (${obs.node_id}) has been ${obs.state} for ${count} consecutive checks (last seen: ${obs.last_seen_at ?? 'never'}).`;
+        sendLivenessAlert(message);
+        this.livenessChanged({
+          nodeId: obs.node_id,
+          displayName: obs.display_name,
+          state: 'offline',
+          occurredAt: obs.observed_at,
+          message
+        });
       }
     }
   }

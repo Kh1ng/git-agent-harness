@@ -19,13 +19,6 @@ import { gahApi, backendInstancesApi, routingCandidatesApi, GahApiError } from '
 import type { ConfigSetData, NotificationSettingsSummary } from '@git-agent-harness/contracts';
 import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, SkillSummary, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
 
-declare global {
-  interface Window {
-    /** The desktop shell exposes navigation only; local commands stay in bundled Settings. */
-    __GAH_DESKTOP_SETTINGS__?: boolean;
-  }
-}
-
 const SETTINGS_REFRESH_MS = 60 * 1000;
 const SETTINGS_SECTIONS_KEY = 'gah.settings.openSections';
 type SettingsSectionId = 'general' | 'skills' | 'memory' | 'factory';

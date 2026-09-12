@@ -16,9 +16,11 @@ import type {
   StatusError,
   RecentLedgerSummary,
   ControllerActivity,
-  DependencyBlocker
+  DependencyBlocker,
+  ActivityEvent
 } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
+import { deliverSystemNotification, mergeActivityEvents } from '../lib/activityNotifications.js';
 
 export interface SessionOutput {
   stdout: string;
@@ -60,6 +62,11 @@ type WebSocketContextType = {
   errors: StatusError[];
   recentLedger: RecentLedgerSummary | null;
   controllerActivity: ControllerActivity[];
+  activityEvents: ActivityEvent[];
+  liveActivity: ActivityEvent | null;
+  activityUnreadCount: number;
+  activitySyncedAt: number | null;
+  markActivityRead: () => void;
   /** Increments each time the socket re-establishes a connection after
    * having previously been connected (i.e. actual reconnects, not the
    * initial connect on mount). Pages use this to re-trigger a fresh REST
@@ -113,13 +120,32 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [errors, setErrors] = useState<StatusError[]>([]);
   const [recentLedger, setRecentLedger] = useState<RecentLedgerSummary | null>(null);
   const [controllerActivity, setControllerActivity] = useState<ControllerActivity[]>([]);
+  const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
+  const [liveActivity, setLiveActivity] = useState<ActivityEvent | null>(null);
+  const [activityUnreadCount, setActivityUnreadCount] = useState(0);
+  const [activitySyncedAt, setActivitySyncedAt] = useState<number | null>(null);
+  const [activityCursor, setActivityCursor] = useState<string | null>(null);
   const [reconnectSeq, setReconnectSeq] = useState(0);
   const socketRef = useRef<WebSocket | null>(null);
   const connectionCleanupRef = useRef<(() => void) | null>(null);
   const refreshOnConnectRef = useRef(false);
   const nextMessageIdRef = useRef(0);
+  const activityIdsRef = useRef(new Set<string>());
 
   const activityProfile = profileOverride ?? profile ?? 'gah';
+  const markActivityRead = useCallback(() => setActivityUnreadCount(0), []);
+  useEffect(() => {
+    activityIdsRef.current.clear();
+    setActivityEvents([]);
+    setLiveActivity(null);
+    setActivityUnreadCount(0);
+    setActivitySyncedAt(null);
+    setActivityCursor(null);
+  }, [profileOverride]);
+  useEffect(() => {
+    if (!activityCursor) return;
+    try { window.localStorage.setItem(`gah.activity.cursor.${profileOverride ?? 'gah'}`, activityCursor); } catch { /* Memory de-duplication still applies. */ }
+  }, [activityCursor, profileOverride]);
   useEffect(() => {
     let cancelled = false;
     const refreshActivity = async () => {
@@ -162,10 +188,13 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
         refreshOnConnectRef.current = true;
 
+        let activityCursor: string | undefined;
+        try { activityCursor = window.localStorage.getItem(`gah.activity.cursor.${profileOverride ?? 'gah'}`) ?? undefined; } catch { /* Replay safely falls back to the bounded tail. */ }
         newSocket.send(JSON.stringify({
           type: 'client.hello' as const,
           clientVersion: '0.1.0',
           profile: profileOverride ?? undefined,
+          activityCursor,
           capabilities: {
             supportsTerminal: true,
             supportsNotifications: true,
@@ -195,6 +224,30 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           setMessages(prev => [...prev.slice(-(MAX_INBOX_MESSAGES - 1)), entry]);
 
           switch (message.type) {
+            case 'activity.replay': {
+              setActivitySyncedAt(Date.now());
+              const fresh = message.events.filter((item) => !activityIdsRef.current.has(item.id));
+              for (const item of fresh) activityIdsRef.current.add(item.id);
+              if (fresh.length > 0) {
+                setActivityEvents((current) => mergeActivityEvents(current, fresh));
+                setActivityUnreadCount((count) => count + fresh.length);
+              }
+              const last = message.events.at(-1);
+              if (last) setActivityCursor(last.id);
+              break;
+            }
+
+            case 'activity.event':
+              if (!activityIdsRef.current.has(message.event.id)) {
+                activityIdsRef.current.add(message.event.id);
+                setActivityEvents((current) => mergeActivityEvents(current, [message.event]));
+                setActivityUnreadCount((count) => count + 1);
+                setLiveActivity(message.event);
+                setActivityCursor(message.event.id);
+                deliverSystemNotification(message.event);
+              }
+              break;
+
             case 'server.welcome':
               setServerVersion(message.serverVersion);
               setTrustedLanMode(message.trustedLanMode === true);
@@ -384,6 +437,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     errors,
     recentLedger,
     controllerActivity,
+    activityEvents,
+    liveActivity,
+    activityUnreadCount,
+    activitySyncedAt,
+    markActivityRead,
     reconnectSeq,
     sendMessage,
     reconnect,

@@ -86,4 +86,6 @@ config/coordinator-identity.json
 apps/server/config/manager-chat-settings.json
 config/manager-chat-settings.json
 config/dispatch-leases.json
+config/activity.jsonl
+apps/server/config/activity.jsonl
 **/config/mutations/

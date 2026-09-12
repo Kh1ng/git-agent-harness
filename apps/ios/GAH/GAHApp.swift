@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 import WebKit
 
 @main
@@ -8,7 +9,7 @@ struct GAHApp: App {
 
 /// The web dashboard owns authentication and work. This shell owns only navigation and its persistent web view.
 @MainActor
-final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
+final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, UNUserNotificationCenterDelegate {
     @Published var address: ServerAddress?
     @Published var error: String?
     @Published var loading = false
@@ -29,7 +30,8 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         configuration.websiteDataStore = .default()
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
-        configuration.userContentController.add(PairingRequestHandler(controller: self), name: "gahController")
+        configuration.userContentController.add(DashboardRequestHandler(controller: self), name: "gahController")
+        UNUserNotificationCenter.current().delegate = self
         webView.isHidden = true
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -58,6 +60,44 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         if security.port != 0 { origin.port = security.port }
         guard let source = origin.url, address.contains(source) else { return }
         scanning = true
+    }
+
+    func requestNotificationAccess(_ message: WKScriptMessage) {
+        guard validDashboardMessage(message),
+              let body = message.body as? [String: Any], body["type"] as? String == "requestNotifications" else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] granted, _ in
+            Task { @MainActor [weak self] in
+                self?.webView.evaluateJavaScript(
+                    "window.dispatchEvent(new CustomEvent('gah:notification-permission',{detail:{granted:\(granted)}}))"
+                )
+            }
+        }
+    }
+
+    func postActivityNotification(_ message: WKScriptMessage) {
+        guard validDashboardMessage(message), let request = activityNotificationRequest(from: message.body) else { return }
+        let content = UNMutableNotificationContent()
+        content.title = request.title
+        content.body = request.body
+        content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: request.id, content: content, trigger: nil))
+    }
+
+    private func validDashboardMessage(_ message: WKScriptMessage) -> Bool {
+        guard message.name == "gahController", message.webView === webView, message.frameInfo.isMainFrame,
+              let address, let sender = message.frameInfo.request.url, address.contains(sender),
+              let current = webView.url, address.contains(current) else { return false }
+        let security = message.frameInfo.securityOrigin
+        var origin = URLComponents()
+        origin.scheme = security.protocol
+        origin.host = security.host
+        if security.port != 0 { origin.port = security.port }
+        return origin.url.map(address.contains) == true
+    }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                             withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
     }
 
     func scannedPairing(_ value: String) {
@@ -134,11 +174,14 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
 
 /// WebKit retains handlers, so the handler must not retain the controller and its web view.
 @MainActor
-private final class PairingRequestHandler: NSObject, WKScriptMessageHandler {
+private final class DashboardRequestHandler: NSObject, WKScriptMessageHandler {
     weak var controller: Controller?
     init(controller: Controller) { self.controller = controller }
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        controller?.requestPairingScan(message)
+        if message.body as? String == "scanPairingCode" { controller?.requestPairingScan(message); return }
+        guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+        if type == "requestNotifications" { controller?.requestNotificationAccess(message) }
+        else if type == "activity" { controller?.postActivityNotification(message) }
     }
 }
 

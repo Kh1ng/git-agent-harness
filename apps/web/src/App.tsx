@@ -7,6 +7,7 @@ import { PwaStatusBars } from './components/PwaStatusBars.js';
 import { SessionDetailModal } from './components/SessionDetailModal.js';
 import type { Session } from '@git-agent-harness/contracts';
 import { readNavigation, updateNavigation, type Page } from './lib/navigationState.js';
+import { ActivityToast } from './components/ActivityToast.js';
 
 const WorkPage = lazy(() => import('./pages/WorkPage.js').then((module) => ({ default: module.WorkPage })));
 const TelemetryPage = lazy(() => import('./pages/TelemetryPage.js').then((module) => ({ default: module.TelemetryPage })));
@@ -23,7 +24,8 @@ export function App() {
   const [currentPage, setCurrentPage] = useState<Page>(() => new URLSearchParams(window.location.hash.slice(1)).has('pair') ? 'settings' : readNavigation().page);
   useEffect(() => updateNavigation({ page: currentPage }), [currentPage]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
-  const { isConnected, isConnecting, sessions } = useWebSocket();
+  const [dismissedActivityId, setDismissedActivityId] = useState<string | null>(null);
+  const { isConnected, isConnecting, sessions, liveActivity, activityUnreadCount } = useWebSocket();
 
   const renderPage = () => {
     switch (currentPage) {
@@ -59,7 +61,7 @@ export function App() {
     <div className="app-shell min-h-dvh bg-page lg:flex">
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 bg-card text-primary p-3 rounded-md">Skip to content</a>
       <PwaStatusBars />
-      <Navbar currentPage={currentPage} onPageChange={setCurrentPage} />
+      <Navbar currentPage={currentPage} onPageChange={setCurrentPage} activityUnreadCount={activityUnreadCount} />
 
       <div className="flex-1 min-w-0">
         <main id="main-content" tabIndex={-1} className="px-4 py-4 sm:px-6 sm:py-6 max-w-[1400px] mx-auto">
@@ -74,6 +76,13 @@ export function App() {
 
       {selectedSession && (
         <SessionDetailModal session={selectedSession} onClose={() => setSelectedSession(null)} />
+      )}
+      {liveActivity && liveActivity.id !== dismissedActivityId && currentPage !== 'events' && (
+        <ActivityToast
+          event={liveActivity}
+          onOpen={() => setCurrentPage('events')}
+          onDismiss={() => setDismissedActivityId(liveActivity.id)}
+        />
       )}
     </div>
   );

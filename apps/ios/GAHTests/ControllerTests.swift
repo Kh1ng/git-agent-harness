@@ -1,6 +1,15 @@
 import XCTest
 
 final class ControllerTests: XCTestCase {
+    func testActivityNotificationPayloadIsBounded() {
+        let valid: [String: Any] = ["type": "activity", "id": "event-1", "title": "Work finished", "body": "#941 passed"]
+        XCTAssertEqual(activityNotificationRequest(from: valid), ActivityNotificationRequest(id: "event-1", title: "Work finished", body: "#941 passed"))
+        XCTAssertNil(activityNotificationRequest(from: ["type": "activity", "id": "event-1", "title": "Missing body"]))
+        XCTAssertNil(activityNotificationRequest(from: ["type": "activity", "id": "bad\nid", "title": "Title", "body": "body"]))
+        XCTAssertNil(activityNotificationRequest(from: ["type": "activity", "id": "event-1", "title": "Bad\nTitle", "body": "body"]))
+        XCTAssertNil(activityNotificationRequest(from: ["type": "activity", "id": "event-1", "title": "Title", "body": String(repeating: "x", count: 501)]))
+    }
+
     func testAddressBoundaryAndSecretFreeRestoration() throws {
         for invalid in ["javascript:alert(1)", "file:///etc/passwd", "https://user:secret@example.com", "https://example.com:70000", "gah://open"] {
             XCTAssertThrowsError(try ServerAddress(invalid), invalid)

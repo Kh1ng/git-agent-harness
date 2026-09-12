@@ -17,6 +17,7 @@ import type { Page } from '../App.js';
 type NavbarProps = {
   currentPage: Page;
   onPageChange: (page: Page) => void;
+  activityUnreadCount?: number;
 };
 
 export const FRONTEND_BUILD = `v${__GAH_VERSION__} (${__GAH_COMMIT__})`;
@@ -29,11 +30,11 @@ const navItems: { id: Page; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'work', label: 'Work', icon: ListChecks },
   { id: 'telemetry', label: 'Telemetry', icon: BarChart3 },
   { id: 'quota', label: 'Quota', icon: Gauge },
-  { id: 'events', label: 'Events', icon: Radio },
+  { id: 'events', label: 'Activity', icon: Radio },
   { id: 'settings', label: 'Settings', icon: Settings }
 ];
 
-function NavLinks({ currentPage, onSelect }: { currentPage: Page; onSelect: (page: Page) => void }) {
+function NavLinks({ currentPage, onSelect, activityUnreadCount = 0 }: { currentPage: Page; onSelect: (page: Page) => void; activityUnreadCount?: number }) {
   return (
     <nav className="flex flex-col gap-0.5" aria-label="Primary">
       {navItems.map((item) => {
@@ -48,6 +49,11 @@ function NavLinks({ currentPage, onSelect }: { currentPage: Page; onSelect: (pag
           >
             <Icon size={17} aria-hidden="true" />
             {item.label}
+            {item.id === 'events' && activityUnreadCount > 0 && (
+              <span className="ml-auto min-w-5 rounded-full bg-accent px-1.5 py-0.5 text-center text-[10px] font-semibold text-page" aria-label={`${activityUnreadCount} unread`}>
+                {Math.min(activityUnreadCount, 99)}
+              </span>
+            )}
           </button>
         );
       })}
@@ -58,7 +64,7 @@ function NavLinks({ currentPage, onSelect }: { currentPage: Page; onSelect: (pag
 /** Desktop: fixed compact sidebar. Mobile (<1024px): a top bar with a
  * hamburger that opens a slide-in drawer -- never a permanently crushed
  * desktop sidebar. */
-export function Navbar({ currentPage, onPageChange }: NavbarProps) {
+export function Navbar({ currentPage, onPageChange, activityUnreadCount }: NavbarProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawer = useRef<HTMLDialogElement>(null);
 
@@ -89,7 +95,7 @@ export function Navbar({ currentPage, onPageChange }: NavbarProps) {
           <p className="text-xs text-muted mt-0.5">Control plane</p>
           <p className="text-[10px] text-muted mt-1 font-mono" data-testid="frontend-build">{FRONTEND_BUILD}</p>
         </div>
-        <NavLinks currentPage={currentPage} onSelect={handleSelect} />
+        <NavLinks currentPage={currentPage} onSelect={handleSelect} activityUnreadCount={activityUnreadCount} />
       </aside>
 
       {/* Mobile top bar */}
@@ -135,7 +141,7 @@ export function Navbar({ currentPage, onPageChange }: NavbarProps) {
             <X size={18} aria-hidden="true" />
           </button>
         </div>
-        <NavLinks currentPage={currentPage} onSelect={handleSelect} />
+        <NavLinks currentPage={currentPage} onSelect={handleSelect} activityUnreadCount={activityUnreadCount} />
       </dialog>
     </>
   );

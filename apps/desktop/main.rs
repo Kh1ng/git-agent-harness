@@ -1,6 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#[cfg(not(windows))]
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -202,6 +201,47 @@ fn can_open_settings(from: &tauri::Url, configured: &str) -> bool {
             .query_pairs()
             .find(|(key, _)| key == "page")
             .is_some_and(|(_, value)| value == "settings")
+}
+
+fn notification_payload(url: &tauri::Url) -> Option<(String, String)> {
+    if url.scheme() != "gah" || url.host_str() != Some("notify") || !matches!(url.path(), "" | "/")
+    {
+        return None;
+    }
+    let values: HashMap<_, _> = url.query_pairs().into_owned().collect();
+    let id = values.get("id")?;
+    let title = values.get("title")?;
+    let body = values.get("body")?;
+    if id.is_empty()
+        || id.len() > 128
+        || title.is_empty()
+        || title.len() > 120
+        || body.is_empty()
+        || body.len() > 500
+        || id
+            .chars()
+            .chain(title.chars())
+            .chain(body.chars())
+            .any(char::is_control)
+    {
+        return None;
+    }
+    Some((title.clone(), body.clone()))
+}
+
+fn can_bridge_notification(from: &tauri::Url, configured: &str) -> bool {
+    central_url(configured).is_ok_and(|central| from.origin() == central.origin())
+}
+
+#[cfg(target_os = "macos")]
+fn show_native_notification(title: &str, body: &str) {
+    let escape = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        escape(body),
+        escape(title)
+    );
+    let _ = command("osascript").args(["-e", &script]).status();
 }
 
 #[tauri::command]
@@ -493,7 +533,11 @@ fn main() {
             .min_inner_size(900.0, 600.0)
             // An inert UI marker; remote pages still have no IPC permissions.
             .initialization_script(
-                "if (window === window.top) window.__GAH_DESKTOP_SETTINGS__ = true;",
+                if cfg!(target_os = "macos") {
+                    "if (window === window.top) { window.__GAH_DESKTOP_SETTINGS__ = true; window.__GAH_DESKTOP_NATIVE_NOTIFICATIONS__ = true; }"
+                } else {
+                    "if (window === window.top) window.__GAH_DESKTOP_SETTINGS__ = true;"
+                },
             )
             .on_navigation(move |url| {
                 if url.as_str() == "gah://settings" || url.as_str() == "gah://settings/" {
@@ -505,6 +549,19 @@ fn main() {
                         let app = navigation_app.clone();
                         let _ = navigation_app.run_on_main_thread(move || show_settings(&app));
                     }
+                    return false;
+                }
+                if let Some((title, body)) = notification_payload(url) {
+                    let allowed = navigation_app
+                        .get_webview_window("dashboard")
+                        .and_then(|window| window.url().ok())
+                        .is_some_and(|from| can_bridge_notification(&from, &read_settings().central_url));
+                    #[cfg(target_os = "macos")]
+                    if allowed {
+                        show_native_notification(&title, &body);
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = (allowed, title, body);
                     return false;
                 }
                 is_local_settings(url) || central_url(url.as_str()).is_ok()
@@ -719,5 +776,31 @@ mod tests {
         ] {
             assert!(central_url(value).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn notification_bridge_accepts_only_bounded_payloads_from_the_configured_origin() {
+        let from: tauri::Url = "https://gah.example.test/?page=activity".parse().unwrap();
+        assert!(can_bridge_notification(&from, "https://gah.example.test"));
+        assert!(!can_bridge_notification(
+            &from,
+            "https://other.example.test"
+        ));
+        let payload: tauri::Url =
+            "gah://notify?id=event-1&title=Work%20finished&body=%23941%20passed"
+                .parse()
+                .unwrap();
+        assert_eq!(
+            notification_payload(&payload),
+            Some(("Work finished".into(), "#941 passed".into()))
+        );
+        assert!(
+            notification_payload(&"gah://notify?title=Missing&id=event-1".parse().unwrap())
+                .is_none()
+        );
+        let oversized: tauri::Url = format!("gah://notify?id=x&title=Ok&body={}", "x".repeat(501))
+            .parse()
+            .unwrap();
+        assert!(notification_payload(&oversized).is_none());
     }
 }

@@ -99,6 +99,7 @@ test.describe('last-updated indicator', () => {
     // Settings fetch chain).
     await page.routeWebSocket('**/ws**', (ws) => {
       ws.send(JSON.stringify(WELCOME_MESSAGE));
+      ws.send(JSON.stringify({ type: 'activity.replay', events: [] }));
     });
   });
 
@@ -107,7 +108,7 @@ test.describe('last-updated indicator', () => {
     { label: 'Quota', heading: 'Quota' },
     { label: 'Telemetry', heading: 'Telemetry' },
     { label: 'Work', heading: 'Work' },
-    { label: 'Events', heading: 'Events' },
+    { label: 'Activity', heading: 'Activity' },
     { label: 'Settings', heading: 'Settings' },
   ]) {
     test(`${route.label} shows a live "Updated ... ago" readout once data loads`, async ({ page }) => {
@@ -132,6 +133,7 @@ test.describe('WS reconnect re-triggers REST refetch', () => {
 
     await page.routeWebSocket('**/ws**', (ws) => {
       ws.send(JSON.stringify(WELCOME_MESSAGE));
+      ws.send(JSON.stringify({ type: 'activity.replay', events: [] }));
       ws.onMessage((raw) => {
         const message = JSON.parse(String(raw)) as { type?: string };
         if (message.type !== 'client.hello') return;

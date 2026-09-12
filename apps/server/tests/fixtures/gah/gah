@@ -76,6 +76,8 @@ if (command === 'pm') {
   respond('quota');
 } else if (command === 'report') {
   respond(args.includes('--series') ? 'report-series' : 'report');
+} else if (command === 'events') {
+  respond('events');
 } else if (command === 'ledger' && sub === 'summary') {
   respond('ledger-summary');
 } else if (command === 'config' && sub === 'show') {

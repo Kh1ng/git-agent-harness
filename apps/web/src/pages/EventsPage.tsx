@@ -1,124 +1,101 @@
 import { useEffect, useState } from 'react';
-import { Radio, CircleDot, PlayCircle, CheckCircle2, XCircle, Clock, ShieldAlert, Ban, StopCircle } from 'lucide-react';
+import { Bell, CheckCircle2, CircleDot, DatabaseZap, Gauge, Radio, ShieldAlert, Wifi, WifiOff, XCircle } from 'lucide-react';
+import type { ActivityKind } from '@git-agent-harness/contracts';
 import type { LucideIcon } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
-import { useUiStore } from '../store/uiStore.js';
-import { useGahStore } from '../store/gahStore.js';
-import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
-import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
-import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
+import { EmptyState } from '../components/ui/EmptyState.js';
 import { formatLocalTime, formatAge } from '../lib/format.js';
+import { setSystemNotificationsEnabled, systemNotificationsEnabled } from '../lib/activityNotifications.js';
 
-const EVENTS_REFRESH_MS = 30 * 1000;
-
-/** `details` is free-form text from the controller (src/events.rs) --
- * for the routine per-tick "observation_completed" event it's always
- * exactly this pattern, which repeats the profile name already shown
- * elsewhere on the page and adds nothing. Every other event's details
- * (human_required reasons, dispatch decisions, etc.) are real content
- * and still render as-is below. */
-function isRedundantProfileEcho(eventType: string, details: string): boolean {
-  return eventType === 'observation_completed' && /^profile=\S+$/.test(details);
-}
-
-const EVENT_ICON: Record<string, LucideIcon> = {
-  observation_completed: CircleDot,
-  action_decided: PlayCircle,
-  dispatch_started: PlayCircle,
-  dispatch_finished: CheckCircle2,
-  backend_marked_unavailable: Ban,
-  wait_selected: Clock,
-  human_required: ShieldAlert,
-  duplicate_guard_triggered: Ban,
-  loop_stopped: StopCircle
+const EVENT_ICON: Record<ActivityKind, LucideIcon> = {
+  dispatch_completed: CheckCircle2,
+  dispatch_failed: XCircle,
+  review_ready: ShieldAlert,
+  node_offline: WifiOff,
+  node_back: Wifi,
+  quota_near_limit: Gauge,
+  gateway_down: DatabaseZap,
+  action_required: Bell
 };
 
-const SINCE_OPTIONS = [
-  { value: '24h', label: 'Last 24 hours' },
-  { value: '7d', label: 'Last 7 days' },
-  { value: '30d', label: 'Last 30 days' }
-];
+const SEVERITY_COLOR = {
+  info: 'text-accent',
+  success: 'text-good',
+  warning: 'text-warning',
+  error: 'text-critical'
+};
 
 export function EventsPage() {
-  const wsProfile = useWebSocket().profile;
-  const profileOverride = useUiStore((s) => s.profileOverride);
-  const profile = profileOverride ?? wsProfile;
-  const events = useGahStore((s) => s.events);
-  const fetchEvents = useGahStore((s) => s.fetchEvents);
-  const [since, setSince] = useState('24h');
+  const { activityEvents, activitySyncedAt, isConnected, markActivityRead } = useWebSocket();
+  const [systemEnabled, setSystemEnabled] = useState(systemNotificationsEnabled);
+  const [permissionError, setPermissionError] = useState('');
 
-  useEffect(() => {
-    fetchEvents({ profile: profile ?? undefined, since }, { force: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [since, profile]);
+  useEffect(() => markActivityRead(), [activityEvents.length, markActivityRead]);
 
-  const refresh = () => fetchEvents({ profile: profile ?? undefined, since }, { force: true });
-  useAutoRefresh(refresh, EVENTS_REFRESH_MS);
-  useWsReconnectRefresh(refresh);
-
-  const list = events.data ?? [];
+  const toggleSystemNotifications = async () => {
+    const enabled = await setSystemNotificationsEnabled(!systemEnabled);
+    setSystemEnabled(enabled);
+    setPermissionError(!enabled && !systemEnabled
+      ? 'System notifications are unavailable or were not allowed. The in-app feed remains active.'
+      : '');
+  };
 
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Events"
-        description="Controller event stream: observations, decisions, dispatches, waits"
-        onRefresh={refresh}
-        refreshing={events.loading}
-        lastUpdated={events.fetchedAt}
+        title="Activity"
+        description="Durable operator events, delivered live and replayed after reconnects"
+        lastUpdated={activitySyncedAt}
         actions={
-          <select
-            value={since}
-            onChange={(e) => setSince(e.target.value)}
-            className="bg-raised border border-subtle rounded-md px-2 py-1.5 text-xs text-primary"
-          >
-            {SINCE_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`inline-flex items-center gap-1.5 text-xs ${isConnected ? 'text-good' : 'text-muted'}`}>
+              <CircleDot size={13} aria-hidden="true" />
+              {isConnected ? 'Live' : 'Reconnecting'}
+            </span>
+            <button
+              type="button"
+              className="btn-secondary"
+              aria-pressed={systemEnabled}
+              onClick={toggleSystemNotifications}
+            >
+              <Bell size={14} aria-hidden="true" />
+              {systemEnabled ? 'System alerts on' : 'Enable system alerts'}
+            </button>
+          </div>
         }
       />
 
-      {events.loading && !events.data ? (
-        <LoadingState label="Loading events…" />
-      ) : events.error ? (
-        <ErrorState
-          message={events.error}
-          endpoint="/api/events"
-          onRetry={() => fetchEvents({ profile: profile ?? undefined, since }, { force: true })}
+      {permissionError && <p role="status" className="text-sm text-warning">{permissionError}</p>}
+
+      {activityEvents.length === 0 ? (
+        <EmptyState
+          icon={Radio}
+          title={activitySyncedAt === null ? 'Waiting for activity' : 'No operator events yet'}
+          description="Completed work, failures, reviews, node health, quota pressure, and gateway outages appear here."
         />
-      ) : list.length === 0 ? (
-        <EmptyState icon={Radio} title="No events in this window" description="The controller hasn't run recently, or hasn't logged anything yet." />
       ) : (
-        <ol className="space-y-1.5">
-          {list
-            .slice()
-            .reverse()
-            .map((event, i) => {
-              const Icon = EVENT_ICON[event.event_type] ?? CircleDot;
-              const localTime = formatLocalTime(event.timestamp);
-              const age = formatAge(event.timestamp);
-              const showDetails = event.details && !isRedundantProfileEcho(event.event_type, event.details);
-              return (
-                <li key={i} className="card-padded flex items-start gap-3 py-2.5">
-                  <Icon size={15} className="text-secondary shrink-0 mt-0.5" aria-hidden="true" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-baseline gap-x-2">
-                      <span className="text-sm font-medium text-primary">{event.event_type.replace(/_/g, ' ')}</span>
-                      {event.work_id && <span className="text-xs text-accent font-mono">{event.work_id}</span>}
-                      <span className="text-xs text-muted ml-auto" title={event.timestamp}>
-                        {localTime ?? event.timestamp}
-                        {age && <span className="text-muted/70"> · {age}</span>}
-                      </span>
-                    </div>
-                    {showDetails && <p className="text-xs text-secondary mt-0.5 break-words">{event.details}</p>}
+        <ol className="space-y-1.5" aria-label="Operator activity">
+          {activityEvents.slice().reverse().map((event) => {
+            const Icon = EVENT_ICON[event.kind];
+            const age = formatAge(event.occurredAt);
+            return (
+              <li key={event.id} className="card-padded flex items-start gap-3 py-3">
+                <Icon size={16} className={`${SEVERITY_COLOR[event.severity]} shrink-0 mt-0.5`} aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                    <span className="text-sm font-semibold text-primary">{event.title}</span>
+                    {event.workId && <span className="text-xs text-accent font-mono">{event.workId}</span>}
+                    <time className="text-xs text-muted sm:ml-auto" dateTime={event.occurredAt} title={event.occurredAt}>
+                      {formatLocalTime(event.occurredAt) ?? event.occurredAt}
+                      {age && <span className="text-muted/70"> · {age}</span>}
+                    </time>
                   </div>
-                </li>
-              );
-            })}
+                  <p className="text-xs text-secondary mt-1 break-words max-w-[75ch]">{event.message}</p>
+                </div>
+              </li>
+            );
+          })}
         </ol>
       )}
     </div>

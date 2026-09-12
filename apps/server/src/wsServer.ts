@@ -7,6 +7,8 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { requiresFleetAuthentication, trustedLanWebSocketMode, webSocketAccessValid } from './webSocketAuth.js';
 import { SERVER_VERSION } from './server.js';
 import { createServerPushBus } from './serverPushBus.js';
+import { ActivityFeed, activitiesFromQuota, activityFromController, activityFromGateway, activityFromNode } from './activityFeed.js';
+import { gatewayHealth } from './managerChat/memoryGatewayClient.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { getSessionManager } from './sessions/SessionManager.js';
 import { createFleetDispatchCoordinator } from './fleetDispatch.js';
@@ -50,6 +52,14 @@ class WebSocketSessionStore {
   getAll() {
     return Array.from(this.sessions.entries());
   }
+
+  hasProfile(profile: string) {
+    return this.getAll().some(([, info]) => info.profile === profile);
+  }
+
+  profiles() {
+    return [...new Set(this.getAll().map(([, info]) => info.profile))];
+  }
   
   broadcast(message: ServerMessage, exclude?: WebSocket, profile?: string) {
     const messageStr = JSON.stringify(message);
@@ -81,11 +91,67 @@ export function createWebSocketHandler(
     registryService?: RegistryService;
     coordinatorIdentity?: ReturnType<typeof getCoordinatorIdentity>;
     node?: import('@git-agent-harness/contracts').NodeRoleStatus;
+    activityFeed?: ActivityFeed;
+    runEvents?: typeof gahCli.runEvents;
+    runQuota?: typeof gahCli.runQuota;
+    gatewayHealth?: typeof gatewayHealth;
   } = {}
 ) {
   const registryService = deps.registryService ?? new RegistryService(deps.node?.role === 'worker' ? null : undefined);
+  const activityFeed = deps.activityFeed ?? new ActivityFeed();
+  const loadEvents = deps.runEvents ?? gahCli.runEvents;
+  const loadQuota = deps.runQuota ?? gahCli.runQuota;
+  const readGatewayHealth = deps.gatewayHealth ?? gatewayHealth;
+  const syncing = new Map<string, Promise<void>>();
+  const quotaSyncedAt = new Map<string, number>();
+  const syncActivity = (profile: string, announce: boolean): Promise<void> => {
+    const current = syncing.get(profile);
+    if (current) return current;
+    const quotaDue = Date.now() - (quotaSyncedAt.get(profile) ?? 0) >= 60_000;
+    if (quotaDue) quotaSyncedAt.set(profile, Date.now());
+    const pending = Promise.all([
+      loadEvents(profile, '30d').catch((error) => {
+        console.error(`Failed to refresh activity for ${profile}: ${error instanceof Error ? error.message : String(error)}`);
+        return [];
+      }),
+      quotaDue ? loadQuota({ profile, since: '24h' }).catch((error) => {
+        console.error(`Failed to refresh quota activity for ${profile}: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      }) : Promise.resolve(null)
+    ])
+      .then(([events, quota]) => {
+        for (const controllerEvent of events) {
+          const event = activityFromController(controllerEvent);
+          if (!event || !activityFeed.record(event) || !announce) continue;
+          sessionStore.broadcast({ type: 'activity.event', event }, undefined, profile);
+        }
+        for (const event of quota ? activitiesFromQuota(quota) : []) {
+          if (activityFeed.record(event) && announce) sessionStore.broadcast({ type: 'activity.event', event }, undefined, profile);
+        }
+      })
+      .finally(() => syncing.delete(profile));
+    syncing.set(profile, pending);
+    return pending;
+  };
+  const syncGateway = (announce: boolean) => {
+    const event = activityFromGateway(readGatewayHealth());
+    if (event && activityFeed.record(event) && announce) sessionStore.broadcast({ type: 'activity.event', event });
+  };
   const unsubscribeFleet = registryService.onChange(() => pushBus.publish({ type: 'fleet.changed' }));
-  wss.once('close', unsubscribeFleet);
+  const unsubscribeLiveness = registryService.onLivenessTransition((transition) => {
+    const event = activityFromNode(transition);
+    if (activityFeed.record(event)) sessionStore.broadcast({ type: 'activity.event', event });
+  });
+  const activityTimer = setInterval(() => {
+    for (const profile of sessionStore.profiles()) void syncActivity(profile, true);
+    syncGateway(true);
+  }, 5_000);
+  activityTimer.unref?.();
+  wss.once('close', () => {
+    unsubscribeFleet();
+    unsubscribeLiveness();
+    clearInterval(activityTimer);
+  });
   fleetDispatch = createFleetDispatchCoordinator({
     registryService,
     pushBus,
@@ -96,8 +162,6 @@ export function createWebSocketHandler(
   wss.on('connection', (ws: WebSocket, req) => {
     console.log('WebSocket client connected');
     
-    let clientInfo: { clientVersion: string; capabilities: ClientCapabilities } | null = null;
-    let isAuthenticated = false;
     // Extract profile from query parameters in the connection URL
     const url = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
     const profileFromQuery = url.searchParams.get('profile') || null;
@@ -111,6 +175,20 @@ export function createWebSocketHandler(
       if (!webSocketAccessValid(ws)) return;
       try {
         const message = JSON.parse(data.toString()) as ClientMessage;
+        if (message.type === 'client.hello') {
+          const profile = message.profile ?? pendingProfiles.get(ws) ?? 'gah';
+          const announce = sessionStore.hasProfile(profile);
+          sessionStore.add(ws, message.clientVersion, message.capabilities, profile);
+          pendingProfiles.delete(ws);
+          await syncActivity(profile, announce);
+          syncGateway(announce);
+          ws.send(JSON.stringify({
+            type: 'activity.replay',
+            events: activityFeed.replay(profile, message.activityCursor)
+          } satisfies ServerMessage));
+          console.log(`Client hello from ${message.clientVersion} with profile: ${profile}`);
+          return;
+        }
         if (deps.node?.role === 'worker' && message.type.startsWith('manager.chat.')) {
           throw new GAHError('Manager chat is only available on the central node.', 'WORKER_ROLE_RESTRICTION');
         }
@@ -133,9 +211,7 @@ export function createWebSocketHandler(
     
     ws.on('close', () => {
       console.log('WebSocket client disconnected');
-      if (clientInfo) {
-        sessionStore.remove(ws);
-      }
+      sessionStore.remove(ws);
       pendingProfiles.delete(ws);
     });
     
@@ -187,15 +263,7 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
   
   switch (message.type) {
     case 'client.hello':
-      // Store client info
-      // Use profile from client.hello message, or fall back to query param from pendingProfiles, or default to 'gah'
-      const pendingProfile = pendingProfiles.get(ws);
-      const profile = message.profile ?? pendingProfile ?? 'gah';
-      sessionStore.add(ws, message.clientVersion, message.capabilities, profile);
-      // Clean up pending profile
-      pendingProfiles.delete(ws);
-      console.log(`Client hello from ${message.clientVersion} with profile: ${profile}`);
-      break;
+      break; // Handled at the connection boundary so replay precedes live delivery.
       
     case 'session.start':
       await handleStartSession(ws, message, requestId);

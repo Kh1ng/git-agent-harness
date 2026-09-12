@@ -865,6 +865,22 @@ mid-file corruption is never altered automatically and requires investigation.
 GAH can notify an operator (and optionally wake a manager agent) on high-signal
 events, without any external wrapper.
 
+### In-app activity and system alerts
+
+The dashboard's **Activity** page receives dispatch completion/failure, review
+ready, node offline/back, quota constraint, gateway failure, and operator-action
+events through the existing authenticated WebSocket. The server stores a
+bounded, de-duplicated feed in `config/activity.jsonl` (override with
+`GAH_ACTIVITY_PATH`). A reconnect sends all entries after the client's last
+cursor. The durable feed itself does not use a client poller.
+
+The current page always shows a new in-app alert. Select **Enable system
+alerts** on the Activity page to add platform delivery. Browsers use the Web
+Notification permission. The macOS tray app uses a bounded bridge that accepts
+alerts only from its configured central origin. The iPhone app uses local iOS
+notifications while it is running and also shows them in the foreground. This
+does not provide background APNs delivery.
+
 ### `notify_command` (per profile)
 
 Set `notify_command` on a profile; GAH pipes a single one-line message to that
