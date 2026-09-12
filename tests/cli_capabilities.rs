@@ -106,6 +106,10 @@ fn test_manifest_remote_and_local_disposition() {
         "tui.run",
         "server.start",
         "telemetry.export",
+        "telemetry.status",
+        "policy.check",
+        "profile.show",
+        "price_guard.check",
     ];
 
     for op_id in local_operations {
