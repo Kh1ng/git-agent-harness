@@ -2,7 +2,9 @@ use super::*;
 use crate::config::ExternalCredentialScope;
 use crate::config::RoutingPolicy;
 use crate::dispatch::attempts::external_approval_gap::external_approval_gaps_for_work_item;
-use crate::dispatch::external_approval_pause::raise_external_approval_request;
+use crate::dispatch::external_approval_pause::{
+    notify_external_approval_request, raise_external_approval_request,
+};
 use crate::dispatch::test_util::{gah_config_with_ledger, profile};
 use std::fs;
 use std::process::Command;
@@ -16,12 +18,14 @@ use std::process::Command;
 fn unapproved_external_credential_pauses_launch_and_grant_resumes() {
     let tmp = tempfile::tempdir().unwrap();
     let mut prof = profile(tmp.path());
+    let notifications = tmp.path().join("notifications.txt");
+    prof.notify_command = Some(format!("cat >> {}", notifications.display()));
     prof.external_credential_scopes.insert(
         "odds".to_string(),
         ExternalCredentialScope {
             env_vars: vec!["ODDS_API_KEY".to_string()],
-            max_requests: Some(25),
-            max_dollars: Some(2.5),
+            max_requests: Some(1),
+            max_dollars: None,
             purpose: Some("odds feed".to_string()),
         },
     );
@@ -52,12 +56,12 @@ fn unapproved_external_credential_pauses_launch_and_grant_resumes() {
     ledger.work_id.clone_from(&Some(work_id.to_string()));
     let mut cfg = cfg;
     cfg.profiles.insert("test".to_string(), prof.clone());
-    assert!(raise_external_approval_request(
-        &cfg, "test", &prof, &ledger, &gaps[0]
-    ));
-    assert!(!raise_external_approval_request(
-        &cfg, "test", &prof, &ledger, &gaps[0]
-    ));
+    if raise_external_approval_request(&cfg, "test", &prof, &ledger, &gaps[0]) {
+        notify_external_approval_request(&cfg, "test", &prof, &ledger, &gaps[0]);
+    }
+    if raise_external_approval_request(&cfg, "test", &prof, &ledger, &gaps[0]) {
+        notify_external_approval_request(&cfg, "test", &prof, &ledger, &gaps[0]);
+    }
 
     // Exactly one pending request is visible in the ledger.
     let entries = crate::ledger::read_entries(&cfg).unwrap();
@@ -66,6 +70,11 @@ fn unapproved_external_credential_pauses_launch_and_grant_resumes() {
         .filter(|row| row.mode == "external_approval_request")
         .count();
     assert_eq!(requests, 1, "duplicate requests must be deduped");
+    assert_eq!(
+        fs::read_to_string(&notifications).unwrap().lines().count(),
+        1,
+        "duplicate requests must emit one notification"
+    );
 
     // 3. Granting releases the hold: the effective gate resolves.
     let grant_entry = crate::ledger::LedgerEntry::new_external_approval(
@@ -78,8 +87,8 @@ fn unapproved_external_credential_pauses_launch_and_grant_resumes() {
             operation_kind: Some("env_credential".to_string()),
             credential_label: Some("odds".to_string()),
             allowed_env_vars: vec!["ODDS_API_KEY".to_string()],
-            max_requests: Some(25),
-            max_dollars: Some(2.5),
+            max_requests: Some(1),
+            max_dollars: None,
             expires_at: None,
             purpose: Some("odds feed".to_string()),
             consumed_requests: Some(0),
@@ -121,6 +130,52 @@ fn unapproved_external_credential_pauses_launch_and_grant_resumes() {
     assert!(
         injected.iter().any(|(key, _)| key == "ODDS_API_KEY"),
         "granted credential must be injected: {injected:?}"
+    );
+
+    // 5. One successful use exhausts the request cap and re-holds without
+    // raising a duplicate request after a restart-style ledger reload.
+    crate::ledger::record_external_approval_consumption_for_work_item(
+        &cfg,
+        "test",
+        &prof,
+        Some(work_id),
+        &crate::ledger::LedgerUsage::default(),
+    )
+    .unwrap();
+    let entries = crate::ledger::read_entries(&cfg).unwrap();
+    let exhausted = crate::ledger::external_approval_snapshot_from_entries(
+        &entries,
+        "test",
+        &prof.repo_id,
+        work_id,
+        "odds",
+        "env_credential",
+    )
+    .unwrap();
+    assert_eq!(
+        exhausted.denial_reason.as_deref(),
+        Some("request cap reached")
+    );
+    assert!(!exhausted.active);
+    assert_eq!(
+        external_approval_gaps_for_work_item(
+            &cfg,
+            "test",
+            &prof,
+            Some(work_id),
+            Some(env_path.to_str().unwrap()),
+        )
+        .len(),
+        1,
+        "cap exhaustion must re-hold"
+    );
+    assert!(!raise_external_approval_request(
+        &cfg, "test", &prof, &ledger, &gaps[0]
+    ));
+    assert_eq!(
+        fs::read_to_string(&notifications).unwrap().lines().count(),
+        2,
+        "cap exhaustion must emit one terminal resolution"
     );
 
     let _ = Command::new("true");

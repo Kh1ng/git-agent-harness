@@ -154,6 +154,7 @@ fn effective_human_gate_for_scope(
             | "external_approval_revoke"
             | "external_approval_expire"
             | "external_approval_deny"
+            | "external_approval_complete"
             | "review_hold"
             | "review_hold_release" => {
                 continue;

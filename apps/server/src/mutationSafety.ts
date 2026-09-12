@@ -12,6 +12,9 @@ type Operation =
   | 'ledger.clear_attempts'
   | 'route_approval.grant'
   | 'route_approval.revoke'
+  | 'external_approval.grant'
+  | 'external_approval.deny'
+  | 'external_approval.revoke'
   | 'backend_instance.set_enabled'
   | 'config.routing_candidate.add'
   | 'config.routing_candidate.remove'
@@ -67,6 +70,7 @@ export function mutationSafety(nodeId: string, directory = process.env.GAH_MUTAT
     if ((
       operation === 'ledger.clear_attempts' ||
       operation.startsWith('route_approval.') ||
+      operation.startsWith('external_approval.') ||
       operation.startsWith('backend_instance.') ||
       operation.startsWith('config.routing_candidate.')
     ) && principal.kind !== 'owner') return reject(403, 'owner_required', 'This operation requires owner access.');

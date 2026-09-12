@@ -842,6 +842,15 @@ export interface ExternalApprovalScope {
   denial_reason: string | null;
 }
 
+/** Exact identity accepted by owner-only external approval mutations. Bounds
+ * are deliberately absent: the server cannot broaden the recorded request. */
+export interface ExternalApprovalDecisionScope {
+  profile: string;
+  work_id: string;
+  credential_label: string;
+  operation_kind: string;
+}
+
 export interface ConfigSummary {
   /** Which agent CLI is currently acting as the operator's manager across
    * all profiles/projects (null = unset, so no manager wake happens). */

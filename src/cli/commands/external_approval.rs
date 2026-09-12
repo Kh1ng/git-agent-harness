@@ -14,6 +14,11 @@ struct ScopeStatus {
 
 pub fn run(command: ExternalApprovalCommands) -> Result<()> {
     match command {
+        ExternalApprovalCommands::List {
+            profile,
+            config_path,
+            json,
+        } => list(&profile, config_path, json),
         ExternalApprovalCommands::Request {
             profile,
             work_id,
@@ -81,6 +86,28 @@ pub fn run(command: ExternalApprovalCommands) -> Result<()> {
             "approved",
             None,
         ),
+        ExternalApprovalCommands::Deny {
+            profile,
+            work_id,
+            credential_label,
+            operation_kind,
+            config_path,
+            json,
+        } => write_transition(
+            "external_approval_deny",
+            &profile,
+            &work_id,
+            &credential_label,
+            &operation_kind,
+            None,
+            None,
+            None,
+            None,
+            config_path,
+            json,
+            "denied",
+            Some("denied by operator"),
+        ),
         ExternalApprovalCommands::Revoke {
             profile,
             work_id,
@@ -126,6 +153,34 @@ pub fn run(command: ExternalApprovalCommands) -> Result<()> {
             Some("expired"),
         ),
     }
+}
+
+fn list(profile: &str, config_path: Option<String>, json: bool) -> Result<()> {
+    let cfg = config::load(config_path.as_deref())?;
+    let prof = config::get_profile(&cfg, profile)?;
+    let snapshots = ledger::external_approval_snapshots_from_entries(
+        &ledger::read_entries(&cfg)?,
+        profile,
+        &prof.repo_id,
+    );
+    if json {
+        println!("{}", serde_json::to_string_pretty(&snapshots)?);
+    } else if snapshots.is_empty() {
+        println!("No external approvals for profile '{profile}'.");
+    } else {
+        for snapshot in snapshots {
+            println!(
+                "{} {} {} {} active={} consumed={}",
+                snapshot.state,
+                snapshot.work_id,
+                snapshot.credential_label,
+                snapshot.operation_kind,
+                snapshot.active,
+                snapshot.consumed_requests,
+            );
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -417,6 +472,44 @@ mod tests {
         .unwrap();
         assert_eq!(snapshot.state, "expired");
         assert!(!snapshot.active);
+
+        run(ExternalApprovalCommands::Request {
+            profile: "test".to_string(),
+            work_id: "ISSUE-44".to_string(),
+            credential_label: "odds".to_string(),
+            operation_kind: "external_api".to_string(),
+            max_requests: Some(1),
+            max_dollars: None,
+            expires_at: None,
+            purpose: Some("test".to_string()),
+            config_path: Some(config_path.to_string_lossy().into_owned()),
+            json: true,
+        })
+        .unwrap();
+        run(ExternalApprovalCommands::Deny {
+            profile: "test".to_string(),
+            work_id: "ISSUE-44".to_string(),
+            credential_label: "odds".to_string(),
+            operation_kind: "external_api".to_string(),
+            config_path: Some(config_path.to_string_lossy().into_owned()),
+            json: true,
+        })
+        .unwrap();
+        let loaded = config::load(Some(config_path.to_str().unwrap())).unwrap();
+        let snapshots = ledger::external_approval_snapshots_from_entries(
+            &ledger::read_entries(&loaded).unwrap(),
+            "test",
+            &profile.repo_id,
+        );
+        assert_eq!(snapshots.len(), 3);
+        assert_eq!(
+            snapshots
+                .iter()
+                .find(|scope| scope.work_id == "ISSUE-44")
+                .unwrap()
+                .state,
+            "denied"
+        );
     }
 
     #[test]

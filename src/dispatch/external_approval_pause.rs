@@ -45,10 +45,71 @@ pub(crate) fn raise_external_approval_request(
             {
                 return false;
             }
-            // Denied/expired/granted are terminal for auto-raising: the hold
-            // stands and re-raising would be an alert storm. Granted cannot
-            // co-occur with a gap (the credential would be injected).
-            "denied" | "expired" | "granted" => return false,
+            // Persist derived expiry/cap outcomes once so their resolution
+            // notification survives restarts without becoming an alert storm.
+            state @ ("denied" | "expired") => {
+                let mode = if state == "denied" {
+                    "external_approval_deny"
+                } else {
+                    "external_approval_expire"
+                };
+                let already_recorded = entries
+                    .iter()
+                    .rev()
+                    .find(|entry| {
+                        entry.profile == profile_name
+                            && entry.repo_id == profile.repo_id
+                            && entry.work_id.as_deref() == Some(work_id)
+                            && entry.external_approval.as_ref().is_some_and(|approval| {
+                                approval.credential_label.as_deref() == Some(&gap.label)
+                                    && approval.operation_kind.as_deref() == Some("env_credential")
+                            })
+                    })
+                    .is_some_and(|entry| entry.mode == mode);
+                if !already_recorded {
+                    let terminal = ExternalApprovalRecord {
+                        state: Some(state.to_string()),
+                        operation_kind: Some("env_credential".to_string()),
+                        credential_label: Some(gap.label.clone()),
+                        allowed_env_vars: Vec::new(),
+                        max_requests: None,
+                        max_dollars: None,
+                        expires_at: None,
+                        purpose: None,
+                        consumed_requests: None,
+                        consumed_dollars: None,
+                        denial_reason: snapshot.denial_reason,
+                    };
+                    match ledger::append_external_approval(
+                        cfg,
+                        LedgerEntry::new_external_approval(
+                            profile_name,
+                            profile,
+                            work_id,
+                            mode,
+                            terminal,
+                        ),
+                    ) {
+                        Ok(_) => notify_event(
+                            cfg,
+                            profile,
+                            NotifyEvent::ExternalApprovalResolved {
+                                profile: profile_name,
+                                work_id,
+                                credential_label: &gap.label,
+                                state,
+                            },
+                        ),
+                        Err(err) => eprintln!(
+                            "warning: failed to persist external approval {state}: {err:#}"
+                        ),
+                    }
+                }
+                return false;
+            }
+            // Granted cannot co-occur with a gap because the credential would
+            // be injected. Do not turn that inconsistency into a new request.
+            "granted" => return false,
             _ => {}
         }
     }
@@ -85,29 +146,58 @@ pub(crate) fn raise_external_approval_request(
 /// configured surface (notify_command + notification channels, #1179).
 pub(crate) fn notify_external_approval_request(
     cfg: &GahConfig,
+    profile_name: &str,
     profile: &Profile,
     ledger: &LedgerEntry,
     gap: &crate::dispatch::attempts::ExternalCredentialGap,
 ) {
+    let work_id = ledger.work_id.as_deref().unwrap_or("<work-id>");
+    let work_url = if work_id.starts_with("https://") || work_id.starts_with("http://") {
+        Some(work_id.to_string())
+    } else {
+        let number = work_id.trim_start_matches('#');
+        profile
+            .web_url()
+            .filter(|_| number.chars().all(|c| c.is_ascii_digit()))
+            .map(|repo| {
+                if profile.provider.eq_ignore_ascii_case("gitlab") {
+                    format!("{repo}/-/issues/{number}")
+                } else {
+                    format!("{repo}/issues/{number}")
+                }
+            })
+    };
+    let cli_arg = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
+    let base_command = format!(
+        "--profile {} --work-id {} --credential-label {} --operation-kind env_credential",
+        cli_arg(profile_name),
+        cli_arg(work_id),
+        cli_arg(&gap.label),
+    );
+    let grant_command = format!("gah external-approval grant {base_command}");
+    let deny_command = format!("gah external-approval deny {base_command}");
+    let bounds = format!(
+        "max_requests={} max_dollars={}",
+        gap.max_requests
+            .map_or_else(|| "unbounded".to_string(), |value| value.to_string()),
+        gap.max_dollars
+            .map_or_else(|| "unbounded".to_string(), |value| value.to_string()),
+    );
     notify_event(
         cfg,
         profile,
         NotifyEvent::ExternalApprovalRequested {
-            profile: profile.display_name.as_str(),
-            work_id: ledger.work_id.as_deref().unwrap_or("unknown"),
+            profile: profile_name,
+            project: &profile.repo_id,
+            work_id,
+            work_url: work_url.as_deref(),
             credential_label: &gap.label,
             env_vars: &gap.env_vars.join(", "),
-            bounds: &format!(
-                "max_requests={:?} max_dollars={:?}",
-                gap.max_requests, gap.max_dollars
-            ),
+            bounds: &bounds,
+            expires_at: "none",
             purpose: gap.purpose.as_deref(),
-            grant_command: &format!(
-                "gah external-approval grant --profile {} {} --credential-label {} --operation-kind env_credential",
-                profile.display_name,
-                ledger.work_id.as_deref().unwrap_or("<work-id>"),
-                gap.label
-            ),
+            grant_command: &grant_command,
+            deny_command: &deny_command,
         },
     );
 }
@@ -138,7 +228,7 @@ pub(crate) fn latch_external_approval_hold(
     ledger.error_summary = Some(format!("{gap_error}"));
     for gap in &gap_error.gaps {
         if raise_external_approval_request(cfg, profile_name, profile, ledger, gap) {
-            notify_external_approval_request(cfg, profile, ledger, gap);
+            notify_external_approval_request(cfg, profile_name, profile, ledger, gap);
         }
     }
     true

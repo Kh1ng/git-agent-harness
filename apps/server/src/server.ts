@@ -3,6 +3,7 @@ import type { NodeRoleStatus } from '@git-agent-harness/contracts';
 import { workerRouteGuard, validateNodeRole } from './nodeRole.js';
 import { workerMemoryRouter } from './workerMemory.js';
 import { paidRouteApprovalsRouter } from './paidRouteApprovals.js';
+import { externalApprovalsRouter } from './externalApprovals.js';
 import { backendInstancesRouter } from './backendInstances.js';
 import { pmPlansRouter } from './pmPlans.js';
 import { nodeSetupRouter } from './nodeSetup.js';
@@ -296,6 +297,7 @@ export function createServer(
   app.use('/api/worker-memory', workerMemoryRouter());
   app.use('/api/pm', pmPlansRouter());
   app.use('/api/route-approvals', paidRouteApprovalsRouter(mutation));
+  app.use('/api/external-approvals', externalApprovalsRouter(mutation));
   app.use('/api/backend-instances', backendInstancesRouter(mutation));
 
   // Issue #149: ordered routing-candidate editing. Mutations wrap the fixed

@@ -21,6 +21,12 @@ gah external-approval inspect --profile example --work-id '#42' \
   --credential-label example-service --operation-kind external_api --json
 ```
 
+List all approval scopes for a profile:
+
+```sh
+gah external-approval list --profile example --json
+```
+
 When you intend to authorize that request, use the same identifiers:
 
 ```sh
@@ -31,6 +37,13 @@ gah external-approval grant --profile example --work-id '#42' \
 Omitted grant limits, expiry, and purpose inherit the pending request. Explicit limits may be smaller. A grant cannot extend the requested expiry or change its purpose.
 
 A grant requires a pending request. Repeated grants fail instead of resetting consumption. To renew an approval, record and inspect a new request first.
+
+Deny a pending request with the same identifiers:
+
+```sh
+gah external-approval deny --profile example --work-id '#42' \
+  --credential-label example-service --operation-kind external_api --json
+```
 
 An expiry must use RFC3339 and remain in the future. Request counts must be positive integers. Dollar limits must be finite and positive.
 
@@ -43,12 +56,24 @@ gah external-approval revoke --profile example --work-id '#42' \
 
 Revocation retains the original scope and consumption in inspection. An external grant does not release an unrelated human hold.
 
+## Automatic pause and notification
+
+GAH pauses one work item before backend launch when its credential scope has no active grant.
+
+The notification includes the project, work link, credential label, bounds, expiry, reason, and exact grant and deny commands.
+
+The same pending request produces one notification. A restart does not produce a second notification.
+
+Open the Work page to review pending requests. An authenticated owner can grant, deny, or revoke the exact recorded scope.
+
+A grant makes the work item eligible for the next loop cycle. A denial, expiry, or exhausted cap keeps the item paused.
+
 ## Current limits
 
 The counter records completed backend attempts, including failed attempts. It does **not** measure individual service requests or stop requests inside a running backend.
 
 External-service dollar usage is unknown. A dollar-capped grant becomes unavailable for the next attempt after consumption with unknown usage. Backend token costs remain separate.
 
-These controls restrict credential injection and subsequent attempts. They are not a service-side spending limit. Pending requests do not yet provide a dedicated dispatch hold or automatic resume workflow.
+These controls restrict credential injection and subsequent attempts. They are not a service-side spending limit.
 
-Issue #653 tracks dedicated holds, notifications, authenticated dashboard controls, and service-request accounting. Existing ledger history remains readable; inspection and credential injection use the same approval state.
+The ledger remains the source of truth. The CLI, server, dashboard, dispatch gate, and notification path use the same approval state.

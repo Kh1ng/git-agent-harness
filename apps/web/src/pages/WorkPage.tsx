@@ -15,6 +15,7 @@ import { LastUpdated } from '../components/ui/LastUpdated.js';
 import { SessionCard } from '../components/SessionCard.js';
 import { AttemptTimeline } from '../components/AttemptTimeline.js';
 import { PaidRouteApprovals } from '../components/PaidRouteApprovals.js';
+import { ExternalApprovals } from '../components/ExternalApprovals.js';
 import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
 
 const WORK_REFRESH_MS = 30 * 1000;
@@ -229,6 +230,7 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
       />
 
       {profile && <PaidRouteApprovals key={profile} profile={profile} />}
+      {profile && <ExternalApprovals key={`external-${profile}`} profile={profile} />}
 
       <NewDispatchForm profile={profile ?? 'gah'} repo={activeProfileRepo} />
 

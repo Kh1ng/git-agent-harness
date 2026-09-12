@@ -1019,6 +1019,15 @@ pub enum RouteApprovalCommands {
 
 #[derive(Subcommand)]
 pub enum ExternalApprovalCommands {
+    /// List external approval scopes for a profile.
+    List {
+        #[arg(long)]
+        profile: String,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Record a requested external operation approval for a specific
     /// profile/repo/work item and credential label.
     Request {
@@ -1076,6 +1085,21 @@ pub enum ExternalApprovalCommands {
         expires_at: Option<String>,
         #[arg(long)]
         purpose: Option<String>,
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Deny a pending external approval request.
+    Deny {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        work_id: String,
+        #[arg(long)]
+        credential_label: String,
+        #[arg(long)]
+        operation_kind: String,
         #[arg(long, name = "config")]
         config_path: Option<String>,
         #[arg(long, default_value_t = false)]

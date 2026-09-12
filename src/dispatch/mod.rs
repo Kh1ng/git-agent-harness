@@ -242,8 +242,18 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     }
     let policy_approval_gate = terminal::is_policy_approval_gate(&ledger);
     let append_result = terminal::append_ledger_entry(cfg, &ledger, policy_approval_gate);
-    if let Err(err) = append_result {
+    if let Err(err) = &append_result {
         eprintln!("warning: failed to append ledger entry: {:#}", err);
+    }
+    if result.is_ok() && append_result.is_ok() {
+        if let Err(err) = crate::ledger::complete_external_approvals_for_work_item(
+            cfg,
+            &args.profile,
+            profile,
+            ledger.work_id.as_deref(),
+        ) {
+            eprintln!("warning: failed to complete external approval: {err:#}");
+        }
     }
     // Issue #230: every terminal attempt (success, failure, timeout,
     // cancellation, or policy refusal) schedules an idempotent telemetry

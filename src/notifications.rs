@@ -73,12 +73,16 @@ pub enum NotifyEvent<'a> {
     /// external credential scope lacks an active grant for this work item.
     ExternalApprovalRequested {
         profile: &'a str,
+        project: &'a str,
         work_id: &'a str,
+        work_url: Option<&'a str>,
         credential_label: &'a str,
         env_vars: &'a str,
         bounds: &'a str,
+        expires_at: &'a str,
         purpose: Option<&'a str>,
         grant_command: &'a str,
+        deny_command: &'a str,
     },
     /// Issue #653: an external-approval request reached a terminal state.
     ExternalApprovalResolved {
@@ -215,20 +219,29 @@ pub fn format_message(event: &NotifyEvent) -> String {
         }
         NotifyEvent::ExternalApprovalRequested {
             profile,
+            project,
             work_id,
+            work_url,
             credential_label,
             env_vars,
             bounds,
+            expires_at,
             purpose,
             grant_command,
+            deny_command,
         } => {
             let mut msg = format!(
-                "[gah] external API approval required [profile={profile}] work_id={work_id} credential={credential_label} env_vars=[{env_vars}] bounds={bounds}",
+                "[gah] external API approval required [profile={profile}] [project={project}] work_id={work_id} credential={credential_label} env_vars=[{env_vars}] bounds={bounds} expiry={expires_at}",
             );
-            if let Some(purpose) = purpose {
-                msg.push_str(&format!(" purpose={purpose}"));
+            if let Some(work_url) = work_url {
+                msg.push_str(&format!(" link={work_url}"));
             }
-            msg.push_str(&format!(" approve: {grant_command}"));
+            if let Some(purpose) = purpose {
+                msg.push_str(&format!(" reason={purpose}"));
+            }
+            msg.push_str(&format!(
+                " approve: {grant_command} deny: {deny_command} dashboard: Work > External API approvals"
+            ));
             msg
         }
         NotifyEvent::ExternalApprovalResolved {

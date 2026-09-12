@@ -19,6 +19,29 @@ fn human_required_includes_reason_and_reference() {
 }
 
 #[test]
+fn external_approval_request_includes_bounded_owner_actions() {
+    let msg = format_message(&NotifyEvent::ExternalApprovalRequested {
+        profile: "real",
+        project: "owner/repo",
+        work_id: "#653",
+        work_url: Some("https://github.com/owner/repo/issues/653"),
+        credential_label: "odds",
+        env_vars: "ODDS_API_KEY",
+        bounds: "max_requests=1 max_dollars=2.5",
+        expires_at: "2026-09-13T00:00:00Z",
+        purpose: Some("fetch odds"),
+        grant_command: "gah external-approval grant --profile 'real' --work-id '#653' --credential-label 'odds' --operation-kind env_credential",
+        deny_command: "gah external-approval deny --profile 'real' --work-id '#653' --credential-label 'odds' --operation-kind env_credential",
+    });
+    assert!(msg.contains("[project=owner/repo]"));
+    assert!(msg.contains("link=https://github.com/owner/repo/issues/653"));
+    assert!(msg.contains("expiry=2026-09-13T00:00:00Z"));
+    assert!(msg.contains("approve: gah external-approval grant"));
+    assert!(msg.contains("deny: gah external-approval deny"));
+    assert!(!msg.contains("secret"));
+}
+
+#[test]
 fn human_required_without_reference() {
     let msg = format_message(&NotifyEvent::HumanRequired {
         reason: "waiting on operator",

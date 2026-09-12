@@ -103,7 +103,7 @@ fn approval_state(
             "approved".to_string()
         }
     });
-    let mut active = tally.grant.is_some() && state != "requested";
+    let mut active = tally.grant.is_some() && !matches!(state.as_str(), "requested" | "completed");
     let mut denial_reason = tally
         .denied_reason
         .clone()
@@ -311,6 +311,11 @@ fn scope_states_from_entries(
                     );
                 }
             }
+            "external_approval_complete" => {
+                if let Some(state) = active_by_scope.get_mut(&scope_key) {
+                    merge_external_approval_record(&mut state.approval, approval);
+                }
+            }
             _ => {}
         }
     }
@@ -347,6 +352,56 @@ pub fn external_approval_snapshot_from_entries(
         consumed_dollars: state.tally.consumed_dollars,
         denial_reason: eval.denial_reason,
     })
+}
+
+/// Project every external-approval scope for one configured profile.
+pub fn external_approval_snapshots_from_entries(
+    entries: &[LedgerEntry],
+    profile_name: &str,
+    repo_id: &str,
+) -> Vec<ExternalApprovalSnapshot> {
+    let mut work_ids = entries
+        .iter()
+        .filter(|entry| {
+            entry.profile == profile_name
+                && entry.repo_id == repo_id
+                && entry.external_approval.is_some()
+        })
+        .filter_map(|entry| entry.work_id.clone())
+        .collect::<HashSet<_>>();
+    let mut snapshots = Vec::new();
+    for work_id in work_ids.drain() {
+        for ((credential_label, operation_kind), state) in
+            scope_states_from_entries(entries, profile_name, repo_id, &work_id)
+        {
+            let eval = approval_state(&state.approval, &state.tally);
+            snapshots.push(ExternalApprovalSnapshot {
+                profile: profile_name.to_string(),
+                repo_id: repo_id.to_string(),
+                work_id: work_id.clone(),
+                credential_label,
+                operation_kind,
+                state: eval.state,
+                active: eval.active,
+                allowed_env_vars: state.approval.allowed_env_vars,
+                max_requests: state.approval.max_requests,
+                max_dollars: state.approval.max_dollars,
+                expires_at: state.approval.expires_at,
+                purpose: state.approval.purpose,
+                consumed_requests: state.tally.consumed_requests,
+                consumed_dollars: state.tally.consumed_dollars,
+                denial_reason: eval.denial_reason,
+            });
+        }
+    }
+    snapshots.sort_by(|left, right| {
+        (&left.work_id, &left.credential_label, &left.operation_kind).cmp(&(
+            &right.work_id,
+            &right.credential_label,
+            &right.operation_kind,
+        ))
+    });
+    snapshots
 }
 
 /// Validate a CLI transition against the ledger read under its write lock.
@@ -465,7 +520,10 @@ pub(super) fn prepare_external_approval(
             approval.expires_at = approval.expires_at.take().or(requested.expires_at);
             approval.purpose = approval.purpose.take().or(requested.purpose);
         }
-        "external_approval_revoke" | "external_approval_expire" => {}
+        "external_approval_revoke"
+        | "external_approval_expire"
+        | "external_approval_deny"
+        | "external_approval_complete" => {}
         _ => anyhow::bail!("unsupported external approval transition"),
     }
     Ok(())
@@ -568,6 +626,69 @@ pub fn record_external_approval_consumption_for_work_item(
     }
 
     Ok(recorded)
+}
+
+/// End each consumed approval scope after its work dispatch succeeds.
+pub fn complete_external_approvals_for_work_item(
+    cfg: &GahConfig,
+    profile_name: &str,
+    profile: &Profile,
+    work_id: Option<&str>,
+) -> anyhow::Result<usize> {
+    let Some(work_id) = work_id else {
+        return Ok(0);
+    };
+    let snapshots = external_approval_snapshots_from_entries(
+        &super::jsonl::read_entries(cfg)?,
+        profile_name,
+        &profile.repo_id,
+    );
+    let mut completed = 0;
+    for scope in snapshots.into_iter().filter(|scope| {
+        scope.work_id == work_id
+            && scope.consumed_requests > 0
+            && (scope.state == "consumed"
+                || matches!(
+                    scope.denial_reason.as_deref(),
+                    Some("request cap reached" | "dollar cap reached" | "usage unknown")
+                ))
+    }) {
+        let approval = ExternalApprovalRecord {
+            state: Some("completed".to_string()),
+            operation_kind: Some(scope.operation_kind),
+            credential_label: Some(scope.credential_label.clone()),
+            allowed_env_vars: Vec::new(),
+            max_requests: None,
+            max_dollars: None,
+            expires_at: None,
+            purpose: None,
+            consumed_requests: None,
+            consumed_dollars: None,
+            denial_reason: None,
+        };
+        super::jsonl::append_external_approval(
+            cfg,
+            LedgerEntry::new_external_approval(
+                profile_name,
+                profile,
+                work_id,
+                "external_approval_complete",
+                approval,
+            ),
+        )?;
+        crate::notifications::notify_event(
+            cfg,
+            profile,
+            crate::notifications::NotifyEvent::ExternalApprovalResolved {
+                profile: profile_name,
+                work_id,
+                credential_label: &scope.credential_label,
+                state: "completed",
+            },
+        );
+        completed += 1;
+    }
+    Ok(completed)
 }
 
 #[cfg(test)]
@@ -858,6 +979,57 @@ mod tests {
         .unwrap();
         assert!(!snapshot.active);
         assert_eq!(snapshot.denial_reason.as_deref(), Some("usage unknown"));
+    }
+
+    #[test]
+    fn successful_work_completes_consumed_approval_once() {
+        let (tmp, cfg) = test_config();
+        let mut profile = approval_profile(tmp.path());
+        let output = tmp.path().join("notifications.txt");
+        profile.notify_command = Some(format!("cat >> {}", output.display()));
+        let work_id = "ISSUE-653";
+        crate::ledger::append(
+            &cfg,
+            &LedgerEntry::new_external_approval(
+                "test",
+                &profile,
+                work_id,
+                "external_approval_grant",
+                approval_record("odds", "external_api", "approved", Some(2), None),
+            ),
+        )
+        .unwrap();
+        record_external_approval_consumption_for_work_item(
+            &cfg,
+            "test",
+            &profile,
+            Some(work_id),
+            &crate::ledger::LedgerUsage::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            complete_external_approvals_for_work_item(&cfg, "test", &profile, Some(work_id))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            complete_external_approvals_for_work_item(&cfg, "test", &profile, Some(work_id))
+                .unwrap(),
+            0
+        );
+        let snapshot = external_approval_snapshot_from_entries(
+            &crate::ledger::read_entries(&cfg).unwrap(),
+            "test",
+            &profile.repo_id,
+            work_id,
+            "odds",
+            "external_api",
+        )
+        .unwrap();
+        assert_eq!(snapshot.state, "completed");
+        assert!(!snapshot.active);
+        assert_eq!(std::fs::read_to_string(output).unwrap().lines().count(), 1);
     }
 
     #[test]

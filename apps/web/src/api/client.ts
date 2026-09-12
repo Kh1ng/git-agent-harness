@@ -685,3 +685,8 @@ export const paidRouteApi = {
   list: (profile: string) => getJson<import('@git-agent-harness/contracts').PaidRouteApproval[]>('/api/route-approvals', { profile }),
   change: (action: 'grant' | 'revoke', scope: import('@git-agent-harness/contracts').PaidRouteScope) => postJson<import('@git-agent-harness/contracts').PaidRouteApproval[], import('@git-agent-harness/contracts').PaidRouteScope & { confirm: true }>(`/api/route-approvals/${action}`, { ...scope, confirm: true })
 };
+
+export const externalApprovalApi = {
+  list: (profile: string) => getJson<import('@git-agent-harness/contracts').ExternalApprovalScope[]>('/api/external-approvals', { profile }),
+  change: (action: 'grant' | 'deny' | 'revoke', scope: import('@git-agent-harness/contracts').ExternalApprovalDecisionScope) => postJson<import('@git-agent-harness/contracts').ExternalApprovalScope[], import('@git-agent-harness/contracts').ExternalApprovalDecisionScope & { confirm: true }>(`/api/external-approvals/${action}`, { ...scope, confirm: true })
+};

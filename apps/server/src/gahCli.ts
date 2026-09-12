@@ -1322,6 +1322,31 @@ export async function runExternalApprovalInspect(
   return raw.scope;
 }
 
+export async function runExternalApprovals(
+  profile: string,
+  config?: string
+): Promise<import('@git-agent-harness/contracts').ExternalApprovalScope[]> {
+  const args = ['external-approval', 'list', '--json', '--profile', profile];
+  if (config) args.push('--config', config);
+  return runJsonCommand(args, config);
+}
+
+export async function changeExternalApproval(
+  action: 'grant' | 'deny' | 'revoke',
+  scope: import('@git-agent-harness/contracts').ExternalApprovalDecisionScope,
+  config?: string
+): Promise<void> {
+  const args = [
+    'external-approval', action,
+    '--profile', scope.profile,
+    '--work-id', scope.work_id,
+    '--credential-label', scope.credential_label,
+    '--operation-kind', scope.operation_kind,
+  ];
+  if (config) args.push('--config', config);
+  await runJsonCommand([...args, '--json'], config);
+}
+
 export async function runConfigShow(
   config?: string
 ): Promise<{ current_manager: string | null; notifications?: import('@git-agent-harness/contracts').NotificationSettingsSummary }> {
