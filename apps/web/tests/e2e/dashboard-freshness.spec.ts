@@ -107,7 +107,7 @@ test.describe('last-updated indicator', () => {
     { label: 'Overview', heading: 'Overview' },
     { label: 'Quota', heading: 'Quota' },
     { label: 'Telemetry', heading: 'Telemetry' },
-    { label: 'Work', heading: 'Work' },
+    { label: 'Factory', heading: 'Factory' },
     { label: 'Activity', heading: 'Activity' },
     { label: 'Settings', heading: 'Settings' },
   ]) {

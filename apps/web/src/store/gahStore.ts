@@ -134,13 +134,16 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
   async fetchStatus(profile, opts) {
     const key = profile ?? '';
     const current = get().status;
-    if (current.loading || (!opts?.force && isFresh(current, key))) return;
-    set({ status: { ...current, loading: true, error: null } });
+    if ((current.loading && current.key === key) || (!opts?.force && isFresh(current, key))) return;
+    const pending = { ...(current.key === key ? current : emptyResource<StatusSnapshot>()), loading: true, error: null, key };
+    set({ status: pending });
     try {
       const data = await gahApi.getStatus(profile);
+      if (get().status !== pending) return;
       set({ status: { data, loading: false, error: null, fetchedAt: Date.now(), key } });
     } catch (error) {
-      set({ status: { ...get().status, loading: false, error: errorMessage(error), key } });
+      if (get().status !== pending) return;
+      set({ status: { ...pending, loading: false, error: errorMessage(error) } });
     }
   },
 
@@ -178,13 +181,16 @@ export const useGahStore = create<GahStoreState>((set, get) => ({
   async fetchReport(params, opts) {
     const key = JSON.stringify(params ?? {});
     const current = get().report;
-    if (current.loading || (!opts?.force && isFresh(current, key))) return;
-    set({ report: { ...current, loading: true, error: null } });
+    if ((current.loading && current.key === key) || (!opts?.force && isFresh(current, key))) return;
+    const pending = { ...(current.key === key ? current : emptyResource<ReportData>()), loading: true, error: null, key };
+    set({ report: pending });
     try {
       const data = await gahApi.getReport(params);
+      if (get().report !== pending) return;
       set({ report: { data, loading: false, error: null, fetchedAt: Date.now(), key } });
     } catch (error) {
-      set({ report: { ...get().report, loading: false, error: errorMessage(error), key } });
+      if (get().report !== pending) return;
+      set({ report: { ...pending, loading: false, error: errorMessage(error) } });
     }
   },
 

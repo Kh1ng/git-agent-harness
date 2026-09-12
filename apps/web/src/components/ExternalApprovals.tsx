@@ -6,7 +6,7 @@ import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 
 const identity = (scope: ExternalApprovalScope) => JSON.stringify([scope.work_id, scope.credential_label, scope.operation_kind]);
 
-export function ExternalApprovals({ profile }: { profile: string }) {
+export function ExternalApprovals({ profile, onPendingWorkIds }: { profile: string; onPendingWorkIds?: (workIds: string[]) => void }) {
   const [approvals, setApprovals] = useState<ExternalApprovalScope[]>([]);
   const [owner, setOwner] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -14,15 +14,19 @@ export function ExternalApprovals({ profile }: { profile: string }) {
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState<{ key: string; action: 'grant' | 'deny' | 'revoke' } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const replaceApprovals = (rows: ExternalApprovalScope[]) => {
+    setApprovals(rows);
+    onPendingWorkIds?.([...new Set(rows.filter(approval => approval.state === 'requested').map(approval => approval.work_id))]);
+  };
   const refresh = async () => {
     setLoading(true);
     try {
       const [rows, session] = await Promise.all([externalApprovalApi.list(profile), pairingApi.session()]);
-      setApprovals(rows); setOwner(session.principal.kind === 'owner'); setError(null);
+      replaceApprovals(rows); setOwner(session.principal.kind === 'owner'); setError(null);
     } catch (failure) {
       if (failure instanceof GahApiError && failure.status === 404 && failure.endpoint === '/api/external-approvals') {
-        setApprovals([]); setNotice(null); setError(null); setConfirming(null);
-      } else setError(failure instanceof Error ? failure.message : 'Cannot load external approvals.');
+        replaceApprovals([]); setNotice(null); setError(null); setConfirming(null);
+      } else { replaceApprovals([]); setError(failure instanceof Error ? failure.message : 'Cannot load external approvals.'); }
     } finally { setLoading(false); }
   };
   useEffect(() => { void refresh(); }, [profile]);
@@ -33,7 +37,7 @@ export function ExternalApprovals({ profile }: { profile: string }) {
     setBusy(true); setError(null); setNotice(null);
     const scope: ExternalApprovalDecisionScope = { profile: approval.profile, work_id: approval.work_id, credential_label: approval.credential_label, operation_kind: approval.operation_kind };
     try {
-      setApprovals(await externalApprovalApi.change(action, scope));
+      replaceApprovals(await externalApprovalApi.change(action, scope));
       setConfirming(null);
       setNotice(`${action === 'grant' ? 'Approved' : action === 'deny' ? 'Denied' : 'Revoked'} ${approval.credential_label} for ${approval.work_id}.`);
     } catch (failure) {

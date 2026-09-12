@@ -29,10 +29,10 @@ export interface ProviderPickerProps {
   /** False while the selected backend's model list is still loading. */
   modelsLoaded: boolean;
   busy: boolean;
-  /** 'session' selections may be null ("default") and a backend switch
+  /** 'backend' shows only the shared backend list. 'session' selections may be null ("default") and a backend switch
    *  resets model + effort to the new backend's defaults; 'profile'
    *  selections always resolve through the profile-level settings. */
-  variant: 'session' | 'profile';
+  variant: 'backend' | 'session' | 'profile';
   triggerAriaLabel?: string;
   onSelect: (selection: ProviderSelection) => void;
 }
@@ -68,7 +68,7 @@ function saveFavorites(favorites: ProviderFavorite[]): void {
 }
 
 /**
- * T3-style provider control for the chat composer: a compact pill reading
+ * Shared provider control: a compact pill reading
  * like "Codex · GPT-5.3 Codex · Medium" that opens a popover with the
  * backend, model, and reasoning-effort choices, plus favorites (persisted
  * in localStorage) that apply all three selections at once.
@@ -194,7 +194,7 @@ export function ProviderPicker({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={triggerAriaLabel}
-        title={busy ? 'Switching provider is disabled while a turn is in flight' : 'Provider, model, and reasoning effort'}
+        title={busy ? 'Switching provider is disabled while a turn is in flight' : variant === 'backend' ? 'Provider' : 'Provider, model, and reasoning effort'}
         className="inline-flex max-w-[14rem] items-center gap-1.5 rounded-md border border-subtle bg-raised px-2 py-2 text-xs text-secondary hover:bg-white/5 disabled:opacity-50"
       >
         <Cpu size={13} className="shrink-0 text-muted" aria-hidden="true" />
@@ -205,10 +205,10 @@ export function ProviderPicker({
         <div
           role="dialog"
           aria-label={triggerAriaLabel}
-          className="absolute bottom-full left-0 z-20 mb-1.5 max-h-[70vh] w-[30rem] max-w-[calc(100vw-3rem)] overflow-y-auto rounded-md border border-subtle bg-card shadow-lg"
+          className="absolute bottom-full left-1/2 z-20 mb-1.5 max-h-[70vh] w-[30rem] max-w-[calc(100vw-3rem)] -translate-x-1/2 overflow-y-auto rounded-md border border-subtle bg-card shadow-lg sm:left-0 sm:translate-x-0"
         >
           <fieldset disabled={busy} className="contents">
-          <div className="border-b border-subtle px-2.5 py-2">
+          {variant !== 'backend' && <div className="border-b border-subtle px-2.5 py-2">
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">Favorites</span>
               {currentFavorite && (
@@ -254,8 +254,8 @@ export function ProviderPicker({
             ) : (
               <p className="mt-1 text-[11px] text-muted">No favorites yet — star a provider, model, or the current selection.</p>
             )}
-          </div>
-          <div className="grid grid-cols-1 gap-2 px-2.5 py-2 sm:grid-cols-3">
+          </div>}
+          <div className={`grid grid-cols-1 gap-2 px-2.5 py-2 ${variant === 'backend' ? '' : 'sm:grid-cols-3'}`}>
             <div className="min-w-0">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">Provider</p>
               <div className="mt-1 max-h-44 space-y-0.5 overflow-y-auto">
@@ -274,7 +274,7 @@ export function ProviderPicker({
                       >
                         <span className="truncate">{backend.displayName}{backend.implemented ? '' : ' (unavailable)'}</span>
                       </button>
-                      <button
+                      {variant !== 'backend' && <button
                         type="button"
                         onClick={() => toggleFavorite(favorite)}
                         disabled={!backend.implemented}
@@ -284,13 +284,13 @@ export function ProviderPicker({
                         title="Favorite this provider"
                       >
                         <Star size={11} className={starClasses(saved)} aria-hidden="true" />
-                      </button>
+                      </button>}
                     </div>
                   );
                 })}
               </div>
             </div>
-            <div className="min-w-0">
+            {variant !== 'backend' && <div className="min-w-0">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">Model</p>
               <div className="mt-1 max-h-44 space-y-0.5 overflow-y-auto">
                 {!modelsLoaded && <p className="px-1.5 py-1 text-[11px] text-muted">Loading models…</p>}
@@ -338,8 +338,8 @@ export function ProviderPicker({
                   );
                 })}
               </div>
-            </div>
-            <div className="min-w-0">
+            </div>}
+            {variant !== 'backend' && <div className="min-w-0">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">Effort</p>
               <div className="mt-1 max-h-44 space-y-0.5 overflow-y-auto">
                 {reasoningEfforts.length === 0 && (
@@ -391,7 +391,7 @@ export function ProviderPicker({
                   );
                 })}
               </div>
-            </div>
+            </div>}
           </div>
           </fieldset>
         </div>

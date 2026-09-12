@@ -31,7 +31,7 @@ test('mobile navigation contains focus, closes with Escape, selection, backdrop,
   expect(focus.width).toBeGreaterThanOrEqual(44);
   expect(focus.height).toBeGreaterThanOrEqual(44);
   await opener.click();
-  await dialog.getByRole('button', { name: 'Work', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Factory', exact: true }).click();
   await expect(dialog).not.toBeVisible();
   expect(selected).toEqual(['work']);
   await opener.click();

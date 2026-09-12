@@ -22,7 +22,7 @@ const VIEWPORTS = [
 const ROUTES: { label: string; heading: string }[] = [
   { label: 'Overview', heading: 'Overview' },
   { label: 'Nodes', heading: 'Nodes' },
-  { label: 'Work', heading: 'Work' },
+  { label: 'Factory', heading: 'Factory' },
   { label: 'Telemetry', heading: 'Telemetry' },
   { label: 'Quota', heading: 'Quota' },
   { label: 'Activity', heading: 'Activity' },

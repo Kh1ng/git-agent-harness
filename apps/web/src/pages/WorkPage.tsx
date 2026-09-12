@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ChevronRight, ListChecks, FileText, Rocket } from 'lucide-react';
-import type { AvailableTicket, MergeRequest, Session, WorkWaypointEvidence } from '@git-agent-harness/contracts';
+import type { AvailableTicket, ManagerBackendInfo, MergeRequest, ProviderKind, Session, UsageRollupTicketRow, WorkWaypointEvidence } from '@git-agent-harness/contracts';
 import { generateProviderInstanceId } from '@git-agent-harness/shared';
 import { gahApi, GahApiError } from '../api/client.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
@@ -17,6 +17,8 @@ import { AttemptTimeline } from '../components/AttemptTimeline.js';
 import { PaidRouteApprovals } from '../components/PaidRouteApprovals.js';
 import { ExternalApprovals } from '../components/ExternalApprovals.js';
 import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
+import { ProviderPicker } from '../components/ProviderPicker.js';
+import { formatCost, formatPercent } from '../lib/format.js';
 import {
   WAYPOINTS,
   WaypointHistory,
@@ -28,16 +30,15 @@ import {
 const WORK_REFRESH_MS = 30 * 1000;
 
 const DISPATCH_MODES = ['fix', 'improve', 'review', 'pm', 'experiment'] as const;
-const DISPATCH_BACKENDS = ['auto', 'openhands', 'codex', 'claude', 'agy', 'vibe', 'opencode', 'hermes'] as const;
 
 /** Minimal "start a new dispatch" form -- the dashboard could only stop/
  * command sessions that already existed, with no way to start one. Sends
  * the same `session.start` message the WS contract already defines
  * (apps/server's SessionManager.startSession); no new server-side work. */
-function NewDispatchForm({ profile, repo }: { profile: string; repo: string | null }) {
+function NewDispatchForm({ profile, repo, backends }: { profile: string; repo: string | null; backends: ManagerBackendInfo[] }) {
   const { sendMessage, isConnected } = useWebSocket();
   const [mode, setMode] = useState<(typeof DISPATCH_MODES)[number]>('fix');
-  const [backend, setBackend] = useState<(typeof DISPATCH_BACKENDS)[number]>('auto');
+  const [backend, setBackend] = useState<ProviderKind>('auto');
   const [target, setTarget] = useState('');
   const [justSent, setJustSent] = useState(false);
 
@@ -62,7 +63,7 @@ function NewDispatchForm({ profile, repo }: { profile: string; repo: string | nu
     <section className="card-padded">
       <h3 className="text-sm font-semibold text-primary mb-3 flex items-center gap-2">
         <Rocket size={15} aria-hidden="true" />
-        Dispatch new work
+        Queue work
       </h3>
       <div className="flex flex-wrap items-end gap-3">
         <label className="text-xs text-muted">
@@ -77,18 +78,22 @@ function NewDispatchForm({ profile, repo }: { profile: string; repo: string | nu
             ))}
           </select>
         </label>
-        <label className="text-xs text-muted">
-          Backend
-          <select
-            value={backend}
-            onChange={(e) => setBackend(e.target.value as typeof backend)}
-            className="block mt-1 bg-raised border border-subtle rounded-md px-2 py-1.5 text-sm text-primary"
-          >
-            {DISPATCH_BACKENDS.map((b) => (
-              <option key={b} value={b}>{b}</option>
-            ))}
-          </select>
-        </label>
+        <div className="text-xs text-muted">
+          <span className="mb-1 block">Backend</span>
+          <ProviderPicker
+            backends={backends}
+            selectedBackendId={backend}
+            models={[]}
+            currentModelId={null}
+            reasoningEfforts={[]}
+            currentReasoningEffortId={null}
+            modelsLoaded
+            busy={false}
+            variant="backend"
+            triggerAriaLabel="Factory backend"
+            onSelect={(selection) => setBackend(selection.backendId as ProviderKind)}
+          />
+        </div>
         <label className="text-xs text-muted flex-1 min-w-[160px]">
           Target (issue number or ticket path)
           <input
@@ -99,7 +104,7 @@ function NewDispatchForm({ profile, repo }: { profile: string; repo: string | nu
             className="block mt-1 w-full bg-raised border border-subtle rounded-md px-2 py-1.5 text-sm text-primary placeholder:text-muted"
           />
         </label>
-        <button onClick={dispatch} disabled={!isConnected || !repo} className="btn-primary">
+        <button onClick={dispatch} disabled={!isConnected || !repo || !backends.find(item => item.id === backend)?.implemented} className="btn-primary">
           {justSent ? 'Sent' : 'Dispatch'}
         </button>
       </div>
@@ -255,18 +260,61 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
   const fetchStatus = useGahStore((s) => s.fetchStatus);
   const profiles = useGahStore((s) => s.profiles);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
+  const report = useGahStore((s) => s.report);
+  const fetchReport = useGahStore((s) => s.fetchReport);
   const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
   const [holdPending, setHoldPending] = useState<string | null>(null);
   const [holdError, setHoldError] = useState<string | null>(null);
+  const [factoryData, setFactoryData] = useState<{ profile: string | null; usageTickets: UsageRollupTicketRow[]; managerBackends: ManagerBackendInfo[] }>({
+    profile: null,
+    usageTickets: [],
+    managerBackends: []
+  });
+  const [paidReviewWorkIds, setPaidReviewWorkIds] = useState<string[]>([]);
+  const [externalReviewWorkIds, setExternalReviewWorkIds] = useState<string[]>([]);
+  const factoryRequestId = useRef(0);
+  const activeProfileRef = useRef(profile);
+  activeProfileRef.current = profile;
+
+  const refreshFactoryData = async () => {
+    const requestedProfile = profile ?? null;
+    const requestId = ++factoryRequestId.current;
+    setFactoryData(current => current.profile === requestedProfile
+      ? current
+      : { profile: requestedProfile, usageTickets: [], managerBackends: [] });
+    const [usage, settings] = await Promise.allSettled([
+      gahApi.getUsageRollup(profile ?? undefined, 30),
+      gahApi.getManagerChatSettings()
+    ]);
+    if (factoryRequestId.current !== requestId) return;
+    setFactoryData({
+      profile: requestedProfile,
+      usageTickets: usage.status === 'fulfilled' ? usage.value.tickets : [],
+      managerBackends: settings.status === 'fulfilled' ? settings.value.availableBackends : []
+    });
+  };
+
+  const refresh = async () => {
+    await Promise.all([
+      fetchStatus(profile ?? undefined, { force: true }),
+      fetchProfiles({ force: true }),
+      fetchReport({ profile: profile ?? undefined, since: '7d', groupBy: 'backend' }, { force: true }),
+      refreshFactoryData()
+    ]);
+  };
 
   useEffect(() => {
-    fetchStatus(profile ?? undefined);
-    fetchProfiles();
-  }, [profile, fetchStatus, fetchProfiles]);
+    setPaidReviewWorkIds([]);
+    setExternalReviewWorkIds([]);
+    void refresh();
+    return () => { factoryRequestId.current += 1; };
+    // Each fetch function is a stable Zustand action; refresh is intentionally
+    // recreated with the selected profile.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile, fetchStatus, fetchProfiles, fetchReport]);
 
-  const refresh = () => fetchStatus(profile ?? undefined, { force: true });
-  useAutoRefresh(refresh, WORK_REFRESH_MS);
-  useWsReconnectRefresh(refresh);
+  useAutoRefresh(() => { void refresh(); }, WORK_REFRESH_MS);
+  useWsReconnectRefresh(() => { void refresh(); });
 
   const activeProfileRepo = profiles.data?.find((p) => p.name === profile)?.repo ?? null;
 
@@ -291,11 +339,56 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
   const issueIntakeRejections = status.data?.issue_intake_rejections ?? [];
   const activeClaims = status.data?.active_claims ?? [];
   const heldWorkIds = new Set(status.data?.review_held_work_ids ?? []);
+  const usageByWorkKey = new Map(factoryData.usageTickets.map((row) => [workKey(row.ticket), row]));
   const waypointCounts = new Map(WAYPOINTS.map((waypoint) => [waypoint.key, 0]));
   for (const item of projectItems) {
     const waypoint = currentWorkWaypoint(itemEvidence(item));
     waypointCounts.set(waypoint.key, (waypointCounts.get(waypoint.key) ?? 0) + 1);
   }
+  const sessionWorkKey = (session: Session) => session.target ? workKey(session.target) : `session:${session.id}`;
+  const inactiveSessionKeys = new Set(recentSessions.map(sessionWorkKey));
+  const queuedWork = new Set(queuedSessions.map(sessionWorkKey));
+  for (const ticket of status.data?.available_tickets ?? []) {
+    const key = workKey(ticket.work_id ?? ticket.normalized_work_identity ?? ticket.ticket_path);
+    if (ticket.execution_policy?.dispatchable_now && ticket.prior_attempt_count === 0 && !ticket.has_active_claim && !ticket.has_active_mr && !ticket.human_required && !inactiveSessionKeys.has(key)) queuedWork.add(key);
+  }
+  const runningWork = new Set(activeSessions.map(sessionWorkKey));
+  for (const claim of activeClaims) runningWork.add(workKey(claim.work_id));
+  const reviewWork = new Map<string, { workId: string; title: string | null; url: string | null; reasons: Set<string> }>();
+  const addReviewWork = (workId: string, reason: string, title: string | null = null, url: string | null = null) => {
+    const key = workKey(workId);
+    const existing = reviewWork.get(key);
+    if (existing) {
+      existing.reasons.add(reason);
+      if (!existing.title && title) existing.title = title;
+      if (!existing.url && url) existing.url = url;
+    } else reviewWork.set(key, { workId, title, url, reasons: new Set([reason]) });
+  };
+  for (const workId of heldWorkIds) addReviewWork(workId, 'Review hold');
+  for (const ticket of status.data?.available_tickets ?? []) if (ticket.human_required) addReviewWork(ticket.work_id ?? ticket.normalized_work_identity ?? ticket.ticket_path, 'Human required', ticket.title);
+  for (const mergeRequest of status.data?.merge_requests ?? []) if (!mergeRequest.merged && mergeRequest.work_id) addReviewWork(mergeRequest.work_id, 'Pull request', mergeRequest.title ?? null, mergeRequest.url);
+  for (const blocker of status.data?.blocked_work_items ?? []) {
+    const workId = blocker.remediation_plan?.work_id ?? blocker.source_reference;
+    if (workId) addReviewWork(workId, blocker.reason_code?.replace(/_/g, ' ') ?? 'Blocked');
+  }
+  for (const workId of paidReviewWorkIds) addReviewWork(workId, 'Paid route approval');
+  for (const workId of externalReviewWorkIds) addReviewWork(workId, 'External API approval');
+  const shippedWork = new Set((status.data?.merge_requests ?? []).filter(mergeRequest => mergeRequest.merged).map(mergeRequest => workKey(mergeRequest.work_id ?? mergeRequest.id ?? mergeRequest.branch)));
+  const factoryCounts = {
+    queued: queuedWork.size,
+    running: runningWork.size,
+    review: reviewWork.size,
+    shipped: shippedWork.size
+  };
+  const dispatchBackends: ManagerBackendInfo[] = [
+    { id: 'auto', displayName: 'Auto', implemented: factoryData.managerBackends.some(item => item.implemented && status.data?.backend_configured?.[item.id] === true) },
+    ...factoryData.managerBackends.map(item => ({ ...item, implemented: item.implemented && status.data?.backend_configured?.[item.id] === true }))
+  ];
+  const reportKey = JSON.stringify({ profile: profile ?? undefined, since: '7d', groupBy: 'backend' });
+  const currentReport = report.key === reportKey && !report.error ? report.data : null;
+  const reportEntries = currentReport?.comparisons.reduce((sum, row) => sum + row.entries, 0) ?? 0;
+  const reportSuccesses = currentReport?.comparisons.reduce((sum, row) => sum + row.validation_pass, 0) ?? 0;
+  const successRate = reportEntries > 0 ? reportSuccesses / reportEntries : null;
   // Issue #503: hold/release safe controls — the same authorization the CLI
   // enforces, via the owner-gated mutation API.
   const setHold = async (workId: string, reason: string) => {
@@ -335,17 +428,81 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Work"
-        description="Active sessions and dispatchable tickets"
+        title="Factory"
+        description="Queue, run, review, and ship agent work"
         onRefresh={refresh}
         refreshing={status.loading}
         lastUpdated={status.fetchedAt}
       />
 
-      {profile && <PaidRouteApprovals key={profile} profile={profile} />}
-      {profile && <ExternalApprovals key={`external-${profile}`} profile={profile} />}
+      <section aria-labelledby="factory-flow-title">
+        <h3 id="factory-flow-title" className="sr-only">Factory flow</h3>
+        <dl className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+          {[
+            ['Queued', factoryCounts.queued],
+            ['Running', factoryCounts.running],
+            ['Needs review', factoryCounts.review],
+            ['Shipped', factoryCounts.shipped]
+          ].map(([label, value]) => (
+            <div key={label} className="card-padded">
+              <dt className="text-xs text-muted">{label}</dt>
+              <dd className="mt-1 text-xl font-semibold tabular-nums text-primary">{value}</dd>
+            </div>
+          ))}
+          <div className="card-padded col-span-2 sm:col-span-1">
+            <dt className="text-xs text-muted">Capacity</dt>
+            <dd className="mt-1 text-xl font-semibold tabular-nums text-primary">
+              {status.data?.inflight_implementation_count ?? activeSessions.length}/{status.data?.max_parallel_workers ?? '—'}
+            </dd>
+          </div>
+          <div className="card-padded">
+            <dt className="text-xs text-muted">Success · 7d</dt>
+            <dd className="mt-1 text-xl font-semibold tabular-nums text-primary">{formatPercent(successRate)}</dd>
+          </div>
+        </dl>
+      </section>
 
-      <NewDispatchForm profile={profile ?? 'gah'} repo={activeProfileRepo} />
+      <NewDispatchForm profile={profile ?? 'gah'} repo={activeProfileRepo} backends={dispatchBackends} />
+
+      {profile && (
+        <div aria-labelledby="factory-review-title">
+          <h3 id="factory-review-title" className="mb-3 text-sm font-semibold text-primary">Needs review ({factoryCounts.review})</h3>
+          <div className="space-y-3">
+            {reviewWork.size > 0 && (
+              <ul className="card divide-y divide-subtle" aria-label="Review queue">
+                {[...reviewWork.values()].map(item => (
+                  <li key={workKey(item.workId)} className="flex flex-wrap items-center justify-between gap-3 px-3 py-3">
+                    <div className="min-w-0">
+                      <p className="text-sm text-primary"><span className="font-mono text-xs text-muted">{item.workId}</span>{item.title ? ` ${item.title}` : ''}</p>
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {[...item.reasons].map(reason => <StatusBadge key={reason} tone="warning" label={reason} />)}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {item.url && <a href={item.url} target="_blank" rel="noreferrer" className="text-xs text-accent hover:underline">Open PR</a>}
+                      {item.reasons.has('Review hold') && (
+                        <button type="button" disabled={holdPending !== null} onClick={() => clearHold(item.workId)} className="btn-secondary min-h-11 sm:min-h-0 sm:py-1">
+                          {holdPending === item.workId ? 'Releasing…' : 'Release hold'}
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <PaidRouteApprovals
+              key={profile}
+              profile={profile}
+              onPendingWorkIds={(workIds) => { if (activeProfileRef.current === profile) setPaidReviewWorkIds(workIds); }}
+            />
+            <ExternalApprovals
+              key={`external-${profile}`}
+              profile={profile}
+              onPendingWorkIds={(workIds) => { if (activeProfileRef.current === profile) setExternalReviewWorkIds(workIds); }}
+            />
+          </div>
+        </div>
+      )}
 
       <section>
         <ControllerActivityCard activity={controllerActivity} />
@@ -417,7 +574,7 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
 
       {recentSessions.length > 0 && (
         <section>
-          <h3 className="text-sm font-semibold text-primary mb-3">Recent sessions</h3>
+          <h3 className="text-sm font-semibold text-primary mb-3">Recent outcomes</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {recentSessions.map((session) => (
               <SessionCard key={session.id} session={session} onClick={() => onSelectSession(session)} />
@@ -429,7 +586,7 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
       <section>
         <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
           <div>
-            <h3 className="text-sm font-semibold text-primary">Project waypoints ({projectItems.length})</h3>
+            <h3 className="text-sm font-semibold text-primary">Factory pipeline ({projectItems.length})</h3>
             <p className="mt-1 text-xs text-muted">Current stage by ticket, derived from the queue, sessions, ledger, and provider state.</p>
           </div>
         </div>
@@ -461,6 +618,7 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                   <th>Waypoints</th>
                   <th>Backend / model</th>
                   <th>Attempts</th>
+                  <th>Cost · 30d</th>
                   <th>Status</th>
                   <th></th>
                 </tr>
@@ -489,6 +647,7 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                         : 'Unknown'}
                     </td>
                     <td>{t?.prior_attempt_count ?? '—'}</td>
+                    <td>{usageByWorkKey.get(item.key)?.estimated_cost_usd == null ? <span className="text-muted">Unmeasured</span> : formatCost(usageByWorkKey.get(item.key)?.estimated_cost_usd)}</td>
                     <td>
                       <div className="flex flex-wrap gap-1">
                         <StatusBadge tone={evidence.humanRequired ? 'warning' : currentWaypoint.key === 'merged' ? 'good' : 'unknown'} label={currentWaypoint.label} />

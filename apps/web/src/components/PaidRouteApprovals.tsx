@@ -6,7 +6,7 @@ import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 
 /** Work-scoped spending decisions stay beside work; approved routes remain
  * available for revocation after their original blocker disappears. */
-export function PaidRouteApprovals({ profile }: { profile: string }) {
+export function PaidRouteApprovals({ profile, onPendingWorkIds }: { profile: string; onPendingWorkIds?: (workIds: string[]) => void }) {
   const [routes, setRoutes] = useState<PaidRouteApproval[]>([]);
   const [owner, setOwner] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -14,16 +14,20 @@ export function PaidRouteApprovals({ profile }: { profile: string }) {
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const replaceRoutes = (rows: PaidRouteApproval[]) => {
+    setRoutes(rows);
+    onPendingWorkIds?.([...new Set(rows.filter(route => route.requested && !route.approved).map(route => route.work_id))]);
+  };
   const refresh = async () => {
     setLoading(true);
     try {
       const [rows, session] = await Promise.all([paidRouteApi.list(profile), pairingApi.session()]);
-      setRoutes(rows); setOwner(session.principal.kind === 'owner'); setError(null);
+      replaceRoutes(rows); setOwner(session.principal.kind === 'owner'); setError(null);
     } catch (failure) {
       // A rolling frontend update may reach an older central without this API.
       if (failure instanceof GahApiError && failure.status === 404 && failure.endpoint === '/api/route-approvals') {
-        setRoutes([]); setNotice(null); setError(null); setConfirming(null);
-      } else setError(failure instanceof Error ? failure.message : 'Cannot load paid-route approvals.');
+        replaceRoutes([]); setNotice(null); setError(null); setConfirming(null);
+      } else { replaceRoutes([]); setError(failure instanceof Error ? failure.message : 'Cannot load paid-route approvals.'); }
     }
     finally { setLoading(false); }
   };
@@ -36,7 +40,7 @@ export function PaidRouteApprovals({ profile }: { profile: string }) {
     const action = route.approved ? 'revoke' : 'grant';
     const scope: PaidRouteScope = { profile: route.profile, work_id: route.work_id, backend: route.backend, backend_instance: route.backend_instance, model: route.model };
     try {
-      setRoutes(await paidRouteApi.change(action, scope));
+      replaceRoutes(await paidRouteApi.change(action, scope));
       setConfirming(null);
       setNotice(`${action === 'grant' ? 'Approved paid use' : 'Revoked paid use'} for ${route.work_id}.`);
     } catch (failure) {

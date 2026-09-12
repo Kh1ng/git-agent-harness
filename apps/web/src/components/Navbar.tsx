@@ -27,7 +27,7 @@ const navItems: { id: Page; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'chat', label: 'Chat', icon: MessageSquare },
   { id: 'git', label: 'Git', icon: GitBranch },
   { id: 'nodes', label: 'Nodes', icon: Server },
-  { id: 'work', label: 'Work', icon: ListChecks },
+  { id: 'work', label: 'Factory', icon: ListChecks },
   { id: 'telemetry', label: 'Telemetry', icon: BarChart3 },
   { id: 'quota', label: 'Quota', icon: Gauge },
   { id: 'events', label: 'Activity', icon: Radio },
