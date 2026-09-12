@@ -6,4 +6,4 @@ The iPhone controller now lives in [`apps/ios`](../ios/README.md). It uses Swift
 
 A successful simulator build does not prove physical installation or mobile network recovery. See [iPhone testing](../../docs/IOS_TESTING.md) for recorded evidence and the manual acceptance run. Issue #936 remains open until its physical-device checks pass.
 
-Android is also a control-only client. Native Android packaging and physical testing remain pending. The shared dashboard and pairing flow are available for browser testing on both platforms. Keep desktop worker controls in `apps/desktop`; do not add worker execution to a mobile app.
+The Android controller lives in [`apps/android`](../android/README.md). It is a native WebView host for the same central dashboard and stores the selected central address on the device. It contains no worker runtime. CI builds a debug APK; release signing remains a distribution concern.

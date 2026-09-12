@@ -26,6 +26,8 @@ coverage/
 /dist
 /dist-electron
 /dist-electron-packages
+apps/android/.gradle/
+apps/android/**/build/
 /**.output
 **/dist/
 

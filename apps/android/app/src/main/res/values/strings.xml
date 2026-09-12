@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">GAH</string>
+    <string name="server_address">Central server address</string>
+    <string name="server_hint">https://central.example.ts.net</string>
+    <string name="connect">Connect</string>
+    <string name="change_server">Change server</string>
+</resources>

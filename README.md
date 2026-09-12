@@ -32,6 +32,10 @@ chmod +x GAH-Worker.AppImage && ./GAH-Worker.AppImage
 
 Smoke test: GAH Worker appears in the system tray.
 
+### Android — control surface (debug APK)
+
+The native Android app is a control-only WebView for a central GAH node. Build it with `gradle -p apps/android testDebugUnitTest assembleDebug`, or download `gah-android-debug-apk` from the Android workflow. See [Android controller](apps/android/README.md).
+
 ### CLI binary (`gah`) — Linux or macOS
 
 ```bash

@@ -53,7 +53,7 @@ These are separate decisions. A running local `gah loop` does not automatically 
 | macOS presence | Dock, tray, and launch-window preferences persist. Defaults show the tray and a window. The app preserves a way to reopen its controls and can show native alerts from the configured central dashboard. | `Presence`, the bounded notification bridge, and their tests in [main.rs](../apps/desktop/main.rs). Packaged Dock/tray and notification permission transitions still need manual verification. |
 | Browser dashboard | React provides Overview, Work, Telemetry, Quota, Activity, Settings, Chat, Git, and Nodes. The same app runs in the desktop dashboard webview. | [App routing](../apps/web/src/App.tsx), [navigation tests](../apps/web/tests/component/Navigation.spec.tsx), [browser smoke tests](../apps/web/tests/e2e/smoke.spec.ts). Navigation uses React state rather than URL routes. |
 | Windows/macOS packaging | CI builds native desktop artifacts, including a Windows NSIS installer. Windows installation can combine the GUI and a WSL worker. | [Desktop workflow](../.github/workflows/desktop.yml), [Windows installer](../scripts/install-windows.ps1), [WSL installer](../scripts/install-wsl-worker.sh). A successful build does not prove installation, reboot recovery, or remote reachability. |
-| iOS/Android | The shared dashboard and QR exchange provide browser control. The iPhone shell can show de-duplicated local activity notifications while running. The intended native apps are control-only clients. | [Mobile scoping](../apps/desktop/MOBILE_SCOPING.md) records packaging work. Android packaging and iOS background push remain unimplemented; physical background/resume still needs verification. |
+| iOS/Android | Native control-only shells load the shared dashboard. The iPhone shell adds QR scanning and de-duplicated local activity notifications. The Android shell stores the central address and isolates external links from its WebView. | [iPhone app](../apps/ios/README.md), [Android app](../apps/android/README.md), and [mobile scoping](../apps/desktop/MOBILE_SCOPING.md). Release signing, iOS background push, and physical background/resume still need verification. |
 
 The [manual testing procedure](testing/worker-device-manual.md) owns device verification steps.
 The [UI audit](UI_AUDIT_2026-09-07.md) records accessibility and layout findings without implying native device coverage.
@@ -219,7 +219,7 @@ restart invalidation, wrong server/origin, hash-only storage, owner restrictions
 A browser regression covers confirmation, QR/manual links, cookie persistence and attributes,
 replay rejection, and a revoked live connection using mock dashboard data with production authentication.
 
-Native iOS/Android scanners, platform keychains, installed webview cookie persistence,
+Native iOS scanning, platform keychains, installed webview cookie persistence,
 and physical devices are not claimed as tested. Validate iOS and Android separately.
 Browser viewport tests do not prove native builds or device behavior.
 
