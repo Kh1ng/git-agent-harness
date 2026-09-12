@@ -6,14 +6,16 @@ use super::super::test_support::{
     profile, record_unavailable,
 };
 use super::super::{
-    CandidateIdentity, ConcurrencyGuard, RouteError, RouteRequest, RoutingRuntimeState,
-    TaskRoutingContext,
+    CandidateIdentity, ConcurrencyGuard, ReviewerOutcomeMetrics, RouteError, RouteRequest,
+    RoutingRuntimeState, TaskRoutingContext,
 };
 use super::is_genuine_agent_failure;
 use crate::availability::{Reason, Source};
 use tempfile::TempDir;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+
+mod reviewer_history_tests;
 
 #[test]
 fn task_rule_precedes_generic_candidates_for_matching_implementation() {

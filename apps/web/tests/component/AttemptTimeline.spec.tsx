@@ -14,6 +14,12 @@ const reviewerDiagnostics: RoutingDiagnostics = {
   selected_pace_band: 'normal',
   selected_cost_class: 'standard',
   selected_over: ['fallback-reviewer/gpt-4o'],
+  configured_order: ['fallback-reviewer/gpt-4o', 'reviewer-backend/gpt-4.1'],
+  final_order: ['reviewer-backend/gpt-4.1', 'fallback-reviewer/gpt-4o'],
+  reviewer_history_status: 'reordered',
+  reviewer_history_min_samples: 5,
+  reviewer_history_selected_samples: 8,
+  reviewer_history_confidence: 'low',
   human_summary: 'Selected the quota-backed reviewer after skipping an exhausted alternative.',
   candidates: [
     {
@@ -21,18 +27,27 @@ const reviewerDiagnostics: RoutingDiagnostics = {
       model: 'gpt-4.1',
       quota_pool: 'reviewers',
       default_order: 1,
-      consideration_order: 1,
+      consideration_order: 0,
       pace_band: 'normal',
       cost_class: 'standard',
       skip_reason: null,
-      unavailable_until: null
+      unavailable_until: null,
+      reviewer_outcome_samples: 8,
+      reviewer_success_rate: 0.875,
+      reviewer_later_fix_correlations: 1,
+      reviewer_human_overrides: 0,
+      reviewer_false_approvals: 1,
+      reviewer_false_rejections: 0,
+      reviewer_quota_backed_reviews: 8,
+      reviewer_average_api_cost_usd: null,
+      reviewer_average_latency_seconds: 42.5
     },
     {
       backend: 'fallback-reviewer',
       model: 'gpt-4o',
       quota_pool: 'fallback',
-      default_order: 2,
-      consideration_order: 2,
+      default_order: 0,
+      consideration_order: 1,
       pace_band: 'fast',
       cost_class: 'premium',
       skip_reason: 'quota exhausted',
@@ -174,6 +189,9 @@ test('renders reviewer attribution, routing rationale, diff stats, and outcome b
   await expect(component).toContainText('Reason: Selected the quota-backed reviewer after skipping an exhausted alternative.');
   await expect(component).toContainText('Selected candidate: Selected reviewer-backend/gpt-4.1 · quota reviewers · pace normal · cost standard');
   await expect(component).toContainText('skipped: quota exhausted');
+  await expect(component).toContainText('Reviewer history: reordered · 8 samples · low confidence');
+  await expect(component).toContainText('review outcomes 8 · success 88% · moved up 1');
+  await expect(component).toContainText('quota-backed 8 · latency avg 42.5s');
   await expect(component).toContainText('Files changed: 5');
   await expect(component).toContainText('+12 / -4');
   await expect(component).toContainText('Commit: created');

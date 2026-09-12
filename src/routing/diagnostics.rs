@@ -1,4 +1,6 @@
-use super::types::{candidate_label, render_skips, SkippedBackend};
+use super::types::{
+    candidate_label, render_skips, CandidateIdentity, RoutingRuntimeState, SkippedBackend,
+};
 use crate::ledger::{RoutingCandidateDiagnostic, RoutingDiagnostics};
 use crate::quota::{self, PaceBand, PacingConfig};
 
@@ -10,6 +12,9 @@ use crate::quota::{self, PaceBand, PacingConfig};
 pub(super) trait DiagnosticCandidate {
     fn backend(&self) -> &str;
     fn backend_instance(&self) -> Option<&str>;
+    fn reviewer_identity_backend(&self) -> &str {
+        self.backend()
+    }
     fn model(&self) -> Option<&str>;
     fn quota_pool(&self) -> Option<&str>;
     fn priority(&self) -> i32;
@@ -64,7 +69,15 @@ pub(super) fn build_routing_diagnostics<C: DiagnosticCandidate>(
     skipped: &[SkippedBackend],
     selected_over: Option<&[String]>,
     pacing: &PacingConfig,
+    runtime: &RoutingRuntimeState,
+    reviewer_history_applied: Option<bool>,
 ) -> RoutingDiagnostics {
+    let configured_order = configured_order(candidates);
+    let final_order = candidates
+        .iter()
+        .map(candidate_history_label)
+        .collect::<Vec<_>>();
+    let reviewer_history_ready = reviewer_history_ready(candidates, runtime);
     let candidates = candidates
         .iter()
         .enumerate()
@@ -74,6 +87,7 @@ pub(super) fn build_routing_diagnostics<C: DiagnosticCandidate>(
                     && skip.backend_instance.as_deref() == candidate.backend_instance()
                     && skip.model.as_deref() == candidate.model()
             });
+            let history = reviewer_history(candidate, runtime);
             RoutingCandidateDiagnostic {
                 backend: candidate.backend().to_string(),
                 backend_instance: candidate.backend_instance().map(str::to_string),
@@ -85,23 +99,57 @@ pub(super) fn build_routing_diagnostics<C: DiagnosticCandidate>(
                 cost_class: Some(candidate_cost_class(candidate)),
                 skip_reason: skipped.map(|skip| skip.reason.clone()),
                 unavailable_until: skipped.and_then(|skip| skip.unavailable_until.clone()),
+                reviewer_completed_reviews: history.map(|metrics| metrics.completed_reviews),
+                reviewer_outcome_samples: history.map(|metrics| metrics.outcome_samples),
+                reviewer_success_rate: history.and_then(|metrics| metrics.success_rate()),
+                reviewer_later_fix_correlations: history
+                    .map(|metrics| metrics.later_fix_correlations),
+                reviewer_human_overrides: history.map(|metrics| metrics.human_overrides),
+                reviewer_false_approvals: history.map(|metrics| metrics.false_approvals),
+                reviewer_false_rejections: history.map(|metrics| metrics.false_rejections),
+                reviewer_average_latency_seconds: history
+                    .and_then(|metrics| metrics.average_latency_seconds()),
+                reviewer_quota_backed_reviews: history.map(|metrics| metrics.quota_backed_reviews),
+                reviewer_average_api_cost_usd: history
+                    .and_then(|metrics| metrics.average_api_cost_usd()),
             }
         })
         .collect();
+    let selected_history = reviewer_history(selected, runtime);
+    let reviewer_history_status = reviewer_history_applied.map(|applied| {
+        if applied {
+            "reordered"
+        } else if reviewer_history_ready {
+            "configured_order_preserved"
+        } else {
+            "insufficient_samples"
+        }
+        .to_string()
+    });
 
     RoutingDiagnostics {
-        policy_reordered_candidates: selected_over.is_some(),
+        policy_reordered_candidates: selected_over.is_some()
+            || reviewer_history_applied.unwrap_or(false),
         selected_backend: Some(selected.backend().to_string()),
         selected_model: selected.model().map(str::to_string),
         selected_quota_pool: selected.quota_pool().map(str::to_string),
         selected_pace_band: candidate_pace_band(selected, pacing),
         selected_cost_class: Some(candidate_cost_class(selected)),
         selected_over: selected_over.unwrap_or_default().to_vec(),
+        configured_order,
+        final_order,
+        reviewer_history_status,
+        reviewer_history_min_samples: reviewer_history_applied.map(|_| 5),
+        reviewer_history_selected_samples: selected_history.map(|metrics| metrics.outcome_samples),
+        reviewer_history_confidence: selected_history
+            .map(|metrics| reviewer_confidence(metrics.outcome_samples).to_string()),
         human_summary: Some(render_routing_diagnostics_human(
             selected,
             skipped,
             selected_over,
             pacing,
+            reviewer_history_applied
+                .map(|applied| (selected_history, applied, reviewer_history_ready)),
         )),
         candidates,
     }
@@ -112,6 +160,7 @@ fn render_routing_diagnostics_human<C: DiagnosticCandidate + ?Sized>(
     skipped: &[SkippedBackend],
     selected_over: Option<&[String]>,
     pacing: &PacingConfig,
+    reviewer_history: Option<(Option<&super::types::ReviewerOutcomeMetrics>, bool, bool)>,
 ) -> String {
     let mut parts = vec![format!("selected {}", describe_candidate(selected, pacing))];
     if let Some(pool) = selected.quota_pool() {
@@ -130,7 +179,85 @@ fn render_routing_diagnostics_human<C: DiagnosticCandidate + ?Sized>(
     if !skipped.is_empty() {
         parts.push(format!("skipped {}", render_skips(skipped)));
     }
+    if let Some((history, reviewer_history_applied, reviewer_history_ready)) = reviewer_history {
+        if let Some(history) = history.filter(|_| reviewer_history_ready) {
+            parts.push(format!(
+                "review history {}: {} samples, {:.0}% observed success, {} false approvals, {} false rejections, {} quota-backed reviews, API avg {}, latency avg {}",
+                if reviewer_history_applied { "reordered candidates" } else { "preserved configured order" },
+                history.outcome_samples,
+                history.success_rate().unwrap_or_default() * 100.0,
+                history.false_approvals,
+                history.false_rejections,
+                history.quota_backed_reviews,
+                history.average_api_cost_usd().map(|value| format!("${value:.4}")).unwrap_or_else(|| "unknown".into()),
+                history.average_latency_seconds().map(|value| format!("{value:.1}s")).unwrap_or_else(|| "unknown".into()),
+            ));
+        } else {
+            parts.push("review history insufficient; configured order preserved".into());
+        }
+    }
     parts.join("; ")
+}
+
+fn reviewer_history<'a, C: DiagnosticCandidate + ?Sized>(
+    candidate: &C,
+    runtime: &'a RoutingRuntimeState,
+) -> Option<&'a super::types::ReviewerOutcomeMetrics> {
+    runtime.reviewer_outcomes.get(&CandidateIdentity::new(
+        candidate.reviewer_identity_backend(),
+        candidate.model(),
+    ))
+}
+
+fn reviewer_history_ready<C: DiagnosticCandidate>(
+    candidates: &[C],
+    runtime: &RoutingRuntimeState,
+) -> bool {
+    let configured_last = candidates
+        .iter()
+        .map(DiagnosticCandidate::original_order)
+        .max()
+        .unwrap_or_default();
+    let comparable = candidates
+        .iter()
+        .filter(|candidate| {
+            !(candidate.requires_approval()
+                || candidate.original_order() == configured_last
+                    && candidate_history_label(*candidate)
+                        .to_ascii_lowercase()
+                        .contains("glm"))
+        })
+        .collect::<Vec<_>>();
+    comparable.len() < 2
+        || comparable.iter().all(|candidate| {
+            reviewer_history(*candidate, runtime)
+                .is_some_and(|metrics| metrics.outcome_samples >= 5)
+        })
+}
+
+fn candidate_history_label<C: DiagnosticCandidate + ?Sized>(candidate: &C) -> String {
+    candidate_label(
+        candidate.backend_instance().unwrap_or(candidate.backend()),
+        candidate.model(),
+    )
+}
+
+fn configured_order<C: DiagnosticCandidate>(candidates: &[C]) -> Vec<String> {
+    let mut configured = candidates.iter().collect::<Vec<_>>();
+    configured.sort_by_key(|candidate| candidate.original_order());
+    configured
+        .into_iter()
+        .map(candidate_history_label)
+        .collect()
+}
+
+fn reviewer_confidence(samples: u64) -> &'static str {
+    match samples {
+        25.. => "high",
+        10.. => "medium",
+        5.. => "low",
+        _ => "insufficient",
+    }
 }
 
 fn candidate_pace_band<C: DiagnosticCandidate + ?Sized>(
@@ -256,6 +383,8 @@ mod tests {
             &skipped,
             Some(&selected_over),
             &PacingConfig::default(),
+            &RoutingRuntimeState::default(),
+            None,
         );
 
         assert!(diagnostics.policy_reordered_candidates);

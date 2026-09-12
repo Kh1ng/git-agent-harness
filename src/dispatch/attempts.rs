@@ -1116,7 +1116,15 @@ pub(super) fn routing_runtime_state(
     current: &LedgerEntry,
 ) -> Result<RoutingRuntimeState> {
     let entries = ledger::read_entries(cfg)?;
-    Ok(routing_runtime_state_from_entries(&entries, current))
+    let mut state = routing_runtime_state_from_entries(&entries, current);
+    let reconciliations = ledger::reconcile::read_reconciliation_entries(cfg).unwrap_or_default();
+    state.reviewer_outcomes = crate::routing::reviewer_outcome_metrics(
+        &entries,
+        &reconciliations,
+        &current.profile,
+        &current.repo_id,
+    );
+    Ok(state)
 }
 
 pub(crate) fn routing_runtime_state_from_entries(
@@ -1125,7 +1133,6 @@ pub(crate) fn routing_runtime_state_from_entries(
 ) -> RoutingRuntimeState {
     let cutoff = OffsetDateTime::now_utc() - time::Duration::days(7);
     let mut state = RoutingRuntimeState::default();
-
     for entry in entries
         .iter()
         .filter(|entry| entry.profile == current.profile)

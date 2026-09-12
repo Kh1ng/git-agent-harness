@@ -138,6 +138,16 @@ export interface RoutingCandidateDiagnostic {
   cost_class: string | null;
   skip_reason: string | null;
   unavailable_until: string | null;
+  reviewer_completed_reviews?: number | null;
+  reviewer_outcome_samples?: number | null;
+  reviewer_success_rate?: number | null;
+  reviewer_later_fix_correlations?: number | null;
+  reviewer_human_overrides?: number | null;
+  reviewer_false_approvals?: number | null;
+  reviewer_false_rejections?: number | null;
+  reviewer_average_latency_seconds?: number | null;
+  reviewer_quota_backed_reviews?: number | null;
+  reviewer_average_api_cost_usd?: number | null;
 }
 
 export interface RoutingDiagnostics {
@@ -148,6 +158,12 @@ export interface RoutingDiagnostics {
   selected_pace_band: string | null;
   selected_cost_class: string | null;
   selected_over: string[];
+  configured_order?: string[];
+  final_order?: string[];
+  reviewer_history_status?: string | null;
+  reviewer_history_min_samples?: number | null;
+  reviewer_history_selected_samples?: number | null;
+  reviewer_history_confidence?: string | null;
   candidates: RoutingCandidateDiagnostic[];
   human_summary: string | null;
 }

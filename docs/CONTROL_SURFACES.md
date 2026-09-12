@@ -104,6 +104,11 @@ OpenHands and Cursor are absent from this chat registry. Cursor is also absent f
 These implementations do not yet form one dispatch, review, chat, skills, plugins, and usage interface.
 
 The [routing module](../src/routing/mod.rs) applies candidate policy, availability, approvals, and reservations.
+For review routes, it can reorder equal-priority configured candidates only
+after each candidate has five observed outcomes. It compares later repairs,
+human merge overrides, latency, quota-backed runs, and API cost. Missing data
+keeps the configured order. Paid approval and a configured-last GLM route do
+not move.
 The [controller](../src/controller/mod.rs) decides work from observed state.
 [ExecutionIdentity](../src/execution_identity.rs) separates runner, logical backend, instance, account, quota pool, and requested/effective models.
 The [migration contract](BACKEND_INSTANCE_CONFIG_MIGRATION.md) preserves legacy declarations and keeps runtime paths out of durable identity.

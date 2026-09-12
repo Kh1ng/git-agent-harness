@@ -33,6 +33,14 @@ impl DiagnosticCandidate for RouteCandidate {
         Some(&self.identity.backend_instance)
     }
 
+    fn reviewer_identity_backend(&self) -> &str {
+        if self.identity.explicit_instance {
+            &self.identity.backend_instance
+        } else {
+            &self.identity.logical_backend
+        }
+    }
+
     fn model(&self) -> Option<&str> {
         self.identity.effective_model.as_deref()
     }
@@ -74,6 +82,7 @@ impl DiagnosticCandidate for RouteCandidate {
 pub(super) struct ReorderDecision {
     pub(super) selected_over: Vec<String>,
     pub(super) escalated: bool,
+    pub(super) outcome_aware: bool,
 }
 
 pub(super) fn append_reorder_reason(
@@ -84,6 +93,8 @@ pub(super) fn append_reorder_reason(
 ) -> String {
     if reorder.escalated {
         base.push_str("; escalated to stronger model after genuine agent failure, selected ");
+    } else if reorder.outcome_aware {
+        base.push_str("; outcome-aware reviewer history selected ");
     } else {
         base.push_str("; cost-aware reorder selected ");
     }
@@ -178,7 +189,8 @@ pub(super) fn order_candidates(
     mode: &str,
 ) -> (Vec<RouteCandidate>, Option<ReorderDecision>) {
     let mut candidates = with_original_order(candidates);
-    if !escalate && !candidates.iter().any(RouteCandidate::has_cost_policy) {
+    let has_review_history = is_review_mode(mode) && !runtime.reviewer_outcomes.is_empty();
+    if !escalate && !has_review_history && !candidates.iter().any(RouteCandidate::has_cost_policy) {
         return (candidates, None);
     }
 
@@ -186,6 +198,18 @@ pub(super) fn order_candidates(
     candidates.sort_by(|left, right| {
         compare_candidates(left, right, &profile.pacing, escalate, runtime, mode)
     });
+    let before_history = candidates
+        .iter()
+        .map(|candidate| CandidateIdentity::from_execution_identity(&candidate.identity))
+        .collect::<Vec<_>>();
+    if is_review_mode(mode) && !escalate {
+        apply_reviewer_history(&mut candidates, runtime, &profile.pacing);
+    }
+    let outcome_aware = before_history
+        != candidates
+            .iter()
+            .map(|candidate| CandidateIdentity::from_execution_identity(&candidate.identity))
+            .collect::<Vec<_>>();
 
     let Some(selected) = candidates.first() else {
         return (candidates, None);
@@ -193,28 +217,129 @@ pub(super) fn order_candidates(
     let selected_over = original
         .iter()
         .take_while(|candidate| !same_destination(candidate, selected))
-        .filter(|candidate| {
-            compare_candidates(
-                selected,
-                candidate,
-                &profile.pacing,
-                escalate,
-                runtime,
-                mode,
-            ) == Ordering::Less
-        })
         .map(|candidate| describe_candidate(candidate, &profile.pacing))
         .collect::<Vec<_>>();
 
-    let reorder = if selected_over.is_empty() {
+    let reorder = if selected_over.is_empty() && !outcome_aware {
         None
     } else {
         Some(ReorderDecision {
             selected_over,
             escalated: escalate,
+            outcome_aware,
         })
     };
     (candidates, reorder)
+}
+
+const REVIEWER_MIN_OUTCOME_SAMPLES: u64 = 5;
+
+fn apply_reviewer_history(
+    candidates: &mut [RouteCandidate],
+    runtime: &RoutingRuntimeState,
+    pacing: &crate::quota::PacingConfig,
+) {
+    let configured_last = candidates
+        .iter()
+        .map(|candidate| candidate.original_order)
+        .max()
+        .unwrap_or_default();
+    let mut start = 0;
+    while start < candidates.len() {
+        let priority = candidates[start].priority;
+        let economic = economic_rank(&candidates[start], pacing);
+        let approval = candidates[start].requires_approval;
+        let end = candidates[start..]
+            .iter()
+            .position(|candidate| {
+                candidate.priority != priority
+                    || economic_rank(candidate, pacing) != economic
+                    || candidate.requires_approval != approval
+            })
+            .map_or(candidates.len(), |offset| start + offset);
+        let positions = (start..end)
+            .filter(|index| {
+                !approval && !glm_is_configured_last(&candidates[*index], configured_last)
+            })
+            .collect::<Vec<_>>();
+        if positions.len() > 1
+            && positions.iter().all(|index| {
+                reviewer_metrics(&candidates[*index], runtime)
+                    .is_some_and(|metrics| metrics.outcome_samples >= REVIEWER_MIN_OUTCOME_SAMPLES)
+            })
+        {
+            let mut ranked = positions
+                .iter()
+                .map(|index| candidates[*index].clone())
+                .collect::<Vec<_>>();
+            ranked.sort_by(|left, right| compare_reviewer_history(left, right, runtime));
+            for (index, candidate) in positions.into_iter().zip(ranked) {
+                candidates[index] = candidate;
+            }
+        }
+        start = end;
+    }
+}
+
+fn glm_is_configured_last(candidate: &RouteCandidate, configured_last: usize) -> bool {
+    candidate.original_order == configured_last
+        && format!(
+            "{} {}",
+            candidate.identity.logical_backend,
+            candidate
+                .identity
+                .effective_model
+                .as_deref()
+                .unwrap_or_default()
+        )
+        .to_ascii_lowercase()
+        .contains("glm")
+}
+
+fn reviewer_metrics<'a>(
+    candidate: &RouteCandidate,
+    runtime: &'a RoutingRuntimeState,
+) -> Option<&'a super::types::ReviewerOutcomeMetrics> {
+    runtime
+        .reviewer_outcomes
+        .get(&CandidateIdentity::from_execution_identity(
+            &candidate.identity,
+        ))
+}
+
+fn compare_reviewer_history(
+    left: &RouteCandidate,
+    right: &RouteCandidate,
+    runtime: &RoutingRuntimeState,
+) -> Ordering {
+    let left_metrics = reviewer_metrics(left, runtime).expect("sample-gated reviewer metrics");
+    let right_metrics = reviewer_metrics(right, runtime).expect("sample-gated reviewer metrics");
+    (right_metrics.successful_outcomes * left_metrics.outcome_samples)
+        .cmp(&(left_metrics.successful_outcomes * right_metrics.outcome_samples))
+        .then_with(|| {
+            (left_metrics.false_approvals * right_metrics.outcome_samples)
+                .cmp(&(right_metrics.false_approvals * left_metrics.outcome_samples))
+        })
+        .then_with(|| {
+            compare_when_both_known(
+                left_metrics.average_api_cost_usd(),
+                right_metrics.average_api_cost_usd(),
+            )
+        })
+        .then_with(|| {
+            compare_when_both_known(
+                left_metrics.average_latency_seconds(),
+                right_metrics.average_latency_seconds(),
+            )
+        })
+        .then_with(|| left.original_order.cmp(&right.original_order))
+}
+
+fn compare_when_both_known(left: Option<f64>, right: Option<f64>) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.total_cmp(&right),
+        _ => Ordering::Equal,
+    }
 }
 
 fn is_strong_candidate(candidate: &RouteCandidate) -> bool {

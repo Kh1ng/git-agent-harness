@@ -124,6 +124,16 @@ function renderRoutingDiagnostics(
           <p>Selected candidate: {routingSummary(diagnostics)}</p>
           {diagnostics.human_summary && <p>Routing summary: {diagnostics.human_summary}</p>}
           {diagnostics.policy_reordered_candidates && <p>Policy reordered candidates before selection.</p>}
+          {diagnostics.reviewer_history_status && (
+            <p>
+              Reviewer history: {diagnostics.reviewer_history_status.replaceAll('_', ' ')}
+              {diagnostics.reviewer_history_selected_samples != null ? ` · ${diagnostics.reviewer_history_selected_samples} samples` : ''}
+              {diagnostics.reviewer_history_confidence ? ` · ${diagnostics.reviewer_history_confidence} confidence` : ''}
+            </p>
+          )}
+          {diagnostics.configured_order && diagnostics.final_order && (
+            <p>Configured: {diagnostics.configured_order.join(' → ')} · Final: {diagnostics.final_order.join(' → ')}</p>
+          )}
           {diagnostics.selected_over.length > 0 && (
             <p>Selected over: {diagnostics.selected_over.join(' · ')}</p>
           )}
@@ -133,12 +143,28 @@ function renderRoutingDiagnostics(
                 candidate.backend === diagnostics.selected_backend &&
                 candidate.model === diagnostics.selected_model &&
                 candidate.quota_pool === diagnostics.selected_quota_pool;
+              const movement =
+                candidate.default_order != null &&
+                candidate.consideration_order != null &&
+                candidate.default_order !== candidate.consideration_order
+                  ? `moved ${candidate.consideration_order < candidate.default_order ? 'up' : 'down'} ${Math.abs(candidate.consideration_order - candidate.default_order)}`
+                  : null;
 
               return (
                 <p key={`${candidate.backend}-${candidate.model ?? 'unknown'}-${candidate.consideration_order ?? index}`}>
                   {routingCandidateLabel(candidate)} ·{' '}
                   {isSelected ? 'selected' : candidate.skip_reason ? `skipped: ${candidate.skip_reason}` : 'considered'}
                   {candidate.unavailable_until ? ` · unavailable until ${candidate.unavailable_until}` : ''}
+                  {candidate.reviewer_outcome_samples != null ? ` · review outcomes ${candidate.reviewer_outcome_samples}` : ''}
+                  {candidate.reviewer_success_rate != null ? ` · success ${(candidate.reviewer_success_rate * 100).toFixed(0)}%` : ''}
+                  {movement ? ` · ${movement}` : ''}
+                  {candidate.reviewer_later_fix_correlations != null ? ` · later fixes ${candidate.reviewer_later_fix_correlations}` : ''}
+                  {candidate.reviewer_human_overrides != null ? ` · human overrides ${candidate.reviewer_human_overrides}` : ''}
+                  {candidate.reviewer_false_approvals != null ? ` · false approvals ${candidate.reviewer_false_approvals}` : ''}
+                  {candidate.reviewer_false_rejections != null ? ` · false rejections ${candidate.reviewer_false_rejections}` : ''}
+                  {candidate.reviewer_quota_backed_reviews != null ? ` · quota-backed ${candidate.reviewer_quota_backed_reviews}` : ''}
+                  {candidate.reviewer_average_api_cost_usd != null ? ` · API avg $${candidate.reviewer_average_api_cost_usd.toFixed(4)}` : ''}
+                  {candidate.reviewer_average_latency_seconds != null ? ` · latency avg ${candidate.reviewer_average_latency_seconds.toFixed(1)}s` : ''}
                 </p>
               );
             })}

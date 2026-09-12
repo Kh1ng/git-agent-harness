@@ -372,6 +372,18 @@ pub struct RoutingDiagnostics {
     #[serde(default)]
     pub selected_over: Vec<String>,
     #[serde(default)]
+    pub configured_order: Vec<String>,
+    #[serde(default)]
+    pub final_order: Vec<String>,
+    #[serde(default)]
+    pub reviewer_history_status: Option<String>,
+    #[serde(default)]
+    pub reviewer_history_min_samples: Option<u64>,
+    #[serde(default)]
+    pub reviewer_history_selected_samples: Option<u64>,
+    #[serde(default)]
+    pub reviewer_history_confidence: Option<String>,
+    #[serde(default)]
     pub candidates: Vec<RoutingCandidateDiagnostic>,
     #[serde(default)]
     pub human_summary: Option<String>,
@@ -398,6 +410,26 @@ pub struct RoutingCandidateDiagnostic {
     pub skip_reason: Option<String>,
     #[serde(default)]
     pub unavailable_until: Option<String>,
+    #[serde(default)]
+    pub reviewer_completed_reviews: Option<u64>,
+    #[serde(default)]
+    pub reviewer_outcome_samples: Option<u64>,
+    #[serde(default)]
+    pub reviewer_success_rate: Option<f64>,
+    #[serde(default)]
+    pub reviewer_later_fix_correlations: Option<u64>,
+    #[serde(default)]
+    pub reviewer_human_overrides: Option<u64>,
+    #[serde(default)]
+    pub reviewer_false_approvals: Option<u64>,
+    #[serde(default)]
+    pub reviewer_false_rejections: Option<u64>,
+    #[serde(default)]
+    pub reviewer_average_latency_seconds: Option<f64>,
+    #[serde(default)]
+    pub reviewer_quota_backed_reviews: Option<u64>,
+    #[serde(default)]
+    pub reviewer_average_api_cost_usd: Option<f64>,
 }
 
 /// Ledger wire schema version. Bumped whenever a field's semantics change
@@ -1181,8 +1213,10 @@ mod tests {
                 cost_class: Some("included_quota".into()),
                 skip_reason: None,
                 unavailable_until: None,
+                ..Default::default()
             }],
             human_summary: Some("selected codex/gpt-5.4".into()),
+            ..Default::default()
         });
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: LedgerEntry = serde_json::from_str(&json).unwrap();

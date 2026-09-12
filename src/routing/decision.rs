@@ -371,6 +371,12 @@ where
                         .as_ref()
                         .map(|decision| decision.selected_over.as_slice()),
                     &profile.pacing,
+                    runtime,
+                    is_review_mode(req.mode).then(|| {
+                        reorder
+                            .as_ref()
+                            .is_some_and(|decision| decision.outcome_aware)
+                    }),
                 )),
             ),
             candidates_for_diagnostics,
@@ -444,6 +450,12 @@ where
                 .as_ref()
                 .map(|decision| decision.selected_over.as_slice()),
             &profile.pacing,
+            runtime,
+            is_review_mode(req.mode).then(|| {
+                reorder
+                    .as_ref()
+                    .is_some_and(|decision| decision.outcome_aware)
+            }),
         ));
         return Ok((
             RouteDecision::from_identity(
@@ -574,6 +586,8 @@ where
         &skipped,
         None,
         &profile.pacing,
+        runtime,
+        is_review_mode(req.mode).then_some(false),
     ));
     Ok((
         RouteDecision::from_identity(
@@ -671,6 +685,8 @@ where
         &skipped,
         None,
         &profile.pacing,
+        runtime,
+        is_review_mode(req.mode).then_some(false),
     ));
     Ok(RouteDecision::from_identity(
         selected

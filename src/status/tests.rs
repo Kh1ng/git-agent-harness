@@ -619,8 +619,10 @@ fn recent_ledger_exposes_routing_diagnostics() {
             cost_class: Some("included_quota".into()),
             skip_reason: None,
             unavailable_until: None,
+            ..Default::default()
         }],
         human_summary: Some("selected codex/gpt-5.4".into()),
+        ..Default::default()
     });
     fs::write(&ledger_path, serde_json::to_string(&entry).unwrap() + "\n").unwrap();
 

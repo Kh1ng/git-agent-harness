@@ -34,11 +34,46 @@ pub struct RouteRequest<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct RoutingRuntimeState {
     pub recent_runs: HashMap<CandidateIdentity, u64>,
+    pub reviewer_outcomes: HashMap<CandidateIdentity, ReviewerOutcomeMetrics>,
     pub attempted: HashSet<CandidateIdentity>,
     /// Routes already launched in the current dispatch, even if they have
     /// not yet been durable-logged as the final attempt record.
     pub dispatch_attempted: HashSet<CandidateIdentity>,
     pub approved: HashSet<CandidateIdentity>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReviewerOutcomeMetrics {
+    pub completed_reviews: u64,
+    pub outcome_samples: u64,
+    pub successful_outcomes: u64,
+    pub later_fix_correlations: u64,
+    pub human_overrides: u64,
+    pub false_approvals: u64,
+    pub false_rejections: u64,
+    pub quota_backed_reviews: u64,
+    pub api_backed_reviews: u64,
+    pub(super) latency_total_seconds: f64,
+    pub(super) latency_samples: u64,
+    pub(super) api_cost_total_usd: f64,
+    pub(super) api_cost_samples: u64,
+}
+
+impl ReviewerOutcomeMetrics {
+    pub fn success_rate(&self) -> Option<f64> {
+        (self.outcome_samples > 0)
+            .then_some(self.successful_outcomes as f64 / self.outcome_samples as f64)
+    }
+
+    pub fn average_latency_seconds(&self) -> Option<f64> {
+        (self.latency_samples > 0)
+            .then_some(self.latency_total_seconds / self.latency_samples as f64)
+    }
+
+    pub fn average_api_cost_usd(&self) -> Option<f64> {
+        (self.api_cost_samples > 0)
+            .then_some(self.api_cost_total_usd / self.api_cost_samples as f64)
+    }
 }
 
 /// Unique identifier for a backend+model combination used for tracking
