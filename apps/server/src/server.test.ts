@@ -86,7 +86,14 @@ function profilePayload(profile: string): ConfigProfileSummary {
       manager_wake_autonomy: 'off',
       env_file: null,
       env_file_prod: null
-    }
+    },
+    prompt_policies: {
+      schema_version: 1,
+      profile,
+      revision: 0,
+      policies: [],
+      rollback_revisions: []
+    },
   };
 }
 

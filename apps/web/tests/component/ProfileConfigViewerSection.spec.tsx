@@ -25,6 +25,21 @@ test('environment sources render configured status without rendering their value
     task_routing_rules: [],
     routine_reviewer: null,
     escalatory_reviewers: [],
+    prompt_policies: {
+      schema_version: 1,
+      profile: 'test-repo',
+      revision: 0,
+      policies: [{
+        slot: 'worker_guidance',
+        task_class: null,
+        reviewer_tier: null,
+        source: 'embedded_default',
+        version: 'worker_guidance-v1',
+        byte_size: 42,
+        sha256: 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+      }],
+      rollback_revisions: []
+    },
     context: {
       global: {
         enabled: true,
@@ -55,10 +70,14 @@ test('environment sources render configured status without rendering their value
     <ProfileConfigViewerSection
       selectedName="test-repo"
       profileConfig={{ data: config, loading: false, error: null }}
+      onRefresh={() => {}}
     />
   );
 
   await expect(component).toContainText('dev env: configured');
   await expect(component).toContainText('prod env: configured');
   await expect(component).not.toContainText(canary);
+  await expect(component).toContainText('Prompt policies');
+  await expect(component).toContainText('worker_guidance');
+  await expect(component).toContainText('worker_guidance-v1');
 });

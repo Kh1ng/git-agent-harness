@@ -560,3 +560,57 @@ fn routing_candidate_add_remove_move_round_trip_with_preview_and_validation() {
 
     let _ = tmp;
 }
+
+#[test]
+fn prompt_policy_cli_versions_audits_and_hides_content_from_show() {
+    let (tmp, config) = config_with_profile();
+    let path = config.to_str().unwrap();
+    let events = tmp.path().join("events.jsonl");
+    let content = "## Safety\nKeep the canary POLICY-CANARY-182 visible only in prompts.";
+
+    bin()
+        .env("GAH_EVENTS_PATH", &events)
+        .args([
+            "config",
+            "prompt-policy",
+            "set",
+            "--profile",
+            "test",
+            "--slot",
+            "worker_guidance",
+            "--content",
+            content,
+            "--expected-revision",
+            "0",
+            "--config",
+            path,
+        ])
+        .assert()
+        .success();
+    let audit = fs::read_to_string(&events).unwrap();
+    assert!(audit.contains("prompt_policy_changed"));
+    assert!(!audit.contains("POLICY-CANARY-182"));
+
+    let shown = bin()
+        .args([
+            "config",
+            "prompt-policy",
+            "show",
+            "--profile",
+            "test",
+            "--json",
+            "--config",
+            path,
+        ])
+        .output()
+        .unwrap();
+    assert!(shown.status.success());
+    let summary: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(summary["revision"], 1);
+    assert!(summary["policies"].as_array().unwrap().iter().any(|entry| {
+        entry["source"] == "profile_override"
+            && entry["byte_size"] == content.len()
+            && entry["sha256"].as_str().unwrap().starts_with("sha256:")
+    }));
+    assert!(!String::from_utf8_lossy(&shown.stdout).contains("POLICY-CANARY-182"));
+}

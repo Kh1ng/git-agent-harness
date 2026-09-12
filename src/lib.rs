@@ -36,6 +36,7 @@ pub mod notify_channels;
 pub mod policy;
 pub mod price_guard;
 pub mod profile_output;
+pub mod prompt_policy;
 pub mod provider;
 pub mod provider_kind;
 pub mod prune;

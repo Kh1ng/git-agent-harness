@@ -1002,6 +1002,35 @@ export interface ConfigProfileSummary {
   escalatory_reviewers: RoutingCandidateSummary[];
   context: ConfigProfileContextSummary;
   notifications: NotificationSummary;
+  prompt_policies: PromptPolicySummary;
+}
+
+export interface PromptPolicyEntrySummary {
+  slot: 'worker_guidance' | 'reviewer_guidance';
+  task_class: string | null;
+  reviewer_tier: 'strong' | 'escalatory' | 'standard' | 'weak' | null;
+  source: 'embedded_default' | 'profile_override';
+  version: string;
+  byte_size: number;
+  sha256: string;
+}
+
+export interface PromptPolicySummary {
+  schema_version: number;
+  profile: string;
+  revision: number;
+  policies: PromptPolicyEntrySummary[];
+  rollback_revisions: number[];
+}
+
+export interface PromptPolicyMutationResult {
+  profile: string;
+  previous_revision: number;
+  revision: number;
+  changed: boolean;
+  dry_run: boolean;
+  preview_diff: string;
+  summary: PromptPolicySummary;
 }
 
 /** Browser-safe notification projection returned by the control-plane

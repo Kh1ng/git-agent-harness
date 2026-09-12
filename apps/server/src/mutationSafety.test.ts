@@ -129,13 +129,13 @@ test('unavailable audit storage prevents execution and keeps a durable reservati
   }
 });
 
-test('all six production mutation routes require keys before invoking CLI actions', async () => {
+test('production mutation routes require keys before invoking CLI actions', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'gah-mutations-routes-'));
   const saved = process.env.GAH_MUTATION_STORE_PATH;
   process.env.GAH_MUTATION_STORE_PATH = directory;
   try {
     await withFixtureServer(async base => {
-      for (const route of ['loop/start', 'loop/stop', 'hold/set', 'hold/clear', 'availability/clear', 'ledger/clear-attempts']) {
+      for (const route of ['loop/start', 'loop/stop', 'hold/set', 'hold/clear', 'availability/clear', 'ledger/clear-attempts', 'profiles/fixture/prompt-policies/set']) {
         const res = await fetch(`${base}/api/${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
         assert.equal(res.status, 400, route);
         assert.equal((await res.json() as { error: string }).error, 'idempotency_key_required', route);

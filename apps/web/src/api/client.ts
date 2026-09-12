@@ -676,6 +676,34 @@ export const routingCandidatesApi = {
   move: (profile: string, from: number, to: number) => postJson<unknown, { from: number; to: number }>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/move`, { from, to }),
 };
 
+export const promptPoliciesApi = {
+  set: (profile: string, body: {
+    slot: 'worker_guidance' | 'reviewer_guidance';
+    task_class?: string;
+    reviewer_tier?: string;
+    content: string;
+    expected_revision: number;
+    dry_run?: boolean;
+  }) => postJson<import('@git-agent-harness/contracts').PromptPolicyMutationResult, typeof body>(
+    '/api/profiles/' + encodeURIComponent(profile) + '/prompt-policies/set',
+    body
+  ),
+  reset: (profile: string, body: {
+    slot: 'worker_guidance' | 'reviewer_guidance';
+    task_class?: string;
+    reviewer_tier?: string;
+    expected_revision: number;
+  }) => postJson<import('@git-agent-harness/contracts').PromptPolicyMutationResult, typeof body>(
+    '/api/profiles/' + encodeURIComponent(profile) + '/prompt-policies/reset',
+    body
+  ),
+  rollback: (profile: string, body: { to_revision: number; expected_revision: number }) =>
+    postJson<import('@git-agent-harness/contracts').PromptPolicyMutationResult, typeof body>(
+      '/api/profiles/' + encodeURIComponent(profile) + '/prompt-policies/rollback',
+      body
+    ),
+};
+
 export const backendInstancesApi = {
   list: (profile: string) => getJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }>('/api/backend-instances', { profile }),
   setEnabled: (profile: string, instance: string, enabled: boolean) => postJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }, { profile: string; instance: string }>(`/api/backend-instances/${enabled ? 'enable' : 'disable'}`, { profile, instance })

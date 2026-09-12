@@ -44,6 +44,7 @@ pub enum EventType {
     PmBlocked,
     PmFailed,
     PmReconciled,
+    PromptPolicyChanged,
     LoopStopped,
     /// TICKET-282: a work item was deliberately NOT dispatched because it would
     /// reuse a branch already attached to another worktree. This is a
@@ -77,6 +78,7 @@ impl EventType {
             Self::PmBlocked => "pm_blocked",
             Self::PmFailed => "pm_failed",
             Self::PmReconciled => "pm_reconciled",
+            Self::PromptPolicyChanged => "prompt_policy_changed",
             Self::LoopStopped => "loop_stopped",
             Self::WorkDeferred => "work_deferred",
             Self::TerminalFailure => "terminal_failure",

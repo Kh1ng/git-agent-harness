@@ -373,6 +373,13 @@ const MOCK_PROFILE_CONFIG = {
   task_routing_rules: [],
   routine_reviewer: null,
   escalatory_reviewers: [],
+  prompt_policies: {
+    schema_version: 1,
+    profile: 'fixture',
+    revision: 0,
+    policies: [],
+    rollback_revisions: []
+  },
   context: {
     global: {
       enabled: true,

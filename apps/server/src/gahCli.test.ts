@@ -10,6 +10,7 @@ import {
   findGahBinary,
   loopSystemctlArgs,
   runDispatchCancellable,
+  runPromptPolicyMutation,
   startLoop,
   stopLoop,
 } from './gahCli.js';
@@ -402,6 +403,43 @@ test('cancel() returns an explicit error when the process has already completed'
   } finally {
     if (original === undefined) delete process.env.GAH_BINARY;
     else process.env.GAH_BINARY = original;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('prompt policy mutation passes dry-run and content as literal argv', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-prompt-policy-'));
+  const script = join(dir, 'fake-gah');
+  const log = join(dir, 'args.log');
+  const marker = join(dir, 'must-not-exist');
+  writeFileSync(script, `#!/bin/sh
+printf '%s\n' "$@" > "$GAH_ARGS_LOG"
+printf '%s\n' '{"profile":"repo","previous_revision":0,"revision":1,"changed":true,"dry_run":true,"preview_diff":"preview","summary":{"schema_version":1,"profile":"repo","revision":1,"policies":[],"rollback_revisions":[0]}}'
+`);
+  chmodSync(script, 0o755);
+  const savedBinary = process.env.GAH_BINARY;
+  const savedLog = process.env.GAH_ARGS_LOG;
+  process.env.GAH_BINARY = script;
+  process.env.GAH_ARGS_LOG = log;
+  try {
+    const content = `Keep this literal: $(touch ${marker})`;
+    const result = await runPromptPolicyMutation('set', {
+      profile: 'repo',
+      slot: 'worker_guidance',
+      content,
+      expected_revision: 0,
+      dry_run: true,
+    });
+    const args = readFileSync(log, 'utf8').trim().split('\n');
+    assert.equal(result.dry_run, true);
+    assert.ok(args.includes('--dry-run'));
+    assert.ok(args.includes(content));
+    assert.equal(existsSync(marker), false);
+  } finally {
+    if (savedBinary === undefined) delete process.env.GAH_BINARY;
+    else process.env.GAH_BINARY = savedBinary;
+    if (savedLog === undefined) delete process.env.GAH_ARGS_LOG;
+    else process.env.GAH_ARGS_LOG = savedLog;
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -456,6 +456,52 @@ pub(super) fn add_routing_candidate_operations(manifest: &mut CapabilityManifest
     }
 }
 
+pub(super) fn add_prompt_policy_operations(manifest: &mut CapabilityManifest) {
+    for (op, display, class, doc) in [
+        (
+            "show",
+            "Show Prompt Policies",
+            OperationClass::Read,
+            "Show effective bounded prompt guidance metadata",
+        ),
+        (
+            "set",
+            "Set Prompt Policy",
+            OperationClass::Mutation,
+            "Set one versioned profile prompt-guidance override",
+        ),
+        (
+            "reset",
+            "Reset Prompt Policy",
+            OperationClass::Mutation,
+            "Restore one prompt-guidance selector to its embedded default",
+        ),
+        (
+            "rollback",
+            "Roll Back Prompt Policies",
+            OperationClass::Mutation,
+            "Restore prompt-guidance overrides from a retained revision",
+        ),
+    ] {
+        manifest.add_operation(OperationDefinition {
+            operation_id: format!("config.prompt_policy.{op}"),
+            display_name: display.to_string(),
+            class,
+            profile_scope: ProfileScope::ProfileRequired,
+            request_schema: None,
+            response_schema: None,
+            streaming: StreamingBehavior::None,
+            idempotency: Idempotency::Idempotent,
+            secret_fields: vec![],
+            remote_disposition: RemoteDisposition::RemoteAvailable,
+            local_only_reason: None,
+            documentation: Some(doc.to_string()),
+            cli_command_path: format!("gah config prompt-policy {op}"),
+            is_stable: true,
+        });
+    }
+}
+
 pub(super) fn add_backend_instance_operations(manifest: &mut CapabilityManifest) {
     // gah config set-backend-instance-enabled
     manifest.add_operation(OperationDefinition {

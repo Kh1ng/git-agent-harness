@@ -19,6 +19,7 @@ pub mod pm;
 pub mod policy;
 pub mod price_guard;
 pub mod profile;
+pub mod prompt_policies;
 pub mod prune;
 pub mod quota;
 pub mod report;

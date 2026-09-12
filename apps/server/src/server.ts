@@ -49,6 +49,7 @@ import {
   runExternalApprovalInspect,
 
   runRoutingCandidateMutation,
+  runPromptPolicyMutation,
 } from './gahCli.js';
 import { REPORT_GROUP_BY_VALUES } from '@git-agent-harness/contracts';
 import type {
@@ -388,6 +389,76 @@ export function createServer(
       }
     });
   }
+
+  const promptPolicyOperations = {
+    set: 'config.prompt_policy.set',
+    reset: 'config.prompt_policy.reset',
+    rollback: 'config.prompt_policy.rollback',
+  } as const;
+  for (const action of ['set', 'reset', 'rollback'] as const) {
+    app.post('/api/profiles/:profile/prompt-policies/' + action, mutation(promptPolicyOperations[action]), async (req, res) => {
+      const profile = req.params.profile;
+      const body = req.body ?? {};
+      const validText = (value: unknown, max: number): value is string =>
+        typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= max && !value.includes('\0');
+      const validRevision = (value: unknown): value is number =>
+        typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+      const allowed = action === 'rollback'
+        ? ['to_revision', 'expected_revision', 'dry_run']
+        : ['slot', 'task_class', 'reviewer_tier', 'content', 'expected_revision', 'dry_run'];
+      if (!routingCandidateText(profile, 128) || !validRevision(body.expected_revision)) {
+        return res.status(400).json({ error: 'invalid_request', message: 'Profile and expected_revision are required.' });
+      }
+      if (Object.keys(body).some(key => !allowed.includes(key)) || (body.dry_run !== undefined && typeof body.dry_run !== 'boolean')) {
+        return res.status(400).json({ error: 'invalid_request', message: 'Invalid prompt-policy mutation.' });
+      }
+      const params: Parameters<typeof runPromptPolicyMutation>[1] = {
+        profile,
+        expected_revision: body.expected_revision,
+        ...(body.dry_run === undefined ? {} : { dry_run: body.dry_run }),
+      };
+      if (action === 'rollback') {
+        if (!validRevision(body.to_revision)) {
+          return res.status(400).json({ error: 'invalid_request', message: 'to_revision is required.' });
+        }
+        params.to_revision = body.to_revision;
+      } else {
+        if (!['worker_guidance', 'reviewer_guidance'].includes(body.slot)) {
+          return res.status(400).json({ error: 'invalid_request', message: 'Choose a valid prompt-policy slot.' });
+        }
+        params.slot = body.slot;
+        if (body.task_class !== undefined) {
+          if (!routingCandidateText(body.task_class, 64)) return res.status(400).json({ error: 'invalid_request', message: 'Invalid task_class.' });
+          params.task_class = body.task_class;
+        }
+        if (body.reviewer_tier !== undefined) {
+          if (!['strong', 'escalatory', 'standard', 'weak'].includes(body.reviewer_tier)) {
+            return res.status(400).json({ error: 'invalid_request', message: 'Invalid reviewer_tier.' });
+          }
+          params.reviewer_tier = body.reviewer_tier;
+        }
+        if (body.slot === 'worker_guidance' && body.reviewer_tier !== undefined) {
+          return res.status(400).json({ error: 'invalid_request', message: 'Worker guidance does not accept reviewer_tier.' });
+        }
+        if (action === 'set') {
+          if (!validText(body.content, 4096)) {
+            return res.status(400).json({ error: 'invalid_request', message: 'Content must be 1-4096 bytes.' });
+          }
+          params.content = body.content;
+        }
+      }
+      try {
+        return res.json(await runPromptPolicyMutation(action, params));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return res.status(message.includes('stale prompt policy revision') ? 409 : 502).json({
+          error: 'prompt_policy_mutation_failed',
+          message,
+        });
+      }
+    });
+  }
+
   app.use('/api/settings/nodes', requireOwner, nodeSetupRouter());
   // Updating the running service also requires the existing operator opt-in.
   app.use('/api/admin', (req, res, next) => {

@@ -19,6 +19,9 @@ type Operation =
   | 'config.routing_candidate.add'
   | 'config.routing_candidate.remove'
   | 'config.routing_candidate.move'
+  | 'config.prompt_policy.set'
+  | 'config.prompt_policy.reset'
+  | 'config.prompt_policy.rollback'
   | 'messaging_bridge.pair'
   | 'messaging_bridge.revoke';
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -75,6 +78,7 @@ export function mutationSafety(nodeId: string, directory = process.env.GAH_MUTAT
       operation.startsWith('external_approval.') ||
       operation.startsWith('backend_instance.') ||
       operation.startsWith('config.routing_candidate.') ||
+      operation.startsWith('config.prompt_policy.') ||
       operation.startsWith('messaging_bridge.')
     ) && principal.kind !== 'owner') return reject(403, 'owner_required', 'This operation requires owner access.');
     if (!key || !/^[A-Za-z0-9_-]{16,128}$/.test(key)) return reject(400, 'idempotency_key_required', 'Supply an Idempotency-Key of 16–128 letters, digits, underscores, or hyphens.');

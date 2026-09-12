@@ -569,6 +569,11 @@ pub enum ConfigCommands {
         #[command(subcommand)]
         command: RoutingCandidateCommands,
     },
+    /// View or change bounded profile prompt guidance.
+    PromptPolicy {
+        #[command(subcommand)]
+        command: PromptPolicyCommands,
+    },
     /// Issue #822: enable or disable one backend instance for a profile.
     ///
     /// The instance must already be declared (in the profile, the repository
@@ -649,6 +654,74 @@ pub enum RoutingCandidateCommands {
         from: usize,
         #[arg(long)]
         to: usize,
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PromptPolicyCommands {
+    /// Show default and profile-specific policy metadata without prompt text.
+    Show {
+        #[arg(long)]
+        profile: String,
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Set one typed guidance section.
+    Set {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        slot: String,
+        #[arg(long)]
+        task_class: Option<String>,
+        #[arg(long)]
+        reviewer_tier: Option<String>,
+        #[arg(long, allow_hyphen_values = true)]
+        content: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Remove one override and restore its embedded default or broader match.
+    Reset {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        slot: String,
+        #[arg(long)]
+        task_class: Option<String>,
+        #[arg(long)]
+        reviewer_tier: Option<String>,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Restore the policy content captured at an earlier revision.
+    Rollback {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        to_revision: u64,
+        #[arg(long)]
+        expected_revision: u64,
         #[arg(long = "config", visible_alias = "config-path")]
         config_path: Option<String>,
         #[arg(long, default_value_t = false)]

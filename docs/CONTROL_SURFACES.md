@@ -66,7 +66,7 @@ The [UI audit](UI_AUDIT_2026-09-07.md) records accessibility and layout findings
 | Inspect usage and failures | [Telemetry](../apps/web/src/pages/TelemetryPage.tsx) shows reports, series, chat usage, and ticket costs. [Quota](../apps/web/src/pages/QuotaPage.tsx) shows candidate eligibility and observation age. | Complete per-account billing and outcome comparisons across every backend remain under #940. Unavailable measurements are not proof of zero usage. |
 | Read activity | [Activity](../apps/web/src/pages/EventsPage.tsx) receives the high-signal controller and node-health stream over the existing WebSocket. The server persists up to 2,000 entries, replays from the client's cursor, and the client de-duplicates by event ID. | System alerts are opt-in. Browser alerts need notification permission; iPhone delivery is local while the app runs, not background APNs. |
 | Manage nodes | [Nodes](../apps/web/src/pages/NodesPage.tsx) shows cached observations, age, profiles, resources, and claims. It exposes health/readiness checks and registration guidance. | An unobserved node has unknown health. Registration does not prove that a CLI is authenticated or eligible for a particular job. |
-| Configure the installation | [Settings](../apps/web/src/pages/SettingsPage.tsx) exposes profiles, effective configuration, backend availability, gateway configuration, skills, update controls, and Windows node commands. The macOS app also changes the host role. | Complete versioned prompt policies remain a separate ticket. |
+| Configure the installation | [Settings](../apps/web/src/pages/SettingsPage.tsx) exposes profiles, effective configuration, backend availability, bounded prompt policies, gateway configuration, skills, update controls, and Windows node commands. The shared authenticated page runs in the browser, desktop webview, and mobile shells. The macOS app also changes the host role. | Prompt-policy edits require an owner session and an optimistic revision. Preview, reset, and rollback use the same server and CLI mutation path. |
 | Use project chat | [Chat](../apps/web/src/pages/ManagerChatPage.tsx) provides sessions, streaming replies/tools, permissions, stop/steer, models, and node selection. An authenticated Telegram bridge maps paired identities to exact profile scopes and one-time action cards. [ProjectRail](../apps/web/src/components/ProjectRail.tsx) groups projects by owner node. | Remote issue/PR-seeded sessions and remote previews remain unsupported. Telegram rejects broad approvals, non-text attachments, and remote slash commands. |
 | Import repositories and inspect Git | [Project routes](../apps/server/src/projectRoutes.ts) import on a selected worker. [Git](../apps/web/src/pages/GitPage.tsx) exposes status, branches, log, commit, and PR/MR actions. | Import is not the resumable onboarding workflow in #539. Provider identity, preflights, validation, and loop enablement do not form one resumable transaction. |
 
@@ -112,6 +112,21 @@ not move.
 The [controller](../src/controller/mod.rs) decides work from observed state.
 [ExecutionIdentity](../src/execution_identity.rs) separates runner, logical backend, instance, account, quota pool, and requested/effective models.
 The [migration contract](BACKEND_INSTANCE_CONFIG_MIGRATION.md) preserves legacy declarations and keeps runtime paths out of durable identity.
+
+Profile prompt policy has two typed, untrusted slots: worker guidance and
+reviewer guidance. A selector can narrow guidance by task class and, for review,
+reviewer tier. Embedded versioned defaults remain available when no override
+matches. The canonical `gah config prompt-policy` commands show hashes and byte
+counts, preview changes, set or reset one selector, and roll back retained
+revisions. Overrides are stored atomically in the profile artifact root and are
+loaded when each dispatch starts.
+
+The following prompt sections remain hardcoded and protected: worker scope,
+safety, approval, publication, verification, live task data, and disposition
+rules; reviewer verdict schema, acceptance gate, evidence rules, authority,
+approval, and merge rules; and capability or skill activation. Profile text is
+indented as data below a separate heading. It cannot create a protected heading
+or replace these rules.
 
 [Status](../src/status.rs) and [Doctor](../src/doctor.rs) use the same executable
 resolver as dispatch. Readiness keeps unresolved, unobserved, and ineligible

@@ -230,6 +230,7 @@ pub struct ConfigProfileSummary {
     pub context: ConfigProfileContextSummary,
     pub notifications: NotificationSummary,
     pub pm_orchestration: PmOrchestrationSummary,
+    pub prompt_policies: crate::prompt_policy::PromptPolicySummary,
 }
 
 #[derive(serde::Serialize)]
@@ -449,6 +450,7 @@ fn build_profile_summary(
             risk_labels: profile.publishing.pm_risk_labels.clone(),
             execution_labels: profile.publishing.pm_execution_labels.clone(),
         },
+        prompt_policies: crate::prompt_policy::summary(profile_name, profile)?,
     })
 }
 

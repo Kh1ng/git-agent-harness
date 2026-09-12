@@ -801,4 +801,59 @@ pub(super) fn add_request_schemas(manifest: &mut CapabilityManifest) {
             ("to", "number", true, "Target zero-based index."),
         ]),
     );
+    set(
+        "config.prompt_policy.show",
+        object(&[("profile", "string", true, PROFILE)]),
+    );
+    let policy_selector = [
+        ("profile", "string", true, PROFILE),
+        (
+            "slot",
+            "string",
+            true,
+            "Prompt slot: worker_guidance or reviewer_guidance.",
+        ),
+        (
+            "task_class",
+            "string",
+            false,
+            "Optional task-class selector.",
+        ),
+        (
+            "reviewer_tier",
+            "string",
+            false,
+            "Optional reviewer-tier selector.",
+        ),
+        (
+            "expected_revision",
+            "number",
+            true,
+            "Current revision used for optimistic concurrency.",
+        ),
+        ("dry_run", "boolean", false, "Preview without writing."),
+    ];
+    let mut policy_set = policy_selector.to_vec();
+    policy_set.push(("content", "string", true, "Bounded replacement guidance."));
+    set("config.prompt_policy.set", object(&policy_set));
+    set("config.prompt_policy.reset", object(&policy_selector));
+    set(
+        "config.prompt_policy.rollback",
+        object(&[
+            ("profile", "string", true, PROFILE),
+            (
+                "to_revision",
+                "number",
+                true,
+                "Retained revision to restore.",
+            ),
+            (
+                "expected_revision",
+                "number",
+                true,
+                "Current revision used for optimistic concurrency.",
+            ),
+            ("dry_run", "boolean", false, "Preview without writing."),
+        ]),
+    );
 }

@@ -15,7 +15,7 @@ import { ProfileEditor } from '../components/ProfileEditor.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
 import { skillFromFrontMatter, SkillFrontMatterError } from '../lib/skillFrontMatter.js';
-import { gahApi, backendInstancesApi, routingCandidatesApi, GahApiError } from '../api/client.js';
+import { gahApi, backendInstancesApi, promptPoliciesApi, routingCandidatesApi, GahApiError } from '../api/client.js';
 import type { ConfigSetData, NotificationSettingsSummary } from '@git-agent-harness/contracts';
 import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, SkillSummary, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
 
@@ -659,6 +659,10 @@ export function ProfileConfigViewerSection({ selectedName, profileConfig, onRefr
         <BackendInstancesCard profileName={selectedName} effective={effective} />
       </div>
 
+      <div className="mt-3">
+        <PromptPoliciesCard profileName={selectedName} effective={effective} onRefresh={onRefresh} />
+      </div>
+
       <div className="mt-3 card-padded border border-subtle">
         <h4 className="text-xs font-semibold text-primary mb-2">Task routing rules</h4>
         {effective.task_routing_rules.length === 0 ? (
@@ -720,6 +724,154 @@ export function ProfileConfigViewerSection({ selectedName, profileConfig, onRefr
         <p className="text-xs text-muted mt-1">Command contents and credentials are intentionally excluded.</p>
       </div>
     </section>
+  );
+}
+
+function PromptPoliciesCard({ profileName, effective, onRefresh }: {
+  profileName: string;
+  effective: SettingsConfigProfileSummary;
+  onRefresh: () => void;
+}) {
+  const [slot, setSlot] = useState<'worker_guidance' | 'reviewer_guidance'>('worker_guidance');
+  const [taskClass, setTaskClass] = useState('');
+  const [reviewerTier, setReviewerTier] = useState('');
+  const [content, setContent] = useState('');
+  const [pending, setPending] = useState(false);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const policy = effective.prompt_policies;
+
+  useEffect(() => {
+    setContent('');
+    setPreview(null);
+    setError(null);
+  }, [profileName, policy.revision]);
+
+  const target = {
+    slot,
+    ...(taskClass.trim() ? { task_class: taskClass.trim() } : {}),
+    ...(slot === 'reviewer_guidance' && reviewerTier ? { reviewer_tier: reviewerTier } : {}),
+  };
+
+  const run = async (operation: () => Promise<import('@git-agent-harness/contracts').PromptPolicyMutationResult>) => {
+    setPending(true);
+    setError(null);
+    try {
+      const result = await operation();
+      setPreview(result.preview_diff);
+      if (!result.dry_run) onRefresh();
+    } catch (failure) {
+      setError(failure instanceof GahApiError ? failure.message : 'Prompt policy mutation failed. Refresh and retry.');
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const overrides = policy.policies.filter((entry) => entry.source === 'profile_override');
+
+  return (
+    <div className="card-padded border border-subtle">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h4 className="text-xs font-semibold text-primary">Prompt policies</h4>
+          <p className="text-xs text-muted mt-1">
+            Revision {policy.revision}. Guidance is bounded and untrusted; safety, approval, merge, evidence, and skill bindings stay protected.
+          </p>
+        </div>
+        {policy.rollback_revisions.length > 0 && (
+          <button
+            type="button"
+            disabled={pending}
+            className="btn-secondary text-xs"
+            onClick={() => {
+              const revision = policy.rollback_revisions.at(-1);
+              if (revision != null) void run(() => promptPoliciesApi.rollback(profileName, {
+                to_revision: revision,
+                expected_revision: policy.revision,
+              }));
+            }}
+          >
+            Roll back to r{policy.rollback_revisions.at(-1)}
+          </button>
+        )}
+      </div>
+
+      <ul className="mt-3 space-y-1 text-xs text-secondary">
+        {policy.policies.map((entry) => (
+          <li className="break-words" key={[entry.slot, entry.task_class ?? 'any', entry.reviewer_tier ?? 'any', entry.source].join('-')}>
+            <span className="font-mono">{entry.slot}</span> · task {entry.task_class ?? 'any'} · tier {entry.reviewer_tier ?? 'any'} · {entry.source.replace('_', ' ')} · {entry.version} · {entry.byte_size} bytes · <span className="font-mono break-all">{entry.sha256.slice(0, 19)}…</span>
+            {entry.source === 'profile_override' && (
+              <button
+                type="button"
+                disabled={pending}
+                className="ml-2 text-critical hover:underline disabled:opacity-50"
+                onClick={() => void run(() => promptPoliciesApi.reset(profileName, {
+                  slot: entry.slot,
+                  ...(entry.task_class ? { task_class: entry.task_class } : {}),
+                  ...(entry.reviewer_tier ? { reviewer_tier: entry.reviewer_tier } : {}),
+                  expected_revision: policy.revision,
+                }))}
+              >
+                Restore default
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+
+      <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2">
+        <label className="text-xs text-secondary">
+          Slot
+          <select className="mt-1 w-full bg-raised border border-subtle rounded px-2 py-1 text-primary" value={slot} onChange={(event) => { setSlot(event.target.value as typeof slot); setPreview(null); }}>
+            <option value="worker_guidance">Worker guidance</option>
+            <option value="reviewer_guidance">Reviewer guidance</option>
+          </select>
+        </label>
+        <label className="text-xs text-secondary">
+          Task class (optional)
+          <input className="mt-1 w-full bg-raised border border-subtle rounded px-2 py-1 text-primary" value={taskClass} maxLength={64} onChange={(event) => { setTaskClass(event.target.value); setPreview(null); }} />
+        </label>
+        <label className="text-xs text-secondary">
+          Reviewer tier
+          <select className="mt-1 w-full bg-raised border border-subtle rounded px-2 py-1 text-primary disabled:opacity-50" value={reviewerTier} disabled={slot === 'worker_guidance'} onChange={(event) => { setReviewerTier(event.target.value); setPreview(null); }}>
+            <option value="">Any tier</option>
+            <option value="strong">Strong</option>
+            <option value="escalatory">Escalatory</option>
+            <option value="standard">Standard</option>
+            <option value="weak">Weak</option>
+          </select>
+        </label>
+      </div>
+      <label className="block mt-2 text-xs text-secondary">
+        Replacement guidance
+        <textarea
+          className="mt-1 w-full min-h-24 bg-raised border border-subtle rounded px-2 py-1 text-primary font-mono"
+          value={content}
+          maxLength={4096}
+          onChange={(event) => {
+            setContent(event.target.value);
+            setPreview(null);
+          }}
+          placeholder="Enter bounded guidance. Protected instructions cannot be replaced."
+        />
+      </label>
+      <div className="mt-2 flex gap-2">
+        <button type="button" className="btn-secondary text-xs" disabled={pending || !content.trim()} onClick={() => void run(() => promptPoliciesApi.set(profileName, {
+          ...target,
+          content,
+          expected_revision: policy.revision,
+          dry_run: true,
+        }))}>Preview</button>
+        <button type="button" className="btn-primary text-xs" disabled={pending || !content.trim() || preview == null} onClick={() => void run(() => promptPoliciesApi.set(profileName, {
+          ...target,
+          content,
+          expected_revision: policy.revision,
+        }))}>{pending ? 'Saving…' : 'Apply'}</button>
+      </div>
+      {error && <p role="alert" className="mt-2 text-xs text-critical">{error}</p>}
+      {preview && <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-xs text-muted bg-raised border border-subtle rounded p-2">{preview}</pre>}
+      {overrides.length === 0 && <p className="mt-2 text-xs text-muted">No profile overrides. Embedded defaults are active.</p>}
+    </div>
   );
 }
 

@@ -93,6 +93,9 @@ pub fn run(command: ConfigCommands) -> Result<()> {
         ConfigCommands::RoutingCandidate { command } => {
             return super::routing_candidates::run(command);
         }
+        ConfigCommands::PromptPolicy { command } => {
+            return super::prompt_policies::run(command);
+        }
         ConfigCommands::SetBackendInstanceEnabled {
             config_path,
             profile,

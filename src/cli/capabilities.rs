@@ -14,7 +14,7 @@
 //!   artifacts are generated from these definitions
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 mod operations;
 mod request_schemas;
@@ -171,20 +171,20 @@ pub struct CapabilityManifest {
     /// Manifest version
     pub manifest_version: String,
     /// All defined operations
-    pub operations: HashMap<String, OperationDefinition>,
+    pub operations: BTreeMap<String, OperationDefinition>,
     /// Map from CLI command path to operation ID for quick lookup
-    pub command_path_to_operation_id: HashMap<String, String>,
+    pub command_path_to_operation_id: BTreeMap<String, String>,
     /// Operations that are remotely available
     pub remote_operations: Vec<String>,
     /// Operations that are local-only with reasons
-    pub local_only_operations: HashMap<String, LocalOnlyReason>,
+    pub local_only_operations: BTreeMap<String, LocalOnlyReason>,
     /// Issue #525: embedded JSON-Schema request payloads, authored next to
     /// each operation and generated into the shipped manifest so clients
     /// (the MCP server) derive their tool input schemas from the manifest
     /// instead of hand-maintaining a second copy. Only operations that a
     /// client can invoke directly carry one.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub request_schemas: HashMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub request_schemas: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for CapabilityManifest {
@@ -199,11 +199,11 @@ impl CapabilityManifest {
         Self {
             schema_version: MANIFEST_SCHEMA_VERSION,
             manifest_version: MANIFEST_VERSION.to_string(),
-            operations: HashMap::new(),
-            command_path_to_operation_id: HashMap::new(),
+            operations: BTreeMap::new(),
+            command_path_to_operation_id: BTreeMap::new(),
             remote_operations: Vec::new(),
-            local_only_operations: HashMap::new(),
-            request_schemas: HashMap::new(),
+            local_only_operations: BTreeMap::new(),
+            request_schemas: BTreeMap::new(),
         }
     }
 
@@ -333,6 +333,7 @@ pub fn generate_manifest() -> CapabilityManifest {
     add_route_approval_operations(&mut manifest);
     add_backend_instance_operations(&mut manifest);
     add_routing_candidate_operations(&mut manifest);
+    add_prompt_policy_operations(&mut manifest);
     request_schemas::add_request_schemas(&mut manifest);
     add_external_approval_operations(&mut manifest);
     add_loop_operations(&mut manifest);

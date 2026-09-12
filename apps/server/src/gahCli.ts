@@ -1407,6 +1407,48 @@ export async function runRoutingCandidateMutation(
   return runVoidCommand(args, config, 'gah config routing-candidate');
 }
 
+export async function runPromptPolicyMutation(
+  action: 'set' | 'reset' | 'rollback',
+  params: {
+    profile: string;
+    slot?: 'worker_guidance' | 'reviewer_guidance';
+    task_class?: string;
+    reviewer_tier?: string;
+    content?: string;
+    expected_revision: number;
+    to_revision?: number;
+    dry_run?: boolean;
+  },
+  config?: string
+): Promise<import('@git-agent-harness/contracts').PromptPolicyMutationResult> {
+  const args = [
+    'config',
+    'prompt-policy',
+    action,
+    '--profile',
+    params.profile,
+    '--expected-revision',
+    String(params.expected_revision),
+    '--json',
+  ];
+  if (action === 'rollback') {
+    if (params.to_revision === undefined) throw new Error('to_revision is required for rollback');
+    args.push('--to-revision', String(params.to_revision));
+  } else {
+    if (!params.slot) throw new Error('slot is required');
+    args.push('--slot', params.slot);
+    if (params.task_class) args.push('--task-class', params.task_class);
+    if (params.reviewer_tier) args.push('--reviewer-tier', params.reviewer_tier);
+    if (action === 'set') {
+      if (!params.content) throw new Error('content is required');
+      args.push('--content', params.content);
+    }
+  }
+  if (params.dry_run) args.push('--dry-run');
+  if (config) args.push('--config', config);
+  return runJsonCommand(args, config);
+}
+
 /** Issue #822: enable or disable one backend instance for a profile. The
  * CLI owns the config write path (merged-entry write, validation before
  * save); the server only shells out with fixed arguments. */
