@@ -4,6 +4,7 @@ import type { PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harn
 import { GahApiError, pairingApi } from '../api/client.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { saveCoordinatorToken } from '../api/coordinatorToken.js';
+import { ConnectionStatus } from './ConnectionStatus.js';
 
 function pairingLink(value: string): { origin: string; code: string; serverId: string } {
   const url = new URL(value);
@@ -18,7 +19,7 @@ function pairingLink(value: string): { origin: string; code: string; serverId: s
  * neither this component nor the QR renderer receives a device credential. */
 export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () => void }) {
   const nativeController = (window as Window & { webkit?: { messageHandlers?: { gahController?: { postMessage?: (message: string) => void } } } }).webkit?.messageHandlers?.gahController;
-  const { isConnected } = useWebSocket();
+  const { isConnected, isConnecting, error: connectionError, serverVersion } = useWebSocket();
   const [pending, setPending] = useState(() => {
     try { return pairingLink(window.location.href); } catch { return null; }
   });
@@ -66,6 +67,7 @@ export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () =
   };
   const url = offer ? `${offer.server.origin}/#pair=${offer.code}&server=${offer.server.id}` : '';
   return <section className="mt-3 text-sm max-sm:[&_button]:min-h-11 max-sm:[&_input]:min-h-11" aria-label="Device pairing">
+    {!pending && <div className="mb-3"><ConnectionStatus isConnected={isConnected} isConnecting={isConnecting} error={connectionError} serverVersion={serverVersion} /></div>}
     {principal === 'device' && <p role="status" className="mb-2 text-good">Paired device · Dashboard access enabled</p>}
     <div className="flex flex-wrap gap-2">
     {!pending && typeof nativeController?.postMessage === 'function' && <button type="button" className="btn-primary" onClick={() => nativeController.postMessage?.('scanPairingCode')}>Scan pairing QR code</button>}

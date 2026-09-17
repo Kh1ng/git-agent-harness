@@ -92,6 +92,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     // A native scan loads the same pairing URL as the browser/manual flow.
     await phone.goto(link);
     await expect(phone.getByRole('heading', { name: 'Confirm this server' })).toBeVisible();
+    await expect(phone.getByText('Connection error: WebSocket connection error')).toHaveCount(0);
     await expect(scanner).toHaveCount(0);
     expect(new URL(phone.url()).searchParams.get('page')).toBe('settings');
     await expect(phone.getByText(`Pairing test central · ${origin}`, { exact: true })).toBeVisible();
