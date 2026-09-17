@@ -125,7 +125,7 @@ final class ControllerTests: XCTestCase {
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()
         field.typeKey("a", modifierFlags: .command)
-        field.typeText("javascript:alert(1)")
+        app.typeText("javascript:alert(1)")
         app.buttons["connectServer"].tap()
         XCTAssertTrue(app.staticTexts["connectionError"].waitForExistence(timeout: 5))
         let screenshot = XCTAttachment(screenshot: app.screenshot())
