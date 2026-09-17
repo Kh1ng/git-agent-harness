@@ -6,7 +6,6 @@ import { useGahStore } from '../store/gahStore.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { CoordinatorConnection } from '../components/CoordinatorConnection.js';
-import { ConnectionStatus } from '../components/ConnectionStatus.js';
 import { FRONTEND_BUILD } from '../components/Navbar.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState } from '../components/ui/EmptyState.js';
@@ -30,7 +29,7 @@ const WAKE_AUTONOMY_OPTIONS: { value: WakeAutonomyValue; label: string }[] = [
 ];
 
 export function SettingsPage() {
-  const { providers, providerStatuses, sendMessage, isConnected, isConnecting, error: connectionError, serverVersion, profile } = useWebSocket();
+  const { providers, providerStatuses, sendMessage, isConnected, serverVersion, profile } = useWebSocket();
   const { theme, setTheme, profileOverride, setProfileOverride } = useUiStore();
   const profiles = useGahStore((s) => s.profiles);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
@@ -123,7 +122,6 @@ export function SettingsPage() {
       <section className="card-padded max-w-4xl" aria-labelledby="connection-settings-title">
         <h2 id="connection-settings-title" className="text-base font-semibold text-primary">Connection & pairing</h2>
         <p className="mt-1 mb-3 break-all text-sm text-secondary">{window.location.origin}</p>
-        <ConnectionStatus isConnected={isConnected} isConnecting={isConnecting} error={connectionError} serverVersion={serverVersion} />
         <CoordinatorConnection />
         {window.__GAH_DESKTOP_SETTINGS__ === true && (
           <div className="mt-3 border-t border-subtle pt-2">

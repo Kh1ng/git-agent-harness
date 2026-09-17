@@ -26,7 +26,7 @@ test('saving a token reconnects the real browser socket without putting credenti
   const component = await mount(<WebSocketProvider><CoordinatorConnection /></WebSocketProvider>);
   await component.getByLabel('Access token', { exact: true }).fill('browser-secret');
   await component.getByRole('button', { name: 'Save and reconnect' }).click();
-  await expect(component.getByRole('status')).toContainText('Trusted-LAN mode is enabled');
+  await expect(component.getByRole('status').filter({ hasText: 'Trusted-LAN mode is enabled' })).toBeVisible();
   const attempts = await page.evaluate(() => (window as typeof window & { __connections: { url: string; protocols: string[] }[] }).__connections);
   expect(attempts.at(-1)?.protocols).toEqual(['gah.v1', `gah-auth.${Buffer.from('browser-secret').toString('base64url')}`]);
   expect(attempts.every(attempt => !attempt.url.includes('browser-secret') && !attempt.url.includes('gah-auth'))).toBe(true);
@@ -35,7 +35,7 @@ test('saving a token reconnects the real browser socket without putting credenti
   await page.screenshot({ path: testInfo.outputPath('connection-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: testInfo.outputPath('connection-mobile.png') });
-  await expect(component.getByRole('status')).toBeVisible();
+  await expect(component.getByRole('status').filter({ hasText: /^Live/ })).toBeVisible();
 });
 
 test('unavailable browser storage leaves the connection form usable and reports save failure', async ({ mount, page }) => {
