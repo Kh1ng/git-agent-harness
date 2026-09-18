@@ -195,7 +195,7 @@ export function ProviderPicker({
         aria-expanded={open}
         aria-label={triggerAriaLabel}
         title={busy ? 'Switching provider is disabled while a turn is in flight' : variant === 'backend' ? 'Provider' : 'Provider, model, and reasoning effort'}
-        className="touch-target inline-flex max-w-[14rem] max-sm:max-w-[5.5rem] max-sm:min-h-11 max-sm:min-w-11 items-center gap-1.5 rounded-md border border-subtle bg-raised px-2 py-2 text-xs text-secondary hover:bg-white/5 disabled:opacity-50"
+        className={`touch-target inline-flex max-w-[14rem] ${variant === 'backend' ? '' : 'max-sm:max-w-[5.5rem]'} max-sm:min-h-11 max-sm:min-w-11 items-center gap-1.5 rounded-md border border-subtle bg-raised px-2 py-2 text-xs text-secondary hover:bg-white/5 disabled:opacity-50`}
       >
         <Cpu size={13} className="shrink-0 text-muted" aria-hidden="true" />
         <span className="truncate">{pillLabel}</span>

@@ -1450,7 +1450,7 @@ export function ManagerChatPage() {
   const closeTools = () => setToolsOpen(false);
 
   return (
-    <div className="chat-viewport flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
       {/* One slim bar: where you are, git at a glance, and everything else behind ⋯. */}
       <div className="flex min-w-0 items-center gap-2">
         <button ref={navigationButton} type="button" onClick={() => setNavigationOpen((open) => !open)}
@@ -1475,7 +1475,7 @@ export function ManagerChatPage() {
         {gitStatus && (
           <button type="button" onClick={() => setToolsOpen(true)}
             className="touch-target inline-flex min-h-11 min-w-11 max-w-[16rem] shrink-0 items-center justify-center gap-1.5 rounded-md border border-subtle px-2 py-1 text-xs text-secondary hover:bg-white/5 sm:min-h-0 sm:min-w-0"
-            aria-label={`Git status for ${gitStatus.branch}: ${gitStatus.changes.length} changed files. Open chat tools for details.`}
+            aria-label={`Git status for ${gitStatus.branch}: ${gitStatus.readOnly ? 'read only' : `${gitStatus.changes.length} changed files`}. Open chat tools for details.`}
             title="Git status — open chat tools for details">
             <GitBranch size={13} className="shrink-0 text-muted" aria-hidden="true" />
             <span className="hidden truncate font-mono sm:inline">{gitStatus.branch}</span>
@@ -1956,7 +1956,7 @@ export function ManagerChatPage() {
               {turnBusy && (
                 <button
                   onClick={handleCancel}
-                  className="btn-secondary !p-0 max-sm:!min-h-11 max-sm:!min-w-11"
+                  className="btn-secondary !px-2.5 max-sm:!min-h-11 max-sm:!min-w-11"
                   aria-label="Stop"
                   title="Stop this turn"
                 >
@@ -1966,7 +1966,7 @@ export function ManagerChatPage() {
               <button
                 onClick={handleSend}
                 disabled={!isConnected || !draft.trim() || sendBlocked}
-                className="btn-primary !p-0 max-sm:!min-h-11 max-sm:!min-w-11 disabled:opacity-40"
+                className="btn-primary !px-2.5 max-sm:!min-h-11 max-sm:!min-w-11 disabled:opacity-40"
                 aria-label="Send"
                 title={turnBusy ? 'Steer this turn' : undefined}
               >
