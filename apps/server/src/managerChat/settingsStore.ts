@@ -67,6 +67,13 @@ export function backendForProfile(profile: string): string {
   return settings.profileOverrides[profile] ?? settings.defaultBackend;
 }
 
+/** Select the backend for one project's interactive default conversation. */
+export function setBackendForProfile(profile: string, backendId: string): void {
+  const settings = readSettings();
+  settings.profileOverrides[profile] = backendId;
+  writeSettings(settings);
+}
+
 function modelOverrideKey(profile: string, backendId: string): string {
   return `${profile}:${backendId}`;
 }

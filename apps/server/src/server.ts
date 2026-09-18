@@ -72,7 +72,7 @@ import { pairingRouter } from './pairing.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { RegistryService, NodeDoctorError } from './registryService.js';
 import { ClaimsService, ClaimConflictError } from './claimsService.js';
-import { readSettings as readManagerChatSettings, writeSettings as writeManagerChatSettings } from './managerChat/settingsStore.js';
+import { readSettings as readManagerChatSettings, setBackendForProfile, writeSettings as writeManagerChatSettings } from './managerChat/settingsStore.js';
 import { gatewayBaseUrl, gatewayApiKey, gatewayHealth, recall } from './managerChat/memoryGatewayClient.js';
 import { readGatewaySettings, writeGatewaySettings } from './gatewaySettingsStore.js';
 import { detectTailscaleIPv4 } from './tailscaleDetect.js';
@@ -1484,6 +1484,25 @@ export function createServer(
     } catch (error) {
       res.status(400).json({
         error: 'Failed to update manager chat settings',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/manager-chat/backend', (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : '';
+    const backendId = typeof req.body?.backendId === 'string' ? req.body.backendId : '';
+    const backend = listManagerBackends().find((candidate) => candidate.id === backendId);
+    if (!profile || !backend?.implemented) {
+      res.status(400).json({ error: 'A valid profile and available backend are required.' });
+      return;
+    }
+    try {
+      setBackendForProfile(profile, backendId);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(400).json({
+        error: 'Failed to switch manager chat backend',
         message: error instanceof Error ? error.message : String(error)
       });
     }
