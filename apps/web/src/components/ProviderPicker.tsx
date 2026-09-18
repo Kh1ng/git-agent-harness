@@ -181,7 +181,7 @@ export function ProviderPicker({
 
   const starClasses = (saved: boolean) => `shrink-0 ${saved ? 'fill-amber-400 text-amber-400' : 'text-muted'}`;
   const rowClasses = (selected: boolean, enabled: boolean) =>
-    `flex min-w-0 flex-1 items-center rounded px-1.5 py-1 text-left text-xs ${
+    `touch-target flex min-w-0 flex-1 items-center rounded px-1.5 py-1 text-left text-xs max-sm:min-h-11 max-sm:min-w-11 ${
       selected ? 'bg-accent/15 text-primary' : enabled ? 'text-secondary hover:bg-white/5' : 'text-muted'
     } disabled:cursor-not-allowed`;
 
@@ -205,8 +205,21 @@ export function ProviderPicker({
         <div
           role="dialog"
           aria-label={triggerAriaLabel}
-          className="absolute bottom-full left-1/2 z-20 mb-1.5 max-h-[70vh] w-[30rem] max-w-[calc(100vw-3rem)] -translate-x-1/2 overflow-y-auto rounded-md border border-subtle bg-card shadow-lg sm:left-0 sm:translate-x-0"
+          className="fixed inset-x-3 bottom-3 z-20 max-h-[calc(100dvh-1.5rem)] overflow-y-auto rounded-md border border-subtle bg-card shadow-lg sm:absolute sm:bottom-full sm:left-0 sm:right-auto sm:mb-1.5 sm:max-h-[70vh] sm:w-[30rem] sm:max-w-[calc(100vw-3rem)]"
         >
+          <div className="flex items-center justify-between border-b border-subtle px-2.5 sm:hidden">
+            <span className="text-xs font-semibold text-primary">
+              {variant === 'backend' ? 'Choose provider' : 'Choose provider, model, and effort'}
+            </span>
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="touch-target inline-flex items-center justify-center rounded text-muted hover:bg-white/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
+              aria-label="Close provider picker"
+            >
+              <X size={16} aria-hidden="true" />
+            </button>
+          </div>
           <fieldset disabled={busy} className="contents">
           {variant !== 'backend' && <div className="border-b border-subtle px-2.5 py-2">
             <div className="flex items-center justify-between gap-2">
@@ -216,7 +229,7 @@ export function ProviderPicker({
                   type="button"
                   onClick={() => toggleFavorite(currentFavorite)}
                   aria-pressed={currentFavoriteSaved}
-                  className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-[10px] text-secondary hover:bg-white/5"
+                  className="touch-target inline-flex items-center gap-1 rounded px-1 py-0.5 text-[10px] text-secondary hover:bg-white/5 max-sm:min-h-11 max-sm:min-w-11"
                   title={currentFavoriteSaved ? 'Remove the current selection from favorites' : 'Save the current selection as a favorite'}
                 >
                   <Star size={11} className={starClasses(currentFavoriteSaved)} aria-hidden="true" />
@@ -233,7 +246,7 @@ export function ProviderPicker({
                       type="button"
                       onClick={() => applyFavorite(favorite)}
                       disabled={!enabled}
-                      className="min-w-0 flex-1 truncate rounded px-1.5 py-1 text-left text-xs text-secondary hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="touch-target min-w-0 flex-1 truncate rounded px-1.5 py-1 text-left text-xs text-secondary hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11"
                       aria-label={`Apply ${favoriteLabel(favorite)}`}
                       title={enabled ? 'Apply this favorite' : 'This provider is unavailable'}
                     >
@@ -243,7 +256,7 @@ export function ProviderPicker({
                     <button
                       type="button"
                       onClick={() => toggleFavorite(favorite)}
-                      className="shrink-0 rounded p-1 text-muted hover:bg-white/5 hover:text-primary"
+                      className="touch-target shrink-0 rounded p-1 text-muted hover:bg-white/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
                       aria-label={`Remove ${favoriteLabel(favorite)} from favorites`}
                     >
                       <X size={11} aria-hidden="true" />
@@ -280,7 +293,7 @@ export function ProviderPicker({
                         disabled={!backend.implemented}
                         aria-pressed={saved}
                         aria-label={`Favorite ${backend.displayName}`}
-                        className="shrink-0 rounded p-1 text-muted hover:bg-white/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                        className="touch-target shrink-0 rounded p-1 text-muted hover:bg-white/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-50 max-sm:min-h-11 max-sm:min-w-11"
                         title="Favorite this provider"
                       >
                         <Star size={11} className={starClasses(saved)} aria-hidden="true" />
@@ -328,7 +341,7 @@ export function ProviderPicker({
                           onClick={() => toggleFavorite(favorite)}
                           aria-pressed={saved}
                           aria-label={`Favorite ${model.name}`}
-                          className="shrink-0 rounded p-1 text-muted hover:bg-white/5 hover:text-primary"
+                          className="touch-target shrink-0 rounded p-1 text-muted hover:bg-white/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
                           title="Favorite this provider + model"
                         >
                           <Star size={11} className={starClasses(saved)} aria-hidden="true" />
@@ -381,7 +394,7 @@ export function ProviderPicker({
                           onClick={() => toggleFavorite(favorite)}
                           aria-pressed={saved}
                           aria-label={`Favorite ${favoriteLabel(favorite)}`}
-                          className="shrink-0 rounded p-1 text-muted hover:bg-white/5 hover:text-primary"
+                          className="touch-target shrink-0 rounded p-1 text-muted hover:bg-white/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
                           title="Favorite this provider + model + effort"
                         >
                           <Star size={11} className={starClasses(saved)} aria-hidden="true" />

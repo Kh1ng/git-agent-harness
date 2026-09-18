@@ -9,7 +9,23 @@ for (const width of [320, 390]) {
     const navigator = page.getByRole('button', { name: /Projects & chats/ });
     const rail = page.getByRole('complementary', { name: 'Chat navigation' });
     const draft = page.getByPlaceholder(/Message the manager/);
-    await expect(page.getByRole('button', { name: 'Provider picker' })).toBeVisible();
+    const providerPicker = page.getByRole('button', { name: 'Provider picker' });
+    await expect(providerPicker).toBeVisible();
+    await providerPicker.click();
+    const providerDialog = page.getByRole('dialog', { name: 'Provider picker' });
+    await expect(providerDialog).toBeVisible();
+    expect(await providerDialog.evaluate((dialog) => {
+      const bounds = dialog.getBoundingClientRect();
+      return bounds.left >= 0 && bounds.right <= window.innerWidth
+        && bounds.top >= 0 && bounds.bottom <= window.innerHeight;
+    })).toBe(true);
+    for (const control of await providerDialog.locator('button:visible').all()) {
+      const bounds = (await control.boundingBox())!;
+      expect(bounds.height).toBeGreaterThanOrEqual(44);
+      expect(bounds.width).toBeGreaterThanOrEqual(44);
+    }
+    await page.screenshot({ path: testInfo.outputPath(`provider-picker-${width}.png`), fullPage: true });
+    await providerDialog.getByRole('button', { name: 'Close provider picker' }).click();
     await expect(page.getByRole('button', { name: /1 changed file\./ })).toBeVisible();
     await expect(navigator).toContainText('Mock session');
     await expect(rail).toBeHidden();
