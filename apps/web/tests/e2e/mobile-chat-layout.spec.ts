@@ -10,7 +10,7 @@ for (const width of [320, 390]) {
     const rail = page.getByRole('complementary', { name: 'Chat navigation' });
     const draft = page.getByPlaceholder(/Message the manager/);
     await expect(page.getByRole('button', { name: 'Provider picker' })).toBeVisible();
-    await expect(page.getByRole('button', { name: /Git status for/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /1 changed file\./ })).toBeVisible();
     await expect(navigator).toContainText('Mock session');
     await expect(rail).toBeHidden();
     await expect(page.getByRole('button', { name: 'Storage', exact: true })).toBeHidden();
@@ -97,6 +97,9 @@ for (const width of [320, 390]) {
     await page.setViewportSize({ width: 1440, height: 900 });
     await expect(rail).toBeVisible();
     await expect(navigator).toBeHidden();
+    const desktopSend = (await page.getByRole('button', { name: 'Send', exact: true }).boundingBox())!;
+    expect(desktopSend.width).toBeGreaterThanOrEqual(34);
+    expect(desktopSend.height).toBeGreaterThanOrEqual(36);
     await expect(page.getByRole('button', { name: 'Storage', exact: true })).toBeHidden();
     await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Storage', exact: true })).toBeVisible();
@@ -126,4 +129,14 @@ test('chat keeps the composer inside short and offline viewports', async ({ page
   await expectComposerInsideViewport();
   await page.setViewportSize({ width: 1440, height: 900 });
   await expectComposerInsideViewport();
+  await page.setViewportSize({ width: 1024, height: 400 });
+  await expectComposerInsideViewport();
+  const primaryNavigation = page.getByRole('navigation', { name: 'Primary' });
+  const sidebar = primaryNavigation.locator('..');
+  await expect(primaryNavigation).toBeVisible();
+  expect(await sidebar.evaluate((element) => element.scrollHeight > element.clientHeight
+    && getComputedStyle(element).overflowY === 'auto')).toBe(true);
+  const settings = primaryNavigation.getByRole('button', { name: 'Settings', exact: true });
+  await settings.scrollIntoViewIfNeeded();
+  await expect(settings).toBeInViewport();
 });

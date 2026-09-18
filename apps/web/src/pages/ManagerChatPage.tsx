@@ -1475,7 +1475,7 @@ export function ManagerChatPage() {
         {gitStatus && (
           <button type="button" onClick={() => setToolsOpen(true)}
             className="touch-target inline-flex min-h-11 min-w-11 max-w-[16rem] shrink-0 items-center justify-center gap-1.5 rounded-md border border-subtle px-2 py-1 text-xs text-secondary hover:bg-white/5 sm:min-h-0 sm:min-w-0"
-            aria-label={`Git status for ${gitStatus.branch}: ${gitStatus.readOnly ? 'read only' : `${gitStatus.changes.length} changed files`}. Open chat tools for details.`}
+            aria-label={`Git status for ${gitStatus.branch}: ${gitStatus.readOnly ? 'read only' : `${gitStatus.changes.length} changed ${gitStatus.changes.length === 1 ? 'file' : 'files'}`}. Open chat tools for details.`}
             title="Git status — open chat tools for details">
             <GitBranch size={13} className="shrink-0 text-muted" aria-hidden="true" />
             <span className="hidden truncate font-mono sm:inline">{gitStatus.branch}</span>
