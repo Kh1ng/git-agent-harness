@@ -137,19 +137,6 @@
     padding-top: env(safe-area-inset-top);
   }
 
-  /* The chat page owns the viewport: header + main padding are subtracted so
-     the composer stays pinned without page scroll. */
-  .chat-viewport {
-    height: calc(100dvh - 2rem - 3.5rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
-    min-height: 26rem;
-  }
-  @media (min-width: 640px) {
-    .chat-viewport { height: calc(100dvh - 3rem - 3.5rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
-  }
-  @media (min-width: 1024px) {
-    .chat-viewport { height: calc(100dvh - 3rem - env(safe-area-inset-bottom)); }
-  }
-
   .chat-menu-item {
     @apply flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-secondary hover:bg-white/5 hover:text-primary disabled:opacity-50 disabled:hover:bg-transparent;
   }
@@ -310,7 +297,7 @@
 }
 
 @media (pointer: coarse) {
-  .btn, .btn-primary, .btn-secondary, .nav-link {
+  .btn, .btn-primary, .btn-secondary, .nav-link, .touch-target {
     min-height: 44px;
     min-width: 44px;
   }

@@ -21,7 +21,7 @@ export function PwaStatusBars() {
       {offline && (
         <div
           role="status"
-          className="flex items-center gap-2 px-4 py-2 bg-warning/15 text-warning text-sm border-b border-warning/30"
+          className="flex shrink-0 items-center gap-2 border-b border-warning/30 bg-warning/15 px-4 py-2 text-sm text-warning lg:col-span-2"
         >
           <WifiOff size={14} aria-hidden="true" />
           Offline — the dashboard is read-only and the data you see may be
@@ -31,7 +31,7 @@ export function PwaStatusBars() {
       {updateApply && !offline && (
         <div
           role="status"
-          className="flex items-center gap-2 px-4 py-2 bg-raised text-secondary text-sm border-b border-subtle"
+          className="flex shrink-0 items-center gap-2 border-b border-subtle bg-raised px-4 py-2 text-sm text-secondary lg:col-span-2"
         >
           Update available.
           <button

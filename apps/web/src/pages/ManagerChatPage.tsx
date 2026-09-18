@@ -190,7 +190,7 @@ function SkillPicker({
   return (
     <details className="group relative">
       <summary
-        className="flex cursor-pointer list-none items-center gap-1.5 rounded-md border border-subtle bg-raised px-2 py-2 text-xs text-secondary hover:bg-white/5 [&::-webkit-details-marker]:hidden"
+        className="touch-target flex min-h-11 min-w-11 cursor-pointer list-none items-center gap-1.5 rounded-md border border-subtle bg-raised px-2 py-2 text-xs text-secondary hover:bg-white/5 sm:min-h-0 sm:min-w-0 [&::-webkit-details-marker]:hidden"
         aria-label="Project skills"
         onClick={(event) => { if (busy) event.preventDefault(); }}
         title={busy ? 'Skill changes are disabled while a turn is in flight' : 'Choose the project skills applied to the next turn'}
@@ -1450,7 +1450,7 @@ export function ManagerChatPage() {
   const closeTools = () => setToolsOpen(false);
 
   return (
-    <div className="chat-viewport flex min-w-0 flex-col gap-3">
+    <div className="chat-viewport flex min-h-0 min-w-0 flex-1 flex-col gap-3">
       {/* One slim bar: where you are, git at a glance, and everything else behind ⋯. */}
       <div className="flex min-w-0 items-center gap-2">
         <button ref={navigationButton} type="button" onClick={() => setNavigationOpen((open) => !open)}
@@ -1474,10 +1474,11 @@ export function ManagerChatPage() {
         )}
         {gitStatus && (
           <button type="button" onClick={() => setToolsOpen(true)}
-            className="hidden max-w-[16rem] shrink-0 items-center gap-1.5 rounded-md border border-subtle px-2 py-1 text-xs text-secondary hover:bg-white/5 sm:inline-flex"
+            className="touch-target inline-flex min-h-11 min-w-11 max-w-[16rem] shrink-0 items-center justify-center gap-1.5 rounded-md border border-subtle px-2 py-1 text-xs text-secondary hover:bg-white/5 sm:min-h-0 sm:min-w-0"
+            aria-label={`Git status for ${gitStatus.branch}: ${gitStatus.changes.length} changed files. Open chat tools for details.`}
             title="Git status — open chat tools for details">
             <GitBranch size={13} className="shrink-0 text-muted" aria-hidden="true" />
-            <span className="truncate font-mono">{gitStatus.branch}</span>
+            <span className="hidden truncate font-mono sm:inline">{gitStatus.branch}</span>
             {gitStatus.changes.length > 0 && !gitStatus.readOnly && (
               <span className="flex shrink-0 items-center gap-1 text-warning">
                 <span className="h-1.5 w-1.5 rounded-full bg-warning" aria-hidden="true" />{gitStatus.changes.length}
@@ -1929,7 +1930,7 @@ export function ManagerChatPage() {
             className="block w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-base text-primary placeholder:text-muted focus:outline-none disabled:opacity-50 sm:text-sm"
           />
           <div className="flex items-end gap-1.5 px-2 pb-2">
-            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 min-[360px]:flex-nowrap">
             {composerPicker && <ProviderPicker {...composerPicker} />}
             <ChatNodePicker compact {...nodeSnapshot} value={chosenNode} disabled={turnBusy || !isConnected || backendChanging || modelChanging || reasoningEffortChanging || sessionSelectionChanging}
               onChange={nodeId => setNodeChoice({ profile, sessionId, nodeId })} />
@@ -1955,7 +1956,7 @@ export function ManagerChatPage() {
               {turnBusy && (
                 <button
                   onClick={handleCancel}
-                  className="btn-secondary !min-h-9 !min-w-9 !p-0"
+                  className="btn-secondary !p-0 max-sm:!min-h-11 max-sm:!min-w-11"
                   aria-label="Stop"
                   title="Stop this turn"
                 >
@@ -1965,7 +1966,7 @@ export function ManagerChatPage() {
               <button
                 onClick={handleSend}
                 disabled={!isConnected || !draft.trim() || sendBlocked}
-                className="btn-primary !min-h-9 !min-w-9 !p-0 disabled:opacity-40"
+                className="btn-primary !p-0 max-sm:!min-h-11 max-sm:!min-w-11 disabled:opacity-40"
                 aria-label="Send"
                 title={turnBusy ? 'Steer this turn' : undefined}
               >

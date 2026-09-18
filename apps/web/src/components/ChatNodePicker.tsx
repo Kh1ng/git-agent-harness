@@ -36,7 +36,7 @@ export function ChatNodePicker({ nodes, value, onChange, loading, error, retry, 
       <label htmlFor={id} className="relative inline-flex min-w-0 items-center" title={`Run on node · ${status}. Each node uses its own checkout; files do not move.`}>
         <Server size={13} className={`pointer-events-none absolute left-2 ${problem ? 'text-warning' : 'text-muted'}`} aria-hidden="true" />
         <select {...selectProps} aria-label="Run on node"
-          className="max-w-[11rem] max-sm:max-w-[7rem] min-w-0 truncate rounded-md border border-subtle bg-raised py-2 pl-7 pr-2 text-xs text-secondary hover:bg-white/5 disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+          className="max-w-[11rem] max-sm:min-h-11 max-sm:min-w-11 max-sm:max-w-[5.5rem] min-w-0 truncate rounded-md border border-subtle bg-raised py-2 pl-7 pr-2 text-xs text-secondary hover:bg-white/5 disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
           {options}
         </select>
       </label>

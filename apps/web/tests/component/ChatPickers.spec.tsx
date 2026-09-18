@@ -23,6 +23,7 @@ test('chat and archive navigation bounds rows, shares search, and retains the se
   await expect(live.locator('button:has(span)')).toHaveCount(10);
   await expect(live.getByRole('button', { name: 'Conversation 15', exact: false })).toHaveAttribute('aria-current', 'page');
   await expect(live.getByRole('button', { name: /Conversation 15/ })).toBeInViewport();
+  await expect(live.getByRole('status')).toHaveClass(/sr-only/);
   await expect(archived).not.toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('gah-1116-rail-desktop.png') });
   await live.getByRole('button', { name: 'Show all' }).click();

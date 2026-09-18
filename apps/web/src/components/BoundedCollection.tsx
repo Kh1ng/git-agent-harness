@@ -27,8 +27,8 @@ export function BoundedCollection<T>({ items, query, searchText, isSelected, lab
 
   return (
     <>
-      {/* Screen readers always hear the count; sighted users only see it once it says something. */}
-      <p role="status" className={normalized || candidates.length > visible.length || selectionOutsideFilter ? 'px-2 text-xs text-secondary' : 'sr-only'}>
+      {/* Screen readers always hear the count; sighted users see it while filtering. */}
+      <p role="status" className={normalized ? 'px-2 text-xs text-secondary' : 'sr-only'}>
         Matches: {matches.length} of {items.length}
         {candidates.length > visible.length ? ` · ${visible.length} rows shown` : ''}
         {selectionOutsideFilter ? ' · current selection also shown' : ''}
