@@ -51,7 +51,7 @@ for (const width of [320, 390]) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath(`chat-tools-${width}.png`), fullPage: true });
     await page.getByLabel('Project skills', { exact: true }).click();
-    await tools.click();
+    await expect(tools).toHaveAttribute('aria-expanded', 'false');
     await expect(draft).toHaveValue('Keep this unfinished message');
     await expect(page.getByLabel('Run on node', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
@@ -68,6 +68,8 @@ for (const width of [320, 390]) {
     await page.setViewportSize({ width: 1440, height: 900 });
     await expect(rail).toBeVisible();
     await expect(navigator).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Storage', exact: true })).toBeHidden();
+    await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Storage', exact: true })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath('chat-desktop.png'), fullPage: true });
   });

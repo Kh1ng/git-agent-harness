@@ -162,12 +162,14 @@ test('archive and preview states mutate through the same REST control plane', as
   await selectScenario(request, 'preview-unavailable');
   await openChat(page);
   await selectSeededSession(page);
+  await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await page.getByRole('button', { name: 'Preview', exact: true }).click();
   await expect(page.getByText('No preview yet.', { exact: false })).toBeVisible();
 
   await selectScenario(request, 'preview-available');
   await openChat(page);
   await selectSeededSession(page);
+  await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await page.getByRole('button', { name: 'Preview :4173', exact: true }).click();
   await expect(page.getByTitle('Session preview')).toBeVisible();
   await expect(page.frameLocator('iframe[title="Session preview"]').getByRole('heading', { name: 'Mock preview available' })).toBeVisible();
@@ -183,6 +185,7 @@ test('archive and preview states mutate through the same REST control plane', as
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     await route.continue();
   });
+  await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
   const defaultConversation = page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: 'Default conversation' });
   // The selection resets optimistically, before any refresh lands.
@@ -217,6 +220,7 @@ test('archive and preview states mutate through the same REST control plane', as
   await selectScenario(request, 'archive-failure');
   await openChat(page);
   await selectSeededSession(page);
+  await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
   await expect(page.getByText('Failed to archive session: Mock archive failed')).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ })).toHaveAttribute('aria-current', 'page');
@@ -225,6 +229,8 @@ test('archive and preview states mutate through the same REST control plane', as
 test('storage dry run selects idle sessions and bulk archives them safely', async ({ page, request }) => {
   await selectScenario(request, 'archive-success');
   await openChat(page);
+
+  await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
 
   await page.getByRole('button', { name: 'Storage', exact: true }).click();
   const storage = page.getByRole('region', { name: 'Chat storage' });

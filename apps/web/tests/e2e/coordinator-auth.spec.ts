@@ -78,6 +78,7 @@ test('the first token restores mounted Chat projects, provider choices, git, and
   await page.locator('section').filter({ hasText: 'Which configured GAH repo' }).getByRole('combobox').selectOption('fixture');
   protectReads = true;
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await page.getByRole('button', { name: 'Storage', exact: true }).click();
   const initialPaths = ['/api/profiles', '/api/projects', '/api/manager-chat/nodes', '/api/manager-chat/settings', '/api/git/status', '/api/manager-chat/issues', '/api/manager-chat/prs', '/api/manager-chat/storage'];
   const providerPaths = ['/api/manager-chat/commands', '/api/manager-chat/models'];

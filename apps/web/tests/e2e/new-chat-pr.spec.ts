@@ -47,6 +47,7 @@ test('PR tab lists open PRs and starts a chat seeded with one', async ({ page, r
   await expect(page.getByRole('dialog', { name: 'New chat' })).toHaveCount(0);
   await expect(page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /#12 Ship the PR chat mode/ })).toHaveAttribute('aria-current', 'page');
   await expect(page.getByText('Head branch: feat/pr-chat')).toBeVisible();
+  await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await expect(page.getByRole('link', { name: 'View PR' })).toHaveAttribute('href', 'https://github.com/Kh1ng/git-agent-harness/pull/12');
   await expect(page.getByRole('button', { name: 'Commit', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Refresh git data' })).toBeEnabled();
@@ -115,6 +116,7 @@ test('git strip commits a writable checkout and exposes an accessible refresh ac
   });
   await openChat(page);
 
+  await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Commit', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Commit', exact: true }).click();
   const commitMessage = page.getByPlaceholder('Commit message');

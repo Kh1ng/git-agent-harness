@@ -93,7 +93,7 @@ export function ProjectRail({
   };
 
   return (
-    <aside className="card p-3 xl:h-[65vh] xl:overflow-y-auto" aria-label="Chat navigation">
+    <aside className="card h-full overflow-y-auto p-3" aria-label="Chat navigation">
       <details open>
         <summary className="group flex cursor-pointer list-none items-center justify-between gap-2 rounded px-1 pb-2 text-xs font-semibold uppercase tracking-wide text-muted marker:content-none hover:text-primary">
           <span className="flex items-center gap-1">
@@ -108,19 +108,18 @@ export function ProjectRail({
             <p className="px-2 py-3 text-xs leading-relaxed text-muted">Import a repository below to start.</p>
           )}
           {[...new Set(sorted.map((project) => project.node_id || localNodeId))].map((owner) => (
-            <section key={owner} aria-label={`Projects on ${nodeName(owner)}`} className="space-y-1 pt-2 first:pt-0">
-              <h3 className="px-2 text-xs font-medium text-secondary break-words">{nodeName(owner)}</h3>
+            <section key={owner} aria-label={`Projects on ${nodeName(owner)}`} className="space-y-0.5 pt-2 first:pt-0">
+              <h3 className="px-2 text-[11px] text-muted break-words">{nodeName(owner)}</h3>
               {sorted.filter((project) => (project.node_id || localNodeId) === owner).map((project) => {
                 const selection = project.chat_profile || project.name;
                 const active = selection === currentProfile;
                 return (
                   <button key={projectKey({ node_id: owner, name: project.name })} type="button"
                     onClick={() => onSelect(selection, owner || undefined)}
-                    className={`block w-full rounded-md px-2 py-2 text-left ${active ? 'bg-accent/15' : 'hover:bg-white/5'}`}
-                    aria-current={active ? 'page' : undefined}>
-                    <span className="block truncate text-sm font-medium text-primary">{project.display_name || project.name}</span>
-                    <span className="block truncate text-xs text-muted">{project.repo}</span>
-                    <span className="mt-1 block truncate text-xs text-secondary">Runs on {nodeName(owner)}</span>
+                    className={`block w-full rounded-md px-2 py-1.5 text-left ${active ? 'bg-accent/15' : 'hover:bg-white/5'}`}
+                    aria-current={active ? 'page' : undefined} title={`Runs on ${nodeName(owner)}`}>
+                    <span className="block truncate text-sm text-primary">{project.display_name || project.name}</span>
+                    <span className="block truncate text-[11px] text-muted">{project.repo}</span>
                   </button>
                 );
               })}
@@ -129,7 +128,7 @@ export function ProjectRail({
         </nav>
       </details>
 
-      <section className="mt-4 border-t border-subtle pt-3" aria-labelledby="chat-list-title">
+      <section className="mt-3 border-t border-subtle pt-3" aria-labelledby="chat-list-title">
         <div className="flex items-center justify-between gap-2 px-1 pb-2">
           <h3 id="chat-list-title" className="text-xs font-semibold uppercase tracking-wide text-muted">Chats</h3>
           {sessionsError ? (
@@ -138,12 +137,9 @@ export function ProjectRail({
             <span className="text-xs tabular-nums text-muted">{liveSessions.length + 1}</span>
           )}
         </div>
-        <label className="mb-2 block space-y-1 text-sm text-secondary">
-          <span>Filter chats and archive</span>
-          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
-            placeholder="Name, number or branch"
-            className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-base text-primary placeholder:text-secondary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" />
-        </label>
+        <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
+          aria-label="Filter chats and archive" placeholder="Search chats"
+          className="mb-2 w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-base text-primary placeholder:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent sm:text-sm" />
         <nav aria-label="Chats" className="space-y-1">
           <BoundedCollection<ChatSessionSummary | null> key={currentProfile} items={[null, ...liveSessions]} query={query}
             label="chats" emptyMessage="No chats yet."

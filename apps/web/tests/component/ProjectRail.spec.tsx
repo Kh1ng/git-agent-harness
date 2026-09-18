@@ -27,7 +27,7 @@ test('groups equal project names by node, selects the remote conversation, and i
     sessions={[]} selectedSessionId={null} onSelect={(profile) => selected.push(profile)} onSessionSelect={() => {}}
     sessionsError={false} onRetrySessions={() => {}} onProjectAdded={(project) => added.push(project)} /></div>);
   const remoteGroup = component.getByRole('region', { name: 'Projects on Windows workstation' });
-  await expect(remoteGroup.getByText('Runs on Windows workstation')).toBeVisible();
+  await expect(remoteGroup.getByRole('heading', { name: 'Windows workstation' })).toBeVisible();
   await expect(remoteGroup.getByRole('button')).toHaveAttribute('aria-current', 'page');
   await remoteGroup.getByRole('button').click();
   expect(selected).toEqual([remote.chat_profile]);
