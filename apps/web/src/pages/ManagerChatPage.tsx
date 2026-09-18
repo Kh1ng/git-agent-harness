@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { ChevronDown, MoreHorizontal, Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles, GitPullRequest, GitCommit, AlertTriangle } from 'lucide-react';
+import { MoreHorizontal, Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles, GitPullRequest, GitCommit, AlertTriangle } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { ChatNodePicker } from '../components/ChatNodePicker.js';
@@ -1153,12 +1153,7 @@ export function ManagerChatPage() {
     setBackendChanging(true);
     const requestedProfile = profile;
     try {
-      // Preserve every other profile's override (#945 AC6) -- the server
-      // replaces profileOverrides wholesale, so merge over the current map.
-      const settings = await gahApi.getManagerChatSettings();
-      await gahApi.setManagerChatSettings({
-        profileOverrides: { ...settings.profileOverrides, [requestedProfile]: backendId }
-      });
+      await gahApi.setManagerChatBackend(requestedProfile, backendId);
       if (activeProfileRef.current === requestedProfile) {
         setActiveBackendId(backendId);
         setModelsLoaded(false);
@@ -1363,7 +1358,6 @@ export function ManagerChatPage() {
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
-  const navigationButton = useRef<HTMLButtonElement>(null);
   const toolsRef = useRef<HTMLDivElement>(null);
 
   // The tools menu closes on an outside click or Escape, like any other menu.
@@ -1380,12 +1374,6 @@ export function ManagerChatPage() {
       document.removeEventListener('keydown', onKey);
     };
   }, [toolsOpen]);
-
-  // The conversation stays mounted while its mobile navigator is opened or closed.
-  const closeNavigation = () => {
-    setNavigationOpen(false);
-    if (window.matchMedia('(max-width: 1279px)').matches) navigationButton.current?.focus();
-  };
 
   useEffect(() => {
     if (!previewOpen || !preview) return;
@@ -1447,21 +1435,54 @@ export function ManagerChatPage() {
 
   const chatTitle = activeSession ? formatChatName(activeSession) : 'Default conversation';
   const projectName = currentProfileInfo?.repo?.split('/').pop() ?? profile;
+  const liveChatSessions = sessions.filter((session) => session.outcome === 'live');
+  const archivedChatSessions = sessions.filter((session) => session.outcome !== 'live');
   const closeTools = () => setToolsOpen(false);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
       {/* One slim bar: where you are, git at a glance, and everything else behind ⋯. */}
-      <div className="flex min-w-0 items-center gap-2">
-        <button ref={navigationButton} type="button" onClick={() => setNavigationOpen((open) => !open)}
-          aria-expanded={navigationOpen} aria-controls="chat-navigation" aria-label="Projects & chats"
-          className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-1 text-left hover:bg-white/5 xl:hidden">
-          <span className="min-w-0">
-            <span className="block truncate text-sm font-semibold text-primary">{chatTitle}</span>
-            <span className="block truncate text-xs text-muted">{projectName}</span>
-          </span>
-          <ChevronDown size={14} className={`shrink-0 text-muted ${navigationOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
-        </button>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div className="grid min-w-0 basis-full grid-cols-2 gap-1.5 xl:hidden">
+          <label className="min-w-0">
+            <span className="sr-only">Project</span>
+            <select
+              aria-label="Project"
+              value={profile}
+              onChange={(event) => setProfileOverride(event.target.value)}
+              className="min-h-11 w-full truncate rounded-md border border-subtle bg-raised px-2 text-sm text-primary"
+            >
+              {availableProfiles.map((project) => (
+                <option key={project.name} value={project.name}>{project.display_name || project.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="min-w-0">
+            <span className="sr-only">Chat</span>
+            <select
+              aria-label="Chat"
+              value={sessionId ?? ''}
+              onChange={(event) => setSessionId(event.target.value || null)}
+              className="min-h-11 w-full truncate rounded-md border border-subtle bg-raised px-2 text-sm text-primary"
+            >
+              <option value="">Default conversation</option>
+              {liveChatSessions.length > 0 && (
+                <optgroup label="Chats">
+                  {liveChatSessions.map((session) => (
+                    <option key={session.id} value={session.id}>{formatChatName(session)}</option>
+                  ))}
+                </optgroup>
+              )}
+              {archivedChatSessions.length > 0 && (
+                <optgroup label={`Archived (${archivedChatSessions.length})`}>
+                  {archivedChatSessions.map((session) => (
+                    <option key={session.id} value={session.id}>{formatChatName(session)}</option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+          </label>
+        </div>
         <div className="hidden min-w-0 flex-1 items-baseline gap-1.5 xl:flex">
           <h2 className="shrink-0 text-sm text-muted" title={currentProfileInfo?.repo ?? profile}>{projectName}</h2>
           <span className="text-sm text-muted" aria-hidden="true">/</span>
@@ -1498,7 +1519,15 @@ export function ManagerChatPage() {
             {gitError && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-critical" aria-hidden="true" />}
           </button>
           {toolsOpen && (
-            <div id="chat-tools" className="absolute right-0 top-full z-30 mt-1 w-80 max-w-[calc(100vw-2rem)] space-y-1 rounded-lg border border-subtle bg-card p-2 shadow-xl max-sm:[&_button]:min-h-11 max-sm:[&_button]:min-w-11">
+            <div id="chat-tools" className="fixed inset-x-3 bottom-3 z-30 max-h-[calc(100dvh-1.5rem)] space-y-1 overflow-y-auto rounded-lg border border-subtle bg-card p-2 shadow-xl max-xl:[&_button]:min-h-11 max-xl:[&_button]:min-w-11 xl:absolute xl:inset-x-auto xl:bottom-auto xl:right-0 xl:top-full xl:mt-1 xl:w-80 xl:max-w-[calc(100vw-2rem)]">
+              <div className="flex items-center justify-between pl-2 xl:hidden">
+                <span className="text-sm font-semibold text-primary">Chat tools</span>
+                <button type="button" onClick={closeTools}
+                  className="inline-flex items-center justify-center rounded-md text-muted hover:text-primary"
+                  aria-label="Close chat tools">
+                  <X size={16} aria-hidden="true" />
+                </button>
+              </div>
               {currentProfileInfo && (
                 <div id="chat-git" className="rounded-md border border-subtle p-2.5">
                   <GitStrip
@@ -1540,6 +1569,13 @@ export function ManagerChatPage() {
                 title="Inspect per-session storage and preview safe reclaim"
               >
                 <HardDrive size={14} aria-hidden="true" /> Storage
+              </button>
+              <button
+                type="button"
+                onClick={() => { setNavigationOpen(true); closeTools(); }}
+                className="chat-menu-item xl:hidden"
+              >
+                <GitBranch size={14} aria-hidden="true" /> Manage projects
               </button>
               {activeSession && activeSession.archivedAt === null && (
                 <button
@@ -1661,13 +1697,20 @@ export function ManagerChatPage() {
       <div className={`relative grid min-h-0 min-w-0 flex-1 gap-4 max-xl:overflow-y-auto ${previewOpen && activeSession && !remoteSession ? 'xl:grid-cols-[15rem_minmax(0,1fr)_minmax(0,26rem)]' : 'xl:grid-cols-[15rem_minmax(0,1fr)]'}`}>
         {/* Below xl the rail floats over the conversation so opening it never reflows the chat. */}
         <div id="chat-navigation" className={`max-xl:[&_button]:!min-h-11 max-xl:[&_summary]:min-h-11 min-h-0 ${navigationOpen ? 'max-xl:absolute max-xl:inset-x-0 max-xl:top-0 max-xl:z-20 max-xl:max-h-full max-xl:flex max-xl:flex-col max-xl:shadow-2xl' : 'max-xl:hidden'}`}>
+          {navigationOpen && (
+            <button type="button" onClick={() => setNavigationOpen(false)}
+              className="touch-target absolute right-2 top-2 z-10 inline-flex items-center justify-center rounded-md bg-raised text-muted hover:text-primary xl:hidden"
+              aria-label="Close project manager">
+              <X size={16} aria-hidden="true" />
+            </button>
+          )}
           <ProjectRail
             currentProfile={profile}
             profiles={availableProfiles.map(project => ({ ...project, name: project.catalogName ?? project.name }))}
             sessions={sessions}
             selectedSessionId={sessionId}
-            onSelect={(selectedProfile) => { setProfileOverride(selectedProfile); closeNavigation(); }}
-            onSessionSelect={(selectedSession) => { setSessionId(selectedSession); closeNavigation(); }}
+            onSelect={(selectedProfile) => { setProfileOverride(selectedProfile); setNavigationOpen(false); }}
+            onSessionSelect={(selectedSession) => { setSessionId(selectedSession); setNavigationOpen(false); }}
             sessionsError={sessionsError}
             onRetrySessions={() => refreshSessions(profile)}
             onProjectAdded={(project) => {

@@ -135,7 +135,9 @@ test('real HTTP/WS pairing confirms access, rejects CSRF and owner exports, and 
     }
     assert.equal(JSON.stringify(registry.getNodes()), originalRegistry, 'Paired requests cannot add, revoke, or change worker credentials');
     assert.equal(readFileSync(process.env.GAH_GATEWAY_SETTINGS_PATH, 'utf8'), gatewaySettings, 'Paired requests cannot redirect the retained gateway key');
-    assert.equal(readFileSync(process.env.GAH_MANAGER_CHAT_SETTINGS_PATH, 'utf8'), managerSettings);
+    const switchHarness = await post('/api/manager-chat/backend', { profile: 'paired-test', backendId: 'codex' }, paired);
+    assert.equal(switchHarness.status, 200, 'Paired devices can select the backend used for interactive chat');
+    assert.equal(JSON.parse(readFileSync(process.env.GAH_MANAGER_CHAT_SETTINGS_PATH, 'utf8')).profileOverrides['paired-test'], 'codex');
     assert.equal(adminUpdates, 0, 'Denied admin requests never start an update');
     assert.equal((await post('/api/admin/update', {}, owner)).status, 202);
     assert.equal(adminUpdates, 1, 'Explicit owner credentials retain administration access');

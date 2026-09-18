@@ -248,6 +248,7 @@ export interface GahDataSource {
   holdClear(params: { profile: string; work_id: string }): Promise<unknown>;
   getManagerChatSettings(): Promise<ManagerChatSettingsSummary>;
   setManagerChatSettings(data: ManagerChatSettingsUpdate): Promise<{ success: boolean }>;
+  setManagerChatBackend(profile: string, backendId: string): Promise<{ success: boolean }>;
   getGatewaySettings(): Promise<GatewaySettingsSummary>;
   revealGatewayBootstrapCommand(): Promise<GatewayBootstrapCommand>;
   getNodeSetupCommand(data: { os: 'windows' | 'linux' | 'macos'; centralUrl: string; role: 'desktop' | 'worker' | 'both' | 'central'; gatewayUrl?: string }): Promise<{ command: string }>;
@@ -519,6 +520,9 @@ export const gahApi: GahDataSource = {
   },
   setManagerChatSettings(data) {
     return postJson<{ success: boolean }, ManagerChatSettingsUpdate>('/api/manager-chat/settings', data);
+  },
+  setManagerChatBackend(profile, backendId) {
+    return postJson<{ success: boolean }, { profile: string; backendId: string }>('/api/manager-chat/backend', { profile, backendId });
   },
   getGatewaySettings() {
     return getJson<GatewaySettingsSummary>('/api/settings/gateway');

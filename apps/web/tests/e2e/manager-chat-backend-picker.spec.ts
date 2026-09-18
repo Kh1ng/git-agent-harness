@@ -16,7 +16,7 @@ const WELCOME = {
 // fallen back to.
 test('the composer picker switches the harness and persists a per-profile override', async ({ page }) => {
   let socket: WebSocketRoute;
-  let lastPost: { profileOverrides?: Record<string, string> } | null = null;
+  let lastPost: { profile: string; backendId: string } | null = null;
   let selectedBackend = 'hermes';
   let selectedReasoningEffort: string | null = null;
 
@@ -35,11 +35,6 @@ test('the composer picker switches the harness and persists a per-profile overri
     }
     if (url.pathname === '/api/controller-activity') return route.fulfill({ json: [] });
     if (url.pathname === '/api/manager-chat/settings') {
-      if (route.request().method() === 'POST') {
-        lastPost = route.request().postDataJSON() as { profileOverrides?: Record<string, string> };
-        selectedBackend = lastPost.profileOverrides?.alpha ?? selectedBackend;
-        return route.fulfill({ json: { success: true } });
-      }
       return route.fulfill({ json: {
         defaultBackend: 'hermes',
         profileOverrides: {},
@@ -49,6 +44,11 @@ test('the composer picker switches the harness and persists a per-profile overri
           { id: 'vibe', displayName: 'Vibe', implemented: false }
         ]
       } });
+    }
+    if (url.pathname === '/api/manager-chat/backend') {
+      lastPost = route.request().postDataJSON() as { profile: string; backendId: string };
+      selectedBackend = lastPost.backendId;
+      return route.fulfill({ json: { success: true } });
     }
     if (url.pathname === '/api/manager-chat/reasoning-effort') {
       selectedReasoningEffort = (route.request().postDataJSON() as { effortId: string }).effortId;
@@ -129,7 +129,7 @@ test('the composer picker switches the harness and persists a per-profile overri
   await expect(picker).toContainText('Claude');
   await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toHaveAttribute('title', 'org/alpha');
   await expect.poll(() => lastPost).not.toBeNull();
-  expect(lastPost?.profileOverrides).toEqual({ alpha: 'claude' });
+  expect(lastPost).toEqual({ profile: 'alpha', backendId: 'claude' });
 
   // Capability-aware: render exactly the active backend's advertised
   // thought-level values. There is no GAH-owned low/medium/high enum.
