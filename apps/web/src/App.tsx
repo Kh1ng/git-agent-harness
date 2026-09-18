@@ -57,14 +57,18 @@ export function App() {
     }
   };
 
+  const isChatPage = currentPage === 'chat';
+
   return (
-    <div className="app-shell min-h-dvh bg-page lg:flex">
+    <div className={`app-shell bg-page ${isChatPage
+      ? 'flex h-dvh flex-col overflow-hidden lg:grid lg:grid-cols-[14rem_minmax(0,1fr)] lg:grid-rows-[auto_minmax(0,1fr)]'
+      : 'min-h-dvh lg:flex'}`}>
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 bg-card text-primary p-3 rounded-md">Skip to content</a>
       <PwaStatusBars />
       <Navbar currentPage={currentPage} onPageChange={setCurrentPage} activityUnreadCount={activityUnreadCount} />
 
-      <div className="flex-1 min-w-0">
-        <main id="main-content" tabIndex={-1} className="px-4 py-4 sm:px-6 sm:py-6 max-w-[1400px] mx-auto">
+      <div className={`min-w-0 flex-1 ${isChatPage ? 'flex min-h-0 flex-col lg:col-start-2 lg:row-start-2' : ''}`}>
+        <main id="main-content" tabIndex={-1} className={`mx-auto w-full max-w-[1400px] px-4 py-4 sm:px-6 sm:py-6 ${isChatPage ? 'flex min-h-0 flex-1 flex-col' : ''}`}>
           {!isConnected && !isConnecting && currentPage !== 'settings' && (
             <p role="status" className="mb-3 text-sm text-secondary">
               Disconnected. <button className="min-h-11 text-accent underline" onClick={() => setCurrentPage('settings')}>Open connection settings</button>

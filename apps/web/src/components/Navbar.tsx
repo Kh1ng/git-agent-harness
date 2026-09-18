@@ -89,7 +89,7 @@ export function Navbar({ currentPage, onPageChange, activityUnreadCount }: Navba
   return (
     <>
       {/* Desktop sidebar */}
-      <aside className="hidden lg:flex lg:flex-col lg:w-56 lg:shrink-0 lg:border-r lg:border-subtle lg:bg-card lg:h-screen lg:sticky lg:top-0 lg:p-3">
+      <aside className={`hidden lg:sticky lg:top-0 lg:w-56 lg:shrink-0 lg:overflow-y-auto lg:flex-col lg:border-r lg:border-subtle lg:bg-card lg:p-3 ${currentPage === 'chat' ? 'lg:row-start-2 lg:flex lg:h-full lg:min-h-0' : 'lg:flex lg:h-screen'}`}>
         <div className="px-2 py-3 mb-2">
           <h1 className="text-sm font-semibold text-primary tracking-tight">Git Agent Harness</h1>
           <p className="text-xs text-muted mt-0.5">Control plane</p>

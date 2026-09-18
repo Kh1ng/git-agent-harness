@@ -70,9 +70,9 @@ test('chat turns and streaming replies render markdown inside bounded bubbles', 
   await expect(link).toHaveAttribute('target', '_blank');
   await expect(link).toHaveAttribute('rel', 'noreferrer');
 
-  const assistantBubble = page.locator('strong', { hasText: 'Bold assistant' })
-    .locator('xpath=ancestor::div[contains(@class, "rounded-lg")][1]');
-  await expect(assistantBubble).toHaveClass(/max-w-\[80%\]/);
-  await expect(assistantBubble).not.toHaveClass(/max-w-none/);
+  // Assistant replies are unboxed prose; the transcript column bounds their width.
+  const transcriptColumn = page.locator('strong', { hasText: 'Bold assistant' })
+    .locator('xpath=ancestor::div[contains(@class, "max-w-3xl")][1]');
+  await expect(transcriptColumn).toHaveCount(1);
   await expect(page.locator('pre')).toHaveCSS('overflow-x', 'auto');
 });

@@ -47,8 +47,10 @@ test('chat sends on the chosen node, locks it during a turn, and refreshes readi
   const picker = page.getByRole('combobox', { name: 'Run on node' });
   await expect(picker).toHaveValue('central');
   await picker.selectOption('worker');
+  await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await page.getByRole('button', { name: 'Storage', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Chat storage' })).toContainText('Unknown in worktrees · Unknown projected reclaim');
+  await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await page.getByRole('button', { name: 'Storage', exact: true }).click();
   await page.getByPlaceholder(/Message the manager/).fill('Check the worker checkout');
   await page.getByRole('button', { name: 'Send', exact: true }).click();

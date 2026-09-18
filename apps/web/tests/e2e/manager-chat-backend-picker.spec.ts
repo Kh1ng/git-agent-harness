@@ -127,7 +127,7 @@ test('the composer picker switches the harness and persists a per-profile overri
 
   await controls.getByRole('button', { name: 'Claude', exact: true }).click();
   await expect(picker).toContainText('Claude');
-  await expect(page.getByRole('paragraph').filter({ hasText: 'org/alpha' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toHaveAttribute('title', 'org/alpha');
   await expect.poll(() => lastPost).not.toBeNull();
   expect(lastPost?.profileOverrides).toEqual({ alpha: 'claude' });
 
