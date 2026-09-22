@@ -23,6 +23,8 @@ if token:
         raise SystemExit('ERROR: COORDINATOR_TOKEN must not contain control characters.')
 elif not path.exists() or not any(line.startswith('COORDINATOR_TOKEN=') and line.partition('=')[2].strip(" '\"") for line in path.read_text().splitlines()):
     raise SystemExit('ERROR: worker installation requires COORDINATOR_TOKEN for central claims and memory.')
+if path.exists():
+    path.chmod(0o600)
 PY
 fi
 args=(config set --node-role "$role")

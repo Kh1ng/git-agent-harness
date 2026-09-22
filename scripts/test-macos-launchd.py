@@ -34,6 +34,8 @@ with tempfile.TemporaryDirectory(prefix='gah-launchd-') as temporary:
         'GAH_NPX_PATH': '/opt/homebrew/bin/npx',
         'GAH_GATEWAY_MEMORYCORE_PATH': str(memory),
         'GAH_DESKTOP_SERVER_PORT': '4774',
+        'GAH_NODE_ADVERTISED_URL': 'https://mac.test.ts.net:4774',
+        'GAH_TAILSCALE_PATH': '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
     }
     subprocess.run(['bash', str(source), 'install', 'central', str(repo)], env=env, check=True)
     central_path = agents / 'dev.git-agent-harness.server.plist'
@@ -52,8 +54,18 @@ with tempfile.TemporaryDirectory(prefix='gah-launchd-') as temporary:
     subprocess.run(['bash', str(source), 'install', 'worker', str(repo), profile], env=env, check=True)
     worker_path = agents / 'dev.git-agent-harness.worker.plist'
     worker = plistlib.loads(worker_path.read_bytes())
-    assert worker['ProgramArguments'][-1] == profile
-    assert worker['RunAtLoad'] is False and worker['KeepAlive'] is False
+    assert worker['ProgramArguments'][-2] == str(repo.resolve() / 'apps/server/dist/bin.js')
+    assert worker['EnvironmentVariables']['HOST'] == '127.0.0.1'
+    assert worker['EnvironmentVariables']['PORT'] == '4774'
+    assert worker['EnvironmentVariables']['GAH_BINARY'] == '/Users/test/.cargo/bin/gah'
+    assert worker['EnvironmentVariables']['GAH_REGISTRY_TRANSPORT_MODE'] == 'authenticated_remote'
+    assert worker['EnvironmentVariables']['GAH_TAILSCALE_SERVE'] == '1'
+    identity_path = home / '.local/share/gah/worker/identity.json'
+    assert worker['EnvironmentVariables']['GAH_COORDINATOR_IDENTITY_PATH'] == str(identity_path)
+    identity = json.loads(identity_path.read_text())
+    assert identity['advertised_url'] == 'https://mac.test.ts.net:4774'
+    assert identity_path.stat().st_mode & 0o777 == 0o600
+    assert worker['RunAtLoad'] is False and worker['KeepAlive'] is True
     assert not central_path.exists(), 'switching roles must remove the old LaunchAgent'
     assert not gateway_path.exists(), 'worker mode must remove the central memory gateway'
     settings = json.loads((home / '.config/gah/desktop.json').read_text())
@@ -62,7 +74,7 @@ with tempfile.TemporaryDirectory(prefix='gah-launchd-') as temporary:
     assert worker_path.stat().st_mode & 0o777 == 0o644
 
     subprocess.run(['bash', str(source), 'install', 'worker', str(repo)], env=env, check=True)
-    assert not worker_path.exists(), 'a missing profile must not reload a stale worker service'
+    assert worker_path.exists(), 'a fresh worker must run before its first profile is imported'
 
     invalid = subprocess.run(
         ['bash', str(source), 'install', 'central', str(repo)],
@@ -70,4 +82,4 @@ with tempfile.TemporaryDirectory(prefix='gah-launchd-') as temporary:
     )
     assert invalid.returncode != 0 and 'between 1024 and 65535' in invalid.stderr
 
-print('macOS LaunchAgents passed: role exclusivity, gateway ownership, escaped values, fixed local port, and persisted checkout.')
+print('macOS LaunchAgents passed: role exclusivity, worker server identity, gateway ownership, fixed port, and persisted checkout.')
