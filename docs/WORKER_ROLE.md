@@ -21,9 +21,17 @@ A disabled profile skips gateway access. An unavailable gateway does not block d
 Rust recall still has no production dispatch caller; wiring that behavior belongs to #830.
 
 For Linux or macOS worker setup, supply `GAH_CENTRAL_URL` and `COORDINATOR_TOKEN` when you run the installer.
-The installer saves the token in `~/.config/gah/gah-loop.env` with mode `0600` and preserves other entries.
-A reinstall can reuse a saved token. Configure direct gateway placement on central; worker installers reject `GAH_GATEWAY_MODE`. Run project memory imports on central.
-On macOS, load that environment file before a manual CLI worker run, as the installer output describes.
+The installer saves the token in `~/.config/gah/gah-loop.env` with mode `0600`.
+A reinstall can use the saved token.
+
+The macOS desktop controls a worker server on port 3774.
+The server binds to loopback. Tailscale Serve publishes it to the tailnet with HTTPS.
+The worker registers all configured profiles after startup.
+Central can then import projects and send chat work to the Mac.
+The desktop worker control does not start `gah loop`.
+
+Configure the gateway on central. Worker installers reject `GAH_GATEWAY_MODE`.
+Run project memory imports on central.
 
 The WSL installer needs a matching CLI release with `config set --node-role` and `status --role` support.
 An older downloaded CLI fails its capability check before the installer changes the active worker settings or service files.

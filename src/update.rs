@@ -144,8 +144,19 @@ pub fn run(args: UpdateArgs) -> Result<()> {
                 None => println!("GAH_WEB_DEPLOY_ROOT is empty: skipping web UI deploy."),
             }
         }
+    } else if cfg!(target_os = "macos") {
+        // The macOS worker exposes the same execution API as the WSL worker.
+        // It does not build the central-only MCP server or web dashboard.
+        run_command(&repo, "npm", &["run", "build:server"])?;
+        if !repo.join("apps/server/dist/bin.js").is_file() {
+            bail!("worker build did not produce apps/server/dist/bin.js");
+        }
+        println!(
+            "Built worker server: {}",
+            repo.join("apps/server/dist/bin.js").display()
+        );
     } else {
-        println!("Role is 'worker': skipping control-plane server build.");
+        println!("Role is 'worker': skipping control-plane server build on this host.");
     }
 
     if cfg!(target_os = "macos") {

@@ -3,8 +3,11 @@
 The native Tauri desktop manages a central GAH node. The headless worker runs inside WSL2.
 The desktop lists Windows and WSL tools separately. A listed executable does not prove authentication or dispatch compatibility.
 
-This implementation requires a Windows test before release. The published desktop 0.1.0 has a hidden startup window.
-The new installer requires desktop 0.1.1 or later.
+For an external test, use the [Windows tester guide](WINDOWS_TESTER_GUIDE.md).
+It starts with a matching Actions bundle and omits maintainer-only build steps.
+
+The published Windows assets do not contain the current test build.
+Use a matching Actions bundle until a new release includes desktop 0.1.1 or later.
 
 ## Install from the central dashboard
 

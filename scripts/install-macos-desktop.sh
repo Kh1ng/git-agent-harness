@@ -5,7 +5,9 @@ set -euo pipefail
 repo="${1:?Usage: install-macos-desktop.sh REPOSITORY}"
 repo="$(cd "$repo" && pwd -P)"
 app_dir="${GAH_DESKTOP_APP_DIR:-$HOME/Applications}"
-source_app="$repo/apps/desktop/target/release/bundle/macos/GAH.app"
+target_dir="${CARGO_TARGET_DIR:-$repo/apps/desktop/target}"
+case "$target_dir" in /*) ;; *) target_dir="$repo/apps/desktop/$target_dir" ;; esac
+source_app="$target_dir/release/bundle/macos/GAH.app"
 
 if [ "${GAH_DESKTOP_SKIP_BUILD:-}" != 1 ]; then
   (cd "$repo/apps/desktop" && npx vite build && npx tauri build --bundles app)

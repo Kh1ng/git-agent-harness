@@ -507,7 +507,10 @@ async fn set_node_role(
     write_settings(&settings)?;
     let url = central_url(&settings.central_url)?;
     open_dashboard(&app, url)?;
+    #[cfg(target_os = "macos")]
     let running = launchd_running(&role);
+    #[cfg(not(target_os = "macos"))]
+    let running = false;
     set_tray_status(&app, &role, running);
     Ok(DesktopRoleStatus {
         role: role.clone(),

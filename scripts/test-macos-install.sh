@@ -21,6 +21,8 @@ export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
 export GAH_NODE_ROLE=worker
 export GAH_CENTRAL_URL=https://central.example.test
 export COORDINATOR_TOKEN=ci-install-test-token
+# The hosted runner has no tailnet. Production workers keep the Tailscale default.
+export GAH_NODE_ADVERTISED_URL=http://127.0.0.1:3774
 bash "$stage/checkout/scripts/install-macos.sh"
 
 "${CARGO_HOME:-$HOME/.cargo}/bin/gah" --help >/dev/null

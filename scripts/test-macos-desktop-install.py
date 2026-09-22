@@ -8,7 +8,9 @@ source = Path(__file__).with_name('install-macos-desktop.sh')
 with tempfile.TemporaryDirectory(prefix='gah-desktop-install-') as temporary:
     root = Path(temporary)
     repo = root / 'repo'
-    built = repo / 'apps/desktop/target/release/bundle/macos/GAH.app'
+    (repo / 'apps/desktop').mkdir(parents=True)
+    target = repo / 'apps/cargo-target'
+    built = target / 'release/bundle/macos/GAH.app'
     built.mkdir(parents=True)
     (built / 'version.txt').write_text('new')
     apps = root / 'Applications'
@@ -18,7 +20,13 @@ with tempfile.TemporaryDirectory(prefix='gah-desktop-install-') as temporary:
     (legacy / 'version.txt').write_text('old')
     subprocess.run(
         ['bash', str(source), str(repo)],
-        env={**os.environ, 'HOME': str(root / 'home'), 'GAH_DESKTOP_APP_DIR': str(apps), 'GAH_DESKTOP_SKIP_BUILD': '1'},
+        env={
+            **os.environ,
+            'HOME': str(root / 'home'),
+            'CARGO_TARGET_DIR': '../cargo-target',
+            'GAH_DESKTOP_APP_DIR': str(apps),
+            'GAH_DESKTOP_SKIP_BUILD': '1',
+        },
         check=True,
     )
     assert (installed / 'version.txt').read_text() == 'new'
