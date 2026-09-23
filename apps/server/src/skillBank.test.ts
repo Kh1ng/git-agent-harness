@@ -8,7 +8,7 @@ import type { Skill } from '@git-agent-harness/contracts';
 import {
   addBinding,
   addCanonicalSkillBinding,
-  clearProfileSkillBindings,
+  clearSkillBindings,
   deleteSkill,
   getSkill,
   listBindings,
@@ -16,7 +16,7 @@ import {
   putSkill,
   removeBinding,
   resolveSkillBindings,
-  setProfileSkillBindings,
+  setSkillBindings,
   seedSkillFromDocs
 } from './skillBank.js';
 
@@ -213,17 +213,37 @@ test('profile skill bindings replace canonical inheritance, including an empty o
       ['alpha@2.0.0']
     );
 
-    setProfileSkillBindings('repo', 'hermes', ['beta']);
+    setSkillBindings('repo', 'hermes', ['beta']);
     const overridden = resolveSkillBindings('repo', 'hermes');
     assert.equal(overridden.source, 'profile');
     assert.deepEqual(overridden.skills.map(({ id }) => id), ['beta']);
 
-    setProfileSkillBindings('repo', 'hermes', []);
+    setSkillBindings('repo', 'hermes', []);
     assert.deepEqual(resolveSkillBindings('repo', 'hermes').skills, []);
 
-    clearProfileSkillBindings('repo', 'hermes');
+    clearSkillBindings('repo', 'hermes');
     assert.equal(resolveSkillBindings('repo', 'hermes').source, 'canonical');
     assert.deepEqual(resolveSkillBindings('repo', 'hermes').skills.map(({ id }) => id), ['alpha']);
+  });
+});
+
+test('chat skill bindings override one session and fall back to the project selection', async () => {
+  await withTempBank(() => {
+    putSkill(skill('alpha', '1.0.0'));
+    putSkill(skill('beta', '1.0.0'));
+    addCanonicalSkillBinding('alpha', 'hermes');
+    setSkillBindings('repo', 'hermes', ['beta']);
+    setSkillBindings('repo', 'hermes', ['alpha'], { sessionId: 'chat-a' });
+
+    const overridden = resolveSkillBindings('repo', 'hermes', { sessionId: 'chat-a' });
+    assert.equal(overridden.source, 'session');
+    assert.deepEqual(overridden.skills.map(({ id }) => id), ['alpha']);
+    assert.deepEqual(resolveSkillBindings('repo', 'hermes', { sessionId: 'chat-b' }).skills.map(({ id }) => id), ['beta']);
+
+    clearSkillBindings('repo', 'hermes', { sessionId: 'chat-a' });
+    const inherited = resolveSkillBindings('repo', 'hermes', { sessionId: 'chat-a' });
+    assert.equal(inherited.source, 'profile');
+    assert.deepEqual(inherited.skills.map(({ id }) => id), ['beta']);
   });
 });
 
@@ -231,11 +251,11 @@ test('profile bindings reject missing and incompatible skill ids before dispatch
   await withTempBank(() => {
     putSkill(skill('alpha', '1.0.0'));
     assert.throws(
-      () => setProfileSkillBindings('repo', 'hermes', ['missing']),
+      () => setSkillBindings('repo', 'hermes', ['missing']),
       /Skill 'missing' does not exist/
     );
     assert.throws(
-      () => setProfileSkillBindings('repo', 'codex', ['alpha']),
+      () => setSkillBindings('repo', 'codex', ['alpha']),
       /Skill 'alpha' does not support backend 'codex'/
     );
     addBinding('missing', 'backend:hermes');

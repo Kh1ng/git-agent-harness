@@ -184,32 +184,36 @@ function SkillPicker({
   const observed = new Map(binding?.observedSkills?.map((skill) => [skill.id, skill.version]) ?? []);
   const selected = new Set(binding?.selectedIds ?? []);
   const selectedVersions = new Map(binding?.skills.filter((skill) => selected.has(skill.id)).map((skill) => [skill.id, skill.version]) ?? []);
+  const sourceLabel = binding?.source === 'session'
+    ? 'Chat override'
+    : binding?.source === 'profile' ? 'Project override' : 'Inherited default';
+  const canInherit = binding?.source === 'session' || (binding?.source === 'profile' && !binding.sessionId);
   const drift = binding?.observedSkills != null
     && (selectedVersions.size !== observed.size || [...selectedVersions].some(([id, version]) => observed.get(id) !== version));
 
   return (
-    <details className="group relative">
+    <details className="group static sm:relative">
       <summary
         className="touch-target flex min-h-11 min-w-11 cursor-pointer list-none items-center gap-1.5 rounded-md border border-subtle bg-raised px-2 py-2 text-xs text-secondary hover:bg-white/5 sm:min-h-0 sm:min-w-0 [&::-webkit-details-marker]:hidden"
-        aria-label="Project skills"
+        aria-label="Skills"
         onClick={(event) => { if (busy) event.preventDefault(); }}
-        title={busy ? 'Skill changes are disabled while a turn is in flight' : 'Choose the project skills applied to the next turn'}
+        title={busy ? 'Skill changes are disabled while a turn is in flight' : 'Choose the skills applied to the next turn'}
       >
         <Sparkles size={13} className="text-accent" aria-hidden="true" />
         <span className="max-sm:hidden">Skills ·</span> {binding?.selectedIds.length ?? 0}
         {drift && <span className="h-1.5 w-1.5 rounded-full bg-warning" title="Configured skills differ from the latest applied turn" />}
       </summary>
-      <div className="absolute bottom-full left-0 z-30 mb-1 w-64 max-w-[calc(100vw-2rem)] rounded-lg border border-subtle bg-raised p-3 shadow-xl">
+      <div className="absolute bottom-full left-2 right-2 z-30 mb-1 rounded-lg border border-subtle bg-raised p-3 shadow-xl sm:left-0 sm:right-auto sm:w-64 sm:max-w-[calc(100vw-2rem)]">
         <div className="mb-2 flex items-start justify-between gap-3">
           <div>
-            <p className="text-sm font-medium text-primary">Project skills</p>
+            <p className="text-sm font-medium text-primary">Skills</p>
             <p className="text-[11px] text-muted">
-              {binding ? `${binding.source === 'profile' ? 'Project override' : 'Inherited default'} · ${binding.backend}` : 'Loading…'}
+              {binding ? `${sourceLabel} · ${binding.backend}` : 'Loading…'}
             </p>
           </div>
-          {binding?.source === 'profile' && (
+          {canInherit && (
             <button type="button" onClick={onInherit} disabled={busy} className="text-[11px] text-accent hover:underline disabled:opacity-50">
-              Use default
+              {binding?.source === 'session' ? 'Use project default' : 'Use default'}
             </button>
           )}
         </div>
@@ -570,6 +574,7 @@ export function ManagerChatPage() {
   );
   useEffect(() => { setNodeChoice(null); }, [profile, sessionId]);
   const skillBackend = activeSession?.backend ?? activeBackendId;
+  const skillSessionId = sessionId && sessionId !== 'default' ? sessionId : undefined;
   const nodeSnapshot = useChatNodes(profile, skillBackend, isConnected, nodesRefreshKey);
   const centralNodeId = nodeSnapshot.nodes.find(node => node.role === 'central')?.nodeId;
   const chosenNode = nodeChoice?.profile === profile && nodeChoice.sessionId === sessionId ? nodeChoice.nodeId
@@ -594,11 +599,11 @@ export function ManagerChatPage() {
     let cancelled = false;
     setSkillBinding(null);
     if (!skillBackend) return;
-    gahApi.getSkillBindings(profile, skillBackend, sessionId)
+    gahApi.getSkillBindings(profile, skillBackend, skillSessionId)
       .then((binding) => { if (!cancelled) setSkillBinding(binding); })
       .catch(() => { if (!cancelled) setSkillBinding(null); });
     return () => { cancelled = true; };
-  }, [profile, skillBackend, sessionId, turns.length, reconnectSeq]);
+  }, [profile, skillBackend, skillSessionId, turns.length, reconnectSeq]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1110,7 +1115,7 @@ export function ManagerChatPage() {
 
   const refreshSkillBinding = async () => {
     if (!skillBackend) return;
-    setSkillBinding(await gahApi.getSkillBindings(profile, skillBackend, sessionId));
+    setSkillBinding(await gahApi.getSkillBindings(profile, skillBackend, skillSessionId));
   };
 
   const handleSkillToggle = async (id: string) => {
@@ -1119,10 +1124,10 @@ export function ManagerChatPage() {
       ? skillBinding.selectedIds.filter((current) => current !== id)
       : [...skillBinding.selectedIds, id];
     const previous = skillBinding;
-    setSkillBinding({ ...skillBinding, source: 'profile', selectedIds: selected });
+    setSkillBinding({ ...skillBinding, source: skillSessionId ? 'session' : 'profile', selectedIds: selected });
     setSkillBindingChanging(true);
     try {
-      await gahApi.setSkillBindings({ profile, backend: skillBackend, skillIds: selected });
+      await gahApi.setSkillBindings({ profile, backend: skillBackend, sessionId: skillSessionId, skillIds: selected });
       await refreshSkillBinding();
     } catch (error) {
       setSkillBinding(previous);
@@ -1136,7 +1141,7 @@ export function ManagerChatPage() {
     if (!skillBackend || turnBusy) return;
     setSkillBindingChanging(true);
     try {
-      await gahApi.inheritSkillBindings(profile, skillBackend);
+      await gahApi.inheritSkillBindings({ profile, backend: skillBackend, sessionId: skillSessionId });
       await refreshSkillBinding();
     } catch (error) {
       setTurns((current) => [...current, { role: 'error', text: `Failed to restore default skills: ${error instanceof Error ? error.message : String(error)}` }]);

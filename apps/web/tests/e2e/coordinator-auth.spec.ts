@@ -96,7 +96,7 @@ test('the first token restores mounted Chat projects, provider choices, git, and
   await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex');
   await expect(page.getByText('feat/mock-control-plane-1087', { exact: true })).toBeVisible();
   await expect(page.getByText(/projected reclaim · idle after/)).toBeVisible();
-  await expect(page.getByLabel('Project skills', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Skills', { exact: true })).toBeVisible();
   await expect(page.getByLabel('Run on node', { exact: true })).toBeEnabled();
   await expect(page.getByLabel('Run on node', { exact: true })).toHaveValue('mock-central');
   await expect.poll(() => [...initialPaths, ...providerPaths, '/api/skills/bindings'].filter(path => !authenticated.has(path))).toEqual([]);

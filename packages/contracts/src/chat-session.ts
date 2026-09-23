@@ -14,6 +14,8 @@
  * `turn/end { reason: 'interrupted' }` on reload -- never truncated.
  */
 
+import type { SkillBindingSource } from './gah.js';
+
 export type ChatSessionEvent =
   | ChatTurnStart
   | ChatTurnEnd
@@ -217,7 +219,7 @@ export interface ChatSkillsApplied {
   seq: number;
   turn: number;
   backend: string;
-  source: 'canonical' | 'profile';
+  source: SkillBindingSource;
   skills: { id: string; version: string }[];
   timestamp: number;
 }

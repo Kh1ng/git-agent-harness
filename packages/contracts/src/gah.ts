@@ -1598,11 +1598,15 @@ export interface SkillSummary {
   bound: boolean;
 }
 
+/** The nearest configured scope that supplied the effective skill set. */
+export type SkillBindingSource = 'canonical' | 'profile' | 'session';
+
 export interface SkillBindingSummary {
   profile: string;
   backend: string;
   instance: string | null;
-  source: 'canonical' | 'profile';
+  sessionId: string | null;
+  source: SkillBindingSource;
   supported: boolean;
   selectedIds: string[];
   observedSkills: { id: string; version: string }[] | null;
@@ -1613,6 +1617,7 @@ export interface SkillBindingUpdate {
   profile: string;
   backend: string;
   instance?: string | null;
+  sessionId?: string | null;
   skillIds: string[];
 }
 
@@ -1620,7 +1625,8 @@ export interface SkillResolution {
   profile: string;
   backend: string;
   instance: string | null;
-  source: 'canonical' | 'profile';
+  sessionId: string | null;
+  source: SkillBindingSource;
   skills: Skill[];
 }
 

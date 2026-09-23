@@ -20,7 +20,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { homedir } from 'node:os';
-import type { Skill, SkillBankFile, SkillSummary } from '@git-agent-harness/contracts';
+import type { Skill, SkillBankFile, SkillBindingSource, SkillSummary } from '@git-agent-harness/contracts';
 
 function bankPath(): string {
   return process.env.GAH_SKILL_BANK_PATH
@@ -221,12 +221,25 @@ const SKILL_CAPABLE_BACKENDS = new Set([
   'agy', 'claude', 'codex', 'hermes', 'openhands', 'opencode', 'vibe'
 ]);
 
+interface SkillBindingScope {
+  instance?: string | null;
+  sessionId?: string | null;
+}
+
 function targetLabel(backend: string, instance?: string | null): string {
   return instance ? `instance:${instance}` : `backend:${backend}`;
 }
 
 function profileLabel(profile: string, target: string): string {
   return `profile:${profile}:${target}`;
+}
+
+function sessionLabel(profile: string, sessionId: string | null | undefined, target: string): string | null {
+  return sessionId && sessionId !== 'default' ? `session:${profile}:${sessionId}:${target}` : null;
+}
+
+function scopedLabel(profile: string, target: string, sessionId?: string | null): string {
+  return sessionLabel(profile, sessionId, target) ?? profileLabel(profile, target);
 }
 
 function newestSkills(skills: Skill[]): Skill[] {
@@ -246,27 +259,32 @@ function selectedLabel(
   file: SkillBankFile,
   profile: string,
   backend: string,
-  instance?: string | null
-): { label: string; source: 'canonical' | 'profile' } {
-  const labels = [
-    ...(instance ? [profileLabel(profile, targetLabel(backend, instance))] : []),
-    profileLabel(profile, targetLabel(backend)),
-    ...(instance ? [targetLabel(backend, instance)] : []),
-    targetLabel(backend)
+  scope: SkillBindingScope
+): { label: string; source: SkillBindingSource } {
+  const backendTarget = targetLabel(backend);
+  const instanceTarget = scope.instance ? targetLabel(backend, scope.instance) : null;
+  const labels: { label: string | null; source: SkillBindingSource }[] = [
+    { label: instanceTarget ? sessionLabel(profile, scope.sessionId, instanceTarget) : null, source: 'session' },
+    { label: sessionLabel(profile, scope.sessionId, backendTarget), source: 'session' },
+    { label: instanceTarget ? profileLabel(profile, instanceTarget) : null, source: 'profile' },
+    { label: profileLabel(profile, backendTarget), source: 'profile' },
+    { label: instanceTarget, source: 'canonical' },
+    { label: backendTarget, source: 'canonical' }
   ];
-  const label = labels.find((candidate) => file.bindingOverrides.includes(candidate))
-    ?? targetLabel(backend);
-  return { label, source: label.startsWith('profile:') ? 'profile' : 'canonical' };
+  const selected = labels.find((candidate) => candidate.label !== null && file.bindingOverrides.includes(candidate.label));
+  return selected?.label
+    ? { label: selected.label, source: selected.source }
+    : { label: backendTarget, source: 'canonical' };
 }
 
-/** Resolve the newest compatible versions for one project/backend instance. */
+/** Resolve the nearest chat, project, or backend skill set to exact versions. */
 export function resolveSkillBindings(
   profile: string,
   backend: string,
-  instance?: string | null
+  scope: SkillBindingScope = {}
 ): import('@git-agent-harness/contracts').SkillResolution {
   const file = readBank();
-  const selected = selectedLabel(file, profile, backend, instance);
+  const selected = selectedLabel(file, profile, backend, scope);
   const available = new Map(newestSkills(file.skills).map((skill) => [skill.id, skill]));
   const selectedIds = Object.entries(file.bindings)
     .filter(([, labels]) => labels.includes(selected.label))
@@ -284,21 +302,22 @@ export function resolveSkillBindings(
   return {
     profile,
     backend,
-    instance: instance ?? null,
+    instance: scope.instance ?? null,
+    sessionId: scope.sessionId && scope.sessionId !== 'default' ? scope.sessionId : null,
     source: selected.source,
     skills
   };
 }
 
-/** Replace one profile-scoped set. An empty array is an intentional override. */
-export function setProfileSkillBindings(
+/** Replace one chat or project set. An empty array is an intentional override. */
+export function setSkillBindings(
   profile: string,
   backend: string,
   skillIds: string[],
-  instance?: string | null
+  scope: SkillBindingScope = {}
 ): void {
   const file = readBank();
-  const label = profileLabel(profile, targetLabel(backend, instance));
+  const label = scopedLabel(profile, targetLabel(backend, scope.instance), scope.sessionId);
   const uniqueIds = [...new Set(skillIds)];
   const available = new Map(newestSkills(file.skills).map((skill) => [skill.id, skill]));
   for (const id of uniqueIds) {
@@ -319,13 +338,13 @@ export function setProfileSkillBindings(
   writeBank(file);
 }
 
-export function clearProfileSkillBindings(
+export function clearSkillBindings(
   profile: string,
   backend: string,
-  instance?: string | null
+  scope: SkillBindingScope = {}
 ): void {
   const file = readBank();
-  const label = profileLabel(profile, targetLabel(backend, instance));
+  const label = scopedLabel(profile, targetLabel(backend, scope.instance), scope.sessionId);
   for (const labels of Object.values(file.bindings)) {
     const index = labels.indexOf(label);
     if (index >= 0) labels.splice(index, 1);
@@ -355,19 +374,19 @@ export function addCanonicalSkillBinding(skillId: string, backend: string): void
 export function skillBindingSummary(
   profile: string,
   backend: string,
-  instance?: string | null,
-  observedSkills: { id: string; version: string }[] | null = null
+  scope: SkillBindingScope & { observedSkills?: { id: string; version: string }[] | null } = {}
 ): import('@git-agent-harness/contracts').SkillBindingSummary {
-  const resolution = resolveSkillBindings(profile, backend, instance);
+  const resolution = resolveSkillBindings(profile, backend, scope);
   const available = newestSkills(listSkills()).filter((skill) => compatible(skill, backend));
   return {
     profile,
     backend,
-    instance: instance ?? null,
+    instance: resolution.instance,
+    sessionId: resolution.sessionId,
     source: resolution.source,
     supported: SKILL_CAPABLE_BACKENDS.has(backend),
     selectedIds: resolution.skills.map((skill) => skill.id),
-    observedSkills,
+    observedSkills: scope.observedSkills ?? null,
     skills: available.map((skill) => ({
       id: skill.id,
       version: skill.version,
