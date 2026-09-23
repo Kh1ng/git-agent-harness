@@ -41,6 +41,19 @@
       </form>
       <p id="status" role="status"></p>
       <p id="error" role="alert"></p>
+      <section aria-labelledby="owner-heading">
+        <h2 id="owner-heading">Owner access</h2>
+        <p>Save the central token in this computer's credential vault. GAH sends it only to the exact central origin above. This is token access, not an account sign-in.</p>
+        <p id="owner-state" role="status">Checking saved owner access...</p>
+        <form id="owner-credential">
+          <label for="owner-token">Central owner token</label>
+          <input id="owner-token" type="password" autocomplete="off" spellcheck="false" />
+          <div class="actions">
+            <button type="submit">Save owner access</button>
+            <button id="forget-owner" type="button">Forget owner access</button>
+          </div>
+        </form>
+      </section>
       <section aria-labelledby="presence-heading">
         <h2 id="presence-heading">App presence</h2>
         <form id="presence">

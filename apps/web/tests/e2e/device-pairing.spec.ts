@@ -118,7 +118,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     expect(await phone.evaluate(() => document.cookie)).not.toContain('gah_device');
     expect(await phone.evaluate(() => sessionStorage.getItem('gah.coordinatorToken'))).toBeNull();
     await phone.reload();
-    await expect(phone.getByRole('status').filter({ hasText: 'Paired device · Dashboard access enabled' })).toBeVisible();
+    await expect(phone.getByRole('status').filter({ hasText: 'Paired controller · Dashboard access enabled' })).toBeVisible();
     await expect(scanner).toBeVisible();
     await expect(phone.getByRole('button', { name: 'Pair this device', exact: true })).toHaveCount(0);
     await phone.getByRole('button', { name: 'Manage pairing', exact: true }).click();
@@ -128,7 +128,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     await phone.getByRole('button', { name: 'Pair another device', exact: true }).click();
     await expect(phone.getByLabel('Access token', { exact: true })).toBeFocused();
     await expect(phone.getByLabel('Access token', { exact: true })).toHaveValue('');
-    await expect(phone.getByText('Owner access is required to generate pairing QR codes and administer central. Paired devices can use the dashboard without this token. Stored only for this tab’s session.')).toBeVisible();
+    await expect(phone.getByText('Owner access is required to generate pairing QR codes and administer central. Controller devices can use the dashboard without this token. Tokens entered here last only for this tab. The desktop app can retain one from This computer.')).toBeVisible();
     expect(await phone.evaluate(async () => (await (await fetch('/api/pairing/session')).json()).principal.kind)).toBe('device');
     for (const width of [320, 1280]) {
       await phone.setViewportSize({ width, height: 844 });
@@ -149,7 +149,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     await phone.getByText('Central access token', { exact: true }).click();
     await phone.getByLabel('Access token', { exact: true }).fill('');
     await phone.getByRole('button', { name: 'Save and reconnect' }).click();
-    await expect(phone.getByRole('status').filter({ hasText: 'Paired device · Dashboard access enabled' })).toBeVisible();
+    await expect(phone.getByRole('status').filter({ hasText: 'Paired controller · Dashboard access enabled' })).toBeVisible();
     const closedBeforeRevocation = closedDeviceSockets;
     await owner.getByRole('button', { name: 'Revoke Test phone', exact: true }).click();
     await expect(owner.getByRole('status').filter({ hasText: 'Revoked Test phone' })).toBeVisible();
