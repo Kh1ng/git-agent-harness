@@ -51,7 +51,7 @@ import {
   runRoutingCandidateMutation,
   runPromptPolicyMutation,
 } from './gahCli.js';
-import { REPORT_GROUP_BY_VALUES } from '@git-agent-harness/contracts';
+import { COORDINATOR_VERSION, REPORT_GROUP_BY_VALUES } from '@git-agent-harness/contracts';
 import type {
   ReportGroupBy,
   ReportSeriesData,
@@ -127,7 +127,7 @@ import {
   type StartAdminUpdateResult
 } from './adminUpdate.js';
 
-const SERVER_VERSION = '0.1.0';
+const SERVER_VERSION = COORDINATOR_VERSION;
 
 type ConfigEffectiveDeps = {
   runConfigShowProfile: (profile: string) => Promise<ConfigProfileSummary>;

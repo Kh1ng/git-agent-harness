@@ -12,7 +12,7 @@ import { RegistryService, containsSecretWords, isSchemaCompatible } from './regi
 import { COORDINATOR_SCHEMA_DIGEST, getCoordinatorIdentity, resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
 import { authMiddleware, isLocalAddress } from './authMiddleware.js';
 import { ClaimsService } from './claimsService.js';
-import type { RegisteredNode, NodeSummary, NodeHealthCheckResult } from '@git-agent-harness/contracts';
+import { COORDINATOR_VERSION, type RegisteredNode, type NodeSummary, type NodeHealthCheckResult } from '@git-agent-harness/contracts';
 
 
 // Helper to set up temporary registry file
@@ -179,7 +179,7 @@ test('getCoordinatorIdentity returns stable identity', () => {
     assert.equal(id1.node_id, id2.node_id);
     assert.equal(id1.display_name, 'GAH Coordinator');
     assert.equal(id1.advertised_url, 'http://localhost:9123');
-    assert.equal(id1.version, '0.1.0');
+    assert.equal(id1.version, COORDINATOR_VERSION);
     assert.ok(id1.schema_digest);
   } finally {
     if (existsSync(tempPath)) {

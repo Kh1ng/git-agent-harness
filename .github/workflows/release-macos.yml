@@ -7,6 +7,9 @@ on:
         description: Release tag (e.g. v0.2.0). Created if absent; shared with other release workflows when set.
         default: ''
         required: false
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -36,6 +39,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check release version
+        env:
+          GAH_RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version }}
+        run: node scripts/check-release-version.mjs "$GAH_RELEASE_TAG"
+
       - name: Build shared packages
         run: npm run build:contracts && npm run build:shared
 
@@ -52,7 +60,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           dmg=$(ls apps/desktop/target/release/bundle/dmg/*.dmg | head -1)
-          tag="${{ github.event.inputs.version }}"
+          tag="${{ inputs.version }}"
+          if [ -z "$tag" ] && [ "${{ github.ref_type }}" = tag ]; then
+            tag="${{ github.ref_name }}"
+          fi
           if [ -z "$tag" ]; then
             tag="release-$(date -u +%Y%m%d-%H%M)-macos"
           fi

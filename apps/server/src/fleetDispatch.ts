@@ -11,6 +11,7 @@ import type {
   ServerMessage,
   Session
 } from '@git-agent-harness/contracts';
+import { COORDINATOR_VERSION } from '@git-agent-harness/contracts';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { getSessionManager, type SessionOptions } from './sessions/SessionManager.js';
 import { resolveSecret, type RegistryService } from './registryService.js';
@@ -433,12 +434,12 @@ class RemoteNodeTransport implements NodeDispatchTransport {
         socket.send(
           JSON.stringify({
             type: 'client.hello',
-            clientVersion: '0.1.0',
+            clientVersion: COORDINATOR_VERSION,
             profile: this.profile,
             capabilities: {
               supportsTerminal: false,
               supportsNotifications: true,
-              version: '0.1.0'
+              version: COORDINATOR_VERSION
             } satisfies ClientCapabilities
           })
         );
@@ -1135,12 +1136,12 @@ export class FleetDispatchCoordinator {
           connection.send(
             JSON.stringify({
               type: 'client.hello',
-              clientVersion: '0.1.0',
+              clientVersion: COORDINATOR_VERSION,
               profile,
               capabilities: {
                 supportsTerminal: false,
                 supportsNotifications: true,
-                version: '0.1.0'
+                version: COORDINATOR_VERSION
               } satisfies ClientCapabilities
             })
           );
