@@ -355,6 +355,14 @@ test('skill bank API stores versions, resolves newest, and refuses deletion of a
         body: JSON.stringify({ id: 'alpha', version: '1.0.0', displayName: 'Alpha', description: 'd', content: 'v1', backends: ['hermes'] })
       });
       assert.equal(create.status, 201);
+      const created = (await create.json()) as { createdAt: number };
+      const update = await fetch(`${baseUrl}/api/skills`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: 'alpha', version: '1.0.0', displayName: 'Alpha edited', description: 'edited', content: 'v1-edited', backends: ['hermes'] })
+      });
+      assert.equal(update.status, 200);
+      assert.equal(((await update.json()) as { createdAt: number }).createdAt, created.createdAt);
       await fetch(`${baseUrl}/api/skills`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -365,7 +373,7 @@ test('skill bank API stores versions, resolves newest, and refuses deletion of a
       const newest = (await (await fetch(`${baseUrl}/api/skills/alpha`)).json()) as { version: string };
       assert.equal(newest.version, '2.0.0');
       const v1 = (await (await fetch(`${baseUrl}/api/skills/alpha?version=1.0.0`)).json()) as { content: string };
-      assert.equal(v1.content, 'v1');
+      assert.equal(v1.content, 'v1-edited');
       assert.equal((await fetch(`${baseUrl}/api/skills/nope`)).status, 404);
 
       const inherited = (await (await fetch(`${baseUrl}/api/skills/bindings?profile=alpha&backend=hermes`)).json()) as {

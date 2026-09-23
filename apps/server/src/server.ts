@@ -1283,7 +1283,7 @@ export function createServer(
     }
   });
 
-  app.post('/api/skills', (req, res) => {
+  app.post('/api/skills', requireOwner, (req, res) => {
     const body = req.body as {
       id?: unknown;
       version?: unknown;
@@ -1293,8 +1293,15 @@ export function createServer(
       backends?: unknown;
       source?: unknown;
     };
-    if (typeof body.id !== 'string' || typeof body.version !== 'string' || typeof body.content !== 'string') {
-      res.status(400).json({ error: 'Invalid skill', message: 'id, version, and content are required' });
+    if (
+      typeof body.id !== 'string'
+      || !body.id.trim()
+      || typeof body.version !== 'string'
+      || !body.version.trim()
+      || typeof body.content !== 'string'
+      || !body.content.trim()
+    ) {
+      res.status(400).json({ error: 'Invalid skill', message: 'id, version, and non-empty content are required' });
       return;
     }
     try {
@@ -1320,7 +1327,7 @@ export function createServer(
     }
   });
 
-  app.delete('/api/skills/:id', (req, res) => {
+  app.delete('/api/skills/:id', requireOwner, (req, res) => {
     try {
       const removed = deleteSkill(req.params.id);
       res.json({ removed: removed.length });

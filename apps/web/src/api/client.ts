@@ -255,7 +255,9 @@ export interface GahDataSource {
   getNodeSetupCommand(data: { os: 'windows' | 'linux' | 'macos'; centralUrl: string; role: 'desktop' | 'worker' | 'both' | 'central'; gatewayUrl?: string }): Promise<{ command: string }>;
   updateGatewaySettings(data: GatewaySettingsUpdate): Promise<GatewaySettingsSummary>;
   getSkills(): Promise<{ skills: SkillSummary[] }>;
+  getSkill(id: string, version: string): Promise<Skill>;
   createSkill(data: SkillCreateData): Promise<Skill>;
+  deleteSkill(id: string): Promise<{ removed: number }>;
   getSkillBindings(profile: string, backend: string, sessionId?: string | null): Promise<SkillBindingSummary>;
   setSkillBindings(data: SkillBindingUpdate): Promise<SkillBindingSummary>;
   inheritSkillBindings(profile: string, backend: string, instance?: string | null): Promise<SkillBindingSummary>;
@@ -553,8 +555,14 @@ export const gahApi: GahDataSource = {
   getSkills() {
     return getJson<{ skills: SkillSummary[] }>('/api/skills');
   },
+  getSkill(id, version) {
+    return getJson<Skill>(`/api/skills/${encodeURIComponent(id)}`, { version });
+  },
   createSkill(data) {
     return postJson<Skill, SkillCreateData>('/api/skills', data);
+  },
+  deleteSkill(id) {
+    return deleteJson<{ removed: number }>(`/api/skills/${encodeURIComponent(id)}`);
   },
   getSkillBindings(profile, backend, sessionId) {
     return getJson<SkillBindingSummary>('/api/skills/bindings', {

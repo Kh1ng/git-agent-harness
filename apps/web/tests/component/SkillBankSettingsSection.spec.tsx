@@ -1,6 +1,6 @@
 import { WebSocketProvider } from '../../src/ws/WebSocketContext.js';
 import { test, expect } from '@playwright/experimental-ct-react';
-import { SkillBankSettingsSection } from '../../src/pages/SettingsPage.js';
+import { SkillBankSettingsSection } from '../../src/components/SkillBankSettingsSection.js';
 import React from 'react';
 
 const SKILL_MD = `---
@@ -146,5 +146,96 @@ test.describe('SkillBankSettingsSection', () => {
     });
 
     await expect(component.getByRole('alert')).toContainText('boom: bad skill');
+  });
+
+  test('keeps an edited draft after an owner denial and saves the same id and version on retry', async ({ mount, page }, testInfo) => {
+    const skill = {
+      id: 'gah-manager',
+      version: '1.0.0',
+      displayName: 'GAH Manager',
+      description: 'Original description',
+      backends: ['codex'],
+      source: 'docs/gah-manager-skill.md',
+      content: '# Original content',
+      createdAt: 10,
+      updatedAt: 10
+    };
+    let saveAttempts = 0;
+    let savedBody: Record<string, unknown> | null = null;
+    await page.route('**/api/skills/gah-manager?version=1.0.0', route => route.fulfill({ json: skill }));
+    await page.route('**/api/skills', route => {
+      if (route.request().method() === 'GET') {
+        return route.fulfill({ json: { skills: [{ ...skill, bound: false }] } });
+      }
+      saveAttempts += 1;
+      savedBody = route.request().postDataJSON();
+      if (saveAttempts === 1) {
+        return route.fulfill({ status: 403, json: { error: 'Forbidden', message: 'This operation requires owner access.' } });
+      }
+      return route.fulfill({ status: 200, json: { ...skill, ...savedBody, updatedAt: 20 } });
+    });
+
+    const component = await mount(<WebSocketProvider><SkillBankSettingsSection /></WebSocketProvider>);
+    await component.getByRole('button', { name: 'Edit GAH Manager 1.0.0' }).click();
+    await component.getByLabel('Display name').fill('Manager instructions');
+    await component.getByLabel('Description').fill('Edited description');
+    await component.getByLabel('Backend compatibility').fill('claude, codex');
+    await component.getByLabel('Markdown content').fill('# Edited content');
+    await component.getByRole('button', { name: 'Save changes' }).click();
+
+    await expect(component.getByRole('alert')).toHaveText('This operation requires owner access.');
+    await expect(component.getByLabel('Display name')).toHaveValue('Manager instructions');
+    await expect(component.getByLabel('Markdown content')).toHaveValue('# Edited content');
+
+    await component.getByRole('button', { name: 'Save changes' }).click();
+    await expect(component.getByRole('status')).toContainText('Saved gah-manager@1.0.0.');
+    expect(savedBody).toMatchObject({
+      id: 'gah-manager',
+      version: '1.0.0',
+      displayName: 'Manager instructions',
+      description: 'Edited description',
+      backends: ['claude', 'codex'],
+      content: '# Edited content',
+      source: 'docs/gah-manager-skill.md'
+    });
+    await page.screenshot({ path: testInfo.outputPath('skill-editor-desktop.png') });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: testInfo.outputPath('skill-editor-mobile.png') });
+  });
+
+  test('confirms removal of an unbound skill and explains why a bound skill cannot be removed', async ({ mount, page }) => {
+    const summaries = [
+      { id: 'bound', version: '1.0.0', displayName: 'Bound skill', description: '', backends: [], source: 'api', bound: true },
+      { id: 'unused', version: '2.0.0', displayName: 'Unused skill', description: '', backends: [], source: 'api', bound: false }
+    ];
+    let removed = false;
+    await page.route('**/api/skills/*', route => {
+      const url = new URL(route.request().url());
+      const id = url.pathname.split('/').at(-1)!;
+      if (route.request().method() === 'DELETE') {
+        removed = true;
+        return route.fulfill({ json: { removed: 1 } });
+      }
+      const summary = summaries.find(skill => skill.id === id)!;
+      return route.fulfill({ json: { ...summary, content: `# ${summary.displayName}`, createdAt: 1, updatedAt: 1 } });
+    });
+    await page.route('**/api/skills', route => route.fulfill({
+      json: { skills: removed ? summaries.filter(skill => skill.id !== 'unused') : summaries }
+    }));
+
+    const component = await mount(<WebSocketProvider><SkillBankSettingsSection /></WebSocketProvider>);
+    await component.getByRole('button', { name: 'Edit Bound skill 1.0.0' }).click();
+    await expect(component.getByText('Removal is unavailable while this skill is bound. Unbind it from every project and backend first.')).toBeVisible();
+    await expect(component.getByRole('button', { name: 'Remove skill' })).toBeDisabled();
+    await component.getByRole('button', { name: 'Cancel' }).click();
+
+    await component.getByRole('button', { name: 'Edit Unused skill 2.0.0' }).click();
+    page.once('dialog', async dialog => {
+      expect(dialog.message()).toBe("Remove 'unused' and all installed versions? This cannot be undone.");
+      await dialog.accept();
+    });
+    await component.getByRole('button', { name: 'Remove skill' }).click();
+    await expect(component.getByRole('status')).toContainText("Removed 'unused' and all installed versions.");
+    await expect(component.getByText('unused@2.0.0')).toHaveCount(0);
   });
 });
