@@ -32,7 +32,7 @@ test('GET /api/usage/rollup aggregates session-log usage and bounds the window',
   writeFileSync(join(logDir, 'session.jsonl'), '');
   appendEvents('gah', [
     { type: 'assistant/message', seq: 1, turn: 1, text: 'burn', backend: 'codex', model: 'gpt-5.3', usage: { input_tokens: 1000, output_tokens: 500, total_tokens: 1500, estimated_cost_usd: 0.05, duration_seconds: 2 }, timestamp: NOW },
-    { type: 'assistant/message', seq: 2, turn: 2, text: 'silent', backend: 'agy', model: null, usage: null, timestamp: NOW }
+    { type: 'assistant/message', seq: 2, turn: 2, text: 'silent', backend: 'agy', model: 'agy-default', usage: null, timestamp: NOW }
   ], { stateDir, sessionId: 'live1' });
 
   const app = createServer({});
@@ -47,6 +47,7 @@ test('GET /api/usage/rollup aggregates session-log usage and bounds the window',
       profile: string;
       rows: { backend: string; model: string | null; day: string; turns: number; total_tokens: number }[];
       unattributed_turns: number;
+      usage_unavailable: { session_id: string; backend: string; model: string | null; day: string }[];
     };
     assert.equal(body.profile, 'gah');
     assert.equal(body.rows.length, 1);
@@ -54,6 +55,12 @@ test('GET /api/usage/rollup aggregates session-log usage and bounds the window',
     assert.equal(body.rows[0].turns, 1);
     assert.equal(body.rows[0].total_tokens, 1500);
     assert.equal(body.unattributed_turns, 1);
+    assert.deepEqual(body.usage_unavailable, [{
+      session_id: 'live1',
+      backend: 'agy',
+      model: 'agy-default',
+      day: new Date(NOW).toISOString().slice(0, 10)
+    }]);
 
     // days is clamped: 0 and 500 both resolve to a valid window request.
     const clamped = await fetch(`http://127.0.0.1:${port}/api/usage/rollup?profile=gah&days=0`);
