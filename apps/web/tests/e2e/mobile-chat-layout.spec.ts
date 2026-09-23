@@ -6,8 +6,6 @@ for (const width of [320, 390]) {
     expect((await request.post(`${mock}/api/mock/scenario`, { data: { name: 'normal' } })).ok()).toBe(true);
     await page.setViewportSize({ width, height: 844 });
     await page.goto('/?page=chat&profile=fixture&chat=mock-session-1');
-    const projectSelector = page.getByRole('combobox', { name: 'Project' });
-    const chatSelector = page.getByRole('combobox', { name: 'Chat' });
     const rail = page.getByRole('complementary', { name: 'Chat navigation' });
     const draft = page.getByPlaceholder(/Message the manager/);
     const providerPicker = page.getByRole('button', { name: 'Provider picker' });
@@ -26,13 +24,32 @@ for (const width of [320, 390]) {
       expect(bounds.width).toBeGreaterThanOrEqual(44);
     }
     await page.screenshot({ path: testInfo.outputPath(`provider-picker-${width}.png`), fullPage: true });
+
+    // The full catalog (#1203) is a phone-sized sheet of its own.
+    await providerDialog.getByRole('button', { name: 'Browse all models' }).click();
+    const catalog = page.getByRole('dialog', { name: 'Browse models' });
+    await expect(catalog.getByRole('searchbox', { name: 'Search models' })).toBeVisible();
+    expect(await catalog.evaluate((dialog) => {
+      const bounds = dialog.getBoundingClientRect();
+      return bounds.left >= 0 && bounds.right <= window.innerWidth && bounds.top >= 0;
+    })).toBe(true);
+    for (const control of await catalog.locator('button:visible').all()) {
+      const bounds = (await control.boundingBox())!;
+      expect(bounds.height).toBeGreaterThanOrEqual(44);
+      expect(bounds.width).toBeGreaterThanOrEqual(44);
+    }
+    await page.screenshot({ path: testInfo.outputPath(`model-browser-${width}.png`), fullPage: true });
+    await catalog.getByRole('button', { name: 'Close model browser' }).click();
+    await expect(catalog).not.toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
     await providerDialog.getByRole('button', { name: 'Close provider picker' }).click();
     await expect(page.getByRole('button', { name: /1 changed file\./ })).toBeVisible();
-    await expect(projectSelector).toHaveValue('fixture');
-    await expect(chatSelector).toHaveValue('mock-session-1');
-    await expect(chatSelector.locator('optgroup[label^="Archived"] option')).toHaveCount(1);
-    await expect(page.getByRole('button', { name: /Projects & chats/ })).toHaveCount(0);
-    await expect(rail).toBeHidden();
+    // One navigator, not two: the chat page carries no rail at any width,
+    // and the way to every other conversation is a single button.
+    await expect(rail).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Projects', exact: true }).first()).toBeVisible();
+    await expect(page).toHaveURL(/[?&]chat=mock-session-1/);
     await expect(page.getByRole('button', { name: 'Storage', exact: true })).toBeHidden();
     await expect(page.getByRole('button', { name: 'New chat', exact: true })).toBeVisible();
     await draft.fill('Keep this unfinished message');
@@ -75,10 +92,6 @@ for (const width of [320, 390]) {
       expect(bounds.height).toBeGreaterThanOrEqual(44);
       expect(bounds.width).toBeGreaterThanOrEqual(44);
     }
-    for (const selector of [projectSelector, chatSelector]) {
-      const target = await selector.boundingBox();
-      expect(target!.height).toBeGreaterThanOrEqual(44);
-    }
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: testInfo.outputPath(`chat-${width}.png`), fullPage: true });
 
@@ -100,13 +113,18 @@ for (const width of [320, 390]) {
       await expect(stop).toHaveCount(0);
     }
 
-    await chatSelector.selectOption('');
+    // New chat drops to a blank conversation: nothing in the URL, and the
+    // launcher offers the projects instead of a rail.
+    await page.getByRole('button', { name: 'New chat', exact: true }).click();
     await expect.poll(() => new URL(page.url()).searchParams.get('chat')).toBeNull();
-    await expect(chatSelector).toHaveValue('');
-    await expect(rail).toBeHidden();
+    const launcher = page.getByRole('list').filter({ hasText: 'Fixture' });
+    const firstProject = launcher.getByRole('button').first();
+    await expect(firstProject).toBeVisible();
+    expect((await firstProject.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`chat-blank-${width}.png`), fullPage: true });
     await page.setViewportSize({ width: 1440, height: 900 });
-    await expect(rail).toBeVisible();
-    await expect(projectSelector).toBeHidden();
+    await expect(rail).toHaveCount(0);
     const desktopSend = (await page.getByRole('button', { name: 'Send', exact: true }).boundingBox())!;
     expect(desktopSend.width).toBeGreaterThanOrEqual(34);
     expect(desktopSend.height).toBeGreaterThanOrEqual(36);

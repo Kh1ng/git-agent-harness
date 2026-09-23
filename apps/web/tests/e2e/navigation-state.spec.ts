@@ -16,22 +16,29 @@ test('a mobile conversation link restores its project and chat after reload and 
   expect((await request.post(`${mock}/api/mock/scenario`, { data: { name: 'normal' } })).ok()).toBe(true);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/?page=chat&profile=fixture&chat=mock-session-1#keep-marker');
-  const selected = page.getByRole('combobox', { name: 'Chat' });
-  await expect(selected).toHaveValue('mock-session-1');
+  const title = page.getByText('Mock session', { exact: true });
+  await expect(title).toBeVisible();
   await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex');
   expect(new URL(page.url()).hash).toBe('#keep-marker');
   await page.reload();
-  await expect(selected).toHaveValue('mock-session-1');
+  await expect(title).toBeVisible();
   await page.getByRole('button', { name: 'Open navigation menu' }).click();
   await page.getByRole('dialog', { name: 'Navigation menu' }).getByRole('button', { name: 'Nodes', exact: true }).click();
   await expect.poll(() => new URL(page.url()).searchParams.get('page')).toBe('nodes');
   await page.getByRole('button', { name: 'Open navigation menu' }).click();
   await page.getByRole('dialog', { name: 'Navigation menu' }).getByRole('button', { name: 'Chat', exact: true }).click();
-  await expect(selected).toHaveValue('mock-session-1');
-  await selected.selectOption('');
+  await expect(title).toBeVisible();
+
+  // A blank chat drops the conversation from the link and keeps everything
+  // else the URL was carrying.
+  await page.getByRole('button', { name: 'New chat', exact: true }).click();
   await expect.poll(() => new URL(page.url()).searchParams.get('chat')).toBeNull();
   expect(new URL(page.url()).searchParams.get('profile')).toBe('fixture');
   expect(new URL(page.url()).hash).toBe('#keep-marker');
   await page.reload();
-  await expect(selected).toHaveValue('');
+  await expect(page.getByRole('heading', { name: 'New chat', exact: true })).toBeVisible();
+
+  // The Projects page links back to the project's default conversation.
+  await page.goto('/?page=chat&profile=fixture&chat=default');
+  await expect(page.getByText('Default conversation', { exact: true })).toBeVisible();
 });

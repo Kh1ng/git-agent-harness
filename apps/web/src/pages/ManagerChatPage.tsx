@@ -1,15 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { MoreHorizontal, Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles, GitPullRequest, GitCommit, AlertTriangle } from 'lucide-react';
+import { MoreHorizontal, Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles, GitPullRequest, GitCommit, AlertTriangle, FolderGit2 } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { ChatNodePicker } from '../components/ChatNodePicker.js';
 import { useChatNodes } from '../hooks/useChatNodes.js';
-import { NewChatModal, type ChatProfile } from '../components/NewChatModal.js';
+import { useChatProfiles } from '../hooks/useChatProfiles.js';
 import { formatChatName } from '../lib/format.js';
-import { readNavigation, updateNavigation } from '../lib/navigationState.js';
+import { readNavigation, updateNavigation, type Page } from '../lib/navigationState.js';
 import { ProviderPicker, type ProviderSelection, type ProviderPickerProps } from '../components/ProviderPicker.js';
-import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
@@ -21,6 +20,7 @@ import type {
   ManagerReasoningEffortInfo,
   ManagerBackendInfo,
   ChatSessionSummary,
+  ChatSessionProjectGroup,
   ChatPreviewInfo,
   ChatReclaimResult,
   SkillBindingSummary,
@@ -467,16 +467,16 @@ function GitStrip({
   );
 }
 
-export function ManagerChatPage() {
+export function ManagerChatPage({ onNavigate }: { onNavigate: (page: Page) => void }) {
   const { sendMessage, messages, isConnected, reconnectSeq } = useWebSocket();
   const wsProfile = useWebSocket().profile;
   const profileOverride = useUiStore((s) => s.profileOverride);
   const setProfileOverride = useUiStore((s) => s.setProfileOverride);
   const profile = profileOverride ?? wsProfile ?? 'gah';
-  const [availableProfiles, setAvailableProfiles] = useState<ChatProfile[]>([]);
   const [nodeChoice, setNodeChoice] = useState<{ profile: string; sessionId: string | null; nodeId: string } | null>(null);
   const fleetChange = [...messages].reverse().find(({ message }) => message.type === 'fleet.changed')?.id ?? 0;
   const nodesRefreshKey = `${reconnectSeq}:${fleetChange}`;
+  const [availableProfiles] = useChatProfiles(nodesRefreshKey);
   const currentProfileInfo = availableProfiles.find((p) => p.name === profile);
 
   const [turns, setTurns] = useState<ChatTurn[]>([]);
@@ -543,21 +543,31 @@ export function ManagerChatPage() {
   const scrollAnchorRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  /** WP2 sessions: null = the profile's default conversation; otherwise a
-   * session bound to its own worktree. */
+  /** What the composer is pointed at. `blank` is a chat that does not exist
+   * yet: the first message creates it (named after that message) and this
+   * page never has to ask which project, node, or model first. Otherwise
+   * `sessionId` is a session bound to its own worktree, and null is the
+   * profile's default conversation — reachable from the Projects page,
+   * which sends `chat=default`. */
   const [selection, setSelection] = useState(() => {
     const saved = readNavigation();
-    return { profile, sessionId: saved.profile === profile ? saved.chat : null };
+    const savedChat = saved.profile === profile ? saved.chat : null;
+    return { profile, sessionId: savedChat === 'default' ? null : savedChat, blank: savedChat === null };
   });
   // A profile change must not request the previous project's conversation.
   const sessionId = selection.profile === profile ? selection.sessionId : null;
-  const setSessionId = (sessionId: string | null) => setSelection({ profile, sessionId });
-  useEffect(() => updateNavigation({ profile, chat: sessionId }), [profile, sessionId]);
+  const blankChat = selection.profile === profile ? selection.blank : true;
+  const setSessionId = (sessionId: string | null) => setSelection({ profile, sessionId, blank: false });
+  const startBlankChat = () => setSelection({ profile, sessionId: null, blank: true });
+  /** The message that opened a blank chat, replayed once its new session is
+   * selected and its (empty) history has settled. */
+  const firstMessageRef = useRef<string | null>(null);
+  const [creatingChat, setCreatingChat] = useState(false);
+  useEffect(
+    () => updateNavigation({ profile, chat: blankChat ? null : sessionId ?? 'default' }),
+    [profile, sessionId, blankChat]
+  );
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
-  const [sessionsError, setSessionsError] = useState(false);
-  /** A new chat created for another project lands in the same render batch
-   * as the profile switch; the [profile] effect restores its session id. */
-  const pendingSessionRef = useRef<string | null>(null);
   const [storageOpen, setStorageOpen] = useState(false);
   const [storage, setStorage] = useState<ChatReclaimResult | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
@@ -599,21 +609,6 @@ export function ManagerChatPage() {
       .catch(() => { if (!cancelled) setSkillBinding(null); });
     return () => { cancelled = true; };
   }, [profile, skillBackend, sessionId, turns.length, reconnectSeq]);
-
-  useEffect(() => {
-    let cancelled = false;
-    Promise.allSettled([gahApi.getProfiles(), gahApi.getProjects()]).then(([local, catalog]) => {
-      if (cancelled) return;
-      setAvailableProfiles(previous => {
-        const localProfiles = local.status === 'fulfilled' ? local.value : previous.filter(item => !item.remote);
-        const projects = catalog.status === 'fulfilled'
-          ? catalog.value.map(project => ({ ...project, name: project.chat_profile ?? project.name, catalogName: project.name, remote: !!project.chat_profile && project.chat_profile !== project.name }))
-          : previous.filter(item => item.remote);
-        return [...new Map([...localProfiles, ...projects].map(project => [project.name, project])).values()];
-      });
-    });
-    return () => { cancelled = true; };
-  }, [reconnectSeq, fleetChange]);
 
   const loadGitData = async () => {
     const requestId = ++gitRequestIdRef.current;
@@ -666,13 +661,12 @@ export function ManagerChatPage() {
       .then(({ sessions: fetched }) => {
         if (activeProfileRef.current !== forProfile) return;
         setSessions(fetched);
-        setSessionsError(false);
       })
       .catch(() => {
-        // #1002: a transient fetch failure must not wipe the rail — that made
-        // every session "disappear" on a blip. Keep the last known list and
-        // surface the failure instead of silently emptying.
-        if (activeProfileRef.current === forProfile) setSessionsError(true);
+        // #1002: a transient fetch failure must not wipe the known list —
+        // that made every session "disappear" on a blip. The Projects page
+        // owns surfacing the failure; here the list only feeds the storage
+        // panel and the active session lookup.
       });
   };
 
@@ -695,12 +689,12 @@ export function ManagerChatPage() {
   }, 5_000);
 
   useEffect(() => {
-    const pendingSession = pendingSessionRef.current;
-    pendingSessionRef.current = null;
     setSessions([]);
     setStorage(null);
     setSelectedSessionIds(new Set());
-    if (selection.profile !== profile || pendingSession !== null) setSessionId(pendingSession);
+    // Switching project lands on a blank chat: the previous project's
+    // conversation is not this project's conversation.
+    if (selection.profile !== profile) startBlankChat();
     refreshSessions(profile);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile]);
@@ -742,13 +736,18 @@ export function ManagerChatPage() {
     setPreviewOpen(false);
     setPreviewPortDraft('');
     steeringRequestIds.current.clear();
+    lastAppliedSeqRef.current = 0;
+    // A blank chat has no server-side conversation to restore yet.
+    if (blankChat) {
+      setHistoryLoaded(true);
+      return;
+    }
     if (sessionId && sessionId !== 'default') {
       gahApi
         .getChatPreview(profile, sessionId)
         .then(({ preview }) => { if (activeProfileRef.current === profile) setPreview(preview); })
         .catch(() => {});
     }
-    lastAppliedSeqRef.current = 0;
     if (!isConnected) return;
     const requestId = generateRequestId();
     historyRequestId.current = requestId;
@@ -759,7 +758,7 @@ export function ManagerChatPage() {
       ...(sessionId ? { sessionId } : {})
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile, sessionId, isConnected, reconnectSeq]);
+  }, [profile, sessionId, blankChat, isConnected, reconnectSeq]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1193,6 +1192,10 @@ export function ManagerChatPage() {
     }
   };
 
+  /** Provider context the composer pill's "Browse all models" dialog
+   *  reads the full catalog through (#1203). */
+  const modelCatalog = { profile, ...(chosenNode ? { nodeId: chosenNode } : {}) };
+
   /** Which conversation the composer's pill controls: the active session
    *  carries its own backend/model/effort; the default conversation drives
    *  the profile-level settings. */
@@ -1210,6 +1213,7 @@ export function ManagerChatPage() {
         currentReasoningEffortId: activeSession.reasoningEffort,
         modelsLoaded: sessionModelsLoaded,
         busy: turnBusy || !nodeReady || sessionSelectionChanging,
+        catalog: modelCatalog,
         onSelect: applySessionSelection
       };
     }
@@ -1224,6 +1228,7 @@ export function ManagerChatPage() {
       currentReasoningEffortId,
       modelsLoaded,
       busy: turnBusy || !nodeReady || backendChanging || modelChanging || reasoningEffortChanging,
+      catalog: modelCatalog,
       onSelect: applyProfileSelection
     };
   })();
@@ -1249,17 +1254,45 @@ export function ManagerChatPage() {
     inputRef.current?.focus();
   };
 
-  const handleSend = () => {
-    const text = draft.trim();
-    if (!text || sendBlocked) return;
+  /** A blank chat's name is the first thing asked of it, bounded so the
+   * rail and the Projects page stay readable. */
+  const chatNameFrom = (text: string) => {
+    const line = text.split('\n')[0].trim();
+    return line.length > 60 ? `${line.slice(0, 59).trimEnd()}…` : line;
+  };
+
+  /** First message of a blank chat: create the session, then let the
+   * replay effect send it once that session's history has settled — so the
+   * history reset cannot wipe the optimistic turn. */
+  const createAndSend = async (text: string) => {
+    setCreatingChat(true);
+    try {
+      const session = await gahApi.createChatSession(
+        profile,
+        activeBackendId ?? undefined,
+        currentModelId,
+        chatNameFrom(text),
+        chosenNode || undefined
+      );
+      firstMessageRef.current = text;
+      refreshSessions(profile);
+      setSessionId(session.id);
+    } catch (err) {
+      setDraft(text);
+      setTurns((prev) => [...prev, { role: 'error', text: `Could not start the chat: ${err instanceof Error ? err.message : String(err)}` }]);
+    } finally {
+      setCreatingChat(false);
+    }
+  };
+
+  const submit = (text: string, forSessionId: string | null) => {
     const requestId = generateRequestId();
     setTurns((prev) => [...prev, {
       role: 'user',
       text,
       ...(turnBusy ? { steeringRequestId: requestId } : {})
     }]);
-    setDraft('');
-    setPaletteOpen(false);
+    const sessionId = forSessionId;
     if (turnBusy) {
       steeringRequestIds.current.add(requestId);
       sendMessage({
@@ -1281,6 +1314,26 @@ export function ManagerChatPage() {
       ...(sessionId ? { sessionId } : {})
     });
   };
+
+  const handleSend = () => {
+    const text = draft.trim();
+    if (!text || sendBlocked || creatingChat) return;
+    setDraft('');
+    setPaletteOpen(false);
+    if (blankChat) {
+      void createAndSend(text);
+      return;
+    }
+    submit(text, sessionId);
+  };
+
+  useEffect(() => {
+    const text = firstMessageRef.current;
+    if (text === null || !historyLoaded || !sessionId) return;
+    firstMessageRef.current = null;
+    submit(text, sessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, historyLoaded]);
 
   const handleCancel = () => {
     if (!turnBusy) return;
@@ -1355,8 +1408,6 @@ export function ManagerChatPage() {
     }
   };
 
-  const [newChatOpen, setNewChatOpen] = useState(false);
-  const [navigationOpen, setNavigationOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const toolsRef = useRef<HTMLDivElement>(null);
 
@@ -1420,71 +1471,42 @@ export function ManagerChatPage() {
     }
   };
 
-  /** New-chat completion: switch project if the modal picked another one,
-   * then select the fresh session (its history effect clears the view).
-   * The pending ref keeps the id alive through the profile-switch effect,
-   * same as a cross-project picker selection. */
-  const handleChatCreated = (createdProfile: string, createdSessionId: string) => {
-    if (createdProfile !== profile) {
-      pendingSessionRef.current = createdSessionId;
-      setProfileOverride(createdProfile);
-    }
-    refreshSessions(createdProfile);
-    setSessionId(createdSessionId);
-  };
+  /** Launcher data (#1199): which projects were worked in most recently,
+   * and how many conversations each one is already holding. Only the blank
+   * chat shows it, so it is only fetched there. */
+  const [projectGroups, setProjectGroups] = useState<ChatSessionProjectGroup[]>([]);
+  useEffect(() => {
+    if (!blankChat) return;
+    let cancelled = false;
+    gahApi.getAllChatSessions()
+      .then(({ projects }) => { if (!cancelled) setProjectGroups(projects); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [blankChat, reconnectSeq]);
 
-  const chatTitle = activeSession ? formatChatName(activeSession) : 'Default conversation';
+  const recentProjects = useMemo(() => {
+    const activity = new Map(projectGroups.map((group) => [group.profile, {
+      open: group.sessions.filter((session) => session.outcome === 'live').length,
+      lastActiveAt: Math.max(0, ...group.sessions.map((session) => session.lastActiveAt))
+    }]));
+    return [...availableProfiles]
+      .sort((a, b) =>
+        (activity.get(b.name)?.lastActiveAt ?? 0) - (activity.get(a.name)?.lastActiveAt ?? 0)
+        || (a.display_name || a.name).localeCompare(b.display_name || b.name))
+      .slice(0, 6)
+      .map((project) => ({ project, open: activity.get(project.name)?.open ?? 0 }));
+  }, [availableProfiles, projectGroups]);
+
+  const chatTitle = blankChat ? 'New chat' : activeSession ? formatChatName(activeSession) : 'Default conversation';
   const projectName = currentProfileInfo?.repo?.split('/').pop() ?? profile;
-  const liveChatSessions = sessions.filter((session) => session.outcome === 'live');
-  const archivedChatSessions = sessions.filter((session) => session.outcome !== 'live');
   const closeTools = () => setToolsOpen(false);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
       {/* One slim bar: where you are, git at a glance, and everything else behind ⋯. */}
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <div className="grid min-w-0 basis-full grid-cols-2 gap-1.5 xl:hidden">
-          <label className="min-w-0">
-            <span className="sr-only">Project</span>
-            <select
-              aria-label="Project"
-              value={profile}
-              onChange={(event) => setProfileOverride(event.target.value)}
-              className="min-h-11 w-full truncate rounded-md border border-subtle bg-raised px-2 text-sm text-primary"
-            >
-              {availableProfiles.map((project) => (
-                <option key={project.name} value={project.name}>{project.display_name || project.name}</option>
-              ))}
-            </select>
-          </label>
-          <label className="min-w-0">
-            <span className="sr-only">Chat</span>
-            <select
-              aria-label="Chat"
-              value={sessionId ?? ''}
-              onChange={(event) => setSessionId(event.target.value || null)}
-              className="min-h-11 w-full truncate rounded-md border border-subtle bg-raised px-2 text-sm text-primary"
-            >
-              <option value="">Default conversation</option>
-              {liveChatSessions.length > 0 && (
-                <optgroup label="Chats">
-                  {liveChatSessions.map((session) => (
-                    <option key={session.id} value={session.id}>{formatChatName(session)}</option>
-                  ))}
-                </optgroup>
-              )}
-              {archivedChatSessions.length > 0 && (
-                <optgroup label={`Archived (${archivedChatSessions.length})`}>
-                  {archivedChatSessions.map((session) => (
-                    <option key={session.id} value={session.id}>{formatChatName(session)}</option>
-                  ))}
-                </optgroup>
-              )}
-            </select>
-          </label>
-        </div>
-        <div className="hidden min-w-0 flex-1 items-baseline gap-1.5 xl:flex">
-          <h2 className="shrink-0 text-sm text-muted" title={currentProfileInfo?.repo ?? profile}>{projectName}</h2>
+        <div className="flex min-w-0 flex-1 basis-40 items-baseline gap-1.5">
+          <h2 className="max-w-[45%] shrink-0 truncate text-sm text-muted" title={currentProfileInfo?.repo ?? profile}>{projectName}</h2>
           <span className="text-sm text-muted" aria-hidden="true">/</span>
           <span className="truncate text-base font-semibold text-primary">{chatTitle}</span>
         </div>
@@ -1507,9 +1529,14 @@ export function ManagerChatPage() {
             )}
           </button>
         )}
-        <button type="button" onClick={() => setNewChatOpen(true)} disabled={!isConnected}
+        <button type="button" onClick={() => onNavigate('projects')}
+          className="btn-secondary shrink-0 !px-2.5 text-xs" aria-label="Projects"
+          title="Projects: existing chats, the archive, and issues waiting for one">
+          <FolderGit2 size={15} aria-hidden="true" /><span className="hidden sm:inline">Projects</span>
+        </button>
+        <button type="button" onClick={startBlankChat} disabled={!isConnected || blankChat}
           className="btn-secondary shrink-0 !px-2.5 text-xs" aria-label="New chat"
-          title="New chat: choose project, node, and provider/model — starts in a fresh worktree">
+          title="New chat: the first message names it and opens its own worktree">
           <Plus size={15} aria-hidden="true" /><span className="hidden sm:inline">New chat</span>
         </button>
         <div ref={toolsRef} className="relative shrink-0">
@@ -1569,13 +1596,6 @@ export function ManagerChatPage() {
                 title="Inspect per-session storage and preview safe reclaim"
               >
                 <HardDrive size={14} aria-hidden="true" /> Storage
-              </button>
-              <button
-                type="button"
-                onClick={() => { setNavigationOpen(true); closeTools(); }}
-                className="chat-menu-item xl:hidden"
-              >
-                <GitBranch size={14} aria-hidden="true" /> Manage projects
               </button>
               {activeSession && activeSession.archivedAt === null && (
                 <button
@@ -1684,41 +1704,7 @@ export function ManagerChatPage() {
         );
       })()}
 
-      <NewChatModal
-        open={newChatOpen}
-        currentProfile={profile}
-        profiles={availableProfiles}
-        backends={availableBackends}
-        nodesRefreshKey={nodesRefreshKey}
-        onClose={() => setNewChatOpen(false)}
-        onCreated={handleChatCreated}
-      />
-
-      <div className={`relative grid min-h-0 min-w-0 flex-1 gap-4 max-xl:overflow-y-auto ${previewOpen && activeSession && !remoteSession ? 'xl:grid-cols-[15rem_minmax(0,1fr)_minmax(0,26rem)]' : 'xl:grid-cols-[15rem_minmax(0,1fr)]'}`}>
-        {/* Below xl the rail floats over the conversation so opening it never reflows the chat. */}
-        <div id="chat-navigation" className={`max-xl:[&_button]:!min-h-11 max-xl:[&_summary]:min-h-11 min-h-0 ${navigationOpen ? 'max-xl:absolute max-xl:inset-x-0 max-xl:top-0 max-xl:z-20 max-xl:max-h-full max-xl:flex max-xl:flex-col max-xl:shadow-2xl' : 'max-xl:hidden'}`}>
-          {navigationOpen && (
-            <button type="button" onClick={() => setNavigationOpen(false)}
-              className="touch-target absolute right-2 top-2 z-10 inline-flex items-center justify-center rounded-md bg-raised text-muted hover:text-primary xl:hidden"
-              aria-label="Close project manager">
-              <X size={16} aria-hidden="true" />
-            </button>
-          )}
-          <ProjectRail
-            currentProfile={profile}
-            profiles={availableProfiles.map(project => ({ ...project, name: project.catalogName ?? project.name }))}
-            sessions={sessions}
-            selectedSessionId={sessionId}
-            onSelect={(selectedProfile) => { setProfileOverride(selectedProfile); setNavigationOpen(false); }}
-            onSessionSelect={(selectedSession) => { setSessionId(selectedSession); setNavigationOpen(false); }}
-            sessionsError={sessionsError}
-            onRetrySessions={() => refreshSessions(profile)}
-            onProjectAdded={(project) => {
-              setAvailableProfiles((profiles) => [...profiles.filter((profile) => profile.name !== project.chat_profile), { ...project, name: project.chat_profile ?? project.name, catalogName: project.name, remote: !!project.chat_profile && project.chat_profile !== project.name }]);
-            }}
-          />
-        </div>
-
+      <div className={`relative grid min-h-0 min-w-0 flex-1 gap-4 max-xl:overflow-y-auto ${previewOpen && activeSession && !remoteSession ? 'xl:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]' : ''}`}>
       {/* WP3 preview panel: the session's dev server through the node's
           dedicated preview port. Auto-detect lights it up mid-turn; the
           port can also be set manually. */}
@@ -1831,10 +1817,59 @@ export function ManagerChatPage() {
               <p className="text-sm">Loading conversation…</p>
             </div>
           )}
-          {historyLoaded && turns.length === 0 && (
+          {historyLoaded && turns.length === 0 && !blankChat && (
             <div className="h-full flex flex-col items-center justify-center text-center text-muted gap-2">
               <MessageSquare size={24} className="opacity-50" aria-hidden="true" />
               <p className="text-sm" title="Context is shared across backends — switching models keeps this session's memory.">Ask about status, blockers, or next steps. Type "/" for commands.</p>
+            </div>
+          )}
+          {historyLoaded && turns.length === 0 && blankChat && (
+            <div className="flex h-full flex-col justify-center gap-7 py-6">
+              <div>
+                <h2 className="text-lg font-semibold text-primary">New chat</h2>
+                <p className="mt-1 text-sm text-secondary">
+                  {creatingChat
+                    ? 'Opening a worktree for this conversation…'
+                    : <>The first message names it. It gets its own branch and worktree in <span className="text-primary">{projectName}</span>, and keeps them through archive and reclaim.</>}
+                </p>
+              </div>
+              <div>
+                <div className="flex items-baseline justify-between gap-2 px-0.5 pb-2">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">Start in</p>
+                  <button type="button" onClick={() => onNavigate('projects')} className="text-xs text-accent hover:underline">
+                    All projects, issues and archive
+                  </button>
+                </div>
+                {recentProjects.length === 0 ? (
+                  <p className="rounded-lg border border-subtle px-3 py-4 text-sm text-secondary">
+                    No project is configured yet. <button type="button" onClick={() => onNavigate('projects')} className="text-accent hover:underline">Import a repository</button> to start.
+                  </p>
+                ) : (
+                  <ul className="divide-y divide-subtle overflow-hidden rounded-lg border border-subtle">
+                    {recentProjects.map(({ project, open }) => {
+                      const active = project.name === profile;
+                      return (
+                        <li key={project.name}>
+                          <button
+                            type="button"
+                            onClick={() => setProfileOverride(project.name)}
+                            aria-current={active ? 'true' : undefined}
+                            className={`flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors ${active ? 'bg-accent/10' : 'hover:bg-white/5'}`}
+                          >
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-sm text-primary">{project.display_name || project.name}</span>
+                              <span className="block truncate text-[11px] text-muted">{project.repo}</span>
+                            </span>
+                            {open > 0 && (
+                              <span className="shrink-0 text-[11px] tabular-nums text-muted">{open} open</span>
+                            )}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
             </div>
           )}
           {turns.filter((turn) => !turn.tool || !liveTools[turn.tool.toolCallId]).map((turn, i) => (

@@ -17,6 +17,7 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage.js').then((module) 
 const ManagerChatPage = lazy(() => import('./pages/ManagerChatPage.js').then((module) => ({ default: module.ManagerChatPage })));
 const GitPage = lazy(() => import('./pages/GitPage.js').then((module) => ({ default: module.GitPage })));
 const NodesPage = lazy(() => import('./pages/NodesPage.js').then((module) => ({ default: module.NodesPage })));
+const ProjectsPage = lazy(() => import('./pages/ProjectsPage.js').then((module) => ({ default: module.ProjectsPage })));
 
 export type { Page } from './lib/navigationState.js';
 
@@ -42,7 +43,9 @@ export function App() {
       case 'settings':
         return <SettingsPage />;
       case 'chat':
-        return <ManagerChatPage />;
+        return <ManagerChatPage onNavigate={setCurrentPage} />;
+      case 'projects':
+        return <ProjectsPage onNavigate={setCurrentPage} />;
       case 'git':
         return <GitPage />;
       case 'overview':

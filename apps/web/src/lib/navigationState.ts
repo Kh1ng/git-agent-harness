@@ -1,4 +1,4 @@
-const pages = ['overview', 'work', 'telemetry', 'quota', 'events', 'settings', 'chat', 'git', 'nodes'] as const;
+const pages = ['overview', 'work', 'telemetry', 'quota', 'events', 'settings', 'chat', 'projects', 'git', 'nodes'] as const;
 export type Page = typeof pages[number];
 
 type NavigationState = { page: Page; profile: string | null; chat: string | null };

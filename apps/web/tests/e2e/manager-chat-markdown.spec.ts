@@ -54,8 +54,9 @@ test('chat turns and streaming replies render markdown inside bounded bubbles', 
     });
   });
 
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  // Chat opens a blank conversation; these turns belong to the project's
+  // default conversation, which the Projects page links to directly.
+  await page.goto('/?page=chat&profile=alpha&chat=default');
 
   await expect(page.locator('code', { hasText: 'inline code' })).toBeVisible();
   await expect(page.locator('strong', { hasText: 'Bold assistant' })).toBeVisible();

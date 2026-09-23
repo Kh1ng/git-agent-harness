@@ -10,6 +10,7 @@ import {
   X,
   MessageSquare,
   GitBranch,
+  FolderGit2,
   Server
 } from 'lucide-react';
 import type { Page } from '../App.js';
@@ -25,6 +26,7 @@ export const FRONTEND_BUILD = `v${__GAH_VERSION__} (${__GAH_COMMIT__})`;
 const navItems: { id: Page; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'chat', label: 'Chat', icon: MessageSquare },
+  { id: 'projects', label: 'Projects', icon: FolderGit2 },
   { id: 'git', label: 'Git', icon: GitBranch },
   { id: 'nodes', label: 'Nodes', icon: Server },
   { id: 'work', label: 'Factory', icon: ListChecks },

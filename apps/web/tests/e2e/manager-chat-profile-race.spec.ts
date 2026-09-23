@@ -82,16 +82,11 @@ test('profile changes reject stale chat replies and control data', async ({ page
     });
   });
 
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  // Chat opens a blank conversation; these turns belong to the project's
+  // default conversation, which the Projects page links to directly.
+  await page.goto('/?page=chat&profile=alpha&chat=default');
   await expect(page.getByRole('button', { name: 'New chat', exact: true })).toBeEnabled();
   await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toBeVisible();
-  const projects = page.getByRole('navigation', { name: 'Projects' });
-  await expect(projects.getByRole('button', { name: 'Alpha org/alpha' })).toBeVisible();
-  // The rail lists every CONFIGURED profile -- the curated catalog no longer
-  // gates chat (it stays for the Overview dashboard), so an un-curated
-  // profile like "hidden" is one click away (the project-switch fix).
-  await expect(projects.getByRole('button', { name: 'Hidden org/hidden' })).toBeVisible();
   await expect.poll(() => heldAlphaHistory).not.toBe('');
   await expect(page.getByText('Loading conversation…')).toBeVisible();
   await expect(page.getByText('Thinking…')).toHaveCount(0);
@@ -115,7 +110,15 @@ test('profile changes reject stale chat replies and control data', async ({ page
   await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
   socket!.send(heldAlphaHistory);
 
-  await projects.getByRole('button', { name: 'Beta org/beta' }).click();
+  // A blank chat's launcher switches project without leaving the page, so
+  // the in-flight alpha turn is still mounted when its reply lands.
+  await page.getByRole('button', { name: 'New chat', exact: true }).click();
+  const launcher = page.getByRole('list').filter({ hasText: 'org/alpha' });
+  // Every CONFIGURED profile is offered -- the curated catalog no longer
+  // gates chat (it stays for the Overview dashboard), so an un-curated
+  // profile like "hidden" is one click away (the project-switch fix).
+  await expect(launcher.getByRole('button', { name: /Hidden/ })).toBeVisible();
+  await launcher.getByRole('button', { name: /Beta/ }).click();
   await expect(page.getByRole('heading', { name: 'beta', exact: true })).toBeVisible();
   releaseAlpha();
   socket!.send(JSON.stringify({
@@ -179,8 +182,9 @@ test('reconnect restores and follows an in-flight reply', async ({ page }) => {
     });
   });
 
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  // Chat opens a blank conversation; these turns belong to the project's
+  // default conversation, which the Projects page links to directly.
+  await page.goto('/?page=chat&profile=alpha&chat=default');
   await expect(page.getByText('partial reply', { exact: true })).toBeVisible();
   const requestsBeforeCompletion = historyRequests;
   await page.getByPlaceholder(/Message the manager/).fill('second question');
@@ -242,8 +246,9 @@ test('a cancelled turn resolves via its terminal reply and the resync shows the 
     });
   });
 
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  // Chat opens a blank conversation; these turns belong to the project's
+  // default conversation, which the Projects page links to directly.
+  await page.goto('/?page=chat&profile=alpha&chat=default');
   await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible();
 
   await page.getByPlaceholder(/Message the manager/).fill('question');
