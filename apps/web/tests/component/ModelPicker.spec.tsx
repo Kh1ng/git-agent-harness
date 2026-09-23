@@ -147,6 +147,7 @@ test('favorites and recents use the existing storage path and apply in one click
   await expect(trigger).toBeFocused();
 
   // One click from the short popover applies the whole saved selection.
+  await trigger.click();
   await expect(popover).toBeVisible();
   await popover.getByRole('button', { name: 'Apply Codex · personal · GPT-5.3 Codex Mini' }).click();
   expect(selected.at(-1)).toEqual({ backendId: 'codex-personal', modelId: 'gpt-5.3-codex-mini', reasoningEffortId: null });
@@ -159,6 +160,21 @@ test('favorites and recents use the existing storage path and apply in one click
   await trigger.click();
   await popover.getByRole('button', { name: 'Remove Codex · personal · GPT-5.3 Codex Mini from favorites' }).click();
   expect(await page.evaluate(() => window.localStorage.getItem('gah.composer.favorites'))).toBe('[]');
+});
+
+test('the quick list is bounded and Escape restores trigger focus', async ({ mount, page }) => {
+  await page.evaluate(() => window.localStorage.setItem('gah.composer.favorites', JSON.stringify(
+    Array.from({ length: 8 }, (_, index) => ({ backend: 'codex-work', model: `model-${index}` }))
+  )));
+  const component = await mount(picker([]));
+  const trigger = component.getByRole('button', { name: 'Provider picker' });
+
+  await trigger.click();
+  const popover = page.getByRole('dialog', { name: 'Provider picker' });
+  await expect(popover.getByRole('button', { name: /^Apply / })).toHaveCount(6);
+  await page.keyboard.press('Escape');
+  await expect(popover).not.toBeVisible();
+  await expect(trigger).toBeFocused();
 });
 
 test('an instance that does not answer keeps its default selectable and offers a retry', async ({ mount, page }) => {

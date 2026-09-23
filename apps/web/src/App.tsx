@@ -23,6 +23,7 @@ export type { Page } from './lib/navigationState.js';
 
 export function App() {
   const [currentPage, setCurrentPage] = useState<Page>(() => new URLSearchParams(window.location.hash.slice(1)).has('pair') ? 'settings' : readNavigation().page);
+  const [chatLauncherRequest, setChatLauncherRequest] = useState(0);
   useEffect(() => updateNavigation({ page: currentPage }), [currentPage]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [dismissedActivityId, setDismissedActivityId] = useState<string | null>(null);
@@ -43,7 +44,7 @@ export function App() {
       case 'settings':
         return <SettingsPage />;
       case 'chat':
-        return <ManagerChatPage onNavigate={setCurrentPage} />;
+        return <ManagerChatPage launcherRequest={chatLauncherRequest} onNavigate={setCurrentPage} />;
       case 'projects':
         return <ProjectsPage onNavigate={setCurrentPage} />;
       case 'git':
@@ -61,6 +62,10 @@ export function App() {
   };
 
   const isChatPage = currentPage === 'chat';
+  const handlePrimaryNavigation = (page: Page) => {
+    if (page === 'chat') setChatLauncherRequest((request) => request + 1);
+    setCurrentPage(page);
+  };
 
   return (
     <div className={`app-shell bg-page ${isChatPage
@@ -68,7 +73,7 @@ export function App() {
       : 'min-h-dvh lg:flex'}`}>
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 bg-card text-primary p-3 rounded-md">Skip to content</a>
       <PwaStatusBars />
-      <Navbar currentPage={currentPage} onPageChange={setCurrentPage} activityUnreadCount={activityUnreadCount} />
+      <Navbar currentPage={currentPage} onPageChange={handlePrimaryNavigation} activityUnreadCount={activityUnreadCount} />
 
       <div className={`min-w-0 flex-1 ${isChatPage ? 'flex min-h-0 flex-col lg:col-start-2 lg:row-start-2' : ''}`}>
         <main id="main-content" tabIndex={-1} className={`mx-auto w-full max-w-[1400px] px-4 py-4 sm:px-6 sm:py-6 ${isChatPage ? 'flex min-h-0 flex-1 flex-col' : ''}`}>

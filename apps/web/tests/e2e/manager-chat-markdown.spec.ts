@@ -54,8 +54,7 @@ test('chat turns and streaming replies render markdown inside bounded bubbles', 
     });
   });
 
-  // Chat opens a blank conversation; these turns belong to the project's
-  // default conversation, which the Projects page links to directly.
+  // Open the project's default conversation.
   await page.goto('/?page=chat&profile=alpha&chat=default');
 
   await expect(page.locator('code', { hasText: 'inline code' })).toBeVisible();

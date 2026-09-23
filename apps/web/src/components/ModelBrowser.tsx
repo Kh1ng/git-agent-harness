@@ -60,7 +60,7 @@ export function ModelBrowser({
   const [catalog, setCatalog] = useState<Record<string, ManagerModelInfo[]>>({});
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState<string[]>([]);
-  const [attempt, setAttempt] = useState(0);
+  const [retryEpoch, setRetryEpoch] = useState(0);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('all');
 
@@ -96,7 +96,7 @@ export function ModelBrowser({
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, attempt, implemented, source.profile, source.nodeId]);
+  }, [open, retryEpoch, implemented, source.profile, source.nodeId]);
 
   // A configured-but-unwired provider still appears, flagged and
   // unselectable (#945) -- silently dropping it reads as "not configured".
@@ -252,7 +252,7 @@ export function ModelBrowser({
               : loading ? 'Loading models…' : `${visible.length} of ${entries.length} shown`}
           </p>
           {failed.length > 0 && (
-            <button type="button" onClick={() => setAttempt((value) => value + 1)} className="btn-secondary text-xs max-sm:min-h-11 max-sm:min-w-11">
+            <button type="button" onClick={() => setRetryEpoch((value) => value + 1)} className="btn-secondary text-xs max-sm:min-h-11 max-sm:min-w-11">
               Retry
             </button>
           )}

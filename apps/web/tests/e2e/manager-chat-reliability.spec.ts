@@ -78,8 +78,7 @@ test('reconnect restores actionable activity and a durable terminal clears a mis
     });
   });
 
-  // Chat opens a blank conversation; these turns belong to the project's
-  // default conversation, which the Projects page links to directly.
+  // Open the project's default conversation.
   await page.goto('/?page=chat&profile=alpha&chat=default');
   await expect(page.getByText('working', { exact: true })).toBeVisible();
   await expect(page.getByRole('alertdialog', { name: 'Permission request' })).toContainText('Run npm test');
@@ -135,8 +134,7 @@ test('permission and terminal frames remain live after the shared inbox rolls ov
     });
   });
 
-  // Chat opens a blank conversation; these turns belong to the project's
-  // default conversation, which the Projects page links to directly.
+  // Open the project's default conversation.
   await page.goto('/?page=chat&profile=alpha&chat=default');
   const composer = page.getByPlaceholder(/Message the manager/);
   await composer.fill('long running turn');
@@ -222,8 +220,7 @@ test('the composer steers the active turn while Stop remains available, then can
     });
   });
 
-  // Chat opens a blank conversation; these turns belong to the project's
-  // default conversation, which the Projects page links to directly.
+  // Open the project's default conversation.
   await page.goto('/?page=chat&profile=alpha&chat=default');
   const composer = page.getByPlaceholder(/Message the manager/);
   await composer.fill('start slowly');

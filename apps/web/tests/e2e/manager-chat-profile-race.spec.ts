@@ -82,8 +82,7 @@ test('profile changes reject stale chat replies and control data', async ({ page
     });
   });
 
-  // Chat opens a blank conversation; these turns belong to the project's
-  // default conversation, which the Projects page links to directly.
+  // Open the project's default conversation.
   await page.goto('/?page=chat&profile=alpha&chat=default');
   await expect(page.getByRole('button', { name: 'New chat', exact: true })).toBeEnabled();
   await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toBeVisible();
@@ -110,10 +109,9 @@ test('profile changes reject stale chat replies and control data', async ({ page
   await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible();
   socket!.send(heldAlphaHistory);
 
-  // A blank chat's launcher switches project without leaving the page, so
+  // The existing project rail switches profile without leaving the page, so
   // the in-flight alpha turn is still mounted when its reply lands.
-  await page.getByRole('button', { name: 'New chat', exact: true }).click();
-  const launcher = page.getByRole('list').filter({ hasText: 'org/alpha' });
+  const launcher = page.getByRole('complementary', { name: 'Chat navigation' });
   // Every CONFIGURED profile is offered -- the curated catalog no longer
   // gates chat (it stays for the Overview dashboard), so an un-curated
   // profile like "hidden" is one click away (the project-switch fix).
@@ -182,8 +180,7 @@ test('reconnect restores and follows an in-flight reply', async ({ page }) => {
     });
   });
 
-  // Chat opens a blank conversation; these turns belong to the project's
-  // default conversation, which the Projects page links to directly.
+  // Open the project's default conversation.
   await page.goto('/?page=chat&profile=alpha&chat=default');
   await expect(page.getByText('partial reply', { exact: true })).toBeVisible();
   const requestsBeforeCompletion = historyRequests;
@@ -246,8 +243,7 @@ test('a cancelled turn resolves via its terminal reply and the resync shows the 
     });
   });
 
-  // Chat opens a blank conversation; these turns belong to the project's
-  // default conversation, which the Projects page links to directly.
+  // Open the project's default conversation.
   await page.goto('/?page=chat&profile=alpha&chat=default');
   await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible();
 

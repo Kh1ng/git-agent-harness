@@ -3,14 +3,14 @@ import { CircleDot, ExternalLink, GitPullRequest, MessageSquare, Plus } from 'lu
 import type { ChatIssueSummary, ChatPrSummary, ChatSessionSummary } from '@git-agent-harness/contracts';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
-import { useChatProfiles } from '../hooks/useChatProfiles.js';
+import { toChatProfile, useChatProfiles } from '../hooks/useChatProfiles.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { NewChatModal } from '../components/NewChatModal.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { BoundedCollection } from '../components/BoundedCollection.js';
-import { updateNavigation, type Page } from '../lib/navigationState.js';
+import { DEFAULT_CONVERSATION_ID, updateNavigation, type Page } from '../lib/navigationState.js';
 import { gahApi } from '../api/client.js';
 import type { ManagerBackendInfo } from '@git-agent-harness/contracts';
 
@@ -38,7 +38,7 @@ export function ProjectsPage({ onNavigate }: { onNavigate: (page: Page) => void 
   const [workLoading, setWorkLoading] = useState(true);
   const [workError, setWorkError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const [attempt, setAttempt] = useState(0);
+  const [retryEpoch, setRetryEpoch] = useState(0);
   const [backends, setBackends] = useState<ManagerBackendInfo[]>([]);
   const [backend, setBackend] = useState<string>('');
   const [starting, setStarting] = useState<string | null>(null);
@@ -93,9 +93,9 @@ export function ProjectsPage({ onNavigate }: { onNavigate: (page: Page) => void 
       if (!cancelled) setWorkError(error instanceof Error ? error.message : String(error));
     }).finally(() => { if (!cancelled) setWorkLoading(false); });
     return () => { cancelled = true; };
-  }, [profile, remote, attempt, reconnectSeq]);
+  }, [profile, remote, retryEpoch, reconnectSeq]);
 
-  useWsReconnectRefresh(() => { refreshSessions(); setAttempt((value) => value + 1); });
+  useWsReconnectRefresh(() => { refreshSessions(); setRetryEpoch((value) => value + 1); });
   // Chats created elsewhere (another tab, the API, a worker) show up here
   // without a manual refresh.
   useAutoRefresh(() => refreshSessions(), 5_000);
@@ -104,7 +104,7 @@ export function ProjectsPage({ onNavigate }: { onNavigate: (page: Page) => void 
    * so the chat page opens against the right repository. */
   const openChat = (sessionId: string | null) => {
     setProfileOverride(profile);
-    updateNavigation({ profile, chat: sessionId ?? 'default' });
+    updateNavigation({ profile, chat: sessionId ?? DEFAULT_CONVERSATION_ID });
     onNavigate('chat');
   };
 
@@ -132,7 +132,7 @@ export function ProjectsPage({ onNavigate }: { onNavigate: (page: Page) => void 
         title="Projects"
         description="Every repository GAH can work in, the chats it already holds, and the work still waiting for one."
         lastUpdated={lastUpdated}
-        onRefresh={() => { refreshSessions(); setAttempt((value) => value + 1); }}
+        onRefresh={() => { refreshSessions(); setRetryEpoch((value) => value + 1); }}
         refreshing={workLoading}
         actions={
           <button type="button" onClick={() => setNewChatOpen(true)} disabled={!isConnected || profiles.length === 0} className="btn-primary">
@@ -157,7 +157,7 @@ export function ProjectsPage({ onNavigate }: { onNavigate: (page: Page) => void 
           onProjectAdded={(project) => {
             setProfiles((previous) => [
               ...previous.filter((item) => item.name !== project.chat_profile),
-              { ...project, name: project.chat_profile ?? project.name, catalogName: project.name, remote: !!project.chat_profile && project.chat_profile !== project.name }
+              toChatProfile(project)
             ]);
           }}
         />
@@ -206,7 +206,7 @@ export function ProjectsPage({ onNavigate }: { onNavigate: (page: Page) => void 
               {workError && (
                 <div role="alert" className="card-padded space-y-2 border-critical/30">
                   <p className="text-sm text-critical">Could not read this project's issues and pull requests. {workError}</p>
-                  <button type="button" onClick={() => setAttempt((value) => value + 1)} className="btn-secondary text-xs">Retry</button>
+                  <button type="button" onClick={() => setRetryEpoch((value) => value + 1)} className="btn-secondary text-xs">Retry</button>
                 </div>
               )}
 

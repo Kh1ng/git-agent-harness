@@ -6,7 +6,6 @@ test('chat sends on the chosen node, locks it during a turn, and refreshes readi
   let stale = false;
   let nodeReads = 0;
   const sent: { requestId: string; profile: string; nodeId: string; message: string }[] = [];
-  const created: Record<string, unknown>[] = [];
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === '/api/profiles') return route.fulfill({ json: [local] });
@@ -23,17 +22,6 @@ test('chat sends on the chosen node, locks it during a turn, and refreshes readi
       candidates: [], warnings: []
     } });
     if (path === '/api/manager-chat/sessions') {
-      // A blank chat's first message creates its session before it sends.
-      if (route.request().method() === 'POST') {
-        const body = route.request().postDataJSON() as Record<string, unknown>;
-        created.push(body);
-        return route.fulfill({ json: {
-          id: 'created-session', profile: body.profile, nodeId: body.nodeId, worktreePath: null,
-          branch: 'gah/chat/created', backend: 'codex', model: null, reasoningEffort: null,
-          title: 'Run on the imported owner', createdAt: 0, lastActiveAt: 0, archivedAt: null,
-          outcome: 'live', settledAt: null, settledReason: null
-        } });
-      }
       return route.fulfill({ json: { sessions: [] } });
     }
     if (path === '/api/manager-chat/settings') return route.fulfill({ json: {
@@ -56,8 +44,7 @@ test('chat sends on the chosen node, locks it during a turn, and refreshes readi
       }));
     });
   });
-  // Chat opens a blank conversation; these turns belong to the project's
-  // default conversation, which the Projects page links to directly.
+  // Open the project's default conversation.
   await page.goto('/?page=chat&profile=alpha&chat=default');
   const picker = page.getByRole('combobox', { name: 'Run on node' });
   await expect(picker).toHaveValue('central');
@@ -85,20 +72,13 @@ test('chat sends on the chosen node, locks it during a turn, and refreshes readi
   stale = false;
   socket!.send(JSON.stringify({ type: 'fleet.changed' }));
   await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
-  // Switching project happens in a blank chat's launcher; the imported
-  // project keeps running on its owning node.
-  await page.getByRole('button', { name: 'New chat', exact: true }).click();
-  await page.getByRole('list').filter({ hasText: 'org/alpha' }).getByRole('button', { name: /Remote project/ }).click();
+  // The existing project rail switches to the imported project and its owner.
+  await page.getByRole('complementary', { name: 'Chat navigation' }).getByRole('button', { name: /Remote project/ }).click();
   await expect(picker).toHaveValue('worker');
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
   await page.getByPlaceholder(/Message the manager/).fill('Run on the imported owner');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect.poll(() => sent.length).toBe(2);
   expect(sent[1].profile).toBe(remote.chat_profile);
   expect(sent[1].nodeId).toBe('worker');
-  // The blank chat names itself after its first message and opens on the
-  // project's owning node, not the coordinator.
-  expect(created).toEqual([{
-    profile: remote.chat_profile, nodeId: 'worker', backend: 'codex', model: null,
-    title: 'Run on the imported owner'
-  }]);
 });

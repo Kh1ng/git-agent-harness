@@ -1,18 +1,11 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext } from '@playwright/test';
+import { openProjects } from './helpers/navigation.js';
 
 const MOCK_BASE_URL = process.env.GAH_MOCK_BASE_URL ?? 'http://127.0.0.1:3774';
 
 async function selectScenario(request: APIRequestContext, name: string): Promise<void> {
   const response = await request.post(`${MOCK_BASE_URL}/api/mock/scenario`, { data: { name } });
   expect(response.ok(), await response.text()).toBe(true);
-}
-
-/** Chat opens a blank conversation; every existing project and chat lives
- * on the Projects page (#1199). */
-async function openProjects(page: Page): Promise<void> {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Projects', exact: true }).click();
-  await expect(page.getByRole('complementary', { name: 'Chat navigation' })).toBeVisible();
 }
 
 test('project and chat navigation stays visible without a global dropdown', async ({ page, request }) => {
@@ -42,22 +35,35 @@ test('projects collapse independently while chats stay usable', async ({ page, r
   await expect(rail.getByRole('navigation', { name: 'Chats', exact: true })).toBeVisible();
 });
 
-test('selecting a chat opens it on the chat page with its own provider', async ({ page, request }) => {
+test('selecting a chat keeps the project rail and opens its own provider', async ({ page, request }) => {
   await selectScenario(request, 'normal');
   await openProjects(page);
 
   await page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ }).click();
 
-  // The chat page takes over: no rail, the session's own provider selection.
+  // Chat keeps the existing rail and uses the session's own provider selection.
   await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible();
-  await expect(page.getByRole('complementary', { name: 'Chat navigation' })).toHaveCount(0);
+  await expect(page.getByRole('complementary', { name: 'Chat navigation' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex', { timeout: 10_000 });
   await expect(page).toHaveURL(/[?&]page=chat/);
   await expect(page).toHaveURL(/[?&]chat=/);
 
-  // And the way back to everything else is one button, not a second rail.
-  await page.getByRole('button', { name: 'Projects', exact: true }).first().click();
+  // The expanded project view remains available as a separate destination.
+  await page.getByRole('button', { name: 'Chat', exact: true }).first().click();
+  await page.getByRole('dialog', { name: 'New chat' }).getByRole('button', { name: 'View all projects' }).click();
   await expect(page.getByRole('complementary', { name: 'Chat navigation' })).toBeVisible();
+});
+
+test('the main Chat action opens the lightweight launcher', async ({ page, request }) => {
+  await selectScenario(request, 'normal');
+  await page.goto('/?page=chat&profile=fixture&chat=default');
+  await expect(page.getByRole('complementary', { name: 'Chat navigation' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Chat', exact: true }).first().click();
+  const launcher = page.getByRole('dialog', { name: 'New chat' });
+  await expect(launcher.getByRole('heading', { name: 'Start a chat' })).toBeVisible();
+  await expect(launcher.getByRole('button', { name: 'View all projects' })).toBeVisible();
+  await expect(launcher.getByRole('button', { name: /Start from an issue in Fixture/ })).toBeVisible();
 });
 
 test('the open issues queue starts a seeded chat in one step', async ({ page, request }) => {

@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { openProjects } from './helpers/navigation.js';
 
 const MOCK_BASE_URL = process.env.GAH_MOCK_BASE_URL ?? 'http://127.0.0.1:3774';
 
@@ -14,12 +15,6 @@ async function selectScenario(request: APIRequestContext, name: string): Promise
 async function openChat(page: Page): Promise<void> {
   await page.goto('/?page=chat&profile=fixture&chat=default');
   await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible();
-}
-
-/** New chat with a source to choose from is a Projects-page flow (#1199). */
-async function openProjects(page: Page): Promise<void> {
-  await page.goto('/?page=projects&profile=fixture');
-  await expect(page.getByRole('complementary', { name: 'Chat navigation' })).toBeVisible();
 }
 
 async function openNewChatModal(page: Page): Promise<void> {
@@ -40,13 +35,11 @@ test('PR tab lists open PRs and starts a chat seeded with one', async ({ page, r
   await expect(dialog.getByText('octocat · approved')).toBeVisible();
   await expect(dialog.getByText('hubot · draft · review required')).toBeVisible();
 
-  await dialog.getByText('#12 Ship the PR chat mode').click();
-  await expect(dialog.getByText(/read-only: no branch is created and the PR is not modified/)).toBeVisible();
   await page.route('**/api/manager-chat/prs**', (route) =>
     route.request().method() === 'GET'
       ? route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ prs: [] }) })
       : route.continue());
-  await dialog.getByRole('button', { name: 'Start chat' }).click();
+  await dialog.getByText('#12 Ship the PR chat mode').click();
 
   // The modal closes, the chat page opens on the fresh session, and its
   // transcript is seeded with the PR.

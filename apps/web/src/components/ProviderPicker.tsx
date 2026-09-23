@@ -43,7 +43,7 @@ export interface ProviderPickerProps {
 
 const FAVORITES_KEY = 'gah.composer.favorites';
 const RECENTS_KEY = 'gah.composer.recents';
-const RECENTS_SHOWN = 3;
+const QUICK_CHOICES_SHOWN = 6;
 const RECENTS_KEPT = 6;
 
 function favoriteKey(favorite: ProviderFavorite): string {
@@ -117,7 +117,10 @@ export function ProviderPicker({
       if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false);
+      if (event.key === 'Escape') {
+        setOpen(false);
+        queueMicrotask(() => triggerRef.current?.focus());
+      }
     };
     document.addEventListener('mousedown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
@@ -196,6 +199,7 @@ export function ProviderPicker({
     });
     rememberRecent(entry);
     setOpen(false);
+    queueMicrotask(() => triggerRef.current?.focus());
   };
 
   /** A catalog pick keeps the effort when the provider is unchanged; a
@@ -221,10 +225,11 @@ export function ProviderPicker({
     : null;
   const currentSaved = currentEntry !== null && isFavorite(currentEntry);
 
+  const quickFavorites = favorites.slice(0, QUICK_CHOICES_SHOWN);
   const quickRecents = recents
     .filter((entry) => !isFavorite(entry) && backends.some((backend) => backend.id === entry.backend && backend.implemented))
     .filter((entry) => currentEntry === null || favoriteKey(entry) !== favoriteKey(currentEntry))
-    .slice(0, RECENTS_SHOWN);
+    .slice(0, QUICK_CHOICES_SHOWN - quickFavorites.length);
 
   const togglePopover = () => {
     const bounds = triggerRef.current?.getBoundingClientRect();
@@ -270,7 +275,7 @@ export function ProviderPicker({
             </span>
             <button
               type="button"
-              onClick={() => setOpen(false)}
+              onClick={() => { setOpen(false); triggerRef.current?.focus(); }}
               className="touch-target inline-flex items-center justify-center rounded text-muted hover:bg-white/5 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
               aria-label="Close provider picker"
             >
@@ -318,12 +323,12 @@ export function ProviderPicker({
                 <p className="mt-0.5 truncate text-sm text-primary">{pillLabel}</p>
               </div>
 
-              {(favorites.length > 0 || quickRecents.length > 0) && (
+              {(quickFavorites.length > 0 || quickRecents.length > 0) && (
                 <div className="border-b border-subtle px-2.5 py-2">
-                  {favorites.length > 0 && <>
+                  {quickFavorites.length > 0 && <>
                     <p className={sectionLabel}>Favorites</p>
                     <div className="mt-1 space-y-0.5">
-                      {favorites.map((favorite) => {
+                      {quickFavorites.map((favorite) => {
                         const enabled = backends.find((backend) => backend.id === favorite.backend)?.implemented === true;
                         return <div key={favoriteKey(favorite)} className="flex items-center gap-1">
                           <button
@@ -350,7 +355,7 @@ export function ProviderPicker({
                     </div>
                   </>}
                   {quickRecents.length > 0 && (
-                    <div className={favorites.length > 0 ? 'mt-2.5' : ''}>
+                    <div className={quickFavorites.length > 0 ? 'mt-2.5' : ''}>
                       <p className={sectionLabel}>Recent</p>
                       <div className="mt-1 space-y-0.5">
                         {quickRecents.map((entry) => (
@@ -418,7 +423,7 @@ export function ProviderPicker({
                 <div className="px-2.5 py-2">
                   <button
                     type="button"
-                    onClick={() => setBrowsing(true)}
+                    onClick={() => { setOpen(false); setBrowsing(true); }}
                     className="touch-target flex w-full items-center justify-center gap-1.5 rounded-md border border-subtle px-2 py-2 text-xs text-secondary hover:border-accent/40 hover:text-primary max-sm:min-h-11 max-sm:min-w-11"
                   >
                     <LayoutGrid size={13} aria-hidden="true" /> Browse all models

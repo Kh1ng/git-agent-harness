@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import { openProjects } from './helpers/navigation.js';
 
 const MOCK_BASE_URL = process.env.GAH_MOCK_BASE_URL ?? 'http://127.0.0.1:3774';
 
@@ -28,17 +29,10 @@ async function connectionCount(request: APIRequestContext): Promise<number> {
   return (await response.json() as { connections: number }).connections;
 }
 
-/** Chat opens a blank conversation; these turns belong to the seeded
- * project's default conversation, which the Projects page links to. */
+/** Open the seeded project's default conversation. */
 async function openChat(page: Page): Promise<void> {
   await page.goto('/?page=chat&profile=fixture&chat=default');
   await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible();
-}
-
-/** Every existing project and chat lives on the Projects page (#1199). */
-async function openProjects(page: Page): Promise<void> {
-  await page.getByRole('button', { name: 'Projects', exact: true }).first().click();
-  await expect(page.getByRole('complementary', { name: 'Chat navigation' })).toBeVisible();
 }
 
 async function selectSeededSession(page: Page): Promise<void> {
@@ -210,7 +204,7 @@ test('archive and preview states mutate through the same REST control plane', as
   await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
   // The selection resets optimistically, before any refresh lands.
-  await expect(page.getByText('Default conversation', { exact: true })).toBeVisible({ timeout: 750 });
+  await expect(page).not.toHaveURL(/[?&]chat=/, { timeout: 750 });
 
   const archived = await request.get(`${MOCK_BASE_URL}/api/manager-chat/sessions?profile=fixture`);
   expect(archived.ok(), await archived.text()).toBe(true);

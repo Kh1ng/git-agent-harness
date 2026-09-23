@@ -43,19 +43,21 @@ for (const width of [320, 390]) {
     await expect(catalog).not.toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
-    await providerDialog.getByRole('button', { name: 'Close provider picker' }).click();
+    await expect(providerPicker).toBeFocused();
     await expect(page.getByRole('button', { name: /1 changed file\./ })).toBeVisible();
-    // One navigator, not two: the chat page carries no rail at any width,
-    // and the way to every other conversation is a single button.
-    await expect(rail).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Projects', exact: true }).first()).toBeVisible();
+    // The existing rail stays mounted and opens as an overlay on phones.
+    await expect(rail).not.toBeVisible();
+    const tools = page.getByRole('button', { name: 'Chat tools', exact: true });
+    await tools.click();
+    await page.getByRole('button', { name: 'Manage projects' }).click();
+    await expect(rail).toBeVisible();
+    await page.getByRole('button', { name: 'Close project manager' }).click();
     await expect(page).toHaveURL(/[?&]chat=mock-session-1/);
     await expect(page.getByRole('button', { name: 'Storage', exact: true })).toBeHidden();
     await expect(page.getByRole('button', { name: 'New chat', exact: true })).toBeVisible();
     await draft.fill('Keep this unfinished message');
     await expect(draft).toHaveValue('Keep this unfinished message');
 
-    const tools = page.getByRole('button', { name: 'Chat tools', exact: true });
     await tools.click();
     await expect(page.getByRole('button', { name: 'Storage', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Archive', exact: true })).toBeVisible();
@@ -113,18 +115,19 @@ for (const width of [320, 390]) {
       await expect(stop).toHaveCount(0);
     }
 
-    // New chat drops to a blank conversation: nothing in the URL, and the
-    // launcher offers the projects instead of a rail.
+    // New chat opens the existing creation flow without discarding the
+    // current conversation first.
     await page.getByRole('button', { name: 'New chat', exact: true }).click();
-    await expect.poll(() => new URL(page.url()).searchParams.get('chat')).toBeNull();
-    const launcher = page.getByRole('list').filter({ hasText: 'Fixture' });
-    const firstProject = launcher.getByRole('button').first();
+    const launcher = page.getByRole('dialog', { name: 'New chat' });
+    await expect(page).toHaveURL(/[?&]chat=mock-session-1/);
+    const firstProject = launcher.getByRole('button', { name: /Fixture/ });
     await expect(firstProject).toBeVisible();
     expect((await firstProject.boundingBox())!.height).toBeGreaterThanOrEqual(44);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    await page.screenshot({ path: testInfo.outputPath(`chat-blank-${width}.png`), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath(`chat-new-${width}.png`), fullPage: true });
+    await launcher.getByRole('button', { name: 'Close', exact: true }).click();
     await page.setViewportSize({ width: 1440, height: 900 });
-    await expect(rail).toHaveCount(0);
+    await expect(rail).toBeVisible();
     const desktopSend = (await page.getByRole('button', { name: 'Send', exact: true }).boundingBox())!;
     expect(desktopSend.width).toBeGreaterThanOrEqual(34);
     expect(desktopSend.height).toBeGreaterThanOrEqual(36);
