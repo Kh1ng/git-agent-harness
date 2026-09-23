@@ -6,8 +6,8 @@ The desktop lists Windows and WSL tools separately. A listed executable does not
 For an external test, use the [Windows tester guide](WINDOWS_TESTER_GUIDE.md).
 It starts with a matching Actions bundle and omits maintainer-only build steps.
 
-The published Windows assets do not contain the current test build.
-Use a matching Actions bundle until a new release includes desktop 0.1.1 or later.
+Release 0.1.2 and later contain matching desktop and worker files.
+Use a matching Actions bundle only to test an unpublished revision.
 
 ## Install from the central dashboard
 
@@ -35,6 +35,10 @@ The central server needs these settings:
 The command contains the central access token. Use it only on a trusted worker computer.
 The worker does not receive the central server's GitHub credential.
 
+GAH does not have account sign-in. The central token grants owner access.
+Device pairing grants dashboard control, but it does not grant update or administration access.
+If an update requires owner access, reconnect with the central token from a trusted computer.
+
 The worker uses port 3774. Windows forwards that port to WSL and restricts its firewall rule to the central node.
 Use a stable Windows LAN or VPN address. If that address changes, run setup again.
 
@@ -46,7 +50,8 @@ Microsoft documents the relevant [WSL networking](https://learn.microsoft.com/en
 
 ## Finish worker readiness
 
-Installation registers the node without repository profiles. It does not advertise the node as ready for a profile.
+A new installation has no repository profiles. An upgrade keeps and registers the existing profiles.
+The installer does not change GitHub, GitLab, Claude, or Codex authentication.
 
 1. Open Ubuntu as the same WSL user.
 2. Install and authenticate the backend that you want to use.
@@ -65,6 +70,17 @@ gah profile add --help
 ~/.local/share/gah/worker/register.sh PROFILE_NAME
 gah doctor --profile PROFILE_NAME
 ```
+
+Use these commands to inspect the common authentication state:
+
+```bash
+gh auth status
+claude auth status
+command -v codex
+```
+
+If `command -v codex` has no output, install Codex inside WSL before you select it.
+Install the repository toolchain too. For this repository, install Rust so that `cargo` is available.
 
 Use the same profile name as the central node. To register several profiles, supply comma-separated names.
 A Claude-only node is valid. Other agent CLIs are optional.
@@ -160,15 +176,20 @@ CARGO_BUILD_JOBS=1 cargo test --manifest-path apps/desktop/Cargo.toml --bin gah-
 CARGO_BUILD_JOBS=1 cargo clippy --manifest-path apps/desktop/Cargo.toml --bin gah-desktop -- -D warnings
 ```
 
-## Evidence from 2026-09-07
+## Evidence
 
 The macOS checks passed: desktop Rust test, desktop Clippy, three workspace typechecks, and both frontend builds.
 Twelve focused server tests passed. These cover installer selection, command validation, and authenticated fleet dispatch and reconciliation.
 The PowerShell parser checked the installer and its embedded task script. The WSL configuration test checked quoting, credential permissions, and stable identity.
 A Chromium smoke test checked the desktop form, separate tool environments, visible errors, and horizontal overflow with a mocked native bridge.
 
-Actual Windows launch, WSL installation, Windows logon, LAN forwarding, and a real backend dispatch remain untested.
-No release was published. Native iOS/Android builds and QR pairing remain separate work.
+On 2026-09-23, a physical Windows host installed the 0.1.2 worker bundle.
+The worker kept its node ID and `gah` profile after the upgrade.
+The central node reached the worker through Tailscale and read its Claude model catalog.
+The worker health endpoint reported version 0.1.2.
+
+Windows restart recovery still needs a separate test after the 0.1.2 release install.
+Native Windows agent execution remains outside this setup. Agents run inside WSL.
 
 ## Installer checks
 

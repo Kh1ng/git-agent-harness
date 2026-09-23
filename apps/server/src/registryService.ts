@@ -11,6 +11,7 @@ import type {
   NodeObservationSnapshot,
   NodeObservationState
 } from '@git-agent-harness/contracts';
+import { COORDINATOR_VERSION } from '@git-agent-harness/contracts';
 import { COORDINATOR_SCHEMA_DIGEST } from './coordinatorIdentity.js';
 
 export function isLoopback(urlStr: string): boolean {
@@ -229,7 +230,7 @@ async function fetchWithTimeout(url: string, headers: Record<string, string>, ti
 
 /** All registered-node requests use the same transport and secret-reference rules. */
 export function nodeHeaders(node: RegisteredNode): Record<string, string> {
-  const headers: Record<string, string> = { Accept: 'application/json', 'User-Agent': 'GAH-Coordinator/0.1.0' };
+  const headers: Record<string, string> = { Accept: 'application/json', 'User-Agent': `GAH-Coordinator/${COORDINATOR_VERSION}` };
   if (node.transport_mode === 'authenticated_remote' || (node.transport_mode === 'trusted_lan' && !isLoopback(node.advertised_url))) {
     headers.Authorization = `Bearer ${resolveSecret(node.secret_ref)}`;
   }

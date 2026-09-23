@@ -53,7 +53,7 @@ fn handle_connection(stream: std::net::TcpStream) -> Result<()> {
     // Send a welcome message
     let welcome_message = json!({
         "type": "server.welcome",
-        "serverVersion": "0.1.0",
+        "serverVersion": env!("CARGO_PKG_VERSION"),
         "serverProviderCatalog": {
             "providers": []
         },

@@ -87,7 +87,11 @@ for attempt in {1..30}; do
   if curl -fsS http://127.0.0.1:3774/health >/dev/null; then break; fi
   sleep 1
 done
-exec ''' + shlex.quote(str(node)) + ' apps/server/dist/registerNodeCli.js --central-url ' + shlex.quote(settings['central_url']) + ' --self-url http://127.0.0.1:3774 --transport-mode trusted_lan --secret-ref env:COORDINATOR_TOKEN --labels windows,wsl --profiles "${1:-}"\n')
+profiles="${1:-}"
+if [ -z "$profiles" ]; then
+  profiles="$("$GAH_BINARY" profile list --json | python3 -c 'import json,sys; print(",".join(profile["name"] for profile in json.load(sys.stdin)))')"
+fi
+exec ''' + shlex.quote(str(node)) + ' apps/server/dist/registerNodeCli.js --central-url ' + shlex.quote(settings['central_url']) + ' --self-url http://127.0.0.1:3774 --transport-mode trusted_lan --secret-ref env:COORDINATOR_TOKEN --labels windows,wsl --profiles "$profiles"\n')
 register.chmod(0o700)
 # systemd quoting uses double quotes and expands percent specifiers, unlike shell quoting.
 unit_path = pathlib.Path.home() / '.config/systemd/user/gah-worker.service'

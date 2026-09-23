@@ -11,6 +11,22 @@ $startup = $assignment.Right.Find({ param($node) $node -is [System.Management.Au
 [void][System.Management.Automation.Language.Parser]::ParseInput($startup, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
 
+# Mirrored WSL owns the Windows address, so a portproxy would loop back onto itself.
+$script:networkCalls = @()
+function wsl.exe {
+    $global:LASTEXITCODE = 0
+    $script:networkCalls += "wsl $args"
+    if ($args -contains 'hostname') { '192.168.1.11 172.28.0.1' }
+}
+function netsh.exe {
+    $global:LASTEXITCODE = 0
+    $script:networkCalls += "netsh $args"
+}
+& ([scriptblock]::Create($startup))
+$networkLog = $script:networkCalls -join "`n"
+if ($networkLog -notmatch 'portproxy delete' -or $networkLog -match 'portproxy add') { throw 'Mirrored WSL must remove, not create, a self-looping portproxy.' }
+Remove-Item Function:\wsl.exe, Function:\netsh.exe
+
 # Load only the connection writer; executing the installer would mutate this machine.
 $writer = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Save-DesktopConnection' }, $true)
 if (-not $writer) { throw 'Missing desktop connection writer.' }

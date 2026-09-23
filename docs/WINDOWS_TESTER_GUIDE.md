@@ -4,7 +4,12 @@ This guide installs one approved GAH test build on Windows. The worker runs insi
 
 Use a disposable repository for the first edit test. Do not use a repository with uncommitted work.
 
-## Get the test package
+## Get the installer
+
+For release 0.1.2 or later, ask the maintainer for the command from **Settings → General → Add a Node**.
+The command downloads matching release files and configures the central connection.
+
+For an unpublished revision, ask the maintainer for these items:
 
 Ask the maintainer for these items:
 
@@ -13,7 +18,7 @@ Ask the maintainer for these items:
 - The central GAH URL.
 - A temporary central access token.
 
-The bundle must contain these files from the same workflow run:
+The unpublished bundle must contain these files from the same workflow run:
 
 ```text
 desktop-artifact.json
@@ -28,6 +33,7 @@ install-wsl.sh
 Do not mix files from different workflow runs. The installer rejects mixed revisions and changed files.
 
 The token gives owner access to the central node. Do not put it in a test report or screenshot.
+GAH does not have account sign-in. Device pairing does not grant update or administration access.
 
 ## Prepare Windows
 
@@ -39,7 +45,7 @@ The token gives owner access to the central node. Do not put it in a test report
 6. Open Ubuntu once and create a normal Linux user.
 7. Run `wsl --list --verbose` and make sure that Ubuntu uses WSL version 2.
 
-## Install GAH
+## Install an unpublished build
 
 Extract the test bundle to one local directory. Then open PowerShell as administrator.
 
@@ -57,6 +63,8 @@ try {
 ```
 
 The command can stop after it installs WSL. If this occurs, finish the Ubuntu setup and run the command again.
+
+For a published release, run the Add a Node command instead of the local-bundle command.
 
 The installer adds two components:
 
@@ -86,6 +94,9 @@ source ~/.local/share/gah/worker/worker.env
 systemctl --user status gah-worker.service --no-pager
 gah doctor --profile PROFILE_NAME
 ```
+
+Run `gh auth status` and `claude auth status` if either CLI appears signed out.
+Run `command -v codex` before you select Codex. No output means that Codex is not installed inside WSL.
 
 ## Do the acceptance test
 
@@ -117,4 +128,5 @@ Do not include tokens, cookies, pairing links, or private source files.
 - Agent processes run inside WSL2. Native Windows execution is not implemented.
 - The worker starts after Windows sign-in. It does not start at the boot screen.
 - A paired device can control work. Owner-only actions require the central token.
-- Use a matching Actions bundle until the maintainer publishes current Windows release assets.
+- Release 0.1.2 and later support the online Add a Node installer.
+- Use a matching Actions bundle only for an unpublished revision.

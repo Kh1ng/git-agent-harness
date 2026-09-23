@@ -6,7 +6,9 @@
 
 Pre-built binaries are published to [GitHub Releases](https://github.com/Kh1ng/git-agent-harness/releases). A GitHub token with `repo` read scope is required because the repository is private.
 
-### Windows — desktop worker (NSIS installer)
+### Windows — desktop and WSL worker
+
+This command installs the desktop only:
 
 ```powershell
 $env:GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
@@ -14,6 +16,12 @@ irm "https://raw.githubusercontent.com/Kh1ng/git-agent-harness/main/scripts/inst
 ```
 
 Smoke test: GAH Worker appears in the system tray after install.
+
+For a managed worker, open **Settings → General → Add a Node** on the central node.
+Select the WSL worker, reveal the command, and run it in PowerShell as administrator.
+
+GAH does not have account sign-in. Remote access uses the central token or device pairing.
+Provider CLIs use separate authentication inside WSL. See the [Windows tester guide](docs/WINDOWS_TESTER_GUIDE.md).
 
 ### Linux — desktop worker (AppImage)
 

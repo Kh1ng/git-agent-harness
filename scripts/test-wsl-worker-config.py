@@ -43,6 +43,20 @@ with tempfile.TemporaryDirectory(prefix='gah-wsl-check-') as temp:
     unit = (home / '.config/systemd/user/gah-worker.service').read_text()
     assert 'Restart=on-failure' in unit and '%%' in unit
     assert token not in unit and token not in (root / 'register.sh').read_text()
+    (release / 'bin').mkdir()
+    (release / 'apps/server/dist').mkdir(parents=True)
+    for name, content in {
+        'curl': '#!/bin/sh\nexit 0\n',
+        'gah': '#!/bin/sh\nprintf \'[%s]\\n\' \'{"name":"alpha"},{"name":"beta"}\'\n',
+    }.items():
+        path = release / 'bin' / name
+        path.write_text(content)
+        path.chmod(0o755)
+    (release / 'apps/server/dist/registerNodeCli.js').write_text('import json,sys; print(json.dumps(sys.argv[1:]))\n')
+    registered = json.loads(subprocess.check_output([str(root / 'register.sh')], text=True))
+    assert registered[registered.index('--profiles') + 1] == 'alpha,beta'
+    overridden = json.loads(subprocess.check_output([str(root / 'register.sh'), 'only-this'], text=True))
+    assert overridden[overridden.index('--profiles') + 1] == 'only-this'
 print('WSL config check passed: private credentials, shell quoting, stable identity, service paths.')
 
 # An old downloaded CLI must fail before the installer rewrites live worker files.
