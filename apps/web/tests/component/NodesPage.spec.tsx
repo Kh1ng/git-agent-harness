@@ -5,6 +5,18 @@ import { NodesPage } from '../../src/pages/NodesPage.js';
 import { WebSocketProvider } from '../../src/ws/WebSocketContext.js';
 
 async function connectSocket(page: Page) {
+  const now = new Date().toISOString();
+  await page.route('**/api/info', (route) => route.fulfill({ json: { identity: {
+    node_id: 'central', display_name: 'GAH Coordinator', advertised_url: 'https://central.example.com', version: '0.1.2', schema_digest: 'fixture'
+  } } }));
+  await page.route('**/api/pairing/session', (route) => route.fulfill({ json: { principal: { kind: 'owner' } } }));
+  await page.route('**/api/pairing/devices', (route) => route.fulfill({ json: { devices: [{
+    id: '11111111-1111-4111-8111-111111111111', name: "Colton's MacBook", created_at: now,
+    expires_at: '2099-01-01T00:00:00Z', revoked_at: null
+  }, {
+    id: '22222222-2222-4222-8222-222222222222', name: 'Old phone', created_at: now,
+    expires_at: '2099-01-01T00:00:00Z', revoked_at: now
+  }] } }));
   await page.evaluate(() => {
     class TestSocket {
       static OPEN = 1;
@@ -31,6 +43,22 @@ const observation = (id: string, state = 'healthy', at = new Date().toISOString(
   last_seen_at: at, profile: 'gah', profiles: ['gah'], resource_pressure: { cpu_percent: 0, rss_bytes: null, disk_percent: 25 },
   active_claims: [{ work_id: '#946', scope: 'implement', pid: 123, claimed_at: at, age_seconds: 0 }], active_work: [],
   backend_configured: {}, backend_instances: [], availability: [], recent_ledger: null, event_cursor: null });
+
+test('lists the coordinator, controller devices, and workers', async ({ mount, page }) => {
+  await connectSocket(page);
+  await page.route('**/api/registry/fleet/snapshot', (route) => route.fulfill({ json: {
+    nodes: [node('one')], observations: [observation('one')], leases: []
+  } }));
+
+  const component = await mount(<WebSocketProvider><NodesPage /></WebSocketProvider>);
+  await expect(component.getByRole('heading', { name: 'Coordinator' })).toBeVisible();
+  await expect(component.getByText('GAH Coordinator', { exact: true })).toBeVisible();
+  await expect(component.getByRole('heading', { name: 'Controller devices' })).toBeVisible();
+  await expect(component.getByText("Colton's MacBook", { exact: true })).toBeVisible();
+  await expect(component.getByText('Old phone', { exact: true })).toHaveCount(0);
+  await expect(component.getByRole('heading', { name: 'Workers' })).toBeVisible();
+  await expect(component.getByRole('button', { name: 'Worker one', exact: true })).toBeVisible();
+});
 
 test('fleet lists unknown, stale and classified health; click checks health and WS invalidates cached data', async ({ mount, page }, testInfo) => {
   await connectSocket(page);

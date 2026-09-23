@@ -217,6 +217,7 @@ export interface StopLoopResult {
 }
 
 export interface GahDataSource {
+  getCoordinatorInfo(): Promise<CoordinatorInfo>;
   getFleetSnapshot(): Promise<FleetSnapshot>;
   checkNodeHealth(nodeId: string): Promise<NodeHealthCheckResult>;
   getNodeDoctor(nodeId: string, profile: string): Promise<DoctorSnapshot>;
@@ -288,6 +289,16 @@ export interface GahDataSource {
   getAdminUpdatePending(): Promise<AdminUpdatePendingInfo>;
   getAdminUpdateStatus(): Promise<AdminUpdateState>;
   startAdminUpdate(): Promise<AdminUpdateState>;
+}
+
+export interface CoordinatorInfo {
+  identity: {
+    node_id: string;
+    display_name: string;
+    advertised_url: string;
+    version: string;
+    schema_digest: string;
+  };
 }
 
 // getRandomValues also works on explicitly enabled HTTP LAN hosts, where
@@ -377,6 +388,9 @@ async function deleteJson<T>(path: string, params?: Record<string, string | unde
 }
 
 export const gahApi: GahDataSource = {
+  getCoordinatorInfo() {
+    return getJson<CoordinatorInfo>('/api/info');
+  },
   getNodeDoctor(nodeId, profile) {
     return getJson<DoctorSnapshot>(`/api/registry/nodes/${encodeURIComponent(nodeId)}/doctor`, { profile });
   },
