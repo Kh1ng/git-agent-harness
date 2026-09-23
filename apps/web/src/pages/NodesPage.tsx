@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { DoctorSnapshot, FleetSnapshot, NodeHealthCheckResult, NodeObservationSnapshot } from '@git-agent-harness/contracts';
-import { gahApi } from '../api/client.js';
+import type { DoctorSnapshot, FleetSnapshot, NodeHealthCheckResult, NodeObservationSnapshot, PairedDevice } from '@git-agent-harness/contracts';
+import { gahApi, pairingApi, type CoordinatorInfo } from '../api/client.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { AddNodeSection } from './SettingsPage.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
@@ -34,6 +34,9 @@ function Resources({ observation }: { observation?: NodeObservationSnapshot }) {
 export function NodesPage() {
   const { messages, reconnectSeq, isConnected, profile } = useWebSocket();
   const [fleet, setFleet] = useState<FleetSnapshot | null>(null);
+  const [coordinator, setCoordinator] = useState<CoordinatorInfo['identity'] | null>(null);
+  const [controllers, setControllers] = useState<PairedDevice[] | null>(null);
+  const [controllerNotice, setControllerNotice] = useState('');
   const [error, setError] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [fetchedAt, setFetchedAt] = useState<number | null>(null);
@@ -49,9 +52,22 @@ export function NodesPage() {
     const sequence = ++refreshSequence.current;
     setRefreshing(true);
     try {
-      const snapshot = await gahApi.getFleetSnapshot();
+      const [snapshot, info] = await Promise.all([gahApi.getFleetSnapshot(), gahApi.getCoordinatorInfo()]);
+      let activeControllers: PairedDevice[] = [];
+      let controllerMessage = '';
+      try {
+        const { principal } = await pairingApi.session();
+        if (principal.kind === 'owner') {
+          const { devices } = await pairingApi.devices();
+          activeControllers = devices.filter((device) => !device.revoked_at && Date.parse(device.expires_at) > Date.now());
+        } else {
+          controllerMessage = 'Owner access is required to list all controller devices.';
+        }
+      } catch (err) {
+        controllerMessage = err instanceof Error ? `Cannot load controller devices: ${err.message}` : 'Cannot load controller devices.';
+      }
       if (sequence !== refreshSequence.current) return;
-      setFleet(snapshot); setError(''); setFetchedAt(Date.now());
+      setFleet(snapshot); setCoordinator(info.identity); setControllers(activeControllers); setControllerNotice(controllerMessage); setError(''); setFetchedAt(Date.now());
     } catch (err) {
       if (sequence === refreshSequence.current) setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -81,12 +97,38 @@ export function NodesPage() {
   const empty = fleet?.nodes.length === 0;
 
   return <>
-    <PageHeader title="Nodes" description="Registered workers, observed health, and work ownership."
+    <PageHeader title="Nodes" description="Coordinator, controller devices, workers, health, and work ownership."
       onRefresh={refresh} refreshing={refreshing} lastUpdated={fetchedAt}
       actions={<button type="button" className="btn-secondary" aria-expanded={showSetup || empty} onClick={() => setShowSetup(!showSetup)}>Register a node</button>} />
     {!isConnected && <p role="status" className="mb-4 text-sm text-warning">Live updates disconnected. Showing the last fetched snapshot; reconnect or refresh to update.</p>}
     {error && <p role="alert" className="mb-4 text-sm text-critical">Cannot load the registry: {error}. Use Refresh to retry.</p>}
     {!fleet && !error && <p role="status" className="text-secondary">Loading registered nodes…</p>}
+    {coordinator && <section className="mb-6 space-y-3" aria-labelledby="coordinator-title">
+      <h2 id="coordinator-title" className="text-base font-semibold text-primary">Coordinator</h2>
+      <div className="border-y border-subtle py-4 space-y-2" aria-label={coordinator.display_name}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="font-semibold text-primary">{coordinator.display_name}</p>
+          <span className={`text-sm ${isConnected ? 'text-primary' : 'text-warning'}`}>{isConnected ? 'Connected' : 'Disconnected'}</span>
+        </div>
+        <dl className="grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
+          <div><dt className="inline text-secondary">Node ID: </dt><dd className="inline break-all text-primary">{coordinator.node_id}</dd></div>
+          <div><dt className="inline text-secondary">Address: </dt><dd className="inline break-all text-primary">{coordinator.advertised_url}</dd></div>
+          <div><dt className="inline text-secondary">Version: </dt><dd className="inline text-primary">{coordinator.version}</dd></div>
+        </dl>
+      </div>
+    </section>}
+    {controllers && <section className="mb-6 space-y-3" aria-labelledby="controller-devices-title">
+      <h2 id="controller-devices-title" className="text-base font-semibold text-primary">Controller devices</h2>
+      {controllerNotice && <p className="text-sm text-secondary">{controllerNotice}</p>}
+      {!controllerNotice && controllers.length === 0 && <p className="text-sm text-secondary">No active paired controller devices.</p>}
+      {controllers.length > 0 && <ul className="divide-y divide-subtle border-y border-subtle">
+        {controllers.map((device) => <li key={device.id} className="flex flex-wrap items-center justify-between gap-2 py-4">
+          <span className="font-semibold text-primary">{device.name}</span>
+          <span className="text-sm text-secondary">Active · expires {new Date(device.expires_at).toLocaleDateString()}</span>
+        </li>)}
+      </ul>}
+    </section>}
+    {fleet && <h2 id="workers-title" className="mb-3 text-base font-semibold text-primary">Workers</h2>}
     {empty && <p className="mb-4 text-secondary">No registered nodes. Install a worker or register an existing worker below.</p>}
     {(showSetup || empty) && <div className="mb-6 space-y-4"><AddNodeSection /><RegisterWorker profile={profile ?? 'gah'} /></div>}
     {fleet && fleet.nodes.length > 0 && <>
