@@ -91,11 +91,11 @@ test('shared mock streams multiple chunks, tool activity, and completion', async
   await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0);
 });
 
-test('project skills inherit, override, and restore from chat', async ({ page, request }) => {
+test('blank chats edit project skills and existing chats keep isolated overrides', async ({ page, request }, testInfo) => {
   await selectScenario(request, 'normal');
   await openChat(page);
 
-  const trigger = page.getByLabel('Project skills');
+  const trigger = page.getByLabel('Skills');
   await expect(trigger).toContainText('Skills · 1');
   await trigger.click();
   await expect(page.getByText('Inherited default · codex')).toBeVisible();
@@ -106,6 +106,15 @@ test('project skills inherit, override, and restore from chat', async ({ page, r
   await expect(page.getByText('Changed since the latest applied turn. The next turn uses this selection.')).toBeVisible();
   await page.getByRole('button', { name: 'Use default' }).click();
   await expect(trigger).toContainText('Skills · 1');
+  await expect(page.getByText('Inherited default · codex')).toBeVisible();
+
+  await selectSeededSession(page);
+  await page.getByRole('checkbox').uncheck();
+  await expect(page.getByText('Chat override · codex')).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('chat-skill-override-desktop.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: testInfo.outputPath('chat-skill-override-mobile.png'), fullPage: true });
+  await page.getByRole('button', { name: 'Use project default' }).click();
   await expect(page.getByText('Inherited default · codex')).toBeVisible();
 });
 

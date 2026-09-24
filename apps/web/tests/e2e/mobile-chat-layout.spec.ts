@@ -72,14 +72,14 @@ for (const width of [320, 390]) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.getByPlaceholder('Commit message').press('Escape');
     await page.getByRole('button', { name: 'Close chat tools' }).click();
-    await page.getByLabel('Project skills', { exact: true }).click();
-    const skills = page.getByText('Project skills', { exact: true });
+    await page.getByLabel('Skills', { exact: true }).click();
+    const skills = page.getByText('Skills', { exact: true });
     await expect(skills).toBeVisible();
     const skillsBounds = await skills.boundingBox();
     expect(skillsBounds!.x).toBeGreaterThanOrEqual(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath(`chat-tools-${width}.png`), fullPage: true });
-    await page.getByLabel('Project skills', { exact: true }).click();
+    await page.getByLabel('Skills', { exact: true }).click();
     await expect(tools).toHaveAttribute('aria-expanded', 'false');
     await expect(draft).toHaveValue('Keep this unfinished message');
     await expect(page.getByLabel('Run on node', { exact: true })).toBeVisible();
@@ -87,7 +87,7 @@ for (const width of [320, 390]) {
     for (const control of [
       page.getByRole('button', { name: 'Provider picker' }),
       page.getByLabel('Run on node', { exact: true }),
-      page.getByLabel('Project skills', { exact: true }),
+      page.getByLabel('Skills', { exact: true }),
       page.getByRole('button', { name: 'Send', exact: true })
     ]) {
       const bounds = (await control.boundingBox())!;
@@ -104,7 +104,7 @@ for (const width of [320, 390]) {
       const controls = [
         page.getByRole('button', { name: 'Provider picker' }),
         page.getByLabel('Run on node', { exact: true }),
-        page.getByLabel('Project skills', { exact: true }),
+        page.getByLabel('Skills', { exact: true }),
         stop,
         page.getByRole('button', { name: 'Send', exact: true })
       ];

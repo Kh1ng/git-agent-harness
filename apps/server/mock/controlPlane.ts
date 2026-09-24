@@ -560,18 +560,29 @@ function createState(scenario: MockScenarioName, reset: number, previewOrigin?: 
   };
 }
 
-function skillBindingSummary(state: MockState, profile: string, backend: string): SkillBindingSummary {
-  const key = `${profile}\0${backend}`;
+function skillBindingKey(profile: string, backend: string, sessionId?: string | null): string {
+  return `${profile}\0${backend}${sessionId ? `\0${sessionId}` : ''}`;
+}
+
+function skillBindingSummary(state: MockState, profile: string, backend: string, sessionId?: string | null): SkillBindingSummary {
+  const projectKey = skillBindingKey(profile, backend);
+  const sessionKey = sessionId ? skillBindingKey(profile, backend, sessionId) : null;
   const compatible = state.skills.filter((skill) => skill.backends.length === 0 || skill.backends.includes(backend));
-  const overridden = Object.hasOwn(state.skillBindings, key);
+  const source = sessionKey && Object.hasOwn(state.skillBindings, sessionKey)
+    ? 'session'
+    : Object.hasOwn(state.skillBindings, projectKey) ? 'profile' : 'canonical';
+  const selectedIds = source === 'session' && sessionKey
+    ? state.skillBindings[sessionKey]
+    : source === 'profile' ? state.skillBindings[projectKey] : compatible.filter((skill) => skill.id === 'gah-manager').map((skill) => skill.id);
   return {
     profile,
     backend,
     instance: null,
-    source: overridden ? 'profile' : 'canonical',
+    sessionId: sessionId ?? null,
+    source,
     supported: BACKENDS.some((candidate) => candidate.id === backend && candidate.implemented),
-    selectedIds: overridden ? state.skillBindings[key] : compatible.filter((skill) => skill.id === 'gah-manager').map((skill) => skill.id),
-    observedSkills: state.skillObservations[key] ?? null,
+    selectedIds,
+    observedSkills: state.skillObservations[sessionKey ?? projectKey] ?? null,
     skills: compatible
   };
 }
@@ -1282,12 +1293,14 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   app.get('/api/skills/bindings', (req, res) => {
     const profile = bodyString(req.query.profile);
     const backend = bodyString(req.query.backend);
+    const sessionId = bodyString(req.query.sessionId);
     if (!profile || !backend) return jsonError(res, 400, 'Invalid skill binding', 'profile and backend required');
-    res.json(skillBindingSummary(state, profile, backend));
+    res.json(skillBindingSummary(state, profile, backend, sessionId));
   });
   app.put('/api/skills/bindings', (req, res) => {
     const profile = bodyString(req.body?.profile);
     const backend = bodyString(req.body?.backend);
+    const sessionId = bodyString(req.body?.sessionId);
     const skillIds = req.body?.skillIds;
     if (!profile || !backend || !Array.isArray(skillIds) || skillIds.some((id) => typeof id !== 'string')) {
       return jsonError(res, 400, 'Invalid skill binding', 'profile, backend, and string skillIds required');
@@ -1295,15 +1308,16 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     const compatible = new Set(skillBindingSummary(state, profile, backend).skills.map((skill) => skill.id));
     const unsupported = skillIds.find((id) => !compatible.has(id));
     if (unsupported) return jsonError(res, 400, 'Invalid skill binding', `Skill '${unsupported}' is unavailable for ${backend}`);
-    state.skillBindings[`${profile}\0${backend}`] = [...new Set(skillIds)];
-    res.json(skillBindingSummary(state, profile, backend));
+    state.skillBindings[skillBindingKey(profile, backend, sessionId)] = [...new Set(skillIds)];
+    res.json(skillBindingSummary(state, profile, backend, sessionId));
   });
   app.delete('/api/skills/bindings', (req, res) => {
     const profile = bodyString(req.query.profile);
     const backend = bodyString(req.query.backend);
+    const sessionId = bodyString(req.query.sessionId);
     if (!profile || !backend) return jsonError(res, 400, 'Invalid skill binding', 'profile and backend required');
-    delete state.skillBindings[`${profile}\0${backend}`];
-    res.json(skillBindingSummary(state, profile, backend));
+    delete state.skillBindings[skillBindingKey(profile, backend, sessionId)];
+    res.json(skillBindingSummary(state, profile, backend, sessionId));
   });
   app.get('/api/skills/:id', (req, res) => {
     const version = bodyString(req.query.version);

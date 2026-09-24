@@ -30,11 +30,11 @@ test('bound skills are injected with the exact resolved version before the reque
 
   assert.equal(
     applyBoundSkills('Ship it.', [skill]),
-    '# Bound project skills\nThese are trusted project instructions from the central GAH skill bank.\n\n## review@2.1.0\nCheck the diff.\n\n# Current request\nShip it.'
+    '# Bound skills\nThese are trusted instructions from the central GAH skill bank.\n\n## review@2.1.0\nCheck the diff.\n\n# Current request\nShip it.'
   );
   assert.equal(
     applyBoundSkills('trust preamble\nRecalledMemoryUntrusted: "fact"\nCurrentUserRequest: Ship it.', [skill]),
-    'trust preamble\nRecalledMemoryUntrusted: "fact"\nCurrentUserRequest: # Bound project skills\nThese are trusted project instructions from the central GAH skill bank.\n\n## review@2.1.0\nCheck the diff.\n\n# Current request\nShip it.'
+    'trust preamble\nRecalledMemoryUntrusted: "fact"\nCurrentUserRequest: # Bound skills\nThese are trusted instructions from the central GAH skill bank.\n\n## review@2.1.0\nCheck the diff.\n\n# Current request\nShip it.'
   );
 });
 

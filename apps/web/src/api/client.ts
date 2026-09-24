@@ -260,7 +260,7 @@ export interface GahDataSource {
   deleteSkill(id: string): Promise<{ removed: number }>;
   getSkillBindings(profile: string, backend: string, sessionId?: string | null): Promise<SkillBindingSummary>;
   setSkillBindings(data: SkillBindingUpdate): Promise<SkillBindingSummary>;
-  inheritSkillBindings(profile: string, backend: string, instance?: string | null): Promise<SkillBindingSummary>;
+  inheritSkillBindings(data: Omit<SkillBindingUpdate, 'skillIds'>): Promise<SkillBindingSummary>;
   recallContext(profile: string, query: string): Promise<{ context: string; memoryCount: number }>;
   getGitStatus(profile: string, sessionId?: string): Promise<{ branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean }>;
   getGitBranches(profile: string): Promise<{ branches: string[]; current: string }>;
@@ -574,9 +574,10 @@ export const gahApi: GahDataSource = {
   setSkillBindings(data) {
     return putJson<SkillBindingSummary, SkillBindingUpdate>('/api/skills/bindings', data);
   },
-  inheritSkillBindings(profile, backend, instance) {
+  inheritSkillBindings({ profile, backend, instance, sessionId }) {
     const query = new URLSearchParams({ profile, backend });
     if (instance) query.set('instance', instance);
+    if (sessionId) query.set('sessionId', sessionId);
     return deleteJson<SkillBindingSummary>(`/api/skills/bindings?${query.toString()}`);
   },
   recallContext(profile, query) {

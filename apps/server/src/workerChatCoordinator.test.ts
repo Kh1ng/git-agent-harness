@@ -19,7 +19,7 @@ import { createChatSession, sendManagerChatMessage, archiveChatSession, getSessi
 import { getSession } from './managerChat/chatSessions.js';
 import type { ManagerAdapter } from './managerChat/registry.js';
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
-import { putSkill, setProfileSkillBindings } from './skillBank.js';
+import { putSkill, setSkillBindings } from './skillBank.js';
 
 test('central keeps history and skills while authenticated turns move between worker checkouts', { timeout: 20_000 }, async t => {
   const root = mkdtempSync(join(tmpdir(), 'gah-central-worker-'));
@@ -80,7 +80,13 @@ test('central keeps history and skills while authenticated turns move between wo
       async runTurn(_key, input) {
         assert.ok(input.cwd?.startsWith(profile.worktree_base));
         assert.match(input.prompt, /central memory fact/);
-        assert.match(input.prompt, /central skill instruction/);
+        if (seen.length === 0) {
+          assert.match(input.prompt, /central skill instruction/);
+          assert.doesNotMatch(input.prompt, /chat-only skill instruction/);
+        } else {
+          assert.match(input.prompt, /chat-only skill instruction/);
+          assert.doesNotMatch(input.prompt, /central skill instruction/);
+        }
         if (seen.length) assert.ok(input.history.some(turn => turn.text === 'reply from one'));
         seen.push(nodeId);
         writeFileSync(join(input.cwd!, 'unfinished.txt'), `work on ${nodeId}`);
@@ -103,19 +109,23 @@ test('central keeps history and skills while authenticated turns move between wo
   }
   const project = addRemoteProject('one', profiles[0]);
   putSkill({ id: 'central', version: '1', displayName: 'Central', description: '', content: 'central skill instruction', backends: ['claude'], source: 'test', createdAt: 1, updatedAt: 1 });
-  setProfileSkillBindings(project.chat_profile, 'claude', ['central']);
+  putSkill({ id: 'chat-only', version: '1', displayName: 'Chat only', description: '', content: 'chat-only skill instruction', backends: ['claude'], source: 'test', createdAt: 1, updatedAt: 1 });
+  setSkillBindings(project.chat_profile, 'claude', ['central']);
   assert.match((await chatNodes(project.chat_profile, 'claude')).find(node => node.nodeId === 'one')!.reason!, /readiness is unknown/);
   await registry.getNodeObservations();
   const nodes = await chatNodes(project.chat_profile, 'claude');
   assert.equal(nodes.find(node => node.role === 'central')?.eligible, false);
   const session = await createChatSession(project.chat_profile, 'claude');
   const first = await sendManagerChatMessage(project.chat_profile, 'first task', 'first', session.id);
+  setSkillBindings(project.chat_profile, 'claude', ['chat-only'], { sessionId: session.id });
   const second = await sendManagerChatMessage(project.chat_profile, 'continue here', 'second', session.id, undefined, 'two');
   assert.deepEqual(seen, ['one', 'two']);
   assert.equal(first.turn.nodeId, 'one');
   assert.equal(second.turn.nodeId, 'two');
   assert.equal(recalls, 2);
-  assert.match(JSON.stringify(getSessionView(project.chat_profile, session.id)), /reply from one/);
+  const sessionView = JSON.stringify(getSessionView(project.chat_profile, session.id));
+  assert.match(sessionView, /reply from one/);
+  assert.match(sessionView, /\[skills · claude · session\] chat-only@1/);
   const saved = getSession(project.chat_profile, session.id)!;
   assert.equal(saved.createdAt, session.createdAt, 'worker switches preserve the central conversation creation date');
   assert.deepEqual(saved.workspaceNodes?.sort(), ['one', 'two']);
