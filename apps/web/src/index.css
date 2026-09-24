@@ -241,6 +241,29 @@
     @apply text-xs font-medium text-muted uppercase tracking-wide;
   }
 
+  .usage-progress {
+    appearance: none;
+    display: block;
+    width: 100%;
+    height: 0.5rem;
+    overflow: hidden;
+    border: 0;
+    border-radius: 9999px;
+    background-color: rgb(var(--surface-raised));
+  }
+  .usage-progress::-webkit-progress-bar {
+    background-color: rgb(var(--surface-raised));
+    border-radius: 9999px;
+  }
+  .usage-progress::-webkit-progress-value {
+    background-color: rgb(var(--accent));
+    border-radius: 9999px;
+  }
+  .usage-progress::-moz-progress-bar {
+    background-color: rgb(var(--accent));
+    border-radius: 9999px;
+  }
+
   /* Chat markdown keeps each role's bubble color while giving generated
      prose predictable spacing and bounded code/link rendering. */
   .chat-markdown {
