@@ -12,6 +12,7 @@ import { DEFAULT_CONVERSATION_ID, readNavigation, updateNavigation, type Page } 
 import { ProviderPicker, type ProviderSelection, type ProviderPickerProps } from '../components/ProviderPicker.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { CommitPrDialog } from '../components/CommitPrDialog.js';
+import { OpenLocalCheckout } from '../components/OpenLocalCheckout.js';
 import { gahApi } from '../api/client.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
@@ -292,8 +293,10 @@ function GitStripEntries({
 
 function GitStrip({
   profile,
+  openProfile,
   sessionId,
   nodeId,
+  nodeName,
   activePrNumber,
   provider,
   repoUrl,
@@ -305,8 +308,10 @@ function GitStrip({
   onRefresh
 }: {
   profile: string;
+  openProfile: string;
   sessionId: string | null;
   nodeId?: string;
+  nodeName: string;
   activePrNumber?: number;
   provider: string;
   repoUrl: string | null;
@@ -385,7 +390,9 @@ function GitStrip({
             </>
           )}
         </div>
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex flex-wrap items-center justify-end gap-1">
+          <OpenLocalCheckout profile={openProfile} nodeId={nodeId} nodeName={nodeName}
+            sessionId={status.cwd && !status.readOnly ? sessionId ?? undefined : undefined} />
           {!status.readOnly && (
             <button
               type="button"
@@ -1525,8 +1532,10 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
                 <div id="chat-git" className="rounded-md border border-subtle p-2.5">
                   <GitStrip
                     profile={profile}
+                    openProfile={currentProfileInfo.catalogName ?? currentProfileInfo.name}
                     sessionId={sessionId}
                     nodeId={chosenNode || undefined}
+                    nodeName={selectedNode?.displayName ?? (currentProfileInfo.remote ? 'remote worker' : 'central node')}
                     activePrNumber={activeSession?.prNumber}
                     provider={currentProfileInfo.provider}
                     repoUrl={currentProfileInfo.web_url}

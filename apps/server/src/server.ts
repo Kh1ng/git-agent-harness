@@ -2015,12 +2015,18 @@ export function createServer(
     const nodeId = typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined;
     try {
       const route = await chatRoute(profile, nodeId, undefined, false);
-      if (route.remote) return res.json(await route.remote.request({ action: 'git-status', sessionId }));
-      const target = await resolveGitTarget(route.profileName, sessionId);
-      if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
-      if (target.kind === 'read-only') return res.json({ branch: target.branch, changes: [], cwd: null, readOnly: true });
-      const result = await getGitStatusCached(route.profileName, target.cwd, sessionId);
-      res.json(result);
+      let result: object;
+      if (route.remote) {
+        result = await route.remote.request<object>({ action: 'git-status', sessionId });
+      } else {
+        const target = await resolveGitTarget(route.profileName, sessionId);
+        if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
+        result = target.kind === 'read-only'
+          ? { branch: target.branch, changes: [], cwd: null, readOnly: true }
+          : await getGitStatusCached(route.profileName, target.cwd, sessionId);
+      }
+      const identity = getCoordinatorIdentity(undefined, coordinatorPort);
+      res.json({ ...result, ownerNodeId: route.nodeId ?? identity.node_id, ownerNodeName: route.nodeName ?? identity.display_name });
     } catch (error) {
       res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
     }

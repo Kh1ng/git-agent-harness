@@ -29,6 +29,24 @@
             "allow-set-worker-running"
           ],
           "local": true
+        },
+        {
+          "identifier": "remote-open-project",
+          "description": "Configured central dashboards may resolve and open only local GAH checkout identifiers",
+          "windows": [
+            "dashboard"
+          ],
+          "permissions": [
+            "allow-desktop-open-context",
+            "allow-open-local-checkout"
+          ],
+          "remote": {
+            "urls": [
+              "http://*",
+              "https://*"
+            ]
+          },
+          "local": false
         }
       ]
     },

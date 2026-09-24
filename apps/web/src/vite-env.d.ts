@@ -8,5 +8,6 @@ interface Window {
   /** The desktop shell exposes navigation bridges; local commands stay in bundled Settings. */
   __GAH_DESKTOP_SETTINGS__?: boolean;
   __GAH_DESKTOP_NATIVE_NOTIFICATIONS__?: boolean;
+  __GAH_DESKTOP_OPEN_PROJECT__?: boolean;
   webkit?: { messageHandlers?: { gahController?: { postMessage: (message: unknown) => void } } };
 }

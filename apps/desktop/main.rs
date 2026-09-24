@@ -12,6 +12,8 @@ use tauri::{
     Manager,
 };
 
+mod open_project;
+
 const OWNER_CREDENTIAL_SERVICE: &str = "com.kh1ng.gah.owner";
 const OWNER_TOKEN_STORAGE_KEY: &str = "gah.coordinatorToken";
 const OWNER_TOKEN_CHANGED_EVENT: &str = "gah.coordinatorTokenChanged";
@@ -25,6 +27,7 @@ struct DesktopSettings {
     server_port: u16,
     node_role: String,
     wsl_distribution: String,
+    preferred_open_tool: String,
     presence: Presence,
 }
 
@@ -855,7 +858,9 @@ fn main() {
             node_role_status,
             set_node_role,
             worker_status,
-            set_worker_running
+            set_worker_running,
+            open_project::desktop_open_context,
+            open_project::open_local_checkout
         ])
         .setup(|app| {
             let settings = read_settings();
@@ -871,9 +876,9 @@ fn main() {
             // An inert UI marker; remote pages still have no IPC permissions.
             .initialization_script(
                 if cfg!(target_os = "macos") {
-                    "if (window === window.top) { window.__GAH_DESKTOP_SETTINGS__ = true; window.__GAH_DESKTOP_NATIVE_NOTIFICATIONS__ = true; }"
+                    "if (window === window.top) { window.__GAH_DESKTOP_SETTINGS__ = true; window.__GAH_DESKTOP_NATIVE_NOTIFICATIONS__ = true; window.__GAH_DESKTOP_OPEN_PROJECT__ = true; }"
                 } else {
-                    "if (window === window.top) window.__GAH_DESKTOP_SETTINGS__ = true;"
+                    "if (window === window.top) { window.__GAH_DESKTOP_SETTINGS__ = true; window.__GAH_DESKTOP_OPEN_PROJECT__ = true; }"
                 },
             )
             .on_page_load(|window, payload| {
