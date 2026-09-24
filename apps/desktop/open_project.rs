@@ -433,7 +433,7 @@ fn has_app(name: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn contains_xcode_project(path: &Path, depth: usize) -> bool {
     if depth == 0 {
         return false;
@@ -844,8 +844,8 @@ mod tests {
         .unwrap();
         assert_eq!(selected.profile.local_path, "/repo");
         assert_eq!(
-            checkout_candidate(&selected, Some("session1")).unwrap().0,
-            "/worktrees/gah-chat-owner/repo-session1"
+            PathBuf::from(checkout_candidate(&selected, Some("session1")).unwrap().0),
+            Path::new("/worktrees").join("gah-chat-owner/repo-session1")
         );
         assert!(select_project(
             vec![selected],
