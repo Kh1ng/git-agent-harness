@@ -18,13 +18,37 @@ git -C "$stage/origin.git" config receive.shallowUpdate true
 git push "$stage/origin.git" HEAD:refs/heads/main
 git clone "$stage/origin.git" "$stage/checkout"
 registration_file="$stage/registration.json"
+health_file="$stage/health-checks"
+health_mode="$stage/health-mode"
 export GAH_CENTRAL_URL=http://127.0.0.1:47819
-python3 - "$registration_file" <<'PY' &
+python3 - "$registration_file" "$health_file" "$health_mode" <<'PY' &
 import json, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/':
+            self.send_response(200)
+            self.end_headers()
+            return
+        if not self.path.startswith('/api/registry/nodes/') or not self.path.endswith('/health') or self.headers.get('Authorization') != 'Bearer ci-install-test-token':
+            self.send_error(401)
+            return
+        health = Path(sys.argv[2])
+        health.write_text(health.read_text() + '1\n' if health.exists() else '1\n')
+        unhealthy = Path(sys.argv[3]).exists()
+        body = json.dumps({
+            'status': 'unhealthy' if unhealthy else 'healthy',
+            'state': 'unreachable' if unhealthy else 'healthy',
+            **({'error': {'kind': 'NETWORK', 'message': 'reverse tunnel is unavailable'}} if unhealthy else {})
+        }).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         if self.path != '/api/registry/nodes' or self.headers.get('Authorization') != 'Bearer ci-install-test-token':
             self.send_error(401)
@@ -48,11 +72,16 @@ for _ in {1..50}; do /usr/bin/curl -s -o /dev/null "$GAH_CENTRAL_URL" && break; 
 /usr/bin/curl -s -o /dev/null "$GAH_CENTRAL_URL" || { echo 'ERROR: fake central did not start' >&2; exit 1; }
 export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
 export REGISTRATION_FILE="$registration_file"
+export HEALTH_FILE="$health_file"
 export GAH_NODE_ROLE=worker
 export COORDINATOR_TOKEN=ci-install-test-token
 # The hosted runner has no tailnet. Production workers keep the Tailscale default.
 export GAH_NODE_ADVERTISED_URL=http://127.0.0.1:3774
+export GAH_NODE_TRANSPORT_MODE=loopback
 bash "$stage/checkout/scripts/install-macos.sh"
+
+unset GAH_NODE_ADVERTISED_URL GAH_NODE_TRANSPORT_MODE
+bash "$stage/checkout/scripts/macos-launchd.sh" install worker "$stage/checkout"
 
 "${CARGO_HOME:-$HOME/.cargo}/bin/gah" --help >/dev/null
 python3 - <<'PY'
@@ -77,5 +106,14 @@ assert desktop['repository_path'].endswith('/checkout'), desktop
 assert desktop['server_port'] == 3774, desktop
 registration = __import__('json').loads(Path(os.environ['REGISTRATION_FILE']).read_text())
 assert registration['advertised_url'] == 'http://127.0.0.1:3774', registration
+assert registration['transport_mode'] == 'loopback', registration
+assert Path(os.environ['HEALTH_FILE']).read_text().count('1\n') >= 2
 print('Real macOS install passed: executable, worker role, relay URL, private credentials, agent configs, and launchd checkout state.')
 PY
+
+touch "$health_mode"
+if bash "$stage/checkout/scripts/macos-launchd.sh" start worker >"$stage/unreachable.out" 2>"$stage/unreachable.err"; then
+  echo 'ERROR: worker start succeeded while central reported the advertised URL unreachable.' >&2
+  exit 1
+fi
+grep -F 'central registered this worker but cannot reach its advertised URL: reverse tunnel is unavailable' "$stage/unreachable.err"

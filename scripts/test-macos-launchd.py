@@ -59,6 +59,7 @@ with tempfile.TemporaryDirectory(prefix='gah-launchd-') as temporary:
     assert worker['EnvironmentVariables']['PORT'] == '4774'
     assert worker['EnvironmentVariables']['GAH_BINARY'] == '/Users/test/.cargo/bin/gah'
     assert worker['EnvironmentVariables']['GAH_REGISTRY_TRANSPORT_MODE'] == 'authenticated_remote'
+    assert worker['EnvironmentVariables']['GAH_NODE_ADVERTISED_URL'] == 'https://mac.test.ts.net:4774'
     assert worker['EnvironmentVariables']['GAH_TAILSCALE_SERVE'] == '1'
     identity_path = home / '.local/share/gah/worker/identity.json'
     assert worker['EnvironmentVariables']['GAH_COORDINATOR_IDENTITY_PATH'] == str(identity_path)
@@ -73,12 +74,22 @@ with tempfile.TemporaryDirectory(prefix='gah-launchd-') as temporary:
     assert settings['server_port'] == 4774
     assert worker_path.stat().st_mode & 0o777 == 0o644
 
-    subprocess.run(['bash', str(source), 'install', 'worker', str(repo)], env=env, check=True)
+    legacy_worker = plistlib.loads(worker_path.read_bytes())
+    del legacy_worker['EnvironmentVariables']['GAH_NODE_ADVERTISED_URL']
+    worker_path.write_bytes(plistlib.dumps(legacy_worker))
+    update_env = {key: value for key, value in env.items() if key != 'GAH_NODE_ADVERTISED_URL'}
+    subprocess.run(['bash', str(source), 'install', 'worker', str(repo)], env=update_env, check=True)
     assert worker_path.exists(), 'a fresh worker must run before its first profile is imported'
+    worker = plistlib.loads(worker_path.read_bytes())
+    identity = json.loads(identity_path.read_text())
+    assert identity['advertised_url'] == 'https://mac.test.ts.net:4774'
+    assert worker['EnvironmentVariables']['GAH_REGISTRY_TRANSPORT_MODE'] == 'authenticated_remote'
 
     tailscale = root / 'tailscale'
     tailscale.write_text('#!/bin/sh\nprintf \'%s\\n\' \'{"Self":{"DNSName":"mac.test.ts.net.","TailscaleIPs":["100.64.0.42","fd7a:115c:a1e0::1"]}}\'\n')
     tailscale.chmod(0o700)
+    worker_path.unlink()
+    identity_path.unlink()
     default_transport_env = {
         key: value for key, value in env.items() if key != 'GAH_NODE_ADVERTISED_URL'
     }
@@ -95,10 +106,44 @@ with tempfile.TemporaryDirectory(prefix='gah-launchd-') as temporary:
     assert worker['EnvironmentVariables']['GAH_REGISTRY_TRANSPORT_MODE'] == 'trusted_lan'
     assert worker['EnvironmentVariables']['GAH_TAILSCALE_SERVE'] == '0'
 
+    tunnel_env = {
+        key: value for key, value in default_transport_env.items()
+        if key not in ('GAH_NODE_ADVERTISED_URL', 'GAH_NODE_TRANSPORT_MODE')
+    }
+    tunnel_env.update({
+        'GAH_NODE_SSH_TARGET': 'khing@central.test',
+        'GAH_NODE_SSH_REMOTE_PORT': '48774',
+    })
+    subprocess.run(['bash', str(source), 'install', 'worker', str(repo), profile], env=tunnel_env, check=True)
+    worker = plistlib.loads(worker_path.read_bytes())
+    identity = json.loads(identity_path.read_text())
+    tunnel_path = agents / 'dev.git-agent-harness.worker-tunnel.plist'
+    tunnel = plistlib.loads(tunnel_path.read_bytes())
+    assert identity['advertised_url'] == 'http://127.0.0.1:48774'
+    assert worker['EnvironmentVariables']['HOST'] == '127.0.0.1'
+    assert worker['EnvironmentVariables']['PORT'] == '4774'
+    assert worker['EnvironmentVariables']['GAH_REGISTRY_TRANSPORT_MODE'] == 'loopback'
+    assert worker['EnvironmentVariables']['GAH_ALLOW_INSECURE_HTTP'] == '0'
+    assert tunnel['ProgramArguments'][-3:] == ['-R', '127.0.0.1:48774:127.0.0.1:4774', 'khing@central.test']
+
+    preserved_tunnel_env = {
+        key: value for key, value in tunnel_env.items()
+        if key not in ('GAH_NODE_SSH_TARGET', 'GAH_NODE_SSH_REMOTE_PORT')
+    }
+    subprocess.run(['bash', str(source), 'install', 'worker', str(repo), profile], env=preserved_tunnel_env, check=True)
+    worker = plistlib.loads(worker_path.read_bytes())
+    identity = json.loads(identity_path.read_text())
+    assert identity['advertised_url'] == 'http://127.0.0.1:48774'
+    assert worker['EnvironmentVariables']['GAH_REGISTRY_TRANSPORT_MODE'] == 'loopback'
+    assert tunnel_path.exists(), 'an update must preserve the managed SSH tunnel'
+
     invalid = subprocess.run(
         ['bash', str(source), 'install', 'central', str(repo)],
         env={**env, 'GAH_DESKTOP_SERVER_PORT': '80'}, capture_output=True, text=True,
     )
     assert invalid.returncode != 0 and 'between 1024 and 65535' in invalid.stderr
 
-print('macOS LaunchAgents passed: role exclusivity, worker server identity, gateway ownership, fixed port, and persisted checkout.')
+    subprocess.run(['bash', str(source), 'install', 'central', str(repo)], env=env, check=True)
+    assert not tunnel_path.exists(), 'central mode must remove the worker tunnel LaunchAgent'
+
+print('macOS LaunchAgents passed: transport preservation, reverse tunnel, role exclusivity, and worker identity.')
