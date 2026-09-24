@@ -11,6 +11,8 @@ const status = document.querySelector<HTMLElement>('#status')!;
 const dock = document.querySelector<HTMLInputElement>('#show-dock')!;
 const launchWindow = document.querySelector<HTMLInputElement>('#launch-window')!;
 const tray = document.querySelector<HTMLInputElement>('#show-tray')!;
+const ownerToken = document.querySelector<HTMLInputElement>('#owner-token')!;
+const ownerState = document.querySelector<HTMLElement>('#owner-state')!;
 const isMac = navigator.userAgent.includes('Mac');
 
 function showPresence(presence: Presence) {
@@ -61,6 +63,21 @@ async function refresh() {
   document.querySelector<HTMLElement>('#tools')!.hidden = false;
 }
 
+async function connect() {
+  await invoke('connect_dashboard', { settings: { central_url: central.value.trim(), wsl_distribution: distribution.value.trim() } });
+}
+
+async function refreshOwnerCredential() {
+  if (!central.value.trim()) {
+    ownerState.textContent = 'Save a central node address first.';
+    return;
+  }
+  const saved = await invoke<boolean>('owner_credential_status', { origin: central.value.trim() });
+  ownerState.textContent = saved
+    ? 'Owner access is saved in this computer\'s credential vault.'
+    : 'No owner token is saved for this central origin.';
+}
+
 document.querySelector('#back')!.addEventListener('click', () => {
   void perform(async () => { await invoke('open_central_settings'); });
 });
@@ -68,8 +85,23 @@ document.querySelector('#back')!.addEventListener('click', () => {
 document.querySelector('#connection')!.addEventListener('submit', (event) => {
   event.preventDefault();
   void perform(async () => {
-    await invoke('connect_dashboard', { settings: { central_url: central.value.trim(), wsl_distribution: distribution.value.trim() } });
+    await connect();
     status.textContent = 'Connecting… Use Settings in the app menu if central is unavailable.';
+  });
+});
+document.querySelector('#owner-credential')!.addEventListener('submit', (event) => {
+  event.preventDefault();
+  void perform(async () => {
+    await invoke('save_owner_credential', { origin: central.value.trim(), token: ownerToken.value });
+    ownerToken.value = '';
+    await connect();
+  });
+});
+document.querySelector('#forget-owner')!.addEventListener('click', () => {
+  void perform(async () => {
+    await invoke('forget_owner_credential', { origin: central.value.trim() });
+    ownerToken.value = '';
+    await connect();
   });
 });
 document.querySelector('#presence')!.addEventListener('submit', (event) => {
@@ -99,6 +131,7 @@ for (const role of ['central', 'worker'] as const) {
 void perform(async () => {
   const settings = await invoke<Settings>('desktop_settings');
   central.value = settings.central_url;
+  await refreshOwnerCredential();
   document.querySelector<HTMLButtonElement>('#back')!.hidden = !settings.central_url;
   distribution.value = settings.wsl_distribution;
   document.querySelector<HTMLElement>('#dock-label')!.hidden = !isMac;

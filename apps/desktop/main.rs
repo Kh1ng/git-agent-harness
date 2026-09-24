@@ -8,8 +8,13 @@ use std::{process::Child, sync::Mutex};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
+    webview::PageLoadEvent,
     Manager,
 };
+
+const OWNER_CREDENTIAL_SERVICE: &str = "com.kh1ng.gah.owner";
+const OWNER_TOKEN_STORAGE_KEY: &str = "gah.coordinatorToken";
+const OWNER_TOKEN_CHANGED_EVENT: &str = "gah.coordinatorTokenChanged";
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -164,6 +169,81 @@ fn central_url(value: &str) -> Result<tauri::Url, String> {
         return Err("Use an HTTP or HTTPS address without embedded credentials.".into());
     }
     Ok(url)
+}
+
+fn central_origin(value: &str) -> Result<String, String> {
+    Ok(central_url(value)?.origin().ascii_serialization())
+}
+
+fn owner_credential(origin: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(OWNER_CREDENTIAL_SERVICE, origin)
+        .map_err(|error| format!("Cannot access the operating system credential vault: {error}"))
+}
+
+fn read_owner_credential(origin: &str) -> Result<Option<String>, String> {
+    match owner_credential(origin)?.get_password() {
+        Ok(token) => Ok(Some(token)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(format!(
+            "Cannot read owner access from the operating system credential vault: {error}"
+        )),
+    }
+}
+
+/** Set the tab-scoped web credential only for the configured central origin. */
+fn owner_session_script(
+    configured_origin: &str,
+    page_url: &tauri::Url,
+    token: Option<&str>,
+) -> Option<String> {
+    if page_url.origin().ascii_serialization() != configured_origin {
+        return None;
+    }
+    let origin = serde_json::to_string(configured_origin).ok()?;
+    let token = serde_json::to_string(&token).ok()?;
+    Some(format!(
+        "(() => {{ if (window.location.origin !== {origin}) return; const key = {key}; const next = {token}; const previous = sessionStorage.getItem(key); if (next === null) sessionStorage.removeItem(key); else sessionStorage.setItem(key, next); if (previous !== next) window.dispatchEvent(new Event({event})); }})();",
+        key = serde_json::to_string(OWNER_TOKEN_STORAGE_KEY).ok()?,
+        event = serde_json::to_string(OWNER_TOKEN_CHANGED_EVENT).ok()?,
+    ))
+}
+
+#[tauri::command]
+fn owner_credential_status(window: tauri::WebviewWindow, origin: String) -> Result<bool, String> {
+    local_only(&window)?;
+    let origin = central_origin(&origin)?;
+    Ok(read_owner_credential(&origin)?.is_some())
+}
+
+#[tauri::command]
+fn save_owner_credential(
+    window: tauri::WebviewWindow,
+    origin: String,
+    token: String,
+) -> Result<(), String> {
+    local_only(&window)?;
+    let origin = central_origin(&origin)?;
+    let token = token.trim();
+    if token.is_empty() || token.len() > 4096 || token.chars().any(char::is_control) {
+        return Err("Enter a valid central owner token.".into());
+    }
+    owner_credential(&origin)?
+        .set_password(token)
+        .map_err(|error| {
+            format!("Cannot save owner access in the operating system credential vault: {error}")
+        })
+}
+
+#[tauri::command]
+fn forget_owner_credential(window: tauri::WebviewWindow, origin: String) -> Result<(), String> {
+    local_only(&window)?;
+    let origin = central_origin(&origin)?;
+    match owner_credential(&origin)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!(
+            "Cannot remove owner access from the operating system credential vault: {error}"
+        )),
+    }
 }
 
 // Only the bundled Settings document may operate this computer. The dashboard
@@ -769,6 +849,9 @@ fn main() {
             save_presence,
             connect_dashboard,
             open_central_settings,
+            owner_credential_status,
+            save_owner_credential,
+            forget_owner_credential,
             node_role_status,
             set_node_role,
             worker_status,
@@ -793,6 +876,25 @@ fn main() {
                     "if (window === window.top) window.__GAH_DESKTOP_SETTINGS__ = true;"
                 },
             )
+            .on_page_load(|window, payload| {
+                if payload.event() != PageLoadEvent::Finished {
+                    return;
+                }
+                let Ok(origin) = central_origin(&read_settings().central_url) else {
+                    return;
+                };
+                if payload.url().origin().ascii_serialization() != origin {
+                    return;
+                }
+                match read_owner_credential(&origin) {
+                    Ok(token) => {
+                        if let Some(script) = owner_session_script(&origin, payload.url(), token.as_deref()) {
+                            let _ = window.eval(script);
+                        }
+                    }
+                    Err(error) => eprintln!("Owner credential unavailable: {error}"),
+                }
+            })
             .on_navigation(move |url| {
                 if url.as_str() == "gah://settings" || url.as_str() == "gah://settings/" {
                     let allowed = navigation_app
@@ -1036,6 +1138,26 @@ mod tests {
         ] {
             assert!(central_url(value).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn owner_credential_injection_is_limited_to_the_configured_origin() {
+        let configured = "https://central.example.test";
+        let matching: tauri::Url = "https://central.example.test/?page=settings"
+            .parse()
+            .unwrap();
+        let other: tauri::Url = "https://other.example.test/".parse().unwrap();
+
+        assert!(owner_session_script(configured, &other, Some("owner-secret")).is_none());
+        let saved = owner_session_script(configured, &matching, Some("owner-'secret"))
+            .expect("matching origin receives the saved credential");
+        assert!(saved.contains("owner-'secret"));
+        assert!(saved.contains("sessionStorage.setItem"));
+
+        let forgotten = owner_session_script(configured, &matching, None)
+            .expect("matching origin clears a forgotten credential");
+        assert!(forgotten.contains("sessionStorage.removeItem"));
+        assert!(!forgotten.contains("owner-secret"));
     }
 
     #[test]

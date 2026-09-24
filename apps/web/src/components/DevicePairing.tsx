@@ -68,7 +68,9 @@ export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () =
   const url = offer ? `${offer.server.origin}/#pair=${offer.code}&server=${offer.server.id}` : '';
   return <section className="mt-3 text-sm max-sm:[&_button]:min-h-11 max-sm:[&_input]:min-h-11" aria-label="Device pairing">
     {!pending && <div className="mb-3"><ConnectionStatus isConnected={isConnected} isConnecting={isConnecting} error={connectionError} serverVersion={serverVersion} /></div>}
-    {principal === 'device' && <p role="status" className="mb-2 text-good">Paired device · Dashboard access enabled</p>}
+    {principal === 'owner' && <p role="status" className="mb-2 text-good">Owner · Administrative access enabled</p>}
+    {principal === 'device' && <p role="status" className="mb-2 text-good">Paired controller · Dashboard access enabled</p>}
+    {principal === null && !pending && <p role="status" className={`mb-2 ${isConnected ? 'text-warning' : 'text-muted'}`}>Disconnected · No owner or controller access</p>}
     <div className="flex flex-wrap gap-2">
     {!pending && typeof nativeController?.postMessage === 'function' && <button type="button" className="btn-primary" onClick={() => nativeController.postMessage?.('scanPairingCode')}>Scan pairing QR code</button>}
     <button type="button" className="btn-secondary" aria-expanded={open} onClick={() => setOpen(!open)}>{principal === 'owner' ? 'Pair a device' : principal === 'device' ? 'Manage pairing' : 'Pair this device'}</button>
