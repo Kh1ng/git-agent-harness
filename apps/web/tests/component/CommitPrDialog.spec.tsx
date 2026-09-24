@@ -65,7 +65,12 @@ test('commits selected files, preserves excluded work, and publishes only after 
   await component.getByLabel('Draft').check();
   expect(requests).toHaveLength(1);
 
-  await component.getByRole('button', { name: 'Push and create draft pull request' }).click();
+  const publish = component.getByRole('button', { name: 'Push and create draft pull request' });
+  await component.getByLabel('Base branch').fill('release');
+  await expect(publish).toBeDisabled();
+  await component.getByLabel('Base branch').fill('main');
+  await expect(publish).toBeEnabled();
+  await publish.click();
   await expect(component.getByRole('link', { name: 'Open pull request' })).toHaveAttribute('href', 'https://github.com/owner/repo/pull/12');
   expect(requests[1]).toEqual({
     path: '/api/git/publish',

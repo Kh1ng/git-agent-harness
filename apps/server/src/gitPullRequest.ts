@@ -3,6 +3,12 @@ import { execProviderCli } from './managerChat/providerCli.js';
 
 type PullRequestProfile = Pick<ProfileSummary, 'provider' | 'repo' | 'web_url' | 'local_path'>;
 
+const GITLAB_DRAFT_PREFIX = /^(draft:|\[draft\]|\(draft\))\s*/i;
+
+function gitLabTitle(title: string, draft: boolean): string {
+  return draft ? (GITLAB_DRAFT_PREFIX.test(title) ? title : `Draft: ${title}`) : title.replace(GITLAB_DRAFT_PREFIX, '');
+}
+
 function validatedProjectUrl(profile: PullRequestProfile): URL {
   const url = new URL(profile.web_url ?? '');
   if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash
@@ -25,7 +31,7 @@ function providerRequest(profile: PullRequestProfile, value: unknown): GitReview
   if (url.origin !== project.origin || url.username || url.password || url.search || url.hash
     || url.pathname !== `${project.pathname}${suffix}`) throw new Error('Provider returned an unexpected pull request URL');
   const draft = request.isDraft === true || request.draft === true || request.work_in_progress === true
-    || /^(draft:|\[draft\]|\(draft\))/i.test(title);
+    || GITLAB_DRAFT_PREFIX.test(title);
   return { number: number as number, title, url: url.href, draft };
 }
 
@@ -74,8 +80,7 @@ export async function createGitLabMergeRequest(
     }
     target = response.default_branch;
   }
-  const title = input.draft && !/^(draft:|\[draft\]|\(draft\))/i.test(input.title)
-    ? `Draft: ${input.title}` : input.title;
+  const title = gitLabTitle(input.title, input.draft);
   const { stdout } = await execProviderCli('glab', [
     'api', `${project}/merge_requests`, '--hostname', projectUrl.host, '--method', 'POST',
     '--raw-field', `source_branch=${branch.trim()}`, '--raw-field', `target_branch=${target}`,
@@ -123,7 +128,7 @@ export async function publishPullRequest(
   if (profile.provider !== 'gitlab') throw new Error('Unsupported repository provider');
   if (!existing) return { url: await createGitLabMergeRequest(profile, input, cwd), existing: false };
   const url = validatedProjectUrl(profile);
-  const title = input.draft && !/^(draft:|\[draft\]|\(draft\))/i.test(input.title) ? `Draft: ${input.title}` : input.title;
+  const title = gitLabTitle(input.title, input.draft);
   const { stdout } = await execProviderCli('glab', [
     'api', `projects/${encodeURIComponent(profile.repo)}/merge_requests/${existing.number}`,
     '--hostname', url.host, '--method', 'PUT',

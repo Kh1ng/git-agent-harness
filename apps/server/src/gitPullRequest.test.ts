@@ -95,6 +95,12 @@ process.stdout.write(JSON.stringify(method === 'GET' ? {default_branch:'trunk'} 
       }
       assert.deepEqual(calls(), []);
     });
+    await t.test('git review returns a safe actionable base error', async () => {
+      const response = await fetch(`${baseUrl}/api/git/review?profile=gitlab&base=missing`);
+      assert.equal(response.status, 502);
+      const body = await response.json() as { message: string };
+      assert.match(body.message, /Base branch 'missing' is unavailable locally/);
+    });
     await t.test('CLI/API failures and invalid host configuration fail without exposing provider output', async () => {
       for (const failure of ['failure', 'invalid-json', 'api-error', 'wrong-host', 'wrong-project']) {
         writeFileSync(mode, failure);
@@ -151,6 +157,15 @@ if (args[0] === 'pr' && args[1] === 'list') {
   process.stdout.write('https://github.com/owner/repo/pull/12\\n');
 }
 `, { mode: 0o755 });
+  writeFileSync(join(bin, 'glab'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
+const method = args[args.indexOf('--method') + 1];
+process.stdout.write(JSON.stringify(method === 'GET'
+  ? [{iid:12,title:'Draft: Old title',web_url:'https://gitlab.example.test/owner/repo/-/merge_requests/12',draft:true}]
+  : {iid:12,title:'Manual title',web_url:'https://gitlab.example.test/owner/repo/-/merge_requests/12',draft:false}));
+`, { mode: 0o755 });
   const savedPath = process.env.PATH;
   process.env.PATH = `${bin}:${savedPath}`;
   t.after(() => {
@@ -172,4 +187,10 @@ if (args[0] === 'pr' && args[1] === 'list') {
   assert.deepEqual(calls.filter(args => args[1] === 'create'), []);
   assert.ok(calls.some(args => args[1] === 'edit' && args.includes('Manual title') && args.includes('Manual body')));
   assert.ok(calls.some(args => args[1] === 'ready' && args.includes('--undo')));
+
+  writeFileSync(log, '');
+  const gitlab = { provider: 'gitlab', repo: 'owner/repo', web_url: 'https://gitlab.example.test/owner/repo', local_path: checkout };
+  await publishPullRequest(gitlab, checkout, { title: 'Draft: Manual title', body: 'Body', base: 'main', draft: false });
+  const gitlabCalls = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.ok(gitlabCalls.some(args => args.includes('--method') && args.includes('PUT') && args.includes('title=Manual title')));
 });
