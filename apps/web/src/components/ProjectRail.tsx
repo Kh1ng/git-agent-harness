@@ -151,6 +151,7 @@ export function ProjectRail({
                 aria-current={(session?.id ?? null) === selectedSessionId ? 'page' : undefined}>
                 <span className="block truncate text-sm text-primary">{session ? formatChatName(session) : 'Default conversation'}</span>
                 {session && <span className="block truncate text-[11px] text-muted">{session.branch}</span>}
+                {session?.titleSuggestion && <span className="block truncate text-[11px] text-muted">Suggested by {session.titleSuggestion.backendInstance ?? session.titleSuggestion.backend} · {session.titleSuggestion.actualModel ?? session.titleSuggestion.effectiveModel}</span>}
               </button>
             )}
           </BoundedCollection>
@@ -172,6 +173,7 @@ export function ProjectRail({
                     aria-current={session.id === selectedSessionId ? 'page' : undefined}>
                     <span className="block truncate text-sm text-secondary">{formatChatName(session)}</span>
                     <span className="block truncate text-[11px] text-muted">{session.branch}</span>
+                    {session.titleSuggestion && <span className="block truncate text-[11px] text-muted">Suggested by {session.titleSuggestion.backendInstance ?? session.titleSuggestion.backend} · {session.titleSuggestion.actualModel ?? session.titleSuggestion.effectiveModel}</span>}
                   </button>
                 )}
               </BoundedCollection>

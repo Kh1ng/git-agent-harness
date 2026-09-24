@@ -13,6 +13,7 @@ import { basename, dirname, join } from 'node:path';
 import type { PermissionPublish } from './ManagerChatManager.js';
 import { respondManagerChatPermission, sendManagerChatMessage } from './ManagerChatManager.js';
 import { stateBase } from './chatSessions.js';
+import { redactTextSecrets } from './redactText.js';
 
 const MAX_TEXT = 4_000;
 const MAX_ATTACHMENT_BYTES = 64 * 1024;
@@ -121,10 +122,7 @@ function bounded(value: unknown, max: number): value is string {
 }
 
 export function redactBridgeText(value: string): string {
-  return value
-    .replace(/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,})\b/g, '[REDACTED:TOKEN]')
-    .replace(/(authorization\s*:\s*bearer\s+)[^\s]+/gi, '$1[REDACTED:TOKEN]')
-    .replace(/((?:api[_-]?key|token|secret|password)\s*[=:]\s*)[^\s]+/gi, '$1[REDACTED:SECRET]');
+  return redactTextSecrets(value);
 }
 
 function telegramId(value: unknown, allowNegative = false): string | null {

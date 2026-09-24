@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import { ArrowUpDown, FlaskConical } from 'lucide-react';
-import type { BackendModelComparison, ExportHealth, ReportGroupBy, UsageRollupSummary } from '@git-agent-harness/contracts';
+import type { BackendModelComparison, ExportHealth, HelperUsageRecord, ReportGroupBy, UsageRollupSummary } from '@git-agent-harness/contracts';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -14,6 +14,39 @@ import { TrendChart } from '../components/TrendChart.js';
 import { formatCost, formatDuration, formatPercent, formatTokens, formatCount, formatAge, oldestFetchedAt } from '../lib/format.js';
 
 const TELEMETRY_REFRESH_MS = 60 * 1000;
+
+function HelperUsageCard({ profile }: { profile: string | undefined }) {
+  const [records, setRecords] = useState<HelperUsageRecord[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const load = () => gahApi.getHelperUsage(100)
+    .then(result => { setRecords(result.records.filter(record => !profile || record.profile === profile).slice(-10).reverse()); setError(null); })
+    .catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
+  useEffect(() => { void load(); }, [profile]);
+  useAutoRefresh(load, TELEMETRY_REFRESH_MS);
+  useWsReconnectRefresh(load);
+  return (
+    <section className="card-padded">
+      <h3 className="text-sm font-semibold text-primary">Helper model usage</h3>
+      <p className="mt-0.5 text-xs text-muted">Titles and Git prose stay separate from coding-session usage.</p>
+      {error ? <p role="alert" className="mt-3 text-xs text-critical">Helper usage unavailable: {error}</p> : records.length === 0 ? (
+        <p className="mt-3 text-xs text-muted">No helper tasks recorded.</p>
+      ) : (
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead><tr className="border-b border-subtle text-left text-muted"><th className="py-2 pr-3 font-medium">Task</th><th className="py-2 pr-3 font-medium">Account / model</th><th className="py-2 pr-3 font-medium">Tokens</th><th className="py-2 pr-3 font-medium">Latency</th><th className="py-2 font-medium">Outcome</th></tr></thead>
+            <tbody>{records.map(record => <tr key={`${record.timestamp}-${record.kind}`} className="border-b border-subtle/50">
+              <td className="py-2 pr-3 text-primary">{record.kind.replace('_', ' ')}</td>
+              <td className="py-2 pr-3">{record.backendInstance ?? record.backend ?? 'fallback'}{record.effectiveModel ? ` · ${record.effectiveModel}${record.actualModel && record.actualModel !== record.effectiveModel ? ` → ${record.actualModel}` : ''}` : ''}</td>
+              <td className="py-2 pr-3 tabular-nums">{record.totalTokens === null ? 'unreported' : formatTokens(record.totalTokens)}</td>
+              <td className="py-2 pr-3 tabular-nums">{record.latencyMs < 1000 ? `${Math.round(record.latencyMs)}ms` : formatDuration(record.latencyMs / 1000)}</td>
+              <td className="py-2">{record.fallbackReason?.replaceAll('_', ' ') ?? 'generated'}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
 
 /** Issue #230: operator-visible tone/label for each export health state. */
 const EXPORT_HEALTH_TONE: Record<ExportHealth['status'], { tone: StatusTone; label: string }> = {
@@ -457,6 +490,8 @@ export function TelemetryPage() {
       {sorted.length > 0 && <UsageSummary rows={sorted} />}
 
       <ChatUsageRollupCard profile={profile ?? undefined} />
+
+      <HelperUsageCard profile={profile ?? undefined} />
 
       <section className="card-padded">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">

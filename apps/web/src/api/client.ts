@@ -61,6 +61,8 @@ import type {
   ChatPrStartResult,
   ChatReclaimResult,
   GitReviewState,
+  HelperSuggestion,
+  HelperUsageRecord,
   AdminUpdatePendingInfo,
   AdminUpdateState
 } from '@git-agent-harness/contracts';
@@ -265,6 +267,8 @@ export interface GahDataSource {
   recallContext(profile: string, query: string): Promise<{ context: string; memoryCount: number }>;
   getGitStatus(profile: string, sessionId?: string, nodeId?: string): Promise<{ branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean; ownerNodeId: string; ownerNodeName: string }>;
   getGitReview(profile: string, options?: { sessionId?: string; nodeId?: string; base?: string }): Promise<GitReviewState>;
+  suggestGitProse(profile: string, data: { kind: 'commit_message' | 'pr_summary'; sessionId?: string; nodeId?: string; files?: string[]; base?: string }): Promise<HelperSuggestion>;
+  getHelperUsage(limit?: number): Promise<{ records: HelperUsageRecord[] }>;
   getGitBranches(profile: string): Promise<{ branches: string[]; current: string }>;
   getGitLog(profile: string, limit?: number): Promise<{ commits: { hash: string; short: string; subject: string; author: string; ago: string }[] }>;
   getGitPrs(profile: string): Promise<{ prs: ChatPrSummary[]; warning?: string }>;
@@ -594,6 +598,12 @@ export const gahApi: GahDataSource = {
   },
   getGitReview(profile, options = {}) {
     return getJson<GitReviewState>('/api/git/review', { profile, ...options });
+  },
+  suggestGitProse(profile, data) {
+    return postJson<HelperSuggestion, typeof data>(`/api/git/suggest?profile=${encodeURIComponent(profile)}`, data);
+  },
+  getHelperUsage(limit) {
+    return getJson<{ records: HelperUsageRecord[] }>('/api/manager-chat/helper-usage', { limit: limit?.toString() });
   },
   getGitBranches(profile) {
     return getJson('/api/git/branches', { profile });

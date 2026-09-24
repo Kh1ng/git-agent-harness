@@ -2,15 +2,18 @@
  * central owns prompts, permissions, memory, skills, and the conversation log. */
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
-import type { ChatSessionSummary, ChatTranscriptTurn, NodeRoleStatus, ProfileSummary } from '@git-agent-harness/contracts';
+import type { ChatSessionSummary, ChatTranscriptTurn, HelperRoutePreference, HelperTaskKind, NodeRoleStatus, ProfileSummary } from '@git-agent-harness/contracts';
 import { runProfileList } from './gahCli.js';
 import { resolveInstanceAdapter, type ManagerAdapter } from './managerChat/registry.js';
 import { archiveSession, chatKey, createSession, getSession, resolveSessionCwd, touchSession, updateSession, type ChatSessionStoreOptions } from './managerChat/chatSessions.js';
-import { commitGitChanges, getGitReviewState, getGitStatusCached } from './gitCache.js';
+import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewChangesForHelper, getSelectedChangesForHelper } from './gitCache.js';
 import { findOpenPullRequest, publishPullRequest } from './gitPullRequest.js';
 
 import { isUsageLimitError } from './managerChat/acpAdapter.js';
 import type { WorkerChatEvent } from './workerChatProtocol.js';
+import { chatTitleInput, commitMessageInput, linkedIssueNumbers, prSummaryInput, runHelperTask } from './managerChat/helperTasks.js';
+import { fetchLinkedChatIssues } from './managerChat/issueChats.js';
+import { validHelperRoute } from './managerChat/settingsStore.js';
 
 interface ActiveExecution {
   key: string;
@@ -39,7 +42,7 @@ export function createWorkerChatRouter(deps: {
     if (!body || typeof body.profile !== 'string' || !body.profile || typeof body.action !== 'string') {
       return void res.status(400).json({ error: 'A profile and worker chat action are required.' });
     }
-    const actions = ['create', 'prepare', 'archive', 'models', 'commands', 'run', 'cancel', 'steer', 'permission', 'git-status', 'git-review', 'git-commit', 'git-publish'];
+    const actions = ['create', 'prepare', 'archive', 'models', 'commands', 'run', 'cancel', 'steer', 'permission', 'git-status', 'git-review', 'git-commit', 'git-publish', 'helper-task'];
     if (!actions.includes(body.action)) return void res.status(400).json({ error: 'Unknown worker chat action.' });
     const sessionId = body.sessionId;
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(sessionId))) {
@@ -57,6 +60,60 @@ export function createWorkerChatRouter(deps: {
         }
         workspaceOperations.add(key);
         workspaceKey = key;
+      }
+      if (body.action === 'helper-task') {
+        const kind = body.kind as HelperTaskKind;
+        if (!['chat_title', 'commit_message', 'pr_summary'].includes(kind)
+          || typeof body.sourceBackend !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(body.sourceBackend)
+          || !(body.sourceBackendInstance === null || (typeof body.sourceBackendInstance === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(body.sourceBackendInstance)))
+          || !(body.preference === undefined || (validHelperRoute(body.preference)
+            && body.preference.profile === body.profile && body.preference.sourceBackend === body.sourceBackend
+            && body.preference.sourceBackendInstance === body.sourceBackendInstance))) {
+          return void res.status(400).json({ error: 'Invalid helper task.' });
+        }
+        let input: string;
+        let fallback: { text: string; title?: string; body?: string };
+        let skippedFiles: string[] = [];
+        if (kind === 'chat_title') {
+          if (typeof body.message !== 'string' || typeof body.fallback !== 'string' || body.fallback.length > 64) return void res.status(400).json({ error: 'A first message is required.' });
+          input = chatTitleInput(body.message);
+          fallback = { text: body.fallback };
+        } else {
+          let cwd = profile.local_path;
+          if (sessionId) {
+            const resolved = await resolveSessionCwd(body.profile, sessionId, profile, deps.sessions);
+            if (!resolved?.session.worktreePath) return void res.status(403).json({ error: 'Session has no writable checkout.' });
+            cwd = resolved.cwd;
+          }
+          if (kind === 'commit_message') {
+            if (!Array.isArray(body.files) || !body.files.every((path: unknown) => typeof path === 'string')) return void res.status(400).json({ error: 'Select changed files.' });
+            const selected = getSelectedChangesForHelper(cwd, body.files);
+            input = commitMessageInput(selected.files, selected.patch);
+            fallback = { text: '' };
+            skippedFiles = selected.skippedFiles;
+          } else {
+            const base = typeof body.base === 'string' ? body.base : undefined;
+            const review = await getGitReviewState(cwd, base);
+            const changes = getReviewChangesForHelper(cwd, base);
+            input = prSummaryInput(
+              { ...review, patch: changes.patch },
+              await fetchLinkedChatIssues(profile, linkedIssueNumbers(review))
+            );
+            fallback = { text: '', title: '', body: '' };
+            skippedFiles = changes.skippedFiles;
+          }
+        }
+        return void res.json({ ...await runHelperTask({
+          profile: body.profile,
+          sourceBackend: body.sourceBackend,
+          sourceBackendInstance: body.sourceBackendInstance,
+          kind,
+          input,
+          fallback
+        }, {
+          ...(body.preference ? { preference: body.preference as HelperRoutePreference } : {}),
+          adapter: async (_profile, backend, instance) => adapterFor(backend, body.profile, instance)
+        }), ...(skippedFiles.length ? { skippedFiles } : {}) });
       }
       if (body.action === 'run' && (typeof body.requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(body.requestId)
         || typeof body.prompt !== 'string' || !Array.isArray(body.history)

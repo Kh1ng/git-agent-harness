@@ -1,4 +1,5 @@
 import type { ManagerAdapter } from './managerChat/registry.js';
+import type { HelperTaskResult } from './managerChat/helperTasks.js';
 
 type TurnInput = Parameters<ManagerAdapter['runTurn']>[1];
 export type WorkerChatEvent =
@@ -65,6 +66,7 @@ type WorkerChatReply = import('@git-agent-harness/contracts').ChatSessionSummary
   | { session: import('@git-agent-harness/contracts').ChatSessionSummary }
   | Awaited<ReturnType<ManagerAdapter['listModels']>>
   | Awaited<ReturnType<ManagerAdapter['listCommands']>>
+  | HelperTaskResult
   | { success: true };
 const timestamp = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 const optionalString = (value: unknown): value is string | undefined => value === undefined || typeof value === 'string';
@@ -73,6 +75,38 @@ const optionalString = (value: unknown): value is string | undefined => value ==
  * Project only the action's response fields before central stores or renders them. */
 export function parseWorkerChatReply(value: unknown, request: Record<string, unknown>): WorkerChatReply {
   const invalid = () => new Error('Worker returned an invalid chat response.');
+  if (request.action === 'helper-task') {
+    if (!object(value) || value.kind !== request.kind || !['chat_title', 'commit_message', 'pr_summary'].includes(String(value.kind))
+      || typeof value.text !== 'string' || value.text.length > 12_000
+      || !(value.title === undefined || (typeof value.title === 'string' && value.title.length <= 200))
+      || !(value.body === undefined || (typeof value.body === 'string' && value.body.length <= 12_000))
+      || !(value.skippedFiles === undefined || (Array.isArray(value.skippedFiles) && value.skippedFiles.length <= 100
+        && value.skippedFiles.every(path => typeof path === 'string' && path.length <= 300)))
+      || typeof value.generated !== 'boolean' || !nullableString(value.backend)
+      || !nullableString(value.backendInstance) || !nullableString(value.requestedModel)
+      || !nullableString(value.effectiveModel) || !nullableString(value.actualModel)
+      || !nullableString(value.fallbackReason) || typeof value.latencyMs !== 'number' || !Number.isFinite(value.latencyMs) || value.latencyMs < 0) throw invalid();
+    let usage: HelperTaskResult['usage'] = null;
+    if (value.usage !== null) {
+      const candidate = value.usage;
+      if (!object(candidate) || !measurement(candidate.input_tokens, true) || !measurement(candidate.output_tokens, true)
+        || !measurement(candidate.total_tokens, true) || !measurement(candidate.estimated_cost_usd) || !measurement(candidate.duration_seconds)) throw invalid();
+      usage = {
+        input_tokens: candidate.input_tokens, output_tokens: candidate.output_tokens,
+        total_tokens: candidate.total_tokens, estimated_cost_usd: candidate.estimated_cost_usd,
+        duration_seconds: candidate.duration_seconds
+      };
+    }
+    return {
+      kind: value.kind as HelperTaskResult['kind'], text: value.text,
+      ...(typeof value.title === 'string' ? { title: value.title } : {}),
+      ...(typeof value.body === 'string' ? { body: value.body } : {}),
+      ...(Array.isArray(value.skippedFiles) ? { skippedFiles: value.skippedFiles as string[] } : {}),
+      generated: value.generated, backend: value.backend, backendInstance: value.backendInstance,
+      requestedModel: value.requestedModel, effectiveModel: value.effectiveModel, actualModel: value.actualModel,
+      fallbackReason: value.fallbackReason, usage, latencyMs: value.latencyMs
+    };
+  }
   if (request.action === 'create' || request.action === 'prepare' || request.action === 'archive') {
     const session = request.action === 'prepare' && object(value) ? value.session : value;
     if (!object(session) || typeof session.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(session.id)

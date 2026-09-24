@@ -72,7 +72,7 @@ import { pairingRouter } from './pairing.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { RegistryService, NodeDoctorError } from './registryService.js';
 import { ClaimsService, ClaimConflictError } from './claimsService.js';
-import { readSettings as readManagerChatSettings, setBackendForProfile, writeSettings as writeManagerChatSettings } from './managerChat/settingsStore.js';
+import { backendForProfile, helperRouteFor, readSettings as readManagerChatSettings, setBackendForProfile, validHelperRoute, writeSettings as writeManagerChatSettings } from './managerChat/settingsStore.js';
 import { gatewayBaseUrl, gatewayApiKey, gatewayHealth, recall } from './managerChat/memoryGatewayClient.js';
 import { readGatewaySettings, writeGatewaySettings } from './gatewaySettingsStore.js';
 import { detectTailscaleIPv4 } from './tailscaleDetect.js';
@@ -96,13 +96,15 @@ import {
   enqueueManagerWake as enqueueManagerChatWake
 } from './managerChat/ManagerChatManager.js';
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
-import { listAllChatSessions, resolveSessionCwd, chatSessionStoreOptions } from './managerChat/chatSessions.js';
+import { getSession, listAllChatSessions, resolveSessionCwd, chatSessionStoreOptions } from './managerChat/chatSessions.js';
 import { usageRollup } from './managerChat/usageRollup.js';
 import { MessagingBridge } from './managerChat/messagingBridge.js';
 import { projectRoutes } from './projectRoutes.js';
 import { chatNodes, chatRoute, configureChatRouting } from './chatRouting.js';
 import { createWorkerChatRouter } from './workerChat.js';
-import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitReviewState, commitGitChanges, cliInDir } from './gitCache.js';
+import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitReviewState, getReviewChangesForHelper, getSelectedChangesForHelper, commitGitChanges, cliInDir } from './gitCache.js';
+import { commitMessageInput, helperFallback, linkedIssueNumbers, prSummaryInput, publicSuggestion, readHelperUsage, recordHelperUsage, runHelperTask, type HelperTaskResult } from './managerChat/helperTasks.js';
+import { fetchLinkedChatIssues } from './managerChat/issueChats.js';
 import { createGitLabMergeRequest, findOpenPullRequest, publishPullRequest } from './gitPullRequest.js';
 import {
   addCanonicalSkillBinding,
@@ -1488,11 +1490,18 @@ export function createServer(
         typeof req.body?.profileOverrides === 'object' && req.body.profileOverrides !== null
           ? req.body.profileOverrides
           : current.profileOverrides;
+      const helperRoutes = req.body?.helperRoutes === undefined
+        ? current.helperRoutes
+        : Array.isArray(req.body.helperRoutes) && req.body.helperRoutes.every(validHelperRoute)
+          ? req.body.helperRoutes
+          : null;
+      if (!helperRoutes) return res.status(400).json({ error: 'Invalid helper routes' });
       writeManagerChatSettings({
         defaultBackend,
         profileOverrides,
         modelOverrides: current.modelOverrides,
-        reasoningEffortOverrides: current.reasoningEffortOverrides
+        reasoningEffortOverrides: current.reasoningEffortOverrides,
+        helperRoutes
       });
       res.json({ success: true });
     } catch (error) {
@@ -2065,6 +2074,71 @@ export function createServer(
         : 'Failed to prepare git review';
       res.status(502).json({ error: 'Failed to prepare git review', message });
     }
+  });
+
+  app.post('/api/git/suggest', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : undefined;
+    const nodeId = typeof req.body?.nodeId === 'string' ? req.body.nodeId : undefined;
+    const kind = req.body?.kind;
+    if (kind !== 'commit_message' && kind !== 'pr_summary') return res.status(400).json({ error: 'Invalid helper task.' });
+    const source = sessionId ? getSession(profile, sessionId, chatSessionStoreOptions) : null;
+    if (sessionId && !source) return res.status(404).json({ error: 'Chat session not found' });
+    const sourceBackend = source?.backend ?? backendForProfile(profile);
+    const sourceBackendInstance = source?.backendInstance ?? null;
+    const preference = helperRouteFor(profile, sourceBackend, sourceBackendInstance);
+    const startedAt = Date.now();
+    let result: HelperTaskResult;
+    try {
+      const route = await chatRoute(profile, nodeId, sourceBackend, false);
+      if (route.remote) {
+        result = await route.remote.request<HelperTaskResult>({
+          action: 'helper-task', sessionId, kind, sourceBackend, sourceBackendInstance,
+          ...(kind === 'commit_message' ? { files: req.body?.files } : { base: req.body?.base }),
+          ...(preference ? { preference: { ...preference, profile: route.profileName } } : {})
+        });
+      } else {
+        const target = await resolveGitTarget(route.profileName, sessionId);
+        if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
+        if (target.kind === 'read-only') return res.status(403).json({ error: 'Session is read-only and has no writable checkout' });
+        let input: string;
+        let skippedFiles: string[] = [];
+        if (kind === 'commit_message') {
+          const files = req.body?.files;
+          if (!Array.isArray(files) || !files.every(path => typeof path === 'string')) return res.status(400).json({ error: 'Select changed files.' });
+          const selected = getSelectedChangesForHelper(target.cwd, files);
+          input = commitMessageInput(selected.files, selected.patch);
+          skippedFiles = selected.skippedFiles;
+        } else {
+          const base = typeof req.body?.base === 'string' ? req.body.base : undefined;
+          const changes = getReviewChangesForHelper(target.cwd, base);
+          const review = { ...await getGitReviewState(target.cwd, base), patch: changes.patch };
+          const profileInfo = await resolveProfileInfo(route.profileName);
+          const issues = profileInfo ? await fetchLinkedChatIssues(profileInfo, linkedIssueNumbers(review)) : [];
+          input = prSummaryInput(review, issues);
+          skippedFiles = changes.skippedFiles;
+        }
+        result = { ...await runHelperTask({
+          profile: route.profileName, sourceBackend, sourceBackendInstance, kind, input,
+          fallback: kind === 'commit_message' ? { text: '' } : { text: '', title: '', body: '' }
+        }, preference ? { preference } : {}), ...(skippedFiles.length ? { skippedFiles } : {}) };
+      }
+    } catch {
+      result = helperFallback(kind, kind === 'commit_message' ? { text: '' } : { text: '', title: '', body: '' }, 'helper_unavailable', Date.now() - startedAt, {
+        backend: preference?.backend ?? sourceBackend,
+        backendInstance: preference ? preference.backendInstance : sourceBackendInstance,
+        requestedModel: preference?.model ?? null,
+        effectiveModel: null,
+        actualModel: null
+      });
+    }
+    try { recordHelperUsage(profile, result); } catch (error) { console.error('[server] helper telemetry failed:', error); }
+    res.json(publicSuggestion(result));
+  });
+
+  app.get('/api/manager-chat/helper-usage', (req, res) => {
+    const limit = typeof req.query.limit === 'string' ? Number(req.query.limit) : 100;
+    res.json({ records: readHelperUsage(Number.isFinite(limit) ? limit : 100) });
   });
 
   app.get('/api/git/branches', async (req, res) => {

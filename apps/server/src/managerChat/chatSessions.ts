@@ -269,7 +269,7 @@ export function getSession(profile: string, sessionId: string, opts?: ChatSessio
 export function updateSession(
   profile: string,
   sessionId: string,
-  patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string },
+  patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string; titleSuggestion?: ChatSessionSummary['titleSuggestion'] },
   opts?: ChatSessionStoreOptions
 ): ChatSessionSummary {
   const sessions = readIndex(profile, opts);
@@ -280,7 +280,10 @@ export function updateSession(
   if (patch.backendInstance !== undefined) session.backendInstance = patch.backendInstance;
   if (patch.model !== undefined) session.model = patch.model;
   if (patch.reasoningEffort !== undefined) session.reasoningEffort = patch.reasoningEffort;
-  if (patch.title !== undefined) session.title = patch.title;
+  if (patch.title !== undefined) {
+    session.title = patch.title;
+    session.titleSuggestion = patch.titleSuggestion;
+  }
   writeIndex(profile, sessions, opts);
   return session;
 }

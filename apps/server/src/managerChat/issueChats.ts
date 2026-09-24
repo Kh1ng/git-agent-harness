@@ -92,7 +92,7 @@ export async function listChatIssues(
   });
 }
 
-async function fetchIssue(
+export async function fetchChatIssue(
   profileInfo: Pick<ProfileSummary, 'provider' | 'local_path'>,
   issueNumber: number
 ): Promise<ReturnType<typeof normalizeIssue>> {
@@ -108,7 +108,15 @@ export async function fetchChatIssueState(
   profileInfo: Pick<ProfileSummary, 'provider' | 'local_path'>,
   issueNumber: number
 ): Promise<string> {
-  return (await fetchIssue(profileInfo, issueNumber)).state;
+  return (await fetchChatIssue(profileInfo, issueNumber)).state;
+}
+
+export async function fetchLinkedChatIssues(
+  profileInfo: Pick<ProfileSummary, 'provider' | 'local_path'>,
+  issueNumbers: number[]
+): Promise<ChatIssueSummary[]> {
+  const issues = await Promise.all(issueNumbers.map(number => fetchChatIssue(profileInfo, number).catch(() => null)));
+  return issues.filter((issue): issue is NonNullable<typeof issue> => issue !== null);
 }
 
 async function labelExists(
@@ -182,7 +190,7 @@ export async function startIssueChat(input: StartIssueChatInput): Promise<StartI
   );
   if (live) return { session: live, existing: true };
 
-  const issue = await fetchIssue(profileInfo, issueNumber);
+  const issue = await fetchChatIssue(profileInfo, issueNumber);
   const normalizedState = issue.state.toLowerCase();
   if (normalizedState !== 'open' && normalizedState !== 'opened') {
     throw new Error(`Issue #${issueNumber} is ${issue.state}, not open`);

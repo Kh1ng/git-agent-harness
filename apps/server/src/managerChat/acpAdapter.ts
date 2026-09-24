@@ -692,8 +692,8 @@ export function createAcpBackend(
     return state.client.availableCommands;
   }
 
-  async function listModels(gahProfile: string) {
-    const state = await connect(gahProfile);
+  async function listModels(gahProfile: string, cwd?: string) {
+    const state = await connect(gahProfile, cwd);
     return {
       models: state.models,
       currentModelId: state.currentModelId,

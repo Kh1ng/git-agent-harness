@@ -9,6 +9,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { DEFAULT_BACKEND_ID } from './registry.js';
+import type { HelperRoutePreference } from '@git-agent-harness/contracts';
 
 export interface ManagerChatSettings {
   defaultBackend: string;
@@ -21,6 +22,7 @@ export interface ManagerChatSettings {
   modelOverrides: Record<string, string>;
   /** Last ACP-advertised thought level picked per profile/backend. */
   reasoningEffortOverrides: Record<string, string>;
+  helperRoutes: HelperRoutePreference[];
 }
 
 function settingsPath(): string {
@@ -39,7 +41,8 @@ export function readSettings(): ManagerChatSettings {
         reasoningEffortOverrides:
           typeof data.reasoningEffortOverrides === 'object' && data.reasoningEffortOverrides
             ? data.reasoningEffortOverrides
-            : {}
+            : {},
+        helperRoutes: Array.isArray(data.helperRoutes) ? data.helperRoutes.filter(validHelperRoute) : []
       };
     } catch {
       // Fall through to defaults on a corrupt file rather than crash.
@@ -49,8 +52,32 @@ export function readSettings(): ManagerChatSettings {
     defaultBackend: DEFAULT_BACKEND_ID,
     profileOverrides: {},
     modelOverrides: {},
-    reasoningEffortOverrides: {}
+    reasoningEffortOverrides: {},
+    helperRoutes: []
   };
+}
+
+function boundedId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(value);
+}
+
+function boundedText(value: unknown, limit: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= limit && !/[\0-\x1f\x7f]/.test(value);
+}
+
+export function validHelperRoute(value: unknown): value is HelperRoutePreference {
+  if (!value || typeof value !== 'object') return false;
+  const route = value as Partial<HelperRoutePreference>;
+  return boundedText(route.profile, 128) && boundedId(route.sourceBackend)
+    && (route.sourceBackendInstance === null || boundedId(route.sourceBackendInstance))
+    && typeof route.enabled === 'boolean' && boundedId(route.backend)
+    && (route.backendInstance === null || boundedId(route.backendInstance))
+    && (route.model === null || boundedText(route.model, 256));
+}
+
+export function helperRouteFor(profile: string, backend: string, backendInstance: string | null): HelperRoutePreference | undefined {
+  return readSettings().helperRoutes.find(route => route.profile === profile && route.sourceBackend === backend
+    && route.sourceBackendInstance === backendInstance);
 }
 
 export function writeSettings(settings: ManagerChatSettings): void {
