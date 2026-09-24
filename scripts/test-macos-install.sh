@@ -17,9 +17,41 @@ git init --bare --initial-branch=main "$stage/origin.git"
 git -C "$stage/origin.git" config receive.shallowUpdate true
 git push "$stage/origin.git" HEAD:refs/heads/main
 git clone "$stage/origin.git" "$stage/checkout"
+central_url_file="$stage/central-url"
+registration_file="$stage/registration.json"
+python3 - "$central_url_file" "$registration_file" <<'PY' &
+import json, sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.path != '/api/registry/nodes' or self.headers.get('Authorization') != 'Bearer ci-install-test-token':
+            self.send_error(401)
+            return
+        Path(sys.argv[2]).write_bytes(self.rfile.read(int(self.headers['Content-Length'])))
+        body = json.dumps({'warnings': []}).encode()
+        self.send_response(201)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_):
+        pass
+
+server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+Path(sys.argv[1]).write_text(f'http://127.0.0.1:{server.server_port}')
+server.serve_forever()
+PY
+central_pid=$!
+trap 'kill "$central_pid" 2>/dev/null || true' EXIT
+for _ in {1..50}; do [ -s "$central_url_file" ] && break; sleep 0.1; done
+[ -s "$central_url_file" ] || { echo 'ERROR: fake central did not start' >&2; exit 1; }
 export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+export REGISTRATION_FILE="$registration_file"
 export GAH_NODE_ROLE=worker
-export GAH_CENTRAL_URL=https://central.example.test
+export GAH_CENTRAL_URL="$(cat "$central_url_file")"
 export COORDINATOR_TOKEN=ci-install-test-token
 # The hosted runner has no tailnet. Production workers keep the Tailscale default.
 export GAH_NODE_ADVERTISED_URL=http://127.0.0.1:3774
@@ -46,5 +78,7 @@ assert (Path.home() / 'Applications/GAH.app').is_dir(), 'the deterministic updat
 desktop = __import__('json').loads((config_root / 'gah/desktop.json').read_text())
 assert desktop['repository_path'].endswith('/checkout'), desktop
 assert desktop['server_port'] == 3774, desktop
+registration = __import__('json').loads(Path(os.environ['REGISTRATION_FILE']).read_text())
+assert registration['advertised_url'] == 'http://127.0.0.1:3774', registration
 print('Real macOS install passed: executable, worker role, relay URL, private credentials, agent configs, and launchd checkout state.')
 PY
