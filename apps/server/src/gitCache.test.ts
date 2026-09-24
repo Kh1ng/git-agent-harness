@@ -119,6 +119,17 @@ describe('commitGitChanges', () => {
       /current worktree changes/
     );
   });
+
+  test('treats selected file names as literals', async () => {
+    const dir = initRepo();
+    writeFileSync(join(dir, 'a1.ts'), 'leave local\n');
+    writeFileSync(join(dir, 'a[1].ts'), 'commit this\n');
+
+    await commitGitChanges('gitcache-test-literal-path', dir, 'literal path', undefined, ['a[1].ts']);
+
+    assert.equal(execFileSync('git', ['-C', dir, 'show', '--format=', '--name-only', 'HEAD'], { encoding: 'utf8' }).trim(), 'a[1].ts');
+    assert.match(execFileSync('git', ['-C', dir, 'status', '--short'], { encoding: 'utf8' }), /a1\.ts/);
+  });
 });
 
 test('getGitReviewState separates dirty files from the committed PR diff', async () => {

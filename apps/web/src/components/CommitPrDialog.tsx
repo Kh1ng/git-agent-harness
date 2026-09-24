@@ -88,11 +88,11 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
   };
 
   const publish = async () => {
-    if (!review || !title.trim() || busy) return;
+    if (!review || !title.trim() || busy || base.trim() !== review.base) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await gahApi.publishGitPr(profile, { title: title.trim(), body, base, draft, sessionId, nodeId });
+      const result = await gahApi.publishGitPr(profile, { title: title.trim(), body, base: base.trim(), draft, sessionId, nodeId });
       setPublished(result.url);
       onChanged();
     } catch (cause) {
@@ -105,6 +105,7 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
   const selectedFiles = [...selected];
   const dirty = (review?.files.length ?? 0) > 0;
   const canReviewPr = !!review && review.commits.length > 0 && (!dirty || continueDirty);
+  const baseNeedsReview = !!review && base.trim() !== review.base;
 
   return (
     <dialog ref={dialog} onClose={onClose} aria-label="Commit and pull request review"
@@ -189,6 +190,7 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
                     className="w-full resize-y rounded-md border border-subtle bg-raised px-3 py-2 text-sm text-primary focus:border-accent focus:outline-none" />
                 </label>
                 <label className="flex items-center gap-2 text-xs text-secondary"><input type="checkbox" checked={draft} onChange={event => setDraft(event.target.checked)} /> Draft</label>
+                {baseNeedsReview && <p role="status" className="text-xs text-warning">Refresh the review before publishing to a different base branch.</p>}
 
                 <div className="grid gap-3 text-xs sm:grid-cols-3">
                   <div className="rounded-md border border-subtle p-3"><p className="mb-2 text-muted">Commits</p>{review.commits.map(commit => <p key={commit.hash}><code>{commit.short}</code> {commit.subject}</p>)}</div>
@@ -197,7 +199,7 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
                 </div>
                 <details className="rounded-md border border-subtle p-3"><summary className="cursor-pointer text-xs font-medium">Committed diff</summary><pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap text-[11px] text-secondary">{review.patch || 'No committed diff.'}</pre></details>
                 <div className="flex flex-wrap items-center gap-3">
-                  <button type="button" className="btn-primary text-xs" disabled={busy || !title.trim()} onClick={() => void publish()}>
+                  <button type="button" className="btn-primary text-xs" disabled={busy || !title.trim() || baseNeedsReview} onClick={() => void publish()}>
                     <GitPullRequest size={13} /> Push and {review.existing ? 'update' : 'create'} {draft ? `draft ${review.providerLabel}` : review.providerLabel}
                   </button>
                   {published && <a href={published} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs text-accent hover:underline"><ExternalLink size={13} /> Open {review.providerLabel}</a>}
