@@ -109,6 +109,7 @@ test('blank chats edit project skills and existing chats keep isolated overrides
   await expect(page.getByText('Inherited default · codex')).toBeVisible();
 
   await selectSeededSession(page);
+  await trigger.click();
   await page.getByRole('checkbox').uncheck();
   await expect(page.getByText('Chat override · codex')).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('chat-skill-override-desktop.png'), fullPage: true });
