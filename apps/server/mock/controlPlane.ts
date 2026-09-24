@@ -46,8 +46,8 @@ import type {
   ReportData,
   ReportSeriesData,
   ServerMessage,
+  Skill,
   SkillBindingSummary,
-  SkillSummary,
   StatusSnapshot,
   UsageRollupSummary
 } from '@git-agent-harness/contracts';
@@ -155,6 +155,8 @@ interface ConversationState {
   reconnectResumed: boolean;
 }
 
+type MockSkill = Skill & { bound: boolean };
+
 interface MockState {
   scenario: MockScenarioName;
   reset: number;
@@ -163,7 +165,7 @@ interface MockState {
   profiles: ProfileSummary[];
   config: ConfigSummary;
   gateway: GatewaySettingsSummary;
-  skills: SkillSummary[];
+  skills: MockSkill[];
   skillBindings: Record<string, string[]>;
   skillObservations: Record<string, { id: string; version: string }[]>;
   loopRunning: boolean;
@@ -218,8 +220,11 @@ const MOCK_SKILLS = [{
   description: 'Coordinates mock GAH work without touching a provider.',
   backends: ['hermes', 'codex', 'claude', 'opencode'],
   source: 'mock/in-memory',
+  content: '# GAH manager\n\nCoordinate mock GAH work without touching a provider.',
+  createdAt: FIXED_NOW,
+  updatedAt: FIXED_NOW,
   bound: true
-}] satisfies SkillSummary[];
+}] satisfies MockSkill[];
 
 const MOCK_ADMIN_PENDING = {
   current: { hash: '1111111111111111111111111111111111111111', short: '1111111', subject: 'Current mock build' },
@@ -1249,6 +1254,31 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     res.json(state.gateway);
   });
   app.get('/api/skills', (_req, res) => res.json({ skills: state.skills }));
+  app.post('/api/skills', (req, res) => {
+    const id = bodyString(req.body?.id);
+    const version = bodyString(req.body?.version);
+    const content = bodyString(req.body?.content);
+    if (!id || !version || !content?.trim()) return jsonError(res, 400, 'Invalid skill', 'id, version, and non-empty content are required');
+    const index = state.skills.findIndex(skill => skill.id === id && skill.version === version);
+    const existing = state.skills[index];
+    const now = Date.now();
+    const skill: MockSkill = {
+      id,
+      version,
+      displayName: bodyString(req.body?.displayName) ?? id,
+      description: bodyString(req.body?.description) ?? '',
+      content,
+      backends: Array.isArray(req.body?.backends) ? req.body.backends.filter((value: unknown): value is string => typeof value === 'string') : [],
+      source: bodyString(req.body?.source) ?? 'api',
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      bound: existing?.bound ?? false
+    };
+    if (index >= 0) state.skills[index] = skill;
+    else state.skills.push(skill);
+    const { bound: _bound, ...record } = skill;
+    res.status(existing ? 200 : 201).json(record);
+  });
   app.get('/api/skills/bindings', (req, res) => {
     const profile = bodyString(req.query.profile);
     const backend = bodyString(req.query.backend);
@@ -1274,6 +1304,21 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     if (!profile || !backend) return jsonError(res, 400, 'Invalid skill binding', 'profile and backend required');
     delete state.skillBindings[`${profile}\0${backend}`];
     res.json(skillBindingSummary(state, profile, backend));
+  });
+  app.get('/api/skills/:id', (req, res) => {
+    const version = bodyString(req.query.version);
+    const skill = state.skills.find(candidate => candidate.id === req.params.id && (!version || candidate.version === version));
+    if (!skill) return jsonError(res, 404, 'Skill not found', `Skill '${req.params.id}' not found`);
+    const { bound: _bound, ...record } = skill;
+    res.json(record);
+  });
+  app.delete('/api/skills/:id', (req, res) => {
+    if (state.skills.some(skill => skill.id === req.params.id && skill.bound)) {
+      return jsonError(res, 409, 'Failed to delete skill', `Cannot delete skill '${req.params.id}': it is still bound; unbind first`);
+    }
+    const before = state.skills.length;
+    state.skills = state.skills.filter(skill => skill.id !== req.params.id);
+    res.json({ removed: before - state.skills.length });
   });
 
   app.get('/api/git/status', (req, res) => {
