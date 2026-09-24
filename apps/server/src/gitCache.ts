@@ -264,10 +264,10 @@ export async function commitGitChanges(
     const { selected, changes } = selectedChanges(cwd, files);
     const untracked = selected.filter(path => changes.untracked.has(path));
     if (untracked.length > 0) {
-      const intent = gitInDir(cwd, ['add', '--intent-to-add', '--', ...untracked]);
+      const intent = gitInDir(cwd, ['--literal-pathspecs', 'add', '--intent-to-add', '--', ...untracked]);
       if (!intent.ok) throw new Error(intent.err || 'git add failed');
     }
-    commit = gitInDir(cwd, ['commit', '--only', '-m', message, '--', ...selected]);
+    commit = gitInDir(cwd, ['--literal-pathspecs', 'commit', '--only', '-m', message, '--', ...selected]);
   }
   if (!commit.ok) throw new Error(commit.err || commit.out || 'git commit failed');
   gitStatusCache.delete(statusCacheKey(profile, sessionId));

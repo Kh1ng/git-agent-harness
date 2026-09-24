@@ -2059,8 +2059,14 @@ export function createServer(
           };
         })();
       res.json({ ...review, ownerNodeId: route.nodeId ?? getCoordinatorIdentity(undefined, coordinatorPort).node_id, ownerNodeName: route.nodeName ?? getCoordinatorIdentity(undefined, coordinatorPort).display_name });
-    } catch {
-      res.status(502).json({ error: 'Failed to prepare git review', message: 'Failed to prepare git review' });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : '';
+      const message = detail === 'A named branch is required'
+        || detail === 'Session is read-only and has no writable checkout'
+        || /^Base branch '[^'\r\n]+' is unavailable locally$/.test(detail)
+        ? detail
+        : 'Failed to prepare git review';
+      res.status(502).json({ error: 'Failed to prepare git review', message });
     }
   });
 
