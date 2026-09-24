@@ -42,7 +42,8 @@ test('connection settings restore dashboard access after the first valid token',
 });
 
 test('the first token restores mounted Chat projects, provider choices, git, and open storage', async ({ page, request }) => {
-  await request.post('http://127.0.0.1:3774/api/mock/scenario', { data: { name: 'normal' } });
+  const mock = process.env.GAH_MOCK_BASE_URL ?? 'http://127.0.0.1:3774';
+  await request.post(`${mock}/api/mock/scenario`, { data: { name: 'normal' } });
   let protectReads = false;
   const rejected = new Set<string>();
   const authenticated = new Set<string>();
@@ -78,21 +79,29 @@ test('the first token restores mounted Chat projects, provider choices, git, and
   await page.locator('section').filter({ hasText: 'Which configured GAH repo' }).getByRole('combobox').selectOption('fixture');
   protectReads = true;
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  await page.getByRole('dialog', { name: 'New chat' }).getByRole('button', { name: 'Close', exact: true }).click();
   await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await page.getByRole('button', { name: 'Storage', exact: true }).click();
-  const initialPaths = ['/api/profiles', '/api/projects', '/api/manager-chat/nodes', '/api/manager-chat/settings', '/api/git/status', '/api/manager-chat/issues', '/api/manager-chat/prs', '/api/manager-chat/storage'];
-  const providerPaths = ['/api/manager-chat/commands', '/api/manager-chat/models'];
+  const initialPaths = ['/api/profiles', '/api/projects', '/api/manager-chat/settings', '/api/git/status', '/api/manager-chat/issues', '/api/manager-chat/prs', '/api/manager-chat/storage'];
+  // Node eligibility, commands, and models all wait for a live connection,
+  // so they are never issued -- let alone rejected -- before login.
+  const providerPaths = ['/api/manager-chat/nodes', '/api/manager-chat/commands', '/api/manager-chat/models'];
   await expect.poll(() => initialPaths.filter(path => !rejected.has(path))).toEqual([]);
-  // Provider discovery waits for an authenticated node readiness result.
+  // Node readiness is attempted and rejected. Commands and models wait for
+  // an authenticated node readiness result.
   await expect(page.getByLabel('Run on node', { exact: true })).toBeDisabled();
-  expect(providerPaths.filter(path => rejected.has(path))).toEqual([]);
-  await expect(page.getByRole('navigation', { name: 'Projects', exact: true }).getByRole('button')).toHaveCount(0);
+  expect(providerPaths.filter(path => rejected.has(path))).toEqual(['/api/manager-chat/nodes']);
+  // The launcher has nothing to offer while reads are rejected.
+  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  const launcher = page.getByRole('dialog', { name: 'New chat' });
+  await expect(launcher.getByText('No project is configured yet.')).toBeVisible();
   // Exercise credential refresh with Chat still mounted; the owner form now lives in Settings.
   await page.evaluate(() => {
     sessionStorage.setItem('gah.coordinatorToken', 'chat-secret');
     window.dispatchEvent(new Event('gah.coordinatorTokenChanged'));
   });
-  await expect(page.getByRole('navigation', { name: 'Projects', exact: true }).getByRole('button', { name: /Fixture/ })).toBeVisible();
+  await expect(launcher.getByRole('button').filter({ hasText: 'Kh1ng/git-agent-harness' })).toBeVisible();
+  await launcher.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex');
   await expect(page.getByText('feat/mock-control-plane-1087', { exact: true })).toBeVisible();
   await expect(page.getByText(/projected reclaim · idle after/)).toBeVisible();
@@ -100,12 +109,15 @@ test('the first token restores mounted Chat projects, provider choices, git, and
   await expect(page.getByLabel('Run on node', { exact: true })).toBeEnabled();
   await expect(page.getByLabel('Run on node', { exact: true })).toHaveValue('mock-central');
   await expect.poll(() => [...initialPaths, ...providerPaths, '/api/skills/bindings'].filter(path => !authenticated.has(path))).toEqual([]);
-  expect(providerPaths.map(path => providerNodes.get(path))).toEqual(['mock-central', 'mock-central']);
+  expect(providerPaths.slice(1).map(path => providerNodes.get(path))).toEqual(['mock-central', 'mock-central']);
   await page.getByPlaceholder('Message the manager… (try "/")').fill('/sta');
   await expect(page.getByRole('button', { name: '/status Show mock status', exact: true })).toBeVisible();
   await page.getByPlaceholder('Message the manager… (try "/")').fill('');
   await expect(page.getByText('Coordinator token required', { exact: true })).toHaveCount(0);
-  // The session backend has its own model loader, independent of the default composer.
+  // The session backend has its own model loader, independent of the default
+  // composer; existing chats are reached through Projects.
+  await page.getByRole('button', { name: 'Chat', exact: true }).first().click();
+  await page.getByRole('dialog', { name: 'New chat' }).getByRole('button', { name: 'View all projects' }).click();
   await page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ }).click();
   await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex');
 });

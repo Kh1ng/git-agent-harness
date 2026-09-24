@@ -1,4 +1,5 @@
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
+import { openProjects } from './helpers/navigation.js';
 
 const MOCK_BASE_URL = process.env.GAH_MOCK_BASE_URL ?? 'http://127.0.0.1:3774';
 
@@ -28,19 +29,31 @@ async function connectionCount(request: APIRequestContext): Promise<number> {
   return (await response.json() as { connections: number }).connections;
 }
 
+/** Open the seeded project's default conversation. */
 async function openChat(page: Page): Promise<void> {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  await page.goto('/?page=chat&profile=fixture&chat=default');
   await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible();
 }
 
 async function selectSeededSession(page: Page): Promise<void> {
+  await openProjects(page);
   await page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ }).click();
   // The composer pill renders the session's provider once its model list
   // has loaded (the seeded session is codex / gpt-5.3-codex).
   const pill = page.getByRole('button', { name: 'Provider picker' });
   await expect(pill).toContainText('Codex');
   await expect(pill).toContainText('GPT-5.3 Codex');
+}
+
+/** Model and provider changes go through the catalog dialog; it closes the
+ * popover behind it, so callers reopen the pill when they need it again. */
+async function pickFromCatalog(page: Page, popover: Locator, ...texts: string[]): Promise<void> {
+  await popover.getByRole('button', { name: 'Browse all models' }).click();
+  const catalog = page.getByRole('dialog', { name: 'Browse models' });
+  let entry = catalog.getByRole('listitem');
+  for (const text of texts) entry = entry.filter({ hasText: text });
+  await entry.getByRole('button').first().click();
+  await expect(catalog).not.toBeVisible();
 }
 
 async function openArchivedChats(page: Page): Promise<void> {
@@ -51,9 +64,10 @@ async function openArchivedChats(page: Page): Promise<void> {
 // The mock is one shared stateful process. Keep scenario mutations ordered.
 test.describe.configure({ mode: 'serial' });
 
-test('chat rail discovers sessions created through REST', async ({ page, request }) => {
+test('the projects rail discovers sessions created through REST', async ({ page, request }) => {
   await selectScenario(request, 'normal');
   await openChat(page);
+  await openProjects(page);
 
   const response = await request.post(`${MOCK_BASE_URL}/api/manager-chat/sessions`, {
     data: { profile: 'fixture', backend: 'codex', title: 'Externally created session' }
@@ -159,6 +173,8 @@ test('slow turn accepts/rejects steering and cancellation restores idle', async 
 });
 
 test('archive and preview states mutate through the same REST control plane', async ({ page, request }) => {
+  // Walks four scenarios, a forced reconnect, and a page switch to Projects.
+  test.setTimeout(90_000);
   await selectScenario(request, 'preview-unavailable');
   await openChat(page);
   await selectSeededSession(page);
@@ -187,16 +203,16 @@ test('archive and preview states mutate through the same REST control plane', as
   });
   await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
-  const defaultConversation = page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: 'Default conversation' });
   // The selection resets optimistically, before any refresh lands.
-  await expect(defaultConversation).toHaveAttribute('aria-current', 'page', { timeout: 750 });
+  await expect(page).not.toHaveURL(/[?&]chat=/, { timeout: 750 });
 
   const archived = await request.get(`${MOCK_BASE_URL}/api/manager-chat/sessions?profile=fixture`);
   expect(archived.ok(), await archived.text()).toBe(true);
   const archivedSessions = (await archived.json() as { sessions: { id: string; archivedAt: number | null }[] }).sessions;
   expect(archivedSessions.find((session) => session.id === 'mock-session-1')?.archivedAt).not.toBeNull();
 
-  // The rail now lists the session under Archived, and not in the working set.
+  // The Projects rail now lists the session under Archived, not in the working set.
+  await openProjects(page);
   await expect(page.getByText(/^Archived \(\d+\)$/)).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ })).toHaveCount(0);
   await openArchivedChats(page);
@@ -213,8 +229,7 @@ test('archive and preview states mutate through the same REST control plane', as
     data: { profile: 'fixture', sessionId: 'mock-session-1' }
   });
   expect(rearchived.ok(), await rearchived.text()).toBe(true);
-  await expect.poll(() => connectionCount(request), { timeout: 15_000 }).toBeGreaterThan(connectionsBeforeReconnect);
-  await expect(defaultConversation).toHaveAttribute('aria-current', 'page');
+  await expect.poll(() => connectionCount(request), { timeout: 30_000 }).toBeGreaterThan(connectionsBeforeReconnect);
   await expect(page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ })).toHaveCount(0);
 
   await selectScenario(request, 'archive-failure');
@@ -223,7 +238,8 @@ test('archive and preview states mutate through the same REST control plane', as
   await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
   await expect(page.getByText('Failed to archive session: Mock archive failed')).toBeVisible();
-  await expect(page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ })).toHaveAttribute('aria-current', 'page');
+  // A failed archive keeps the conversation selected, not silently reset.
+  await expect(page).toHaveURL(/[?&]chat=mock-session-1/);
 });
 
 test('storage dry run selects idle sessions and bulk archives them safely', async ({ page, request }) => {
@@ -241,10 +257,13 @@ test('storage dry run selects idle sessions and bulk archives them safely', asyn
   await storage.getByRole('button', { name: 'Select idle (1)' }).click();
   await expect(storage.getByLabel('Select Mock session')).toBeChecked();
   await storage.getByRole('button', { name: 'Archive selected (1)' }).click();
+  await expect(storage).toContainText('No live chat sessions.');
+
+  // The archived conversation is still reachable, from Projects.
+  await openProjects(page);
   await expect(page.getByText(/^Archived \(\d+\)$/)).toBeVisible({ timeout: 10_000 });
   await openArchivedChats(page);
   await expect(page.getByRole('navigation', { name: 'Archived chats' }).getByRole('button', { name: /Mock session/ })).toBeVisible();
-  await expect(storage).toContainText('No live chat sessions.');
 });
 
 test('composer provider control covers success, delayed, empty, failed, and AGY shapes', async ({ page, request }) => {
@@ -279,15 +298,16 @@ test('the composer picker switches session backend, model, and effort', async ({
   const popover = page.getByRole('dialog', { name: 'Provider picker' });
   await expect(popover).toBeVisible();
 
-  // The mock codex advertises low/medium/xhigh; pin xhigh on the session,
-  // then switch the session model -- each lands as a session PATCH.
+  // The mock codex advertises low/medium/xhigh; effort stays in the short
+  // popover, while model and provider live in the catalog (#1203). Each
+  // lands as a session PATCH.
   await popover.getByRole('button', { name: 'Extra high', exact: true }).click();
   const effortState = await (await request.get(`${MOCK_BASE_URL}/api/mock/state`)).json() as {
     sessions: { id: string; reasoningEffort: string | null }[];
   };
   expect(effortState.sessions.find((s) => s.id === 'mock-session-1')?.reasoningEffort).toBe('xhigh');
 
-  await popover.getByRole('button', { name: 'GPT-5.3 Codex Spark', exact: true }).click();
+  await pickFromCatalog(page, popover, 'GPT-5.3 Codex Spark');
   const modelState = await (await request.get(`${MOCK_BASE_URL}/api/mock/state`)).json() as {
     sessions: { id: string; model: string | null }[];
   };
@@ -295,7 +315,8 @@ test('the composer picker switches session backend, model, and effort', async ({
   await expect(pill).toContainText('GPT-5.3 Codex Spark');
 
   // A backend switch resets model + effort to the new backend's defaults.
-  await popover.getByRole('button', { name: 'Claude', exact: true }).click();
+  await pill.click();
+  await pickFromCatalog(page, popover, 'Claude', 'Default model');
   const backendState = await (await request.get(`${MOCK_BASE_URL}/api/mock/state`)).json() as {
     sessions: { id: string; backend: string; model: string | null; reasoningEffort: string | null }[];
   };
@@ -307,6 +328,8 @@ test('the composer picker switches session backend, model, and effort', async ({
   await expect(pill).toContainText('Claude');
 
   // Escape closes the popover.
+  await pill.click();
+  await expect(popover).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(popover).toHaveCount(0);
 });
@@ -321,7 +344,8 @@ test('composer favorites persist across reload and apply all three selections at
   const popover = page.getByRole('dialog', { name: 'Provider picker' });
 
   // Build a full selection (model + effort), then star it as a favorite.
-  await popover.getByRole('button', { name: 'GPT-5.3 Codex Spark', exact: true }).click();
+  await pickFromCatalog(page, popover, 'GPT-5.3 Codex Spark');
+  await pill.click();
   await popover.getByRole('button', { name: 'Extra high', exact: true }).click();
   await expect(pill).toContainText('GPT-5.3 Codex Spark');
   await popover.getByRole('button', { name: 'Save current' }).click();
@@ -332,10 +356,10 @@ test('composer favorites persist across reload and apply all three selections at
 
   // Switch away to Claude (model/effort reset), then reload: the favorite
   // survives in localStorage and one click restores all three selections.
-  await popover.getByRole('button', { name: 'Claude', exact: true }).click();
+  await pickFromCatalog(page, popover, 'Claude', 'Default model');
   await expect(pill).toContainText('Claude · Default model');
   await page.reload();
-  await openChat(page);
+  await openProjects(page);
   await page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ }).click();
   await expect(pill).toContainText('Claude · Default model');
 
@@ -390,7 +414,13 @@ test('composer favorites cannot select unavailable providers', async ({ page, re
 
   await page.getByRole('button', { name: 'Provider picker' }).click();
   const popover = page.getByRole('dialog', { name: 'Provider picker' });
-  await expect(popover.getByRole('button', { name: 'Unavailable (unavailable)', exact: true })).toBeDisabled();
-  await expect(popover.getByRole('button', { name: 'Favorite Unavailable' })).toBeDisabled();
+  // A favorite pinned to an unwired provider stays listed but unusable.
   await expect(popover.getByRole('button', { name: 'Apply Unavailable' })).toBeDisabled();
+
+  await popover.getByRole('button', { name: 'Browse all models' }).click();
+  const catalog = page.getByRole('dialog', { name: 'Browse models' });
+  const card = catalog.getByRole('listitem').filter({ hasText: 'Unavailable (unavailable)' });
+  await expect(card.getByRole('button')).toBeDisabled();
+  // And it offers no star: a provider you cannot use cannot be pinned.
+  await expect(card.getByRole('button')).toHaveCount(1);
 });

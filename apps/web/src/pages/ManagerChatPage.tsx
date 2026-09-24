@@ -6,8 +6,9 @@ import { useUiStore } from '../store/uiStore.js';
 import { ChatNodePicker } from '../components/ChatNodePicker.js';
 import { useChatNodes } from '../hooks/useChatNodes.js';
 import { NewChatModal, type ChatProfile } from '../components/NewChatModal.js';
+import { toChatProfile } from '../hooks/useChatProfiles.js';
 import { formatChatName } from '../lib/format.js';
-import { readNavigation, updateNavigation } from '../lib/navigationState.js';
+import { DEFAULT_CONVERSATION_ID, readNavigation, updateNavigation, type Page } from '../lib/navigationState.js';
 import { ProviderPicker, type ProviderSelection, type ProviderPickerProps } from '../components/ProviderPicker.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { gahApi } from '../api/client.js';
@@ -467,7 +468,7 @@ function GitStrip({
   );
 }
 
-export function ManagerChatPage() {
+export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherRequest?: number; onNavigate?: (page: Page) => void }) {
   const { sendMessage, messages, isConnected, reconnectSeq } = useWebSocket();
   const wsProfile = useWebSocket().profile;
   const profileOverride = useUiStore((s) => s.profileOverride);
@@ -547,7 +548,7 @@ export function ManagerChatPage() {
    * session bound to its own worktree. */
   const [selection, setSelection] = useState(() => {
     const saved = readNavigation();
-    return { profile, sessionId: saved.profile === profile ? saved.chat : null };
+    return { profile, sessionId: saved.profile === profile && saved.chat !== DEFAULT_CONVERSATION_ID ? saved.chat : null };
   });
   // A profile change must not request the previous project's conversation.
   const sessionId = selection.profile === profile ? selection.sessionId : null;
@@ -607,7 +608,7 @@ export function ManagerChatPage() {
       setAvailableProfiles(previous => {
         const localProfiles = local.status === 'fulfilled' ? local.value : previous.filter(item => !item.remote);
         const projects = catalog.status === 'fulfilled'
-          ? catalog.value.map(project => ({ ...project, name: project.chat_profile ?? project.name, catalogName: project.name, remote: !!project.chat_profile && project.chat_profile !== project.name }))
+          ? catalog.value.map(toChatProfile)
           : previous.filter(item => item.remote);
         return [...new Map([...localProfiles, ...projects].map(project => [project.name, project])).values()];
       });
@@ -742,7 +743,7 @@ export function ManagerChatPage() {
     setPreviewOpen(false);
     setPreviewPortDraft('');
     steeringRequestIds.current.clear();
-    if (sessionId && sessionId !== 'default') {
+    if (sessionId && sessionId !== DEFAULT_CONVERSATION_ID) {
       gahApi
         .getChatPreview(profile, sessionId)
         .then(({ preview }) => { if (activeProfileRef.current === profile) setPreview(preview); })
@@ -1210,6 +1211,7 @@ export function ManagerChatPage() {
         currentReasoningEffortId: activeSession.reasoningEffort,
         modelsLoaded: sessionModelsLoaded,
         busy: turnBusy || !nodeReady || sessionSelectionChanging,
+        catalog: { profile, ...(chosenNode ? { nodeId: chosenNode } : {}) },
         onSelect: applySessionSelection
       };
     }
@@ -1224,6 +1226,7 @@ export function ManagerChatPage() {
       currentReasoningEffortId,
       modelsLoaded,
       busy: turnBusy || !nodeReady || backendChanging || modelChanging || reasoningEffortChanging,
+      catalog: { profile, ...(chosenNode ? { nodeId: chosenNode } : {}) },
       onSelect: applyProfileSelection
     };
   })();
@@ -1356,6 +1359,7 @@ export function ManagerChatPage() {
   };
 
   const [newChatOpen, setNewChatOpen] = useState(false);
+  const [launcherOpen, setLauncherOpen] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const toolsRef = useRef<HTMLDivElement>(null);
@@ -1432,6 +1436,13 @@ export function ManagerChatPage() {
     refreshSessions(createdProfile);
     setSessionId(createdSessionId);
   };
+
+  useEffect(() => {
+    if (launcherRequest > 0) {
+      setLauncherOpen(true);
+      setNewChatOpen(true);
+    }
+  }, [launcherRequest]);
 
   const chatTitle = activeSession ? formatChatName(activeSession) : 'Default conversation';
   const projectName = currentProfileInfo?.repo?.split('/').pop() ?? profile;
@@ -1686,11 +1697,13 @@ export function ManagerChatPage() {
 
       <NewChatModal
         open={newChatOpen}
+        launcher={launcherOpen}
         currentProfile={profile}
         profiles={availableProfiles}
         backends={availableBackends}
         nodesRefreshKey={nodesRefreshKey}
-        onClose={() => setNewChatOpen(false)}
+        onClose={() => { setNewChatOpen(false); setLauncherOpen(false); }}
+        onViewAllProjects={onNavigate ? () => onNavigate('projects') : undefined}
         onCreated={handleChatCreated}
       />
 
@@ -1714,7 +1727,7 @@ export function ManagerChatPage() {
             sessionsError={sessionsError}
             onRetrySessions={() => refreshSessions(profile)}
             onProjectAdded={(project) => {
-              setAvailableProfiles((profiles) => [...profiles.filter((profile) => profile.name !== project.chat_profile), { ...project, name: project.chat_profile ?? project.name, catalogName: project.name, remote: !!project.chat_profile && project.chat_profile !== project.name }]);
+              setAvailableProfiles((profiles) => [...profiles.filter((profile) => profile.name !== project.chat_profile), toChatProfile(project)]);
             }}
           />
         </div>
