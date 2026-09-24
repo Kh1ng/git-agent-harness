@@ -90,7 +90,8 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
       models: Map<string, { turns: number; totalTokens: number }>;
     }>();
     for (const row of rows) {
-      const agg = map.get(row.backend) ?? {
+      const account = row.backend_instance ? `${row.backend} · ${row.backend_instance}` : row.backend;
+      const agg = map.get(account) ?? {
         turns: 0,
         inputTokens: 0,
         outputTokens: 0,
@@ -112,7 +113,7 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
       modelTotal.turns += row.turns;
       modelTotal.totalTokens += row.total_tokens;
       agg.models.set(model, modelTotal);
-      map.set(row.backend, agg);
+      map.set(account, agg);
     }
     return [...map.entries()].sort((a, b) => b[1].totalTokens - a[1].totalTokens);
   }, [rows]);

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { compactionSummary, isCompactionCommand, isUsageLimitError } from './managerChat/acpAdapter.js';
+import { claudeSpawnSpec, codexSpawnSpec, compactionSummary, isCompactionCommand, isUsageLimitError } from './managerChat/acpAdapter.js';
 import { normalizeRemoteUrl } from './managerChat/memoryGatewayClient.js';
 import {
   modelOverrideForProfile,
@@ -14,6 +14,15 @@ import {
 import { historyDelta, readModelConfig, readReasoningConfig, resumePrompt, toChatUsage, toContextUsage } from './managerChat/acpAdapter.js';
 import { applyBoundSkills, handoffAttempt } from './managerChat/ManagerChatManager.js';
 import type { Skill } from '@git-agent-harness/contracts';
+
+test('named account ACP children receive only their executable and isolated provider state', () => {
+  assert.deepEqual(codexSpawnSpec({ executable: '/bin/codex-work', state_root: '/state/work' }).env, {
+    CODEX_PATH: '/bin/codex-work', HOME: '/state/work', CODEX_HOME: join('/state/work', '.codex')
+  });
+  assert.deepEqual(claudeSpawnSpec({ executable: '/bin/claude-personal', state_root: '/state/personal' }).env, {
+    CLAUDE_CODE_EXECUTABLE: '/bin/claude-personal', HOME: '/state/personal', CLAUDE_CONFIG_DIR: join('/state/personal', '.claude')
+  });
+});
 
 test('bound skills are injected with the exact resolved version before the request', () => {
   const skill: Skill = {

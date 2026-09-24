@@ -317,6 +317,92 @@ fn set_backend_instance_enabled_writes_merged_entry_and_flips_state() {
 }
 
 #[test]
+fn add_backend_instance_creates_isolated_runtime_and_safe_projection() {
+    let (tmp, config) = config_with_profile();
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    make_fake_bin_with_body(
+        &fake_bin,
+        "codex",
+        "#!/bin/sh\nif [ \"$1\" = \"login\" ]; then echo 'Logged in using ChatGPT'; echo 'token=super-secret' >&2; fi\n",
+    );
+    let path = prepend_path(&fake_bin);
+    let home = tmp.path().join("home");
+    bin()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .args([
+            "config",
+            "add-backend-instance",
+            "--config",
+            config.to_str().unwrap(),
+            "--profile",
+            "test",
+            "--instance",
+            "codex-work",
+            "--runner-kind",
+            "codex",
+            "--account-label",
+            "Work",
+        ])
+        .assert()
+        .success();
+
+    let output = bin()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .args([
+            "config",
+            "show-backend-instance-runtime",
+            "--config",
+            config.to_str().unwrap(),
+            "--profile",
+            "test",
+            "--instance",
+            "codex-work",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let runtime: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(runtime["backend_instance"], "codex-work");
+    assert_eq!(runtime["account_label"], "Work");
+    assert_eq!(
+        runtime["state_root"],
+        home.join(".config/gah/backend-instances/codex-work")
+            .to_string_lossy()
+            .as_ref()
+    );
+
+    let projected = bin()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .args([
+            "config",
+            "test-backend-instance",
+            "--config",
+            config.to_str().unwrap(),
+            "--profile",
+            "test",
+            "--instance",
+            "codex-work",
+        ])
+        .output()
+        .unwrap();
+    assert!(projected.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&projected.stdout).unwrap()["auth_ready"],
+        true
+    );
+    assert!(!String::from_utf8_lossy(&projected.stdout).contains("super-secret"));
+    assert!(!String::from_utf8_lossy(&projected.stderr).contains("super-secret"));
+}
+
+#[test]
 fn notification_channel_settings_round_trip_and_validate() {
     let (tmp, config) = config_with_profile();
     let config_path = config.to_str().unwrap();

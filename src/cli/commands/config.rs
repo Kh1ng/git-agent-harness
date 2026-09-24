@@ -157,6 +157,207 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                 instance, state_word, profile
             );
         }
+        ConfigCommands::AddBackendInstance {
+            config_path,
+            profile,
+            instance,
+            runner_kind,
+            account_label,
+        } => {
+            let instance =
+                crate::execution_identity::validate_operator_label("backend instance", &instance)?;
+            let account_label = crate::execution_identity::validate_operator_label(
+                "account label",
+                &account_label,
+            )?;
+            if !matches!(runner_kind.as_str(), "codex" | "claude") {
+                anyhow::bail!("runner kind must be 'codex' or 'claude'");
+            }
+            let mut cfg = config::load(config_path.as_deref())?;
+            let state_root = config::default_config_dir()
+                .join("backend-instances")
+                .join(&instance);
+            let mut entry = config::BackendInstanceConfig {
+                runner_kind: runner_kind.clone(),
+                logical_backend: Some(runner_kind.clone()),
+                resolve_from_path: Some(true),
+                state_root: Some(state_root.to_string_lossy().into_owned()),
+                account_label: Some(account_label),
+                auth_source_label: Some(format!("{runner_kind}-cli-login")),
+                ..Default::default()
+            };
+            entry.enabled = Some(matches!(
+                crate::runner::resolve_backend_instance_executable(&entry),
+                crate::runner::ExecutableResolution::Found(_)
+            ));
+            {
+                let profile_config = cfg
+                    .profiles
+                    .get_mut(&profile)
+                    .ok_or_else(|| anyhow::anyhow!("profile '{}' is not configured", profile))?;
+                if profile_config
+                    .effective_routing(&cfg.defaults)
+                    .backend_instances
+                    .contains_key(&instance)
+                {
+                    anyhow::bail!("backend instance '{}' already exists", instance);
+                }
+                profile_config
+                    .routing
+                    .backend_instances
+                    .insert(instance.clone(), entry);
+                if let Err(errors) =
+                    config::check_profile_backend_instances(&cfg.defaults, profile_config)
+                {
+                    anyhow::bail!(
+                        "cannot add backend instance '{}': {}",
+                        instance,
+                        errors.join("; ")
+                    );
+                }
+            }
+            std::fs::create_dir_all(&state_root)?;
+            config::save(&cfg, config_path.as_deref())?;
+            println!(
+                "Added backend instance '{}' for profile '{}'",
+                instance, profile
+            );
+        }
+        ConfigCommands::SetBackendInstanceLabel {
+            config_path,
+            profile,
+            instance,
+            account_label,
+        } => {
+            let account_label = crate::execution_identity::validate_operator_label(
+                "account label",
+                &account_label,
+            )?;
+            let mut cfg = config::load(config_path.as_deref())?;
+            {
+                let profile_config = cfg
+                    .profiles
+                    .get_mut(&profile)
+                    .ok_or_else(|| anyhow::anyhow!("profile '{}' is not configured", profile))?;
+                let mut entry = profile_config
+                    .effective_routing(&cfg.defaults)
+                    .backend_instances
+                    .get(&instance)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("backend instance '{}' is not declared", instance)
+                    })?;
+                entry.account_label = Some(account_label);
+                profile_config
+                    .routing
+                    .backend_instances
+                    .insert(instance.clone(), entry);
+                if let Err(errors) =
+                    config::check_profile_backend_instances(&cfg.defaults, profile_config)
+                {
+                    anyhow::bail!(
+                        "cannot update backend instance '{}': {}",
+                        instance,
+                        errors.join("; ")
+                    );
+                }
+            }
+            config::save(&cfg, config_path.as_deref())?;
+            println!(
+                "Updated backend instance '{}' for profile '{}'",
+                instance, profile
+            );
+        }
+        ConfigCommands::ShowBackendInstanceRuntime {
+            config_path,
+            profile,
+            instance,
+        } => {
+            let cfg = config::load(config_path.as_deref())?;
+            let profile_config = config::get_profile(&cfg, &profile)?;
+            let routing = profile_config.effective_routing(&cfg.defaults);
+            let entry = routing.backend_instances.get(&instance).ok_or_else(|| {
+                anyhow::anyhow!("backend instance '{}' is not declared", instance)
+            })?;
+            if !entry.enabled() {
+                anyhow::bail!("backend instance '{}' is disabled", instance);
+            }
+            let executable = match crate::runner::resolve_backend_instance_executable(entry) {
+                crate::runner::ExecutableResolution::Found(path) => path,
+                _ => anyhow::bail!("backend instance '{}' executable is unavailable", instance),
+            };
+            println!(
+                "{}",
+                serde_json::json!({
+                    "backend_instance": instance,
+                    "runner_kind": entry.runner_kind,
+                    "logical_backend": entry.logical_backend.as_deref().unwrap_or(&entry.runner_kind),
+                    "executable": executable,
+                    "state_root": entry.state_root,
+                    "account_label": entry.account_label,
+                })
+            );
+        }
+        ConfigCommands::TestBackendInstance {
+            config_path,
+            profile,
+            instance,
+        } => {
+            let cfg = config::load(config_path.as_deref())?;
+            let routing = config::get_profile(&cfg, &profile)?.effective_routing(&cfg.defaults);
+            let entry = routing.backend_instances.get(&instance).ok_or_else(|| {
+                anyhow::anyhow!("backend instance '{}' is not declared", instance)
+            })?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "backend_instance": instance,
+                    "auth_ready": config::backend_instance_auth_ready(entry),
+                })
+            );
+        }
+        ConfigCommands::AuthenticateBackendInstance {
+            config_path,
+            profile,
+            instance,
+        } => {
+            let cfg = config::load(config_path.as_deref())?;
+            let profile_config = config::get_profile(&cfg, &profile)?;
+            let routing = profile_config.effective_routing(&cfg.defaults);
+            let entry = routing.backend_instances.get(&instance).ok_or_else(|| {
+                anyhow::anyhow!("backend instance '{}' is not declared", instance)
+            })?;
+            let executable = match crate::runner::resolve_backend_instance_executable(entry) {
+                crate::runner::ExecutableResolution::Found(path) => path,
+                _ => anyhow::bail!("backend instance '{}' executable is unavailable", instance),
+            };
+            let root = entry.state_root.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("backend instance '{}' has no isolated state_root", instance)
+            })?;
+            std::fs::create_dir_all(root)?;
+            let mut command = std::process::Command::new(executable);
+            command.env("HOME", root);
+            match entry.runner_kind.as_str() {
+                "codex" => {
+                    command
+                        .env("CODEX_HOME", std::path::Path::new(root).join(".codex"))
+                        .args(["login", "--device-auth"]);
+                }
+                "claude" => {
+                    command
+                        .env(
+                            "CLAUDE_CONFIG_DIR",
+                            std::path::Path::new(root).join(".claude"),
+                        )
+                        .args(["auth", "login"]);
+                }
+                other => anyhow::bail!("runner kind '{}' has no managed login flow", other),
+            }
+            let status = command.status()?;
+            if !status.success() {
+                anyhow::bail!("provider login failed for backend instance '{}'", instance);
+            }
+        }
     }
     Ok(())
 }

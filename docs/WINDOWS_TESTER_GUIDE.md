@@ -11,8 +11,6 @@ The command downloads matching release files and configures the central connecti
 
 For an unpublished revision, ask the maintainer for these items:
 
-Ask the maintainer for these items:
-
 - One test bundle from a successful Desktop workflow run.
 - The full source revision for that workflow run.
 - The central GAH URL.
@@ -76,7 +74,7 @@ The `GAH WSL Worker` task starts the worker after Windows sign-in. The desktop a
 ## Prepare one project
 
 1. Open Ubuntu as the same Linux user.
-2. Install and authenticate one supported agent CLI.
+2. Install one supported agent CLI.
 3. Run `gh auth login` for a GitHub test repository.
 4. Open GAH from the Windows Start menu.
 5. Connect GAH to the central URL.
@@ -87,6 +85,20 @@ The `GAH WSL Worker` task starts the worker after Windows sign-in. The desktop a
 10. Open **Nodes** and select the Windows worker.
 11. Select the imported profile and run the readiness check.
 
+Add and authenticate a named agent account in Ubuntu:
+
+```bash
+gah config add-backend-instance --profile PROFILE_NAME --instance codex-work --runner-kind codex --account-label work
+gah config authenticate-backend-instance --profile PROFILE_NAME --instance codex-work
+gah doctor --profile PROFILE_NAME --validate
+```
+
+Use `claude` for `--runner-kind` when you add a Claude account. Use a unique instance name, such as `claude-work`.
+Each instance has a separate state directory. Signing out of one instance does not sign out another instance.
+
+Use the same instance name on the central node if you start the Windows chat from the central dashboard.
+The provider login still runs inside WSL for the Windows worker.
+
 Use this command in Ubuntu if the worker does not appear:
 
 ```bash
@@ -95,7 +107,7 @@ systemctl --user status gah-worker.service --no-pager
 gah doctor --profile PROFILE_NAME
 ```
 
-Run `gh auth status` and `claude auth status` if either CLI appears signed out.
+Run the `authenticate-backend-instance` command again if an account appears signed out.
 Run `command -v codex` before you select Codex. No output means that Codex is not installed inside WSL.
 
 ## Do the acceptance test

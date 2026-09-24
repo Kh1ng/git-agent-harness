@@ -19,6 +19,7 @@ import {
 } from './acpAdapter.js';
 import { createHeadlessBackend, vibeBackendSpec, agyBackendSpec, openhandsBackendSpec } from './headlessAdapter.js';
 import type { ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
+import { runBackendInstanceRuntime } from '../gahCli.js';
 
 export type { ManagerCommandInfo, ManagerModelInfo, ManagerReasoningEffortInfo };
 
@@ -149,5 +150,26 @@ export function resolveAdapter(backendId: string): ManagerAdapter {
   if (!adapter) {
     throw new Error(`Unknown manager backend "${backendId}"`);
   }
+  return adapter;
+}
+
+const INSTANCE_ADAPTERS = new Map<string, { runtime: string; adapter: ManagerAdapter }>();
+
+/** Resolve one named account to its own ACP process and connection map. */
+export async function resolveInstanceAdapter(profile: string, backendId: string, instance?: string | null): Promise<ManagerAdapter> {
+  if (!instance) return resolveAdapter(backendId);
+  const key = `${profile}\0${instance}`;
+  const runtime = await runBackendInstanceRuntime(profile, instance);
+  const runtimeKey = JSON.stringify(runtime);
+  const cached = INSTANCE_ADAPTERS.get(key);
+  if (cached?.runtime === runtimeKey) return cached.adapter;
+  if (runtime.logical_backend !== backendId) throw new Error(`Backend instance "${instance}" does not serve ${backendId}.`);
+  const label = runtime.account_label ? `${backendId} · ${runtime.account_label}` : `${backendId} · ${instance}`;
+  const adapter = runtime.runner_kind === 'codex'
+    ? acpManagerAdapter(backendId, label, () => codexSpawnSpec(runtime), { consecutiveFailureReconnectThreshold: 2 })
+    : runtime.runner_kind === 'claude'
+      ? acpManagerAdapter(backendId, label, () => claudeSpawnSpec(runtime))
+      : (() => { throw new Error(`Backend instance "${instance}" is not supported by Manager Chat.`); })();
+  INSTANCE_ADAPTERS.set(key, { runtime: runtimeKey, adapter });
   return adapter;
 }

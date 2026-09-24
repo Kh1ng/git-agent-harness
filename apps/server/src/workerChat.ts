@@ -4,7 +4,7 @@ import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import type { ChatSessionSummary, ChatTranscriptTurn, NodeRoleStatus, ProfileSummary } from '@git-agent-harness/contracts';
 import { runProfileList } from './gahCli.js';
-import { resolveAdapter, type ManagerAdapter } from './managerChat/registry.js';
+import { resolveInstanceAdapter, type ManagerAdapter } from './managerChat/registry.js';
 import { archiveSession, chatKey, createSession, getSession, resolveSessionCwd, touchSession, updateSession, type ChatSessionStoreOptions } from './managerChat/chatSessions.js';
 
 import { isUsageLimitError } from './managerChat/acpAdapter.js';
@@ -22,14 +22,14 @@ export function createWorkerChatRouter(deps: {
   node: NodeRoleStatus;
   nodeId: string;
   profiles?: () => Promise<ProfileSummary[]>;
-  adapter?: typeof resolveAdapter;
+  adapter?: (backend: string, profile?: string, instance?: string | null) => ManagerAdapter | Promise<ManagerAdapter>;
   sessions?: ChatSessionStoreOptions;
 }) {
   const router = Router();
   const active = new Map<string, ActiveExecution>();
   const workspaceOperations = new Set<string>();
   const profiles = deps.profiles ?? runProfileList;
-  const adapterFor = deps.adapter ?? resolveAdapter;
+  const adapterFor = deps.adapter ?? ((backend: string, profile?: string, instance?: string | null) => resolveInstanceAdapter(profile ?? '', backend, instance));
   router.post('/', async (req, res) => {
     if (deps.node.role !== 'worker') return void res.status(409).json({ error: 'Agent execution belongs on a worker.' });
     const body = req.body;
@@ -81,11 +81,16 @@ export function createWorkerChatRouter(deps: {
       }
       const backend = body.backend;
       if (typeof backend !== 'string') return void res.status(400).json({ error: 'A backend is required.' });
-      const adapter = adapterFor(backend);
+      const backendInstance = body.backendInstance === null || body.backendInstance === undefined ? null : body.backendInstance;
+      if (backendInstance !== null && (typeof backendInstance !== 'string' || !/^[a-zA-Z0-9_.-]{1,128}$/.test(backendInstance))) {
+        return void res.status(400).json({ error: 'Invalid backend instance.' });
+      }
+      const adapter = await adapterFor(backend, body.profile, backendInstance);
       if (body.action === 'models') return void res.json(await adapter.listModels(key));
       if (body.action === 'commands') return void res.json(await adapter.listCommands(key));
       const settings = {
         backend,
+        backendInstance,
         model: typeof body.model === 'string' ? body.model : null,
         reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort : null,
         ...(typeof body.title === 'string' ? { title: body.title } : {})

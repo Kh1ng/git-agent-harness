@@ -23,6 +23,7 @@ export interface ProviderSelection {
 export interface ProviderPickerProps {
   backends: ManagerBackendInfo[];
   selectedBackendId: string | null;
+  selectedInstanceLabel?: string | null;
   models: ManagerModelInfo[];
   currentModelId: string | null;
   reasoningEfforts: ManagerReasoningEffortInfo[];
@@ -87,6 +88,7 @@ function save(key: string, entries: ProviderFavorite[]): void {
 export function ProviderPicker({
   backends,
   selectedBackendId,
+  selectedInstanceLabel,
   models,
   currentModelId,
   reasoningEfforts,
@@ -136,6 +138,7 @@ export function ProviderPicker({
   const backendName = (id: string) => backends.find((backend) => backend.id === id)?.displayName ?? id;
   const pillLabel = [
     selectedBackendId ? backendName(selectedBackendId) : 'provider',
+    selectedInstanceLabel,
     selectedModel?.name ?? (showDefaultModel ? 'Default model' : null),
     selectedEffort?.name ?? (variant === 'session' && reasoningEfforts.length > 0 && !selectedEffort ? 'Default effort' : null)
   ].filter((part): part is string => Boolean(part)).join(' · ');

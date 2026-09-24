@@ -248,6 +248,7 @@ const MOCK_USAGE_ROLLUP = {
   generated_at: FIXED_NOW,
   rows: [{
     backend: 'codex',
+    backend_instance: 'codex-work',
     model: 'gpt-5.3-codex',
     day: '2023-11-14',
     turns: 3,
@@ -257,6 +258,7 @@ const MOCK_USAGE_ROLLUP = {
     estimated_cost_usd: 0.04
   }, {
     backend: 'codex',
+    backend_instance: 'codex-work',
     model: 'gpt-5.3-codex',
     day: '2023-11-13',
     turns: 1,

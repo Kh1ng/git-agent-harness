@@ -274,14 +274,14 @@ export interface GahDataSource {
   setManagerChatReasoningEffort(profile: string, effortId: string, nodeId?: string): Promise<{ success: boolean }>;
   getChatSessions(profile: string): Promise<{ sessions: ChatSessionSummary[] }>;
   getAllChatSessions(): Promise<{ projects: ChatSessionProjectGroup[] }>;
-  createChatSession(profile: string, backend?: string, model?: string | null, title?: string, nodeId?: string): Promise<ChatSessionSummary>;
-  updateChatSession(profile: string, sessionId: string, patch: { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string }): Promise<ChatSessionSummary>;
+  createChatSession(profile: string, backend?: string, model?: string | null, title?: string, nodeId?: string, backendInstance?: string | null): Promise<ChatSessionSummary>;
+  updateChatSession(profile: string, sessionId: string, patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string }): Promise<ChatSessionSummary>;
   archiveChatSession(profile: string, sessionId: string): Promise<ChatSessionSummary>;
   bulkArchiveChatSessions(profile: string, sessionIds: string[]): Promise<{ sessions: ChatSessionSummary[] }>;
   getChatStorage(profile: string): Promise<ChatReclaimResult>;
   reclaimChatSessions(profile: string, dryRun: boolean): Promise<ChatReclaimResult>;
   getChatNodes(profile?: string, backend?: string): Promise<{ nodes: ChatNodeInfo[] }>;
-  getManagerChatModelsForBackend(profile: string, backend: string, nodeId?: string): Promise<ManagerModelsSummary>;
+  getManagerChatModelsForBackend(profile: string, backend: string, nodeId?: string, backendInstance?: string | null): Promise<ManagerModelsSummary>;
   getChatPreview(profile: string, sessionId: string): Promise<{ preview: ChatPreviewInfo | null }>;
   setChatPreview(profile: string, sessionId: string, port: number | null): Promise<{ preview: ChatPreviewInfo | null }>;
   getChatIssues(profile: string): Promise<{ issues: ChatIssueSummary[] }>;
@@ -627,11 +627,13 @@ export const gahApi: GahDataSource = {
   getAllChatSessions() {
     return getJson<{ projects: ChatSessionProjectGroup[] }>('/api/manager-chat/sessions/all');
   },
-  createChatSession(profile, backend, model, title, nodeId) {
-    return postJson<ChatSessionSummary, { profile: string; backend?: string; model?: string | null; title?: string; nodeId?: string }>('/api/manager-chat/sessions', { profile, backend, model, title, nodeId });
+  createChatSession(profile, backend, model, title, nodeId, backendInstance) {
+    return postJson<ChatSessionSummary, { profile: string; backend?: string; backendInstance?: string; model?: string | null; title?: string; nodeId?: string }>('/api/manager-chat/sessions', {
+      profile, backend, model, title, nodeId, ...(backendInstance == null ? {} : { backendInstance })
+    });
   },
   updateChatSession(profile, sessionId, patch) {
-    return postJson<ChatSessionSummary, { profile: string; sessionId: string } & { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string }>('/api/manager-chat/sessions/update', { profile, sessionId, ...patch });
+    return postJson<ChatSessionSummary, { profile: string; sessionId: string } & { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string }>('/api/manager-chat/sessions/update', { profile, sessionId, ...patch });
   },
   archiveChatSession(profile, sessionId) {
     return postJson<ChatSessionSummary, { profile: string; sessionId: string }>('/api/manager-chat/sessions/archive', { profile, sessionId });
@@ -648,8 +650,8 @@ export const gahApi: GahDataSource = {
   getChatNodes(profile, backend) {
     return getJson<{ nodes: ChatNodeInfo[] }>('/api/manager-chat/nodes', { profile, backend });
   },
-  getManagerChatModelsForBackend(profile, backend, nodeId) {
-    return getJson<ManagerModelsSummary>('/api/manager-chat/models', { profile, backend, nodeId });
+  getManagerChatModelsForBackend(profile, backend, nodeId, backendInstance) {
+    return getJson<ManagerModelsSummary>('/api/manager-chat/models', { profile, backend, nodeId, backendInstance: backendInstance ?? undefined });
   },
   getChatPreview(profile, sessionId) {
     return getJson<{ preview: ChatPreviewInfo | null }>('/api/manager-chat/preview', { profile, sessionId });
@@ -733,7 +735,9 @@ export const promptPoliciesApi = {
 
 export const backendInstancesApi = {
   list: (profile: string) => getJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }>('/api/backend-instances', { profile }),
-  setEnabled: (profile: string, instance: string, enabled: boolean) => postJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }, { profile: string; instance: string }>(`/api/backend-instances/${enabled ? 'enable' : 'disable'}`, { profile, instance })
+  setEnabled: (profile: string, instance: string, enabled: boolean) => postJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }, { profile: string; instance: string }>(`/api/backend-instances/${enabled ? 'enable' : 'disable'}`, { profile, instance }),
+  add: (profile: string, instance: string, runnerKind: 'codex' | 'claude', accountLabel: string) => postJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }, { profile: string; instance: string; runnerKind: 'codex' | 'claude'; accountLabel: string }>('/api/backend-instances/add', { profile, instance, runnerKind, accountLabel }),
+  setLabel: (profile: string, instance: string, accountLabel: string) => postJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }, { profile: string; instance: string; accountLabel: string }>('/api/backend-instances/label', { profile, instance, accountLabel })
 };
 
 export const paidRouteApi = {

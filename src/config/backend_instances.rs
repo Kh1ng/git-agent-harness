@@ -2,6 +2,8 @@ use super::{CandidateConfig, Defaults, Profile, RoutingPolicy};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 
 /// Provider-neutral declaration of one concrete runner/account binding.
 /// Map keys are stable backend-instance identifiers. Credentials are never
@@ -45,6 +47,55 @@ impl BackendInstanceConfig {
     pub fn resolves_from_path(&self) -> bool {
         self.resolve_from_path.unwrap_or(false)
     }
+}
+
+/// Bounded, secret-free provider auth check for one concrete instance.
+/// Command output is discarded; only the provider's structured/safe login
+/// result reaches config, Doctor, or the dashboard.
+pub fn backend_instance_auth_ready(instance: &BackendInstanceConfig) -> Option<bool> {
+    let crate::runner::ExecutableResolution::Found(executable) =
+        crate::runner::resolve_backend_instance_executable(instance)
+    else {
+        return Some(false);
+    };
+    let mut command = Command::new(executable);
+    match instance.runner_kind.as_str() {
+        "codex" => {
+            command.args(["login", "status"]);
+        }
+        "claude" => {
+            command.args(["auth", "status", "--json"]);
+        }
+        _ => return None,
+    }
+    if let Some(root) = instance.state_root.as_deref() {
+        command.env("HOME", root);
+        if instance.runner_kind == "codex" {
+            command.env("CODEX_HOME", Path::new(root).join(".codex"));
+        } else {
+            command.env("CLAUDE_CONFIG_DIR", Path::new(root).join(".claude"));
+        }
+    }
+    let output = crate::runner::process::run_bounded(command, Duration::from_secs(10))?;
+    if instance.runner_kind == "claude" {
+        let status = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()?;
+        return Some(
+            output.status.success()
+                && status.get("loggedIn").and_then(|value| value.as_bool()) == Some(true),
+        );
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_lowercase();
+    Some(
+        output.status.success()
+            && text
+                .lines()
+                .any(|line| line.contains("logged in") && !line.contains("not logged in")),
+    )
 }
 
 pub(crate) fn merge_instance_maps(
@@ -179,6 +230,22 @@ pub fn check_profile_backend_instances(
     for (name, instance) in &routing.backend_instances {
         validate_instance(name, instance, &mut state_roots, &mut errors);
     }
+    for runner in ["codex", "claude"] {
+        let accounts = routing
+            .backend_instances
+            .iter()
+            .filter(|(_, instance)| instance.enabled() && instance.runner_kind == runner)
+            .collect::<Vec<_>>();
+        if accounts.len() > 1 {
+            for (name, instance) in accounts {
+                if instance.state_root.as_deref().is_none_or(str::is_empty) {
+                    errors.push(format!(
+                        "instance '{name}': multiple {runner} accounts require an isolated state_root"
+                    ));
+                }
+            }
+        }
+    }
     for candidate in all_candidates(&routing) {
         validate_candidate(&routing, candidate, &mut errors);
     }
@@ -220,10 +287,21 @@ fn validate_instance(
             instance.runner_kind
         ));
     }
+    if let Some(root) = instance
+        .state_root
+        .as_deref()
+        .filter(|root| !root.trim().is_empty())
+    {
+        let normalized = PathBuf::from(root).to_string_lossy().into_owned();
+        if let Some(other) = state_roots.insert(normalized.clone(), name.to_string()) {
+            errors.push(format!(
+                "instances '{other}' and '{name}' share state_root '{normalized}'; declare isolated state roots"
+            ));
+        }
+    }
     // Issue #822: a disabled instance must stay saveable even while its
-    // executable is broken or removed -- taking a misbehaving backend out
-    // of rotation without deleting its declaration is the point of the
-    // toggle. Its identity fields are still validated above.
+    // executable is broken or removed. State isolation above remains an
+    // invariant because re-enabling must not de-authenticate a sibling.
     if !instance.enabled() {
         return;
     }
@@ -250,18 +328,6 @@ fn validate_instance(
         None => errors.push(format!(
             "instance '{name}': missing explicit executable binding"
         )),
-    }
-    if let Some(root) = instance
-        .state_root
-        .as_deref()
-        .filter(|root| !root.trim().is_empty())
-    {
-        let normalized = PathBuf::from(root).to_string_lossy().into_owned();
-        if let Some(other) = state_roots.insert(normalized.clone(), name.to_string()) {
-            errors.push(format!(
-                "instances '{other}' and '{name}' share state_root '{normalized}'; declare isolated state roots"
-            ));
-        }
     }
 }
 
@@ -376,6 +442,7 @@ fn validate_cost(
 mod tests {
     use super::*;
     use crate::config::tests::test_profile_for_notifications;
+    use crate::runner::backends::test_util::make_fake_bin;
 
     #[test]
     fn profile_registry_overrides_global_by_instance_key() {
@@ -492,6 +559,50 @@ mod tests {
             .join("\n");
         assert!(errors.contains("share state_root"));
         assert!(errors.contains("requires instance 'opencode-api' auth_source_label"));
+    }
+
+    #[test]
+    fn disabled_instances_still_cannot_share_account_state() {
+        let mut profile = test_profile_for_notifications();
+        for (name, enabled) in [("codex-one", true), ("codex-two", false)] {
+            profile.routing.backend_instances.insert(
+                name.into(),
+                BackendInstanceConfig {
+                    runner_kind: "codex".into(),
+                    enabled: Some(enabled),
+                    executable: Some("/bin/sh".into()),
+                    state_root: Some("/tmp/shared-codex-home".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        let errors = check_profile_backend_instances(&Defaults::default(), &profile)
+            .unwrap_err()
+            .join("\n");
+        assert!(errors.contains("share state_root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_probe_keeps_provider_output_out_of_the_result() {
+        let dir = tempfile::tempdir().unwrap();
+        make_fake_bin(
+            dir.path(),
+            "codex-instance",
+            "#!/bin/sh\necho 'Logged in using ChatGPT'\necho 'token=super-secret' >&2\n",
+        );
+        let instance = BackendInstanceConfig {
+            runner_kind: "codex".into(),
+            executable: Some(
+                dir.path()
+                    .join("codex-instance")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            state_root: Some(dir.path().join("state").to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        assert_eq!(backend_instance_auth_ready(&instance), Some(true));
     }
 }
 

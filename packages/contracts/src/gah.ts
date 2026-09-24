@@ -602,6 +602,8 @@ export type ReportGroupBy = typeof REPORT_GROUP_BY_VALUES[number];
  */
 export interface UsageRollupRow {
   backend: string;
+  /** Named account instance used for the turn; null is the default account. */
+  backend_instance: string | null;
   /** null = the backend's default model for that turn. */
   model: string | null;
   /** UTC day the turn's assistant message was logged, e.g. 2026-08-30. */

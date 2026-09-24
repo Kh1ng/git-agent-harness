@@ -560,6 +560,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
   useEffect(() => updateNavigation({ profile, chat: sessionId }), [profile, sessionId]);
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const [sessionsError, setSessionsError] = useState(false);
+  const [backendInstanceLabels, setBackendInstanceLabels] = useState<Record<string, string>>({});
   /** A new chat created for another project lands in the same render batch
    * as the profile switch; the [profile] effect restores its session id. */
   const pendingSessionRef = useRef<string | null>(null);
@@ -573,6 +574,15 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
     () => sessions.find((s) => s.id === sessionId) ?? null,
     [sessions, sessionId]
   );
+  useEffect(() => {
+    let cancelled = false;
+    gahApi.getProfileConfig(profile)
+      .then(({ backend_instances: instances }) => {
+        if (!cancelled) setBackendInstanceLabels(Object.fromEntries(instances.map((instance) => [instance.backend_instance, instance.account_label ?? instance.backend_instance])));
+      })
+      .catch(() => { if (!cancelled) setBackendInstanceLabels({}); });
+    return () => { cancelled = true; };
+  }, [profile, reconnectSeq]);
   useEffect(() => { setNodeChoice(null); }, [profile, sessionId]);
   const skillBackend = activeSession?.backend ?? activeBackendId;
   const skillSessionId = sessionId && sessionId !== 'default' ? sessionId : undefined;
@@ -851,7 +861,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
     setSessionEfforts([]);
     if (!activeSession || !isConnected || !chosenNode || !nodeReady) return;
     gahApi
-      .getManagerChatModelsForBackend(profile, activeSession.backend, chosenNode || undefined)
+      .getManagerChatModelsForBackend(profile, activeSession.backend, chosenNode || undefined, activeSession.backendInstance)
       .then(({ models, reasoningEfforts: advertisedEfforts }) => {
         if (!cancelled) {
           setSessionModels(models);
@@ -862,7 +872,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
       .catch(() => { if (!cancelled) { setSessionModels([]); setSessionModelsLoaded(true); } });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile, sessionId, activeSession?.backend, isConnected, reconnectSeq, chosenNode, nodeReady]);
+  }, [profile, sessionId, activeSession?.backend, activeSession?.backendInstance, isConnected, reconnectSeq, chosenNode, nodeReady]);
 
   /** Composer provider picker, session variant: one PATCH carries the full
    *  desired selection. A backend switch resets model + effort (the picker
@@ -878,6 +888,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
     try {
       await gahApi.updateChatSession(profile, activeSession.id, {
         ...(backendChanged ? { backend: next.backendId } : {}),
+        ...(backendChanged ? { backendInstance: null } : {}),
         model: next.modelId,
         reasoningEffort: next.reasoningEffortId
       });
@@ -1210,6 +1221,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
         variant: 'session',
         backends: availableBackends,
         selectedBackendId: activeSession.backend,
+        selectedInstanceLabel: activeSession.backendInstance ? backendInstanceLabels[activeSession.backendInstance] ?? activeSession.backendInstance : undefined,
         models: sessionModels,
         currentModelId: activeSession.model,
         reasoningEfforts: sessionEfforts,

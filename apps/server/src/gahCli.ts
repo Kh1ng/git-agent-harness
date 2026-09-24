@@ -1472,6 +1472,52 @@ export async function runBackendInstanceToggle(
   return runVoidCommand(args, config, 'gah config set-backend-instance-enabled');
 }
 
+export async function runBackendInstanceAdd(
+  profile: string,
+  instance: string,
+  runnerKind: 'codex' | 'claude',
+  accountLabel: string,
+  config?: string
+): Promise<void> {
+  const args = ['config', 'add-backend-instance', '--profile', profile, '--instance', instance,
+    '--runner-kind', runnerKind, '--account-label', accountLabel];
+  if (config) args.push('--config-path', config);
+  return runVoidCommand(args, config, 'gah config add-backend-instance');
+}
+
+export async function runBackendInstanceLabel(
+  profile: string,
+  instance: string,
+  accountLabel: string,
+  config?: string
+): Promise<void> {
+  const args = ['config', 'set-backend-instance-label', '--profile', profile, '--instance', instance,
+    '--account-label', accountLabel];
+  if (config) args.push('--config-path', config);
+  return runVoidCommand(args, config, 'gah config set-backend-instance-label');
+}
+
+export interface BackendInstanceRuntime {
+  backend_instance: string;
+  runner_kind: string;
+  logical_backend: string;
+  executable: string;
+  state_root: string | null;
+  account_label: string | null;
+}
+
+export function runBackendInstanceRuntime(profile: string, instance: string, config?: string): Promise<BackendInstanceRuntime> {
+  const args = ['config', 'show-backend-instance-runtime', '--profile', profile, '--instance', instance];
+  if (config) args.push('--config-path', config);
+  return runJsonCommand<BackendInstanceRuntime>(args, config);
+}
+
+export function runBackendInstanceAuth(profile: string, instance: string, config?: string): Promise<{ backend_instance: string; auth_ready: boolean | null }> {
+  const args = ['config', 'test-backend-instance', '--profile', profile, '--instance', instance];
+  if (config) args.push('--config-path', config);
+  return runJsonCommand(args, config);
+}
+
 export async function runConfigShowProfile(
   profile: string,
   config?: string

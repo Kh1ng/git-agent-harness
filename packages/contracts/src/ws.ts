@@ -403,6 +403,7 @@ export type ClientMessage =
       nodeId?: string;
       /** Backend to serve the session; omitted = profile default. */
       backend?: string;
+      backendInstance?: string | null;
       /** Model override for the session's backend; omitted = backend default. */
       model?: string;
       /** Per-session reasoning effort; omitted = backend default. */
@@ -418,6 +419,7 @@ export type ClientMessage =
       profile: string;
       sessionId: string;
       backend?: string;
+      backendInstance?: string | null;
       model?: string | null;
       reasoningEffort?: string | null;
       title?: string;

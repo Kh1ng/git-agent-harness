@@ -17,6 +17,23 @@ replace-wholesale semantics. Legacy candidates without `instance` continue to
 use the existing profile paths, backend aliases, and AGY secondary-home
 compatibility behavior.
 
+## Codex and Claude accounts
+
+Use Settings to add a named Codex or Claude account to a profile. GAH shows only the safe account label and auth status.
+
+The equivalent CLI flow is:
+
+```text
+gah config add-backend-instance --profile my-repo --instance codex-work --runner-kind codex --account-label work
+gah config authenticate-backend-instance --profile my-repo --instance codex-work
+gah doctor --profile my-repo --validate
+```
+
+The authentication command starts the provider's browser or device flow. GAH does not accept or store the provider password or token.
+
+Each named account gets a separate state directory under the GAH configuration directory.
+Use a different instance name for each account. Chat stores the selected instance with the session.
+
 ## Shared registry
 
 Declare safe labels, never credentials. `executable` may be a CLI or a wrapper
