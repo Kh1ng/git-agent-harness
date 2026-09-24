@@ -77,12 +77,16 @@ with tempfile.TemporaryDirectory(prefix='gah-launchd-') as temporary:
     legacy_worker = plistlib.loads(worker_path.read_bytes())
     del legacy_worker['EnvironmentVariables']['GAH_NODE_ADVERTISED_URL']
     worker_path.write_bytes(plistlib.dumps(legacy_worker))
-    update_env = {key: value for key, value in env.items() if key != 'GAH_NODE_ADVERTISED_URL'}
+    update_env = {
+        key: value for key, value in env.items()
+        if key not in ('GAH_DESKTOP_SERVER_PORT', 'GAH_NODE_ADVERTISED_URL')
+    }
     subprocess.run(['bash', str(source), 'install', 'worker', str(repo)], env=update_env, check=True)
     assert worker_path.exists(), 'a fresh worker must run before its first profile is imported'
     worker = plistlib.loads(worker_path.read_bytes())
     identity = json.loads(identity_path.read_text())
     assert identity['advertised_url'] == 'https://mac.test.ts.net:4774'
+    assert worker['EnvironmentVariables']['PORT'] == '4774'
     assert worker['EnvironmentVariables']['GAH_REGISTRY_TRANSPORT_MODE'] == 'authenticated_remote'
 
     tailscale = root / 'tailscale'
@@ -128,12 +132,13 @@ with tempfile.TemporaryDirectory(prefix='gah-launchd-') as temporary:
 
     preserved_tunnel_env = {
         key: value for key, value in tunnel_env.items()
-        if key not in ('GAH_NODE_SSH_TARGET', 'GAH_NODE_SSH_REMOTE_PORT')
+        if key not in ('GAH_DESKTOP_SERVER_PORT', 'GAH_NODE_SSH_TARGET', 'GAH_NODE_SSH_REMOTE_PORT')
     }
     subprocess.run(['bash', str(source), 'install', 'worker', str(repo), profile], env=preserved_tunnel_env, check=True)
     worker = plistlib.loads(worker_path.read_bytes())
     identity = json.loads(identity_path.read_text())
     assert identity['advertised_url'] == 'http://127.0.0.1:48774'
+    assert worker['EnvironmentVariables']['PORT'] == '4774'
     assert worker['EnvironmentVariables']['GAH_REGISTRY_TRANSPORT_MODE'] == 'loopback'
     assert tunnel_path.exists(), 'an update must preserve the managed SSH tunnel'
 

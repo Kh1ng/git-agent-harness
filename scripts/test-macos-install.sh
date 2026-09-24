@@ -67,7 +67,7 @@ class Handler(BaseHTTPRequestHandler):
 ThreadingHTTPServer(('127.0.0.1', 47819), Handler).serve_forever()
 PY
 central_pid=$!
-trap 'kill "$central_pid" 2>/dev/null || true' EXIT
+trap 'launchctl bootout "gui/$(id -u)/dev.git-agent-harness.worker-tunnel" 2>/dev/null || true; kill "$central_pid" 2>/dev/null || true' EXIT
 for _ in {1..50}; do /usr/bin/curl -s -o /dev/null "$GAH_CENTRAL_URL" && break; sleep 0.1; done
 /usr/bin/curl -s -o /dev/null "$GAH_CENTRAL_URL" || { echo 'ERROR: fake central did not start' >&2; exit 1; }
 export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
@@ -76,12 +76,15 @@ export HEALTH_FILE="$health_file"
 export GAH_NODE_ROLE=worker
 export COORDINATOR_TOKEN=ci-install-test-token
 # The hosted runner has no tailnet. Production workers keep the Tailscale default.
-export GAH_NODE_ADVERTISED_URL=http://127.0.0.1:3774
-export GAH_NODE_TRANSPORT_MODE=loopback
+export GAH_DESKTOP_SERVER_PORT=4774
+export GAH_NODE_SSH_TARGET=127.0.0.1
+export GAH_NODE_SSH_REMOTE_PORT=48774
 bash "$stage/checkout/scripts/install-macos.sh"
+launchctl print "gui/$(id -u)/dev.git-agent-harness.worker-tunnel" >/dev/null
 
-unset GAH_NODE_ADVERTISED_URL GAH_NODE_TRANSPORT_MODE
+unset GAH_DESKTOP_SERVER_PORT GAH_NODE_SSH_TARGET GAH_NODE_SSH_REMOTE_PORT
 bash "$stage/checkout/scripts/macos-launchd.sh" install worker "$stage/checkout"
+launchctl print "gui/$(id -u)/dev.git-agent-harness.worker-tunnel" >/dev/null
 
 "${CARGO_HOME:-$HOME/.cargo}/bin/gah" --help >/dev/null
 python3 - <<'PY'
@@ -103,9 +106,9 @@ assert not Path('/etc/gah/server.env').exists(), 'a worker must not configure a 
 assert (Path.home() / 'Applications/GAH.app').is_dir(), 'the deterministic update must install the desktop app'
 desktop = __import__('json').loads((config_root / 'gah/desktop.json').read_text())
 assert desktop['repository_path'].endswith('/checkout'), desktop
-assert desktop['server_port'] == 3774, desktop
+assert desktop['server_port'] == 4774, desktop
 registration = __import__('json').loads(Path(os.environ['REGISTRATION_FILE']).read_text())
-assert registration['advertised_url'] == 'http://127.0.0.1:3774', registration
+assert registration['advertised_url'] == 'http://127.0.0.1:48774', registration
 assert registration['transport_mode'] == 'loopback', registration
 assert Path(os.environ['HEALTH_FILE']).read_text().count('1\n') >= 2
 print('Real macOS install passed: executable, worker role, relay URL, private credentials, agent configs, and launchd checkout state.')

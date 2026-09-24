@@ -132,20 +132,25 @@ gah_path="${GAH_CLI_PATH:-$(command -v gah || true)}"
 if [ -z "$node_path" ]; then echo "ERROR: node is required for $role mode" >&2; exit 1; fi
 if [ "$role" = worker ] && [ -z "$gah_path" ]; then echo 'ERROR: gah is required for worker mode' >&2; exit 1; fi
 
-port="${GAH_DESKTOP_SERVER_PORT:-3774}"
+explicit_port="${GAH_DESKTOP_SERVER_PORT:-}"
+port="$explicit_port"
 explicit_advertised_url="${GAH_NODE_ADVERTISED_URL:-}"
 explicit_transport_mode="${GAH_NODE_TRANSPORT_MODE:-}"
 advertised_url="$explicit_advertised_url"
 transport_mode="$explicit_transport_mode"
 worker_identity="$HOME/.local/share/gah/worker/identity.json"
+if [ "$role" = worker ] && [ -z "$port" ] && [ -f "$plist" ]; then
+  port="$(plist_value PORT 2>/dev/null || true)"
+fi
+[ -n "$port" ] || port=3774
 if [ "$role" = worker ] && [ -z "$advertised_url" ] && [ -f "$plist" ]; then
-  advertised_url="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:GAH_NODE_ADVERTISED_URL' "$plist" 2>/dev/null || true)"
+  advertised_url="$(plist_value GAH_NODE_ADVERTISED_URL 2>/dev/null || true)"
 fi
 if [ "$role" = worker ] && [ -z "$advertised_url" ] && [ -f "$worker_identity" ]; then
   advertised_url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("advertised_url", ""))' "$worker_identity" 2>/dev/null || true)"
 fi
 if [ "$role" = worker ] && [ -z "$transport_mode" ] && [ -f "$plist" ]; then
-  transport_mode="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:GAH_REGISTRY_TRANSPORT_MODE' "$plist" 2>/dev/null || true)"
+  transport_mode="$(plist_value GAH_REGISTRY_TRANSPORT_MODE 2>/dev/null || true)"
 fi
 tunnel_target="${GAH_NODE_SSH_TARGET:-}"
 tunnel_remote_port="${GAH_NODE_SSH_REMOTE_PORT:-}"
