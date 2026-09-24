@@ -1478,3 +1478,6 @@ fn handoff_mode_rejects_all_remote_provider_calls() {
     link_provider_child(&profile, "parent", &child).unwrap();
     link_provider_dependency(&profile, &child, &child).unwrap();
 }
+
+#[path = "tests/comment_tests.rs"]
+mod comment_tests;
