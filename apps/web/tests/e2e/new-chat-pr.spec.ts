@@ -48,7 +48,7 @@ test('PR tab lists open PRs and starts a chat seeded with one', async ({ page, r
   await expect(page.getByText('Head branch: feat/pr-chat')).toBeVisible();
   await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await expect(page.getByRole('link', { name: 'View PR' })).toHaveAttribute('href', 'https://github.com/Kh1ng/git-agent-harness/pull/12');
-  await expect(page.getByRole('button', { name: 'Commit', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Commit / PR', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Refresh git data' })).toBeEnabled();
 
   // The created session is read-only on the provider: worktree-less.
@@ -117,13 +117,14 @@ test('git strip commits a writable checkout and exposes an accessible refresh ac
   await openChat(page);
 
   await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Commit', exact: true })).toBeEnabled();
-  await page.getByRole('button', { name: 'Commit', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Commit / PR', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Commit / PR', exact: true }).click();
   const commitMessage = page.getByPlaceholder('Commit message');
   await commitMessage.fill('fix the chat git actions');
-  await commitMessage.locator('..').getByRole('button', { name: 'Commit', exact: true }).click();
+  await commitMessage.locator('..').getByRole('button', { name: 'Commit all', exact: true }).click();
 
-  await expect(commitMessage).toHaveCount(0);
+  await expect(commitMessage).toHaveValue('');
   expect(message).toBe('fix the chat git actions');
+  await page.getByRole('button', { name: 'Close commit review' }).click();
   await expect(page.getByRole('button', { name: 'Refresh git data' })).toBeEnabled();
 });
