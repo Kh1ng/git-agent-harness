@@ -64,6 +64,49 @@ function changedFiles(cwd: string) {
   };
 }
 
+function selectedChanges(cwd: string, files: string[]) {
+  const selected = [...new Set(files)];
+  if (selected.length === 0 || selected.some(path => !path || /[\0\r\n]/.test(path))) throw new Error('Select at least one valid changed file');
+  const changes = changedFiles(cwd);
+  if (selected.some(path => !changes.paths.includes(path))) throw new Error('Selected files must be current worktree changes');
+  return { selected, changes };
+}
+
+function helperSafePath(path: string): boolean {
+  const name = path.split('/').at(-1) ?? path;
+  return !/^\.env(?:\.|$)/i.test(name)
+    && !/(?:auth|credential|secret|token)s?(?:\.|$)/i.test(name)
+    && !/\.(?:key|pem|p12|pfx)$/i.test(name)
+    && !/^(?:\.npmrc|\.pypirc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519))$/i.test(name);
+}
+
+function sanitizeHelperPatch(patch: string): string {
+  return patch.split('\n').map(line => /(?:password|passwd|secret|token|api[_-]?key|authorization|private[_-]?key)["']?\s*[:=]/i.test(line)
+    ? `${line[0] === '+' || line[0] === '-' || line[0] === ' ' ? line[0] : ''}[credential line omitted]`
+    : line).join('\n');
+}
+
+/** Exact working diff for a reviewed file selection. Unrelated dirty files
+ * never enter helper-model input. */
+export function getSelectedChangesPatch(cwd: string, files: string[]): string {
+  const { selected, changes } = selectedChanges(cwd, files);
+  if (selected.some(path => !helperSafePath(path))) throw new Error('Credential and environment files cannot be sent to a helper model');
+  const tracked = selected.filter(path => !changes.untracked.has(path));
+  const chunks = tracked.length > 0 ? [gitOutput(cwd, ['diff', '--no-ext-diff', '--no-color', 'HEAD', '--', ...tracked])] : [];
+  for (const path of selected.filter(candidate => changes.untracked.has(candidate))) {
+    const diff = gitInDir(cwd, ['diff', '--no-ext-diff', '--no-color', '--no-index', '--', '/dev/null', path]);
+    if (diff.ok || diff.out) chunks.push(diff.out);
+  }
+  return sanitizeHelperPatch(chunks.join('\n'));
+}
+
+/** Committed diff for helper input, excluding credential and environment files. */
+export function getReviewHelperPatch(cwd: string, requestedBase?: string): string {
+  const { ref } = reviewBase(cwd, requestedBase);
+  const files = nulList(gitOutput(cwd, ['diff', '--name-only', '-z', '--no-renames', `${ref}...HEAD`])).filter(helperSafePath);
+  return files.length === 0 ? '' : sanitizeHelperPatch(gitOutput(cwd, ['diff', '--no-ext-diff', '--no-color', `${ref}...HEAD`, '--', ...files]));
+}
+
 function reviewBase(cwd: string, requested?: string): { base: string; ref: string } {
   let base = requested?.trim().replace(/^origin\//, '') ?? '';
   if (base) {
@@ -206,10 +249,7 @@ export async function commitGitChanges(
     if (!add.ok) throw new Error(add.err || 'git add failed');
     commit = gitInDir(cwd, ['commit', '-m', message]);
   } else {
-    const selected = [...new Set(files)];
-    if (selected.length === 0 || selected.some(path => !path || /[\0\r\n]/.test(path))) throw new Error('Select at least one valid changed file');
-    const changes = changedFiles(cwd);
-    if (selected.some(path => !changes.paths.includes(path))) throw new Error('Selected files must be current worktree changes');
+    const { selected, changes } = selectedChanges(cwd, files);
     const untracked = selected.filter(path => changes.untracked.has(path));
     if (untracked.length > 0) {
       const intent = gitInDir(cwd, ['add', '--intent-to-add', '--', ...untracked]);

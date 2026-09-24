@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { commitGitChanges, getGitReviewState, getGitStatusCached } from './gitCache.js';
+import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewHelperPatch, getSelectedChangesPatch } from './gitCache.js';
 
 // AsyncTtlCache's own TTL/coalescing/isolation/failure behavior is covered
 // by asyncTtlCache.test.ts. These tests focus on gitCache's own wrapper
@@ -119,6 +119,18 @@ describe('commitGitChanges', () => {
       /current worktree changes/
     );
   });
+
+  test('helper diff input contains only the selected changes', () => {
+    const dir = initRepo();
+    writeFileSync(join(dir, 'selected.txt'), 'selected content\n');
+    writeFileSync(join(dir, 'config.json'), '{"api_key":"do-not-send"}\n');
+    writeFileSync(join(dir, '.env'), 'SECRET=do-not-send\n');
+    const patch = getSelectedChangesPatch(dir, ['selected.txt', 'config.json']);
+    assert.match(patch, /selected content/);
+    assert.doesNotMatch(patch, /do-not-send|SECRET|\.env/);
+    assert.match(patch, /credential line omitted/);
+    assert.throws(() => getSelectedChangesPatch(dir, ['.env']), /cannot be sent/);
+  });
 });
 
 test('getGitReviewState separates dirty files from the committed PR diff', async () => {
@@ -129,7 +141,9 @@ test('getGitReviewState separates dirty files from the committed PR diff', async
   execFileSync('git', ['-C', dir, 'push', '-u', 'origin', 'main']);
   execFileSync('git', ['-C', dir, 'switch', '-c', 'feature/review']);
   writeFileSync(join(dir, 'committed.txt'), 'in pr\n');
+  writeFileSync(join(dir, '.env.production'), 'SECRET=do-not-send\n');
   execFileSync('git', ['-C', dir, 'add', 'committed.txt']);
+  execFileSync('git', ['-C', dir, 'add', '.env.production']);
   execFileSync('git', ['-C', dir, 'commit', '-m', 'committed change']);
   writeFileSync(join(dir, 'local-only.txt'), 'not in pr\n');
 
@@ -137,8 +151,10 @@ test('getGitReviewState separates dirty files from the committed PR diff', async
 
   assert.equal(review.base, 'main');
   assert.deepEqual(review.commits.map(commit => commit.subject), ['committed change']);
-  assert.deepEqual(review.changedFiles, ['committed.txt']);
+  assert.deepEqual(review.changedFiles, ['.env.production', 'committed.txt']);
   assert.deepEqual(review.files.map(file => file.path), ['local-only.txt']);
   assert.match(review.patch, /committed\.txt/);
   assert.doesNotMatch(review.patch, /local-only\.txt/);
+  assert.match(getReviewHelperPatch(dir), /committed\.txt/);
+  assert.doesNotMatch(getReviewHelperPatch(dir), /SECRET|\.env/);
 });

@@ -350,6 +350,8 @@ export interface ChatSessionSummary {
    * own backend, only when the backend advertises the control. */
   reasoningEffort: string | null;
   title: string | null;
+  /** Present only while the automatic title remains unedited. */
+  titleSuggestion?: { backend: string; backendInstance: string | null; model: string };
   createdAt: number;
   lastActiveAt: number;
   archivedAt: number | null;

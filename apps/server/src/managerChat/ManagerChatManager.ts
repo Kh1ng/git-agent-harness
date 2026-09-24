@@ -25,6 +25,7 @@ import {
   backendForProfile,
   modelOverrideForProfile,
   reasoningEffortOverrideForProfile,
+  helperRouteFor,
   setModelOverrideForProfile,
   setReasoningEffortOverrideForProfile
 } from './settingsStore.js';
@@ -52,6 +53,7 @@ import { resolveSkillBindings } from '../skillBank.js';
 import { chatRoute, localChatNodeId, rememberWorkspace, type ChatRoute } from '../chatRouting.js';
 import { createWorkspace, getSession, sessionBranchName, storeSession } from './chatSessions.js';
 import type { ManagerAdapter } from './registry.js';
+import { chatTitleInput, helperFallback, recordHelperUsage, runHelperTask, type HelperTaskResult } from './helperTasks.js';
 
 // Serializes turns per profile -- without this, two concurrent messages for
 // the same profile (e.g. two open browser tabs) would both prompt the same
@@ -230,6 +232,41 @@ async function findProfileInfo(profile: string): Promise<ProfileSummary | null> 
   }
   profileInfoCache = { at: now, profiles: await runProfileList() };
   return profileInfoCache.profiles.find((p) => p.name === profile) ?? null;
+}
+
+async function generateChatTitle(
+  profile: string,
+  sessionId: string,
+  session: import('@git-agent-harness/contracts').ChatSessionSummary,
+  message: string,
+  route: ChatRoute,
+  fallbackTitle: string
+): Promise<void> {
+  const startedAt = Date.now();
+  const preference = helperRouteFor(profile, session.backend, session.backendInstance ?? null);
+  let result: HelperTaskResult;
+  try {
+    result = route.remote
+      ? await route.remote.request<HelperTaskResult>({
+        action: 'helper-task', sessionId, kind: 'chat_title', message: chatTitleInput(message), fallback: fallbackTitle,
+        sourceBackend: session.backend, sourceBackendInstance: session.backendInstance ?? null,
+        ...(preference ? { preference: { ...preference, profile: route.profileName } } : {})
+      })
+      : await runHelperTask({
+        profile: route.profileName, sourceBackend: session.backend, sourceBackendInstance: session.backendInstance ?? null,
+        kind: 'chat_title', input: chatTitleInput(message), fallback: { text: fallbackTitle }
+      }, preference ? { preference } : {});
+  } catch {
+    result = helperFallback('chat_title', { text: fallbackTitle }, 'helper_unavailable', Date.now() - startedAt);
+  }
+  try { recordHelperUsage(profile, result); } catch (error) { console.error('[managerChat] helper telemetry failed:', error); }
+  const current = getSession(profile, sessionId, chatSessionStoreOptions);
+  if (!result.generated || !result.model || !current || current.title !== fallbackTitle || current.titleSuggestion) return;
+  updateSession(profile, sessionId, {
+    title: result.text,
+    titleSuggestion: { backend: result.backend ?? session.backend, backendInstance: result.backendInstance, model: result.model }
+  }, chatSessionStoreOptions);
+  updatedPublisher?.({ type: 'manager.chat.updated', requestId: `helper-title-${sessionId}`, profile, sessionId });
 }
 
 /** The full folded view, including cursor + streaming state. */
@@ -844,6 +881,14 @@ export function sendManagerChatMessage(
     let session = getSession(profile, sessionId, chatSessionStoreOptions);
     if (!session || session.archivedAt !== null) throw new Error('Chat session is unavailable or archived.');
     const route = await chatRoute(profile, nodeId ?? session.nodeId, session.backend);
+    if (!session.title && !message.trim().startsWith('/')) {
+      const fallbackTitle = chatTitleFromText(message);
+      if (fallbackTitle) {
+        session = updateSession(profile, sessionId, { title: fallbackTitle }, chatSessionStoreOptions);
+        void generateChatTitle(profile, sessionId, session, message, route, fallbackTitle)
+          .catch(error => console.error('[managerChat] helper title failed:', error));
+      }
+    }
     const previousNode = session.nodeId ?? localChatNodeId();
     if (previousNode && !session.workspaces?.[previousNode]) session = { ...session, workspaces: { ...session.workspaces, [previousNode]: { branch: session.branch, worktreePath: session.worktreePath } } };
     if (route.remote) {
@@ -864,10 +909,6 @@ export function sendManagerChatMessage(
     const resolved = await resolveSessionCwd(profile, sessionId, profileInfo, chatSessionStoreOptions);
     if (!resolved) {
       throw new Error(`No active chat session '${sessionId}' for profile '${profile}'`);
-    }
-    if (!resolved.session.title && !message.trim().startsWith('/')) {
-      const title = chatTitleFromText(message);
-      if (title) updateSession(profile, sessionId, { title }, chatSessionStoreOptions);
     }
     return { cwd: resolved.cwd, backend: resolved.session.backend, backendInstance: resolved.session.backendInstance, model: resolved.session.model, reasoningEffort: resolved.session.reasoningEffort, route };
   };

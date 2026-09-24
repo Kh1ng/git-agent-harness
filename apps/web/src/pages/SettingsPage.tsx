@@ -16,7 +16,7 @@ import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
 import { gahApi, backendInstancesApi, promptPoliciesApi, routingCandidatesApi, GahApiError } from '../api/client.js';
 import type { ConfigSetData, NotificationSettingsSummary } from '@git-agent-harness/contracts';
-import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, AdminUpdatePendingInfo, AdminUpdateState } from '@git-agent-harness/contracts';
+import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, AdminUpdatePendingInfo, AdminUpdateState, BackendInstanceSummary, HelperRoutePreference, ManagerModelInfo } from '@git-agent-harness/contracts';
 
 const SETTINGS_REFRESH_MS = 60 * 1000;
 const SETTINGS_SECTIONS_KEY = 'gah.settings.openSections';
@@ -1373,6 +1373,129 @@ function NotificationChannelSection({ config, setConfig, clearConfigErrors }: Gl
   );
 }
 
+const accountValue = (backend: string, instance: string | null) => `${backend}:${instance ?? ''}`;
+const parseAccount = (value: string) => {
+  const [backend, instance = ''] = value.split(':');
+  return { backend, instance: instance || null };
+};
+
+function HelperRoutingCard({ profiles, settings, disabled, onSave }: {
+  profiles: ProfileSummary[];
+  settings: ManagerChatSettingsSummary;
+  disabled: boolean;
+  onSave: (routes: HelperRoutePreference[]) => void;
+}) {
+  const [profile, setProfile] = useState(profiles[0]?.name ?? '');
+  const [instances, setInstances] = useState<BackendInstanceSummary[]>([]);
+  const [source, setSource] = useState('');
+  const [draft, setDraft] = useState<HelperRoutePreference | null>(null);
+  const [models, setModels] = useState<ManagerModelInfo[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!profile) return;
+    let cancelled = false;
+    backendInstancesApi.list(profile)
+      .then(result => { if (!cancelled) setInstances(result.backend_instances.filter(instance => instance.enabled)); })
+      .catch(() => { if (!cancelled) setInstances([]); });
+    const backend = settings.profileOverrides[profile] ?? settings.defaultBackend;
+    setSource(accountValue(backend, null));
+    return () => { cancelled = true; };
+  }, [profile, settings.defaultBackend, settings.profileOverrides]);
+
+  const accounts = [
+    ...settings.availableBackends.filter(option => option.implemented).map(option => ({
+      value: accountValue(option.id, null), label: `${option.displayName} default`, backend: option.id, instance: null as string | null
+    })),
+    ...instances.map(instance => ({
+      value: accountValue(instance.logical_backend, instance.backend_instance),
+      label: `${instance.account_label ?? instance.backend_instance} · ${instance.logical_backend}`,
+      backend: instance.logical_backend,
+      instance: instance.backend_instance as string | null
+    }))
+  ];
+
+  useEffect(() => {
+    if (!profile || !source) return;
+    const selected = parseAccount(source);
+    const saved = settings.helperRoutes.find(route => route.profile === profile && route.sourceBackend === selected.backend
+      && route.sourceBackendInstance === selected.instance);
+    setDraft(saved ?? {
+      profile, sourceBackend: selected.backend, sourceBackendInstance: selected.instance,
+      enabled: true, backend: selected.backend, backendInstance: selected.instance, model: null
+    });
+  }, [profile, source, settings.helperRoutes]);
+
+  useEffect(() => {
+    if (!draft?.enabled) { setModels([]); return; }
+    let cancelled = false;
+    setLoadingModels(true);
+    setError(null);
+    gahApi.getManagerChatModelsForBackend(profile, draft.backend, undefined, draft.backendInstance)
+      .then(result => { if (!cancelled) setModels(result.models); })
+      .catch(cause => { if (!cancelled) { setModels([]); setError(cause instanceof Error ? cause.message : String(cause)); } })
+      .finally(() => { if (!cancelled) setLoadingModels(false); });
+    return () => { cancelled = true; };
+  }, [profile, draft?.enabled, draft?.backend, draft?.backendInstance]);
+
+  if (profiles.length === 0 || !draft) return null;
+  const effectiveModel = draft.model ?? (draft.backend === 'codex'
+    ? models.find(model => /luna/i.test(`${model.id} ${model.name}`))?.id ?? null
+    : null);
+  const effective = !draft.enabled ? 'disabled; deterministic fallback'
+    : loadingModels ? 'loading model catalog…'
+      : error ? 'model catalog unavailable; deterministic fallback'
+        : effectiveModel ? `${draft.backendInstance ?? draft.backend} · ${effectiveModel}`
+          : draft.backend === 'codex' ? 'no advertised Luna; deterministic fallback'
+            : 'no helper model selected; deterministic fallback';
+  const target = accountValue(draft.backend, draft.backendInstance);
+
+  return (
+    <div className="mt-5 border-t border-subtle pt-4">
+      <h4 className="text-xs font-semibold text-primary">Low-cost helper model</h4>
+      <p className="mt-1 text-xs text-muted">Chat titles and requested Git prose use this account without changing the coding model.</p>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <label className="space-y-1 text-xs text-secondary">Profile
+          <select value={profile} onChange={event => setProfile(event.target.value)} className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-primary">
+            {profiles.map(option => <option key={option.name} value={option.name}>{option.display_name || option.name}</option>)}
+          </select>
+        </label>
+        <label className="space-y-1 text-xs text-secondary">Active account route
+          <select value={source} onChange={event => setSource(event.target.value)} className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-primary">
+            {accounts.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </label>
+        <label className="flex items-center gap-2 text-xs text-secondary sm:col-span-2">
+          <input type="checkbox" checked={draft.enabled} onChange={event => setDraft({ ...draft, enabled: event.target.checked })} />
+          Use model-generated helper suggestions
+        </label>
+        <label className="space-y-1 text-xs text-secondary">Helper account
+          <select value={target} disabled={!draft.enabled} onChange={event => {
+            const selected = parseAccount(event.target.value);
+            setDraft({ ...draft, backend: selected.backend, backendInstance: selected.instance, model: null });
+          }} className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-primary disabled:opacity-50">
+            {accounts.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </label>
+        <label className="space-y-1 text-xs text-secondary">Helper model
+          <select value={draft.model ?? ''} disabled={!draft.enabled || loadingModels} onChange={event => setDraft({ ...draft, model: event.target.value || null })}
+            className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-primary disabled:opacity-50">
+            <option value="">{draft.backend === 'codex' ? 'Automatic advertised Luna' : 'Deterministic fallback'}</option>
+            {models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}
+          </select>
+        </label>
+      </div>
+      <p className="mt-2 text-xs text-muted">Effective: {effective}</p>
+      {error && <p role="alert" className="mt-2 text-xs text-critical">Model catalog unavailable: {error}</p>}
+      <button type="button" className="btn-secondary mt-3 text-xs" disabled={disabled} onClick={() => onSave([
+        ...settings.helperRoutes.filter(route => !(route.profile === draft.profile && route.sourceBackend === draft.sourceBackend && route.sourceBackendInstance === draft.sourceBackendInstance)),
+        draft
+      ])}>Save helper route</button>
+    </div>
+  );
+}
+
 function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles: ProfileSummary[] }) {
   const [settings, setSettings] = useState<ManagerChatSettingsSummary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1384,7 +1507,7 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
     gahApi
       .getManagerChatSettings()
       .then((data) => {
-        setSettings(data);
+        setSettings({ ...data, helperRoutes: data.helperRoutes ?? [] });
         setError(null);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
@@ -1396,7 +1519,7 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
   }, []);
   useWsReconnectRefresh(load);
 
-  const save = async (update: { defaultBackend?: string; profileOverrides?: Record<string, string> }) => {
+  const save = async (update: { defaultBackend?: string; profileOverrides?: Record<string, string>; helperRoutes?: HelperRoutePreference[] }) => {
     setLoading(true);
     try {
       await gahApi.setManagerChatSettings(update);
@@ -1513,6 +1636,8 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
           </button>
         </div>
       )}
+
+      <HelperRoutingCard profiles={configuredProfiles} settings={settings} disabled={loading} onSave={helperRoutes => void save({ helperRoutes })} />
 
       {error && <p className="mt-3 text-xs text-critical">Error: {error}</p>}
     </section>

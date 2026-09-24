@@ -33,6 +33,7 @@ import type {
   ConfigSummary,
   GatewayBootstrapCommand,
   GatewaySettingsSummary,
+  HelperUsageRecord,
   SettingsConfigProfileSummary,
   DoctorSnapshot,
   LedgerEntry,
@@ -540,6 +541,7 @@ function createState(scenario: MockScenarioName, reset: number, previewOrigin?: 
     settings: {
       defaultBackend: defaultBackendFor(scenario),
       profileOverrides: {},
+      helperRoutes: [],
       availableBackends: BACKENDS
     } satisfies ManagerChatSettingsSummary,
     profiles: structuredClone(MOCK_PROFILES),
@@ -1201,6 +1203,21 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   app.get('/api/usage/rollup', (req, res) => {
     res.json({ ...MOCK_USAGE_ROLLUP, profile: bodyString(req.query.profile) ?? 'fixture' } satisfies UsageRollupSummary);
   });
+  app.get('/api/manager-chat/helper-usage', (_req, res) => {
+    res.json({ records: [{
+      timestamp: FIXED_NOW,
+      kind: 'chat_title',
+      profile: 'fixture',
+      backend: 'codex',
+      backendInstance: 'codex-work',
+      model: 'gpt-6-luna',
+      inputTokens: 34,
+      outputTokens: 6,
+      totalTokens: 40,
+      latencyMs: 420,
+      fallbackReason: null
+    } satisfies HelperUsageRecord] });
+  });
   app.get('/api/report', (_req, res) => res.json(REPORT_FIXTURE));
   app.get('/api/report/series', (_req, res) => {
     res.json({
@@ -1351,6 +1368,15 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     res.json({ commits: [{ hash: '1111111111111111111111111111111111111111', short: '1111111', subject: 'Mock commit', author: 'GAH', ago: '1 minute ago' }] });
   });
   app.get('/api/git/prs', (_req, res) => res.json({ prs: state.gitPrs }));
+  app.post('/api/git/suggest', (req, res) => {
+    if (req.body?.kind === 'pr_summary') {
+      res.json({ kind: 'pr_summary', text: '## Summary\n\n- Describe the change', title: 'Describe the change', body: '## Summary\n\n- Describe the change',
+        generated: true, backend: 'codex', backendInstance: 'codex-work', model: 'gpt-6-luna', fallbackReason: null });
+      return;
+    }
+    res.json({ kind: 'commit_message', text: 'Describe the change', generated: true,
+      backend: 'codex', backendInstance: 'codex-work', model: 'gpt-6-luna', fallbackReason: null });
+  });
   app.post('/api/git/pr', (req, res) => {
     const title = bodyString(req.body?.title);
     if (!title) return jsonError(res, 400, 'Invalid pull request', 'title required');
@@ -1398,10 +1424,12 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   app.post('/api/manager-chat/settings', (req, res) => {
     const defaultBackend = bodyString(req.body?.defaultBackend);
     const overrides = req.body?.profileOverrides;
+    const helperRoutes = req.body?.helperRoutes;
     state.settings = {
       ...state.settings,
       ...(defaultBackend ? { defaultBackend } : {}),
-      ...(overrides && typeof overrides === 'object' ? { profileOverrides: overrides as Record<string, string> } : {})
+      ...(overrides && typeof overrides === 'object' ? { profileOverrides: overrides as Record<string, string> } : {}),
+      ...(Array.isArray(helperRoutes) ? { helperRoutes } : {})
     } satisfies ManagerChatSettingsSummary;
     res.json({ success: true });
   });

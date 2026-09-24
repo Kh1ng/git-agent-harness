@@ -1494,6 +1494,47 @@ export interface ManagerChatSettingsSummary {
   defaultBackend: string;
   profileOverrides: Record<string, string>;
   availableBackends: ManagerBackendInfo[];
+  helperRoutes: HelperRoutePreference[];
+}
+
+export type HelperTaskKind = 'chat_title' | 'commit_message' | 'pr_summary';
+
+/** One explicit helper route for one source account. Missing routes use the
+ * source account and an advertised Luna model only when the source is Codex. */
+export interface HelperRoutePreference {
+  profile: string;
+  sourceBackend: string;
+  sourceBackendInstance: string | null;
+  enabled: boolean;
+  backend: string;
+  backendInstance: string | null;
+  model: string | null;
+}
+
+export interface HelperSuggestion {
+  kind: HelperTaskKind;
+  text: string;
+  title?: string;
+  body?: string;
+  generated: boolean;
+  backend: string | null;
+  backendInstance: string | null;
+  model: string | null;
+  fallbackReason: string | null;
+}
+
+export interface HelperUsageRecord {
+  timestamp: number;
+  kind: HelperTaskKind;
+  profile: string;
+  backend: string | null;
+  backendInstance: string | null;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  latencyMs: number;
+  fallbackReason: string | null;
 }
 
 /** Secret-safe GET /api/settings/gateway summary. Credential bytes are
@@ -1548,6 +1589,7 @@ export interface GatewaySettingsUpdate {
 export interface ManagerChatSettingsUpdate {
   defaultBackend?: string;
   profileOverrides?: Record<string, string>;
+  helperRoutes?: HelperRoutePreference[];
 }
 
 /** A real slash command from the active backend's own command registry
