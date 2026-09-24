@@ -77,6 +77,30 @@ test('rollup counts usage-less turns as unattributed and honors the window', () 
   }
 });
 
+test('rollup keeps prior backend usage and identifies later turns with unavailable counters', () => {
+  const stateDir = fixture();
+  try {
+    sessionLog(stateDir, 'repo', 'mixed');
+    appendEvents('repo', [
+      { type: 'assistant/message', seq: 1, turn: 1, text: 'measured', backend: 'claude', model: 'claude-opus-4-1', usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150, estimated_cost_usd: 0.01, duration_seconds: 1 }, timestamp: NOW - 1000 },
+      { type: 'assistant/message', seq: 2, turn: 2, text: 'missing counters', backend: 'codex', model: 'gpt-5.3', usage: null, timestamp: NOW }
+    ], { stateDir, sessionId: 'mixed' });
+
+    const rollup = usageRollup('repo', 7, { stateDir, now: () => NOW });
+    assert.equal(rollup.rows.length, 1);
+    assert.equal(rollup.rows[0]?.backend, 'claude');
+    assert.deepEqual(rollup.usage_unavailable, [{
+      session_id: 'mixed',
+      backend: 'codex',
+      model: 'gpt-5.3',
+      day: '2026-08-30'
+    }]);
+  } finally {
+    setChatSessionStoreOptions({ stateDir: undefined });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test('rollup preserves unknown cost instead of presenting it as zero', () => {
   const stateDir = fixture();
   try {

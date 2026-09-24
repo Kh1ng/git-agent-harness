@@ -78,6 +78,7 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
   useWsReconnectRefresh(() => setRetry(value => value + 1));
 
   const rows = rollup?.rows ?? [];
+  const usageUnavailable = rollup?.usage_unavailable ?? [];
   const byBackend = useMemo(() => {
     const map = new Map<string, {
       turns: number;
@@ -127,8 +128,7 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
         <div>
           <h3 className="text-sm font-semibold text-primary">Manager chat usage</h3>
           <p className="text-xs text-muted mt-0.5">
-            Backend-reported usage from GAH session logs. API equivalent is an estimate, not your subscription bill.
-            {rollup && rollup.unattributed_turns > 0 && ` ${rollup.unattributed_turns} turns reported no usage.`}
+            Source: manager-chat session logs. API equivalent is an estimate, not your subscription bill.
           </p>
         </div>
         <div className="flex rounded-md border border-subtle overflow-hidden text-xs">
@@ -147,17 +147,19 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
         <LoadingState label="Rolling up session usage…" />
       ) : error ? (
         <ErrorState message={`Usage rollup failed: ${error}`} onRetry={() => setRetry((current) => current + 1)} />
-      ) : rows.length === 0 ? (
+      ) : rows.length === 0 && usageUnavailable.length === 0 ? (
         <EmptyState icon={FlaskConical} title="No usage recorded" description={`No manager-chat usage in the last ${days} days.`} />
       ) : (
         <>
-          <p className="mb-3 text-xs tabular-nums text-secondary">
-            {formatCount(reportedTurns)} usage-reported turns · {formatTokens(reportedTokens)} tokens ·{' '}
-            {costedTurns > 0 ? formatCost(apiCostUsd) : 'Unmeasured'} API equivalent
-            {costedTurns > 0 && costedTurns < reportedTurns ? ` on ${formatCount(costedTurns)} of ${formatCount(reportedTurns)} turns` : ''}
-          </p>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs tabular-nums">
+          {rows.length > 0 && (
+            <>
+              <p className="mb-3 text-xs tabular-nums text-secondary">
+                {formatCount(reportedTurns)} usage-reported turns · {formatTokens(reportedTokens)} tokens ·{' '}
+                {costedTurns > 0 ? formatCost(apiCostUsd) : 'Unmeasured'} API equivalent
+                {costedTurns > 0 && costedTurns < reportedTurns ? ` on ${formatCount(costedTurns)} of ${formatCount(reportedTurns)} turns` : ''}
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs tabular-nums">
               <thead>
                 <tr className="text-left text-muted border-b border-subtle">
                   <th className="py-2 pr-4 font-medium">Backend</th>
@@ -197,8 +199,10 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
                   );
                 })}
               </tbody>
-            </table>
-          </div>
+                </table>
+              </div>
+            </>
+          )}
           {rollup && rollup.tickets.length > 0 && (
             <div className="mt-4">
               <h4 className="text-xs font-semibold text-secondary mb-2">Cost per ticket</h4>
@@ -225,6 +229,38 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
                         <td className="hidden py-2 text-muted sm:table-cell">
                           {Object.entries(ticket.backends).sort((a, b) => b[1] - a[1]).map(([backend, tokens]) => `${backend}: ${formatTokens(tokens)}`).join(' · ')}
                         </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          {usageUnavailable.length > 0 && (
+            <div className={rows.length > 0 ? 'mt-4' : ''}>
+              <h4 className="text-xs font-semibold text-warning">
+                Usage unavailable ({formatCount(usageUnavailable.length)})
+              </h4>
+              <p className="mt-1 text-xs text-muted">
+                These completed turns did not report token counters. Existing measured rows are unchanged.
+              </p>
+              <div className="mt-2 overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-muted border-b border-subtle">
+                      <th className="py-2 pr-4 font-medium">Session</th>
+                      <th className="py-2 pr-4 font-medium">Backend</th>
+                      <th className="py-2 pr-4 font-medium">Model</th>
+                      <th className="py-2 font-medium">Day</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {usageUnavailable.map((turn, index) => (
+                      <tr key={`${turn.session_id}-${turn.backend}-${turn.day}-${index}`} className="border-b border-subtle/50">
+                        <td className="py-2 pr-4 font-mono text-primary">{turn.session_id}</td>
+                        <td className="py-2 pr-4">{turn.backend}</td>
+                        <td className="py-2 pr-4 text-muted">{turn.model ?? 'default'}</td>
+                        <td className="py-2 text-muted">{turn.day}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -369,7 +405,7 @@ export function TelemetryPage() {
     <div className="space-y-6">
       <PageHeader
         title="Telemetry"
-        description="Backend & model performance, tokens, and cost"
+        description="Manager-chat usage and dispatch-ledger performance"
         onRefresh={refreshAll}
         refreshing={report.loading}
         lastUpdated={lastUpdated}
@@ -396,11 +432,11 @@ export function TelemetryPage() {
 
       <section className="card-padded">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-          <h3 className="text-sm font-semibold text-primary">Usage trend</h3>
+          <h3 className="text-sm font-semibold text-primary">Dispatch ledger trend</h3>
           <div className="flex items-center gap-3">
             <span className="inline-flex items-center gap-1 text-xs text-muted">
               <FlaskConical size={12} aria-hidden="true" />
-              Real ledger series ({reportSeries.data?.bucket ?? 'daily'})
+              Dispatch attempts ({reportSeries.data?.bucket ?? 'daily'})
             </span>
             <select
               value={trendMetric}
@@ -424,7 +460,7 @@ export function TelemetryPage() {
             onRetry={() => fetchReportSeries({ profile: profile ?? undefined, since: '14d', bucket: 'daily' }, { force: true })}
           />
         ) : activeTrend.data.length === 0 ? (
-          <EmptyState icon={FlaskConical} title="No trend data for this window" description="Try a longer time range once more runs have completed." />
+          <EmptyState icon={FlaskConical} title="No dispatch-ledger trend" description="No dispatch runs were recorded in this window. Manager-chat usage above is unaffected." />
         ) : (
           <TrendChart data={activeTrend.data} valueLabel={activeTrend.label} formatValue={activeTrend.format as (v: number) => string} />
         )}
@@ -432,7 +468,7 @@ export function TelemetryPage() {
 
       <section>
         <h3 className="text-sm font-semibold text-primary mb-3">
-          {groupBy === 'model' ? 'Model' : 'Backend'} performance (7d)
+          Dispatch ledger {groupBy === 'model' ? 'model' : 'backend'} performance (7d)
         </h3>
         {report.loading && !report.data ? (
           <LoadingState label="Loading report…" />
@@ -443,7 +479,7 @@ export function TelemetryPage() {
             onRetry={() => fetchReport({ profile: profile ?? undefined, since: '7d', groupBy }, { force: true })}
           />
         ) : sorted.length === 0 ? (
-          <EmptyState icon={FlaskConical} title="No report data for this window" description="Try a longer time range once more runs have completed." />
+          <EmptyState icon={FlaskConical} title="No dispatch-ledger data" description="No dispatch runs were recorded in this window. Manager-chat usage above is unaffected." />
         ) : (
           <div className="card overflow-x-auto">
             <table className="table-base min-w-[980px]">

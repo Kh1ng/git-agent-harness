@@ -266,6 +266,7 @@ const MOCK_USAGE_ROLLUP = {
     estimated_cost_usd: 0.01
   }],
   unattributed_turns: 0,
+  usage_unavailable: [],
   tickets: [{
     ticket: '#1087',
     title: 'Mock control plane',
