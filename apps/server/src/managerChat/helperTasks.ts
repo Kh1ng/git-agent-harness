@@ -1,4 +1,5 @@
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type {
   ChatUsage,
@@ -44,6 +45,13 @@ interface HelperTaskDeps {
 type HelperAttribution = Pick<HelperTaskResult, 'backend' | 'backendInstance' | 'requestedModel' | 'effectiveModel' | 'actualModel'>;
 
 const queues = new Map<string, Promise<void>>();
+let helperWorkingDirectory: string | null = null;
+
+/** ACP keeps one cwd per connection, so all helper turns share one isolated,
+ * initially empty temp directory instead of the server checkout. */
+function workingDirectory(): string {
+  return helperWorkingDirectory ??= mkdtempSync(join(tmpdir(), 'gah-helper-'));
+}
 
 function bounded(value: string, limit: number): string {
   return value.replace(/\0/g, '').slice(0, limit);
@@ -177,7 +185,8 @@ async function run(request: HelperTaskRequest, deps: HelperTaskDeps): Promise<He
   const key = `helper:${request.profile}:${backend}:${backendInstance ?? 'default'}`;
   try {
     const adapter = await adapterFor(request.profile, backend, backendInstance);
-    const catalog = await withTimeout(adapter.listModels(key), deps.timeoutMs ?? HELPER_TIMEOUT_MS, () => void adapter.cancelTurn(key));
+    const cwd = workingDirectory();
+    const catalog = await withTimeout(adapter.listModels(key, cwd), deps.timeoutMs ?? HELPER_TIMEOUT_MS, () => void adapter.cancelTurn(key));
     const selectedModel = requestedModel ?? (backend === 'codex' ? lunaModel(catalog.models) : null);
     if (!selectedModel || !catalog.models.some(candidate => candidate.id === selectedModel)) {
       return fallback(request, 'missing_model', startedAt, now, attempted());
@@ -186,6 +195,7 @@ async function run(request: HelperTaskRequest, deps: HelperTaskDeps): Promise<He
     const result = await withTimeout(adapter.runTurn(key, {
       prompt: prompt(request.kind, sanitizeHelperInput(request.input)),
       history: [],
+      cwd,
       model: effectiveModel,
       onChunk: () => {},
       onToolResult: () => {}

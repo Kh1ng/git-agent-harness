@@ -74,8 +74,9 @@ function selectedChanges(cwd: string, files: string[]) {
 
 function helperSafePath(path: string): boolean {
   const name = path.split('/').at(-1) ?? path;
+  const ordinarySource = /\.(?:[cm]?[jt]sx?|css|s[ac]ss|less|html?|mdx?|vue|svelte)$/i.test(name);
   return !/^\.env(?:\.|$)/i.test(name)
-    && !/(?:auth|credential|secret|token)s?(?:\.|$)/i.test(name)
+    && (ordinarySource || !/^(?:auth|credentials?|secrets?|tokens?)(?:[._-]|$)/i.test(name))
     && !/\.(?:key|pem|p12|pfx)$/i.test(name)
     && !/^(?:\.npmrc|\.pypirc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519))$/i.test(name);
 }
@@ -84,16 +85,18 @@ function helperSafePath(path: string): boolean {
  * never enter helper-model input. */
 export function getSelectedChangesForHelper(cwd: string, files: string[]) {
   const { selected, changes } = selectedChanges(cwd, files);
-  if (selected.some(path => !helperSafePath(path))) throw new Error('Credential and environment files cannot be sent to a helper model');
-  const tracked = selected.filter(path => !changes.untracked.has(path));
-  const chunks = tracked.length > 0 ? [gitOutput(cwd, ['diff', '--no-ext-diff', '--no-color', 'HEAD', '--', ...tracked])] : [];
-  for (const path of selected.filter(candidate => changes.untracked.has(candidate))) {
-    const diff = gitInDir(cwd, ['diff', '--no-ext-diff', '--no-color', '--no-index', '--', '/dev/null', path]);
+  const safe = selected.filter(helperSafePath);
+  const skippedFiles = selected.filter(path => !helperSafePath(path)).slice(0, 100).map(path => path.slice(0, 300));
+  const tracked = safe.filter(path => !changes.untracked.has(path));
+  const chunks = tracked.length > 0 ? [gitOutput(cwd, ['--literal-pathspecs', 'diff', '--no-ext-diff', '--no-color', 'HEAD', '--', ...tracked])] : [];
+  for (const path of safe.filter(candidate => changes.untracked.has(candidate))) {
+    const diff = gitInDir(cwd, ['--literal-pathspecs', 'diff', '--no-ext-diff', '--no-color', '--no-index', '--', '/dev/null', path]);
     if (diff.ok || diff.out) chunks.push(diff.out);
   }
   return {
-    files: changes.files.filter(file => selected.includes(file.path)),
-    patch: chunks.join('\n')
+    files: changes.files.filter(file => safe.includes(file.path)),
+    patch: chunks.join('\n'),
+    skippedFiles
   };
 }
 
@@ -102,10 +105,18 @@ export function getSelectedChangesPatch(cwd: string, files: string[]): string {
 }
 
 /** Committed diff for helper input, excluding credential and environment files. */
-export function getReviewHelperPatch(cwd: string, requestedBase?: string): string {
+export function getReviewChangesForHelper(cwd: string, requestedBase?: string) {
   const { ref } = reviewBase(cwd, requestedBase);
-  const files = nulList(gitOutput(cwd, ['diff', '--name-only', '-z', '--no-renames', `${ref}...HEAD`])).filter(helperSafePath);
-  return files.length === 0 ? '' : gitOutput(cwd, ['diff', '--no-ext-diff', '--no-color', `${ref}...HEAD`, '--', ...files]);
+  const changed = nulList(gitOutput(cwd, ['diff', '--name-only', '-z', '--no-renames', `${ref}...HEAD`]));
+  const files = changed.filter(helperSafePath);
+  return {
+    patch: files.length === 0 ? '' : gitOutput(cwd, ['--literal-pathspecs', 'diff', '--no-ext-diff', '--no-color', `${ref}...HEAD`, '--', ...files]),
+    skippedFiles: changed.filter(path => !helperSafePath(path)).slice(0, 100).map(path => path.slice(0, 300))
+  };
+}
+
+export function getReviewHelperPatch(cwd: string, requestedBase?: string): string {
+  return getReviewChangesForHelper(cwd, requestedBase).patch;
 }
 
 function reviewBase(cwd: string, requested?: string): { base: string; ref: string } {

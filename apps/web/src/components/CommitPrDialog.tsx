@@ -98,9 +98,9 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
     try {
       const suggestion = await gahApi.suggestGitProse(profile, { kind: 'commit_message', sessionId, nodeId, files: selectedFiles });
       if (messageRevision.current !== revision) return;
+      setCommitSuggestion(suggestion);
       if (suggestion.generated) {
         setMessage(suggestion.text);
-        setCommitSuggestion(suggestion);
         messageEdited.current = false;
       } else {
         setError(`No model suggestion was available (${suggestion.fallbackReason ?? 'unknown reason'}). Enter a commit message manually.`);
@@ -124,10 +124,10 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
     try {
       const suggestion = await gahApi.suggestGitProse(profile, { kind: 'pr_summary', sessionId, nodeId, base });
       if (titleRevision.current !== titleAtRequest || bodyRevision.current !== bodyAtRequest) return;
+      setPrSuggestion(suggestion);
       if (suggestion.generated) {
         setTitle(suggestion.title ?? '');
         setBody(suggestion.body ?? '');
-        setPrSuggestion(suggestion);
         titleEdited.current = false;
         bodyEdited.current = false;
       } else {
@@ -215,7 +215,8 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
                   <button type="button" className="btn-secondary text-xs" disabled={busy || !message.trim()}
                     onClick={() => void commit()}>Commit all</button>
                 </div>
-                {commitSuggestion && <p className="text-xs text-muted">Suggested by {commitSuggestion.backendInstance ?? commitSuggestion.backend} · {commitSuggestion.actualModel ?? commitSuggestion.effectiveModel}</p>}
+                {commitSuggestion?.generated && <p className="text-xs text-muted">Suggested by {commitSuggestion.backendInstance ?? commitSuggestion.backend} · {commitSuggestion.actualModel ?? commitSuggestion.effectiveModel}</p>}
+                {!!commitSuggestion?.skippedFiles?.length && <p className="text-xs text-warning">Not sent to the helper: {commitSuggestion.skippedFiles.join(', ')}</p>}
                 <p className="text-xs text-muted">Unselected changes stay local and will not enter this {review.providerLabel}.</p>
                 {!continueDirty && review.commits.length > 0 && (
                   <button type="button" className="btn-secondary text-xs" onClick={() => setContinueDirty(true)}>Continue with uncommitted changes</button>
@@ -252,7 +253,8 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
                   <textarea aria-label="Pull request body" rows={7} value={body} onChange={event => { bodyEdited.current = true; bodyRevision.current++; setPrSuggestion(null); setBody(event.target.value); }}
                     className="w-full resize-y rounded-md border border-subtle bg-raised px-3 py-2 text-sm text-primary focus:border-accent" />
                 </label>
-                {prSuggestion && <p className="text-xs text-muted">Suggested by {prSuggestion.backendInstance ?? prSuggestion.backend} · {prSuggestion.actualModel ?? prSuggestion.effectiveModel}</p>}
+                {prSuggestion?.generated && <p className="text-xs text-muted">Suggested by {prSuggestion.backendInstance ?? prSuggestion.backend} · {prSuggestion.actualModel ?? prSuggestion.effectiveModel}</p>}
+                {!!prSuggestion?.skippedFiles?.length && <p className="text-xs text-warning">Not sent to the helper: {prSuggestion.skippedFiles.join(', ')}</p>}
                 <label className="flex items-center gap-2 text-xs text-secondary"><input type="checkbox" checked={draft} onChange={event => setDraft(event.target.checked)} /> Draft</label>
 
                 <div className="grid gap-3 text-xs sm:grid-cols-3">

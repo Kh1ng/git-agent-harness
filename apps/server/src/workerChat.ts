@@ -6,7 +6,7 @@ import type { ChatSessionSummary, ChatTranscriptTurn, HelperRoutePreference, Hel
 import { runProfileList } from './gahCli.js';
 import { resolveInstanceAdapter, type ManagerAdapter } from './managerChat/registry.js';
 import { archiveSession, chatKey, createSession, getSession, resolveSessionCwd, touchSession, updateSession, type ChatSessionStoreOptions } from './managerChat/chatSessions.js';
-import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewHelperPatch, getSelectedChangesForHelper } from './gitCache.js';
+import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewChangesForHelper, getSelectedChangesForHelper } from './gitCache.js';
 import { findOpenPullRequest, publishPullRequest } from './gitPullRequest.js';
 
 import { isUsageLimitError } from './managerChat/acpAdapter.js';
@@ -73,6 +73,7 @@ export function createWorkerChatRouter(deps: {
         }
         let input: string;
         let fallback: { text: string; title?: string; body?: string };
+        let skippedFiles: string[] = [];
         if (kind === 'chat_title') {
           if (typeof body.message !== 'string' || typeof body.fallback !== 'string' || body.fallback.length > 64) return void res.status(400).json({ error: 'A first message is required.' });
           input = chatTitleInput(body.message);
@@ -89,17 +90,20 @@ export function createWorkerChatRouter(deps: {
             const selected = getSelectedChangesForHelper(cwd, body.files);
             input = commitMessageInput(selected.files, selected.patch);
             fallback = { text: '' };
+            skippedFiles = selected.skippedFiles;
           } else {
             const base = typeof body.base === 'string' ? body.base : undefined;
             const review = await getGitReviewState(cwd, base);
+            const changes = getReviewChangesForHelper(cwd, base);
             input = prSummaryInput(
-              { ...review, patch: getReviewHelperPatch(cwd, base) },
+              { ...review, patch: changes.patch },
               await fetchLinkedChatIssues(profile, linkedIssueNumbers(review))
             );
             fallback = { text: '', title: '', body: '' };
+            skippedFiles = changes.skippedFiles;
           }
         }
-        return void res.json(await runHelperTask({
+        return void res.json({ ...await runHelperTask({
           profile: body.profile,
           sourceBackend: body.sourceBackend,
           sourceBackendInstance: body.sourceBackendInstance,
@@ -109,7 +113,7 @@ export function createWorkerChatRouter(deps: {
         }, {
           ...(body.preference ? { preference: body.preference as HelperRoutePreference } : {}),
           adapter: async (_profile, backend, instance) => adapterFor(backend, body.profile, instance)
-        }));
+        }), skippedFiles });
       }
       if (body.action === 'run' && (typeof body.requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(body.requestId)
         || typeof body.prompt !== 'string' || !Array.isArray(body.history)

@@ -65,7 +65,7 @@ export interface ManagerAdapter extends ManagerBackendInfo {
     }
   ): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }>;
   listCommands(gahProfile: string): Promise<ManagerCommandInfo[]>;
-  listModels(gahProfile: string): Promise<{
+  listModels(gahProfile: string, cwd?: string): Promise<{
     models: ManagerModelInfo[];
     currentModelId: string | null;
     reasoningEfforts: ManagerReasoningEffortInfo[];

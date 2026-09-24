@@ -1523,6 +1523,7 @@ export interface HelperSuggestion {
   effectiveModel: string | null;
   actualModel: string | null;
   fallbackReason: string | null;
+  skippedFiles?: string[];
 }
 
 export interface HelperUsageRecord {

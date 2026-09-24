@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewHelperPatch, getSelectedChangesForHelper, getSelectedChangesPatch } from './gitCache.js';
+import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewChangesForHelper, getReviewHelperPatch, getSelectedChangesForHelper, getSelectedChangesPatch } from './gitCache.js';
 
 // AsyncTtlCache's own TTL/coalescing/isolation/failure behavior is covered
 // by asyncTtlCache.test.ts. These tests focus on gitCache's own wrapper
@@ -124,13 +124,17 @@ describe('commitGitChanges', () => {
     const dir = initRepo();
     writeFileSync(join(dir, 'selected.txt'), 'selected content\n');
     writeFileSync(join(dir, '.env'), 'SECRET=do-not-send\n');
+    writeFileSync(join(dir, 'credentials.production.json'), '{"token":"do-not-send"}\n');
+    writeFileSync(join(dir, 'useAuth.tsx'), 'export const useAuth = true;\n');
+    writeFileSync(join(dir, 'oauth.ts'), 'export const oauth = true;\n');
+    writeFileSync(join(dir, 'tokens.css'), '.tokens {}\n');
     const patch = getSelectedChangesPatch(dir, ['selected.txt']);
     assert.match(patch, /selected content/);
     assert.doesNotMatch(patch, /SECRET|\.env/);
-    assert.deepEqual(getSelectedChangesForHelper(dir, ['selected.txt']).files, [
-      { path: 'selected.txt', staged: false, unstaged: false, untracked: true }
-    ]);
-    assert.throws(() => getSelectedChangesPatch(dir, ['.env']), /cannot be sent/);
+    const selected = getSelectedChangesForHelper(dir, ['selected.txt', '.env', 'credentials.production.json', 'useAuth.tsx', 'oauth.ts', 'tokens.css']);
+    assert.deepEqual(selected.files.map(file => file.path), ['oauth.ts', 'selected.txt', 'tokens.css', 'useAuth.tsx']);
+    assert.deepEqual(selected.skippedFiles, ['.env', 'credentials.production.json']);
+    assert.doesNotMatch(selected.patch, /SECRET|\.env/);
   });
 });
 
@@ -158,4 +162,5 @@ test('getGitReviewState separates dirty files from the committed PR diff', async
   assert.doesNotMatch(review.patch, /local-only\.txt/);
   assert.match(getReviewHelperPatch(dir), /committed\.txt/);
   assert.doesNotMatch(getReviewHelperPatch(dir), /SECRET|\.env/);
+  assert.deepEqual(getReviewChangesForHelper(dir).skippedFiles, ['.env.production']);
 });

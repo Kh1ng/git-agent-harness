@@ -102,7 +102,7 @@ import { MessagingBridge } from './managerChat/messagingBridge.js';
 import { projectRoutes } from './projectRoutes.js';
 import { chatNodes, chatRoute, configureChatRouting } from './chatRouting.js';
 import { createWorkerChatRouter } from './workerChat.js';
-import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitReviewState, getReviewHelperPatch, getSelectedChangesForHelper, commitGitChanges, cliInDir } from './gitCache.js';
+import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitReviewState, getReviewChangesForHelper, getSelectedChangesForHelper, commitGitChanges, cliInDir } from './gitCache.js';
 import { commitMessageInput, helperFallback, linkedIssueNumbers, prSummaryInput, publicSuggestion, readHelperUsage, recordHelperUsage, runHelperTask, type HelperTaskResult } from './managerChat/helperTasks.js';
 import { fetchLinkedChatIssues } from './managerChat/issueChats.js';
 import { createGitLabMergeRequest, findOpenPullRequest, publishPullRequest } from './gitPullRequest.js';
@@ -2090,22 +2090,26 @@ export function createServer(
         if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
         if (target.kind === 'read-only') return res.status(403).json({ error: 'Session is read-only and has no writable checkout' });
         let input: string;
+        let skippedFiles: string[] = [];
         if (kind === 'commit_message') {
           const files = req.body?.files;
           if (!Array.isArray(files) || !files.every(path => typeof path === 'string')) return res.status(400).json({ error: 'Select changed files.' });
           const selected = getSelectedChangesForHelper(target.cwd, files);
           input = commitMessageInput(selected.files, selected.patch);
+          skippedFiles = selected.skippedFiles;
         } else {
           const base = typeof req.body?.base === 'string' ? req.body.base : undefined;
-          const review = { ...await getGitReviewState(target.cwd, base), patch: getReviewHelperPatch(target.cwd, base) };
+          const changes = getReviewChangesForHelper(target.cwd, base);
+          const review = { ...await getGitReviewState(target.cwd, base), patch: changes.patch };
           const profileInfo = await resolveProfileInfo(route.profileName);
           const issues = profileInfo ? await fetchLinkedChatIssues(profileInfo, linkedIssueNumbers(review)) : [];
           input = prSummaryInput(review, issues);
+          skippedFiles = changes.skippedFiles;
         }
-        result = await runHelperTask({
+        result = { ...await runHelperTask({
           profile: route.profileName, sourceBackend, sourceBackendInstance, kind, input,
           fallback: kind === 'commit_message' ? { text: '' } : { text: '', title: '', body: '' }
-        }, preference ? { preference } : {});
+        }, preference ? { preference } : {}), skippedFiles };
       }
     } catch {
       result = helperFallback(kind, kind === 'commit_message' ? { text: '' } : { text: '', title: '', body: '' }, 'helper_unavailable', Date.now() - startedAt, {

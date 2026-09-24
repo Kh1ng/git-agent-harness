@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -23,14 +23,16 @@ const usage: ChatUsage = {
   duration_seconds: 0.2
 };
 
-function fakeAdapter(models: string[], reply: string, seen: { model?: string | null }): ManagerAdapter {
+function fakeAdapter(models: string[], reply: string, seen: { model?: string | null; cwd?: string; modelCwd?: string }): ManagerAdapter {
   return {
     id: 'codex', displayName: 'Codex', implemented: true,
-    async listModels() {
+    async listModels(_key, cwd?: string) {
+      seen.modelCwd = cwd;
       return { models: models.map(id => ({ id, name: id })), currentModelId: 'coding-model', reasoningEfforts: [], currentReasoningEffortId: null, contextUsage: null };
     },
     async runTurn(_key, input) {
       seen.model = input.model;
+      seen.cwd = input.cwd;
       return { reply, model: input.model ?? null, usage };
     },
     async listCommands() { return []; },
@@ -40,7 +42,7 @@ function fakeAdapter(models: string[], reply: string, seen: { model?: string | n
 }
 
 test('Codex helpers use the advertised Luna model on the active account', async () => {
-  const seen: { account?: string | null; model?: string | null } = {};
+  const seen: { account?: string | null; model?: string | null; cwd?: string; modelCwd?: string } = {};
   const result = await runHelperTask({
     profile: 'gah', sourceBackend: 'codex', sourceBackendInstance: 'codex-personal',
     kind: 'chat_title', input: chatTitleInput('Fix the worker update flow'),
@@ -53,6 +55,10 @@ test('Codex helpers use the advertised Luna model on the active account', async 
   });
   assert.equal(seen.account, 'codex-personal');
   assert.equal(seen.model, 'gpt-6-luna-2026-09');
+  assert.ok(seen.cwd);
+  assert.equal(seen.modelCwd, seen.cwd);
+  assert.notEqual(seen.cwd, process.cwd());
+  assert.deepEqual(readdirSync(seen.cwd), []);
   assert.equal(result.text, 'Worker update flow');
   assert.equal(result.backendInstance, 'codex-personal');
   assert.equal(result.requestedModel, null);

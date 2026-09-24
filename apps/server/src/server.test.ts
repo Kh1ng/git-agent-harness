@@ -735,7 +735,7 @@ test('git routes reject stale sessions and expose worktree-less sessions as read
     assert.equal(suggestionResponse.status, 200);
     assert.deepEqual(await suggestionResponse.json(), {
       kind: 'commit_message', text: '', generated: false, backend: 'hermes', backendInstance: null,
-      requestedModel: null, effectiveModel: null, actualModel: null, fallbackReason: 'missing_model'
+      requestedModel: null, effectiveModel: null, actualModel: null, fallbackReason: 'missing_model', skippedFiles: []
     });
 
     const commit = (sessionId: string) => fetch(`${baseUrl}/api/git/commit?profile=${profile}&sessionId=${sessionId}`, {

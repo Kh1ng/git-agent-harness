@@ -80,6 +80,8 @@ export function parseWorkerChatReply(value: unknown, request: Record<string, unk
       || typeof value.text !== 'string' || value.text.length > 12_000
       || !(value.title === undefined || (typeof value.title === 'string' && value.title.length <= 200))
       || !(value.body === undefined || (typeof value.body === 'string' && value.body.length <= 12_000))
+      || !(value.skippedFiles === undefined || (Array.isArray(value.skippedFiles) && value.skippedFiles.length <= 100
+        && value.skippedFiles.every(path => typeof path === 'string' && path.length <= 300)))
       || typeof value.generated !== 'boolean' || !nullableString(value.backend)
       || !nullableString(value.backendInstance) || !nullableString(value.requestedModel)
       || !nullableString(value.effectiveModel) || !nullableString(value.actualModel)
@@ -99,6 +101,7 @@ export function parseWorkerChatReply(value: unknown, request: Record<string, unk
       kind: value.kind as HelperTaskResult['kind'], text: value.text,
       ...(typeof value.title === 'string' ? { title: value.title } : {}),
       ...(typeof value.body === 'string' ? { body: value.body } : {}),
+      ...(Array.isArray(value.skippedFiles) ? { skippedFiles: value.skippedFiles as string[] } : {}),
       generated: value.generated, backend: value.backend, backendInstance: value.backendInstance,
       requestedModel: value.requestedModel, effectiveModel: value.effectiveModel, actualModel: value.actualModel,
       fallbackReason: value.fallbackReason, usage, latencyMs: value.latencyMs
