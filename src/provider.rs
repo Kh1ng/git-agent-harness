@@ -7,7 +7,9 @@ use std::thread;
 use std::time::Duration;
 use url::Url;
 
+mod comments;
 mod relations;
+pub use comments::{delete_comment, update_comment, CommentThread};
 pub(crate) use relations::{link_provider_child, link_provider_dependency};
 
 const GAH_REVIEW_STATE_LABELS: [&str; 5] = [
@@ -133,6 +135,9 @@ pub(crate) fn gitlab_api(
             endpoint,
             redacted_provider_output(&out)
         );
+    }
+    if out.stdout.iter().all(u8::is_ascii_whitespace) {
+        return Ok(serde_json::Value::Null);
     }
     serde_json::from_slice(&out.stdout)
         .with_context(|| format!("parsing GitLab API response for {endpoint}"))
