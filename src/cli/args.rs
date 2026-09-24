@@ -594,6 +594,58 @@ pub enum ConfigCommands {
         #[arg(long, action = clap::ArgAction::Set)]
         enabled: bool,
     },
+    /// Add an isolated named Codex or Claude account to one profile.
+    AddBackendInstance {
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        instance: String,
+        #[arg(long)]
+        runner_kind: String,
+        #[arg(long)]
+        account_label: String,
+    },
+    /// Change the safe display label without changing durable instance identity.
+    SetBackendInstanceLabel {
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        instance: String,
+        #[arg(long)]
+        account_label: String,
+    },
+    /// Internal runtime projection used by Manager Chat. Never includes credentials.
+    #[command(hide = true)]
+    ShowBackendInstanceRuntime {
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        instance: String,
+    },
+    /// Check one provider login without printing provider output.
+    TestBackendInstance {
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        instance: String,
+    },
+    /// Run the provider's interactive browser/device login in this instance's isolated state.
+    AuthenticateBackendInstance {
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        instance: String,
+    },
 }
 
 #[derive(Subcommand)]

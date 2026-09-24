@@ -14,6 +14,7 @@
 import { recall, capture, flushSession } from './memoryGatewayClient.js';
 import {
   resolveAdapter,
+  resolveInstanceAdapter,
   listManagerBackends,
   type ManagerCommandInfo,
   type ManagerModelInfo,
@@ -244,17 +245,18 @@ export function listChatSessions(profile: string) {
 
 /** Creates a chat session bound to a fresh worktree (WP2). The backend
  * resolves at create time: explicit request, else the profile default. */
-export async function createChatSession(profile: string, backend?: string, model?: string | null, title?: string, reasoningEffort?: string | null, nodeId?: string) {
+export async function createChatSession(profile: string, backend?: string, model?: string | null, title?: string, reasoningEffort?: string | null, nodeId?: string, backendInstance?: string | null) {
   const selectedBackend = backend ?? backendForProfile(profile);
   const route = await chatRoute(profile, nodeId, selectedBackend);
+  if (backendInstance && !route.remote) await resolveInstanceAdapter(profile, selectedBackend, backendInstance);
   if (route.remote) {
-    const session = await route.remote.request<import('@git-agent-harness/contracts').ChatSessionSummary>({ action: 'create', sessionId: randomUUID(), backend: selectedBackend, model, title, reasoningEffort });
+    const session = await route.remote.request<import('@git-agent-harness/contracts').ChatSessionSummary>({ action: 'create', sessionId: randomUUID(), backend: selectedBackend, backendInstance, model, title, reasoningEffort });
     return storeSession(rememberWorkspace({ ...session, profile }, route), chatSessionStoreOptions);
   }
   const profileInfo = await findProfileInfo(route.profileName);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   const session = await createSession(
-    { profile, profileInfo, backend: backend ?? backendForProfile(profile), model: model ?? null, reasoningEffort: reasoningEffort ?? null, title },
+    { profile, profileInfo, backend: backend ?? backendForProfile(profile), backendInstance: backendInstance ?? null, model: model ?? null, reasoningEffort: reasoningEffort ?? null, title },
     chatSessionStoreOptions
   );
   return storeSession(rememberWorkspace(session, route), chatSessionStoreOptions);
@@ -266,7 +268,7 @@ export async function createChatSession(profile: string, backend?: string, model
 export function updateChatSession(
   profile: string,
   sessionId: string,
-  patch: { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string }
+  patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string }
 ) {
   return updateSession(profile, sessionId, patch, chatSessionStoreOptions);
 }
@@ -459,10 +461,11 @@ export async function setReasoningEffortForProfile(profile: string, effortId: st
  * listModelsForProfile does for the default. */
 export async function listModelsForBackend(
   profile: string,
-  backendId: string, nodeId?: string
+  backendId: string, nodeId?: string, backendInstance?: string | null
 ): ReturnType<typeof listModelsForProfile> {
   const route = await chatRoute(profile, nodeId, backendId, false);
-  const adapter = route.remote?.adapter(backendId) ?? resolveAdapter(backendId);
+  const adapter = route.remote?.adapter(backendId, undefined, backendInstance)
+    ?? await resolveInstanceAdapter(profile, backendId, backendInstance);
   const summary = await adapter.listModels(profile);
   const override = modelOverrideForProfile(profile, backendId);
   const effort = reasoningEffortOverrideForProfile(profile, backendId);
@@ -492,7 +495,7 @@ export function applyBoundSkills(prompt: string, skills: Skill[]): string {
   const instructions = skills
     .map((skill) => `## ${skill.id}@${skill.version}\n${skill.content.trim()}`)
     .join('\n\n');
-  const injected = `# Bound project skills\nThese are trusted project instructions from the central GAH skill bank.\n\n${instructions}\n\n# Current request\n${prompt.slice(requestStart)}`;
+  const injected = `# Bound skills\nThese are trusted instructions from the central GAH skill bank.\n\n${instructions}\n\n# Current request\n${prompt.slice(requestStart)}`;
   return `${prompt.slice(0, requestStart)}${injected}`;
 }
 
@@ -552,6 +555,7 @@ export interface RunTurnContext {
   /** Backend serving this conversation; the session's own backend for
    * session-bound turns, the profile default otherwise. */
   backend: string;
+  backendInstance?: string | null;
   /** Session working directory (WP2); undefined = the server's cwd. */
   cwd?: string;
   /** Per-conversation model override (WP2 sessions); undefined = none. */
@@ -593,7 +597,9 @@ export async function runTurn(
     fallbackBackends: listManagerBackends().filter((b) => b.implemented && b.id !== context.backend).map((b) => b.id),
     attempt: async (backendId) => {
       if (context.route?.remote) await chatRoute(profile, context.route.nodeId, backendId);
-      const adapter = context.route?.remote?.adapter(backendId, context.sessionId === 'default' ? undefined : context.sessionId) ?? resolveAdapter(backendId);
+      const ownInstance = backendId === context.backend ? context.backendInstance : null;
+      const adapter = context.route?.remote?.adapter(backendId, context.sessionId === 'default' ? undefined : context.sessionId, ownInstance)
+        ?? await resolveInstanceAdapter(profile, backendId, ownInstance);
       active.backend = backendId;
       active.adapter = adapter;
       const attempt = async () => {
@@ -606,7 +612,7 @@ export async function runTurn(
         const reasoningEffort = ownBackend ? context.reasoningEffort : undefined;
         const binding = isSlashCommand
           ? { source: 'canonical' as const, skills: [] }
-          : resolveSkillBindings(profile, backendId);
+          : resolveSkillBindings(profile, backendId, { sessionId: context.sessionId });
         const attemptPrompt = applyBoundSkills(prompt, binding.skills);
         if (!isSlashCommand) {
           active.chunkWriter?.append({
@@ -830,10 +836,10 @@ export function sendManagerChatMessage(
   // materializing it from the branch if prune reclaimed the idle worktree)
   // and serve the turn from the session's own backend. Unknown or archived
   // sessions fail loudly rather than silently landing in the default log.
-  const prepareSession = async (): Promise<{ cwd?: string; backend: string; model?: string | null; reasoningEffort?: string | null; route: ChatRoute }> => {
+  const prepareSession = async (): Promise<{ cwd?: string; backend: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; route: ChatRoute }> => {
     if (!sessionId || sessionId === 'default') {
       const backend = backendOverride ?? backendForProfile(profile);
-      return { backend, model: modelOverrideForProfile(profile, backend), reasoningEffort: reasoningEffortOverrideForProfile(profile, backend), route: await chatRoute(profile, nodeId, backend) };
+      return { backend, backendInstance: null, model: modelOverrideForProfile(profile, backend), reasoningEffort: reasoningEffortOverrideForProfile(profile, backend), route: await chatRoute(profile, nodeId, backend) };
     }
     let session = getSession(profile, sessionId, chatSessionStoreOptions);
     if (!session || session.archivedAt !== null) throw new Error('Chat session is unavailable or archived.');
@@ -841,9 +847,9 @@ export function sendManagerChatMessage(
     const previousNode = session.nodeId ?? localChatNodeId();
     if (previousNode && !session.workspaces?.[previousNode]) session = { ...session, workspaces: { ...session.workspaces, [previousNode]: { branch: session.branch, worktreePath: session.worktreePath } } };
     if (route.remote) {
-      const prepared = await route.remote.request<{ session: import('@git-agent-harness/contracts').ChatSessionSummary }>({ action: 'prepare', sessionId, backend: session.backend, model: session.model, reasoningEffort: session.reasoningEffort, title: session.title });
+      const prepared = await route.remote.request<{ session: import('@git-agent-harness/contracts').ChatSessionSummary }>({ action: 'prepare', sessionId, backend: session.backend, backendInstance: session.backendInstance, model: session.model, reasoningEffort: session.reasoningEffort, title: session.title });
       session = storeSession(rememberWorkspace({ ...session, branch: prepared.session.branch, worktreePath: prepared.session.worktreePath }, route), chatSessionStoreOptions);
-      return { backend: session.backend, model: session.model, reasoningEffort: session.reasoningEffort, route };
+      return { backend: session.backend, backendInstance: session.backendInstance, model: session.model, reasoningEffort: session.reasoningEffort, route };
     }
     const profileInfo = await findProfileInfo(route.profileName);
     if (!profileInfo) {
@@ -863,7 +869,7 @@ export function sendManagerChatMessage(
       const title = chatTitleFromText(message);
       if (title) updateSession(profile, sessionId, { title }, chatSessionStoreOptions);
     }
-    return { cwd: resolved.cwd, backend: resolved.session.backend, model: resolved.session.model, reasoningEffort: resolved.session.reasoningEffort, route };
+    return { cwd: resolved.cwd, backend: resolved.session.backend, backendInstance: resolved.session.backendInstance, model: resolved.session.model, reasoningEffort: resolved.session.reasoningEffort, route };
   };
 
   const key = chatKey(profile, sessionId);
@@ -1092,7 +1098,7 @@ export function sendManagerChatMessage(
           detectPreview(text);
         },
         active,
-        { key, sessionId, backend: sessionContext.backend, cwd: sessionContext.cwd, model: sessionContext.model, reasoningEffort: sessionContext.reasoningEffort, route: sessionContext.route },
+        { key, sessionId, backend: sessionContext.backend, backendInstance: sessionContext.backendInstance, cwd: sessionContext.cwd, model: sessionContext.model, reasoningEffort: sessionContext.reasoningEffort, route: sessionContext.route },
         onToolCall
       );
       // A cancel is a barrier for the queue: once we've sent session/cancel
@@ -1107,11 +1113,13 @@ export function sendManagerChatMessage(
       );
       const result = await Promise.race([run, settleDeadline]);
       const { reply, backend, model, usage, handoff } = result;
+      const backendInstance = backend === sessionContext.backend ? sessionContext.backendInstance ?? null : null;
       await active.chunkWriter.close();
       const assistant: ChatTranscriptTurn = {
         role: 'assistant',
         text: reply,
         backend,
+        backendInstance,
         model,
         usage,
         timestamp: Date.now(),
@@ -1126,6 +1134,7 @@ export function sendManagerChatMessage(
               turn: turnNo,
               text: reply,
               backend,
+              backendInstance,
               model,
               usage,
               nodeId: sessionContext.route.nodeId, nodeName: sessionContext.route.nodeName,

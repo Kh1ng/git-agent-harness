@@ -40,9 +40,9 @@ export function workerChatConnection(registry: RegistryService, nodeId: string, 
       assertRegistration();
       return result as T;
     },
-    adapter(backend: string, sessionId?: string): ManagerAdapter {
+    adapter(backend: string, sessionId?: string, backendInstance?: string | null): ManagerAdapter {
       let active: { requestId: string; abort: AbortController } | undefined;
-      const command = <T>(action: string, extra: Record<string, unknown> = {}) => this.request<T>({ action, backend, sessionId, ...extra });
+      const command = <T>(action: string, extra: Record<string, unknown> = {}) => this.request<T>({ action, backend, backendInstance, sessionId, ...extra });
       return {
         id: backend, displayName: `${backend} on ${node.display_name}`, implemented: true,
         async runTurn(_key, input) {
@@ -57,7 +57,7 @@ export function workerChatConnection(registry: RegistryService, nodeId: string, 
           });
           let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
           try {
-            const response = await post({ action: 'run', requestId, backend, sessionId, prompt: input.prompt, history: input.history, model: input.model, reasoningEffort: input.reasoningEffort }, abort.signal);
+            const response = await post({ action: 'run', requestId, backend, backendInstance, sessionId, prompt: input.prompt, history: input.history, model: input.model, reasoningEffort: input.reasoningEffort }, abort.signal);
             if (!response.headers.get('content-type')?.startsWith('application/x-ndjson') || !response.body) throw new Error('Worker does not support chat streaming. Update the worker.');
             reader = response.body.getReader();
             const decoder = new TextDecoder();

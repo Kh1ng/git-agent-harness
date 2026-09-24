@@ -16,22 +16,30 @@ test('a mobile conversation link restores its project and chat after reload and 
   expect((await request.post(`${mock}/api/mock/scenario`, { data: { name: 'normal' } })).ok()).toBe(true);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/?page=chat&profile=fixture&chat=mock-session-1#keep-marker');
-  const selected = page.getByRole('combobox', { name: 'Chat' });
-  await expect(selected).toHaveValue('mock-session-1');
+  const chatSelect = page.getByRole('combobox', { name: 'Chat', exact: true });
+  await expect(chatSelect).toHaveValue('mock-session-1');
   await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex');
   expect(new URL(page.url()).hash).toBe('#keep-marker');
   await page.reload();
-  await expect(selected).toHaveValue('mock-session-1');
+  await expect(chatSelect).toHaveValue('mock-session-1');
   await page.getByRole('button', { name: 'Open navigation menu' }).click();
   await page.getByRole('dialog', { name: 'Navigation menu' }).getByRole('button', { name: 'Nodes', exact: true }).click();
   await expect.poll(() => new URL(page.url()).searchParams.get('page')).toBe('nodes');
   await page.getByRole('button', { name: 'Open navigation menu' }).click();
   await page.getByRole('dialog', { name: 'Navigation menu' }).getByRole('button', { name: 'Chat', exact: true }).click();
-  await expect(selected).toHaveValue('mock-session-1');
-  await selected.selectOption('');
+  await page.getByRole('dialog', { name: 'New chat' }).getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(chatSelect).toHaveValue('mock-session-1');
+
+  // Selecting the default conversation drops the session id and keeps the
+  // rest of the URL.
+  await chatSelect.selectOption('');
   await expect.poll(() => new URL(page.url()).searchParams.get('chat')).toBeNull();
   expect(new URL(page.url()).searchParams.get('profile')).toBe('fixture');
   expect(new URL(page.url()).hash).toBe('#keep-marker');
   await page.reload();
-  await expect(selected).toHaveValue('');
+  await expect(chatSelect).toHaveValue('');
+
+  // The Projects page links back to the project's default conversation.
+  await page.goto('/?page=chat&profile=fixture&chat=default');
+  await expect(chatSelect).toHaveValue('');
 });

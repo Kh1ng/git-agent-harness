@@ -55,6 +55,26 @@ test('rollup aggregates usage by backend, model, and UTC day', () => {
   }
 });
 
+test('rollup keeps named backend accounts separate', () => {
+  const stateDir = fixture();
+  try {
+    sessionLog(stateDir, 'repo', 'accounts');
+    appendEvents('repo', [
+      { type: 'assistant/message', seq: 1, turn: 1, text: 'work', backend: 'codex', backendInstance: 'codex-work', model: 'gpt-5.3', usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15, estimated_cost_usd: 0.01, duration_seconds: 1 }, timestamp: NOW },
+      { type: 'assistant/message', seq: 2, turn: 2, text: 'personal', backend: 'codex', backendInstance: 'codex-personal', model: 'gpt-5.3', usage: { input_tokens: 20, output_tokens: 10, total_tokens: 30, estimated_cost_usd: 0.02, duration_seconds: 1 }, timestamp: NOW }
+    ], { stateDir, sessionId: 'accounts' });
+
+    const rows = usageRollup('repo', 7, { stateDir, now: () => NOW }).rows;
+    assert.deepEqual(rows.map((row) => [row.backend_instance, row.total_tokens]).sort(), [
+      ['codex-personal', 30],
+      ['codex-work', 15]
+    ]);
+  } finally {
+    setChatSessionStoreOptions({ stateDir: undefined });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test('rollup counts usage-less turns as unattributed and honors the window', () => {
   const stateDir = fixture();
   try {
@@ -71,6 +91,30 @@ test('rollup counts usage-less turns as unattributed and honors the window', () 
     const month = usageRollup('repo', 30, { stateDir, now: () => NOW });
     assert.equal(month.rows.length, 1);
     assert.equal(month.unattributed_turns, 1);
+  } finally {
+    setChatSessionStoreOptions({ stateDir: undefined });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('rollup keeps prior backend usage and identifies later turns with unavailable counters', () => {
+  const stateDir = fixture();
+  try {
+    sessionLog(stateDir, 'repo', 'mixed');
+    appendEvents('repo', [
+      { type: 'assistant/message', seq: 1, turn: 1, text: 'measured', backend: 'claude', model: 'claude-opus-4-1', usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150, estimated_cost_usd: 0.01, duration_seconds: 1 }, timestamp: NOW - 1000 },
+      { type: 'assistant/message', seq: 2, turn: 2, text: 'missing counters', backend: 'codex', model: 'gpt-5.3', usage: null, timestamp: NOW }
+    ], { stateDir, sessionId: 'mixed' });
+
+    const rollup = usageRollup('repo', 7, { stateDir, now: () => NOW });
+    assert.equal(rollup.rows.length, 1);
+    assert.equal(rollup.rows[0]?.backend, 'claude');
+    assert.deepEqual(rollup.usage_unavailable, [{
+      session_id: 'mixed',
+      backend: 'codex',
+      model: 'gpt-5.3',
+      day: '2026-08-30'
+    }]);
   } finally {
     setChatSessionStoreOptions({ stateDir: undefined });
     rmSync(stateDir, { recursive: true, force: true });

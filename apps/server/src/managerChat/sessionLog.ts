@@ -202,6 +202,7 @@ export function deriveModelHistory(events: ChatSessionEvent[]): ChatTranscriptTu
         text: event.text,
         timestamp: event.timestamp,
         backend: event.backend,
+        backendInstance: event.backendInstance ?? null,
         model: event.model,
         usage: event.usage, nodeId: event.nodeId, nodeName: event.nodeName
       });

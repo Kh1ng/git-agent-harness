@@ -370,12 +370,26 @@ export function isUsageLimitError(error: unknown): boolean {
   return /usage limit|rate limit|quota|exhausted|insufficient (credits|quota)|hit (your|the) (daily |monthly )?limit|quota.*exceed/i.test(message);
 }
 
-export function codexSpawnSpec(): SpawnSpec {
-  return { command: 'node', args: [resolveBinScript('@agentclientprotocol/codex-acp')] };
+export function codexSpawnSpec(runtime?: { executable: string; state_root: string | null }): SpawnSpec {
+  return {
+    command: 'node',
+    args: [resolveBinScript('@agentclientprotocol/codex-acp')],
+    ...(runtime ? { env: {
+      CODEX_PATH: runtime.executable,
+      ...(runtime.state_root ? { HOME: runtime.state_root, CODEX_HOME: path.join(runtime.state_root, '.codex') } : {})
+    } } : {})
+  };
 }
 
-export function claudeSpawnSpec(): SpawnSpec {
-  return { command: 'node', args: [resolveBinScript('@agentclientprotocol/claude-agent-acp')] };
+export function claudeSpawnSpec(runtime?: { executable: string; state_root: string | null }): SpawnSpec {
+  return {
+    command: 'node',
+    args: [resolveBinScript('@agentclientprotocol/claude-agent-acp')],
+    ...(runtime ? { env: {
+      CLAUDE_CODE_EXECUTABLE: runtime.executable,
+      ...(runtime.state_root ? { HOME: runtime.state_root, CLAUDE_CONFIG_DIR: path.join(runtime.state_root, '.claude') } : {})
+    } } : {})
+  };
 }
 
 /** opencode ships a native ACP server (`opencode acp`) — Tier A like

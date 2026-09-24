@@ -34,6 +34,8 @@ async function exercise(real: boolean) {
   app.use(express.json(), rateLimit({ windowMs: 60_000, limit: 200, validate: false }), authMiddleware);
   let rows = [instance('codex-paid', true), instance('codex-broken', false)];
   let toggles: Array<{ profile: string; instance: string; enabled: boolean }> = [];
+  const additions: string[] = [];
+  const labels: string[] = [];
   const router = real
     ? backendInstancesRouter(mutationSafety('test-node', join(directory, 'mutations')))
     : backendInstancesRouter(
@@ -45,7 +47,16 @@ async function exercise(real: boolean) {
         async (profile: string, instanceName: string, enabled: boolean) => {
           toggles.push({ profile, instance: instanceName, enabled });
           rows = rows.map(row => (row.backend_instance === instanceName ? { ...row, enabled } : row));
-        }
+        },
+        async (_profile, instanceName, runnerKind, accountLabel) => {
+          additions.push(`${instanceName}:${runnerKind}:${accountLabel}`);
+          rows.push({ ...instance(instanceName, true), runner_kind: runnerKind, logical_backend: runnerKind, account_label: accountLabel });
+        },
+        async (_profile, instanceName, accountLabel) => {
+          labels.push(`${instanceName}:${accountLabel}`);
+          rows = rows.map(row => row.backend_instance === instanceName ? { ...row, account_label: accountLabel } : row);
+        },
+        async (_profile, instanceName) => ({ backend_instance: instanceName, auth_ready: instanceName !== 'codex-broken' })
       );
   app.use('/api/backend-instances', router);
   const server = http.createServer(app);
@@ -64,7 +75,9 @@ async function exercise(real: boolean) {
       body: JSON.stringify(input),
     });
   try {
-    assert.equal((await list()).backend_instances.length, 2);
+    const initial = (await list()).backend_instances;
+    assert.equal(initial.length, 2);
+    if (!real) assert.equal(initial.find(row => row.backend_instance === 'codex-broken')?.auth_ready, false);
     const offer = access.create({ id: 'test-node', name: 'Fixture', origin });
     const paired = access.redeem(offer.code, 'test-node', origin, 'Phone');
     // Paired (non-owner) devices may read but never toggle.
@@ -83,6 +96,12 @@ async function exercise(real: boolean) {
     if (!real) assert.equal(toggles.filter(entry => entry.instance === 'codex-paid' && entry.enabled === false).length, 1);
     assert.equal((await post('enable', { profile: 'real', instance: 'codex-paid' }, 'owner-enable')).status, 200);
     assert.equal((await list()).backend_instances.find(row => row.backend_instance === 'codex-paid')?.enabled, true);
+    if (!real) {
+      assert.equal((await post('add', { profile: 'real', instance: 'claude-work', runnerKind: 'claude', accountLabel: 'Work' }, 'owner-add-account')).status, 200);
+      assert.deepEqual(additions, ['claude-work:claude:Work']);
+      assert.equal((await post('label', { profile: 'real', instance: 'claude-work', accountLabel: 'Client' }, 'owner-label-account')).status, 200);
+      assert.deepEqual(labels, ['claude-work:Client']);
+    }
     const audit = (await import('node:fs')).readFileSync(join(directory, 'mutations/audit.jsonl'), 'utf8');
     assert.ok(audit.includes('backend_instance.set_enabled'));
     assert.ok(audit.includes('owner_required'));

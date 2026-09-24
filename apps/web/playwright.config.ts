@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 const port = process.env.GAH_WEB_TEST_PORT ?? '3000';
 const baseURL = `http://localhost:${port}`;
+const mockPort = process.env.GAH_MOCK_TEST_PORT ?? '3774';
 
 /**
  * Hermetic Playwright setup (issue #636). Two webServers:
@@ -36,14 +37,14 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: 'npm run dev:mock -- --host 127.0.0.1 --port 3774 --scenario normal',
+      command: `npm run dev:mock -- --host 127.0.0.1 --port ${mockPort} --scenario normal`,
       cwd: '../server',
-      url: 'http://127.0.0.1:3774/health',
+      url: `http://127.0.0.1:${mockPort}/health`,
       reuseExistingServer: false,
       timeout: 60_000
     },
     {
-      command: `VITE_PROXY_TARGET=http://localhost:3774 VITE_WS_PROXY_TARGET=ws://localhost:3774 npm run dev -- --port ${port}`,
+      command: `VITE_PROXY_TARGET=http://localhost:${mockPort} VITE_WS_PROXY_TARGET=ws://localhost:${mockPort} npm run dev -- --port ${port}`,
       url: baseURL,
       reuseExistingServer: false,
       timeout: 30_000

@@ -32,7 +32,7 @@ export function CoordinatorConnection() {
           <input ref={tokenInput} type="password" autoComplete="off" className="input mt-1 w-full" value={token} onChange={event => setToken(event.target.value)} />
         </label>
         <button className="btn-secondary" type="submit">Save and reconnect</button>
-        <p className="w-full text-xs text-muted">Owner access is required to generate pairing QR codes and administer central. Paired devices can use the dashboard without this token. Stored only for this tab’s session.</p>
+        <p className="w-full text-xs text-muted">Owner access is required to generate pairing QR codes and administer central. Controller devices can use the dashboard without this token. Tokens entered here last only for this tab. The desktop app can retain one from This computer.</p>
         {error && <p role="alert" className="w-full text-xs text-critical">{error}</p>}
       </form>
     </details>

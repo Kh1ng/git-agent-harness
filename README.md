@@ -704,10 +704,12 @@ failed tickets to stronger models.
 The central node stores versioned skills and their backend bindings in
 `~/.config/gah/skills.json` (`GAH_SKILL_BANK_PATH` overrides the path).
 The Chat page's **Skills** control shows the resolved set for the current
-project and backend. Projects inherit the canonical backend set until they
-save an override; **Use default** restores inheritance. The exact resolved
-versions are recorded in the chat event log and injected into every normal
-turn.
+project, chat, and backend. A blank chat edits the project override. An
+existing chat edits only that chat, so sibling chats keep the project set.
+The control identifies a chat override, project override, or inherited
+default. **Use project default** clears a chat override; **Use default** clears
+the project override. The server resolves the set again at the start of every
+normal turn, then records the exact applied versions in that chat's event log.
 
 Workers resolve bindings from the central `/api/skills/resolve` endpoint and
 cache the last successful response under `~/.config/gah/skill-cache`. A worker

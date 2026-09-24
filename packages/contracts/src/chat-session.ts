@@ -14,6 +14,8 @@
  * `turn/end { reason: 'interrupted' }` on reload -- never truncated.
  */
 
+import type { SkillBindingSource } from './gah.js';
+
 export type ChatSessionEvent =
   | ChatTurnStart
   | ChatTurnEnd
@@ -93,6 +95,7 @@ export interface ChatAssistantMessage {
   turn: number;
   text: string;
   backend: string;
+  backendInstance?: string | null;
   model: string | null;
   usage: ChatUsage | null;
   timestamp: number;
@@ -217,7 +220,7 @@ export interface ChatSkillsApplied {
   seq: number;
   turn: number;
   backend: string;
-  source: 'canonical' | 'profile';
+  source: SkillBindingSource;
   skills: { id: string; version: string }[];
   timestamp: number;
 }
@@ -272,6 +275,7 @@ export interface ChatTranscriptTurn {
   nodeName?: string;
   /** Present on assistant turns: which backend + model produced this reply. */
   backend?: string;
+  backendInstance?: string | null;
   model?: string | null;
   usage?: ChatUsage | null;
   /** Present on tool turns (slice 3): structured tool-call info for cards. */
@@ -336,6 +340,8 @@ export interface ChatSessionSummary {
   branch: string;
   /** Backend serving this session (per-session override of the profile default). */
   backend: string;
+  /** Named backend account. Null/absent preserves the legacy shared backend session. */
+  backendInstance?: string | null;
   /** Model override for the session's backend; null = the backend's default.
    * Applied on the session's connection before each turn. */
   model: string | null;

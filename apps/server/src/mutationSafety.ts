@@ -16,6 +16,7 @@ type Operation =
   | 'external_approval.deny'
   | 'external_approval.revoke'
   | 'backend_instance.set_enabled'
+  | 'backend_instance.configure'
   | 'config.routing_candidate.add'
   | 'config.routing_candidate.remove'
   | 'config.routing_candidate.move'

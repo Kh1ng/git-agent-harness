@@ -81,6 +81,8 @@ export function parseWorkerChatReply(value: unknown, request: Record<string, unk
       || (request.action !== 'create' && typeof request.sessionId !== 'string')
       || typeof session.backend !== 'string' || !session.backend
       || (request.action !== 'archive' && session.backend !== request.backend)
+      || !(session.backendInstance === undefined || nullableString(session.backendInstance))
+      || (request.action !== 'archive' && (session.backendInstance ?? null) !== (request.backendInstance ?? null))
       || typeof session.branch !== 'string' || !session.branch || !nullableString(session.worktreePath)
       || !nullableString(session.model) || !nullableString(session.reasoningEffort) || !nullableString(session.title)
       || !timestamp(session.createdAt) || !timestamp(session.lastActiveAt)
@@ -92,7 +94,8 @@ export function parseWorkerChatReply(value: unknown, request: Record<string, unk
       || (request.action === 'archive' && (session.outcome === 'live' || session.archivedAt === null))) throw invalid();
     const result: import('@git-agent-harness/contracts').ChatSessionSummary = {
       id: session.id, profile: request.profile, branch: session.branch, worktreePath: session.worktreePath,
-      backend: session.backend, model: session.model, reasoningEffort: session.reasoningEffort, title: session.title,
+      backend: session.backend, ...(typeof session.backendInstance === 'string' ? { backendInstance: session.backendInstance } : {}),
+      model: session.model, reasoningEffort: session.reasoningEffort, title: session.title,
       createdAt: session.createdAt, lastActiveAt: session.lastActiveAt, archivedAt: session.archivedAt,
       outcome: session.outcome, settledAt: session.settledAt,
       settledReason: session.settledReason

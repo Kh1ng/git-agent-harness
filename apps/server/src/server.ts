@@ -106,7 +106,7 @@ import { getGitStatusCached, getGitBranchesCached, getGitLogCached, commitGitCha
 import { createGitLabMergeRequest } from './gitPullRequest.js';
 import {
   addCanonicalSkillBinding,
-  clearProfileSkillBindings,
+  clearSkillBindings,
   deleteSkill,
   getSkill,
   listSkillSummaries,
@@ -114,7 +114,7 @@ import {
   putSkill,
   resolveSkillBindings,
   seedSkillFromDocs,
-  setProfileSkillBindings,
+  setSkillBindings,
   skillBindingSummary
 } from './skillBank.js';
 import { readLog as readManagerChatLog } from './managerChat/sessionLog.js';
@@ -1206,7 +1206,11 @@ export function createServer(
       return;
     }
     try {
-      res.json(skillBindingSummary(profile, backend, instance, observedSkills(profile, backend, sessionId)));
+      res.json(skillBindingSummary(profile, backend, {
+        instance,
+        sessionId,
+        observedSkills: observedSkills(profile, backend, sessionId)
+      }));
     } catch (error) {
       res.status(400).json({
         error: 'Failed to resolve skill bindings',
@@ -1219,12 +1223,13 @@ export function createServer(
     const profile = typeof req.query.profile === 'string' ? req.query.profile : '';
     const backend = typeof req.query.backend === 'string' ? req.query.backend : '';
     const instance = typeof req.query.instance === 'string' ? req.query.instance : undefined;
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
     if (!profile || !backend) {
       res.status(400).json({ error: 'Invalid skill resolution', message: 'profile and backend are required' });
       return;
     }
     try {
-      res.json(resolveSkillBindings(profile, backend, instance));
+      res.json(resolveSkillBindings(profile, backend, { instance, sessionId }));
     } catch (error) {
       res.status(400).json({
         error: 'Failed to resolve skills',
@@ -1237,6 +1242,7 @@ export function createServer(
     const profile = typeof req.body?.profile === 'string' ? req.body.profile : '';
     const backend = typeof req.body?.backend === 'string' ? req.body.backend : '';
     const instance = typeof req.body?.instance === 'string' ? req.body.instance : undefined;
+    const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : undefined;
     const skillIds = Array.isArray(req.body?.skillIds)
       ? req.body.skillIds.filter((id: unknown): id is string => typeof id === 'string')
       : null;
@@ -1245,8 +1251,8 @@ export function createServer(
       return;
     }
     try {
-      setProfileSkillBindings(profile, backend, skillIds, instance);
-      res.json(skillBindingSummary(profile, backend, instance));
+      setSkillBindings(profile, backend, skillIds, { instance, sessionId });
+      res.json(skillBindingSummary(profile, backend, { instance, sessionId }));
     } catch (error) {
       res.status(400).json({
         error: 'Failed to update skill bindings',
@@ -1259,12 +1265,13 @@ export function createServer(
     const profile = typeof req.query.profile === 'string' ? req.query.profile : '';
     const backend = typeof req.query.backend === 'string' ? req.query.backend : '';
     const instance = typeof req.query.instance === 'string' ? req.query.instance : undefined;
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
     if (!profile || !backend) {
       res.status(400).json({ error: 'Invalid skill binding', message: 'profile and backend are required' });
       return;
     }
-    clearProfileSkillBindings(profile, backend, instance);
-    res.json(skillBindingSummary(profile, backend, instance));
+    clearSkillBindings(profile, backend, { instance, sessionId });
+    res.json(skillBindingSummary(profile, backend, { instance, sessionId }));
   });
 
   app.get('/api/skills/:id', (req, res) => {
@@ -1283,7 +1290,7 @@ export function createServer(
     }
   });
 
-  app.post('/api/skills', (req, res) => {
+  app.post('/api/skills', requireOwner, (req, res) => {
     const body = req.body as {
       id?: unknown;
       version?: unknown;
@@ -1293,8 +1300,15 @@ export function createServer(
       backends?: unknown;
       source?: unknown;
     };
-    if (typeof body.id !== 'string' || typeof body.version !== 'string' || typeof body.content !== 'string') {
-      res.status(400).json({ error: 'Invalid skill', message: 'id, version, and content are required' });
+    if (
+      typeof body.id !== 'string'
+      || !body.id.trim()
+      || typeof body.version !== 'string'
+      || !body.version.trim()
+      || typeof body.content !== 'string'
+      || !body.content.trim()
+    ) {
+      res.status(400).json({ error: 'Invalid skill', message: 'id, version, and non-empty content are required' });
       return;
     }
     try {
@@ -1320,7 +1334,7 @@ export function createServer(
     }
   });
 
-  app.delete('/api/skills/:id', (req, res) => {
+  app.delete('/api/skills/:id', requireOwner, (req, res) => {
     try {
       const removed = deleteSkill(req.params.id);
       res.json({ removed: removed.length });
@@ -1622,7 +1636,7 @@ export function createServer(
     const backend = typeof req.query.backend === 'string' ? req.query.backend : undefined;
     try {
       const summary = backend
-        ? await listManagerChatModelsForBackend(profile, backend, typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined)
+        ? await listManagerChatModelsForBackend(profile, backend, typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined, typeof req.query.backendInstance === 'string' ? req.query.backendInstance : null)
         : await listManagerChatModels(profile, typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined);
       res.json(summary);
     } catch (error) {
@@ -1740,7 +1754,7 @@ export function createServer(
     const model = typeof req.body?.model === 'string' ? req.body.model : null;
     const title = typeof req.body?.title === 'string' ? req.body.title : undefined;
     try {
-      const session = await createChatSession(profile, backend, model, title, typeof req.body.reasoningEffort === 'string' ? req.body.reasoningEffort : null, typeof req.body.nodeId === 'string' ? req.body.nodeId : undefined);
+      const session = await createChatSession(profile, backend, model, title, typeof req.body.reasoningEffort === 'string' ? req.body.reasoningEffort : null, typeof req.body.nodeId === 'string' ? req.body.nodeId : undefined, typeof req.body.backendInstance === 'string' ? req.body.backendInstance : null);
       res.status(201).json(session);
     } catch (error) {
       res.status(502).json({
@@ -1757,8 +1771,9 @@ export function createServer(
       res.status(400).json({ error: 'Missing required field: sessionId' });
       return;
     }
-    const patch: { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string } = {};
+    const patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string } = {};
     if (typeof req.body?.backend === 'string') patch.backend = req.body.backend;
+    if (typeof req.body?.backendInstance === 'string' || req.body?.backendInstance === null) patch.backendInstance = req.body.backendInstance;
     if (typeof req.body?.model === 'string' || req.body?.model === null) patch.model = req.body.model;
     if (typeof req.body?.reasoningEffort === 'string' || req.body?.reasoningEffort === null) patch.reasoningEffort = req.body.reasoningEffort;
     if (typeof req.body?.title === 'string') patch.title = req.body.title;

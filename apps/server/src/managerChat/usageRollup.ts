@@ -13,7 +13,7 @@
 
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { UsageRollupRow, UsageRollupSummary, UsageRollupTicketRow } from '@git-agent-harness/contracts';
+import type { UsageRollupRow, UsageRollupSummary, UsageRollupTicketRow, UsageUnavailableTurn } from '@git-agent-harness/contracts';
 import { readLog } from './sessionLog.js';
 import { chatSessionStoreOptions, listSessions, stateBase } from './chatSessions.js';
 
@@ -49,7 +49,7 @@ export function usageRollup(profile: string, days: number, opts?: { stateDir?: s
 
   const totals = new Map<string, UsageRollupRow>();
   const ticketTotals = new Map<string, UsageRollupTicketRow>();
-  let unattributedTurns = 0;
+  const usageUnavailable: UsageUnavailableTurn[] = [];
 
   // Per-ticket rollup (#940 "cost per ticket"): sessions carry their
   // branch, and issue/PR chats branch for their ticket -- so joining the
@@ -86,16 +86,22 @@ export function usageRollup(profile: string, days: number, opts?: { stateDir?: s
       if (event.timestamp < since) continue;
       const usage = event.usage;
       if (!usage || (usage.total_tokens === null && usage.input_tokens === null && usage.output_tokens === null)) {
-        unattributedTurns += 1;
+        usageUnavailable.push({
+          session_id: sessionId,
+          backend: event.backend,
+          model: event.model,
+          day: utcDay(event.timestamp)
+        });
         continue;
       }
       const tokens = usage.total_tokens ?? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
 
-      const key = `${event.backend}\u0000${event.model ?? ''}\u0000${utcDay(event.timestamp)}`;
+      const key = `${event.backend}\u0000${event.backendInstance ?? ''}\u0000${event.model ?? ''}\u0000${utcDay(event.timestamp)}`;
       let row = totals.get(key);
       if (!row) {
         row = {
           backend: event.backend,
+          backend_instance: event.backendInstance ?? null,
           model: event.model,
           day: utcDay(event.timestamp),
           turns: 0,
@@ -137,7 +143,8 @@ export function usageRollup(profile: string, days: number, opts?: { stateDir?: s
     since,
     generated_at: now,
     rows,
-    unattributed_turns: unattributedTurns,
+    unattributed_turns: usageUnavailable.length,
+    usage_unavailable: usageUnavailable,
     tickets: [...ticketTotals.values()]
       .filter((row) => row.turns > 0)
       .sort((a, b) => b.total_tokens - a.total_tokens)

@@ -16,13 +16,14 @@ import { FIXTURE_GAH_BINARY } from './fixtureGahHarness.js';
 
 test('real HTTP/WS pairing confirms access, rejects CSRF and owner exports, and revokes existing sockets individually', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'gah-pairing-http-'));
-  const keys = ['COORDINATOR_TOKEN', 'GAH_ALLOW_INSECURE_HTTP', 'GAH_COORDINATOR_IDENTITY_PATH', 'GAH_WS_AUTH_MODE',
+  const keys = ['COORDINATOR_TOKEN', 'GAH_ALLOW_INSECURE_HTTP', 'GAH_COORDINATOR_IDENTITY_PATH', 'GAH_WS_AUTH_MODE', 'GAH_SKILL_BANK_PATH',
     'GAH_GATEWAY_SETTINGS_PATH', 'GAH_MANAGER_CHAT_SETTINGS_PATH', 'GAH_ENABLE_ADMIN_UPDATE', 'GAH_BINARY', 'GAH_FIXTURE_PROFILE_LIST'] as const;
   const saved = keys.map(key => process.env[key]);
   process.env.COORDINATOR_TOKEN = 'owner-secret-never-in-qr';
   process.env.GAH_ALLOW_INSECURE_HTTP = '1';
   process.env.GAH_COORDINATOR_IDENTITY_PATH = join(directory, 'identity.json');
   process.env.GAH_WS_AUTH_MODE = 'trusted_lan';
+  process.env.GAH_SKILL_BANK_PATH = join(directory, 'skills.json');
   process.env.GAH_GATEWAY_SETTINGS_PATH = join(directory, 'gateway.json');
   process.env.GAH_MANAGER_CHAT_SETTINGS_PATH = join(directory, 'manager-chat.json');
   process.env.GAH_ENABLE_ADMIN_UPDATE = '1';
@@ -126,6 +127,8 @@ test('real HTTP/WS pairing confirms access, rejects CSRF and owner exports, and 
       ['PUT', '/api/settings/gateway', { url: 'https://attacker.example.test' }],
       ['POST', '/api/manager-chat/settings', { defaultBackend: 'codex' }],
       ['POST', '/api/manager-chat/reclaim', { profile: 'paired-test', dryRun: false }],
+      ['POST', '/api/skills', { id: 'paired-skill', version: '1.0.0', content: '# Unsafe edit' }],
+      ['DELETE', '/api/skills/gah-manager', {}],
       ['POST', '/api/admin/update', {}],
     ];
     for (const [method, path, body] of ownerOperations) {
@@ -137,6 +140,12 @@ test('real HTTP/WS pairing confirms access, rejects CSRF and owner exports, and 
     assert.equal(readFileSync(process.env.GAH_GATEWAY_SETTINGS_PATH, 'utf8'), gatewaySettings, 'Paired requests cannot redirect the retained gateway key');
     const switchHarness = await post('/api/manager-chat/backend', { profile: 'paired-test', backendId: 'codex' }, paired);
     assert.equal(switchHarness.status, 200, 'Paired devices can select the backend used for interactive chat');
+    const bindSkills = await fetch(base + '/api/skills/bindings', {
+      method: 'PUT',
+      headers: { ...paired, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: 'paired-test', backend: 'codex', skillIds: [] })
+    });
+    assert.equal(bindSkills.status, 200, 'Paired devices can change project skill bindings');
     assert.equal(JSON.parse(readFileSync(process.env.GAH_MANAGER_CHAT_SETTINGS_PATH, 'utf8')).profileOverrides['paired-test'], 'codex');
     assert.equal(adminUpdates, 0, 'Denied admin requests never start an update');
     assert.equal((await post('/api/admin/update', {}, owner)).status, 202);

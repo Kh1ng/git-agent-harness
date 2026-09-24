@@ -108,6 +108,15 @@ test('reasoning effort persists on the session and updates in place', withEnv(as
   assert.equal(pinned.reasoningEffort, 'low');
 }));
 
+test('named backend account survives a session-store restart', withEnv(async (env) => {
+  const created = await createSession({
+    profile: 'p', profileInfo: env.profileInfo, backend: 'codex', backendInstance: 'codex-work'
+  });
+  setChatSessionStoreOptions({ stateDir: undefined });
+  setChatSessionStoreOptions({ stateDir: env.stateDir });
+  assert.equal(getSession('p', created.id)?.backendInstance, 'codex-work');
+}));
+
 test('legacy indexes derive live/archive outcomes without a migration command', withEnv(async (env) => {
   const projectDir = join(env.stateDir, 'project-p');
   execFileSync('mkdir', ['-p', projectDir]);

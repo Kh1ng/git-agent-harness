@@ -46,8 +46,8 @@ import type {
   ReportData,
   ReportSeriesData,
   ServerMessage,
+  Skill,
   SkillBindingSummary,
-  SkillSummary,
   StatusSnapshot,
   UsageRollupSummary
 } from '@git-agent-harness/contracts';
@@ -155,6 +155,8 @@ interface ConversationState {
   reconnectResumed: boolean;
 }
 
+type MockSkill = Skill & { bound: boolean };
+
 interface MockState {
   scenario: MockScenarioName;
   reset: number;
@@ -163,7 +165,7 @@ interface MockState {
   profiles: ProfileSummary[];
   config: ConfigSummary;
   gateway: GatewaySettingsSummary;
-  skills: SkillSummary[];
+  skills: MockSkill[];
   skillBindings: Record<string, string[]>;
   skillObservations: Record<string, { id: string; version: string }[]>;
   loopRunning: boolean;
@@ -218,8 +220,11 @@ const MOCK_SKILLS = [{
   description: 'Coordinates mock GAH work without touching a provider.',
   backends: ['hermes', 'codex', 'claude', 'opencode'],
   source: 'mock/in-memory',
+  content: '# GAH manager\n\nCoordinate mock GAH work without touching a provider.',
+  createdAt: FIXED_NOW,
+  updatedAt: FIXED_NOW,
   bound: true
-}] satisfies SkillSummary[];
+}] satisfies MockSkill[];
 
 const MOCK_ADMIN_PENDING = {
   current: { hash: '1111111111111111111111111111111111111111', short: '1111111', subject: 'Current mock build' },
@@ -243,6 +248,7 @@ const MOCK_USAGE_ROLLUP = {
   generated_at: FIXED_NOW,
   rows: [{
     backend: 'codex',
+    backend_instance: 'codex-work',
     model: 'gpt-5.3-codex',
     day: '2023-11-14',
     turns: 3,
@@ -252,6 +258,7 @@ const MOCK_USAGE_ROLLUP = {
     estimated_cost_usd: 0.04
   }, {
     backend: 'codex',
+    backend_instance: 'codex-work',
     model: 'gpt-5.3-codex',
     day: '2023-11-13',
     turns: 1,
@@ -261,6 +268,7 @@ const MOCK_USAGE_ROLLUP = {
     estimated_cost_usd: 0.01
   }],
   unattributed_turns: 0,
+  usage_unavailable: [],
   tickets: [{
     ticket: '#1087',
     title: 'Mock control plane',
@@ -555,18 +563,29 @@ function createState(scenario: MockScenarioName, reset: number, previewOrigin?: 
   };
 }
 
-function skillBindingSummary(state: MockState, profile: string, backend: string): SkillBindingSummary {
-  const key = `${profile}\0${backend}`;
+function skillBindingKey(profile: string, backend: string, sessionId?: string | null): string {
+  return `${profile}\0${backend}${sessionId ? `\0${sessionId}` : ''}`;
+}
+
+function skillBindingSummary(state: MockState, profile: string, backend: string, sessionId?: string | null): SkillBindingSummary {
+  const projectKey = skillBindingKey(profile, backend);
+  const sessionKey = sessionId ? skillBindingKey(profile, backend, sessionId) : null;
   const compatible = state.skills.filter((skill) => skill.backends.length === 0 || skill.backends.includes(backend));
-  const overridden = Object.hasOwn(state.skillBindings, key);
+  const source = sessionKey && Object.hasOwn(state.skillBindings, sessionKey)
+    ? 'session'
+    : Object.hasOwn(state.skillBindings, projectKey) ? 'profile' : 'canonical';
+  const selectedIds = source === 'session' && sessionKey
+    ? state.skillBindings[sessionKey]
+    : source === 'profile' ? state.skillBindings[projectKey] : compatible.filter((skill) => skill.id === 'gah-manager').map((skill) => skill.id);
   return {
     profile,
     backend,
     instance: null,
-    source: overridden ? 'profile' : 'canonical',
+    sessionId: sessionId ?? null,
+    source,
     supported: BACKENDS.some((candidate) => candidate.id === backend && candidate.implemented),
-    selectedIds: overridden ? state.skillBindings[key] : compatible.filter((skill) => skill.id === 'gah-manager').map((skill) => skill.id),
-    observedSkills: state.skillObservations[key] ?? null,
+    selectedIds,
+    observedSkills: state.skillObservations[sessionKey ?? projectKey] ?? null,
     skills: compatible
   };
 }
@@ -1249,15 +1268,42 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     res.json(state.gateway);
   });
   app.get('/api/skills', (_req, res) => res.json({ skills: state.skills }));
+  app.post('/api/skills', (req, res) => {
+    const id = bodyString(req.body?.id);
+    const version = bodyString(req.body?.version);
+    const content = bodyString(req.body?.content);
+    if (!id || !version || !content?.trim()) return jsonError(res, 400, 'Invalid skill', 'id, version, and non-empty content are required');
+    const index = state.skills.findIndex(skill => skill.id === id && skill.version === version);
+    const existing = state.skills[index];
+    const now = Date.now();
+    const skill: MockSkill = {
+      id,
+      version,
+      displayName: bodyString(req.body?.displayName) ?? id,
+      description: bodyString(req.body?.description) ?? '',
+      content,
+      backends: Array.isArray(req.body?.backends) ? req.body.backends.filter((value: unknown): value is string => typeof value === 'string') : [],
+      source: bodyString(req.body?.source) ?? 'api',
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      bound: existing?.bound ?? false
+    };
+    if (index >= 0) state.skills[index] = skill;
+    else state.skills.push(skill);
+    const { bound: _bound, ...record } = skill;
+    res.status(existing ? 200 : 201).json(record);
+  });
   app.get('/api/skills/bindings', (req, res) => {
     const profile = bodyString(req.query.profile);
     const backend = bodyString(req.query.backend);
+    const sessionId = bodyString(req.query.sessionId);
     if (!profile || !backend) return jsonError(res, 400, 'Invalid skill binding', 'profile and backend required');
-    res.json(skillBindingSummary(state, profile, backend));
+    res.json(skillBindingSummary(state, profile, backend, sessionId));
   });
   app.put('/api/skills/bindings', (req, res) => {
     const profile = bodyString(req.body?.profile);
     const backend = bodyString(req.body?.backend);
+    const sessionId = bodyString(req.body?.sessionId);
     const skillIds = req.body?.skillIds;
     if (!profile || !backend || !Array.isArray(skillIds) || skillIds.some((id) => typeof id !== 'string')) {
       return jsonError(res, 400, 'Invalid skill binding', 'profile, backend, and string skillIds required');
@@ -1265,15 +1311,31 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     const compatible = new Set(skillBindingSummary(state, profile, backend).skills.map((skill) => skill.id));
     const unsupported = skillIds.find((id) => !compatible.has(id));
     if (unsupported) return jsonError(res, 400, 'Invalid skill binding', `Skill '${unsupported}' is unavailable for ${backend}`);
-    state.skillBindings[`${profile}\0${backend}`] = [...new Set(skillIds)];
-    res.json(skillBindingSummary(state, profile, backend));
+    state.skillBindings[skillBindingKey(profile, backend, sessionId)] = [...new Set(skillIds)];
+    res.json(skillBindingSummary(state, profile, backend, sessionId));
   });
   app.delete('/api/skills/bindings', (req, res) => {
     const profile = bodyString(req.query.profile);
     const backend = bodyString(req.query.backend);
+    const sessionId = bodyString(req.query.sessionId);
     if (!profile || !backend) return jsonError(res, 400, 'Invalid skill binding', 'profile and backend required');
-    delete state.skillBindings[`${profile}\0${backend}`];
-    res.json(skillBindingSummary(state, profile, backend));
+    delete state.skillBindings[skillBindingKey(profile, backend, sessionId)];
+    res.json(skillBindingSummary(state, profile, backend, sessionId));
+  });
+  app.get('/api/skills/:id', (req, res) => {
+    const version = bodyString(req.query.version);
+    const skill = state.skills.find(candidate => candidate.id === req.params.id && (!version || candidate.version === version));
+    if (!skill) return jsonError(res, 404, 'Skill not found', `Skill '${req.params.id}' not found`);
+    const { bound: _bound, ...record } = skill;
+    res.json(record);
+  });
+  app.delete('/api/skills/:id', (req, res) => {
+    if (state.skills.some(skill => skill.id === req.params.id && skill.bound)) {
+      return jsonError(res, 409, 'Failed to delete skill', `Cannot delete skill '${req.params.id}': it is still bound; unbind first`);
+    }
+    const before = state.skills.length;
+    state.skills = state.skills.filter(skill => skill.id !== req.params.id);
+    res.json({ removed: before - state.skills.length });
   });
 
   app.get('/api/git/status', (req, res) => {
