@@ -8,6 +8,7 @@ import { gahApi } from '../api/client.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { CommitPrDialog } from '../components/CommitPrDialog.js';
+import { OpenLocalCheckout } from '../components/OpenLocalCheckout.js';
 import type { ChatPrSummary } from '@git-agent-harness/contracts';
 
 interface GitStatus { branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean }
@@ -84,6 +85,7 @@ export function GitPage() {
                 </option>
               ))}
             </select>
+            <OpenLocalCheckout profile={profile} nodeName="central node" />
             <button type="button" className="btn-primary text-xs" onClick={() => setReviewOpen(true)}>Commit / PR</button>
             <div className="flex overflow-hidden rounded-md border border-subtle text-xs">
               {tabs.map((t) => (

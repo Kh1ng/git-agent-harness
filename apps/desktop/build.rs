@@ -12,6 +12,8 @@ fn main() {
             "set_node_role",
             "worker_status",
             "set_worker_running",
+            "desktop_open_context",
+            "open_local_checkout",
         ]),
     ))
     .expect("failed to build desktop permissions");
