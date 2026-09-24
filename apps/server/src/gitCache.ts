@@ -4,6 +4,7 @@
  * repeat and never hammer the provider.
  */
 import { spawnSync } from 'node:child_process';
+import type { GitReviewState } from '@git-agent-harness/contracts';
 import { AsyncTtlCache } from './asyncTtlCache.js';
 
 const DEFAULT_GIT_CACHE_TTL_MS = 15_000; // 15 seconds TTL for git data
@@ -31,9 +32,90 @@ interface GitCommitResult {
   hash: string;
 }
 
+export type GitWorktreeReview = Omit<GitReviewState,
+  'ownerNodeId' | 'ownerNodeName' | 'provider' | 'providerLabel' | 'existing'>;
+
 function gitInDir(cwd: string, args: string[]): { ok: boolean; out: string; err: string } {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: SUBPROCESS_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES });
   return { ok: result.status === 0, out: result.stdout ?? '', err: result.stderr ?? '' };
+}
+
+function gitOutput(cwd: string, args: string[]): string {
+  const result = gitInDir(cwd, args);
+  if (!result.ok) throw new Error(result.err || result.out || `git ${args[0]} failed`);
+  return result.out;
+}
+
+function nulList(value: string): string[] {
+  return value.split('\0').filter(Boolean);
+}
+
+function changedFiles(cwd: string) {
+  const staged = new Set(nulList(gitOutput(cwd, ['diff', '--cached', '--name-only', '-z', '--no-renames'])));
+  const unstaged = new Set(nulList(gitOutput(cwd, ['diff', '--name-only', '-z', '--no-renames'])));
+  const untracked = new Set(nulList(gitOutput(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])));
+  const paths = [...new Set([...staged, ...unstaged, ...untracked])].sort();
+  return {
+    paths,
+    staged,
+    unstaged,
+    untracked,
+    files: paths.map(path => ({ path, staged: staged.has(path), unstaged: unstaged.has(path), untracked: untracked.has(path) }))
+  };
+}
+
+function reviewBase(cwd: string, requested?: string): { base: string; ref: string } {
+  let base = requested?.trim().replace(/^origin\//, '') ?? '';
+  if (base) {
+    if (!gitInDir(cwd, ['check-ref-format', '--branch', base]).ok) throw new Error('Invalid base branch');
+  } else {
+    const symbolic = gitInDir(cwd, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']);
+    base = symbolic.ok ? symbolic.out.trim().replace(/^origin\//, '') : '';
+    if (!base) {
+      base = gitInDir(cwd, ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main']).ok ? 'main'
+        : gitInDir(cwd, ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/master']).ok ? 'master'
+          : gitOutput(cwd, ['branch', '--show-current']).trim();
+    }
+  }
+  const remote = `refs/remotes/origin/${base}`;
+  const ref = gitInDir(cwd, ['rev-parse', '--verify', '--quiet', remote]).ok ? remote : base;
+  if (!gitInDir(cwd, ['rev-parse', '--verify', '--quiet', ref]).ok) throw new Error(`Base branch '${base}' is unavailable locally`);
+  return { base, ref };
+}
+
+/** Returns the committed and uncommitted state that a user must review before
+ * committing or publishing. This function never fetches, stages, or pushes. */
+export async function getGitReviewState(cwd: string, requestedBase?: string): Promise<GitWorktreeReview> {
+  const branch = gitOutput(cwd, ['branch', '--show-current']).trim();
+  if (!branch) throw new Error('A named branch is required');
+  const { base, ref } = reviewBase(cwd, requestedBase);
+  const upstreamResult = gitInDir(cwd, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']);
+  const upstream = upstreamResult.ok ? upstreamResult.out.trim() : null;
+  let ahead = 0;
+  let behind = 0;
+  if (upstream) {
+    const counts = gitOutput(cwd, ['rev-list', '--left-right', '--count', `${upstream}...HEAD`]).trim().split(/\s+/).map(Number);
+    behind = counts[0] || 0;
+    ahead = counts[1] || 0;
+  }
+  const records = gitOutput(cwd, ['log', `${ref}..HEAD`, '--format=%H%x1f%h%x1f%s%x1e'])
+    .split('\x1e').map(record => record.trim()).filter(Boolean);
+  const commits = records.map(record => {
+    const [hash, short, ...subject] = record.split('\x1f');
+    return { hash, short, subject: subject.join('\x1f') };
+  });
+  const changes = changedFiles(cwd);
+  return {
+    branch,
+    base,
+    upstream,
+    ahead,
+    behind,
+    files: changes.files,
+    commits,
+    changedFiles: nulList(gitOutput(cwd, ['diff', '--name-only', '-z', '--no-renames', `${ref}...HEAD`])).sort(),
+    patch: gitOutput(cwd, ['diff', '--no-ext-diff', '--no-color', `${ref}...HEAD`])
+  };
 }
 
 /** Runs a provider mutation with the same timeout/output bounds as git. */
@@ -104,8 +186,9 @@ export async function getGitLogCached(profile: string, cwd: string, limit: numbe
 }
 
 /**
- * Commits staged + unstaged changes in a profile's checkout (`git add -A`
- * then `git commit`). Not cached -- it's a mutation, not an observation --
+ * Commits all changes or only the selected files. `git commit --only` keeps
+ * unrelated staged files staged, which is the native partial-commit contract.
+ * Not cached -- it's a mutation, not an observation --
  * but it drops the status/log cache entries it just invalidated so the next
  * strip refresh doesn't serve a stale pre-commit snapshot for the rest of
  * the TTL window.
@@ -114,11 +197,26 @@ export async function commitGitChanges(
   profile: string,
   cwd: string,
   message: string,
-  sessionId?: string
+  sessionId?: string,
+  files?: string[]
 ): Promise<GitCommitResult> {
-  const add = gitInDir(cwd, ['add', '-A']);
-  if (!add.ok) throw new Error(add.err || 'git add failed');
-  const commit = gitInDir(cwd, ['commit', '-m', message]);
+  let commit;
+  if (files === undefined) {
+    const add = gitInDir(cwd, ['add', '-A']);
+    if (!add.ok) throw new Error(add.err || 'git add failed');
+    commit = gitInDir(cwd, ['commit', '-m', message]);
+  } else {
+    const selected = [...new Set(files)];
+    if (selected.length === 0 || selected.some(path => !path || /[\0\r\n]/.test(path))) throw new Error('Select at least one valid changed file');
+    const changes = changedFiles(cwd);
+    if (selected.some(path => !changes.paths.includes(path))) throw new Error('Selected files must be current worktree changes');
+    const untracked = selected.filter(path => changes.untracked.has(path));
+    if (untracked.length > 0) {
+      const intent = gitInDir(cwd, ['add', '--intent-to-add', '--', ...untracked]);
+      if (!intent.ok) throw new Error(intent.err || 'git add failed');
+    }
+    commit = gitInDir(cwd, ['commit', '--only', '-m', message, '--', ...selected]);
+  }
   if (!commit.ok) throw new Error(commit.err || commit.out || 'git commit failed');
   gitStatusCache.delete(statusCacheKey(profile, sessionId));
   for (const key of gitLogCache.keys()) {
