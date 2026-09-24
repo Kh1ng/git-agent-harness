@@ -205,23 +205,40 @@ fn safe_identifier(value: &str) -> bool {
         })
 }
 
+fn posix_join(base: &str, name: &str) -> String {
+    format!("{}/{}", base.trim_end_matches('/'), name)
+}
+
 fn checkout_candidate(
     project: &LocalProject,
     session_id: Option<&str>,
 ) -> Result<(String, Option<String>), String> {
-    if project.profile.name.is_empty() || project.profile.name.chars().any(char::is_control) {
+    if project.profile.name.is_empty()
+        || project.profile.name.chars().any(char::is_control)
+        || project.profile.local_path.is_empty()
+        || project.profile.local_path.chars().any(char::is_control)
+    {
         return Err("The local profile identity is invalid.".into());
     }
     let Some(session_id) = session_id.filter(|id| *id != "default") else {
         return Ok((project.profile.local_path.clone(), None));
     };
     if !safe_identifier(session_id)
-        || !safe_identifier(&project.profile.repo_id)
+        || project.profile.repo_id.is_empty()
+        || project.profile.repo_id.chars().any(char::is_control)
         || project.profile.worktree_base.is_empty()
+        || project.profile.worktree_base.chars().any(char::is_control)
     {
         return Err("The chat worktree identity is invalid.".into());
     }
     let name = format!("gah-chat-{}-{session_id}", project.profile.repo_id);
+    #[cfg(windows)]
+    if project.environment == Environment::Wsl {
+        return Ok((
+            posix_join(&project.profile.worktree_base, &name),
+            Some(project.profile.worktree_base.clone()),
+        ));
+    }
     Ok((
         Path::new(&project.profile.worktree_base)
             .join(name)
@@ -232,6 +249,11 @@ fn checkout_candidate(
 }
 
 fn validate_native_checkout(candidate: &str, base: Option<&str>) -> Result<String, String> {
+    if candidate.chars().any(char::is_control)
+        || base.is_some_and(|value| value.chars().any(char::is_control))
+    {
+        return Err("The local checkout path is invalid.".into());
+    }
     let path =
         std::fs::canonicalize(candidate).map_err(|_| "The local checkout no longer exists.")?;
     if !path.is_dir() {
@@ -240,7 +262,7 @@ fn validate_native_checkout(candidate: &str, base: Option<&str>) -> Result<Strin
     if let Some(base) = base {
         let base =
             std::fs::canonicalize(base).map_err(|_| "The local worktree root no longer exists.")?;
-        if path.parent() != Some(base.as_path()) {
+        if path == base || !path.starts_with(&base) {
             return Err("The chat worktree is outside the configured worktree root.".into());
         }
     }
@@ -261,7 +283,11 @@ fn validate_native_checkout(candidate: &str, base: Option<&str>) -> Result<Strin
     if root != path {
         return Err("The resolved folder is outside the checkout root.".into());
     }
-    Ok(path.to_string_lossy().into_owned())
+    let path = path.to_string_lossy().into_owned();
+    if path.chars().any(char::is_control) {
+        return Err("The local checkout path is invalid.".into());
+    }
+    Ok(path)
 }
 
 const WSL_RESOLVE_SCRIPT: &str = r#"
@@ -270,7 +296,8 @@ target="$(readlink -f -- "$1")"
 [ -d "$target" ]
 if [ "$3" = session ]; then
   base="$(readlink -f -- "$2")"
-  [ "$(dirname -- "$target")" = "$base" ]
+  [ "$target" != "$base" ]
+  case "$target" in "$base"/*) ;; *) exit 1 ;; esac
 fi
 root="$(git -C "$target" rev-parse --show-toplevel)"
 [ "$(readlink -f -- "$root")" = "$target" ]
@@ -306,14 +333,21 @@ fn resolve_wsl_checkout(
     if !output.status.success() {
         return Err("The WSL checkout is missing or outside its configured worktree root.".into());
     }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    parse_wsl_checkout(&output.stdout)
+}
+
+fn parse_wsl_checkout(output: &[u8]) -> Result<String, String> {
+    let path = String::from_utf8_lossy(output).trim().to_owned();
     if path.is_empty() || path.chars().any(char::is_control) {
         return Err("WSL returned an invalid Windows checkout path.".into());
     }
     Ok(path)
 }
 
-fn resolve_checkout(project_ref: &OpenProjectRef) -> Result<Option<Checkout>, String> {
+fn select_project(
+    projects: Vec<LocalProject>,
+    project_ref: &OpenProjectRef,
+) -> Result<Option<LocalProject>, String> {
     if project_ref.profile.is_empty()
         || project_ref.profile.len() > 128
         || project_ref.profile.chars().any(char::is_control)
@@ -324,13 +358,17 @@ fn resolve_checkout(project_ref: &OpenProjectRef) -> Result<Option<Checkout>, St
     {
         return Err("The project identity is invalid.".into());
     }
-    let settings = read_settings();
-    let Some(project) = local_projects(&settings)?.into_iter().find(|candidate| {
+    Ok(projects.into_iter().find(|candidate| {
         candidate.profile.name == project_ref.profile
             && project_ref.node_id.as_ref().map_or(true, |requested| {
                 candidate.node_id.as_ref() == Some(requested)
             })
-    }) else {
+    }))
+}
+
+fn resolve_checkout(project_ref: &OpenProjectRef) -> Result<Option<Checkout>, String> {
+    let settings = read_settings();
+    let Some(project) = select_project(local_projects(&settings)?, project_ref)? else {
         return Ok(None);
     };
     let (candidate, base) = checkout_candidate(&project, project_ref.session_id.as_deref())?;
@@ -367,9 +405,20 @@ fn supported_tool(id: &str) -> bool {
 
 #[cfg(target_os = "macos")]
 fn which(name: &str) -> Option<String> {
-    let output = command("which").arg(name).output().ok()?.stdout;
-    let path = String::from_utf8_lossy(&output).trim().to_owned();
-    (!path.is_empty()).then_some(path)
+    let path = command("which")
+        .arg(name)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|path| !path.is_empty());
+    path.or_else(|| {
+        ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+            .into_iter()
+            .map(|dir| Path::new(dir).join(name))
+            .find(|path| path.is_file())
+            .map(|path| path.to_string_lossy().into_owned())
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -447,6 +496,34 @@ fn where_program(names: &[&str]) -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
+fn find_program(root: &Path, names: &[&str], depth: usize) -> Option<PathBuf> {
+    if depth == 0 {
+        return None;
+    }
+    for entry in std::fs::read_dir(root).ok()?.filter_map(Result::ok) {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_file()
+            && names.iter().any(|name| {
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.eq_ignore_ascii_case(name))
+            })
+        {
+            return Some(path);
+        }
+        if kind.is_dir() && !kind.is_symlink() {
+            if let Some(found) = find_program(&path, names, depth - 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
 fn editor_program(id: &str) -> Option<PathBuf> {
     let names: &[&str] = match id {
         "vscode" => &["Code.exe"],
@@ -462,16 +539,30 @@ fn editor_program(id: &str) -> Option<PathBuf> {
         "android_studio" => &["studio64.exe"],
         _ => return None,
     };
-    where_program(names).or_else(|| {
-        (id == "vscode")
-            .then(|| {
-                std::env::var_os("LOCALAPPDATA")
-                    .map(PathBuf::from)?
-                    .join("Programs/Microsoft VS Code/Code.exe")
-            })
-            .flatten()
-            .filter(|path| path.is_file())
-    })
+    if let Some(path) = where_program(names) {
+        return Some(path);
+    }
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    if id == "vscode" {
+        return local
+            .map(|root| root.join("Programs/Microsoft VS Code/Code.exe"))
+            .filter(|path| path.is_file());
+    }
+    for root in [
+        std::env::var_os("ProgramFiles")
+            .map(PathBuf::from)
+            .map(|path| path.join("JetBrains")),
+        local.as_ref().map(|path| path.join("Programs")),
+        local.map(|path| path.join("JetBrains/Toolbox/apps")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(path) = find_program(&root, names, 7) {
+            return Some(path);
+        }
+    }
+    None
 }
 
 #[cfg(windows)]
@@ -697,7 +788,7 @@ mod tests {
             std::env::temp_dir().join(format!("gah-open-test-{}-{nonce}", std::process::id()));
         let checkout = root.join("checkout");
         let worktrees = root.join("worktrees");
-        let target = worktrees.join("gah-chat-repo-session1");
+        let target = worktrees.join("gah-chat-owner/repo-session1");
         fs::create_dir_all(&checkout).unwrap();
         fs::create_dir_all(&target).unwrap();
         command("git")
@@ -718,7 +809,47 @@ mod tests {
             Some(worktrees.to_string_lossy().as_ref())
         )
         .is_err());
+        assert!(validate_native_checkout("/tmp/bad\npath", None).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn opaque_project_identity_selects_only_its_local_node() {
+        let project = LocalProject {
+            node_id: Some("mac-1".into()),
+            profile: Profile {
+                name: "gah".into(),
+                local_path: "/repo".into(),
+                repo_id: "owner/repo".into(),
+                worktree_base: "/worktrees".into(),
+            },
+            environment: Environment::Native,
+        };
+        let selected = select_project(
+            vec![project],
+            &OpenProjectRef {
+                profile: "gah".into(),
+                node_id: Some("mac-1".into()),
+                session_id: Some("session1".into()),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.profile.local_path, "/repo");
+        assert_eq!(
+            checkout_candidate(&selected, Some("session1")).unwrap().0,
+            "/worktrees/gah-chat-owner/repo-session1"
+        );
+        assert!(select_project(
+            vec![selected],
+            &OpenProjectRef {
+                profile: "gah".into(),
+                node_id: Some("windows-1".into()),
+                session_id: None,
+            },
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
@@ -748,5 +879,14 @@ mod tests {
         assert_eq!(args[7], "session");
         assert!(!args[3].contains(path));
         assert!(args[3].contains("wslpath -w"));
+        assert_eq!(
+            posix_join("/home/me/worktrees/", "gah-chat-owner/repo-session"),
+            "/home/me/worktrees/gah-chat-owner/repo-session"
+        );
+        assert_eq!(
+            parse_wsl_checkout(b"C:\\Users\\me\\repo\r\n").unwrap(),
+            "C:\\Users\\me\\repo"
+        );
+        assert!(parse_wsl_checkout(b"C:\\bad\npath").is_err());
     }
 }

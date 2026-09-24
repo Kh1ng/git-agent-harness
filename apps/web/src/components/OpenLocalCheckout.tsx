@@ -22,7 +22,7 @@ interface OpenProjectRef {
 
 export function OpenLocalCheckout({ profile, nodeId, nodeName, sessionId }: OpenProjectRef & { nodeName: string }) {
   const [context, setContext] = useState<OpenContext | null>(null);
-  const [open, setOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
@@ -40,10 +40,10 @@ export function OpenLocalCheckout({ profile, nodeId, nodeName, sessionId }: Open
   }, [profile, nodeId, sessionId]);
 
   useEffect(() => {
-    if (!open) return;
-    const closeOutside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
+    if (!menuOpen) return;
+    const closeOutside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setMenuOpen(false); };
     const closeEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { setOpen(false); menuButton.current?.focus(); }
+      if (event.key === 'Escape') { setMenuOpen(false); menuButton.current?.focus(); }
     };
     document.addEventListener('pointerdown', closeOutside);
     document.addEventListener('keydown', closeEscape);
@@ -51,7 +51,7 @@ export function OpenLocalCheckout({ profile, nodeId, nodeName, sessionId }: Open
       document.removeEventListener('pointerdown', closeOutside);
       document.removeEventListener('keydown', closeEscape);
     };
-  }, [open]);
+  }, [menuOpen]);
 
   if (window.__GAH_DESKTOP_OPEN_PROJECT__ !== true || !context) return null;
   if (!context.available) {
@@ -63,14 +63,14 @@ export function OpenLocalCheckout({ profile, nodeId, nodeName, sessionId }: Open
   const launch = async (tool: OpenTool, fromMenu = false) => {
     if (busy) return;
     if (fromMenu) {
-      setOpen(false);
+      setMenuOpen(false);
     }
     setBusy(true);
     setError(null);
     try {
       await invoke('open_local_checkout', { project, tool: tool.id });
       setContext(current => current ? { ...current, preferredTool: tool.id } : current);
-      setOpen(false);
+      setMenuOpen(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -86,10 +86,10 @@ export function OpenLocalCheckout({ profile, nodeId, nodeName, sessionId }: Open
         <FolderOpen size={13} /> {busy ? 'Opening…' : `Open in ${preferred.label}`}
       </button>
       <button ref={menuButton} type="button" className="btn-secondary rounded-l-none px-2 text-xs" disabled={busy}
-        aria-label="Choose local app" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+        aria-label="Choose local app" aria-expanded={menuOpen} onClick={() => setMenuOpen(value => !value)}>
         <ChevronDown size={13} />
       </button>
-      {open && (
+      {menuOpen && (
         <div className="absolute right-0 top-full z-30 mt-1 min-w-48 rounded-md border border-subtle bg-raised p-1 shadow-lg">
           {context.tools.map(tool => (
             <button key={tool.id} type="button" className="chat-menu-item text-xs"
