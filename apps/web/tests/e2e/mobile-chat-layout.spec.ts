@@ -67,11 +67,11 @@ for (const width of [320, 390]) {
       expect(bounds.height).toBeGreaterThanOrEqual(44);
       expect(bounds.width).toBeGreaterThanOrEqual(44);
     }
-    await page.getByRole('button', { name: 'Commit', exact: true }).click();
+    await page.getByRole('button', { name: 'Commit / PR', exact: true }).click();
     await expect(page.getByPlaceholder('Commit message')).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.getByPlaceholder('Commit message').press('Escape');
-    await page.getByRole('button', { name: 'Close chat tools' }).click();
+    await expect(tools).toHaveAttribute('aria-expanded', 'false');
     await page.getByLabel('Skills', { exact: true }).click();
     const skills = page.getByText('Skills', { exact: true });
     await expect(skills).toBeVisible();
