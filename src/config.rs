@@ -2,12 +2,11 @@ use crate::job_kind::{JobFamily, JobKind};
 use crate::provider_kind::{ProviderKind, UnknownProviderKind};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 mod backend_instances;
 mod merge_policy;
-pub use backend_instances::{check_profile_backend_instances, BackendInstanceConfig};
+pub use backend_instances::*;
 pub use merge_policy::MergePolicy;
 mod backend_paths;
 mod issue_intake;
@@ -391,8 +390,9 @@ pub fn canonical_backend_name(name: &str) -> &str {
 }
 
 pub fn default_config_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    PathBuf::from(home).join(".config/gah")
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    home.map_or_else(|| PathBuf::from("/root"), PathBuf::from)
+        .join(".config/gah")
 }
 
 pub fn default_config_path() -> PathBuf {

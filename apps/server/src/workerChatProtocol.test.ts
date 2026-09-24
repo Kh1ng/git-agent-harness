@@ -65,6 +65,10 @@ test('worker session replies preserve expected identity and omit worker-supplied
     workspaces: { central: { branch: 'main', worktreePath: '/central/checkout' } }, prNumber: 99, secret: 'omit' };
   assert.deepEqual(parseWorkerChatReply(injected, create), session);
   assert.deepEqual(parseWorkerChatReply({ session: injected, extra: 'omit' }, { ...create, action: 'prepare' }), { session });
+  assert.deepEqual(
+    parseWorkerChatReply({ ...session, backendInstance: 'codex-work' }, { ...create, backendInstance: 'codex-work' }),
+    { ...session, backendInstance: 'codex-work' }
+  );
   const archived = { ...session, archivedAt: 101, outcome: 'archived' };
   assert.deepEqual(parseWorkerChatReply(archived, { ...create, action: 'archive' }), archived);
   for (const patch of [{ id: 'different' }, { id: '../escape' }, { profile: 'other-project' }, { backend: 'other-backend' },

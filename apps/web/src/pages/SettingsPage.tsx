@@ -884,23 +884,28 @@ function BackendInstancesCard({ profileName, effective }: { profileName: string;
   const [pendingInstance, setPendingInstance] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadedFor, setLoadedFor] = useState(profileName);
+  const [adding, setAdding] = useState(false);
+  const [newInstance, setNewInstance] = useState('');
+  const [newLabel, setNewLabel] = useState('');
+  const [newRunner, setNewRunner] = useState<'codex' | 'claude'>('codex');
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editLabel, setEditLabel] = useState('');
+  const [loginCommand, setLoginCommand] = useState<string | null>(null);
 
   useEffect(() => {
-    if (declared) {
-      setInstances(declared);
-      setLoadedFor(profileName);
-      setError(null);
-    }
+    if (!declared) return;
+    let cancelled = false;
+    setInstances(declared);
+    setLoadedFor(profileName);
+    setError(null);
+    setAdding(false);
+    setEditing(null);
+    setLoginCommand(null);
+    backendInstancesApi.list(profileName)
+      .then((response) => { if (!cancelled) setInstances(response.backend_instances); })
+      .catch(() => { if (!cancelled) setError('Auth status is unavailable. Use Test to retry.'); });
+    return () => { cancelled = true; };
   }, [declared, profileName]);
-
-  if (!declared || declared.length === 0) {
-    return (
-      <div className="card-padded border border-subtle">
-        <h4 className="text-xs font-semibold text-primary mb-2">Backend instances</h4>
-        <p className="text-xs text-muted">No backend instances declared. Add one under [defaults.routing.backend_instances] or the profile's routing section.</p>
-      </div>
-    );
-  }
 
   const toggle = async (instance: string, enabled: boolean) => {
     setPendingInstance(instance);
@@ -915,22 +920,101 @@ function BackendInstancesCard({ profileName, effective }: { profileName: string;
     }
   };
 
+  const add = async () => {
+    setPendingInstance('new');
+    setError(null);
+    try {
+      const response = await backendInstancesApi.add(profileName, newInstance.trim(), newRunner, newLabel.trim());
+      setInstances(response.backend_instances);
+      setNewInstance('');
+      setNewLabel('');
+      setAdding(false);
+    } catch (failure) {
+      setError(failure instanceof GahApiError ? failure.message : 'Account was not added. Refresh and retry.');
+    } finally {
+      setPendingInstance(null);
+    }
+  };
+
+  const saveLabel = async (instance: string) => {
+    setPendingInstance(instance);
+    setError(null);
+    try {
+      const response = await backendInstancesApi.setLabel(profileName, instance, editLabel.trim());
+      setInstances(response.backend_instances);
+      setEditing(null);
+    } catch (failure) {
+      setError(failure instanceof GahApiError ? failure.message : 'Account label was not changed. Refresh and retry.');
+    } finally {
+      setPendingInstance(null);
+    }
+  };
+
+  const test = async (instance: string) => {
+    setPendingInstance(instance);
+    setError(null);
+    try {
+      const response = await backendInstancesApi.list(profileName);
+      setInstances(response.backend_instances);
+    } catch (failure) {
+      setError(failure instanceof GahApiError ? failure.message : 'Account test failed. Check Doctor for details.');
+    } finally {
+      setPendingInstance(null);
+    }
+  };
+
+  const reauthenticate = async (instance: string) => {
+    const command = `gah config authenticate-backend-instance --profile ${profileName} --instance ${instance}`;
+    setLoginCommand(command);
+    await navigator.clipboard?.writeText(command).catch(() => undefined);
+  };
+
   return (
     <div className="card-padded border border-subtle">
-      <h4 className="text-xs font-semibold text-primary mb-2">Backend instances</h4>
-      <p className="text-xs text-muted mb-2">
-        Disabled instances stay configured for status and attribution, but routing never selects them.
-        Re-enabling validates the executable binding again.
-      </p>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <h4 className="text-xs font-semibold text-primary">Backend accounts</h4>
+        <button type="button" className="btn-secondary text-xs" onClick={() => setAdding((open) => !open)} disabled={pendingInstance !== null}>
+          {adding ? 'Cancel' : 'Add account'}
+        </button>
+      </div>
+      <p className="mb-3 max-w-2xl text-xs text-muted">Each named Codex or Claude account gets separate provider state. GAH stores the label and state location, never the provider token.</p>
       {error && <p className="text-xs text-critical mb-2">{error}</p>}
+      {loginCommand && (
+        <div className="mb-3 rounded-md border border-subtle bg-raised p-2 text-xs text-secondary">
+          <p>Run this command in a terminal on this node. It starts the provider's browser or device login.</p>
+          <code className="mt-1 block break-all text-primary">{loginCommand}</code>
+        </div>
+      )}
+      {adding && (
+        <div className="mb-3 grid gap-2 rounded-md border border-subtle bg-raised p-3 sm:grid-cols-2">
+          <label className="space-y-1 text-xs text-secondary">Provider
+            <select value={newRunner} onChange={(event) => setNewRunner(event.target.value as 'codex' | 'claude')} className="w-full rounded-md border border-subtle bg-card px-2 py-1.5 text-primary">
+              <option value="codex">Codex</option><option value="claude">Claude</option>
+            </select>
+          </label>
+          <label className="space-y-1 text-xs text-secondary">Account label
+            <input value={newLabel} onChange={(event) => setNewLabel(event.target.value)} placeholder="Personal" className="w-full rounded-md border border-subtle bg-card px-2 py-1.5 text-primary" />
+          </label>
+          <label className="space-y-1 text-xs text-secondary sm:col-span-2">Instance ID
+            <input value={newInstance} onChange={(event) => setNewInstance(event.target.value)} placeholder="codex-personal" className="w-full rounded-md border border-subtle bg-card px-2 py-1.5 font-mono text-primary" />
+          </label>
+          <button type="button" className="btn-primary text-xs sm:col-span-2 sm:justify-self-start" onClick={add} disabled={!newInstance.trim() || !newLabel.trim() || pendingInstance !== null}>Add isolated account</button>
+        </div>
+      )}
+      {instances.length === 0 && <p className="text-xs text-muted">No named accounts yet. Add one to keep provider logins separate.</p>}
       <ul className="space-y-2">
         {instances.map((instance) => (
-          <li key={instance.backend_instance} className="flex items-center justify-between gap-3">
+          <li key={instance.backend_instance} className="flex flex-col gap-2 border-t border-subtle pt-2 first:border-t-0 first:pt-0 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <p className="text-xs font-medium text-primary">
-                <span className="font-mono">{instance.backend_instance}</span>
-                <span className="text-muted"> · {instance.logical_backend}</span>
+                {instance.account_label ?? instance.backend_instance}
+                <span className="text-muted"> · {instance.logical_backend} · </span>
+                <span className="font-mono text-muted">{instance.backend_instance}</span>
                 {!instance.enabled && <span className="ml-2 text-critical">disabled</span>}
+              </p>
+              <p className={`text-xs ${instance.auth_ready ? 'text-secondary' : 'text-warning'}`}>
+                {instance.auth_ready === true ? 'Authenticated' : instance.auth_ready === false ? 'Login required' : 'Auth status unavailable'}
+                {instance.isolated_state_configured ? ' · isolated state' : ' · shared state'}
               </p>
               {instance.executable_resolved === false && (
                 <p className="text-xs text-critical">{instance.resolution_error ?? 'Executable is not resolved.'}</p>
@@ -941,15 +1025,19 @@ function BackendInstancesCard({ profileName, effective }: { profileName: string;
               {instance.config_source && (
                 <p className="text-xs text-muted">Source: {instance.config_source.replace('_', ' ')}</p>
               )}
+              {editing === instance.backend_instance && (
+                <div className="mt-2 flex gap-2">
+                  <input aria-label={`Account label for ${instance.backend_instance}`} value={editLabel} onChange={(event) => setEditLabel(event.target.value)} className="min-w-0 rounded-md border border-subtle bg-raised px-2 py-1 text-xs text-primary" />
+                  <button type="button" className="btn-primary text-xs" onClick={() => saveLabel(instance.backend_instance)} disabled={!editLabel.trim() || pendingInstance !== null}>Save</button>
+                </div>
+              )}
             </div>
-            <button
-              type="button"
-              disabled={pendingInstance !== null || loadedFor !== profileName}
-              onClick={() => toggle(instance.backend_instance, !instance.enabled)}
-              className={instance.enabled ? 'btn-secondary text-xs' : 'btn-primary text-xs'}
-            >
-              {pendingInstance === instance.backend_instance ? 'Saving…' : instance.enabled ? 'Disable' : 'Enable'}
-            </button>
+            <div className="flex flex-wrap gap-1.5">
+              <button type="button" className="btn-secondary text-xs" disabled={pendingInstance !== null} onClick={() => { setEditing(instance.backend_instance); setEditLabel(instance.account_label ?? instance.backend_instance); }}>Rename</button>
+              <button type="button" className="btn-secondary text-xs" disabled={pendingInstance !== null} onClick={() => test(instance.backend_instance)}>{pendingInstance === instance.backend_instance ? 'Testing…' : 'Test'}</button>
+              <button type="button" className="btn-secondary text-xs" disabled={pendingInstance !== null} onClick={() => reauthenticate(instance.backend_instance)}>Re-authenticate</button>
+              <button type="button" disabled={pendingInstance !== null || loadedFor !== profileName} onClick={() => toggle(instance.backend_instance, !instance.enabled)} className={instance.enabled ? 'btn-secondary text-xs' : 'btn-primary text-xs'}>{instance.enabled ? 'Disable' : 'Enable'}</button>
+            </div>
           </li>
         ))}
       </ul>

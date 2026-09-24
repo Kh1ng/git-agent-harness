@@ -1622,7 +1622,7 @@ export function createServer(
     const backend = typeof req.query.backend === 'string' ? req.query.backend : undefined;
     try {
       const summary = backend
-        ? await listManagerChatModelsForBackend(profile, backend, typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined)
+        ? await listManagerChatModelsForBackend(profile, backend, typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined, typeof req.query.backendInstance === 'string' ? req.query.backendInstance : null)
         : await listManagerChatModels(profile, typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined);
       res.json(summary);
     } catch (error) {
@@ -1740,7 +1740,7 @@ export function createServer(
     const model = typeof req.body?.model === 'string' ? req.body.model : null;
     const title = typeof req.body?.title === 'string' ? req.body.title : undefined;
     try {
-      const session = await createChatSession(profile, backend, model, title, typeof req.body.reasoningEffort === 'string' ? req.body.reasoningEffort : null, typeof req.body.nodeId === 'string' ? req.body.nodeId : undefined);
+      const session = await createChatSession(profile, backend, model, title, typeof req.body.reasoningEffort === 'string' ? req.body.reasoningEffort : null, typeof req.body.nodeId === 'string' ? req.body.nodeId : undefined, typeof req.body.backendInstance === 'string' ? req.body.backendInstance : null);
       res.status(201).json(session);
     } catch (error) {
       res.status(502).json({
@@ -1757,8 +1757,9 @@ export function createServer(
       res.status(400).json({ error: 'Missing required field: sessionId' });
       return;
     }
-    const patch: { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string } = {};
+    const patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string } = {};
     if (typeof req.body?.backend === 'string') patch.backend = req.body.backend;
+    if (typeof req.body?.backendInstance === 'string' || req.body?.backendInstance === null) patch.backendInstance = req.body.backendInstance;
     if (typeof req.body?.model === 'string' || req.body?.model === null) patch.model = req.body.model;
     if (typeof req.body?.reasoningEffort === 'string' || req.body?.reasoningEffort === null) patch.reasoningEffort = req.body.reasoningEffort;
     if (typeof req.body?.title === 'string') patch.title = req.body.title;

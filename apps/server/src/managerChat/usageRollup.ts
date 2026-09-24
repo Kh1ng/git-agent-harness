@@ -91,11 +91,12 @@ export function usageRollup(profile: string, days: number, opts?: { stateDir?: s
       }
       const tokens = usage.total_tokens ?? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
 
-      const key = `${event.backend}\u0000${event.model ?? ''}\u0000${utcDay(event.timestamp)}`;
+      const key = `${event.backend}\u0000${event.backendInstance ?? ''}\u0000${event.model ?? ''}\u0000${utcDay(event.timestamp)}`;
       let row = totals.get(key);
       if (!row) {
         row = {
           backend: event.backend,
+          backend_instance: event.backendInstance ?? null,
           model: event.model,
           day: utcDay(event.timestamp),
           turns: 0,

@@ -170,7 +170,9 @@ fn check_backend_instance_config(defaults: &Defaults, profile: &Profile) -> bool
     match config::check_profile_backend_instances(defaults, profile) {
         Ok(()) => {
             let summaries = crate::config_show::backend_instance_summaries(defaults, profile);
+            let routing = profile.effective_routing(defaults);
             let count = summaries.len();
+            let mut ready = true;
             print_check(
                 CheckStatus::Pass,
                 "backend instances",
@@ -194,8 +196,35 @@ fn check_backend_instance_config(defaults: &Defaults, profile: &Profile) -> bool
                         instance.resolution_source
                     ),
                 );
+                if let Some(auth_ready) = routing
+                    .backend_instances
+                    .get(&instance.backend_instance)
+                    .and_then(config::backend_instance_auth_ready)
+                {
+                    let auth_status = if auth_ready {
+                        CheckStatus::Pass
+                    } else if instance.enabled {
+                        ready = false;
+                        CheckStatus::Fail
+                    } else {
+                        CheckStatus::Warn
+                    };
+                    print_check(
+                        auth_status,
+                        "backend instance auth",
+                        &format!(
+                            "{}: {}",
+                            instance.backend_instance,
+                            if auth_ready {
+                                "authenticated"
+                            } else {
+                                "provider CLI login required"
+                            }
+                        ),
+                    );
+                }
             }
-            true
+            ready
         }
         Err(errors) => {
             for error in &errors {

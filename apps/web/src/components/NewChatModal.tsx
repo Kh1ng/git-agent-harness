@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { FolderGit2, Cpu, X, CircleDot, GitPullRequest } from 'lucide-react';
-import type { ChatIssueSummary, ChatPrSummary, ManagerModelInfo, ProfileSummary, ProjectSummary } from '@git-agent-harness/contracts';
+import type { BackendInstanceSummary, ChatIssueSummary, ChatPrSummary, ManagerModelInfo, ProfileSummary, ProjectSummary } from '@git-agent-harness/contracts';
 import { ChatNodePicker } from './ChatNodePicker.js';
 import { useChatNodes } from '../hooks/useChatNodes.js';
 import { BoundedCollection } from './BoundedCollection.js';
-import { gahApi } from '../api/client.js';
+import { backendInstancesApi, gahApi } from '../api/client.js';
 import type { ManagerBackendInfo } from '@git-agent-harness/contracts';
 
 export type ChatProfile = ProfileSummary & Partial<Pick<ProjectSummary, 'node_id' | 'chat_profile'>> & { remote?: boolean; catalogName?: string };
@@ -41,6 +41,8 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
   const [backend, setBackend] = useState<string>('');
   const [models, setModels] = useState<ManagerModelInfo[]>([]);
   const [model, setModel] = useState<string | null>(null);
+  const [backendInstances, setBackendInstances] = useState<BackendInstanceSummary[]>([]);
+  const [backendInstance, setBackendInstance] = useState<string | null>(null);
   const [title, setTitle] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -79,6 +81,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
     setTitle('');
     setQuery('');
     setModel(null);
+    setBackendInstance(null);
     setMode('blank');
     setNodeChoice(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -140,6 +143,20 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
   }, [open, project]);
 
   useEffect(() => {
+    if (!open || !project || !backend) return;
+    let cancelled = false;
+    backendInstancesApi.list(project)
+      .then(({ backend_instances: instances }) => {
+        if (cancelled) return;
+        const eligible = instances.filter((instance) => instance.enabled && instance.executable_resolved !== false && instance.auth_ready !== false && instance.logical_backend === backend);
+        setBackendInstances(eligible);
+        setBackendInstance((selected) => eligible.some((instance) => instance.backend_instance === selected) ? selected : null);
+      })
+      .catch(() => { if (!cancelled) { setBackendInstances([]); setBackendInstance(null); } });
+    return () => { cancelled = true; };
+  }, [open, project, backend]);
+
+  useEffect(() => {
     if (!open || !backend || !nodeId || !nodeReady) {
       setModels([]);
       setModel(null);
@@ -149,7 +166,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
     setModels([]);
     setModel(null);
     gahApi
-      .getManagerChatModelsForBackend(project, backend, nodeId || undefined)
+      .getManagerChatModelsForBackend(project, backend, nodeId || undefined, backendInstance)
       .then(({ models, currentModelId }) => {
         if (cancelled) return;
         setModels(models);
@@ -163,7 +180,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
       });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, project, backend, nodeId, nodeReady]);
+  }, [open, project, backend, backendInstance, nodeId, nodeReady]);
   if (!open) return null;
 
   const create = async () => {
@@ -180,7 +197,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
         const { session } = await gahApi.startChatFromPr(project, pr.number, backend, model);
         onCreated(project, session.id);
       } else {
-        const session = await gahApi.createChatSession(project, backend, model, title.trim() || undefined, nodeId);
+        const session = await gahApi.createChatSession(project, backend, model, title.trim() || undefined, nodeId, backendInstance);
         onCreated(project, session.id);
       }
       dialog.current?.close();
@@ -387,6 +404,18 @@ export function NewChatModal({ open, currentProfile, profiles, backends, onClose
                 <option key={m.id} value={m.id}>{m.name}</option>
               ))}
             </select>
+          )}
+          {mode === 'blank' && backendInstances.length > 0 && (
+            <label className="block space-y-1 text-xs text-secondary">Account
+              <select value={backendInstance ?? ''} onChange={(event) => setBackendInstance(event.target.value || null)} className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-primary">
+                <option value="">Default provider login</option>
+                {backendInstances.map((instance) => (
+                  <option key={instance.backend_instance} value={instance.backend_instance}>
+                    {instance.account_label ?? instance.backend_instance} · {instance.backend_instance}
+                  </option>
+                ))}
+              </select>
+            </label>
           )}
           {backend && models.length === 0 && (
             <p className="text-[11px] text-muted">This provider uses its default model.</p>

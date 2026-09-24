@@ -86,7 +86,8 @@ function readIndex(profile: string, opts?: ChatSessionStoreOptions): ChatSession
       // Backward-compatible read migration for indexes written before #990.
       outcome: session.outcome ?? (session.archivedAt === null ? 'live' : 'archived'),
       settledAt: session.settledAt ?? null,
-      settledReason: session.settledReason ?? null
+      settledReason: session.settledReason ?? null,
+      backendInstance: session.backendInstance ?? null
     }));
 }
 
@@ -158,6 +159,7 @@ export interface CreateSessionInput {
   /** Pull request identity for PR chats; omitted for issue and general sessions. */
   prNumber?: number;
   backend: string;
+  backendInstance?: string | null;
   /** Model override for the backend; null = backend default. */
   model?: string | null;
   /** Per-session reasoning effort; null/omitted = backend default. */
@@ -193,6 +195,7 @@ export async function createSession(input: CreateSessionInput, opts?: ChatSessio
     worktreePath: null,
     branch: input.branch ?? sessionBranchName(profileInfo.repo_id, sessionId, input.title),
     backend,
+    backendInstance: input.backendInstance ?? null,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     title: input.title ?? null,
@@ -266,7 +269,7 @@ export function getSession(profile: string, sessionId: string, opts?: ChatSessio
 export function updateSession(
   profile: string,
   sessionId: string,
-  patch: { backend?: string; model?: string | null; reasoningEffort?: string | null; title?: string },
+  patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string },
   opts?: ChatSessionStoreOptions
 ): ChatSessionSummary {
   const sessions = readIndex(profile, opts);
@@ -274,6 +277,7 @@ export function updateSession(
   if (!session) throw new Error(`No chat session '${sessionId}' for profile '${profile}'`);
   if (session.archivedAt !== null) throw new Error(`Chat session '${sessionId}' is archived`);
   if (patch.backend !== undefined) session.backend = patch.backend;
+  if (patch.backendInstance !== undefined) session.backendInstance = patch.backendInstance;
   if (patch.model !== undefined) session.model = patch.model;
   if (patch.reasoningEffort !== undefined) session.reasoningEffort = patch.reasoningEffort;
   if (patch.title !== undefined) session.title = patch.title;
