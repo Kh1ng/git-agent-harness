@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Own the macOS control-plane/worker lifecycle from one deterministic place.
 set -euo pipefail
+trap 'echo "ERROR: macOS LaunchAgent setup failed at line $LINENO." >&2' ERR
 
 action="${1:?Usage: macos-launchd.sh install|start|stop|status central|worker [repo] [profile]}"
 role="${2:?Missing node role}"
