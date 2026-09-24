@@ -2115,7 +2115,7 @@ export function createServer(
         result = { ...await runHelperTask({
           profile: route.profileName, sourceBackend, sourceBackendInstance, kind, input,
           fallback: kind === 'commit_message' ? { text: '' } : { text: '', title: '', body: '' }
-        }, preference ? { preference } : {}), skippedFiles };
+        }, preference ? { preference } : {}), ...(skippedFiles.length ? { skippedFiles } : {}) };
       }
     } catch {
       result = helperFallback(kind, kind === 'commit_message' ? { text: '' } : { text: '', title: '', body: '' }, 'helper_unavailable', Date.now() - startedAt, {

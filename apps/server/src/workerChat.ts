@@ -113,7 +113,7 @@ export function createWorkerChatRouter(deps: {
         }, {
           ...(body.preference ? { preference: body.preference as HelperRoutePreference } : {}),
           adapter: async (_profile, backend, instance) => adapterFor(backend, body.profile, instance)
-        }), skippedFiles });
+        }), ...(skippedFiles.length ? { skippedFiles } : {}) });
       }
       if (body.action === 'run' && (typeof body.requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(body.requestId)
         || typeof body.prompt !== 'string' || !Array.isArray(body.history)
