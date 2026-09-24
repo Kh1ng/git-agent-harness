@@ -121,6 +121,10 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
   const reportedTokens = byBackend.reduce((sum, [, row]) => sum + row.totalTokens, 0);
   const apiCostUsd = byBackend.reduce((sum, [, row]) => sum + row.apiCostUsd, 0);
   const costedTurns = byBackend.reduce((sum, [, row]) => sum + row.costedTurns, 0);
+  const usageSeries = byBackend.flatMap(([backend, aggregate]) =>
+    [...aggregate.models.entries()].map(([model, modelUsage]) => ({ backend, model, ...modelUsage }))
+  ).sort((a, b) => b.totalTokens - a.totalTokens);
+  const maxSeriesTokens = Math.max(...usageSeries.map((series) => series.totalTokens), 1);
 
   return (
     <section className="card-padded">
@@ -158,6 +162,29 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
                 {costedTurns > 0 ? formatCost(apiCostUsd) : 'Unmeasured'} API equivalent
                 {costedTurns > 0 && costedTurns < reportedTurns ? ` on ${formatCount(costedTurns)} of ${formatCount(reportedTurns)} turns` : ''}
               </p>
+              <div className="mb-4 rounded-md border border-subtle bg-raised/40 p-3" aria-labelledby="manager-usage-chart-title">
+                <h4 id="manager-usage-chart-title" className="text-xs font-semibold text-secondary">
+                  Tokens by backend and model
+                </h4>
+                <div className="mt-3 space-y-3">
+                  {usageSeries.map((series) => (
+                    <div key={`${series.backend}-${series.model}`} className="grid min-w-0 grid-cols-1 gap-1.5 sm:grid-cols-[minmax(8rem,12rem)_1fr_auto] sm:items-center sm:gap-3">
+                      <span className="truncate text-xs text-primary" title={`${series.backend} / ${series.model}`}>
+                        {series.backend} / {series.model}
+                      </span>
+                      <progress
+                        className="usage-progress"
+                        max={maxSeriesTokens}
+                        value={series.totalTokens}
+                        aria-label={`${series.backend} ${series.model}: ${formatTokens(series.totalTokens)} tokens across ${formatCount(series.turns)} turns`}
+                      />
+                      <span className="text-xs tabular-nums text-muted sm:text-right">
+                        {formatTokens(series.totalTokens)} · {formatCount(series.turns)} turns
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs tabular-nums">
               <thead>

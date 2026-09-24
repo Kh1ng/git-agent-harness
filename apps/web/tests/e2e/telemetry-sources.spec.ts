@@ -35,6 +35,8 @@ test('empty dispatch telemetry keeps manager-chat usage and unavailable-turn ide
   const managerUsage = page.locator('section').filter({ hasText: 'Manager chat usage' });
   await expect(managerUsage.getByText('claude', { exact: true })).toBeVisible();
   await expect(managerUsage.getByText('claude-opus-4-1 · 6.2M · 3 turns', { exact: true })).toBeVisible();
+  await expect(managerUsage.getByRole('heading', { name: 'Tokens by backend and model' })).toBeVisible();
+  await expect(managerUsage.getByRole('progressbar', { name: 'claude claude-opus-4-1: 6.2M tokens across 3 turns' })).toBeVisible();
   await expect(managerUsage.getByRole('heading', { name: 'Usage unavailable (1)' })).toBeVisible();
   await expect(managerUsage.getByText('codex-test-chat', { exact: true })).toBeVisible();
   await expect(managerUsage.getByText('codex', { exact: true })).toBeVisible();
