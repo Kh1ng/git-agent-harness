@@ -33,6 +33,7 @@ import type {
   ConfigSummary,
   GatewayBootstrapCommand,
   GatewaySettingsSummary,
+  GitReviewState,
   SettingsConfigProfileSummary,
   DoctorSnapshot,
   LedgerEntry,
@@ -1346,6 +1347,27 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       return;
     }
     res.json({ branch: 'feat/mock-control-plane-1087', changes: [{ status: 'M', path: 'apps/server/mock/controlPlane.ts' }], cwd: '/mock/in-memory-only' });
+  });
+  app.get('/api/git/review', (req, res) => {
+    const sessionId = bodyString(req.query.sessionId);
+    const session = sessionId ? state.sessions.get(sessionId) : null;
+    if (session && !session.worktreePath) return jsonError(res, 403, 'Read-only checkout', 'Session has no writable checkout');
+    res.json({
+      ownerNodeId: 'mock-central',
+      ownerNodeName: 'Mock central',
+      provider: 'github',
+      providerLabel: 'pull request',
+      branch: session?.branch ?? 'feat/mock-control-plane-1087',
+      base: bodyString(req.query.base) ?? 'main',
+      upstream: null,
+      ahead: 1,
+      behind: 0,
+      files: [{ path: 'apps/server/mock/controlPlane.ts', staged: false, unstaged: true, untracked: false }],
+      commits: [{ hash: '1111111111111111111111111111111111111111', short: '1111111', subject: 'Mock commit' }],
+      changedFiles: ['apps/server/mock/controlPlane.ts'],
+      patch: 'diff --git a/apps/server/mock/controlPlane.ts b/apps/server/mock/controlPlane.ts',
+      existing: null
+    } satisfies GitReviewState);
   });
   app.get('/api/git/log', (_req, res) => {
     res.json({ commits: [{ hash: '1111111111111111111111111111111111111111', short: '1111111', subject: 'Mock commit', author: 'GAH', ago: '1 minute ago' }] });
