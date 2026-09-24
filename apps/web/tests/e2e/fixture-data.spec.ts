@@ -30,9 +30,9 @@ test('Quota page renders the fixture quota snapshot observations', async ({ page
   // responses/quota.json carries codex/claude candidate cards with usage.
   await expect(page.getByText('codex', { exact: false }).first()).toBeVisible();
   await expect(page.getByText('claude', { exact: false }).first()).toBeVisible();
-  await expect(page.getByText('Windows', { exact: true })).toBeVisible();
+  await expect(page.getByText('Quota windows', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('weekly', { exact: false })).toBeVisible();
-  await expect(page.getByText(/66% remaining/)).toBeVisible();
+  await expect(page.getByText('65.8% remaining', { exact: true })).toBeVisible();
   await expect(page.getByText('Account quota check', { exact: true })).toBeVisible();
   await expect(page.getByText('Quota data', { exact: true })).toBeVisible();
   await expect(page.getByTestId('quota-check-codex').getByText('No quota data recorded')).toBeVisible();

@@ -302,6 +302,19 @@ test('new non-chat mutations return success and persist in memory', async () => 
     const prs = await fetch(`${running.baseUrl}/api/git/prs`).then((response) => response.json()) as { prs: { title: string }[] };
     assert.equal(prs.prs[0]?.title, 'Mock pull request');
 
+    const createdSkill = await post(running.baseUrl, '/api/skills', {
+      id: 'review', version: '1.0.0', displayName: 'Review', content: '# Review', backends: ['codex']
+    });
+    assert.equal(createdSkill.status, 201);
+    const createdAt = (await createdSkill.json() as { createdAt: number }).createdAt;
+    const updatedSkill = await post(running.baseUrl, '/api/skills', {
+      id: 'review', version: '1.0.0', displayName: 'Review edits', content: '# Review edits', backends: ['codex']
+    });
+    assert.equal(updatedSkill.status, 200);
+    assert.equal((await updatedSkill.json() as { createdAt: number }).createdAt, createdAt);
+    assert.equal((await fetch(`${running.baseUrl}/api/skills/review?version=1.0.0`).then(response => response.json()) as { content: string }).content, '# Review edits');
+    assert.equal((await fetch(`${running.baseUrl}/api/skills/review`, { method: 'DELETE' })).status, 200);
+
     assert.equal((await post(running.baseUrl, '/api/manager-chat/issues/start', { profile: 'fixture', issueNumber: 1087 })).status, 201);
     assert.equal((await post(running.baseUrl, '/api/admin/update')).status, 202);
   } finally {

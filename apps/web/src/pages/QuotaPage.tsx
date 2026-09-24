@@ -25,27 +25,45 @@ function scopeIdentity(backend: string, model: string | null, pool?: string | nu
   return parts.join(' / ');
 }
 
-function formatQuotaUsage(q: {
-  quota_used_percent?: number | null;
-  quota_remaining_percent?: number | null;
+function formatQuotaMetadata(q: {
   quota_window?: string | null;
   quota_reset_at?: string | null;
   usage_source?: string | null;
 }): string {
-  const limit = q.quota_remaining_percent !== null && q.quota_remaining_percent !== undefined
-    ? `${formatPercent(q.quota_remaining_percent / 100)} remaining`
-    : q.quota_used_percent !== null && q.quota_used_percent !== undefined
-      ? `${formatPercent(q.quota_used_percent / 100)} used`
-      : 'No usage percentage available';
+  const remaining = formatRemaining(q.quota_reset_at);
+  const reset = q.quota_reset_at?.startsWith('in ')
+    ? q.quota_reset_at
+    : remaining
+      ? `in ${remaining}`
+      : formatLocalTime(q.quota_reset_at) ?? q.quota_reset_at;
 
-  const reset = q.quota_reset_at
-    ? q.quota_reset_at.startsWith('in ')
-      ? q.quota_reset_at
-      : formatRemaining(q.quota_reset_at) ?? formatLocalTime(q.quota_reset_at) ?? q.quota_reset_at
-    : null;
+  return [reset ? `Resets ${reset}` : 'No reset time', q.usage_source ? `source: ${q.usage_source}` : null]
+    .filter(Boolean)
+    .join(' · ');
+}
 
-  const source = q.usage_source ? ` · source: ${q.usage_source}` : '';
-  return `${limit}${reset ? ` · resets ${reset}` : ''}${source}`;
+function quotaPercentages(q: {
+  quota_used_percent?: number | null;
+  quota_remaining_percent?: number | null;
+}): { used: number; remaining: number } | null {
+  const used = q.quota_used_percent;
+  const remaining = q.quota_remaining_percent;
+  if (used === null || used === undefined) {
+    if (remaining === null || remaining === undefined) return null;
+    const boundedRemaining = Math.min(100, Math.max(0, remaining));
+    return { used: 100 - boundedRemaining, remaining: boundedRemaining };
+  }
+  const boundedUsed = Math.min(100, Math.max(0, used));
+  return {
+    used: boundedUsed,
+    remaining: remaining === null || remaining === undefined
+      ? 100 - boundedUsed
+      : Math.min(100, Math.max(0, remaining))
+  };
+}
+
+function formatQuotaPercent(value: number): string {
+  return formatPercent(value / 100, Number.isInteger(value) ? 0 : 1);
 }
 
 export function QuotaFreshnessPanel({
@@ -265,17 +283,51 @@ export function QuotaPage() {
                   </div>
                   {candidate.source && <p className="text-xs text-muted mt-1">Source: {candidate.source}</p>}
 
-                  {observations.length > 0 && (
-                    <div className="mt-3 pt-3 border-t border-subtle space-y-1">
-                      <p className="text-[11px] uppercase tracking-wide text-muted">Windows</p>
-                      {observations.map((q, j) => (
-                        <div key={j} className="flex items-start justify-between gap-2 text-xs text-secondary">
-                          <span>{q.quota_window ?? 'unknown'}{q.model ? ` · ${q.model}` : ''}</span>
-                          <span className="text-right">{formatQuotaUsage(q)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <div className="mt-3 pt-3 border-t border-subtle">
+                    <p className="text-[11px] uppercase tracking-wide text-muted mb-2">Quota windows</p>
+                    {observations.length === 0 ? (
+                      <p className="text-xs text-muted">No quota windows reported for this candidate.</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {observations.map((q, j) => {
+                          const percentages = quotaPercentages(q);
+                          const observationAge = formatAge(q.observed_at);
+                          const observationStale = isStale(q.observed_at);
+                          const label = `${q.quota_window ?? 'Unknown window'}${q.model ? ` · ${q.model}` : ''}`;
+                          return (
+                            <div key={j} className="text-xs text-secondary">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="font-medium text-primary">{label}</span>
+                                {observationStale && <StatusBadge tone="serious" label="Stale" />}
+                              </div>
+                              {percentages ? (
+                                <>
+                                  <div className="mt-1.5 flex items-center justify-between gap-3 tabular-nums">
+                                    <span>{formatQuotaPercent(percentages.used)} used</span>
+                                    <span className="text-muted">{formatQuotaPercent(percentages.remaining)} remaining</span>
+                                  </div>
+                                  <progress
+                                    className="usage-progress mt-1.5"
+                                    max={100}
+                                    value={percentages.used}
+                                    aria-label={`${label}: ${formatQuotaPercent(percentages.used)} used, ${formatQuotaPercent(percentages.remaining)} remaining`}
+                                  />
+                                </>
+                              ) : (
+                                <div className="mt-1.5 rounded-md border border-subtle bg-raised px-2.5 py-2 text-muted">
+                                  No usage percentage available
+                                </div>
+                              )}
+                              <p className="mt-1.5 text-muted">
+                                {formatQuotaMetadata(q)}
+                                {` · ${observationAge ? `observed ${observationAge}` : 'no observation time'}`}
+                              </p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 </div>
               );
             })}

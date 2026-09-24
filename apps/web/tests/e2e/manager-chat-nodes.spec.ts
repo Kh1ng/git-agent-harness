@@ -21,7 +21,9 @@ test('chat sends on the chosen node, locks it during a turn, and refreshes readi
       profiles: [{ profile: 'alpha', worktreeBytes: null, projectedReclaimBytes: null, idleDays: 7, sessions: [] }],
       candidates: [], warnings: []
     } });
-    if (path === '/api/manager-chat/sessions') return route.fulfill({ json: { sessions: [] } });
+    if (path === '/api/manager-chat/sessions') {
+      return route.fulfill({ json: { sessions: [] } });
+    }
     if (path === '/api/manager-chat/settings') return route.fulfill({ json: {
       defaultBackend: 'codex', profileOverrides: {}, availableBackends: [{ id: 'codex', displayName: 'Codex', implemented: true }]
     } });
@@ -42,8 +44,8 @@ test('chat sends on the chosen node, locks it during a turn, and refreshes readi
       }));
     });
   });
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  // Open the project's default conversation.
+  await page.goto('/?page=chat&profile=alpha&chat=default');
   const picker = page.getByRole('combobox', { name: 'Run on node' });
   await expect(picker).toHaveValue('central');
   await picker.selectOption('worker');
@@ -70,8 +72,10 @@ test('chat sends on the chosen node, locks it during a turn, and refreshes readi
   stale = false;
   socket!.send(JSON.stringify({ type: 'fleet.changed' }));
   await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
-  await page.getByRole('button', { name: /Remote project/ }).click();
+  // The existing project rail switches to the imported project and its owner.
+  await page.getByRole('complementary', { name: 'Chat navigation' }).getByRole('button', { name: /Remote project/ }).click();
   await expect(picker).toHaveValue('worker');
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
   await page.getByPlaceholder(/Message the manager/).fill('Run on the imported owner');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect.poll(() => sent.length).toBe(2);

@@ -616,6 +616,15 @@ export interface UsageRollupRow {
   estimated_cost_usd: number | null;
 }
 
+/** A completed manager-chat turn whose backend did not report counters.
+ * Prompt and response text are intentionally excluded. */
+export interface UsageUnavailableTurn {
+  session_id: string;
+  backend: string;
+  model: string | null;
+  day: string;
+}
+
 export interface UsageRollupSummary {
   profile: string;
   /** Inclusive window start (ms epoch) the rollup covers. */
@@ -626,6 +635,8 @@ export interface UsageRollupSummary {
   /** Turns whose assistant message reported no usage at all -- counted so
    * silent gaps are visible instead of disappearing the burn. */
   unattributed_turns: number;
+  /** Diagnostic identity for every usage-less turn. */
+  usage_unavailable: UsageUnavailableTurn[];
   /** Same burn grouped per ticket: issue chats roll up under their issue
    * number, other sessions under their branch, the profile default
    * conversation under a shared bucket. Sorted by tokens desc. */
@@ -1600,11 +1611,15 @@ export interface SkillSummary {
   bound: boolean;
 }
 
+/** The nearest configured scope that supplied the effective skill set. */
+export type SkillBindingSource = 'canonical' | 'profile' | 'session';
+
 export interface SkillBindingSummary {
   profile: string;
   backend: string;
   instance: string | null;
-  source: 'canonical' | 'profile';
+  sessionId: string | null;
+  source: SkillBindingSource;
   supported: boolean;
   selectedIds: string[];
   observedSkills: { id: string; version: string }[] | null;
@@ -1615,6 +1630,7 @@ export interface SkillBindingUpdate {
   profile: string;
   backend: string;
   instance?: string | null;
+  sessionId?: string | null;
   skillIds: string[];
 }
 
@@ -1622,7 +1638,8 @@ export interface SkillResolution {
   profile: string;
   backend: string;
   instance: string | null;
-  source: 'canonical' | 'profile';
+  sessionId: string | null;
+  source: SkillBindingSource;
   skills: Skill[];
 }
 

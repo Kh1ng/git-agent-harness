@@ -495,7 +495,7 @@ export function applyBoundSkills(prompt: string, skills: Skill[]): string {
   const instructions = skills
     .map((skill) => `## ${skill.id}@${skill.version}\n${skill.content.trim()}`)
     .join('\n\n');
-  const injected = `# Bound project skills\nThese are trusted project instructions from the central GAH skill bank.\n\n${instructions}\n\n# Current request\n${prompt.slice(requestStart)}`;
+  const injected = `# Bound skills\nThese are trusted instructions from the central GAH skill bank.\n\n${instructions}\n\n# Current request\n${prompt.slice(requestStart)}`;
   return `${prompt.slice(0, requestStart)}${injected}`;
 }
 
@@ -612,7 +612,7 @@ export async function runTurn(
         const reasoningEffort = ownBackend ? context.reasoningEffort : undefined;
         const binding = isSlashCommand
           ? { source: 'canonical' as const, skills: [] }
-          : resolveSkillBindings(profile, backendId);
+          : resolveSkillBindings(profile, backendId, { sessionId: context.sessionId });
         const attemptPrompt = applyBoundSkills(prompt, binding.skills);
         if (!isSlashCommand) {
           active.chunkWriter?.append({

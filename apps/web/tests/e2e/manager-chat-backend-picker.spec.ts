@@ -113,8 +113,7 @@ test('the composer picker switches the harness and persists a per-profile overri
     });
   });
 
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  await page.goto('/?page=chat&profile=alpha&chat=default');
   await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toBeVisible();
 
   const picker = page.getByRole('button', { name: 'Provider picker' });
@@ -122,10 +121,14 @@ test('the composer picker switches the harness and persists a per-profile overri
   await expect(page.getByLabel('Harness / backend')).toHaveCount(0);
   await picker.click();
   const controls = page.getByRole('dialog', { name: 'Provider picker' });
+  // The common switch is short: the catalog is one step further in.
+  await controls.getByRole('button', { name: 'Browse all models' }).click();
+  const catalog = page.getByRole('dialog', { name: 'Browse models' });
   // A configured-but-unimplemented backend is shown, not silently skipped.
-  await expect(controls.getByRole('button', { name: 'Vibe (unavailable)', exact: true })).toBeDisabled();
+  await expect(catalog.getByRole('button', { name: /^Vibe \(unavailable\)/ })).toBeDisabled();
 
-  await controls.getByRole('button', { name: 'Claude', exact: true }).click();
+  await catalog.getByRole('listitem').filter({ hasText: 'Claude' }).getByRole('button').first().click();
+  await expect(catalog).not.toBeVisible();
   await expect(picker).toContainText('Claude');
   await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toHaveAttribute('title', 'org/alpha');
   await expect.poll(() => lastPost).not.toBeNull();
@@ -134,6 +137,8 @@ test('the composer picker switches the harness and persists a per-profile overri
   // Capability-aware: render exactly the active backend's advertised
   // thought-level values. There is no GAH-owned low/medium/high enum.
   await expect(picker).toBeEnabled();
+  // Choosing from the catalog settles the popover; effort is one reopen away.
+  await picker.click();
   await expect(controls.getByRole('button', { name: 'Low', exact: true })).toBeVisible();
   await controls.getByRole('button', { name: 'Ultra', exact: true }).click();
   await expect.poll(() => selectedReasoningEffort).toBe('ultra');
