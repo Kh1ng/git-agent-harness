@@ -142,6 +142,12 @@ with tempfile.TemporaryDirectory(prefix='gah-launchd-') as temporary:
     assert worker['EnvironmentVariables']['GAH_REGISTRY_TRANSPORT_MODE'] == 'loopback'
     assert tunnel_path.exists(), 'an update must preserve the managed SSH tunnel'
 
+    switch_env = {**preserved_tunnel_env, 'GAH_NODE_ADVERTISED_URL': 'https://mac.test.ts.net:4774'}
+    subprocess.run(['bash', str(source), 'install', 'worker', str(repo), profile], env=switch_env, check=True)
+    worker = plistlib.loads(worker_path.read_bytes())
+    assert worker['EnvironmentVariables']['GAH_REGISTRY_TRANSPORT_MODE'] == 'authenticated_remote'
+    assert not tunnel_path.exists(), 'an explicit URL change must replace the saved tunnel transport'
+
     invalid = subprocess.run(
         ['bash', str(source), 'install', 'central', str(repo)],
         env={**env, 'GAH_DESKTOP_SERVER_PORT': '80'}, capture_output=True, text=True,

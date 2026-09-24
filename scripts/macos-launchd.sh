@@ -149,7 +149,7 @@ fi
 if [ "$role" = worker ] && [ -z "$advertised_url" ] && [ -f "$worker_identity" ]; then
   advertised_url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("advertised_url", ""))' "$worker_identity" 2>/dev/null || true)"
 fi
-if [ "$role" = worker ] && [ -z "$transport_mode" ] && [ -f "$plist" ]; then
+if [ "$role" = worker ] && [ -z "$explicit_advertised_url" ] && [ -z "$transport_mode" ] && [ -f "$plist" ]; then
   transport_mode="$(plist_value GAH_REGISTRY_TRANSPORT_MODE 2>/dev/null || true)"
 fi
 tunnel_target="${GAH_NODE_SSH_TARGET:-}"
