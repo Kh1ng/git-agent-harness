@@ -1519,7 +1519,9 @@ export interface HelperSuggestion {
   generated: boolean;
   backend: string | null;
   backendInstance: string | null;
-  model: string | null;
+  requestedModel: string | null;
+  effectiveModel: string | null;
+  actualModel: string | null;
   fallbackReason: string | null;
 }
 
@@ -1529,7 +1531,9 @@ export interface HelperUsageRecord {
   profile: string;
   backend: string | null;
   backendInstance: string | null;
-  model: string | null;
+  requestedModel: string | null;
+  effectiveModel: string | null;
+  actualModel: string | null;
   inputTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;

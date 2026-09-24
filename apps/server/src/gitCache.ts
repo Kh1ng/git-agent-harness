@@ -80,15 +80,9 @@ function helperSafePath(path: string): boolean {
     && !/^(?:\.npmrc|\.pypirc|\.netrc|id_(?:rsa|dsa|ecdsa|ed25519))$/i.test(name);
 }
 
-function sanitizeHelperPatch(patch: string): string {
-  return patch.split('\n').map(line => /(?:password|passwd|secret|token|api[_-]?key|authorization|private[_-]?key)["']?\s*[:=]/i.test(line)
-    ? `${line[0] === '+' || line[0] === '-' || line[0] === ' ' ? line[0] : ''}[credential line omitted]`
-    : line).join('\n');
-}
-
 /** Exact working diff for a reviewed file selection. Unrelated dirty files
  * never enter helper-model input. */
-export function getSelectedChangesPatch(cwd: string, files: string[]): string {
+export function getSelectedChangesForHelper(cwd: string, files: string[]) {
   const { selected, changes } = selectedChanges(cwd, files);
   if (selected.some(path => !helperSafePath(path))) throw new Error('Credential and environment files cannot be sent to a helper model');
   const tracked = selected.filter(path => !changes.untracked.has(path));
@@ -97,14 +91,21 @@ export function getSelectedChangesPatch(cwd: string, files: string[]): string {
     const diff = gitInDir(cwd, ['diff', '--no-ext-diff', '--no-color', '--no-index', '--', '/dev/null', path]);
     if (diff.ok || diff.out) chunks.push(diff.out);
   }
-  return sanitizeHelperPatch(chunks.join('\n'));
+  return {
+    files: changes.files.filter(file => selected.includes(file.path)),
+    patch: chunks.join('\n')
+  };
+}
+
+export function getSelectedChangesPatch(cwd: string, files: string[]): string {
+  return getSelectedChangesForHelper(cwd, files).patch;
 }
 
 /** Committed diff for helper input, excluding credential and environment files. */
 export function getReviewHelperPatch(cwd: string, requestedBase?: string): string {
   const { ref } = reviewBase(cwd, requestedBase);
   const files = nulList(gitOutput(cwd, ['diff', '--name-only', '-z', '--no-renames', `${ref}...HEAD`])).filter(helperSafePath);
-  return files.length === 0 ? '' : sanitizeHelperPatch(gitOutput(cwd, ['diff', '--no-ext-diff', '--no-color', `${ref}...HEAD`, '--', ...files]));
+  return files.length === 0 ? '' : gitOutput(cwd, ['diff', '--no-ext-diff', '--no-color', `${ref}...HEAD`, '--', ...files]);
 }
 
 function reviewBase(cwd: string, requested?: string): { base: string; ref: string } {

@@ -104,7 +104,8 @@ test('worker model and command responses validate consumed fields and strip unkn
 
 test('worker helper replies are bounded and keep usage attribution', () => {
   const helper = { kind: 'pr_summary', text: 'Summary', title: 'Review helper routing', body: '## Summary', generated: true,
-    backend: 'codex', backendInstance: 'work', model: 'gpt-6-luna', fallbackReason: null, usage, latencyMs: 12 };
+    backend: 'codex', backendInstance: 'work', requestedModel: null, effectiveModel: 'gpt-6-luna', actualModel: 'gpt-6-luna',
+    fallbackReason: null, usage, latencyMs: 12 };
   assert.deepEqual(parseWorkerChatReply({ ...helper, secret: 'omit' }, { action: 'helper-task', kind: 'pr_summary' }), helper);
   for (const patch of [{ kind: 'commit_message' }, { title: 'x'.repeat(201) }, { body: 'x'.repeat(12_001) }, { latencyMs: -1 }]) {
     assert.throws(() => parseWorkerChatReply({ ...helper, ...patch }, { action: 'helper-task', kind: 'pr_summary' }), /invalid chat response/);

@@ -351,7 +351,7 @@ export interface ChatSessionSummary {
   reasoningEffort: string | null;
   title: string | null;
   /** Present only while the automatic title remains unedited. */
-  titleSuggestion?: { backend: string; backendInstance: string | null; model: string };
+  titleSuggestion?: { backend: string; backendInstance: string | null; effectiveModel: string; actualModel: string | null };
   createdAt: number;
   lastActiveAt: number;
   archivedAt: number | null;

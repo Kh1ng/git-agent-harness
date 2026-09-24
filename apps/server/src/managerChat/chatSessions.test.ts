@@ -112,9 +112,9 @@ test('editing a generated title clears its helper provenance', withEnv(async (en
   const created = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'codex' });
   const suggested = updateSession('p', created.id, {
     title: 'Review helper routing',
-    titleSuggestion: { backend: 'codex', backendInstance: 'work', model: 'gpt-6-luna' }
+    titleSuggestion: { backend: 'codex', backendInstance: 'work', effectiveModel: 'gpt-6-luna', actualModel: 'gpt-6-luna' }
   });
-  assert.equal(suggested.titleSuggestion?.model, 'gpt-6-luna');
+  assert.equal(suggested.titleSuggestion?.effectiveModel, 'gpt-6-luna');
   assert.equal(updateSession('p', created.id, { title: 'My title' }).titleSuggestion, undefined);
 }));
 

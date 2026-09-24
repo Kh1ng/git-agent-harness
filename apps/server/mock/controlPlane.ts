@@ -1210,7 +1210,9 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       profile: 'fixture',
       backend: 'codex',
       backendInstance: 'codex-work',
-      model: 'gpt-6-luna',
+      requestedModel: null,
+      effectiveModel: 'gpt-6-luna',
+      actualModel: 'gpt-6-luna',
       inputTokens: 34,
       outputTokens: 6,
       totalTokens: 40,
@@ -1371,11 +1373,11 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   app.post('/api/git/suggest', (req, res) => {
     if (req.body?.kind === 'pr_summary') {
       res.json({ kind: 'pr_summary', text: '## Summary\n\n- Describe the change', title: 'Describe the change', body: '## Summary\n\n- Describe the change',
-        generated: true, backend: 'codex', backendInstance: 'codex-work', model: 'gpt-6-luna', fallbackReason: null });
+        generated: true, backend: 'codex', backendInstance: 'codex-work', requestedModel: null, effectiveModel: 'gpt-6-luna', actualModel: 'gpt-6-luna', fallbackReason: null });
       return;
     }
     res.json({ kind: 'commit_message', text: 'Describe the change', generated: true,
-      backend: 'codex', backendInstance: 'codex-work', model: 'gpt-6-luna', fallbackReason: null });
+      backend: 'codex', backendInstance: 'codex-work', requestedModel: null, effectiveModel: 'gpt-6-luna', actualModel: 'gpt-6-luna', fallbackReason: null });
   });
   app.post('/api/git/pr', (req, res) => {
     const title = bodyString(req.body?.title);

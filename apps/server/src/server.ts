@@ -102,8 +102,9 @@ import { MessagingBridge } from './managerChat/messagingBridge.js';
 import { projectRoutes } from './projectRoutes.js';
 import { chatNodes, chatRoute, configureChatRouting } from './chatRouting.js';
 import { createWorkerChatRouter } from './workerChat.js';
-import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitReviewState, getReviewHelperPatch, getSelectedChangesPatch, commitGitChanges, cliInDir } from './gitCache.js';
-import { commitMessageInput, helperFallback, prSummaryInput, publicSuggestion, readHelperUsage, recordHelperUsage, runHelperTask, type HelperTaskResult } from './managerChat/helperTasks.js';
+import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitReviewState, getReviewHelperPatch, getSelectedChangesForHelper, commitGitChanges, cliInDir } from './gitCache.js';
+import { commitMessageInput, helperFallback, linkedIssueNumbers, prSummaryInput, publicSuggestion, readHelperUsage, recordHelperUsage, runHelperTask, type HelperTaskResult } from './managerChat/helperTasks.js';
+import { fetchLinkedChatIssues } from './managerChat/issueChats.js';
 import { createGitLabMergeRequest, findOpenPullRequest, publishPullRequest } from './gitPullRequest.js';
 import {
   addCanonicalSkillBinding,
@@ -2092,10 +2093,14 @@ export function createServer(
         if (kind === 'commit_message') {
           const files = req.body?.files;
           if (!Array.isArray(files) || !files.every(path => typeof path === 'string')) return res.status(400).json({ error: 'Select changed files.' });
-          input = commitMessageInput(files, getSelectedChangesPatch(target.cwd, files));
+          const selected = getSelectedChangesForHelper(target.cwd, files);
+          input = commitMessageInput(selected.files, selected.patch);
         } else {
           const base = typeof req.body?.base === 'string' ? req.body.base : undefined;
-          input = prSummaryInput({ ...await getGitReviewState(target.cwd, base), patch: getReviewHelperPatch(target.cwd, base) });
+          const review = { ...await getGitReviewState(target.cwd, base), patch: getReviewHelperPatch(target.cwd, base) };
+          const profileInfo = await resolveProfileInfo(route.profileName);
+          const issues = profileInfo ? await fetchLinkedChatIssues(profileInfo, linkedIssueNumbers(review)) : [];
+          input = prSummaryInput(review, issues);
         }
         result = await runHelperTask({
           profile: route.profileName, sourceBackend, sourceBackendInstance, kind, input,
@@ -2103,7 +2108,13 @@ export function createServer(
         }, preference ? { preference } : {});
       }
     } catch {
-      result = helperFallback(kind, kind === 'commit_message' ? { text: '' } : { text: '', title: '', body: '' }, 'helper_unavailable', Date.now() - startedAt);
+      result = helperFallback(kind, kind === 'commit_message' ? { text: '' } : { text: '', title: '', body: '' }, 'helper_unavailable', Date.now() - startedAt, {
+        backend: preference?.backend ?? sourceBackend,
+        backendInstance: preference ? preference.backendInstance : sourceBackendInstance,
+        requestedModel: preference?.model ?? null,
+        effectiveModel: null,
+        actualModel: null
+      });
     }
     try { recordHelperUsage(profile, result); } catch (error) { console.error('[server] helper telemetry failed:', error); }
     res.json(publicSuggestion(result));

@@ -2,6 +2,7 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type {
   ChatUsage,
+  ChatIssueSummary,
   GitReviewState,
   HelperRoutePreference,
   HelperSuggestion,
@@ -10,6 +11,7 @@ import type {
 } from '@git-agent-harness/contracts';
 import { isUsageLimitError } from './acpAdapter.js';
 import { stateBase } from './chatSessions.js';
+import { redactTextSecrets } from './redactText.js';
 import { resolveInstanceAdapter, type ManagerAdapter } from './registry.js';
 import { helperRouteFor } from './settingsStore.js';
 
@@ -39,25 +41,52 @@ interface HelperTaskDeps {
   now?: () => number;
 }
 
+type HelperAttribution = Pick<HelperTaskResult, 'backend' | 'backendInstance' | 'requestedModel' | 'effectiveModel' | 'actualModel'>;
+
 const queues = new Map<string, Promise<void>>();
 
 function bounded(value: string, limit: number): string {
   return value.replace(/\0/g, '').slice(0, limit);
 }
 
+/** Last-line redaction before any repository text crosses the model boundary. */
+export function sanitizeHelperInput(value: string): string {
+  let output = value;
+  const secrets = Object.entries(process.env)
+    .filter(([name, secret]) => !!secret && secret.length >= 4 && /TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY/i.test(name))
+    .sort((a, b) => b[1]!.length - a[1]!.length);
+  for (const [name, secret] of secrets) output = output.replaceAll(secret!, `[REDACTED:${name}]`);
+  return redactTextSecrets(output)
+    .split('\n').map(line => /(?:password|passwd|secret|token|api[_-]?key|authorization|private[_-]?key)["']?\s*[:=]/i.test(line)
+      ? `${line[0] === '+' || line[0] === '-' || line[0] === ' ' ? line[0] : ''}[credential line omitted]`
+      : line).join('\n');
+}
+
 export function chatTitleInput(message: string): string {
   return bounded(message, CHAT_TITLE_INPUT_LIMIT);
 }
 
-export function commitMessageInput(files: string[], patch: string): string {
-  const names = files.slice(0, 100).map(file => bounded(file, 300));
-  return `Selected files:\n${names.map(file => `- ${file}`).join('\n')}\n\nSelected diff:\n${bounded(patch, DIFF_INPUT_LIMIT)}`;
+export function commitMessageInput(files: Array<{ path: string; staged: boolean; unstaged: boolean; untracked: boolean }>, patch: string): string {
+  const names = files.slice(0, 100).map(file => {
+    const state = [file.staged && 'staged', file.unstaged && 'unstaged', file.untracked && 'untracked'].filter(Boolean).join(', ');
+    return `- ${bounded(file.path, 300)} (${state})`;
+  });
+  return `Selected files:\n${names.join('\n')}\n\nSelected diff:\n${bounded(patch, DIFF_INPUT_LIMIT)}`;
 }
 
-export function prSummaryInput(review: Pick<GitReviewState, 'branch' | 'base' | 'commits' | 'patch'>): string {
+export function linkedIssueNumbers(review: Pick<GitReviewState, 'branch' | 'commits'>): number[] {
+  return [...new Set([review.branch, ...review.commits.map(commit => commit.subject)]
+    .flatMap(value => value.match(/#(\d+)/g) ?? []).map(value => Number(value.slice(1))))].slice(0, 5);
+}
+
+export function prSummaryInput(
+  review: Pick<GitReviewState, 'branch' | 'base' | 'commits' | 'patch'>,
+  issues: Array<Pick<ChatIssueSummary, 'number' | 'title' | 'labels'>> = []
+): string {
   const subjects = review.commits.slice(0, 100).map(commit => bounded(commit.subject, 500));
-  const references = [...new Set([review.branch, ...subjects].flatMap(value => value.match(/#\d+/g) ?? []))].slice(0, 20);
-  return `Base: ${bounded(review.base, 200)}\nHead: ${bounded(review.branch, 200)}\nCommits:\n${subjects.map(subject => `- ${subject}`).join('\n') || '- None'}\nLinked issue references: ${references.join(', ') || 'None'}\n\nCommitted diff:\n${bounded(review.patch, DIFF_INPUT_LIMIT)}`;
+  const references = linkedIssueNumbers(review).map(number => `#${number}`).join(', ') || 'None';
+  const metadata = issues.map(issue => `- #${issue.number} ${bounded(issue.title, 500)}${issue.labels.length ? ` [${issue.labels.map(label => bounded(label, 100)).join(', ')}]` : ''}`).join('\n') || '- None';
+  return `Base: ${bounded(review.base, 200)}\nHead: ${bounded(review.branch, 200)}\nCommits:\n${subjects.map(subject => `- ${subject}`).join('\n') || '- None'}\nLinked issue references: ${references}\nLinked issue metadata:\n${metadata}\n\nCommitted diff:\n${bounded(review.patch, DIFF_INPUT_LIMIT)}`;
 }
 
 function prompt(kind: HelperTaskKind, input: string): string {
@@ -80,23 +109,22 @@ function parseReply(kind: HelperTaskKind, reply: string): Pick<HelperSuggestion,
   return text ? { text } : null;
 }
 
-function fallback(request: HelperTaskRequest, reason: string, startedAt: number, now: () => number): HelperTaskResult {
-  return helperFallback(request.kind, request.fallback, reason, Math.max(0, now() - startedAt));
+function fallback(request: HelperTaskRequest, reason: string, startedAt: number, now: () => number, route?: HelperAttribution): HelperTaskResult {
+  return helperFallback(request.kind, request.fallback, reason, Math.max(0, now() - startedAt), route);
 }
 
 export function helperFallback(
   kind: HelperTaskKind,
   value: Pick<HelperSuggestion, 'text' | 'title' | 'body'>,
   reason: string,
-  latencyMs = 0
+  latencyMs = 0,
+  route: HelperAttribution = { backend: null, backendInstance: null, requestedModel: null, effectiveModel: null, actualModel: null }
 ): HelperTaskResult {
   return {
     kind,
     ...value,
     generated: false,
-    backend: null,
-    backendInstance: null,
-    model: null,
+    ...route,
     fallbackReason: reason,
     usage: null,
     latencyMs
@@ -138,41 +166,47 @@ async function run(request: HelperTaskRequest, deps: HelperTaskDeps): Promise<He
   const now = deps.now ?? Date.now;
   const startedAt = now();
   const preference = deps.preference ?? helperRouteFor(request.profile, request.sourceBackend, request.sourceBackendInstance);
-  if (preference?.enabled === false) return fallback(request, 'disabled', startedAt, now);
   const backend = preference?.backend ?? request.sourceBackend;
   const backendInstance = preference ? preference.backendInstance : request.sourceBackendInstance;
-  if (backend !== 'codex' && !preference?.model) return fallback(request, 'missing_model', startedAt, now);
+  const requestedModel = preference?.model ?? null;
+  let effectiveModel: string | null = null;
+  const attempted = (actualModel: string | null = null): HelperAttribution => ({ backend, backendInstance, requestedModel, effectiveModel, actualModel });
+  if (preference?.enabled === false) return fallback(request, 'disabled', startedAt, now, attempted());
+  if (backend !== 'codex' && !requestedModel) return fallback(request, 'missing_model', startedAt, now, attempted());
   const adapterFor = deps.adapter ?? ((profile, targetBackend, instance) => resolveInstanceAdapter(profile, targetBackend, instance));
   const key = `helper:${request.profile}:${backend}:${backendInstance ?? 'default'}`;
   try {
     const adapter = await adapterFor(request.profile, backend, backendInstance);
     const catalog = await withTimeout(adapter.listModels(key), deps.timeoutMs ?? HELPER_TIMEOUT_MS, () => void adapter.cancelTurn(key));
-    const model = preference?.model ?? (backend === 'codex' ? lunaModel(catalog.models) : null);
-    if (!model || !catalog.models.some(candidate => candidate.id === model)) {
-      return fallback(request, 'missing_model', startedAt, now);
+    const selectedModel = requestedModel ?? (backend === 'codex' ? lunaModel(catalog.models) : null);
+    if (!selectedModel || !catalog.models.some(candidate => candidate.id === selectedModel)) {
+      return fallback(request, 'missing_model', startedAt, now, attempted());
     }
+    effectiveModel = selectedModel;
     const result = await withTimeout(adapter.runTurn(key, {
-      prompt: prompt(request.kind, request.input),
+      prompt: prompt(request.kind, sanitizeHelperInput(request.input)),
       history: [],
-      model,
+      model: effectiveModel,
       onChunk: () => {},
       onToolResult: () => {}
     }), deps.timeoutMs ?? HELPER_TIMEOUT_MS, () => void adapter.cancelTurn(key));
     const parsed = parseReply(request.kind, result.reply);
-    if (!parsed) return fallback(request, 'invalid_output', startedAt, now);
+    if (!parsed) return fallback(request, 'invalid_output', startedAt, now, attempted());
     return {
       kind: request.kind,
       ...parsed,
       generated: true,
       backend,
       backendInstance,
-      model: result.model ?? model,
+      requestedModel,
+      effectiveModel,
+      actualModel: result.model,
       fallbackReason: null,
       usage: result.usage,
       latencyMs: Math.max(0, now() - startedAt)
     };
   } catch (error) {
-    return fallback(request, failureReason(error), startedAt, now);
+    return fallback(request, failureReason(error), startedAt, now, attempted());
   }
 }
 
@@ -204,7 +238,9 @@ export function recordHelperUsage(profile: string, result: HelperTaskResult): vo
     profile,
     backend: result.backend,
     backendInstance: result.backendInstance,
-    model: result.model,
+    requestedModel: result.requestedModel,
+    effectiveModel: result.effectiveModel,
+    actualModel: result.actualModel,
     inputTokens: result.usage?.input_tokens ?? null,
     outputTokens: result.usage?.output_tokens ?? null,
     totalTokens: result.usage?.total_tokens ?? null,
@@ -219,7 +255,10 @@ export function recordHelperUsage(profile: string, result: HelperTaskResult): vo
 export function readHelperUsage(limit = 100): HelperUsageRecord[] {
   try {
     return readFileSync(usagePath(), 'utf8').trim().split('\n').filter(Boolean).slice(-Math.min(500, Math.max(1, limit)))
-      .map(line => JSON.parse(line) as HelperUsageRecord);
+      .flatMap(line => {
+        try { return [JSON.parse(line) as HelperUsageRecord]; }
+        catch { return []; }
+      });
   } catch {
     return [];
   }

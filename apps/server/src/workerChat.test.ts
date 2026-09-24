@@ -28,6 +28,11 @@ test('remote agent runs only in the worker profile and streams permission, steer
   const adapter: ManagerAdapter = {
     id: 'claude', displayName: 'Claude', implemented: true,
     async runTurn(key, input) {
+      if (key.startsWith('helper:')) {
+        assert.equal(input.model, 'helper-model');
+        assert.match(input.prompt, /Fix worker auth/);
+        return { reply: 'Worker auth', model: 'helper-model', usage: null };
+      }
       calls++;
       assert.equal(key, 'demo#test-session');
       assert.equal(input.cwd, cwd);
@@ -42,7 +47,7 @@ test('remote agent runs only in the worker profile and streams permission, steer
       return { reply: 'worker reply', model: null, usage: null };
     },
     listCommands: async () => [],
-    listModels: async () => ({ models: [], currentModelId: null, reasoningEfforts: [], currentReasoningEffortId: null, contextUsage: null }),
+    listModels: async () => ({ models: [{ id: 'helper-model', name: 'Helper model' }], currentModelId: null, reasoningEfforts: [], currentReasoningEffortId: null, contextUsage: null }),
     setModel: async () => {}, setReasoningEffort: async () => {},
     steerTurn: async (_key, message) => { steered = message; return { outcome: 'injected' }; },
     cancelTurn: async () => { cancelled++; }
@@ -64,6 +69,17 @@ test('remote agent runs only in the worker profile and streams permission, steer
   registry.registerNode({ node_id: 'worker', display_name: 'Worker', advertised_url: url, version: '0.1.0', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback', secret_ref: 'env:WORKER_CHAT_TEST_TOKEN', profiles: ['demo'] });
   const connection = workerChatConnection(registry, 'worker', 'demo', profile);
   const remote = connection.adapter('claude', 'test-session');
+    const helper = await connection.request<import('./managerChat/helperTasks.js').HelperTaskResult>({
+      action: 'helper-task', kind: 'chat_title', sourceBackend: 'claude', sourceBackendInstance: null,
+      message: 'Fix worker auth', fallback: 'Fix worker auth',
+      preference: { profile: 'demo', sourceBackend: 'claude', sourceBackendInstance: null, enabled: true,
+        backend: 'claude', backendInstance: null, model: 'helper-model' }
+    });
+    assert.deepEqual(helper, {
+      kind: 'chat_title', text: 'Worker auth', generated: true, backend: 'claude', backendInstance: null,
+      requestedModel: 'helper-model', effectiveModel: 'helper-model', actualModel: 'helper-model',
+      fallbackReason: null, usage: null, latencyMs: helper.latencyMs
+    });
     const bad = await fetch(`${url}/api/worker-chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nodeId: 'worker', action: 'run', profile: 'demo', repo: profile.repo, provider: profile.provider, origin: new URL(profile.web_url).origin, sessionId: 'bad-turn', backend: 'claude', prompt: 'bad' }) });
     assert.equal(bad.status, 400);
     assert.equal(getSession('demo', 'bad-turn', { stateDir: join(root, 'worker-state') }), null, 'invalid input must not create a workspace');

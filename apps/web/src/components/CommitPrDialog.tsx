@@ -47,6 +47,11 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
     setError(null);
     try {
       const next = await gahApi.getGitReview(profile, { sessionId, nodeId, base: requestedBase || undefined });
+      messageRevision.current++;
+      titleRevision.current++;
+      bodyRevision.current++;
+      setCommitSuggestion(null);
+      setPrSuggestion(null);
       setReview(next);
       setBase(next.base);
       setSelected(new Set(next.files.map(file => file.path)));
@@ -192,6 +197,8 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
                       <input type="checkbox" checked={selected.has(file.path)} onChange={event => {
                         const next = new Set(selected);
                         if (event.target.checked) next.add(file.path); else next.delete(file.path);
+                        messageRevision.current++;
+                        setCommitSuggestion(null);
                         setSelected(next);
                       }} />
                       <code className="min-w-0 flex-1 break-all">{file.path}</code>
@@ -208,7 +215,7 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
                   <button type="button" className="btn-secondary text-xs" disabled={busy || !message.trim()}
                     onClick={() => void commit()}>Commit all</button>
                 </div>
-                {commitSuggestion && <p className="text-xs text-muted">Suggested by {commitSuggestion.backendInstance ?? commitSuggestion.backend} · {commitSuggestion.model}</p>}
+                {commitSuggestion && <p className="text-xs text-muted">Suggested by {commitSuggestion.backendInstance ?? commitSuggestion.backend} · {commitSuggestion.actualModel ?? commitSuggestion.effectiveModel}</p>}
                 <p className="text-xs text-muted">Unselected changes stay local and will not enter this {review.providerLabel}.</p>
                 {!continueDirty && review.commits.length > 0 && (
                   <button type="button" className="btn-secondary text-xs" onClick={() => setContinueDirty(true)}>Continue with uncommitted changes</button>
@@ -224,7 +231,12 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <label className="space-y-1 text-xs text-secondary">Base branch
-                    <span className="flex gap-2"><input aria-label="Base branch" value={base} onChange={event => setBase(event.target.value)}
+                    <span className="flex gap-2"><input aria-label="Base branch" value={base} onChange={event => {
+                      titleRevision.current++;
+                      bodyRevision.current++;
+                      setPrSuggestion(null);
+                      setBase(event.target.value);
+                    }}
                       className="min-w-0 flex-1 rounded-md border border-subtle bg-raised px-3 py-2 text-primary focus:border-accent" />
                     <button type="button" className="btn-secondary" disabled={busy || !base.trim()} onClick={() => void load(base)} aria-label="Refresh base review"><RefreshCw size={13} /></button></span>
                   </label>
@@ -240,7 +252,7 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
                   <textarea aria-label="Pull request body" rows={7} value={body} onChange={event => { bodyEdited.current = true; bodyRevision.current++; setPrSuggestion(null); setBody(event.target.value); }}
                     className="w-full resize-y rounded-md border border-subtle bg-raised px-3 py-2 text-sm text-primary focus:border-accent" />
                 </label>
-                {prSuggestion && <p className="text-xs text-muted">Suggested by {prSuggestion.backendInstance ?? prSuggestion.backend} · {prSuggestion.model}</p>}
+                {prSuggestion && <p className="text-xs text-muted">Suggested by {prSuggestion.backendInstance ?? prSuggestion.backend} · {prSuggestion.actualModel ?? prSuggestion.effectiveModel}</p>}
                 <label className="flex items-center gap-2 text-xs text-secondary"><input type="checkbox" checked={draft} onChange={event => setDraft(event.target.checked)} /> Draft</label>
 
                 <div className="grid gap-3 text-xs sm:grid-cols-3">

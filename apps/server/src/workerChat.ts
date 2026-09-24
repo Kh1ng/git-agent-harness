@@ -6,12 +6,13 @@ import type { ChatSessionSummary, ChatTranscriptTurn, HelperRoutePreference, Hel
 import { runProfileList } from './gahCli.js';
 import { resolveInstanceAdapter, type ManagerAdapter } from './managerChat/registry.js';
 import { archiveSession, chatKey, createSession, getSession, resolveSessionCwd, touchSession, updateSession, type ChatSessionStoreOptions } from './managerChat/chatSessions.js';
-import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewHelperPatch, getSelectedChangesPatch } from './gitCache.js';
+import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewHelperPatch, getSelectedChangesForHelper } from './gitCache.js';
 import { findOpenPullRequest, publishPullRequest } from './gitPullRequest.js';
 
 import { isUsageLimitError } from './managerChat/acpAdapter.js';
 import type { WorkerChatEvent } from './workerChatProtocol.js';
-import { chatTitleInput, commitMessageInput, prSummaryInput, runHelperTask } from './managerChat/helperTasks.js';
+import { chatTitleInput, commitMessageInput, linkedIssueNumbers, prSummaryInput, runHelperTask } from './managerChat/helperTasks.js';
+import { fetchLinkedChatIssues } from './managerChat/issueChats.js';
 import { validHelperRoute } from './managerChat/settingsStore.js';
 
 interface ActiveExecution {
@@ -85,12 +86,16 @@ export function createWorkerChatRouter(deps: {
           }
           if (kind === 'commit_message') {
             if (!Array.isArray(body.files) || !body.files.every((path: unknown) => typeof path === 'string')) return void res.status(400).json({ error: 'Select changed files.' });
-            input = commitMessageInput(body.files, getSelectedChangesPatch(cwd, body.files));
+            const selected = getSelectedChangesForHelper(cwd, body.files);
+            input = commitMessageInput(selected.files, selected.patch);
             fallback = { text: '' };
           } else {
             const base = typeof body.base === 'string' ? body.base : undefined;
             const review = await getGitReviewState(cwd, base);
-            input = prSummaryInput({ ...review, patch: getReviewHelperPatch(cwd, base) });
+            input = prSummaryInput(
+              { ...review, patch: getReviewHelperPatch(cwd, base) },
+              await fetchLinkedChatIssues(profile, linkedIssueNumbers(review))
+            );
             fallback = { text: '', title: '', body: '' };
           }
         }

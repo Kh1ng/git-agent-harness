@@ -257,14 +257,21 @@ async function generateChatTitle(
         kind: 'chat_title', input: chatTitleInput(message), fallback: { text: fallbackTitle }
       }, preference ? { preference } : {});
   } catch {
-    result = helperFallback('chat_title', { text: fallbackTitle }, 'helper_unavailable', Date.now() - startedAt);
+    result = helperFallback('chat_title', { text: fallbackTitle }, 'helper_unavailable', Date.now() - startedAt, {
+      backend: preference?.backend ?? session.backend,
+      backendInstance: preference ? preference.backendInstance : session.backendInstance ?? null,
+      requestedModel: preference?.model ?? null,
+      effectiveModel: null,
+      actualModel: null
+    });
   }
   try { recordHelperUsage(profile, result); } catch (error) { console.error('[managerChat] helper telemetry failed:', error); }
   const current = getSession(profile, sessionId, chatSessionStoreOptions);
-  if (!result.generated || !result.model || !current || current.title !== fallbackTitle || current.titleSuggestion) return;
+  if (!result.generated || !result.effectiveModel || !current || current.title !== fallbackTitle || current.titleSuggestion) return;
   updateSession(profile, sessionId, {
     title: result.text,
-    titleSuggestion: { backend: result.backend ?? session.backend, backendInstance: result.backendInstance, model: result.model }
+    titleSuggestion: { backend: result.backend ?? session.backend, backendInstance: result.backendInstance,
+      effectiveModel: result.effectiveModel, actualModel: result.actualModel }
   }, chatSessionStoreOptions);
   updatedPublisher?.({ type: 'manager.chat.updated', requestId: `helper-title-${sessionId}`, profile, sessionId });
 }

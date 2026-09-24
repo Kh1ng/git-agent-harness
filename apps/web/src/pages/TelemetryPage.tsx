@@ -36,7 +36,7 @@ function HelperUsageCard({ profile }: { profile: string | undefined }) {
             <thead><tr className="border-b border-subtle text-left text-muted"><th className="py-2 pr-3 font-medium">Task</th><th className="py-2 pr-3 font-medium">Account / model</th><th className="py-2 pr-3 font-medium">Tokens</th><th className="py-2 pr-3 font-medium">Latency</th><th className="py-2 font-medium">Outcome</th></tr></thead>
             <tbody>{records.map(record => <tr key={`${record.timestamp}-${record.kind}`} className="border-b border-subtle/50">
               <td className="py-2 pr-3 text-primary">{record.kind.replace('_', ' ')}</td>
-              <td className="py-2 pr-3">{record.backendInstance ?? record.backend ?? 'fallback'}{record.model ? ` · ${record.model}` : ''}</td>
+              <td className="py-2 pr-3">{record.backendInstance ?? record.backend ?? 'fallback'}{record.effectiveModel ? ` · ${record.effectiveModel}${record.actualModel && record.actualModel !== record.effectiveModel ? ` → ${record.actualModel}` : ''}` : ''}</td>
               <td className="py-2 pr-3 tabular-nums">{record.totalTokens === null ? 'unreported' : formatTokens(record.totalTokens)}</td>
               <td className="py-2 pr-3 tabular-nums">{record.latencyMs < 1000 ? `${Math.round(record.latencyMs)}ms` : formatDuration(record.latencyMs / 1000)}</td>
               <td className="py-2">{record.fallbackReason?.replaceAll('_', ' ') ?? 'generated'}</td>

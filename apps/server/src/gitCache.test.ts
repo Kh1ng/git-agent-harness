@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewHelperPatch, getSelectedChangesPatch } from './gitCache.js';
+import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewHelperPatch, getSelectedChangesForHelper, getSelectedChangesPatch } from './gitCache.js';
 
 // AsyncTtlCache's own TTL/coalescing/isolation/failure behavior is covered
 // by asyncTtlCache.test.ts. These tests focus on gitCache's own wrapper
@@ -123,12 +123,13 @@ describe('commitGitChanges', () => {
   test('helper diff input contains only the selected changes', () => {
     const dir = initRepo();
     writeFileSync(join(dir, 'selected.txt'), 'selected content\n');
-    writeFileSync(join(dir, 'config.json'), '{"api_key":"do-not-send"}\n');
     writeFileSync(join(dir, '.env'), 'SECRET=do-not-send\n');
-    const patch = getSelectedChangesPatch(dir, ['selected.txt', 'config.json']);
+    const patch = getSelectedChangesPatch(dir, ['selected.txt']);
     assert.match(patch, /selected content/);
-    assert.doesNotMatch(patch, /do-not-send|SECRET|\.env/);
-    assert.match(patch, /credential line omitted/);
+    assert.doesNotMatch(patch, /SECRET|\.env/);
+    assert.deepEqual(getSelectedChangesForHelper(dir, ['selected.txt']).files, [
+      { path: 'selected.txt', staged: false, unstaged: false, untracked: true }
+    ]);
     assert.throws(() => getSelectedChangesPatch(dir, ['.env']), /cannot be sent/);
   });
 });

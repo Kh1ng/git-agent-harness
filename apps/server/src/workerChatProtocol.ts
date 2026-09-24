@@ -81,7 +81,8 @@ export function parseWorkerChatReply(value: unknown, request: Record<string, unk
       || !(value.title === undefined || (typeof value.title === 'string' && value.title.length <= 200))
       || !(value.body === undefined || (typeof value.body === 'string' && value.body.length <= 12_000))
       || typeof value.generated !== 'boolean' || !nullableString(value.backend)
-      || !nullableString(value.backendInstance) || !nullableString(value.model)
+      || !nullableString(value.backendInstance) || !nullableString(value.requestedModel)
+      || !nullableString(value.effectiveModel) || !nullableString(value.actualModel)
       || !nullableString(value.fallbackReason) || typeof value.latencyMs !== 'number' || !Number.isFinite(value.latencyMs) || value.latencyMs < 0) throw invalid();
     let usage: HelperTaskResult['usage'] = null;
     if (value.usage !== null) {
@@ -99,7 +100,8 @@ export function parseWorkerChatReply(value: unknown, request: Record<string, unk
       ...(typeof value.title === 'string' ? { title: value.title } : {}),
       ...(typeof value.body === 'string' ? { body: value.body } : {}),
       generated: value.generated, backend: value.backend, backendInstance: value.backendInstance,
-      model: value.model, fallbackReason: value.fallbackReason, usage, latencyMs: value.latencyMs
+      requestedModel: value.requestedModel, effectiveModel: value.effectiveModel, actualModel: value.actualModel,
+      fallbackReason: value.fallbackReason, usage, latencyMs: value.latencyMs
     };
   }
   if (request.action === 'create' || request.action === 'prepare' || request.action === 'archive') {

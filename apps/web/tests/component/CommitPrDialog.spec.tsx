@@ -83,8 +83,8 @@ test('requested model suggestions stay attributed until the user edits them', as
       const body = request.postDataJSON();
       suggestions.push(body);
       return route.fulfill({ json: body.kind === 'commit_message'
-        ? { kind: body.kind, text: 'Update selected files', generated: true, backend: 'codex', backendInstance: 'codex-work', model: 'gpt-6-luna', fallbackReason: null }
-        : { kind: body.kind, text: 'Summary', title: 'Improve review flow', body: '## Summary\n\n- Improve review', generated: true, backend: 'codex', backendInstance: 'codex-work', model: 'gpt-6-luna', fallbackReason: null } });
+        ? { kind: body.kind, text: 'Update selected files', generated: true, backend: 'codex', backendInstance: 'codex-work', requestedModel: null, effectiveModel: 'gpt-6-luna', actualModel: 'gpt-6-luna', fallbackReason: null }
+        : { kind: body.kind, text: 'Summary', title: 'Improve review flow', body: '## Summary\n\n- Improve review', generated: true, backend: 'codex', backendInstance: 'codex-work', requestedModel: null, effectiveModel: 'gpt-6-luna', actualModel: 'gpt-6-luna', fallbackReason: null } });
     }
     return route.abort();
   });
@@ -96,6 +96,8 @@ test('requested model suggestions stay attributed until the user edits them', as
   await component.getByRole('button', { name: 'Suggest' }).click();
   await expect(component.getByLabel('Commit message')).toHaveValue('Update selected files');
   await expect(component.getByText('Suggested by codex-work · gpt-6-luna')).toBeVisible();
+  await component.getByText('src/keep.ts').click();
+  await expect(component.getByText('Suggested by codex-work · gpt-6-luna')).toHaveCount(0);
   await component.getByLabel('Commit message').fill('Manual commit');
   await expect(component.getByText('Suggested by codex-work · gpt-6-luna')).toHaveCount(0);
 
@@ -104,6 +106,8 @@ test('requested model suggestions stay attributed until the user edits them', as
   await expect(component.getByLabel('Pull request title')).toHaveValue('Improve review flow');
   await expect(component.getByLabel('Pull request body')).toHaveValue('## Summary\n\n- Improve review');
   await expect(component.getByText('Suggested by codex-work · gpt-6-luna')).toBeVisible();
+  await component.getByLabel('Base branch').fill('develop');
+  await expect(component.getByText('Suggested by codex-work · gpt-6-luna')).toHaveCount(0);
   await component.getByLabel('Pull request title').fill('Manual PR');
   await expect(component.getByText('Suggested by codex-work · gpt-6-luna')).toHaveCount(0);
 
@@ -120,7 +124,7 @@ test('late and failed suggestions preserve user prose', async ({ mount, page }) 
     if (url.pathname === '/api/git/suggest') {
       await new Promise(resolve => setTimeout(resolve, 100));
       return route.fulfill({ json: { kind: 'commit_message', text: '', generated: false, backend: null,
-        backendInstance: null, model: null, fallbackReason: 'missing_model' } });
+        backendInstance: null, requestedModel: null, effectiveModel: null, actualModel: null, fallbackReason: 'missing_model' } });
     }
     return route.abort();
   });
