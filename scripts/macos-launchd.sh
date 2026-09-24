@@ -59,7 +59,7 @@ register_worker() {
 
 configure_worker_transport() {
   [ "${GAH_LAUNCHD_DRY_RUN:-}" = 1 ] && return
-  [ "$(plist_value GAH_TAILSCALE_SERVE)" = 1 ] || return
+  [ "$(plist_value GAH_TAILSCALE_SERVE)" = 1 ] || return 0
   tailscale_path="$(plist_value GAH_TAILSCALE_CLI)"
   port="$(plist_value PORT)"
   "$tailscale_path" serve --bg --yes --https="$port" "http://127.0.0.1:$port" >/dev/null
@@ -68,8 +68,8 @@ configure_worker_transport() {
 disable_worker_transport() {
   [ "${GAH_LAUNCHD_DRY_RUN:-}" = 1 ] && return
   worker_plist="$agents_dir/$worker_label.plist"
-  [ -f "$worker_plist" ] || return
-  [ "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:GAH_TAILSCALE_SERVE' "$worker_plist" 2>/dev/null || true)" = 1 ] || return
+  [ -f "$worker_plist" ] || return 0
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:GAH_TAILSCALE_SERVE' "$worker_plist" 2>/dev/null || true)" = 1 ] || return 0
   tailscale_path="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:GAH_TAILSCALE_CLI' "$worker_plist")"
   port="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:PORT' "$worker_plist")"
   "$tailscale_path" serve --https="$port" off >/dev/null 2>&1 || true
