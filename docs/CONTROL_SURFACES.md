@@ -36,7 +36,8 @@ The central server owns fleet registration, central claims, project ownership, c
 On macOS, `scripts/install-macos.sh` and the desktop role control share the
 tracked `scripts/macos-launchd.sh` service owner. Central mode serves the same
 web control surface on loopback port 3774 by default. Worker mode serves the
-execution API through Tailscale Serve and registers its configured profiles.
+execution API through its selected transport and registers its configured profiles.
+Worker updates retain the selected advertised URL and transport. Installation stops if central cannot poll the registered worker.
 Switching roles unloads the opposite LaunchAgent, so one Mac cannot run both contracts.
 Workers expose an execution API and keep their own checkouts and runtime artifacts.
 The phrase "worker has no server" in older tickets conflicts with this implemented transport.

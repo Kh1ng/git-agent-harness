@@ -541,6 +541,35 @@ advertises the central node's own endpoint, which would make its liveness
 poller poll itself and recurse. Re-running registration updates the existing
 node's validated endpoint, transport, secret reference, and profile declarations.
 
+### macOS worker transport
+
+The macOS installer saves `GAH_NODE_ADVERTISED_URL` and the transport mode in the worker LaunchAgent.
+Later updates use the saved values. Supply new values only when you want to change the transport.
+
+If central can reach the Mac tailnet address, use the default `trusted_lan` transport.
+You can set an HTTPS `GAH_NODE_ADVERTISED_URL` to use Tailscale Serve.
+For a plain-HTTP central URL, central must set `GAH_ALLOW_INSECURE_HTTP=1`.
+
+If inbound tailnet TCP does not work, use the managed reverse SSH tunnel:
+
+```bash
+GAH_NODE_ROLE=worker \
+GAH_CENTRAL_URL=http://192.168.5.15:3773 \
+COORDINATOR_TOKEN=<central-token> \
+GAH_NODE_SSH_TARGET=khing@192.168.5.15 \
+GAH_NODE_SSH_REMOTE_PORT=48774 \
+bash scripts/install-macos.sh
+```
+
+The SSH key must work with `BatchMode=yes` before you run the installer.
+The SSH server on central must permit remote TCP forwarding.
+The tunnel maps central `127.0.0.1:48774` to Mac `127.0.0.1:3774`.
+The installer registers `http://127.0.0.1:48774` with `loopback` transport.
+
+The installer then calls central's `/api/registry/nodes/:nodeId/health` endpoint.
+Installation stops if central cannot reach the advertised URL.
+Read `~/.local/state/gah/worker-tunnel.log` if the tunnel does not start.
+
 > **Updating an existing registration requires the coordinator token.**
 > Creating a new node is how a worker self-registers, so it stays open to
 > loopback/authenticated requests. But a re-registration that matches an

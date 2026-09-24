@@ -25,8 +25,12 @@ The installer saves the token in `~/.config/gah/gah-loop.env` with mode `0600`.
 A reinstall can use the saved token.
 
 The macOS desktop controls a worker server on port 3774.
-The server binds to loopback. Tailscale Serve publishes it to the tailnet with HTTPS.
+By default, the server binds to the Mac tailnet IPv4 address.
+You can use Tailscale Serve, an explicit URL, or a managed reverse SSH tunnel instead.
+The installer saves the selected URL and transport in the worker LaunchAgent.
+An update uses these saved values unless you supply new values.
 The worker registers all configured profiles after startup.
+The installer asks central to poll the registered worker before it reports success.
 Central can then import projects and send chat work to the Mac.
 The desktop worker control does not start `gah loop`.
 
