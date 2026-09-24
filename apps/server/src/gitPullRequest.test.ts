@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { withFixtureServer } from './fixtureGahHarness.js';
+import { publishPullRequest } from './gitPullRequest.js';
 
 test('Git page creates provider-scoped PRs and MRs through isolated CLI fixtures', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'gah-gitlab-create-'));
@@ -94,6 +95,12 @@ process.stdout.write(JSON.stringify(method === 'GET' ? {default_branch:'trunk'} 
       }
       assert.deepEqual(calls(), []);
     });
+    await t.test('git review returns a safe actionable base error', async () => {
+      const response = await fetch(`${baseUrl}/api/git/review?profile=gitlab&base=missing`);
+      assert.equal(response.status, 502);
+      const body = await response.json() as { message: string };
+      assert.match(body.message, /Base branch 'missing' is unavailable locally/);
+    });
     await t.test('CLI/API failures and invalid host configuration fail without exposing provider output', async () => {
       for (const failure of ['failure', 'invalid-json', 'api-error', 'wrong-host', 'wrong-project']) {
         writeFileSync(mode, failure);
@@ -114,4 +121,76 @@ process.stdout.write(JSON.stringify(method === 'GET' ? {default_branch:'trunk'} 
       assert.deepEqual(calls(), []);
     });
   });
+});
+
+test('reviewed publish pushes only commits and updates an existing pull request', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'gah-git-publish-'));
+  const origin = join(root, 'origin.git');
+  const checkout = join(root, 'checkout');
+  const bin = join(root, 'bin');
+  const log = join(root, 'calls.jsonl');
+  const existing = join(root, 'existing');
+  mkdirSync(bin);
+  execFileSync('git', ['init', '--quiet', '--bare', '--initial-branch=main', origin]);
+  execFileSync('git', ['init', '--quiet', '--initial-branch=main', checkout]);
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: checkout });
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: checkout });
+  writeFileSync(join(checkout, 'README.md'), 'base\n');
+  execFileSync('git', ['add', 'README.md'], { cwd: checkout });
+  execFileSync('git', ['commit', '--quiet', '-m', 'Base'], { cwd: checkout });
+  execFileSync('git', ['remote', 'add', 'origin', origin], { cwd: checkout });
+  execFileSync('git', ['push', '--quiet', '--set-upstream', 'origin', 'main'], { cwd: checkout });
+  execFileSync('git', ['switch', '--quiet', '-c', 'feature/review'], { cwd: checkout });
+  writeFileSync(join(checkout, 'committed.txt'), 'published\n');
+  execFileSync('git', ['add', 'committed.txt'], { cwd: checkout });
+  execFileSync('git', ['commit', '--quiet', '-m', 'Reviewed change'], { cwd: checkout });
+  writeFileSync(join(checkout, 'excluded.txt'), 'local only\n');
+
+  writeFileSync(join(bin, 'gh'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
+if (args[0] === 'pr' && args[1] === 'list') {
+  process.stdout.write(fs.existsSync(${JSON.stringify(existing)})
+    ? JSON.stringify([{number:12,title:'Old title',url:'https://github.com/owner/repo/pull/12',isDraft:false}]) : '[]');
+} else if (args[0] === 'pr' && args[1] === 'create') {
+  process.stdout.write('https://github.com/owner/repo/pull/12\\n');
+}
+`, { mode: 0o755 });
+  writeFileSync(join(bin, 'glab'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
+const method = args[args.indexOf('--method') + 1];
+process.stdout.write(JSON.stringify(method === 'GET'
+  ? [{iid:12,title:'Draft: Old title',web_url:'https://gitlab.example.test/owner/repo/-/merge_requests/12',draft:true}]
+  : {iid:12,title:'Manual title',web_url:'https://gitlab.example.test/owner/repo/-/merge_requests/12',draft:false}));
+`, { mode: 0o755 });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${bin}:${savedPath}`;
+  t.after(() => {
+    process.env.PATH = savedPath;
+    rmSync(root, { recursive: true, force: true });
+  });
+  const profile = { provider: 'github', repo: 'owner/repo', web_url: 'https://github.com/owner/repo', local_path: checkout };
+
+  const created = await publishPullRequest(profile, checkout, { title: 'Reviewed change', body: 'Body', base: 'main', draft: false });
+  assert.deepEqual(created, { url: 'https://github.com/owner/repo/pull/12', existing: false });
+  assert.equal(execFileSync('git', ['--git-dir', origin, 'show', 'feature/review:committed.txt'], { encoding: 'utf8' }), 'published\n');
+  assert.throws(() => execFileSync('git', ['--git-dir', origin, 'show', 'feature/review:excluded.txt'], { stdio: 'pipe' }));
+
+  writeFileSync(existing, 'yes');
+  writeFileSync(log, '');
+  const updated = await publishPullRequest(profile, checkout, { title: 'Manual title', body: 'Manual body', base: 'main', draft: true });
+  assert.deepEqual(updated, { url: 'https://github.com/owner/repo/pull/12', existing: true });
+  const calls = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(calls.filter(args => args[1] === 'create'), []);
+  assert.ok(calls.some(args => args[1] === 'edit' && args.includes('Manual title') && args.includes('Manual body')));
+  assert.ok(calls.some(args => args[1] === 'ready' && args.includes('--undo')));
+
+  writeFileSync(log, '');
+  const gitlab = { provider: 'gitlab', repo: 'owner/repo', web_url: 'https://gitlab.example.test/owner/repo', local_path: checkout };
+  await publishPullRequest(gitlab, checkout, { title: 'Draft: Manual title', body: 'Body', base: 'main', draft: false });
+  const gitlabCalls = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.ok(gitlabCalls.some(args => args.includes('--method') && args.includes('PUT') && args.includes('title=Manual title')));
 });

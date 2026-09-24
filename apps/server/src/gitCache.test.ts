@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { commitGitChanges, getGitStatusCached } from './gitCache.js';
+import { commitGitChanges, getGitReviewState, getGitStatusCached } from './gitCache.js';
 
 // AsyncTtlCache's own TTL/coalescing/isolation/failure behavior is covered
 // by asyncTtlCache.test.ts. These tests focus on gitCache's own wrapper
@@ -93,4 +93,63 @@ describe('commitGitChanges', () => {
     const after = await getGitStatusCached(profile, dir, sessionId);
     assert.equal(after.changes.length, 0);
   });
+
+  test('commits selected files and preserves an unrelated staged file', async () => {
+    const dir = initRepo();
+    writeFileSync(join(dir, 'selected.txt'), 'selected\n');
+    writeFileSync(join(dir, 'later.txt'), 'later\n');
+    execFileSync('git', ['-C', dir, 'add', 'later.txt']);
+
+    await commitGitChanges('gitcache-test-partial', dir, 'selected only', undefined, ['selected.txt']);
+
+    assert.equal(execFileSync('git', ['-C', dir, 'show', '--format=', '--name-only', 'HEAD'], { encoding: 'utf8' }).trim(), 'selected.txt');
+    assert.equal(execFileSync('git', ['-C', dir, 'diff', '--cached', '--name-only'], { encoding: 'utf8' }).trim(), 'later.txt');
+
+    await commitGitChanges('gitcache-test-partial', dir, 'later only', undefined, ['later.txt']);
+    assert.deepEqual(
+      execFileSync('git', ['-C', dir, 'log', '-2', '--pretty=%s'], { encoding: 'utf8' }).trim().split('\n'),
+      ['later only', 'selected only']
+    );
+  });
+
+  test('rejects paths that are not current worktree changes', async () => {
+    const dir = initRepo();
+    await assert.rejects(
+      commitGitChanges('gitcache-test-path-guard', dir, 'bad path', undefined, ['../outside']),
+      /current worktree changes/
+    );
+  });
+
+  test('treats selected file names as literals', async () => {
+    const dir = initRepo();
+    writeFileSync(join(dir, 'a1.ts'), 'leave local\n');
+    writeFileSync(join(dir, 'a[1].ts'), 'commit this\n');
+
+    await commitGitChanges('gitcache-test-literal-path', dir, 'literal path', undefined, ['a[1].ts']);
+
+    assert.equal(execFileSync('git', ['-C', dir, 'show', '--format=', '--name-only', 'HEAD'], { encoding: 'utf8' }).trim(), 'a[1].ts');
+    assert.match(execFileSync('git', ['-C', dir, 'status', '--short'], { encoding: 'utf8' }), /a1\.ts/);
+  });
+});
+
+test('getGitReviewState separates dirty files from the committed PR diff', async () => {
+  const origin = mkdtempSync(join(tmpdir(), 'gah-gitreview-origin-'));
+  execFileSync('git', ['init', '--bare', '--initial-branch=main', origin]);
+  const dir = initRepo();
+  execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', origin]);
+  execFileSync('git', ['-C', dir, 'push', '-u', 'origin', 'main']);
+  execFileSync('git', ['-C', dir, 'switch', '-c', 'feature/review']);
+  writeFileSync(join(dir, 'committed.txt'), 'in pr\n');
+  execFileSync('git', ['-C', dir, 'add', 'committed.txt']);
+  execFileSync('git', ['-C', dir, 'commit', '-m', 'committed change']);
+  writeFileSync(join(dir, 'local-only.txt'), 'not in pr\n');
+
+  const review = await getGitReviewState(dir);
+
+  assert.equal(review.base, 'main');
+  assert.deepEqual(review.commits.map(commit => commit.subject), ['committed change']);
+  assert.deepEqual(review.changedFiles, ['committed.txt']);
+  assert.deepEqual(review.files.map(file => file.path), ['local-only.txt']);
+  assert.match(review.patch, /committed\.txt/);
+  assert.doesNotMatch(review.patch, /local-only\.txt/);
 });

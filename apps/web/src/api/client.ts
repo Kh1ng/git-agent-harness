@@ -60,6 +60,7 @@ import type {
   ChatPrSummary,
   ChatPrStartResult,
   ChatReclaimResult,
+  GitReviewState,
   AdminUpdatePendingInfo,
   AdminUpdateState
 } from '@git-agent-harness/contracts';
@@ -262,12 +263,14 @@ export interface GahDataSource {
   setSkillBindings(data: SkillBindingUpdate): Promise<SkillBindingSummary>;
   inheritSkillBindings(data: Omit<SkillBindingUpdate, 'skillIds'>): Promise<SkillBindingSummary>;
   recallContext(profile: string, query: string): Promise<{ context: string; memoryCount: number }>;
-  getGitStatus(profile: string, sessionId?: string): Promise<{ branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean }>;
+  getGitStatus(profile: string, sessionId?: string, nodeId?: string): Promise<{ branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean }>;
+  getGitReview(profile: string, options?: { sessionId?: string; nodeId?: string; base?: string }): Promise<GitReviewState>;
   getGitBranches(profile: string): Promise<{ branches: string[]; current: string }>;
   getGitLog(profile: string, limit?: number): Promise<{ commits: { hash: string; short: string; subject: string; author: string; ago: string }[] }>;
   getGitPrs(profile: string): Promise<{ prs: ChatPrSummary[]; warning?: string }>;
   createGitPr(profile: string, data: { title: string; body?: string; base?: string; draft?: boolean }): Promise<{ url: string }>;
-  createGitCommit(profile: string, message: string, sessionId?: string): Promise<{ hash: string }>;
+  createGitCommit(profile: string, message: string, sessionId?: string, files?: string[], nodeId?: string): Promise<{ hash: string }>;
+  publishGitPr(profile: string, data: { title: string; body: string; base: string; draft: boolean; sessionId?: string; nodeId?: string }): Promise<{ url: string; existing: boolean }>;
   getManagerChatCommands(profile: string, nodeId?: string): Promise<{ commands: ManagerCommandInfo[] }>;
   getManagerChatModels(profile: string, nodeId?: string): Promise<ManagerModelsSummary>;
   setManagerChatModel(profile: string, modelId: string, nodeId?: string): Promise<{ success: boolean }>;
@@ -586,8 +589,11 @@ export const gahApi: GahDataSource = {
       { profile, query }
     );
   },
-  getGitStatus(profile, sessionId) {
-    return getJson('/api/git/status', { profile, sessionId });
+  getGitStatus(profile, sessionId, nodeId) {
+    return getJson('/api/git/status', { profile, sessionId, nodeId });
+  },
+  getGitReview(profile, options = {}) {
+    return getJson<GitReviewState>('/api/git/review', { profile, ...options });
   },
   getGitBranches(profile) {
     return getJson('/api/git/branches', { profile });
@@ -601,10 +607,15 @@ export const gahApi: GahDataSource = {
   createGitPr(profile, data) {
     return postJson(`/api/git/pr?profile=${encodeURIComponent(profile)}`, data);
   },
-  createGitCommit(profile, message, sessionId) {
+  createGitCommit(profile, message, sessionId, files, nodeId) {
     const query = new URLSearchParams({ profile });
     if (sessionId) query.set('sessionId', sessionId);
-    return postJson(`/api/git/commit?${query.toString()}`, { message });
+    return postJson(`/api/git/commit?${query.toString()}`, { message, ...(files ? { files } : {}), ...(nodeId ? { nodeId } : {}) });
+  },
+  publishGitPr(profile, { sessionId, ...data }) {
+    const query = new URLSearchParams({ profile });
+    if (sessionId) query.set('sessionId', sessionId);
+    return postJson(`/api/git/publish?${query.toString()}`, data);
   },
   getManagerChatCommands(profile, nodeId) {
     return getJson<{ commands: ManagerCommandInfo[] }>('/api/manager-chat/commands', { profile, nodeId });

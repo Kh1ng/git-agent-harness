@@ -729,7 +729,7 @@ test('git routes reject stale sessions and expose worktree-less sessions as read
   try {
     const commit = (sessionId: string) => fetch(`${baseUrl}/api/git/commit?profile=${profile}&sessionId=${sessionId}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `git-commit-test-${sessionId}` },
       body: JSON.stringify({ message: 'should not land' })
     });
     const status = (sessionId: string) => fetch(`${baseUrl}/api/git/status?profile=${profile}&sessionId=${sessionId}`);

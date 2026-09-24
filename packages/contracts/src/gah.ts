@@ -768,6 +768,46 @@ export interface ProjectImportData {
   reclone?: boolean;
 }
 
+export interface GitReviewFile {
+  path: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+}
+
+export interface GitReviewCommit {
+  hash: string;
+  short: string;
+  subject: string;
+}
+
+export interface GitReviewPullRequest {
+  number: number;
+  title: string;
+  url: string;
+  draft: boolean;
+}
+
+/** Review-only snapshot used by the shared Commit and PR dialog. Paths are
+ * resolved on the owning node and never accepted from the browser as roots. */
+export interface GitReviewState {
+  ownerNodeId: string;
+  ownerNodeName: string;
+  provider: 'github' | 'gitlab';
+  providerLabel: 'pull request' | 'merge request';
+  branch: string;
+  base: string;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  files: GitReviewFile[];
+  commits: GitReviewCommit[];
+  changedFiles: string[];
+  patch: string;
+  existing: GitReviewPullRequest | null;
+  readOnly?: boolean;
+}
+
 export interface ProjectImportResult {
   project: ProjectSummary;
   checkoutPath: string;

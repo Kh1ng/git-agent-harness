@@ -17,6 +17,8 @@ type Operation =
   | 'external_approval.revoke'
   | 'backend_instance.set_enabled'
   | 'backend_instance.configure'
+  | 'git.commit'
+  | 'git.publish'
   | 'config.routing_candidate.add'
   | 'config.routing_candidate.remove'
   | 'config.routing_candidate.move'

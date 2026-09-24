@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { MoreHorizontal, Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles, GitPullRequest, GitCommit, AlertTriangle } from 'lucide-react';
+import { MoreHorizontal, Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles, GitPullRequest, AlertTriangle } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { ChatNodePicker } from '../components/ChatNodePicker.js';
@@ -11,6 +11,7 @@ import { formatChatName } from '../lib/format.js';
 import { DEFAULT_CONVERSATION_ID, readNavigation, updateNavigation, type Page } from '../lib/navigationState.js';
 import { ProviderPicker, type ProviderSelection, type ProviderPickerProps } from '../components/ProviderPicker.js';
 import { ProjectRail } from '../components/ProjectRail.js';
+import { CommitPrDialog } from '../components/CommitPrDialog.js';
 import { gahApi } from '../api/client.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
@@ -292,6 +293,7 @@ function GitStripEntries({
 function GitStrip({
   profile,
   sessionId,
+  nodeId,
   activePrNumber,
   provider,
   repoUrl,
@@ -304,6 +306,7 @@ function GitStrip({
 }: {
   profile: string;
   sessionId: string | null;
+  nodeId?: string;
   activePrNumber?: number;
   provider: string;
   repoUrl: string | null;
@@ -314,10 +317,7 @@ function GitStrip({
   error: string | null;
   onRefresh: () => void;
 }) {
-  const [commitOpen, setCommitOpen] = useState(false);
-  const [commitMessage, setCommitMessage] = useState('');
-  const [committing, setCommitting] = useState(false);
-  const [commitError, setCommitError] = useState<string | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
 
   if (!status) {
     if (loading) return <div className="text-xs text-muted">Loading git status…</div>;
@@ -353,22 +353,6 @@ function GitStrip({
       : null
   );
 
-  const submitCommit = async () => {
-    if (!commitMessage.trim() || committing) return;
-    setCommitting(true);
-    setCommitError(null);
-    try {
-      await gahApi.createGitCommit(profile, commitMessage.trim(), sessionId ?? undefined);
-      setCommitMessage('');
-      setCommitOpen(false);
-      onRefresh();
-    } catch (error) {
-      setCommitError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setCommitting(false);
-    }
-  };
-
   return (
     <div className="space-y-2 text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -402,15 +386,15 @@ function GitStrip({
           )}
         </div>
         <div className="flex items-center gap-1 shrink-0">
-          {!clean && !status.readOnly && (
+          {!status.readOnly && (
             <button
               type="button"
-              onClick={() => { setCommitOpen((v) => !v); setCommitError(null); }}
+              onClick={() => setReviewOpen(true)}
               className="flex items-center gap-1 text-muted hover:text-primary"
-              title="Commit changes"
+              title="Review commits and pull request"
             >
-              <GitCommit size={13} />
-              Commit
+              <GitPullRequest size={13} />
+              Commit / PR
             </button>
           )}
           {activePrUrl && (
@@ -447,27 +431,8 @@ function GitStrip({
         </div>
       )}
 
-      {commitOpen && (
-        <div className="flex items-center gap-2 rounded-md border border-subtle bg-raised px-2 py-1.5">
-          <input
-            type="text"
-            autoFocus
-            value={commitMessage}
-            onChange={(e) => setCommitMessage(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') void submitCommit(); if (e.key === 'Escape') { e.preventDefault(); setCommitOpen(false); } }}
-            placeholder="Commit message"
-            className="min-w-0 flex-1 bg-transparent text-primary text-xs focus:outline-none"
-          />
-          <button
-            onClick={submitCommit}
-            disabled={!commitMessage.trim() || committing}
-            className="btn-primary text-[11px] px-2 py-1 disabled:opacity-50"
-          >
-            {committing ? 'Committing…' : 'Commit'}
-          </button>
-          {commitError && <span className="text-critical text-[11px]">{commitError}</span>}
-        </div>
-      )}
+      {reviewOpen && <CommitPrDialog profile={profile} sessionId={sessionId ?? undefined} nodeId={nodeId}
+        onClose={() => setReviewOpen(false)} onChanged={onRefresh} />}
     </div>
   );
 }
@@ -640,7 +605,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
       // null sentinel on failure (not []) so a transient refresh error
       // doesn't overwrite last-known issues/PRs with an empty list.
       const [status, issuesResult, prsResult] = await Promise.all([
-        gahApi.getGitStatus(profile, forSessionId),
+        gahApi.getGitStatus(profile, forSessionId, chosenNode || undefined),
         gahApi.getChatIssues(profile).then(({ issues }) => issues).catch((error) => {
           // Surface individual fetch errors to the UI
           if (gitRequestIdRef.current === requestId) {
@@ -673,7 +638,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
     setGitIssues([]);
     setGitPrs([]);
     void loadGitData();
-  }, [profile, sessionId]);
+  }, [profile, sessionId, chosenNode]);
   useWsReconnectRefresh(() => { void loadGitData(); });
 
   const refreshSessions = (forProfile: string) => {
@@ -1561,6 +1526,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
                   <GitStrip
                     profile={profile}
                     sessionId={sessionId}
+                    nodeId={chosenNode || undefined}
                     activePrNumber={activeSession?.prNumber}
                     provider={currentProfileInfo.provider}
                     repoUrl={currentProfileInfo.web_url}

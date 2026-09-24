@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { GitBranch, GitCommit, GitPullRequest, RefreshCw, Plus, ExternalLink } from 'lucide-react';
+import { GitBranch, GitCommit, GitPullRequest, ExternalLink } from 'lucide-react';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
@@ -7,6 +7,7 @@ import { useGahStore } from '../store/gahStore.js';
 import { gahApi } from '../api/client.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
+import { CommitPrDialog } from '../components/CommitPrDialog.js';
 import type { ChatPrSummary } from '@git-agent-harness/contracts';
 
 interface GitStatus { branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean }
@@ -30,13 +31,7 @@ export function GitPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // PR creation form
-  const [prTitle, setPrTitle] = useState('');
-  const [prBody, setPrBody] = useState('');
-  const [prDraft, setPrDraft] = useState(false);
-  const [creatingPr, setCreatingPr] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
-  const [showPrForm, setShowPrForm] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -60,26 +55,6 @@ export function GitPage() {
   useEffect(() => { load(); }, [profile]);
   useEffect(() => { fetchProfiles(); }, [fetchProfiles]);
   useWsReconnectRefresh(() => { void load(); void fetchProfiles({ force: true }); });
-
-  const createPr = async () => {
-    if (!prTitle) return;
-    setCreatingPr(true);
-    setCreateError(null);
-    try {
-      const result = await gahApi.createGitPr(profile, { title: prTitle, body: prBody, draft: prDraft });
-      setShowPrForm(false);
-      setPrTitle('');
-      setPrBody('');
-      // Refresh PRs
-      const updated = await gahApi.getGitPrs(profile);
-      setPrs(updated);
-      window.open(result.url, '_blank');
-    } catch (e) {
-      setCreateError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setCreatingPr(false);
-    }
-  };
 
   const tabs: { id: Tab; label: string }[] = [
     { id: 'status', label: 'Status' },
@@ -109,6 +84,7 @@ export function GitPage() {
                 </option>
               ))}
             </select>
+            <button type="button" className="btn-primary text-xs" onClick={() => setReviewOpen(true)}>Commit / PR</button>
             <div className="flex overflow-hidden rounded-md border border-subtle text-xs">
               {tabs.map((t) => (
                 <button
@@ -191,47 +167,8 @@ export function GitPage() {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold text-primary">Open pull requests</h3>
-            <button
-              onClick={() => setShowPrForm((v) => !v)}
-              className="btn-primary text-xs flex items-center gap-1.5"
-            >
-              <Plus size={12} />
-              New PR
-            </button>
+            <button type="button" onClick={() => setReviewOpen(true)} className="btn-primary text-xs">Review and create</button>
           </div>
-
-          {showPrForm && (
-            <div className="card-padded space-y-3">
-              <input
-                type="text"
-                value={prTitle}
-                onChange={(e) => setPrTitle(e.target.value)}
-                placeholder="PR title"
-                className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary focus:outline-none focus:border-accent"
-              />
-              <textarea
-                value={prBody}
-                onChange={(e) => setPrBody(e.target.value)}
-                placeholder="Description (optional)"
-                rows={3}
-                className="w-full bg-raised border border-subtle rounded-md px-3 py-2 text-sm text-primary resize-none focus:outline-none focus:border-accent"
-              />
-              <div className="flex items-center gap-4">
-                <label className="flex items-center gap-2 text-xs text-secondary cursor-pointer">
-                  <input type="checkbox" checked={prDraft} onChange={(e) => setPrDraft(e.target.checked)} className="accent-accent" />
-                  Draft
-                </label>
-                <button
-                  onClick={createPr}
-                  disabled={!prTitle || creatingPr}
-                  className="btn-primary text-xs px-3 py-1.5 disabled:opacity-50"
-                >
-                  {creatingPr ? 'Creating…' : 'Create PR'}
-                </button>
-                {createError && <p className="text-xs text-critical">{createError}</p>}
-              </div>
-            </div>
-          )}
 
           {prs.warning && <p className="text-xs text-muted italic">{prs.warning}</p>}
 
@@ -272,6 +209,7 @@ export function GitPage() {
           )}
         </div>
       )}
+      {reviewOpen && <CommitPrDialog profile={profile} onClose={() => setReviewOpen(false)} onChanged={() => void load()} />}
     </div>
   );
 }

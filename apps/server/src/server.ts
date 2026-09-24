@@ -100,10 +100,10 @@ import { listAllChatSessions, resolveSessionCwd, chatSessionStoreOptions } from 
 import { usageRollup } from './managerChat/usageRollup.js';
 import { MessagingBridge } from './managerChat/messagingBridge.js';
 import { projectRoutes } from './projectRoutes.js';
-import { chatNodes, configureChatRouting } from './chatRouting.js';
+import { chatNodes, chatRoute, configureChatRouting } from './chatRouting.js';
 import { createWorkerChatRouter } from './workerChat.js';
-import { getGitStatusCached, getGitBranchesCached, getGitLogCached, commitGitChanges, cliInDir } from './gitCache.js';
-import { createGitLabMergeRequest } from './gitPullRequest.js';
+import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitReviewState, commitGitChanges, cliInDir } from './gitCache.js';
+import { createGitLabMergeRequest, findOpenPullRequest, publishPullRequest } from './gitPullRequest.js';
 import {
   addCanonicalSkillBinding,
   clearSkillBindings,
@@ -2012,16 +2012,52 @@ export function createServer(
   app.get('/api/git/status', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
-    const target = await resolveGitTarget(profile, sessionId);
-    if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
-    if (target.kind === 'read-only') {
-      return res.json({ branch: target.branch, changes: [], cwd: null, readOnly: true });
-    }
+    const nodeId = typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined;
     try {
-      const result = await getGitStatusCached(profile, target.cwd, sessionId);
+      const route = await chatRoute(profile, nodeId, undefined, false);
+      if (route.remote) return res.json(await route.remote.request({ action: 'git-status', sessionId }));
+      const target = await resolveGitTarget(route.profileName, sessionId);
+      if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
+      if (target.kind === 'read-only') return res.json({ branch: target.branch, changes: [], cwd: null, readOnly: true });
+      const result = await getGitStatusCached(route.profileName, target.cwd, sessionId);
       res.json(result);
     } catch (error) {
       res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get('/api/git/review', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
+    const nodeId = typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined;
+    const base = typeof req.query.base === 'string' ? req.query.base : undefined;
+    try {
+      const route = await chatRoute(profile, nodeId, undefined, false);
+      const review = route.remote
+        ? await route.remote.request<Record<string, unknown>>({ action: 'git-review', sessionId, base })
+        : await (async () => {
+          const target = await resolveGitTarget(route.profileName, sessionId);
+          if (target.kind === 'error') throw new Error(target.error);
+          if (target.kind === 'read-only') throw new Error('Session is read-only and has no writable checkout');
+          const profileInfo = await resolveProfileInfo(route.profileName);
+          if (!profileInfo || !['github', 'gitlab'].includes(profileInfo.provider)) throw new Error('Unsupported repository provider');
+          const state = await getGitReviewState(target.cwd, base);
+          return {
+            ...state,
+            provider: profileInfo.provider,
+            providerLabel: profileInfo.provider === 'gitlab' ? 'merge request' : 'pull request',
+            existing: await findOpenPullRequest(profileInfo, target.cwd, state.branch).catch(() => null)
+          };
+        })();
+      res.json({ ...review, ownerNodeId: route.nodeId ?? getCoordinatorIdentity(undefined, coordinatorPort).node_id, ownerNodeName: route.nodeName ?? getCoordinatorIdentity(undefined, coordinatorPort).display_name });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : '';
+      const message = detail === 'A named branch is required'
+        || detail === 'Session is read-only and has no writable checkout'
+        || /^Base branch '[^'\r\n]+' is unavailable locally$/.test(detail)
+        ? detail
+        : 'Failed to prepare git review';
+      res.status(502).json({ error: 'Failed to prepare git review', message });
     }
   });
 
@@ -2085,21 +2121,47 @@ export function createServer(
     res.json({ url: out.trim() });
   });
 
-  app.post('/api/git/commit', async (req, res) => {
+  app.post('/api/git/commit', mutation('git.commit'), async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
-    const { message } = req.body as { message?: string };
+    const { message, files, nodeId } = req.body as { message?: string; files?: unknown; nodeId?: unknown };
     if (!message || !message.trim()) return res.status(400).json({ error: 'message required' });
-    const target = await resolveGitTarget(profile, sessionId);
-    if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
-    if (target.kind === 'read-only') {
-      return res.status(403).json({ error: 'Session is read-only and has no writable checkout' });
-    }
+    if (files !== undefined && (!Array.isArray(files) || !files.every(path => typeof path === 'string'))) return res.status(400).json({ error: 'files must be an array of changed paths' });
+    if (nodeId !== undefined && typeof nodeId !== 'string') return res.status(400).json({ error: 'nodeId must be a string' });
     try {
-      const result = await commitGitChanges(profile, target.cwd, message.trim(), sessionId);
+      const route = await chatRoute(profile, nodeId as string | undefined, undefined, false);
+      if (route.remote) return res.json(await route.remote.request({ action: 'git-commit', sessionId, message: message.trim(), files }));
+      const target = await resolveGitTarget(route.profileName, sessionId);
+      if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
+      if (target.kind === 'read-only') return res.status(403).json({ error: 'Session is read-only and has no writable checkout' });
+      const result = await commitGitChanges(route.profileName, target.cwd, message.trim(), sessionId, files as string[] | undefined);
       res.json(result);
     } catch (error) {
       res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post('/api/git/publish', mutation('git.publish'), async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
+    const { title, body = '', base, draft = false, nodeId } = req.body ?? {};
+    if (typeof title !== 'string' || !title.trim() || typeof body !== 'string' || typeof base !== 'string' || !base.trim()
+      || typeof draft !== 'boolean' || (nodeId !== undefined && typeof nodeId !== 'string')) {
+      return res.status(400).json({ error: 'Invalid pull request review' });
+    }
+    try {
+      const route = await chatRoute(profile, nodeId, undefined, false);
+      if (route.remote) return res.json(await route.remote.request({ action: 'git-publish', sessionId, title: title.trim(), body, base: base.trim(), draft }));
+      const target = await resolveGitTarget(route.profileName, sessionId);
+      if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
+      if (target.kind === 'read-only') return res.status(403).json({ error: 'Session is read-only and has no writable checkout' });
+      const profileInfo = await resolveProfileInfo(route.profileName);
+      if (!profileInfo) return res.status(404).json({ error: 'Profile not found' });
+      const review = await getGitReviewState(target.cwd, base.trim());
+      if (review.commits.length === 0) return res.status(409).json({ error: 'No committed changes exist against the selected base' });
+      res.json(await publishPullRequest(profileInfo, target.cwd, { title: title.trim(), body, base: review.base, draft }));
+    } catch {
+      res.status(502).json({ error: 'Push or provider request failed' });
     }
   });
 
