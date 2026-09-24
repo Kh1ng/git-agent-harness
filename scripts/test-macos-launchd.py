@@ -76,6 +76,25 @@ with tempfile.TemporaryDirectory(prefix='gah-launchd-') as temporary:
     subprocess.run(['bash', str(source), 'install', 'worker', str(repo)], env=env, check=True)
     assert worker_path.exists(), 'a fresh worker must run before its first profile is imported'
 
+    tailscale = root / 'tailscale'
+    tailscale.write_text('#!/bin/sh\nprintf \'%s\\n\' \'{"Self":{"DNSName":"mac.test.ts.net.","TailscaleIPs":["100.64.0.42","fd7a:115c:a1e0::1"]}}\'\n')
+    tailscale.chmod(0o700)
+    default_transport_env = {
+        key: value for key, value in env.items() if key != 'GAH_NODE_ADVERTISED_URL'
+    }
+    default_transport_env['GAH_TAILSCALE_PATH'] = str(tailscale)
+    subprocess.run(
+        ['bash', str(source), 'install', 'worker', str(repo), profile],
+        env=default_transport_env,
+        check=True,
+    )
+    worker = plistlib.loads(worker_path.read_bytes())
+    identity = json.loads(identity_path.read_text())
+    assert identity['advertised_url'] == 'http://100.64.0.42:4774'
+    assert worker['EnvironmentVariables']['HOST'] == '100.64.0.42'
+    assert worker['EnvironmentVariables']['GAH_REGISTRY_TRANSPORT_MODE'] == 'trusted_lan'
+    assert worker['EnvironmentVariables']['GAH_TAILSCALE_SERVE'] == '0'
+
     invalid = subprocess.run(
         ['bash', str(source), 'install', 'central', str(repo)],
         env={**env, 'GAH_DESKTOP_SERVER_PORT': '80'}, capture_output=True, text=True,

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Own the macOS control-plane/worker lifecycle from one deterministic place.
 set -euo pipefail
+trap 'echo "ERROR: macOS LaunchAgent setup failed at line $LINENO." >&2' ERR
 
 action="${1:?Usage: macos-launchd.sh install|start|stop|status central|worker [repo] [profile]}"
 role="${2:?Missing node role}"
@@ -39,12 +40,14 @@ register_worker() {
   host="$(plist_value HOST)"
   port="$(plist_value PORT)"
   transport_mode="$(plist_value GAH_REGISTRY_TRANSPORT_MODE)"
+  set -a
+  # shellcheck disable=SC1090
+  [ ! -f "$HOME/.config/gah/gah-loop.env" ] || . "$HOME/.config/gah/gah-loop.env"
+  set +a
+  curl_args=(-fsS -m 2)
+  [ -z "${COORDINATOR_TOKEN:-}" ] || curl_args+=(-H "Authorization: Bearer $COORDINATOR_TOKEN")
   for _ in $(seq 1 20); do
-    if /usr/bin/curl -fsS -m 2 "http://$host:$port/health" >/dev/null 2>&1; then
-      set -a
-      # shellcheck disable=SC1090
-      [ ! -f "$HOME/.config/gah/gah-loop.env" ] || . "$HOME/.config/gah/gah-loop.env"
-      set +a
+    if /usr/bin/curl "${curl_args[@]}" "http://$host:$port/health" >/dev/null 2>&1; then
       GAH_COORDINATOR_IDENTITY_PATH="$identity_path" "$gah_path" node register --transport-mode "$transport_mode"
       return
     fi
@@ -56,7 +59,7 @@ register_worker() {
 
 configure_worker_transport() {
   [ "${GAH_LAUNCHD_DRY_RUN:-}" = 1 ] && return
-  [ "$(plist_value GAH_TAILSCALE_SERVE)" = 1 ] || return
+  [ "$(plist_value GAH_TAILSCALE_SERVE)" = 1 ] || return 0
   tailscale_path="$(plist_value GAH_TAILSCALE_CLI)"
   port="$(plist_value PORT)"
   "$tailscale_path" serve --bg --yes --https="$port" "http://127.0.0.1:$port" >/dev/null
@@ -65,8 +68,8 @@ configure_worker_transport() {
 disable_worker_transport() {
   [ "${GAH_LAUNCHD_DRY_RUN:-}" = 1 ] && return
   worker_plist="$agents_dir/$worker_label.plist"
-  [ -f "$worker_plist" ] || return
-  [ "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:GAH_TAILSCALE_SERVE' "$worker_plist" 2>/dev/null || true)" = 1 ] || return
+  [ -f "$worker_plist" ] || return 0
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:GAH_TAILSCALE_SERVE' "$worker_plist" 2>/dev/null || true)" = 1 ] || return 0
   tailscale_path="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:GAH_TAILSCALE_CLI' "$worker_plist")"
   port="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:PORT' "$worker_plist")"
   "$tailscale_path" serve --https="$port" off >/dev/null 2>&1 || true
@@ -92,6 +95,8 @@ case "$action" in
   *) echo "ERROR: invalid action '$action'" >&2; exit 1 ;;
 esac
 
+[ "$role" != worker ] || disable_worker_transport
+
 repo="${3:?Install requires the GAH repository path}"
 profile="${4:-}"
 repo="$(cd "$repo" && pwd -P)"
@@ -111,9 +116,9 @@ if [ -z "$tailscale_path" ] && [ -x /Applications/Tailscale.app/Contents/MacOS/T
 fi
 if [ "$role" = worker ] && [ -z "$advertised_url" ]; then
   [ -n "$tailscale_path" ] || { echo 'ERROR: Tailscale is required for a macOS worker.' >&2; exit 1; }
-  tailscale_dns="$($tailscale_path status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
-  [ -n "$tailscale_dns" ] || { echo 'ERROR: cannot find this Mac tailnet DNS name.' >&2; exit 1; }
-  advertised_url="https://$tailscale_dns:$port"
+  tailscale_ip="$($tailscale_path status --json | python3 -c 'import json,sys; print(next((value for value in json.load(sys.stdin)["Self"]["TailscaleIPs"] if ":" not in value), ""))')"
+  [ -n "$tailscale_ip" ] || { echo 'ERROR: cannot find this Mac tailnet IPv4 address.' >&2; exit 1; }
+  advertised_url="http://$tailscale_ip:$port"
 fi
 
 export GAH_LAUNCHD_ACTION="$action" GAH_LAUNCHD_ROLE="$role" GAH_LAUNCHD_REPO="$repo"
@@ -287,3 +292,5 @@ elif [ -f "$gateway_plist" ]; then
   run_launchctl bootout "$domain/$gateway_label" >/dev/null 2>&1 || true
   bootstrap_agent "$gateway_plist"
 fi
+[ "$role" != worker ] || configure_worker_transport
+[ "$role" != worker ] || register_worker
