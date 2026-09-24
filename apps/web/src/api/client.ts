@@ -263,7 +263,7 @@ export interface GahDataSource {
   setSkillBindings(data: SkillBindingUpdate): Promise<SkillBindingSummary>;
   inheritSkillBindings(data: Omit<SkillBindingUpdate, 'skillIds'>): Promise<SkillBindingSummary>;
   recallContext(profile: string, query: string): Promise<{ context: string; memoryCount: number }>;
-  getGitStatus(profile: string, sessionId?: string, nodeId?: string): Promise<{ branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean }>;
+  getGitStatus(profile: string, sessionId?: string, nodeId?: string): Promise<{ branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean; ownerNodeId: string; ownerNodeName: string }>;
   getGitReview(profile: string, options?: { sessionId?: string; nodeId?: string; base?: string }): Promise<GitReviewState>;
   getGitBranches(profile: string): Promise<{ branches: string[]; current: string }>;
   getGitLog(profile: string, limit?: number): Promise<{ commits: { hash: string; short: string; subject: string; author: string; ago: string }[] }>;

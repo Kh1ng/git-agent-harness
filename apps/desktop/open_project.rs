@@ -205,6 +205,7 @@ fn safe_identifier(value: &str) -> bool {
         })
 }
 
+#[cfg(any(windows, test))]
 fn posix_join(base: &str, name: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), name)
 }
@@ -290,6 +291,7 @@ fn validate_native_checkout(candidate: &str, base: Option<&str>) -> Result<Strin
     Ok(path)
 }
 
+#[cfg(any(windows, test))]
 const WSL_RESOLVE_SCRIPT: &str = r#"
 set -euo pipefail
 target="$(readlink -f -- "$1")"
@@ -304,6 +306,7 @@ root="$(git -C "$target" rev-parse --show-toplevel)"
 wslpath -w "$target"
 "#;
 
+#[cfg(any(windows, test))]
 fn wsl_resolve_args(candidate: &str, base: Option<&str>) -> Vec<String> {
     [
         "--exec",
@@ -336,6 +339,7 @@ fn resolve_wsl_checkout(
     parse_wsl_checkout(&output.stdout)
 }
 
+#[cfg(any(windows, test))]
 fn parse_wsl_checkout(output: &[u8]) -> Result<String, String> {
     let path = String::from_utf8_lossy(output).trim().to_owned();
     if path.is_empty() || path.chars().any(char::is_control) {
@@ -354,7 +358,7 @@ fn select_project(
         || project_ref
             .node_id
             .as_deref()
-            .is_some_and(|id| id.is_empty() || id.len() > 128 || id.chars().any(char::is_control))
+            .is_none_or(|id| id.is_empty() || id.len() > 128 || id.chars().any(char::is_control))
     {
         return Err("The project identity is invalid.".into());
     }
@@ -429,6 +433,7 @@ fn has_app(name: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn contains_xcode_project(path: &Path, depth: usize) -> bool {
     if depth == 0 {
         return false;
@@ -604,10 +609,12 @@ fn spawn(mut process: Command) -> Result<(), String> {
         .map_err(|error| format!("Cannot open the local checkout: {error}"))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn apple_script_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -694,7 +701,7 @@ fn launch(_tool_id: &str, _checkout: &Checkout) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn desktop_open_context(
+pub async fn desktop_open_context(
     window: tauri::WebviewWindow,
     project: OpenProjectRef,
 ) -> Result<DesktopOpenContext, String> {
@@ -731,7 +738,7 @@ pub fn desktop_open_context(
 }
 
 #[tauri::command]
-pub fn open_local_checkout(
+pub async fn open_local_checkout(
     window: tauri::WebviewWindow,
     project: OpenProjectRef,
     tool: String,
@@ -826,7 +833,7 @@ mod tests {
             environment: Environment::Native,
         };
         let selected = select_project(
-            vec![project],
+            vec![project.clone()],
             &OpenProjectRef {
                 profile: "gah".into(),
                 node_id: Some("mac-1".into()),
@@ -850,6 +857,15 @@ mod tests {
         )
         .unwrap()
         .is_none());
+        assert!(select_project(
+            vec![project],
+            &OpenProjectRef {
+                profile: "gah".into(),
+                node_id: None,
+                session_id: None,
+            },
+        )
+        .is_err());
     }
 
     #[test]

@@ -722,6 +722,7 @@ test('git routes reject stale sessions and expose worktree-less sessions as read
   };
 
   const app = createServer({});
+  const identity = JSON.parse(readFileSync(process.env.GAH_COORDINATOR_IDENTITY_PATH, 'utf8')) as { node_id: string; display_name: string };
   const server = http.createServer(app);
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -760,7 +761,9 @@ test('git routes reject stale sessions and expose worktree-less sessions as read
       branch: prSession.branch,
       changes: [],
       cwd: null,
-      readOnly: true
+      readOnly: true,
+      ownerNodeId: identity.node_id,
+      ownerNodeName: identity.display_name
     });
 
     // Confirm none of the rejected attempts ever touched local_path.

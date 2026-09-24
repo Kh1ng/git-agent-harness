@@ -11,7 +11,7 @@ import { CommitPrDialog } from '../components/CommitPrDialog.js';
 import { OpenLocalCheckout } from '../components/OpenLocalCheckout.js';
 import type { ChatPrSummary } from '@git-agent-harness/contracts';
 
-interface GitStatus { branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean }
+interface GitStatus { branch: string; changes: { status: string; path: string }[]; cwd: string | null; readOnly?: boolean; ownerNodeId: string; ownerNodeName: string }
 interface GitLog { commits: { hash: string; short: string; subject: string; author: string; ago: string }[] }
 interface GitPrs { prs: ChatPrSummary[]; warning?: string }
 
@@ -85,7 +85,7 @@ export function GitPage() {
                 </option>
               ))}
             </select>
-            <OpenLocalCheckout profile={profile} nodeName="central node" />
+            {status && <OpenLocalCheckout profile={profile} nodeId={status.ownerNodeId} nodeName={status.ownerNodeName} />}
             <button type="button" className="btn-primary text-xs" onClick={() => setReviewOpen(true)}>Commit / PR</button>
             <div className="flex overflow-hidden rounded-md border border-subtle text-xs">
               {tabs.map((t) => (
@@ -211,7 +211,7 @@ export function GitPage() {
           )}
         </div>
       )}
-      {reviewOpen && <CommitPrDialog profile={profile} onClose={() => setReviewOpen(false)} onChanged={() => void load()} />}
+      {reviewOpen && <CommitPrDialog profile={profile} nodeId={status?.ownerNodeId} onClose={() => setReviewOpen(false)} onChanged={() => void load()} />}
     </div>
   );
 }
