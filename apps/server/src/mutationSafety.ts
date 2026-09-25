@@ -26,7 +26,11 @@ type Operation =
   | 'config.prompt_policy.reset'
   | 'config.prompt_policy.rollback'
   | 'messaging_bridge.pair'
-  | 'messaging_bridge.revoke';
+  | 'messaging_bridge.revoke'
+  | 'push_subscription.add'
+  | 'push_subscription.remove'
+  | 'apns_device.add'
+  | 'apns_device.remove';
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 
 // JSON object order is not part of the request's meaning; array order is.
@@ -66,7 +70,7 @@ export function mutationSafety(nodeId: string, directory = process.env.GAH_MUTAT
     const principal = res.locals.authPrincipal;
     const actor = principal?.kind === 'owner' ? 'owner' : principal?.kind === 'device' ? `device:${principal.id}` : 'unauthenticated';
     const key = req.get('Idempotency-Key');
-    const target = digest(canonical({ body: req.body ?? null, query: req.query }));
+    const target = digest(canonical({ params: req.params, body: req.body ?? null, query: req.query }));
     const operationId = digest(canonical([nodeId, actor, operation, key ?? null]));
     const record = { actor, operation, operation_id: operationId, target_digest: target };
     const reject = (status: number, code: string, message: string) => {

@@ -1,7 +1,7 @@
+use super::super::super::attempts::reserve_backend_attempt;
 use super::{
-    mark_review_budget_exhausted, mark_review_shutdown_cancelled, reserve_review_route,
-    review_attempt_environment, review_failure_output, review_outcome_allows_reroute,
-    review_terminal_failure_summary,
+    mark_review_budget_exhausted, mark_review_shutdown_cancelled, review_attempt_environment,
+    review_failure_output, review_outcome_allows_reroute, review_terminal_failure_summary,
 };
 use crate::config::tests::test_profile_for_notifications;
 use crate::ledger::{LedgerEntry, LedgerUsage};
@@ -218,7 +218,7 @@ fn three_reviews_never_overlap_on_a_backend_model_capped_at_one() {
             let max_seen = Arc::clone(&max_seen);
             std::thread::spawn(move || {
                 start.wait();
-                let _slot = reserve_review_route(&profile, &route, None).unwrap();
+                let _slot = reserve_backend_attempt(&profile, &route.identity, None).unwrap();
                 max_seen.fetch_max(
                     current_concurrent(&route.effective_backend, route.effective_model.as_deref()),
                     Ordering::SeqCst,

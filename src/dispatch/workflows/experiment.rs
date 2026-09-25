@@ -152,6 +152,7 @@ pub(crate) fn experiment(
                 exit_code: -1,
                 duration_secs: 0.0,
                 log_path: log_path.to_string_lossy().into_owned(),
+                agent_session: None,
                 final_summary: None,
                 agy_cli_log_delta: None,
                 internal_log_delta: None,
@@ -162,6 +163,7 @@ pub(crate) fn experiment(
             }
         }
     };
+    ledger.origin_agent_session = result.agent_session.clone();
     println!(
         "Backend finished: exit={} duration={:.0}s log={}",
         result.exit_code, result.duration_secs, result.log_path

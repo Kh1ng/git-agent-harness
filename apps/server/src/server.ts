@@ -128,6 +128,8 @@ import {
   type AdminUpdateState,
   type StartAdminUpdateResult
 } from './adminUpdate.js';
+import type { WebPushNotifications } from './webPush.js';
+import type { ApnsNotifications } from './apns.js';
 
 const SERVER_VERSION = COORDINATOR_VERSION;
 
@@ -149,6 +151,8 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   readAdminUpdateState?: typeof readAdminUpdateState;
   detectTailscaleIPv4?: typeof detectTailscaleIPv4;
   messagingBridge?: MessagingBridge;
+  webPushNotifications?: WebPushNotifications;
+  apnsNotifications?: ApnsNotifications;
 };
 
 const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
@@ -317,6 +321,45 @@ export function createServer(
   app.use('/api', authMiddleware);
   const mutation = mutationSafety(getCoordinatorIdentity(undefined, coordinatorPort).node_id);
   app.use(workerRouteGuard(node));
+  if (node.role === 'central' && configDeps.webPushNotifications) {
+    const push = configDeps.webPushNotifications;
+    app.get('/api/push/public-key', (_req, res) => res.json({ publicKey: push.publicKey() }));
+    app.get('/api/push/subscriptions', (_req, res) => res.json(push.list()));
+    app.post('/api/push/subscriptions', mutation('push_subscription.add'), (req, res) => {
+      try {
+        res.status(201).json(push.register(req.body?.subscription, req.body?.label));
+      } catch (error) {
+        res.status(400).json({ error: 'invalid_push_subscription', message: error instanceof Error ? error.message : String(error) });
+      }
+    });
+    app.delete('/api/push/subscriptions/:id', mutation('push_subscription.remove'), (req, res) => {
+      try {
+        const result = push.remove(req.params.id);
+        res.status(result.removed ? 200 : 404).json(result);
+      } catch (error) {
+        res.status(400).json({ error: 'invalid_push_subscription', message: error instanceof Error ? error.message : String(error) });
+      }
+    });
+  }
+  if (node.role === 'central' && configDeps.apnsNotifications) {
+    const apns = configDeps.apnsNotifications;
+    app.get('/api/push/apns-devices', (_req, res) => res.json(apns.list()));
+    app.post('/api/push/apns-devices', mutation('apns_device.add'), (req, res) => {
+      try {
+        res.status(201).json(apns.register(req.body));
+      } catch (error) {
+        res.status(400).json({ error: 'invalid_apns_device', message: error instanceof Error ? error.message : String(error) });
+      }
+    });
+    app.delete('/api/push/apns-devices/:id', mutation('apns_device.remove'), (req, res) => {
+      try {
+        const result = apns.remove(req.params.id);
+        res.status(result.removed ? 200 : 404).json(result);
+      } catch (error) {
+        res.status(400).json({ error: 'invalid_apns_device', message: error instanceof Error ? error.message : String(error) });
+      }
+    });
+  }
   if (node.role === 'central') configureChatRouting(registryService, () => getCoordinatorIdentity(undefined, coordinatorPort));
   app.use('/api/worker-chat', createWorkerChatRouter({ node, nodeId: getCoordinatorIdentity(undefined, coordinatorPort).node_id }));
   app.use('/api/worker-memory', workerMemoryRouter());

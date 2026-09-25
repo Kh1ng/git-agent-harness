@@ -3,7 +3,9 @@ import XCTest
 final class ControllerTests: XCTestCase {
     func testActivityNotificationPayloadIsBounded() {
         let valid: [String: Any] = ["type": "activity", "id": "event-1", "title": "Work finished", "body": "#941 passed"]
-        XCTAssertEqual(activityNotificationRequest(from: valid), ActivityNotificationRequest(id: "event-1", title: "Work finished", body: "#941 passed"))
+        XCTAssertEqual(activityNotificationRequest(from: valid), ActivityNotificationRequest(id: "event-1", title: "Work finished", body: "#941 passed", url: nil))
+        XCTAssertEqual(activityNotificationRequest(from: valid.merging(["url": "/?page=chat&profile=gah&chat=s1"]) { _, new in new })?.url, "/?page=chat&profile=gah&chat=s1")
+        XCTAssertNil(activityNotificationRequest(from: valid.merging(["url": "https://evil.example/"]) { _, new in new }))
         XCTAssertNil(activityNotificationRequest(from: ["type": "activity", "id": "event-1", "title": "Missing body"]))
         XCTAssertNil(activityNotificationRequest(from: ["type": "activity", "id": "bad\nid", "title": "Title", "body": "body"]))
         XCTAssertNil(activityNotificationRequest(from: ["type": "activity", "id": "event-1", "title": "Bad\nTitle", "body": "body"]))
@@ -31,6 +33,10 @@ final class ControllerTests: XCTestCase {
         let link = URL(string: "gah://open?url=https%3A%2F%2Fgah.example%2F%3Fpage%3Dchat")!
         XCTAssertEqual(try ServerAddress.fromDeepLink(link).url.absoluteString, "https://gah.example/?page=chat")
         XCTAssertThrowsError(try ServerAddress.fromDeepLink(URL(string: "gah://open?url=https://a.example&url=https://b.example")!))
+        let server = try ServerAddress("https://gah.example/")
+        XCTAssertEqual(server.chatURL(from: URL(string: "gah://chat?profile=gah&chat=session-7")!)?.absoluteString,
+                       "https://gah.example/?page=chat&profile=gah&chat=session-7")
+        XCTAssertNil(server.chatURL(from: URL(string: "https://evil.example/?profile=gah&chat=session-7")!))
     }
 
     func testFailedSwitchHidesOldDashboardAndRetryKeepsUnusedPairingCode() throws {

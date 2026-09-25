@@ -6,7 +6,6 @@
 
 use crate::config::{self, GahConfig};
 use crate::ledger::{read_entries, LedgerEntry};
-use crate::models::PolicyConfig;
 use crate::notifications::{
     notify_terminal_failure_resolved, notify_terminal_failure_resolved_with_run_id,
 };
@@ -667,19 +666,7 @@ fn source_issue_closure_allowed(profile: &crate::config::Profile) -> Result<bool
     let Some(policy_path) = &profile.policy_path else {
         return Ok(true);
     };
-    let text = fs::read_to_string(policy_path)
-        .with_context(|| format!("reading policy file: {}", policy_path))?;
-    let cfg: PolicyConfig =
-        toml::from_str(&text).with_context(|| format!("parsing policy file: {}", policy_path))?;
-    let repo = cfg.repo;
-    let allowed = match repo.trust_mode.as_str() {
-        "read_only" => false,
-        "draft_pr_allowed" => repo.allow_issue_write,
-        // For any other trust mode, defer to the general issue write permission
-        // This future-proofs the function for new trust modes
-        _ => repo.allow_issue_write,
-    };
-    Ok(allowed)
+    crate::policy::config_allows_action(std::path::Path::new(policy_path), "edit-issue")
 }
 
 fn resolve_source_issue_mapping(

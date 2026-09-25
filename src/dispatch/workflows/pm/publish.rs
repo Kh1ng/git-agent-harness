@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 
 const PUBLICATION_SCHEMA_VERSION: u32 = 1;
 const MAX_ARTIFACT_BYTES: usize = 400_000;
-const MAX_PROVIDER_TITLE_CHARS: usize = 255;
 const MAX_PROVIDER_BODY_BYTES: usize = 60_000;
 
 trait IssuePublisher {
@@ -352,11 +351,11 @@ fn publish_with_provider(
                     state,
                     context.child_depth,
                 );
-                if ticket.title.chars().count() > MAX_PROVIDER_TITLE_CHARS {
+                if ticket.title.chars().count() > provider::PROVIDER_TITLE_MAX_CHARS {
                     anyhow::bail!(
                         "PM child '{}' title exceeds provider limit of {} characters",
                         ticket_key,
-                        MAX_PROVIDER_TITLE_CHARS
+                        provider::PROVIDER_TITLE_MAX_CHARS
                     );
                 }
                 if body.len() > MAX_PROVIDER_BODY_BYTES {

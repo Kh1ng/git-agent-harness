@@ -1,4 +1,6 @@
-use super::{gitlab_api, provider_command, redacted_provider_output, ProviderIssue};
+use super::{
+    gitlab_api, gitlab_project_id, provider_command, redacted_provider_output, ProviderIssue,
+};
 use crate::config::Profile;
 use anyhow::{Context, Result};
 
@@ -77,10 +79,7 @@ pub(crate) fn link_provider_dependency(
     if profile.provider != "gitlab" {
         return Ok(());
     }
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let result = gitlab_api(
         profile,
         &format!("projects/{project_id}/issues/{}/links", dependency.number),

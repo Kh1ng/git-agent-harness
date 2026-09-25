@@ -192,6 +192,7 @@ pub(crate) fn pm(
                     exit_code: -1,
                     duration_secs: 0.0,
                     log_path: log_path.to_string_lossy().into_owned(),
+                    agent_session: None,
                     final_summary: None,
                     agy_cli_log_delta: None,
                     internal_log_delta: None,
@@ -207,6 +208,9 @@ pub(crate) fn pm(
             result.exit_code, result.duration_secs, result.log_path
         );
         ledger.backend_exit_code = Some(result.exit_code);
+        if result.agent_session.is_some() {
+            ledger.origin_agent_session = result.agent_session.clone();
+        }
         ledger.validation_result = Some("not_run".into());
         record_external_approval_consumption_for_last_attempt(cfg, profile_name, profile, ledger);
         let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
@@ -287,6 +291,7 @@ pub(crate) fn pm(
                     attempt_count: Some(attempted_routes.len() as u32 + 1),
                     error_summary: Some(&message),
                     mr_url: None,
+                    origin_agent_session: result.agent_session.as_ref(),
                 },
             );
 
@@ -328,14 +333,6 @@ pub(crate) fn pm(
     Ok(())
 }
 
-fn reserve_pm_backend(
-    profile: &Profile,
-    identity: &crate::execution_identity::ExecutionIdentity,
-    route_admission: Option<&crate::controller::RouteNodeAdmission>,
-) -> Result<super::super::attempts::BackendAdmissionGuard> {
-    reserve_backend_attempt(profile, identity, route_admission)
-}
-
 fn run_pm_backend_attempt<T>(
     profile: &Profile,
     identity: &crate::execution_identity::ExecutionIdentity,
@@ -344,7 +341,7 @@ fn run_pm_backend_attempt<T>(
     run_backend: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     let admission_guard =
-        reserve_pm_backend(profile, identity, route_admission).map_err(|error| {
+        reserve_backend_attempt(profile, identity, route_admission).map_err(|error| {
             super::super::contextualize_capacity_deferral(error, attempts_completed)
         })?;
     let result = run_backend();

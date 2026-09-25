@@ -18,7 +18,7 @@ export function ActivityToast({ event, onOpen, onDismiss }: {
           <p className="text-sm font-semibold text-primary">{event.title}</p>
           <p className="mt-1 line-clamp-2 text-xs text-secondary">{event.message}</p>
           <button type="button" className="mt-2 text-xs font-medium text-accent hover:underline" onClick={onOpen}>
-            View activity
+            {event.sessionId ? 'Open chat' : 'View activity'}
           </button>
         </div>
         <button type="button" className="-m-2 min-h-11 min-w-11 p-2 text-muted hover:text-primary" onClick={onDismiss} aria-label="Dismiss notification">

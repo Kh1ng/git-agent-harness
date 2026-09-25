@@ -43,11 +43,10 @@ pub struct Defaults {
     pub routing: RoutingPolicy,
     /// Which agent CLI ("claude" | "codex" | "hermes") is currently acting
     /// as the operator's manager across all profiles/projects. Read by the
-    /// manager-wake feature (`Profile::manager_wake_autonomy`) to decide
-    /// who to invoke when a notify-worthy event fires. Global, not
-    /// per-profile -- "who's on call" is a cross-project fact, unlike
-    /// autonomy bounds. `None`/unrecognized values mean no wake happens
-    /// even if a profile has autonomy enabled.
+    /// manager-wake feature (`Profile::manager_wake_autonomy`) for
+    /// supervisory events and as the fallback when the originating worker
+    /// session cannot resume. Global, not per-profile -- "who's on call"
+    /// is a cross-project fact, unlike autonomy bounds.
     pub current_manager: Option<String>,
     /// See `crate::network_exposure` module docs (issue #879).
     pub network_exposure: crate::network_exposure::NetworkExposureLevel,

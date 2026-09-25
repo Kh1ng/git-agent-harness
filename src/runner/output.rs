@@ -113,6 +113,20 @@ fn is_codex_event_type(event_type: &str) -> bool {
     )
 }
 
+pub(crate) fn extract_codex_thread_id(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let event = serde_json::from_str::<Value>(line).ok()?;
+        (event.get("type").and_then(Value::as_str) == Some("thread.started"))
+            .then(|| {
+                event
+                    .get("thread_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .flatten()
+    })
+}
+
 /// Extract only the final agent message belonging to the newest completed
 /// Codex turn. Tool events, usage records, stale turns, and incomplete turns
 /// are never returned.
@@ -284,6 +298,7 @@ mod tests {
             extract_codex_jsonl_summary(log).as_deref(),
             Some("Final summary")
         );
+        assert_eq!(extract_codex_thread_id(log).as_deref(), Some("secret"));
     }
 
     #[test]

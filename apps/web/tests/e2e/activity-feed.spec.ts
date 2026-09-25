@@ -43,6 +43,16 @@ const offline = {
   workId: null
 };
 
+const chatFinished = {
+  ...finished,
+  id: 'chat:gah:session-7:3:chat_turn_completed',
+  kind: 'chat_turn_completed',
+  title: 'gah: reply ready',
+  message: 'The requested change is ready.',
+  workId: null,
+  sessionId: 'session-7'
+};
+
 test('replay de-duplicates durable activity', async ({ page }) => {
   await page.routeWebSocket('**/ws**', (ws) => {
     ws.send(JSON.stringify(welcome));
@@ -94,4 +104,68 @@ test('iOS keeps system alerts off when notification permission is denied', async
   await page.getByRole('button', { name: 'Enable system alerts' }).click();
   await expect(page.getByText('System notifications are unavailable or were not allowed.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enable system alerts' })).toHaveAttribute('aria-pressed', 'false');
+});
+
+test('chat activity opens the originating session and suppresses a focused-chat notification', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('gah.activity.systemNotifications', '1');
+    class FakeNotification {
+      static permission = 'granted';
+      constructor() { (window as typeof window & { notificationCount?: number }).notificationCount = 1; }
+    }
+    Object.defineProperty(window, 'Notification', { value: FakeNotification });
+  });
+  await page.routeWebSocket('**/ws**', (ws) => {
+    ws.send(JSON.stringify(welcome));
+    ws.onMessage((raw) => {
+      if (JSON.parse(String(raw)).type === 'client.hello') {
+        ws.send(JSON.stringify({ type: 'activity.replay', events: [] }));
+        ws.send(JSON.stringify({ type: 'activity.event', event: chatFinished }));
+      }
+    });
+  });
+  await page.goto('/?page=chat&profile=gah&chat=session-7');
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { notificationCount?: number }).notificationCount ?? 0)).toBe(0);
+  await page.goto('/?page=events');
+  await expect(page.getByRole('link', { name: /gah: reply ready/ })).toHaveAttribute('href', '/?page=chat&profile=gah&chat=session-7');
+});
+
+test('background push subscribes, unsubscribes, and hides the toggle on insecure HTTP', async ({ page }) => {
+  const requests: string[] = [];
+  await page.addInitScript(() => {
+    const subscription = {
+      toJSON: () => ({ endpoint: 'https://push.example/device', keys: { p256dh: 'p', auth: 'a' } }),
+      unsubscribe: async () => true
+    };
+    Object.defineProperty(window, 'PushManager', { value: class {} });
+    Object.defineProperty(window, 'Notification', { value: class { static permission = 'granted'; } });
+    Object.defineProperty(navigator, 'serviceWorker', { value: { ready: Promise.resolve({ pushManager: {
+      getSubscription: async () => null,
+      subscribe: async () => subscription
+    } }) } });
+  });
+  await page.route('**/api/push/**', async (route) => {
+    requests.push(route.request().method());
+    if (route.request().url().endsWith('/public-key')) return route.fulfill({ json: { publicKey: 'AQ' } });
+    if (route.request().method() === 'POST') return route.fulfill({ status: 201, json: { id: 'a'.repeat(24), count: 1 } });
+    if (route.request().method() === 'DELETE') return route.fulfill({ json: { removed: true, count: 0 } });
+    return route.fulfill({ json: { count: 0 } });
+  });
+  await page.routeWebSocket('**/ws**', (ws) => {
+    ws.send(JSON.stringify(welcome));
+    ws.onMessage((raw) => {
+      if (JSON.parse(String(raw)).type === 'client.hello') ws.send(JSON.stringify({ type: 'activity.replay', events: [] }));
+    });
+  });
+  await page.goto('/?page=events');
+  await page.getByRole('button', { name: 'Enable system alerts' }).click();
+  await expect(page.getByRole('button', { name: 'System alerts on' })).toBeVisible();
+  await page.getByRole('button', { name: 'System alerts on' }).click();
+  await expect.poll(() => requests.filter((method) => method === 'POST').length).toBe(1);
+  await expect.poll(() => requests.filter((method) => method === 'DELETE').length).toBe(1);
+
+  await page.addInitScript(() => Object.defineProperty(window, 'isSecureContext', { value: false }));
+  await page.reload();
+  await expect(page.getByText('Background push needs the HTTPS dashboard URL.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Enable system alerts' })).toBeDisabled();
 });

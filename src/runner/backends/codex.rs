@@ -45,6 +45,7 @@ pub(crate) fn run_with_executable(
     )?;
 
     let output_text = fs::read_to_string(&log_path).unwrap_or_default();
+    let thread_id = output::extract_codex_thread_id(&output_text);
     let transcript_path =
         crate::runner::review_usage::find_codex_transcript(env_vars, &output_text)
             .map(|path| path.to_string_lossy().into_owned());
@@ -52,6 +53,11 @@ pub(crate) fn run_with_executable(
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
+        agent_session: thread_id.map(|provider_session_id| crate::ledger::AgentSessionRef {
+            backend: "codex".into(),
+            provider_session_id,
+            working_directory: Some(worktree.to_string_lossy().into_owned()),
+        }),
         final_summary: output::extract_codex_jsonl_summary(&output_text),
         agy_cli_log_delta: None,
         internal_log_delta: None,

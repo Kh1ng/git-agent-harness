@@ -497,6 +497,9 @@ pub(crate) fn improve(
                 return Err(e);
             }
         };
+        if result.agent_session.is_some() {
+            ledger.origin_agent_session = result.agent_session.clone();
+        }
         // The backend process launched and ran to an exit code, regardless
         // of what that code was — "completed" tracks whether the attempt
         // got a fair shot, not whether it succeeded.
@@ -604,6 +607,7 @@ pub(crate) fn improve(
                         backend: &route.effective_backend,
                         model: route.effective_model.as_deref().unwrap_or(&llm.model),
                         duration_seconds: result.duration_secs,
+                        origin_agent_session: result.agent_session.as_ref(),
                     },
                 );
             }

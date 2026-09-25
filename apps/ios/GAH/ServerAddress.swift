@@ -60,6 +60,17 @@ struct ServerAddress: Equatable {
         return try ServerAddress(value)
     }
 
+    func chatURL(from link: URL) -> URL? {
+        guard link.scheme == "gah", link.host == "chat",
+              let items = URLComponents(url: link, resolvingAgainstBaseURL: false)?.queryItems,
+              let profile = items.first(where: { $0.name == "profile" })?.value,
+              let chat = items.first(where: { $0.name == "chat" })?.value,
+              profile.count <= 512, chat.count <= 512,
+              var target = URLComponents(url: origin, resolvingAgainstBaseURL: false) else { return nil }
+        target.queryItems = [URLQueryItem(name: "page", value: "chat"), URLQueryItem(name: "profile", value: profile), URLQueryItem(name: "chat", value: chat)]
+        return target.url
+    }
+
     enum AddressError: LocalizedError {
         case invalid, invalidPairing
         var errorDescription: String? {

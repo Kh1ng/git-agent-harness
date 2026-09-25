@@ -1,5 +1,10 @@
 import type { ControllerActivity, ControllerEvent } from '@git-agent-harness/contracts';
 
+/** Whether terminal controller details report a successful dispatch. */
+export function controllerDispatchSucceeded(details: string): boolean {
+  return /:\s*success\s*$/i.test(details);
+}
+
 /** Reconstruct controller-launched runs from correlated events. */
 export function deriveControllerActivity(events: ControllerEvent[]): ControllerActivity[] {
   const runs = new Map<string, ControllerActivity>();
@@ -22,7 +27,7 @@ export function deriveControllerActivity(events: ControllerEvent[]): ControllerA
       const run = runs.get(event.run_id);
       if (!run) continue;
       run.finished_at = event.timestamp;
-      run.status = event.details.endsWith(': success') ? 'finished' : 'failed';
+      run.status = controllerDispatchSucceeded(event.details) ? 'finished' : 'failed';
       run.outcome = event.details;
     }
   }

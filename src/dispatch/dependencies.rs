@@ -1,7 +1,7 @@
 use super::issues::{fetch_dependency_issue, DependencyIssue, IssueDetails};
 use crate::config::Profile;
 use crate::models::{DependencyBlocker, DependencyObservation};
-use crate::provider::{gitlab_api, provider_command};
+use crate::provider::{gitlab_api, gitlab_project_id, provider_command};
 use anyhow::Result;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -176,11 +176,10 @@ pub(crate) fn fetch_gitlab_blocks_links(
         return Ok(Vec::new());
     }
 
-    let project_id = profile.provider_project_id.as_deref().ok_or_else(|| {
-        DependencyRelationshipError::ProviderError {
-            message: "profile missing provider_project_id for gitlab".to_string(),
-        }
-    })?;
+    let project_id =
+        gitlab_project_id(profile).map_err(|error| DependencyRelationshipError::ProviderError {
+            message: error.to_string(),
+        })?;
 
     let endpoint = format!("projects/{project_id}/issues/{issue_number}/links");
     let result = gitlab_api(profile, &endpoint, "GET", &[]);

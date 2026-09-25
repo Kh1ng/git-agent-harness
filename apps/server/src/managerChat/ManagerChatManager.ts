@@ -126,14 +126,19 @@ export type UpdatedPublish = (event: {
 }) => void;
 let updatedPublisher: UpdatedPublish | undefined;
 
+export type ChatLifecyclePublish = (event: import('../activityFeed.js').ChatLifecycleEvent) => void;
+let lifecyclePublisher: ChatLifecyclePublish | undefined;
+
 export function setChatEventPublishers(publishers: {
   toolCall?: ToolCallPublish;
   permission?: PermissionPublish;
   updated?: UpdatedPublish;
+  lifecycle?: ChatLifecyclePublish;
 }): void {
   toolCallPublisher = publishers.toolCall;
   permissionPublisher = publishers.permission;
   updatedPublisher = publishers.updated;
+  lifecyclePublisher = publishers.lifecycle;
 }
 
 /** Live preview push (WP3): fired when a session's preview port is set or
@@ -959,6 +964,15 @@ export function sendManagerChatMessage(
       profile,
       ...(sessionId ? { sessionId } : {})
     });
+    lifecyclePublisher?.({
+      phase: 'start',
+      profile,
+      ...(sessionId ? { sessionId } : {}),
+      turn: turnNo,
+      occurredAt: new Date(now).toISOString(),
+      backend: sessionContext.backend,
+      model: sessionContext.model
+    });
 
     try {
       // Keep slash commands bare so the backend dispatches them instead of
@@ -1054,6 +1068,16 @@ export function sendManagerChatMessage(
         };
         permissionPublisher?.(permissionEvent);
         await hooks.onPermission?.(permissionEvent);
+        lifecyclePublisher?.({
+          phase: 'permission',
+          profile,
+          ...(sessionId ? { sessionId } : {}),
+          turn: turnNo,
+          occurredAt: new Date().toISOString(),
+          backend: active.backend,
+          model: sessionContext.model,
+          tool: request.title
+        });
       };
       // Slice 3: structured tool-call activity -- logged (durable, replayed
       // on resume) and pushed live. Status transitions append new events;
@@ -1105,6 +1129,16 @@ export function sendManagerChatMessage(
           ...(sessionId ? { sessionId } : {}),
           turn: turnNo,
           ...tool
+        });
+        lifecyclePublisher?.({
+          phase: 'tool',
+          profile,
+          ...(sessionId ? { sessionId } : {}),
+          turn: turnNo,
+          occurredAt: new Date().toISOString(),
+          backend: active.backend,
+          model: sessionContext.model,
+          tool: tool.title
         });
         if (tool.summary) detectPreview(tool.summary);
       };
@@ -1218,6 +1252,17 @@ export function sendManagerChatMessage(
             ...(compaction ? [{ type: 'compaction/end' as const, seq: ++active.seq, turn: turnNo, timestamp: Date.now() }] : [])
           ];
       appendEvents(profile, done, sessionOpts);
+      lifecyclePublisher?.({
+        phase: 'end',
+        profile,
+        ...(sessionId ? { sessionId } : {}),
+        turn: turnNo,
+        occurredAt: new Date().toISOString(),
+        backend,
+        model,
+        outcome: active.cancelled ? 'cancelled' : 'complete',
+        ...(!active.cancelled ? { reply } : {})
+      });
       return { turn: assistant, cancelled: active.cancelled };
     } catch (error) {
       await active.chunkWriter?.close().catch(() => undefined);
@@ -1232,6 +1277,11 @@ export function sendManagerChatMessage(
         appendEvents(profile, [
           { type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'cancelled' }, timestamp: Date.now() }
         ], sessionOpts);
+        lifecyclePublisher?.({
+          phase: 'end', profile, ...(sessionId ? { sessionId } : {}), turn: turnNo,
+          occurredAt: new Date().toISOString(), backend: active.backend, model: sessionContext.model,
+          outcome: 'cancelled'
+        });
         return {
           turn: { role: 'assistant', text: '', backend: active.backend, model: null, usage: null, timestamp: Date.now(), nodeId: sessionContext.route.nodeId, nodeName: sessionContext.route.nodeName },
           cancelled: true
@@ -1243,6 +1293,11 @@ export function sendManagerChatMessage(
         { type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'error', message: text }, timestamp: Date.now() }
       ];
       appendEvents(profile, done, sessionOpts);
+      lifecyclePublisher?.({
+        phase: 'end', profile, ...(sessionId ? { sessionId } : {}), turn: turnNo,
+        occurredAt: new Date().toISOString(), backend: active.backend, model: sessionContext.model,
+        outcome: 'error', error: text
+      });
       throw error;
     } finally {
       // A turn ending answers any still-live permission fail-closed (e.g.

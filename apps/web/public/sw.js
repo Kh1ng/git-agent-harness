@@ -41,6 +41,42 @@ self.addEventListener('message', (event) => {
   if (event.data === 'skip-waiting') self.skipWaiting();
 });
 
+self.addEventListener('push', (event) => {
+  event.waitUntil((async () => {
+    let payload;
+    try { payload = event.data?.json(); } catch { return; }
+    if (!payload || typeof payload.id !== 'string' || typeof payload.title !== 'string'
+      || typeof payload.body !== 'string' || typeof payload.url !== 'string') return;
+    let target;
+    try { target = new URL(payload.url, self.location.origin); } catch { return; }
+    if (target.origin !== self.location.origin) return;
+    const visible = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    if (visible.some((client) => client.visibilityState === 'visible')) return;
+    await self.registration.showNotification(payload.title, {
+      body: payload.body,
+      tag: payload.id,
+      data: { url: target.href }
+    });
+  })());
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    let target;
+    try { target = new URL(event.notification.data?.url, self.location.origin); } catch { return; }
+    if (target.origin !== self.location.origin) return;
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const existing = windows[0];
+    if (existing) {
+      await existing.navigate(target.href);
+      await existing.focus();
+      return;
+    }
+    await self.clients.openWindow(target.href);
+  })());
+});
+
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== 'GET') return;

@@ -96,6 +96,7 @@ fn review_verdict_includes_verdict_and_url() {
     let msg = format_message(&NotifyEvent::ReviewVerdict {
         verdict: "APPROVE",
         mr_url: "https://example.com/mr/2",
+        work_id: "WORK-X",
     });
     assert_eq!(msg, "[gah] review APPROVE on https://example.com/mr/2");
 }
@@ -126,6 +127,7 @@ fn dispatch_failed_includes_failure_class_and_work_id() {
         attempt_count: Some(3),
         error_summary: None,
         mr_url: Some("https://example.com/mr/4"),
+        origin_agent_session: None,
     });
     assert_eq!(
             msg,
@@ -145,6 +147,7 @@ fn dispatch_failed_without_summary_renders_without_none() {
         attempt_count: None,
         error_summary: None,
         mr_url: None,
+        origin_agent_session: None,
     });
     assert_eq!(
             msg,
@@ -169,6 +172,7 @@ fn dispatch_failed_truncates_and_strips_ansi_from_summary() {
         attempt_count: None,
         error_summary: Some(&long_summary),
         mr_url: None,
+        origin_agent_session: None,
     });
     let summary = msg
         .split(" summary=")
@@ -191,6 +195,7 @@ fn dispatch_failed_marks_human_route_failure_as_paused_non_spending() {
         attempt_count: Some(1),
         error_summary: None,
         mr_url: None,
+        origin_agent_session: None,
     });
     assert!(msg.contains("[state=paused_non_spending]"));
 }
@@ -606,6 +611,7 @@ fn wake_instruction_is_none_when_autonomy_off() {
         NotifyEvent::ReviewVerdict {
             verdict: "APPROVE",
             mr_url: "u",
+            work_id: "w",
         },
         NotifyEvent::DispatchFailed {
             timestamp: "2026-07-01T00:00:00Z",
@@ -617,6 +623,7 @@ fn wake_instruction_is_none_when_autonomy_off() {
             attempt_count: Some(1),
             error_summary: None,
             mr_url: None,
+            origin_agent_session: None,
         },
     ] {
         assert!(format_wake_instruction(&event, WakeAutonomy::Off).is_none());
@@ -635,6 +642,7 @@ fn wake_instruction_includes_paused_non_spending_for_human_route_failures() {
         attempt_count: Some(1),
         error_summary: None,
         mr_url: None,
+        origin_agent_session: None,
     };
     let instruction = format_wake_instruction(&event, WakeAutonomy::ReviewOnly).unwrap();
     assert!(instruction.contains("[state=paused_non_spending]"));
@@ -865,4 +873,68 @@ fn paid_route_notice_without_reset_does_not_invent_eta_or_wake_an_approver() {
     assert!(!message.contains("opencode/opencode"));
     assert!(!message.contains("reset"));
     assert!(format_wake_instruction(&event, WakeAutonomy::Full).is_none());
+}
+
+#[test]
+fn only_continuation_work_targets_the_originating_agent() {
+    let needs_fix = NotifyEvent::ReviewVerdict {
+        verdict: "NEEDS_FIX",
+        mr_url: "https://example.com/mr/2",
+        work_id: "WORK-2",
+    };
+    assert!(
+        format_origin_wake_instruction(&needs_fix, WakeAutonomy::Full)
+            .unwrap()
+            .contains("same provider conversation")
+    );
+    let approved = NotifyEvent::ReviewVerdict {
+        verdict: "APPROVE",
+        mr_url: "https://example.com/mr/2",
+        work_id: "WORK-2",
+    };
+    assert!(format_origin_wake_instruction(&approved, WakeAutonomy::Full).is_none());
+    assert!(format_origin_wake_instruction(&needs_fix, WakeAutonomy::Off).is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn originating_codex_session_is_resumed_from_the_ledger() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let executable = tmp.path().join("fake-codex");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut profile = crate::config::tests::test_profile_for_notifications();
+    profile.local_path = tmp.path().to_string_lossy().into_owned();
+    profile.codex_path = Some(executable.to_string_lossy().into_owned());
+    let mut cfg = test_gah_config(None);
+    cfg.defaults.artifact_root = tmp.path().to_string_lossy().into_owned();
+    let mut entry =
+        crate::ledger::LedgerEntry::new("repo", &profile, "codex", "improve", "target", None, None);
+    entry.work_id = Some("WORK-2".into());
+    entry.origin_agent_session = Some(crate::ledger::AgentSessionRef {
+        backend: "codex".into(),
+        provider_session_id: "session-2".into(),
+        working_directory: Some(tmp.path().to_string_lossy().into_owned()),
+    });
+    crate::ledger::append(&cfg, &entry).unwrap();
+
+    assert!(wake_originating_agent(&cfg, &profile, "WORK-2", "continue safely", None).unwrap());
+    let arguments = executable.with_extension("args");
+    for _ in 0..100 {
+        if arguments.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        std::fs::read_to_string(arguments).unwrap(),
+        "exec\nresume\n--json\nsession-2\ncontinue safely\n"
+    );
 }
