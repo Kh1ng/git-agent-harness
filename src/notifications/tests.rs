@@ -127,7 +127,6 @@ fn dispatch_failed_includes_failure_class_and_work_id() {
         attempt_count: Some(3),
         error_summary: None,
         mr_url: Some("https://example.com/mr/4"),
-        origin_agent_session: None,
     });
     assert_eq!(
             msg,
@@ -147,7 +146,6 @@ fn dispatch_failed_without_summary_renders_without_none() {
         attempt_count: None,
         error_summary: None,
         mr_url: None,
-        origin_agent_session: None,
     });
     assert_eq!(
             msg,
@@ -172,7 +170,6 @@ fn dispatch_failed_truncates_and_strips_ansi_from_summary() {
         attempt_count: None,
         error_summary: Some(&long_summary),
         mr_url: None,
-        origin_agent_session: None,
     });
     let summary = msg
         .split(" summary=")
@@ -195,7 +192,6 @@ fn dispatch_failed_marks_human_route_failure_as_paused_non_spending() {
         attempt_count: Some(1),
         error_summary: None,
         mr_url: None,
-        origin_agent_session: None,
     });
     assert!(msg.contains("[state=paused_non_spending]"));
 }
@@ -623,7 +619,6 @@ fn wake_instruction_is_none_when_autonomy_off() {
             attempt_count: Some(1),
             error_summary: None,
             mr_url: None,
-            origin_agent_session: None,
         },
     ] {
         assert!(format_wake_instruction(&event, WakeAutonomy::Off).is_none());
@@ -642,7 +637,6 @@ fn wake_instruction_includes_paused_non_spending_for_human_route_failures() {
         attempt_count: Some(1),
         error_summary: None,
         mr_url: None,
-        origin_agent_session: None,
     };
     let instruction = format_wake_instruction(&event, WakeAutonomy::ReviewOnly).unwrap();
     assert!(instruction.contains("[state=paused_non_spending]"));
@@ -894,6 +888,41 @@ fn only_continuation_work_targets_the_originating_agent() {
     };
     assert!(format_origin_wake_instruction(&approved, WakeAutonomy::Full).is_none());
     assert!(format_origin_wake_instruction(&needs_fix, WakeAutonomy::Off).is_none());
+    assert!(format_origin_wake_instruction(
+        &NotifyEvent::BackendStalled {
+            work_id: "WORK-2",
+            backend: "codex",
+            model: "gpt",
+            duration_seconds: 30.0,
+        },
+        WakeAutonomy::Full,
+    )
+    .is_none());
+    assert!(format_wake_instruction(
+        &NotifyEvent::BackendStalled {
+            work_id: "WORK-2",
+            backend: "codex",
+            model: "gpt",
+            duration_seconds: 30.0,
+        },
+        WakeAutonomy::Full,
+    )
+    .is_none());
+    assert!(format_origin_wake_instruction(
+        &NotifyEvent::DispatchFailed {
+            timestamp: "2026-09-25T12:00:00Z",
+            profile: "repo",
+            failure_class: "agent_failure",
+            failure_stage: Some("agent_run"),
+            run_id: "run-1",
+            work_id: "WORK-2",
+            attempt_count: Some(1),
+            error_summary: Some("failed"),
+            mr_url: None,
+        },
+        WakeAutonomy::Full,
+    )
+    .is_none());
 }
 
 #[cfg(unix)]
@@ -903,9 +932,66 @@ fn originating_codex_session_is_resumed_from_the_ledger() {
 
     let tmp = tempfile::tempdir().unwrap();
     let executable = tmp.path().join("fake-codex");
+    let session_home = tmp.path().join("session-home");
+    std::fs::create_dir(&session_home).unwrap();
     std::fs::write(
         &executable,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nprintf '%s\\n' \"$HOME\" > \"$0.home\"\nprintf '%s\\n' \"$CODEX_HOME\" > \"$0.codex-home\"\nsleep 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut profile = crate::config::tests::test_profile_for_notifications();
+    profile.local_path = tmp.path().to_string_lossy().into_owned();
+    profile.codex_path = Some("/wrong/profile/codex".into());
+    profile.codex_args = vec!["--sandbox".into(), "read-only".into()];
+    let mut cfg = test_gah_config(None);
+    cfg.defaults.artifact_root = tmp.path().to_string_lossy().into_owned();
+    let mut entry =
+        crate::ledger::LedgerEntry::new("repo", &profile, "codex", "improve", "target", None, None);
+    entry.work_id = Some("WORK-2".into());
+    entry.origin_agent_session = Some(crate::ledger::AgentSessionRef {
+        backend: crate::ledger::AgentSessionBackend::Codex,
+        provider_session_id: "session-2".into(),
+        working_directory: Some(tmp.path().to_string_lossy().into_owned()),
+        executable: Some(executable.to_string_lossy().into_owned()),
+        home: Some(session_home.to_string_lossy().into_owned()),
+    });
+    crate::ledger::append(&cfg, &entry).unwrap();
+
+    assert!(wake_originating_agent(&cfg, &profile, "WORK-2", "continue safely").unwrap());
+    let arguments = executable.with_extension("args");
+    for _ in 0..100 {
+        if arguments.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        std::fs::read_to_string(arguments).unwrap(),
+        "exec\nresume\n--json\nsession-2\ncontinue safely\n--sandbox\nread-only\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(executable.with_extension("home")).unwrap(),
+        format!("{}\n", session_home.display())
+    );
+    assert_eq!(
+        std::fs::read_to_string(executable.with_extension("codex-home")).unwrap(),
+        format!("{}/.codex\n", session_home.display())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn originating_agent_never_falls_back_to_the_profile_checkout() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let executable = tmp.path().join("fake-codex");
+    let marker = tmp.path().join("ran");
+    std::fs::write(
+        &executable,
+        format!("#!/bin/sh\ntouch {}\n", marker.display()),
     )
     .unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -917,24 +1003,50 @@ fn originating_codex_session_is_resumed_from_the_ledger() {
     cfg.defaults.artifact_root = tmp.path().to_string_lossy().into_owned();
     let mut entry =
         crate::ledger::LedgerEntry::new("repo", &profile, "codex", "improve", "target", None, None);
-    entry.work_id = Some("WORK-2".into());
+    entry.work_id = Some("WORK-MISSING".into());
     entry.origin_agent_session = Some(crate::ledger::AgentSessionRef {
         backend: crate::ledger::AgentSessionBackend::Codex,
-        provider_session_id: "session-2".into(),
-        working_directory: Some(tmp.path().to_string_lossy().into_owned()),
+        provider_session_id: "session-missing".into(),
+        working_directory: Some(
+            tmp.path()
+                .join("deleted-worktree")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        executable: None,
+        home: None,
     });
     crate::ledger::append(&cfg, &entry).unwrap();
 
-    assert!(wake_originating_agent(&cfg, &profile, "WORK-2", "continue safely", None).unwrap());
-    let arguments = executable.with_extension("args");
-    for _ in 0..100 {
-        if arguments.exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert_eq!(
-        std::fs::read_to_string(arguments).unwrap(),
-        "exec\nresume\n--json\nsession-2\ncontinue safely\n"
-    );
+    assert!(!wake_originating_agent(&cfg, &profile, "WORK-MISSING", "continue safely").unwrap());
+    assert!(!marker.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn originating_agent_immediate_failure_reaches_manager_fallback() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let executable = tmp.path().join("fake-codex");
+    std::fs::write(&executable, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut profile = crate::config::tests::test_profile_for_notifications();
+    profile.codex_path = Some(executable.to_string_lossy().into_owned());
+    let mut cfg = test_gah_config(None);
+    cfg.defaults.artifact_root = tmp.path().to_string_lossy().into_owned();
+    let mut entry =
+        crate::ledger::LedgerEntry::new("repo", &profile, "codex", "improve", "target", None, None);
+    entry.work_id = Some("WORK-FAILED".into());
+    entry.origin_agent_session = Some(crate::ledger::AgentSessionRef {
+        backend: crate::ledger::AgentSessionBackend::Codex,
+        provider_session_id: "missing-session".into(),
+        working_directory: Some(tmp.path().to_string_lossy().into_owned()),
+        executable: Some(executable.to_string_lossy().into_owned()),
+        home: None,
+    });
+    crate::ledger::append(&cfg, &entry).unwrap();
+
+    assert!(wake_originating_agent(&cfg, &profile, "WORK-FAILED", "continue safely").is_err());
 }

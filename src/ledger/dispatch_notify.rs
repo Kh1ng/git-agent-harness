@@ -50,7 +50,6 @@ pub(super) fn notify_if_genuine_failure(cfg: &GahConfig, entry: &LedgerEntry) {
             attempt_count: entry.attempts_completed,
             error_summary: entry.error_summary.as_deref(),
             mr_url: entry.mr_url.as_deref(),
-            origin_agent_session: entry.origin_agent_session.as_ref(),
         },
     );
 }

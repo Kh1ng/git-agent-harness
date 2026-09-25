@@ -17,6 +17,7 @@ export type ChatLifecycleEvent = {
   backend?: string | null;
   model?: string | null;
   tool?: string;
+  permissionId?: string;
   outcome?: 'complete' | 'error' | 'cancelled';
   reply?: string;
   error?: string;
@@ -46,7 +47,12 @@ export function activityFromChat(event: ChatLifecycleEvent): ActivityEvent | nul
   if (event.phase === 'permission') {
     return {
       ...shared,
-      id: `chat:${event.profile}:${sessionId}:${event.turn}:chat_permission_requested`,
+      id: stableId('chat_permission', {
+        profile: event.profile,
+        sessionId,
+        turn: event.turn,
+        request: event.permissionId ?? event.occurredAt
+      }),
       kind: 'chat_permission_requested',
       severity: 'warning',
       title: `${event.profile}: permission required`,
@@ -187,7 +193,7 @@ export class ActivityFeed {
     }
   }
 
-  record(event: ActivityEvent): boolean {
+  record(event: ActivityEvent, deliver = true): boolean {
     if (this.ids.has(event.id)) return false;
     this.events.push(event);
     this.ids.add(event.id);
@@ -199,7 +205,7 @@ export class ActivityFeed {
       this.trim();
       if (this.path) writeFileSync(this.path, this.events.map((item) => JSON.stringify(item)).join('\n') + '\n', { mode: 0o600 });
     }
-    if (this.onRecorded) {
+    if (deliver && this.onRecorded) {
       void Promise.resolve().then(() => this.onRecorded?.(event)).catch((error) => {
         console.error(`[activity] delivery failed for ${event.id}: ${error instanceof Error ? error.message : String(error)}`);
       });
@@ -215,6 +221,5 @@ export class ActivityFeed {
 
   private trim(): void {
     this.events = this.events.slice(-MAX_STORED_EVENTS);
-    this.ids = new Set(this.events.map((event) => event.id));
   }
 }

@@ -57,6 +57,10 @@ pub(crate) fn run_with_executable(
             backend: crate::ledger::AgentSessionBackend::Codex,
             provider_session_id,
             working_directory: Some(worktree.to_string_lossy().into_owned()),
+            executable: Some(executable.to_string_lossy().into_owned()),
+            home: env_vars
+                .iter()
+                .find_map(|(key, value)| (key == "HOME").then(|| value.clone())),
         }),
         final_summary: output::extract_codex_jsonl_summary(&output_text),
         agy_cli_log_delta: None,

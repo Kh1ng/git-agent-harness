@@ -26,6 +26,7 @@ type StoredDevice = {
   pushToStartToken: string | null;
   liveActivities: Record<string, string>;
   createdAt: string;
+  deviceId?: string;
 };
 
 const TOKEN_PATTERN = /^[a-fA-F0-9]{32,512}$/;
@@ -90,7 +91,7 @@ export class ApnsNotifications {
     return { count: this.devices().length };
   }
 
-  register(input: unknown): { id: string; count: number } {
+  register(input: unknown, deviceId?: string): { id: string; count: number } {
     if (!input || typeof input !== 'object') throw new Error('An APNs device token is required.');
     const value = input as Record<string, unknown>;
     if (!validToken(value.token)) throw new Error('A valid APNs device token is required.');
@@ -119,7 +120,8 @@ export class ApnsNotifications {
       label: typeof value.label === 'string' && value.label.trim() ? value.label.trim() : previous?.label ?? null,
       pushToStartToken: typeof value.pushToStartToken === 'string' ? value.pushToStartToken : previous?.pushToStartToken ?? null,
       liveActivities: { ...(previous?.liveActivities ?? {}) },
-      createdAt: previous?.createdAt ?? new Date(this.now()).toISOString()
+      createdAt: previous?.createdAt ?? new Date(this.now()).toISOString(),
+      ...(deviceId ? { deviceId } : previous?.deviceId ? { deviceId: previous.deviceId } : {})
     };
     if (liveActivity) device.liveActivities[activityKey(liveActivity.profile, liveActivity.sessionId)] = liveActivity.token;
     writePrivatePushStore(this.devicesPath, [...devices.filter((entry) => entry.id !== id), device]);
@@ -132,6 +134,12 @@ export class ApnsNotifications {
     const after = before.filter((device) => device.id !== id);
     if (after.length !== before.length) writePrivatePushStore(this.devicesPath, after);
     return { removed: after.length !== before.length, count: after.length };
+  }
+
+  removeForDevice(deviceId: string): void {
+    const devices = this.devices();
+    const remaining = devices.filter((device) => device.deviceId !== deviceId);
+    if (remaining.length !== devices.length) writePrivatePushStore(this.devicesPath, remaining);
   }
 
   async deliverActivity(event: ActivityEvent): Promise<void> {
@@ -171,7 +179,7 @@ export class ApnsNotifications {
     }
     const end = event.phase === 'end';
     const now = this.now();
-    if (!end && now - (this.lastActivityUpdate.get(key) ?? 0) < UPDATE_INTERVAL_MS) return;
+    if (!end && event.phase !== 'permission' && now - (this.lastActivityUpdate.get(key) ?? 0) < UPDATE_INTERVAL_MS) return;
     if (!end) this.lastActivityUpdate.set(key, now); else {
       this.lastActivityUpdate.delete(key);
       this.activityStartedAt.delete(key);

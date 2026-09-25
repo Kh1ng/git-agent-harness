@@ -53,6 +53,7 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         configuration.userContentController.add(DashboardRequestHandler(controller: self), name: "gahController")
         UNUserNotificationCenter.current().delegate = self
         AppDelegate.controller = self
+        UIApplication.shared.registerForRemoteNotifications()
         webView.isHidden = true
         webView.navigationDelegate = self
         webView.uiDelegate = self

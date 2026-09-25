@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -57,15 +57,29 @@ test('Live Activity starts remotely, rate-limits updates, and always ends', asyn
     await setup.service.deliverChatLifecycle({ ...base, phase: 'start' });
     await setup.service.deliverChatLifecycle({ ...base, phase: 'tool', tool: 'cargo test' });
     await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', tool: 'shell' });
+    assert.equal(setup.requests.length, 3);
+    assert.equal((setup.requests[2].payload as { aps: { 'content-state': { state: string } } }).aps['content-state'].state, 'waiting for permission');
     setup.advance(5_000);
     await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', tool: 'shell' });
     await setup.service.deliverChatLifecycle({ ...base, phase: 'end', outcome: 'complete' });
-    assert.equal(setup.requests.length, 4);
+    assert.equal(setup.requests.length, 5);
     assert.equal(setup.requests[0].token, token('b'));
     assert.equal((setup.requests[0].payload as { aps: { event: string } }).aps.event, 'start');
     assert.equal(setup.requests[0].headers['apns-topic'], 'com.kh1ng.gah.controller.push-type.liveactivity');
-    assert.deepEqual(setup.requests.slice(1).map((request) => (request.payload as { aps: { event: string } }).aps.event), ['update', 'update', 'end']);
+    assert.deepEqual(setup.requests.slice(1).map((request) => (request.payload as { aps: { event: string } }).aps.event), ['update', 'update', 'update', 'end']);
     const dismissal = (setup.requests.at(-1)!.payload as { aps: { 'dismissal-date': number } }).aps['dismissal-date'];
     assert.equal(dismissal, Math.floor((Date.parse('2026-09-25T12:00:05Z') + 15 * 60_000) / 1_000));
+  } finally { rmSync(setup.directory, { recursive: true, force: true }); }
+});
+
+test('revoking a paired device removes only its APNs registration', () => {
+  const setup = fixture();
+  try {
+    setup.service.register({ token: token('a') }, 'device-1');
+    setup.service.register({ token: token('b') }, 'device-2');
+    setup.service.removeForDevice('device-1');
+    assert.deepEqual(setup.service.list(), { count: 1 });
+    const stored = JSON.parse(readFileSync(setup.devicesPath, 'utf8')) as { deviceId?: string }[];
+    assert.deepEqual(stored.map((entry) => entry.deviceId), ['device-2']);
   } finally { rmSync(setup.directory, { recursive: true, force: true }); }
 });

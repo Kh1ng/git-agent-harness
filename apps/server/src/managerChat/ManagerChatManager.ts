@@ -1072,8 +1072,8 @@ export function sendManagerChatMessage(
           locations: request.locations
         };
         permissionPublisher?.(permissionEvent);
+        publishLifecycle({ phase: 'permission', permissionId, tool: request.title });
         await hooks.onPermission?.(permissionEvent);
-        publishLifecycle({ phase: 'permission', tool: request.title });
       };
       // Slice 3: structured tool-call activity -- logged (durable, replayed
       // on resume) and pushed live. Status transitions append new events;

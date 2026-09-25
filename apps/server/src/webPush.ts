@@ -32,6 +32,7 @@ type StoredSubscription = {
   label: string | null;
   createdAt: string;
   subscription: PushSubscription;
+  deviceId?: string;
 };
 type WebPushTransport = Pick<typeof webPush, 'generateVAPIDKeys' | 'setVapidDetails' | 'sendNotification'>;
 
@@ -94,18 +95,21 @@ export class WebPushNotifications {
     return { count: this.subscriptions().length };
   }
 
-  register(value: unknown, label?: unknown): { id: string; count: number } {
+  register(value: unknown, label?: unknown, deviceId?: string): { id: string; count: number } {
     if (!validSubscription(value)) throw new Error('A valid HTTPS push subscription is required.');
     if (!validPushDeviceLabel(label)) {
       throw new Error('Device label must be at most 80 printable characters.');
     }
     const id = pushRegistrationId(value.endpoint);
-    const subscriptions = this.subscriptions().filter((entry) => entry.id !== id);
+    const stored = this.subscriptions();
+    const existing = stored.find((entry) => entry.id === id);
+    const subscriptions = stored.filter((entry) => entry.id !== id);
     subscriptions.push({
       id,
       label: typeof label === 'string' && label.trim() ? label.trim() : null,
       createdAt: new Date().toISOString(),
-      subscription: value
+      subscription: value,
+      ...(deviceId ? { deviceId } : existing?.deviceId ? { deviceId: existing.deviceId } : {})
     });
     writePrivatePushStore(this.subscriptionsPath, subscriptions);
     return { id, count: subscriptions.length };
@@ -119,6 +123,12 @@ export class WebPushNotifications {
     return { removed: after.length !== before.length, count: after.length };
   }
 
+  removeForDevice(deviceId: string): void {
+    const subscriptions = this.subscriptions();
+    const remaining = subscriptions.filter((entry) => entry.deviceId !== deviceId);
+    if (remaining.length !== subscriptions.length) writePrivatePushStore(this.subscriptionsPath, remaining);
+  }
+
   async deliverActivity(event: ActivityEvent): Promise<void> {
     const publicPayload = activityPushPayload(event);
     if (!publicPayload) {
@@ -126,10 +136,6 @@ export class WebPushNotifications {
       return;
     }
     const payload = JSON.stringify(publicPayload);
-    if (Buffer.byteLength(payload) > MAX_PAYLOAD_BYTES) {
-      console.error(`[webPush] skipped oversized activity payload ${event.id}`);
-      return;
-    }
     const subscriptions = this.subscriptions();
     const expired = new Set<string>();
     await Promise.all(subscriptions.map(async (entry) => {

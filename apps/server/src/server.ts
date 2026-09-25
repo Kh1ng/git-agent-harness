@@ -285,6 +285,12 @@ export function createServer(
   const centralClaims = () => claimsService ??= new ClaimsService();
   const app = express();
   if (node.role === 'central') app.locals.deviceAccess = configDeps.deviceAccess ?? new DeviceAccess();
+  if (node.role === 'central' && (configDeps.webPushNotifications || configDeps.apnsNotifications)) {
+    app.locals.deviceAccess.onRevoke((deviceId: string) => {
+      configDeps.webPushNotifications?.removeForDevice(deviceId);
+      configDeps.apnsNotifications?.removeForDevice(deviceId);
+    });
+  }
   // Trust X-Forwarded-* only when the immediate hop is loopback (a TLS-terminating
   // reverse proxy on this same host). `true` would trust those headers from any
   // direct peer, letting a remote attacker forge `X-Forwarded-Proto: https` and
@@ -335,7 +341,7 @@ export function createServer(
     app.get('/api/push/subscriptions', (_req, res) => res.json(push.list()));
     app.post('/api/push/subscriptions', mutation('push_subscription.add'), (req, res) => {
       try {
-        res.status(201).json(push.register(req.body?.subscription, req.body?.label));
+        res.status(201).json(push.register(req.body?.subscription, req.body?.label, res.locals.authPrincipal?.kind === 'device' ? res.locals.authPrincipal.id : undefined));
       } catch (error) {
         res.status(400).json({ error: 'invalid_push_subscription', message: error instanceof Error ? error.message : String(error) });
       }
@@ -354,7 +360,7 @@ export function createServer(
     app.get('/api/push/apns-devices', (_req, res) => res.json(apns.list()));
     app.post('/api/push/apns-devices', mutation('apns_device.add'), (req, res) => {
       try {
-        res.status(201).json(apns.register(req.body));
+        res.status(201).json(apns.register(req.body, res.locals.authPrincipal?.kind === 'device' ? res.locals.authPrincipal.id : undefined));
       } catch (error) {
         res.status(400).json({ error: 'invalid_apns_device', message: error instanceof Error ? error.message : String(error) });
       }

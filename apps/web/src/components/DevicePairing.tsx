@@ -5,6 +5,7 @@ import { GahApiError, pairingApi } from '../api/client.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { saveCoordinatorToken } from '../api/coordinatorToken.js';
 import { ConnectionStatus } from './ConnectionStatus.js';
+import { setSystemNotificationsEnabled } from '../lib/activityNotifications.js';
 
 function pairingLink(value: string): { origin: string; code: string; serverId: string } {
   const url = new URL(value);
@@ -133,7 +134,7 @@ export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () =
           </li>)}</ul>
         </div>
       </>}
-      {principal === 'device' && !pending && <div className="space-y-2"><p className="text-secondary">Pairing stays signed in across app or browser restarts until it expires or the owner revokes access.</p><p className="text-secondary">To generate a pairing QR code for another device, sign in with the central owner token.</p><button type="button" className="btn-secondary" disabled={busy} onClick={() => void run(async () => { await unregisterNativePush(); await pairingApi.logout(); saveCoordinatorToken(''); setPrincipal(null); setNotice('Device session cleared from this browser.'); })}>Disconnect this browser</button></div>}
+      {principal === 'device' && !pending && <div className="space-y-2"><p className="text-secondary">Pairing stays signed in across app or browser restarts until it expires or the owner revokes access.</p><p className="text-secondary">To generate a pairing QR code for another device, sign in with the central owner token.</p><button type="button" className="btn-secondary" disabled={busy} onClick={() => void run(async () => { await unregisterNativePush(); await setSystemNotificationsEnabled(false); await pairingApi.logout(); saveCoordinatorToken(''); setPrincipal(null); setNotice('Device session cleared from this browser.'); })}>Disconnect this browser</button></div>}
       {principal === null && !pending && <p className="text-secondary">Ask the owner for a pairing link or QR code to stay signed in on this device. An owner access token grants temporary access for this tab only.</p>}
       {!pending && <form className="space-y-2 border-t border-subtle pt-3" onSubmit={event => { event.preventDefault(); try {
         const parsed = pairingLink(manualLink);

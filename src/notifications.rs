@@ -121,7 +121,6 @@ pub enum NotifyEvent<'a> {
         attempt_count: Option<u32>,
         error_summary: Option<&'a str>,
         mr_url: Option<&'a str>,
-        origin_agent_session: Option<&'a crate::ledger::AgentSessionRef>,
     },
     /// A terminal dispatch failure for the same `(profile, work_id)` was resolved
     /// by later merge/close/reconcile activity.
@@ -140,7 +139,6 @@ pub enum NotifyEvent<'a> {
         backend: &'a str,
         model: &'a str,
         duration_seconds: f64,
-        origin_agent_session: Option<&'a crate::ledger::AgentSessionRef>,
     },
     /// A local operator handoff artifact was created (delivery_mode = handoff).
     HandoffCreated {
@@ -439,8 +437,9 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
         // The controller owns this bounded reroute. Waking a manager for each
         // malformed intermediate opinion would recreate the notification
         // spam this event is designed to explain.
-        NotifyEvent::ReviewOutputInvalid { .. }
-        | NotifyEvent::PaidRouteApprovalRequired { .. } => return None,
+        NotifyEvent::ReviewOutputInvalid { .. } | NotifyEvent::PaidRouteApprovalRequired { .. } => {
+            return None
+        }
         // Issue #653: external approvals are operator decisions; a woken
         // manager must never grant its own credentials.
         NotifyEvent::ExternalApprovalRequested { .. } => return None,
@@ -471,16 +470,9 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
             context
         }
         NotifyEvent::DispatchFailureResolved { .. } => return None,
-        NotifyEvent::BackendStalled {
-            work_id,
-            backend,
-            model,
-            duration_seconds,
-            ..
-        } => format!(
-            "Backend stalled for work_id={work_id} on {} after {duration_seconds:.0}s; GAH is rerouting.",
-            route_label(backend, model)
-        ),
+        // The controller already owns the reroute. A second agent in the same
+        // worktree would race the fallback attempt.
+        NotifyEvent::BackendStalled { .. } => return None,
         // Already resolved -- nothing for a woken agent to act on.
         NotifyEvent::MrMerged { .. } => return None,
         NotifyEvent::HandoffCreated { .. } => return None,
@@ -1033,7 +1025,6 @@ pub(crate) fn notify_terminal_failure(
             attempt_count: terminal_failure.attempt_count,
             error_summary: terminal_failure.error_summary,
             mr_url: terminal_failure.mr_url,
-            origin_agent_session: None,
         },
     );
 }
@@ -1095,23 +1086,7 @@ pub fn notify_event(cfg: &GahConfig, profile: &Profile, event: NotifyEvent) {
     let origin_woken = format_origin_wake_instruction(&event, profile.manager_wake_autonomy)
         .and_then(|instruction| {
             event_work_id(&event).map(|work_id| {
-                wake_originating_agent(
-                    cfg,
-                    profile,
-                    work_id,
-                    &crate::redact::redact(&instruction),
-                    match &event {
-                        NotifyEvent::BackendStalled {
-                            origin_agent_session,
-                            ..
-                        }
-                        | NotifyEvent::DispatchFailed {
-                            origin_agent_session,
-                            ..
-                        } => *origin_agent_session,
-                        _ => None,
-                    },
-                )
+                wake_originating_agent(cfg, profile, work_id, &crate::redact::redact(&instruction))
             })
         })
         .transpose()
@@ -1235,18 +1210,14 @@ fn format_origin_wake_instruction(
         WakeAutonomy::Full => "Continue the work in the same provider conversation. Fix the failure, validate the result, and report the outcome. Do not merge your own change.",
     };
     let context = match event {
-        NotifyEvent::ReviewVerdict { verdict, mr_url, work_id }
-            if verdict.eq_ignore_ascii_case("NEEDS_FIX") =>
-        {
+        NotifyEvent::ReviewVerdict {
+            verdict,
+            mr_url,
+            work_id,
+        } if verdict.eq_ignore_ascii_case("NEEDS_FIX") => {
             format!("Review requested fixes for work {work_id} at {mr_url}.")
         }
-        NotifyEvent::DispatchFailed { work_id, error_summary, .. } => format!(
-            "Your dispatch for work {work_id} failed.{}",
-            summarize_error_summary(*error_summary).map_or(String::new(), |summary| format!(" Summary: {summary}"))
-        ),
-        NotifyEvent::BackendStalled { work_id, backend, duration_seconds, .. } => format!(
-            "Your {backend} run for work {work_id} stalled after {duration_seconds:.0}s and GAH rerouted it."
-        ),
+        NotifyEvent::DispatchFailed { .. } | NotifyEvent::BackendStalled { .. } => return None,
         _ => return None,
     };
     Some(format!("[gah origin wake] {context} {action}"))
@@ -1257,56 +1228,66 @@ fn wake_originating_agent(
     profile: &Profile,
     work_id: &str,
     instruction: &str,
-    direct_session: Option<&crate::ledger::AgentSessionRef>,
 ) -> anyhow::Result<bool> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    let (session, fallback_directory) = if let Some(session) = direct_session {
-        (session.clone(), profile.local_path.clone())
-    } else {
-        let Some(entry) = crate::ledger::entries_for_work_id(cfg, work_id)?
-            .into_iter()
-            .rev()
-            .find(|entry| entry.repo_id == profile.repo_id && entry.origin_agent_session.is_some())
-        else {
-            return Ok(false);
-        };
-        (
-            entry.origin_agent_session.expect("filtered above"),
-            entry.local_path,
-        )
+    let Some(entry) = crate::ledger::entries_for_work_id(cfg, work_id)?
+        .into_iter()
+        .rev()
+        .find(|entry| entry.repo_id == profile.repo_id && entry.origin_agent_session.is_some())
+    else {
+        return Ok(false);
     };
-    let working_directory = session
+    let session = entry.origin_agent_session.expect("filtered above");
+    let Some(working_directory) = session
         .working_directory
         .as_deref()
         .filter(|path| std::path::Path::new(path).is_dir())
-        .unwrap_or(&fallback_directory);
+    else {
+        return Ok(false);
+    };
     let (program, args): (String, Vec<String>) = match session.backend {
-        crate::ledger::AgentSessionBackend::Claude => (
-            profile
-                .claude_path
-                .clone()
-                .unwrap_or_else(|| "claude".into()),
-            vec![
+        crate::ledger::AgentSessionBackend::Claude => {
+            let mut args = vec![
                 "-p".into(),
                 instruction.into(),
                 "--resume".into(),
-                session.provider_session_id,
+                session.provider_session_id.clone(),
                 "--output-format".into(),
                 "text".into(),
-            ],
-        ),
-        crate::ledger::AgentSessionBackend::Codex => (
-            profile.codex_path.clone().unwrap_or_else(|| "codex".into()),
-            vec![
+            ];
+            args.extend(crate::runner::filtered_backend_args(
+                "claude",
+                &profile.claude_args,
+            ));
+            (
+                session
+                    .executable
+                    .clone()
+                    .or_else(|| profile.claude_path.clone())
+                    .unwrap_or_else(|| "claude".into()),
+                args,
+            )
+        }
+        crate::ledger::AgentSessionBackend::Codex => {
+            let mut args = vec![
                 "exec".into(),
                 "resume".into(),
                 "--json".into(),
-                session.provider_session_id,
+                session.provider_session_id.clone(),
                 instruction.into(),
-            ],
-        ),
+            ];
+            args.extend(crate::runner::filtered_codex_args(&profile.codex_args));
+            (
+                session
+                    .executable
+                    .clone()
+                    .or_else(|| profile.codex_path.clone())
+                    .unwrap_or_else(|| "codex".into()),
+                args,
+            )
+        }
         crate::ledger::AgentSessionBackend::Unknown => return Ok(false),
     };
     let (_log_path, log) =
@@ -1325,9 +1306,34 @@ fn wake_originating_agent(
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr));
+    if let Some(home) = session.home.as_deref() {
+        command.env("HOME", home);
+        match session.backend {
+            crate::ledger::AgentSessionBackend::Codex => {
+                command.env("CODEX_HOME", std::path::Path::new(home).join(".codex"));
+            }
+            crate::ledger::AgentSessionBackend::Claude => {
+                command.env(
+                    "CLAUDE_CONFIG_DIR",
+                    std::path::Path::new(home).join(".claude"),
+                );
+            }
+            crate::ledger::AgentSessionBackend::Unknown => {}
+        }
+    }
     let mut child = command
         .spawn()
         .context("spawning originating agent session")?;
+    let startup_deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    while std::time::Instant::now() < startup_deadline {
+        if let Some(status) = child.try_wait()? {
+            if status.success() {
+                return Ok(true);
+            }
+            anyhow::bail!("originating agent session exited during startup with {status}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
     std::thread::spawn(move || {
         let _ = child.wait();
     });

@@ -81,6 +81,8 @@ pub(crate) fn run_with_executable(
             backend: crate::ledger::AgentSessionBackend::Claude,
             provider_session_id: session_id,
             working_directory: Some(worktree.to_string_lossy().into_owned()),
+            executable: Some(executable.to_string_lossy().into_owned()),
+            home: home.map(|path| path.to_string_lossy().into_owned()),
         }),
         final_summary,
         agy_cli_log_delta: None,

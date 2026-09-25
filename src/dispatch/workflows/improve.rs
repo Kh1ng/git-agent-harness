@@ -607,7 +607,6 @@ pub(crate) fn improve(
                         backend: &route.effective_backend,
                         model: route.effective_model.as_deref().unwrap_or(&llm.model),
                         duration_seconds: result.duration_secs,
-                        origin_agent_session: result.agent_session.as_ref(),
                     },
                 );
             }

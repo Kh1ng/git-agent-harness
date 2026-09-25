@@ -31,8 +31,15 @@ impl std::fmt::Display for AgentSessionBackend {
 pub struct AgentSessionRef {
     pub backend: AgentSessionBackend,
     pub provider_session_id: String,
+    /// Exact checkout used by the attempt. Resumption is refused if it no longer exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
+    /// Resolved backend executable, including an instance-specific binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+    /// Per-attempt provider state root. This restores the conversation store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
 }
 
 #[cfg(test)]
@@ -49,5 +56,11 @@ mod tests {
             serde_json::to_string(&AgentSessionBackend::Codex).unwrap(),
             r#""codex""#
         );
+        let legacy: AgentSessionRef = serde_json::from_str(
+            r#"{"backend":"codex","provider_session_id":"session","working_directory":"/tmp/work"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.executable, None);
+        assert_eq!(legacy.home, None);
     }
 }

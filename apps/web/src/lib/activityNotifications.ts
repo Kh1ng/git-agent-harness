@@ -1,4 +1,5 @@
 import { activityPath, type ActivityEvent } from '@git-agent-harness/contracts';
+import { pushApi } from '../api/client.js';
 import { readNavigation } from './navigationState.js';
 
 const ENABLED_KEY = 'gah.activity.systemNotifications';
@@ -35,34 +36,27 @@ async function setBackgroundPush(enabled: boolean): Promise<void> {
   const existing = await registration.pushManager.getSubscription();
   if (!enabled) {
     const id = window.localStorage.getItem(PUSH_ID_KEY);
-    if (id) {
-      await fetch(`/api/push/subscriptions/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-        headers: { 'Idempotency-Key': crypto.randomUUID() }
-      });
+    try {
+      if (id) await pushApi.remove(id);
+    } finally {
       window.localStorage.removeItem(PUSH_ID_KEY);
+      await existing?.unsubscribe();
     }
-    await existing?.unsubscribe();
     return;
   }
-  const keyResponse = await fetch('/api/push/public-key');
-  if (!keyResponse.ok) throw new Error('Cannot load the push key.');
-  const { publicKey } = await keyResponse.json() as { publicKey?: string };
+  const { publicKey } = await pushApi.publicKey();
   if (!publicKey) throw new Error('The push key is unavailable.');
   const subscription = existing ?? await registration.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: applicationServerKey(publicKey)
   });
-  const response = await fetch('/api/push/subscriptions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
-    body: JSON.stringify({ subscription: subscription.toJSON(), label: navigator.userAgent.slice(0, 80) })
-  });
-  if (!response.ok) {
+  let saved: { id?: string };
+  try {
+    saved = await pushApi.register(subscription.toJSON(), navigator.userAgent.slice(0, 80));
+  } catch (error) {
     if (!existing) await subscription.unsubscribe();
-    throw new Error('Cannot save the push subscription.');
+    throw error;
   }
-  const saved = await response.json() as { id?: string };
   if (!saved.id) throw new Error('The server did not return a push subscription id.');
   window.localStorage.setItem(PUSH_ID_KEY, saved.id);
 }
@@ -70,9 +64,7 @@ async function setBackgroundPush(enabled: boolean): Promise<void> {
 export async function backgroundPushDeviceCount(): Promise<number | null> {
   if (backgroundPushStatus() !== 'available') return null;
   try {
-    const response = await fetch('/api/push/subscriptions');
-    if (!response.ok) return null;
-    const value = await response.json() as { count?: number };
+    const value = await pushApi.count();
     return typeof value.count === 'number' ? value.count : null;
   } catch {
     return null;
@@ -80,6 +72,9 @@ export async function backgroundPushDeviceCount(): Promise<number | null> {
 }
 
 export async function setSystemNotificationsEnabled(enabled: boolean): Promise<boolean> {
+  if (!enabled) {
+    try { window.localStorage.setItem(ENABLED_KEY, '0'); } catch { /* Local delivery is already off. */ }
+  }
   try {
     const ios = window.webkit?.messageHandlers?.gahController;
     if (enabled && ios) {

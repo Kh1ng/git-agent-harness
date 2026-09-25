@@ -94,6 +94,19 @@ test('expired subscriptions are pruned and other delivery failures do not escape
   }
 });
 
+test('revoking a paired device removes only its subscriptions', () => {
+  const f = fixture();
+  try {
+    f.service.register(subscription, 'Phone', 'device-1');
+    f.service.register({ ...subscription, endpoint: 'https://push.example.test/device-2' }, 'Tablet', 'device-2');
+    f.service.removeForDevice('device-1');
+    const stored = JSON.parse(readFileSync(f.subscriptions, 'utf8')) as { deviceId?: string }[];
+    assert.deepEqual(stored.map((entry) => entry.deviceId), ['device-2']);
+  } finally {
+    rmSync(f.directory, { recursive: true });
+  }
+});
+
 test('pruning an expired send preserves a subscription registered in flight', async () => {
   let rejectDelivery: ((error: Error) => void) | undefined;
   const f = fixture(() => new Promise((_, reject) => { rejectDelivery = reject; }));

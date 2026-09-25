@@ -291,7 +291,6 @@ pub(crate) fn pm(
                     attempt_count: Some(attempted_routes.len() as u32 + 1),
                     error_summary: Some(&message),
                     mr_url: None,
-                    origin_agent_session: result.agent_session.as_ref(),
                 },
             );
 

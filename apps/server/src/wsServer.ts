@@ -123,11 +123,11 @@ export function createWebSocketHandler(
       .then(([events, quota]) => {
         for (const controllerEvent of events) {
           const event = activityFromController(controllerEvent);
-          if (!event || !activityFeed.record(event) || !announce) continue;
+          if (!event || !activityFeed.record(event, announce) || !announce) continue;
           sessionStore.broadcast({ type: 'activity.event', event }, undefined, profile);
         }
         for (const event of quota ? activitiesFromQuota(quota) : []) {
-          if (activityFeed.record(event) && announce) sessionStore.broadcast({ type: 'activity.event', event }, undefined, profile);
+          if (activityFeed.record(event, announce) && announce) sessionStore.broadcast({ type: 'activity.event', event }, undefined, profile);
         }
       })
       .finally(() => syncing.delete(profile));
@@ -136,7 +136,7 @@ export function createWebSocketHandler(
   };
   const syncGateway = (announce: boolean) => {
     const event = activityFromGateway(readGatewayHealth());
-    if (event && activityFeed.record(event) && announce) sessionStore.broadcast({ type: 'activity.event', event });
+    if (event && activityFeed.record(event, announce) && announce) sessionStore.broadcast({ type: 'activity.event', event });
   };
   const unsubscribeFleet = registryService.onChange(() => pushBus.publish({ type: 'fleet.changed' }));
   const unsubscribeLiveness = registryService.onLivenessTransition((transition) => {

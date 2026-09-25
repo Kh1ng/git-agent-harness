@@ -97,7 +97,11 @@ async function main() {
     coordinatorIdentity,
     node,
     activityFeed,
-    onChatLifecycle: (event) => { void apnsNotifications?.deliverChatLifecycle(event); }
+    onChatLifecycle: (event) => {
+      void apnsNotifications?.deliverChatLifecycle(event).catch((error) => {
+        console.error(`[apns] chat lifecycle delivery failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
   });
   markReadinessCheck('webSocket', true);
   

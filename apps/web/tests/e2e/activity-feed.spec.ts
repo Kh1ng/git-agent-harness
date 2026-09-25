@@ -133,6 +133,7 @@ test('chat activity opens the originating session and suppresses a focused-chat 
 test('background push subscribes, unsubscribes, and hides the toggle on insecure HTTP', async ({ page }) => {
   const requests: string[] = [];
   await page.addInitScript(() => {
+    sessionStorage.setItem('gah.coordinatorToken', 'push-owner-token');
     const subscription = {
       toJSON: () => ({ endpoint: 'https://push.example/device', keys: { p256dh: 'p', auth: 'a' } }),
       unsubscribe: async () => true
@@ -146,6 +147,7 @@ test('background push subscribes, unsubscribes, and hides the toggle on insecure
   });
   await page.route('**/api/push/**', async (route) => {
     requests.push(route.request().method());
+    expect(route.request().headers().authorization).toBe('Bearer push-owner-token');
     if (route.request().url().endsWith('/public-key')) return route.fulfill({ json: { publicKey: 'AQ' } });
     if (route.request().method() === 'POST') return route.fulfill({ status: 201, json: { id: 'a'.repeat(24), count: 1 } });
     if (route.request().method() === 'DELETE') return route.fulfill({ json: { removed: true, count: 0 } });
@@ -168,4 +170,36 @@ test('background push subscribes, unsubscribes, and hides the toggle on insecure
   await page.reload();
   await expect(page.getByText('Background push needs the HTTPS dashboard URL.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enable system alerts' })).toBeDisabled();
+});
+
+test('disabling alerts clears local state even when server cleanup fails', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('gah.activity.systemNotifications', '1');
+    localStorage.setItem('gah.activity.pushSubscriptionId', 'a'.repeat(24));
+    Object.defineProperty(window, 'PushManager', { value: class {} });
+    Object.defineProperty(navigator, 'serviceWorker', { value: { ready: Promise.resolve({ pushManager: {
+      getSubscription: async () => ({ unsubscribe: async () => {
+        (window as typeof window & { pushUnsubscribed?: boolean }).pushUnsubscribed = true;
+        return true;
+      } })
+    } }) } });
+  });
+  await page.route('**/api/push/subscriptions**', async (route) => {
+    if (route.request().method() === 'DELETE') return route.fulfill({ status: 500, json: { message: 'store unavailable' } });
+    return route.fulfill({ json: { count: 1 } });
+  });
+  await page.routeWebSocket('**/ws**', (ws) => {
+    ws.send(JSON.stringify(welcome));
+    ws.onMessage((raw) => {
+      if (JSON.parse(String(raw)).type === 'client.hello') ws.send(JSON.stringify({ type: 'activity.replay', events: [] }));
+    });
+  });
+  await page.goto('/?page=events');
+  await page.getByRole('button', { name: 'System alerts on' }).click();
+  await expect(page.getByRole('button', { name: 'Enable system alerts' })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => ({
+    enabled: localStorage.getItem('gah.activity.systemNotifications'),
+    pushId: localStorage.getItem('gah.activity.pushSubscriptionId'),
+    unsubscribed: (window as typeof window & { pushUnsubscribed?: boolean }).pushUnsubscribed
+  }))).toEqual({ enabled: '0', pushId: null, unsubscribed: true });
 });
