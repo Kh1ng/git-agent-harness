@@ -5,10 +5,9 @@ import { OverviewPage } from './pages/OverviewPage.js';
 import { Navbar } from './components/Navbar.js';
 import { PwaStatusBars } from './components/PwaStatusBars.js';
 import { SessionDetailModal } from './components/SessionDetailModal.js';
-import type { Session } from '@git-agent-harness/contracts';
+import { activityPath, type Session } from '@git-agent-harness/contracts';
 import { readNavigation, updateNavigation, type Page } from './lib/navigationState.js';
 import { ActivityToast } from './components/ActivityToast.js';
-import { activityUrl } from './lib/activityNotifications.js';
 
 const WorkPage = lazy(() => import('./pages/WorkPage.js').then((module) => ({ default: module.WorkPage })));
 const TelemetryPage = lazy(() => import('./pages/TelemetryPage.js').then((module) => ({ default: module.TelemetryPage })));
@@ -93,7 +92,7 @@ export function App() {
       {liveActivity && liveActivity.id !== dismissedActivityId && currentPage !== 'events' && (
         <ActivityToast
           event={liveActivity}
-          onOpen={() => window.location.assign(activityUrl(liveActivity))}
+          onOpen={() => window.location.assign(activityPath(liveActivity))}
           onDismiss={() => setDismissedActivityId(liveActivity.id)}
         />
       )}

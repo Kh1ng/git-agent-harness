@@ -64,4 +64,12 @@ mod tests {
         assert!(!repo_allows_action(&policy, "git-push-prod"));
         assert!(!repo_allows_action(&policy, "unknown"));
     }
+
+    #[test]
+    fn unknown_trust_modes_fail_closed() {
+        let mut policy = policy();
+        policy.trust_mode = "future_mode".into();
+        assert!(!repo_allows_action(&policy, "edit-issue"));
+        assert!(!repo_allows_action(&policy, "open-draft-pr"));
+    }
 }

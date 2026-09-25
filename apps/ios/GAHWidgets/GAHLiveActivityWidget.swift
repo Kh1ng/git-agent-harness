@@ -26,7 +26,7 @@ struct GAHLiveActivityWidget: Widget {
                 DynamicIslandExpandedRegion(.trailing) { Text(context.state.backend).font(.caption) }
                 DynamicIslandExpandedRegion(.bottom) { Text(context.state.state) }
             } compactLeading: {
-                Image(systemName: context.state.state.contains("permission") ? "exclamationmark.circle" : "message")
+                Image(systemName: context.state.state == "waiting for permission" ? "exclamationmark.circle" : "message")
             } compactTrailing: {
                 Text(context.state.backend.prefix(3))
             } minimal: {

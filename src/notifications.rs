@@ -517,23 +517,8 @@ fn wake_manager_session_with<F>(
 {
     use std::io::Write;
 
-    if let Err(err) = std::fs::create_dir_all(log_dir) {
-        eprintln!("[gah] manager_wake: failed to create log dir (swallowed): {err:#}");
-    }
-    let ts = time::OffsetDateTime::now_utc().unix_timestamp();
-    let log_path = log_dir.join(format!(
-        "{ts}-{}-{}.log",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let audit = options.open(&log_path).and_then(|mut file| {
+    let (log_path, audit) = create_private_wake_log(log_dir, None);
+    let audit = audit.and_then(|mut file| {
         writeln!(
             file,
             "manager: {manager}\nrepo_id: {repo_id}\ndisplay_name: {display_name}\ninstruction: {instruction}"
@@ -549,6 +534,30 @@ fn wake_manager_session_with<F>(
     if let Err(err) = enqueue(manager, repo_id, instruction, &log_path) {
         eprintln!("[gah] manager_wake failed (swallowed): {err:#}");
     }
+}
+
+fn create_private_wake_log(
+    log_dir: &std::path::Path,
+    marker: Option<&str>,
+) -> (std::path::PathBuf, std::io::Result<std::fs::File>) {
+    let marker = marker.map(|value| format!("-{value}")).unwrap_or_default();
+    let log_path = log_dir.join(format!(
+        "{}-{}{marker}-{}.log",
+        time::OffsetDateTime::now_utc().unix_timestamp(),
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let file = std::fs::create_dir_all(log_dir).and_then(|()| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(&log_path)
+    });
+    (log_path, file)
 }
 
 fn manager_wake_url(central_url: &str) -> anyhow::Result<String> {
@@ -1273,8 +1282,8 @@ fn wake_originating_agent(
         .as_deref()
         .filter(|path| std::path::Path::new(path).is_dir())
         .unwrap_or(&fallback_directory);
-    let (program, args): (String, Vec<String>) = match session.backend.as_str() {
-        "claude" => (
+    let (program, args): (String, Vec<String>) = match session.backend {
+        crate::ledger::AgentSessionBackend::Claude => (
             profile
                 .claude_path
                 .clone()
@@ -1288,7 +1297,7 @@ fn wake_originating_agent(
                 "text".into(),
             ],
         ),
-        "codex" => (
+        crate::ledger::AgentSessionBackend::Codex => (
             profile.codex_path.clone().unwrap_or_else(|| "codex".into()),
             vec![
                 "exec".into(),
@@ -1298,24 +1307,11 @@ fn wake_originating_agent(
                 instruction.into(),
             ],
         ),
-        _ => return Ok(false),
+        crate::ledger::AgentSessionBackend::Unknown => return Ok(false),
     };
-    let log_dir = cfg.defaults.manager_wake_log_dir();
-    std::fs::create_dir_all(&log_dir)?;
-    let log_path = log_dir.join(format!(
-        "{}-{}-origin-{}.log",
-        OffsetDateTime::now_utc().unix_timestamp(),
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut log = options.open(&log_path)?;
+    let (_log_path, log) =
+        create_private_wake_log(&cfg.defaults.manager_wake_log_dir(), Some("origin"));
+    let mut log = log?;
     writeln!(
         log,
         "origin_backend: {}\nwork_id: {work_id}\ninstruction: {instruction}",

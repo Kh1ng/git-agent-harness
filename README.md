@@ -2,6 +2,8 @@
 
 `gah` is a CLI that runs coding agents against real repositories with guardrails around git worktrees, validation, pushing, draft MR/PR creation, PM ticket decomposition, session logging, and cleanup.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for coding and review standards.
+
 ## Binary releases (no build required)
 
 Pre-built binaries are published to [GitHub Releases](https://github.com/Kh1ng/git-agent-harness/releases). A GitHub token with `repo` read scope is required because the repository is private.

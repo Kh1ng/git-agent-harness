@@ -1,10 +1,11 @@
 import crypto from 'node:crypto';
 import { connect } from 'node:http2';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { ActivityEvent } from '@git-agent-harness/contracts';
 import type { ChatLifecycleEvent } from './activityFeed.js';
 import { activityPushPayload } from './webPush.js';
+import { pushRegistrationId, validPushDeviceLabel, writePrivatePushStore } from './pushStore.js';
 
 type ApnsConfig = {
   keyPath: string;
@@ -17,6 +18,7 @@ type ApnsResponse = { status: number; reason?: string };
 export type ApnsRequest = { token: string; headers: Record<string, string>; payload: object };
 type ApnsTransport = (host: string, request: ApnsRequest) => Promise<ApnsResponse>;
 type LiveActivityRegistration = { profile: string; sessionId: string; token: string };
+type TokenSlot = 'device' | 'pushToStartToken' | { liveActivity: string };
 type StoredDevice = {
   id: string;
   token: string;
@@ -28,14 +30,6 @@ type StoredDevice = {
 
 const TOKEN_PATTERN = /^[a-fA-F0-9]{32,512}$/;
 const UPDATE_INTERVAL_MS = 5_000;
-
-function privateJson(path: string, value: unknown): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.tmp-${process.pid}-${crypto.randomUUID()}`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  renameSync(temporary, path);
-  chmodSync(path, 0o600);
-}
 
 function activityKey(profile: string, sessionId?: string): string {
   return `${profile}:${sessionId || 'default'}`;
@@ -103,7 +97,7 @@ export class ApnsNotifications {
     if (value.pushToStartToken !== undefined && value.pushToStartToken !== null && !validToken(value.pushToStartToken)) {
       throw new Error('Invalid Live Activity push-to-start token.');
     }
-    if (value.label !== undefined && (typeof value.label !== 'string' || value.label.length > 80 || /[\x00-\x1f\x7f]/.test(value.label))) {
+    if (!validPushDeviceLabel(value.label)) {
       throw new Error('Device label must be at most 80 printable characters.');
     }
     const live = value.liveActivity;
@@ -116,7 +110,7 @@ export class ApnsNotifications {
       }
       liveActivity = item as LiveActivityRegistration;
     }
-    const id = crypto.createHash('sha256').update(value.token).digest('hex').slice(0, 24);
+    const id = pushRegistrationId(value.token);
     const devices = this.devices();
     const previous = devices.find((device) => device.id === id);
     const device: StoredDevice = {
@@ -128,7 +122,7 @@ export class ApnsNotifications {
       createdAt: previous?.createdAt ?? new Date(this.now()).toISOString()
     };
     if (liveActivity) device.liveActivities[activityKey(liveActivity.profile, liveActivity.sessionId)] = liveActivity.token;
-    privateJson(this.devicesPath, [...devices.filter((entry) => entry.id !== id), device]);
+    writePrivatePushStore(this.devicesPath, [...devices.filter((entry) => entry.id !== id), device]);
     return { id, count: devices.some((entry) => entry.id === id) ? devices.length : devices.length + 1 };
   }
 
@@ -136,7 +130,7 @@ export class ApnsNotifications {
     if (!/^[a-f0-9]{24}$/.test(id)) throw new Error('Invalid APNs device id.');
     const before = this.devices();
     const after = before.filter((device) => device.id !== id);
-    if (after.length !== before.length) privateJson(this.devicesPath, after);
+    if (after.length !== before.length) writePrivatePushStore(this.devicesPath, after);
     return { removed: after.length !== before.length, count: after.length };
   }
 
@@ -189,7 +183,7 @@ export class ApnsNotifications {
     await this.sendToDevices((device) => {
       const token = device.liveActivities[key];
       return token ? { token, headers: this.headers('liveactivity', `${this.config.bundleId}.push-type.liveactivity`), payload: { aps } } : null;
-    }, key);
+    }, { liveActivity: key });
   }
 
   private headers(pushType: 'alert' | 'liveactivity', topic: string, collapseId?: string): Record<string, string> {
@@ -214,7 +208,7 @@ export class ApnsNotifications {
 
   private async sendToDevices(
     request: (device: StoredDevice) => ApnsRequest | null,
-    tokenKind: 'device' | 'pushToStartToken' | string
+    tokenSlot: TokenSlot
   ): Promise<void> {
     const host = this.config.environment === 'production' ? 'https://api.push.apple.com' : 'https://api.sandbox.push.apple.com';
     const devices = this.devices();
@@ -230,7 +224,7 @@ export class ApnsNotifications {
         const response = await this.transport(host, outgoing);
         if (response.status === 410 || response.reason === 'BadDeviceToken' || response.reason === 'Unregistered') {
           const kinds = invalid.get(device.id) ?? new Map<string, string>();
-          kinds.set(tokenKind, outgoing.token);
+          kinds.set(typeof tokenSlot === 'string' ? tokenSlot : tokenSlot.liveActivity, outgoing.token);
           invalid.set(device.id, kinds);
         } else if (response.status >= 400) {
           console.error(`[apns] delivery failed for device ${device.id}: ${response.reason ?? response.status}`);
@@ -240,7 +234,7 @@ export class ApnsNotifications {
       }
     }));
     if (!invalid.size) return;
-    privateJson(this.devicesPath, this.devices().flatMap((device) => {
+    writePrivatePushStore(this.devicesPath, this.devices().flatMap((device) => {
       const kinds = invalid.get(device.id);
       if (!kinds) return [device];
       if (kinds.get('device') === device.token) return [];

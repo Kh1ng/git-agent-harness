@@ -78,7 +78,7 @@ pub(crate) fn run_with_executable(
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agent_session: Some(crate::ledger::AgentSessionRef {
-            backend: "claude".into(),
+            backend: crate::ledger::AgentSessionBackend::Claude,
             provider_session_id: session_id,
             working_directory: Some(worktree.to_string_lossy().into_owned()),
         }),

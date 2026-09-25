@@ -18,7 +18,7 @@ pub use self::approvals::{
 };
 #[allow(unused_imports)]
 pub use self::entry::{
-    review_generation, AgentSessionRef, AttemptBehaviorMetrics, AttemptRecord,
+    review_generation, AgentSessionBackend, AgentSessionRef, AttemptBehaviorMetrics, AttemptRecord,
     AttemptRoutingRecord, BehaviorMetric, BehaviorMetricQuality, ExternalApprovalRecord,
     FailureClass, FailureStage, LedgerEntry, LedgerUsage, RoutingCandidateDiagnostic,
     RoutingDiagnostics, CURRENT_REVIEW_CONTRACT_VERSION, LEDGER_SCHEMA_VERSION,

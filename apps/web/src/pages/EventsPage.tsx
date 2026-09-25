@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Bell, CheckCircle2, CircleDot, DatabaseZap, Gauge, KeyRound, MessageCircle, Radio, ShieldAlert, Wifi, WifiOff, XCircle } from 'lucide-react';
-import type { ActivityKind } from '@git-agent-harness/contracts';
+import { activityPath, type ActivityKind } from '@git-agent-harness/contracts';
 import type { LucideIcon } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState } from '../components/ui/EmptyState.js';
 import { formatLocalTime, formatAge } from '../lib/format.js';
-import { activityUrl, backgroundPushDeviceCount, backgroundPushStatus, setSystemNotificationsEnabled, systemNotificationsEnabled } from '../lib/activityNotifications.js';
+import { backgroundPushDeviceCount, backgroundPushStatus, setSystemNotificationsEnabled, systemNotificationsEnabled } from '../lib/activityNotifications.js';
 
 const EVENT_ICON: Record<ActivityKind, LucideIcon> = {
   dispatch_completed: CheckCircle2,
@@ -92,7 +92,7 @@ export function EventsPage() {
             const age = formatAge(event.occurredAt);
             return (
               <li key={event.id}>
-                <a href={activityUrl(event)} className="card-padded flex items-start gap-3 py-3">
+                <a href={activityPath(event)} className="card-padded flex items-start gap-3 py-3">
                   <Icon size={16} className={`${SEVERITY_COLOR[event.severity]} shrink-0 mt-0.5`} aria-hidden="true" />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">

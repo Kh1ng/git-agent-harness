@@ -109,10 +109,6 @@ export async function setSystemNotificationsEnabled(enabled: boolean): Promise<b
   return enabled;
 }
 
-export function activityUrl(event: ActivityEvent): string {
-  return activityPath(event);
-}
-
 function focusedChat(event: ActivityEvent): boolean {
   if (event.kind !== 'chat_turn_completed' || document.visibilityState !== 'visible' || !document.hasFocus()) return false;
   const navigation = readNavigation();
@@ -121,7 +117,7 @@ function focusedChat(event: ActivityEvent): boolean {
 
 export function deliverSystemNotification(event: ActivityEvent): void {
   if (!systemNotificationsEnabled() || focusedChat(event)) return;
-  const url = activityUrl(event);
+  const url = activityPath(event);
   if (window.__GAH_DESKTOP_NATIVE_NOTIFICATIONS__ === true) {
     const target = new URL('gah://notify');
     target.searchParams.set('id', event.id);

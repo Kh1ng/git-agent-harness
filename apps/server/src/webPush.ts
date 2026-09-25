@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -7,13 +6,13 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  renameSync,
   unlinkSync,
   writeFileSync
 } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { activityPath, type ActivityEvent } from '@git-agent-harness/contracts';
 import webPush, { type PushSubscription } from 'web-push';
+import { pushRegistrationId, validPushDeviceLabel, writePrivatePushStore } from './pushStore.js';
 
 const PUSH_ACTIVITY_KINDS = new Set([
   'chat_turn_completed',
@@ -50,22 +49,9 @@ export function activityPushPayload(event: ActivityEvent): ActivityPushPayload |
   return Buffer.byteLength(JSON.stringify(payload)) <= MAX_PAYLOAD_BYTES ? payload : null;
 }
 
-function privateJson(path: string, value: unknown): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.tmp-${process.pid}-${crypto.randomUUID()}`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(temporary, 0o600);
-  renameSync(temporary, path);
-  chmodSync(path, 0o600);
-}
-
 function readJson<T>(path: string, fallback: T): T {
   if (!existsSync(path)) return fallback;
   return JSON.parse(readFileSync(path, 'utf8')) as T;
-}
-
-function subscriptionId(endpoint: string): string {
-  return crypto.createHash('sha256').update(endpoint).digest('hex').slice(0, 24);
 }
 
 function validSubscription(value: unknown): value is PushSubscription {
@@ -110,10 +96,10 @@ export class WebPushNotifications {
 
   register(value: unknown, label?: unknown): { id: string; count: number } {
     if (!validSubscription(value)) throw new Error('A valid HTTPS push subscription is required.');
-    if (label !== undefined && (typeof label !== 'string' || label.length > 80 || /[\x00-\x1f\x7f]/.test(label))) {
+    if (!validPushDeviceLabel(label)) {
       throw new Error('Device label must be at most 80 printable characters.');
     }
-    const id = subscriptionId(value.endpoint);
+    const id = pushRegistrationId(value.endpoint);
     const subscriptions = this.subscriptions().filter((entry) => entry.id !== id);
     subscriptions.push({
       id,
@@ -121,7 +107,7 @@ export class WebPushNotifications {
       createdAt: new Date().toISOString(),
       subscription: value
     });
-    privateJson(this.subscriptionsPath, subscriptions);
+    writePrivatePushStore(this.subscriptionsPath, subscriptions);
     return { id, count: subscriptions.length };
   }
 
@@ -129,7 +115,7 @@ export class WebPushNotifications {
     if (!/^[a-f0-9]{24}$/.test(id)) throw new Error('Invalid push subscription id.');
     const before = this.subscriptions();
     const after = before.filter((entry) => entry.id !== id);
-    if (after.length !== before.length) privateJson(this.subscriptionsPath, after);
+    if (after.length !== before.length) writePrivatePushStore(this.subscriptionsPath, after);
     return { removed: after.length !== before.length, count: after.length };
   }
 
@@ -163,7 +149,7 @@ export class WebPushNotifications {
         }
       }
     }));
-    if (expired.size) privateJson(this.subscriptionsPath, this.subscriptions().filter((entry) => !expired.has(entry.id)));
+    if (expired.size) writePrivatePushStore(this.subscriptionsPath, this.subscriptions().filter((entry) => !expired.has(entry.id)));
   }
 
   private loadOrCreateKeys(): VapidKeys {

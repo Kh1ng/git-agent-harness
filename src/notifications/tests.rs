@@ -919,7 +919,7 @@ fn originating_codex_session_is_resumed_from_the_ledger() {
         crate::ledger::LedgerEntry::new("repo", &profile, "codex", "improve", "target", None, None);
     entry.work_id = Some("WORK-2".into());
     entry.origin_agent_session = Some(crate::ledger::AgentSessionRef {
-        backend: "codex".into(),
+        backend: crate::ledger::AgentSessionBackend::Codex,
         provider_session_id: "session-2".into(),
         working_directory: Some(tmp.path().to_string_lossy().into_owned()),
     });

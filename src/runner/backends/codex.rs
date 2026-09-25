@@ -54,7 +54,7 @@ pub(crate) fn run_with_executable(
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
         agent_session: thread_id.map(|provider_session_id| crate::ledger::AgentSessionRef {
-            backend: "codex".into(),
+            backend: crate::ledger::AgentSessionBackend::Codex,
             provider_session_id,
             working_directory: Some(worktree.to_string_lossy().into_owned()),
         }),

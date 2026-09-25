@@ -126,7 +126,9 @@ export type UpdatedPublish = (event: {
 }) => void;
 let updatedPublisher: UpdatedPublish | undefined;
 
-export type ChatLifecyclePublish = (event: import('../activityFeed.js').ChatLifecycleEvent) => void;
+type ChatLifecycleEvent = import('../activityFeed.js').ChatLifecycleEvent;
+type ChatLifecycleUpdate = Pick<ChatLifecycleEvent, 'phase'> & Partial<Omit<ChatLifecycleEvent, 'phase' | 'profile' | 'sessionId' | 'turn' | 'occurredAt'>>;
+export type ChatLifecyclePublish = (event: ChatLifecycleEvent) => void;
 let lifecyclePublisher: ChatLifecyclePublish | undefined;
 
 export function setChatEventPublishers(publishers: {
@@ -953,6 +955,17 @@ export function sendManagerChatMessage(
       previewSets: []
     };
     activeTurns.set(key, active);
+    const publishLifecycle = (event: ChatLifecycleUpdate, occurredAt = Date.now()): void => {
+      lifecyclePublisher?.({
+        profile,
+        ...(sessionId ? { sessionId } : {}),
+        turn: turnNo,
+        occurredAt: new Date(occurredAt).toISOString(),
+        backend: active.backend,
+        model: sessionContext.model,
+        ...event
+      });
+    };
     appendEvents(profile, [
       ...(compaction ? [{ type: 'compaction/start' as const, seq: ++active.seq, turn: turnNo, timestamp: now }] : []),
       { type: 'turn/start', seq: ++active.seq, turn: turnNo, timestamp: now },
@@ -964,15 +977,7 @@ export function sendManagerChatMessage(
       profile,
       ...(sessionId ? { sessionId } : {})
     });
-    lifecyclePublisher?.({
-      phase: 'start',
-      profile,
-      ...(sessionId ? { sessionId } : {}),
-      turn: turnNo,
-      occurredAt: new Date(now).toISOString(),
-      backend: sessionContext.backend,
-      model: sessionContext.model
-    });
+    publishLifecycle({ phase: 'start' }, now);
 
     try {
       // Keep slash commands bare so the backend dispatches them instead of
@@ -1068,16 +1073,7 @@ export function sendManagerChatMessage(
         };
         permissionPublisher?.(permissionEvent);
         await hooks.onPermission?.(permissionEvent);
-        lifecyclePublisher?.({
-          phase: 'permission',
-          profile,
-          ...(sessionId ? { sessionId } : {}),
-          turn: turnNo,
-          occurredAt: new Date().toISOString(),
-          backend: active.backend,
-          model: sessionContext.model,
-          tool: request.title
-        });
+        publishLifecycle({ phase: 'permission', tool: request.title });
       };
       // Slice 3: structured tool-call activity -- logged (durable, replayed
       // on resume) and pushed live. Status transitions append new events;
@@ -1130,16 +1126,7 @@ export function sendManagerChatMessage(
           turn: turnNo,
           ...tool
         });
-        lifecyclePublisher?.({
-          phase: 'tool',
-          profile,
-          ...(sessionId ? { sessionId } : {}),
-          turn: turnNo,
-          occurredAt: new Date().toISOString(),
-          backend: active.backend,
-          model: sessionContext.model,
-          tool: tool.title
-        });
+        publishLifecycle({ phase: 'tool', tool: tool.title });
         if (tool.summary) detectPreview(tool.summary);
       };
       const run = runTurn(
@@ -1252,12 +1239,8 @@ export function sendManagerChatMessage(
             ...(compaction ? [{ type: 'compaction/end' as const, seq: ++active.seq, turn: turnNo, timestamp: Date.now() }] : [])
           ];
       appendEvents(profile, done, sessionOpts);
-      lifecyclePublisher?.({
+      publishLifecycle({
         phase: 'end',
-        profile,
-        ...(sessionId ? { sessionId } : {}),
-        turn: turnNo,
-        occurredAt: new Date().toISOString(),
         backend,
         model,
         outcome: active.cancelled ? 'cancelled' : 'complete',
@@ -1277,11 +1260,7 @@ export function sendManagerChatMessage(
         appendEvents(profile, [
           { type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'cancelled' }, timestamp: Date.now() }
         ], sessionOpts);
-        lifecyclePublisher?.({
-          phase: 'end', profile, ...(sessionId ? { sessionId } : {}), turn: turnNo,
-          occurredAt: new Date().toISOString(), backend: active.backend, model: sessionContext.model,
-          outcome: 'cancelled'
-        });
+        publishLifecycle({ phase: 'end', outcome: 'cancelled' });
         return {
           turn: { role: 'assistant', text: '', backend: active.backend, model: null, usage: null, timestamp: Date.now(), nodeId: sessionContext.route.nodeId, nodeName: sessionContext.route.nodeName },
           cancelled: true
@@ -1293,11 +1272,7 @@ export function sendManagerChatMessage(
         { type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'error', message: text }, timestamp: Date.now() }
       ];
       appendEvents(profile, done, sessionOpts);
-      lifecyclePublisher?.({
-        phase: 'end', profile, ...(sessionId ? { sessionId } : {}), turn: turnNo,
-        occurredAt: new Date().toISOString(), backend: active.backend, model: sessionContext.model,
-        outcome: 'error', error: text
-      });
+      publishLifecycle({ phase: 'end', outcome: 'error', error: text });
       throw error;
     } finally {
       // A turn ending answers any still-live permission fail-closed (e.g.
