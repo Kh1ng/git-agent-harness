@@ -55,7 +55,7 @@ class Fixture(BaseHTTPRequestHandler):
 const statusText = document.getElementById('statusText');
 const scan = () => window.webkit.messageHandlers.gahController.postMessage('scanPairingCode');
 function requestFrame(otherOrigin) {
- const frame = document.createElement('iframe'); frame.hidden = true;
+ const frame = document.createElement('iframe'); frame.width = '1'; frame.height = '1'; frame.style.border = '0';
  const label = otherOrigin ? 'Request scan from other origin' : 'Request scan from subframe';
  window.addEventListener('message', function sent(event) {
   if (event.source !== frame.contentWindow) return;
