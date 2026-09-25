@@ -22,6 +22,10 @@ class Fixture(BaseHTTPRequestHandler):
             Fixture.recovery_unavailable = True
         if path == "/allow-recovery":
             Fixture.recovery_unavailable = False
+        if path in {"/arm-recovery", "/allow-recovery"}:
+            self.send_response(200)
+            self.end_headers()
+            return
         if path == "/unavailable" or (path == "/recovery" and Fixture.recovery_unavailable):
             self.close_connection = True
             return
