@@ -62,6 +62,14 @@ test('Web Push and APNs registration require authentication and mutation receipt
     assert.equal((await fetch(`${base}/api/push/apns-devices/${'b'.repeat(24)}`, {
       method: 'DELETE', headers: { ...auth, 'Idempotency-Key': 'apns-remove-00001' }
     })).status, 200);
+    let rateLimited = false;
+    for (let request = 0; request < 60; request++) {
+      if ((await fetch(`${base}/api/push/public-key`, { headers: auth })).status === 429) {
+        rateLimited = true;
+        break;
+      }
+    }
+    assert.ok(rateLimited, 'push routes must reject repeated authenticated file access');
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(mutationStore, { recursive: true, force: true });

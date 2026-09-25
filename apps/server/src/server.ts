@@ -321,6 +321,14 @@ export function createServer(
   app.use('/api', authMiddleware);
   const mutation = mutationSafety(getCoordinatorIdentity(undefined, coordinatorPort).node_id);
   app.use(workerRouteGuard(node));
+  if (node.role === 'central' && (configDeps.webPushNotifications || configDeps.apnsNotifications)) {
+    app.use('/api/push', rateLimit({
+      windowMs: 60_000,
+      limit: 60,
+      standardHeaders: true,
+      legacyHeaders: false
+    }));
+  }
   if (node.role === 'central' && configDeps.webPushNotifications) {
     const push = configDeps.webPushNotifications;
     app.get('/api/push/public-key', (_req, res) => res.json({ publicKey: push.publicKey() }));
