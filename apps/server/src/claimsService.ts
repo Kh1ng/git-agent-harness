@@ -7,18 +7,16 @@
  * (work_claim.rs) is untouched, it protects a different, single-machine
  * problem.
  *
- * Storage is a plain JSON file + in-memory Map, matching registryService.ts's
- * own load()/save() pattern -- not SQLite. Correctness doesn't need a real
- * database here: as long as acquire/renew/release are synchronous functions
- * (no `await` between the read-check and the write), Node's single-threaded
- * event loop already guarantees no other request can interleave in the
- * middle, which is the same atomicity a `WHERE` clause buys you, without a
- * new native dependency for a three-column table.
+ * Storage is a private JSON file + in-memory Map, not SQLite. Writes replace
+ * the file atomically, and synchronous mutations cannot interleave within one
+ * server process. Independently loaded service processes remain explicitly
+ * last-write-wins; the deployment contract runs one central claims service.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { ClaimLease } from '@git-agent-harness/contracts';
+import { writePrivatePushStore as writePrivateJsonStore } from './pushStore.js';
 
 const DEFAULT_LEASE_SECONDS = 15 * 60; // 15 min; renewal interval is lease/3, see central_claims.rs
 const MIN_LEASE_SECONDS = 60;
@@ -52,24 +50,24 @@ export class ClaimsService {
     if (existsSync(this.configPath)) {
       try {
         const data = JSON.parse(readFileSync(this.configPath, 'utf8'));
-        if (Array.isArray(data.leases)) {
-          for (const lease of data.leases as ClaimLease[]) {
-            this.leases.set(claimKey(lease.profile, lease.work_id), lease);
-          }
+        if (!Array.isArray(data.leases)) {
+          throw new Error('expected a leases array');
+        }
+        for (const lease of data.leases as ClaimLease[]) {
+          this.leases.set(claimKey(lease.profile, lease.work_id), lease);
         }
       } catch (e) {
-        console.error('Failed to load claims config:', e);
+        throw new Error(
+          `Failed to load claims config ${this.configPath}: ${e instanceof Error ? e.message : String(e)}`,
+          { cause: e }
+        );
       }
     }
   }
 
   private save() {
     try {
-      const dir = dirname(this.configPath);
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true });
-      }
-      writeFileSync(this.configPath, JSON.stringify({ leases: Array.from(this.leases.values()) }, null, 2));
+      writePrivateJsonStore(this.configPath, { leases: Array.from(this.leases.values()) });
     } catch (e) {
       console.error('Failed to save claims config:', e);
       throw e;

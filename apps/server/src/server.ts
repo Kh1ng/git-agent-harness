@@ -836,10 +836,22 @@ export function createServer(
     return { nodeId, profile, workId };
   }
 
+  const claimsStoreUnavailable = (res: express.Response, error: unknown): void => {
+    console.error(`Claims store failed to load: ${error instanceof Error ? error.message : String(error)}`);
+    res.status(500).json({ error: 'Claims store unavailable', message: 'The claims store could not be loaded; check server logs.' });
+  };
+
   app.post('/api/claims/acquire', (req, res) => {
+    let claims;
+    try {
+      claims = centralClaims();
+    } catch (error) {
+      claimsStoreUnavailable(res, error);
+      return;
+    }
     try {
       const { nodeId, profile, workId } = authorizeClaimRequest(req.body.node_id, req.body.profile, req.body.work_id);
-      const lease = centralClaims().acquire(nodeId, profile, workId, req.body.lease_seconds);
+      const lease = claims.acquire(nodeId, profile, workId, req.body.lease_seconds);
       res.status(200).json(lease);
     } catch (error) {
       if (error instanceof ClaimConflictError) {
@@ -851,9 +863,16 @@ export function createServer(
   });
 
   app.post('/api/claims/renew', (req, res) => {
+    let claims;
+    try {
+      claims = centralClaims();
+    } catch (error) {
+      claimsStoreUnavailable(res, error);
+      return;
+    }
     try {
       const { nodeId, profile, workId } = authorizeClaimRequest(req.body.node_id, req.body.profile, req.body.work_id);
-      const lease = centralClaims().renew(nodeId, profile, workId, req.body.lease_seconds);
+      const lease = claims.renew(nodeId, profile, workId, req.body.lease_seconds);
       res.status(200).json(lease);
     } catch (error) {
       if (error instanceof ClaimConflictError) {
@@ -865,9 +884,16 @@ export function createServer(
   });
 
   app.post('/api/claims/release', (req, res) => {
+    let claims;
+    try {
+      claims = centralClaims();
+    } catch (error) {
+      claimsStoreUnavailable(res, error);
+      return;
+    }
     try {
       const { nodeId, profile, workId } = authorizeClaimRequest(req.body.node_id, req.body.profile, req.body.work_id);
-      centralClaims().release(nodeId, profile, workId);
+      claims.release(nodeId, profile, workId);
       res.status(200).json({ success: true });
     } catch (error) {
       res.status(400).json({ error: 'Bad Request', message: error instanceof Error ? error.message : String(error) });
