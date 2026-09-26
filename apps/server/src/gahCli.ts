@@ -78,6 +78,7 @@ export function findGahBinary(isExecutable: ExecutableProbe = executableOnDisk):
   return 'gah';
 }
 const STATUS_CACHE_TTL_MS = 30_000;
+const MAX_READ_OUTPUT_BYTES = 2 * 1024 * 1024;
 const statusCache = new AsyncTtlCache<string, StatusSnapshot>(STATUS_CACHE_TTL_MS);
 
 /**
@@ -153,39 +154,7 @@ async function runStatusUncached(profile: string, config?: string): Promise<Stat
     args.push('--config-path', config);
   }
 
-  return new Promise((resolve, reject) => {
-    const child = spawn(findGahBinary(), args, getSpawnOptions(config));
-    
-    let stdout = '';
-    let stderr = '';
-    
-    child.stdout?.on('data', (data) => {
-      stdout += data.toString();
-    });
-    
-    child.stderr?.on('data', (data) => {
-      stderr += data.toString();
-    });
-    
-    child.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`gah status failed with exit code ${code}: ${stderr || stdout}`));
-        return;
-      }
-      
-      try {
-        const result = JSON.parse(stdout) as StatusSnapshot;
-        resolve(result);
-      } catch (parseError) {
-        reject(new Error(`Failed to parse gah status output: ${parseError instanceof Error ? parseError.message : String(parseError)}
-Output: ${stdout}`));
-      }
-    });
-    
-    child.on('error', (error) => {
-      reject(new Error(`Failed to spawn gah: ${error instanceof Error ? error.message : String(error)}`));
-    });
-  });
+  return runJsonCommand<StatusSnapshot>(args, config);
 }
 
 /**
@@ -219,8 +188,18 @@ function runJsonCommand<T>(
 
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let outputError: Error | undefined;
 
     child.stdout?.on('data', (data) => {
+      stdoutBytes += data.length;
+      if (stdoutBytes > MAX_READ_OUTPUT_BYTES) {
+        outputError ??= new Error(
+          `gah ${args[0]} output exceeded ${MAX_READ_OUTPUT_BYTES} bytes (observed ${stdoutBytes})`
+        );
+        child.kill();
+        return;
+      }
       stdout += data.toString();
     });
 
@@ -229,6 +208,10 @@ function runJsonCommand<T>(
     });
 
     child.on('close', (code) => {
+      if (outputError) {
+        reject(outputError);
+        return;
+      }
       if (code !== 0 && !acceptStructuredFailure) {
         reject(new Error(`gah ${args[0]} failed with exit code ${code}: ${stderr || stdout}`));
         return;
