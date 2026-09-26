@@ -68,6 +68,22 @@ export interface ActivityEvent {
   nodeId?: string | null;
 }
 
+/** The single wake filter: every delivery method (push, APNs, channel,
+ * command hook, in-page system notification) notifies only these kinds. */
+export const NOTIFIABLE_ACTIVITY_KINDS: ReadonlySet<ActivityKind> = new Set<ActivityKind>([
+  "chat_turn_completed",
+  "chat_turn_failed",
+  "chat_permission_requested",
+  "action_required",
+  "dispatch_failed",
+  "review_ready",
+  "node_offline"
+]);
+
+export function notifiableActivity(event: Pick<ActivityEvent, "kind">): boolean {
+  return NOTIFIABLE_ACTIVITY_KINDS.has(event.kind);
+}
+
 export function activityPath(event: Pick<ActivityEvent, "profile" | "sessionId">): string {
   if (event.profile && event.sessionId) {
     return `/?${new URLSearchParams({ page: "chat", profile: event.profile, chat: event.sessionId })}`;

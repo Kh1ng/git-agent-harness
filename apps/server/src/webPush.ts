@@ -10,19 +10,10 @@ import {
   writeFileSync
 } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { activityPath, type ActivityEvent } from '@git-agent-harness/contracts';
+import { activityPath, notifiableActivity, type ActivityEvent } from '@git-agent-harness/contracts';
 import webPush, { type PushSubscription } from 'web-push';
 import { pushRegistrationId, removePushEntries, validPushDeviceLabel, validPushRegistrationId, writePrivatePushStore } from './pushStore.js';
 
-const PUSH_ACTIVITY_KINDS = new Set([
-  'chat_turn_completed',
-  'chat_turn_failed',
-  'chat_permission_requested',
-  'action_required',
-  'dispatch_failed',
-  'review_ready',
-  'node_offline'
-]);
 const MAX_PAYLOAD_BYTES = 3 * 1024;
 const FAILURE_LOG_INTERVAL_MS = 60 * 60 * 1_000;
 const PUSH_ENDPOINT_HOSTS = new Set(['fcm.googleapis.com', 'updates.push.services.mozilla.com']);
@@ -42,7 +33,7 @@ export type ActivityPushPayload = { id: string; title: string; body: string; url
 
 /** The shared wake filter and bounded public payload for every push transport. */
 export function activityPushPayload(event: ActivityEvent): ActivityPushPayload | null {
-  if (!PUSH_ACTIVITY_KINDS.has(event.kind)) return null;
+  if (!notifiableActivity(event)) return null;
   const payload = {
     id: event.id,
     title: event.title.slice(0, 120),
@@ -133,7 +124,7 @@ export class WebPushNotifications {
   async deliverActivity(event: ActivityEvent): Promise<void> {
     const publicPayload = activityPushPayload(event);
     if (!publicPayload) {
-      if (PUSH_ACTIVITY_KINDS.has(event.kind)) console.error(`[webPush] skipped oversized activity payload ${event.id}`);
+      if (notifiableActivity(event)) console.error(`[webPush] skipped oversized activity payload ${event.id}`);
       return;
     }
     const payload = JSON.stringify(publicPayload);

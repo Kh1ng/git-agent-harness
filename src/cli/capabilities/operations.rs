@@ -90,6 +90,25 @@ pub(super) fn add_policy_operations(manifest: &mut CapabilityManifest) {
     });
 
     manifest.add_operation(OperationDefinition {
+        operation_id: "notify.send".to_string(),
+        display_name: "Send Channel Notification".to_string(),
+        class: OperationClass::Mutation,
+        profile_scope: ProfileScope::Global,
+        request_schema: None,
+        response_schema: None,
+        streaming: StreamingBehavior::None,
+        idempotency: Idempotency::NonIdempotent,
+        secret_fields: vec![],
+        remote_disposition: RemoteDisposition::LocalOnly,
+        local_only_reason: Some(LocalOnlyReason::SecuritySensitive),
+        documentation: Some(
+            "Deliver one message through the configured Telegram or Discord channel".to_string(),
+        ),
+        cli_command_path: "gah notify-send".to_string(),
+        is_stable: true,
+    });
+
+    manifest.add_operation(OperationDefinition {
         operation_id: "price_guard.check".to_string(),
         display_name: "Check Model Price".to_string(),
         class: OperationClass::Read,
