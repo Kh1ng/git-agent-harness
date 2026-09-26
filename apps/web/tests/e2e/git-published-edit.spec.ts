@@ -20,4 +20,8 @@ test('edits a published pull request through the mock control plane', async ({ p
   expect(response.ok(), await response.text()).toBe(true);
   const body = await response.json() as { prs: { number: number; title: string }[] };
   expect(body.prs.find(pr => pr.number === 12)?.title).toBe('Published title edited in dashboard');
+
+  // The mock server is shared across the e2e suite; restore the fixture
+  // state so later specs see the original PR titles.
+  await request.post(`${MOCK_BASE_URL}/api/mock/scenario`, { data: { name: 'normal' } });
 });
