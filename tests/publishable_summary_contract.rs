@@ -2,9 +2,9 @@ use assert_cmd::Command;
 mod support;
 use serde_json::Value;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
+use support::write_executable;
 
 fn git(args: &[&str], directory: &Path, home: &Path) {
     let output = ProcessCommand::new("git")
@@ -18,13 +18,6 @@ fn git(args: &[&str], directory: &Path, home: &Path) {
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-fn write_executable(path: &Path, body: &str) {
-    fs::write(path, body).unwrap();
-    let mut permissions = fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).unwrap();
 }
 
 #[test]

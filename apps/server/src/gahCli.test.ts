@@ -73,6 +73,19 @@ test('doctor treats a valid JSON failure snapshot as a successful transport resp
   }
 });
 
+test('read commands reject output above 2 MB without parsing it', async () => {
+  const restore = pinFakeGah("head -c 2097153 /dev/zero | tr '\\0' x");
+  try {
+    await assert.rejects(
+      runQuota({ profile: 'fixture' }),
+      (error: unknown) => error instanceof Error
+        && /gah quota output exceeded 2097152 bytes \(observed \d+\)/.test(error.message)
+    );
+  } finally {
+    restore();
+  }
+});
+
 test('read commands reject with a spawn failure when the pinned binary cannot execute', async () => {
   // A directory passes findGahBinary's X_OK probe but cannot be spawned,
   // exercising the transport-level failure path without any real gah build.

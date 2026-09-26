@@ -3,6 +3,7 @@ import { ExternalLink, GitCommit, GitPullRequest, RefreshCw, X } from 'lucide-re
 import type { ChatPrSummary, GitReviewState, HelperSuggestion, MergeRequest } from '@git-agent-harness/contracts';
 import { ExternalAnchor } from './ExternalAnchor.js';
 import { gahApi } from '../api/client.js';
+import { ciLabelFor, stateLabelFor } from '../lib/reviewLabels.js';
 
 interface CommitPrDialogProps {
   profile: string;
@@ -187,8 +188,8 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged,
   const baseNeedsReview = !!review && base.trim() !== review.base;
   const providerLink = published ?? review?.existing?.url ?? providerRequest?.url ?? mergeRequest?.url ?? null;
   const reviewBranch = providerRequest?.headRefName ?? mergeRequest?.branch ?? review?.branch ?? 'Unknown';
-  const stateLabel = mergeRequest?.state ?? (providerRequest ? 'open' : review?.existing ? 'open' : 'Not published');
-  const ciLabel = mergeRequest?.ci_pending ? 'Pending' : mergeRequest?.ci_passed ? 'Passed' : mergeRequest ? 'Not passing' : 'Unknown';
+  const stateLabel = stateLabelFor(mergeRequest, !!providerRequest, !!review?.existing);
+  const ciLabel = ciLabelFor(mergeRequest);
   const classification = mergeRequest?.classification ?? providerRequest?.reviewState ?? 'Not reviewed';
   const recommendedAction = mergeRequest?.recommended_action?.replaceAll('_', ' ') ?? 'None';
 

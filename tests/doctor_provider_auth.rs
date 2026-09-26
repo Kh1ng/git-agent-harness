@@ -3,38 +3,15 @@
 //! and project, not just an explicit token env var. These integration tests
 //! use fake `gh`/`glab` commands and contain no real credentials.
 
-use assert_cmd::Command;
+use cli_support::{gah_command as bin, write_fake_binary};
 use predicates::prelude::*;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
 use tempfile::TempDir;
 
-fn bin() -> Command {
-    static COMMAND_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let invocation_id = COMMAND_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut cmd = Command::cargo_bin("gah").unwrap();
-    cmd.env(
-        "XDG_STATE_HOME",
-        std::env::temp_dir().join(format!(
-            "gah-docauth-test-state-{}-{invocation_id}",
-            std::process::id()
-        )),
-    );
-    cmd.env(
-        "GAH_AVAILABILITY_PATH",
-        "/nonexistent-availability-path.json",
-    );
-    cmd.env(
-        "GAH_VALIDATION_CHECK_PATH",
-        std::env::temp_dir().join(format!(
-            "gah-docauth-test-validation-{}-{invocation_id}.json",
-            std::process::id()
-        )),
-    );
-    cmd
-}
+#[path = "support/cli.rs"]
+mod cli_support;
 
 fn init_git_repo(path: &Path) {
     fs::create_dir_all(path.join("docs")).unwrap();
@@ -104,14 +81,6 @@ default_target_branch = "main"
     cfg
 }
 
-fn make_fake_bin_with_body(dir: &Path, name: &str, body: &str) {
-    let path = dir.join(name);
-    fs::write(&path, body).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
-}
-
 fn prepend_path(dir: &Path) -> String {
     let old = std::env::var("PATH").unwrap_or_default();
     format!("{}:{}", dir.display(), old)
@@ -144,7 +113,7 @@ fn run_doctor_provider_auth_with_env(
 
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
-    make_fake_bin_with_body(&fake_bin, cli, cli_body);
+    write_fake_binary(&fake_bin, cli, cli_body);
 
     let mut cmd = bin();
     cmd.args([
@@ -303,7 +272,7 @@ fn doctor_gitlab_no_token_no_cli_fails_closed() {
 
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
-    make_fake_bin_with_body(&fake_bin, "which", "#!/bin/sh\nexit 1\n");
+    write_fake_binary(&fake_bin, "which", "#!/bin/sh\nexit 1\n");
 
     bin()
         .args([
@@ -351,7 +320,7 @@ fn worker_doctor_uses_central_memory_but_keeps_role_and_provider_checks() {
             ),
         )
         .unwrap();
-        make_fake_bin_with_body(
+        write_fake_binary(
             &fake_bin,
             "gh",
             if provider_ready {

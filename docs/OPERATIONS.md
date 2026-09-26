@@ -591,18 +591,9 @@ use, and alerts once a node has been `stale`/`unreachable`/`auth_failed`/
 not on every subsequent bad check, and again if it recovers and later goes
 bad a second time.
 
-Alerting reuses the same shell-hook shape as the Rust side's per-profile
-`notify_command` (section 4 below) rather than inventing new plumbing: set
-`GAH_NODE_LIVENESS_NOTIFY_COMMAND` in `apps/server`'s environment (e.g.
-`/etc/gah/server.env`, `EnvironmentFile=-`'d by `gah-server.service`) and
-a one-line message is piped to that command's stdin, shell-executed.
-Unset skips alerting entirely; a failing or missing command is logged to
-stderr and swallowed -- it never crashes the scheduler.
-
-```bash
-# /etc/gah/server.env
-GAH_NODE_LIVENESS_NOTIFY_COMMAND=/home/you/bin/telegram-notify
-```
+The alert is a `node_offline` activity event. It reaches every delivery
+method in [Notification delivery methods](#notification-delivery-methods):
+push, APNs, the Telegram/Discord channel, and `GAH_NOTIFY_COMMAND`.
 
 This is the interim, poll-based liveness model. The eventual model
 (worker nodes dial in and hold a persistent WebSocket, reusing the
@@ -885,6 +876,49 @@ mid-file corruption is never altered automatically and requires investigation.
 GAH can notify an operator (and optionally wake a manager agent) on high-signal
 events, without any external wrapper.
 
+### Notification delivery methods
+
+Events enter the central server's activity feed. One filter,
+`notifiableActivity` in `packages/contracts`, decides which events can wake a
+person: a chat reply, a chat failure, a chat permission request, an operator
+action, a failed dispatch, a ready review, and an offline node. Every
+delivery method below uses that filter.
+
+| Method | Receives | Enable |
+| --- | --- | --- |
+| Dashboard alert | Every feed event (in-page); notifiable events as system notifications | Activity page → **Enable system alerts** |
+| Web Push | Notifiable events | Same toggle, on an HTTPS dashboard |
+| APNs and Live Activity | Notifiable events; Live Activity for each running chat turn | `GAH_APNS_*` on the central server |
+| Telegram or Discord channel | Notifiable chat and node events from the feed; dispatch events directly from the Rust CLI | `[defaults] notification_channel` |
+| `GAH_NOTIFY_COMMAND` | Notifiable events, as one line on stdin | Set it in the central server's environment |
+| Per-profile `notify_command` | Rust dispatch and controller events only | `notify_command` on a profile |
+
+The channel is split by origin. The Rust CLI sends dispatch and controller
+events itself, because a worker's event log never reaches the central feed.
+The feed sends the events that only the server sees, through
+`gah notify-send --title --message --url`. Each event goes to the channel once.
+
+Configure the channel in the GAH config. Credentials stay in the environment
+of both the CLI and the central server:
+
+```toml
+[defaults]
+notification_channel = "telegram"   # or "discord", or "none"
+telegram_chat_id = "12345"
+```
+
+```bash
+# /etc/gah/server.env and the CLI environment
+TELEGRAM_BOT_TOKEN=123456:replace-me     # telegram
+DISCORD_WEBHOOK_URL=https://discord...   # discord
+GAH_NOTIFY_COMMAND=/home/you/bin/notify  # optional shell hook
+```
+
+`GAH_NODE_LIVENESS_NOTIFY_COMMAND` still works as an alias for
+`GAH_NOTIFY_COMMAND`. The server prints one deprecation line at startup. The
+hook now receives every notifiable event, not only node outages. A failing
+delivery method is logged and never blocks the others.
+
 ### In-app activity and system alerts
 
 The dashboard's **Activity** page receives dispatch completion/failure, review
@@ -981,14 +1015,13 @@ notify_command = "/home/you/bin/telegram-notify"
 
 ### Agent wake (opt-in autonomy)
 
-A Telegram ping still needs a human to act. GAH can instead resume the worker
-that performed the work when a review requests fixes, a dispatch fails, or a
-backend stalls. If that provider session is unavailable, GAH wakes the manager.
-Supervisory events go directly to the manager. Set two things:
+A Telegram ping still needs a human to act. GAH can instead queue an
+instruction on the profile's durable manager chat when a review requests fixes,
+a dispatch fails, or a backend stalls. Resuming the originating worker session
+is parked in #1235. Set two things:
 
-- `defaults.current_manager` — global fallback and supervisor. One of `claude`,
-  `codex`, `hermes`. The originating Claude or Codex worker does not need to
-  match this setting.
+- `defaults.current_manager` — the manager that receives the wake. One of
+  `claude`, `codex`, `hermes`.
 - `profiles.<name>.manager_wake_autonomy` — per profile:
   - `off` (default) — no wake; `notify_command` behavior unchanged.
   - `review_only` — woken agent reviews and comments, must not merge or write.
@@ -1004,8 +1037,8 @@ current_manager = "claude"
 manager_wake_autonomy = "review_only"
 ```
 
-Wakes are fire-and-forget but **always logged**: stdout/stderr of the resumed
-worker or manager go to a timestamped file under the wake log dir
+Wakes are fire-and-forget but **always logged**: each queued instruction is
+written to a timestamped file under the wake log dir
 (`GAH_MANAGER_WAKE_LOG_DIR`, else `artifact_root/manager-wake-logs`). Inspect
 after the fact to see exactly what an unsupervised agent did — a wake must never
 be unobservable. `MrMerged` never wakes (nothing left to act on).

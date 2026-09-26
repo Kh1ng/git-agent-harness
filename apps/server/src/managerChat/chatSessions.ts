@@ -230,6 +230,42 @@ export async function createWorkspace(record: ChatSessionSummary, profileInfo: P
   }
 }
 
+/** Commit dirty chat work with an explicit audit commit and publish the
+ * session branch so another node can continue from the same tree. */
+export async function publishWorkspace(
+  profile: string,
+  sessionId: string,
+  profileInfo: Pick<ProfileSummary, 'repo_id' | 'local_path' | 'worktree_base'>,
+  opts?: ChatSessionStoreOptions
+): Promise<{ branch: string; commit: string }> {
+  const resolved = await resolveSessionCwd(profile, sessionId, profileInfo, opts);
+  if (!resolved?.session.worktreePath) throw new Error('Session has no writable workspace to carry.');
+  const { stdout: status } = await git(resolved.cwd, 'status', '--porcelain');
+  if (status.trim()) {
+    await git(resolved.cwd, 'add', '-A');
+    await git(resolved.cwd, 'commit', '-m', `gah: save chat handoff ${sessionId}`);
+  }
+  const { stdout } = await git(resolved.cwd, 'rev-parse', 'HEAD');
+  const commit = stdout.trim();
+  await git(resolved.cwd, 'push', 'origin', `HEAD:refs/heads/${resolved.session.branch}`);
+  return { branch: resolved.session.branch, commit };
+}
+
+/** Fast-forward an existing or newly materialized workspace to the branch
+ * published by the previous node. */
+export async function refreshWorkspace(
+  profile: string,
+  sessionId: string,
+  profileInfo: Pick<ProfileSummary, 'repo_id' | 'local_path' | 'worktree_base'>,
+  opts?: ChatSessionStoreOptions
+): Promise<string> {
+  const resolved = await resolveSessionCwd(profile, sessionId, profileInfo, opts);
+  if (!resolved?.session.worktreePath) throw new Error('Session has no writable workspace to refresh.');
+  await git(resolved.cwd, 'fetch', 'origin', `refs/heads/${resolved.session.branch}:refs/remotes/origin/${resolved.session.branch}`);
+  await git(resolved.cwd, 'merge', '--ff-only', `origin/${resolved.session.branch}`);
+  return (await git(resolved.cwd, 'rev-parse', 'HEAD')).stdout.trim();
+}
+
 export function listSessions(profile: string, opts?: ChatSessionStoreOptions): ChatSessionSummary[] {
   return readIndex(profile, opts)
     .slice()

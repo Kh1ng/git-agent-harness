@@ -2,10 +2,11 @@ use regex::Regex;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+
+mod support;
 
 const DEFAULT_MAX_LINES: usize = 1500;
 
@@ -1197,8 +1198,7 @@ fn install_linux_defaults_gateway_url_to_central_host() {
     .unwrap();
 
     let fake_tailscale = tmp.join("tailscale");
-    fs::write(&fake_tailscale, "#!/bin/sh\necho 100.109.87.86\n").unwrap();
-    fs::set_permissions(&fake_tailscale, fs::Permissions::from_mode(0o755)).unwrap();
+    support::write_executable(&fake_tailscale, "#!/bin/sh\necho 100.109.87.86\n");
 
     let run = |extra: &str| {
         let probe = format!(
@@ -1258,12 +1258,10 @@ fn install_linux_prefers_the_tailnet_bind_host() {
     let tmp = std::env::temp_dir().join(format!("gah-src-test-bind-{}", std::process::id()));
     fs::create_dir_all(&tmp).unwrap();
     let fake_gah = tmp.join("gah");
-    fs::write(
+    support::write_executable(
         &fake_gah,
         "#!/bin/sh\n[ \"$1\" = tailscale-ip ] && echo 100.118.97.79\n",
-    )
-    .unwrap();
-    fs::set_permissions(&fake_gah, fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let run = |host: Option<&str>, path: &Path| {
         let host = host
@@ -1291,8 +1289,7 @@ fn install_linux_prefers_the_tailnet_bind_host() {
     let empty = tmp.join("empty");
     fs::create_dir_all(&empty).unwrap();
     let unavailable_gah = empty.join("gah");
-    fs::write(&unavailable_gah, "#!/bin/sh\nexit 1\n").unwrap();
-    fs::set_permissions(&unavailable_gah, fs::Permissions::from_mode(0o755)).unwrap();
+    support::write_executable(&unavailable_gah, "#!/bin/sh\nexit 1\n");
     assert_eq!(
         String::from_utf8_lossy(&run(None, &empty).stdout),
         "127.0.0.1"

@@ -1,15 +1,11 @@
 use assert_cmd::Command;
+use cli_support::write_executable;
 use serde_json::Value;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-fn write_executable(path: &Path, body: &str) {
-    fs::write(path, body).unwrap();
-    let mut permissions = fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).unwrap();
-}
+#[path = "support/cli.rs"]
+mod cli_support;
 
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let temp = tempfile::tempdir().unwrap();
@@ -45,8 +41,8 @@ provider_project_id = "42"
     (temp, config, bin)
 }
 
-fn command(config: &Path, bin: &Path) -> Command {
-    let mut command = Command::cargo_bin("gah").unwrap();
+fn command(config: &Path, bin: &Path) -> cli_support::IsolatedCommand<Command> {
+    let mut command = cli_support::gah_command();
     let path = format!(
         "{}:{}",
         bin.display(),

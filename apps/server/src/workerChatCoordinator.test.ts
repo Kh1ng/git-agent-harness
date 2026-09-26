@@ -66,13 +66,20 @@ test('central keeps history and skills while authenticated turns move between wo
   const fixture: ProfileSummary = JSON.parse(readFileSync(new URL('../tests/fixtures/gah/responses/profile-list.json', import.meta.url), 'utf8'))[0];
   const profiles: ProfileSummary[] = [];
   const seen: string[] = [];
+  const unavailableForHandoff = new Set<string>();
+  const seed = join(root, 'seed');
+  const remote = join(root, 'remote.git');
+  mkdirSync(seed);
+  for (const args of [['init', '--quiet', '--initial-branch=main'], ['config', 'user.email', 'test@gah'], ['config', 'user.name', 'Test']]) execFileSync('git', args, { cwd: seed });
+  writeFileSync(join(seed, 'README.md'), '# worker');
+  execFileSync('git', ['add', '.'], { cwd: seed });
+  execFileSync('git', ['commit', '--quiet', '-m', 'initial'], { cwd: seed });
+  execFileSync('git', ['clone', '--quiet', '--bare', seed, remote]);
   for (const nodeId of ['one', 'two']) {
     const checkout = join(root, nodeId);
-    mkdirSync(checkout);
-    for (const args of [['init', '--quiet', '--initial-branch=main'], ['config', 'user.email', 'test@gah'], ['config', 'user.name', 'Test']]) execFileSync('git', args, { cwd: checkout });
-    writeFileSync(join(checkout, 'README.md'), '# worker');
-    execFileSync('git', ['add', '.'], { cwd: checkout });
-    execFileSync('git', ['commit', '--quiet', '-m', 'initial'], { cwd: checkout });
+    execFileSync('git', ['clone', '--quiet', remote, checkout]);
+    execFileSync('git', ['config', 'user.email', 'test@gah'], { cwd: checkout });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: checkout });
     const profile = { ...fixture, name: 'worker-only', local_path: checkout, worktree_base: join(root, `${nodeId}-worktrees`) };
     profiles.push(profile);
     const adapter: ManagerAdapter = {
@@ -88,6 +95,8 @@ test('central keeps history and skills while authenticated turns move between wo
           assert.doesNotMatch(input.prompt, /central skill instruction/);
         }
         if (seen.length) assert.ok(input.history.some(turn => turn.text === 'reply from one'));
+        if (nodeId === 'two' && seen.length === 1) assert.equal(readFileSync(join(input.cwd!, 'unfinished.txt'), 'utf8'), 'work on one');
+        if (nodeId === 'one' && seen.length === 2) assert.equal(readFileSync(join(input.cwd!, 'unfinished.txt'), 'utf8'), 'work on two');
         seen.push(nodeId);
         writeFileSync(join(input.cwd!, 'unfinished.txt'), `work on ${nodeId}`);
         return { reply: `reply from ${nodeId}`, model: null, usage: null };
@@ -99,7 +108,10 @@ test('central keeps history and skills while authenticated turns move between wo
     };
     const node = { role: 'worker' as const, central_url: 'https://central.test' };
     const app = express();
-    app.use(express.json(), rateLimit({ windowMs: 60_000, limit: 200, validate: false }), authMiddleware, workerRouteGuard(node));
+    app.use(express.json(), (req, res, next) => {
+      if (unavailableForHandoff.has(nodeId) && req.body?.action === 'handoff') return void res.status(503).json({ error: 'offline' });
+      next();
+    }, rateLimit({ windowMs: 60_000, limit: 200, validate: false }), authMiddleware, workerRouteGuard(node));
     app.get('/api/status', (_req, res) => res.json({ node_id: nodeId, generated_at: new Date().toISOString(), profile: { profile: profile.name }, backend_configured: { claude: true }, backend_instances: [], availability: [] }));
     app.use('/api/worker-chat', createWorkerChatRouter({ node, nodeId, profiles: async () => [profile], adapter: () => adapter, sessions: { stateDir: join(root, `${nodeId}-state`) } }));
     const url = await listen(createServer(app));
@@ -119,18 +131,27 @@ test('central keeps history and skills while authenticated turns move between wo
   const first = await sendManagerChatMessage(project.chat_profile, 'first task', 'first', session.id);
   setSkillBindings(project.chat_profile, 'claude', ['chat-only'], { sessionId: session.id });
   const second = await sendManagerChatMessage(project.chat_profile, 'continue here', 'second', session.id, undefined, 'two');
-  assert.deepEqual(seen, ['one', 'two']);
+  const third = await sendManagerChatMessage(project.chat_profile, 'move back', 'third', session.id, undefined, 'one');
+  unavailableForHandoff.add('one');
+  const fourth = await sendManagerChatMessage(project.chat_profile, 'continue despite offline source', 'fourth', session.id, undefined, 'two');
+  assert.deepEqual(seen, ['one', 'two', 'one', 'two']);
   assert.equal(first.turn.nodeId, 'one');
   assert.equal(second.turn.nodeId, 'two');
-  assert.equal(recalls, 2);
+  assert.equal(third.turn.nodeId, 'one');
+  assert.equal(fourth.turn.nodeId, 'two');
+  assert.equal(recalls, 4);
   const sessionView = JSON.stringify(getSessionView(project.chat_profile, session.id));
   assert.match(sessionView, /reply from one/);
+  assert.match(sessionView, /\[handoff: one → two\] Workspace carried in commit [0-9a-f]+/);
+  assert.match(sessionView, /\[handoff: two → one\] Workspace carried in commit [0-9a-f]+/);
+  assert.match(sessionView, /\[handoff: one → two\] Changes on one were not carried/);
   assert.match(sessionView, /\[skills · claude · session\] chat-only@1/);
   const saved = getSession(project.chat_profile, session.id)!;
   assert.equal(saved.createdAt, session.createdAt, 'worker switches preserve the central conversation creation date');
   assert.deepEqual(saved.workspaceNodes?.sort(), ['one', 'two']);
   assert.notEqual(saved.workspaces?.one.worktreePath, saved.workspaces?.two.worktreePath);
   assert.ok(existsSync(join(saved.workspaces!.one.worktreePath!, 'unfinished.txt')));
+  assert.equal(readFileSync(join(saved.workspaces!.two.worktreePath!, 'unfinished.txt'), 'utf8'), 'work on two');
   const storage = await reclaimChatSessions({ profile: project.chat_profile, dryRun: true });
   assert.equal(storage.profiles[0].worktreeBytes, null);
   assert.deepEqual(storage.candidates, []);
