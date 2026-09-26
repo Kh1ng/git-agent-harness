@@ -3,7 +3,7 @@
 // authorization layer on top of this.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdtempSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -91,4 +91,50 @@ test('claims persist across ClaimsService instances backed by the same file', ()
 
   const second = new ClaimsService(path);
   assert.equal(second.getLease('gah', 'ticket-1')?.node_id, 'node-a');
+});
+
+test('a corrupt claims store fails loudly and is never overwritten', () => {
+  const path = tempClaimsPath();
+  const corrupt = '{not json';
+  writeFileSync(path, corrupt);
+
+  assert.throws(
+    () => new ClaimsService(path),
+    (error: unknown) => error instanceof Error
+      && error.message.includes(`Failed to load claims config ${path}`)
+      && error.message.includes('JSON')
+  );
+  assert.equal(readFileSync(path, 'utf8'), corrupt);
+});
+
+test('claims use atomic owner-only replacement', { skip: process.platform === 'win32' }, () => {
+  const path = tempClaimsPath();
+  const service = new ClaimsService(path);
+  service.acquire('node-a', 'gah', 'ticket-1');
+  const oldContents = readFileSync(path, 'utf8');
+  const oldFile = openSync(path, 'r');
+  try {
+    service.acquire('node-a', 'gah', 'ticket-2');
+    assert.equal(readFileSync(oldFile, 'utf8'), oldContents, 'an open descriptor keeps the pre-rename file');
+  } finally {
+    closeSync(oldFile);
+  }
+
+  const stored = JSON.parse(readFileSync(path, 'utf8'));
+  assert.equal(stored.leases.length, 2);
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+  assert.deepEqual(readdirSync(join(path, '..')).filter(name => name.includes('.tmp-')), []);
+});
+
+test('independent writers are explicitly last-write-wins and leave valid JSON', () => {
+  const path = tempClaimsPath();
+  const first = new ClaimsService(path);
+  const second = new ClaimsService(path);
+
+  first.acquire('node-a', 'gah', 'ticket-1');
+  second.acquire('node-b', 'gah', 'ticket-2');
+
+  const stored = JSON.parse(readFileSync(path, 'utf8'));
+  assert.deepEqual(stored.leases.map((lease: { work_id: string }) => lease.work_id), ['ticket-2']);
+  assert.equal(new ClaimsService(path).getLease('gah', 'ticket-2')?.node_id, 'node-b');
 });
