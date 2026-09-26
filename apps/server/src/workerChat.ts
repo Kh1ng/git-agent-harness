@@ -165,10 +165,11 @@ export function createWorkerChatRouter(deps: {
           return void res.json(await commitGitChanges(body.profile, cwd, body.message.trim(), sessionId, body.files));
         }
         if (body.action === 'git-update') {
-          if (!Number.isSafeInteger(body.number) || body.number <= 0 || typeof body.title !== 'string' || !body.title.trim() || typeof body.body !== 'string') {
+          if (!Number.isSafeInteger(body.number) || body.number <= 0 || typeof body.title !== 'string' || !body.title.trim() || typeof body.body !== 'string'
+            || (body.draft !== undefined && typeof body.draft !== 'boolean')) {
             return void res.status(400).json({ error: 'A valid pull request update is required.' });
           }
-          return void res.json(await updatePullRequest(profile, cwd, { number: body.number, title: body.title.trim(), body: body.body }));
+          return void res.json(await updatePullRequest(profile, cwd, { number: body.number, title: body.title.trim(), body: body.body, draft: body.draft }));
         }
         if (typeof body.title !== 'string' || !body.title.trim() || typeof body.body !== 'string'
           || typeof body.base !== 'string' || !body.base.trim() || typeof body.draft !== 'boolean') {

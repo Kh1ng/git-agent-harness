@@ -282,7 +282,7 @@ export interface GahDataSource {
   createGitPr(profile: string, data: { title: string; body?: string; base?: string; draft?: boolean }): Promise<{ url: string }>;
   createGitCommit(profile: string, message: string, sessionId?: string, files?: string[], nodeId?: string): Promise<{ hash: string }>;
   publishGitPr(profile: string, data: { title: string; body: string; base: string; draft: boolean; sessionId?: string; nodeId?: string }): Promise<{ url: string; existing: boolean }>;
-  updateGitPr(profile: string, data: { number: number; title: string; body: string; sessionId?: string; nodeId?: string }): Promise<{ url: string }>;
+  updateGitPr(profile: string, data: { number: number; title: string; body: string; draft?: boolean; sessionId?: string; nodeId?: string }): Promise<{ url: string }>;
   getManagerChatCommands(profile: string, nodeId?: string): Promise<{ commands: ManagerCommandInfo[] }>;
   getManagerChatModels(profile: string, nodeId?: string): Promise<ManagerModelsSummary>;
   setManagerChatModel(profile: string, modelId: string, nodeId?: string): Promise<{ success: boolean }>;

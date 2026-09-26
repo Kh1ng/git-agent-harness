@@ -111,7 +111,7 @@ test('updates published prose without pushing and surfaces provider stderr', asy
   await component.getByLabel('Pull request body').fill('Updated description');
   page.once('dialog', dialog => dialog.accept());
   await component.getByRole('button', { name: 'Update published title and description' }).click();
-  expect(update).toEqual({ number: 12, title: 'Updated title', body: 'Updated description', nodeId: 'worker-1' });
+  expect(update).toEqual({ number: 12, title: 'Updated title', body: 'Updated description', draft: false, nodeId: 'worker-1' });
   await expect(component.getByRole('link', { name: 'Open pull request' }).first()).toHaveAttribute('href', 'https://github.com/owner/repo/pull/12');
 
   fail = true;

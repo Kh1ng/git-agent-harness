@@ -786,6 +786,8 @@ export interface GitReviewPullRequest {
   title: string;
   url: string;
   draft: boolean;
+  /** Published description; null when the provider reports none. */
+  body?: string | null;
 }
 
 /** Review-only snapshot used by the shared Commit and PR dialog. Paths are

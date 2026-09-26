@@ -173,6 +173,8 @@ interface MockState {
   loopRunning: boolean;
   adminUpdate: AdminUpdateState;
   gitPrs: ChatPrSummary[];
+  /** Published descriptions by PR number, so description edits round-trip. */
+  gitPrBodies: Record<number, string>;
   selectedModels: Record<string, string | null>;
   selectedEfforts: Record<string, string | null>;
   sessions: Map<string, ChatSessionSummary>;
@@ -554,6 +556,7 @@ function createState(scenario: MockScenarioName, reset: number, previewOrigin?: 
     loopRunning: true,
     adminUpdate: structuredClone(MOCK_ADMIN_IDLE),
     gitPrs: structuredClone(MOCK_PRS),
+    gitPrBodies: {},
     selectedModels: { codex: 'gpt-5.3-codex', claude: 'claude-sonnet-4-5', opencode: 'openai/gpt-5.2', agy: null },
     selectedEfforts: { codex: 'medium', claude: 'standard', opencode: 'high', agy: null },
     sessions: new Map([
@@ -1197,6 +1200,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     const request = state.gitPrs.find(candidate => candidate.number === number);
     if (!request) return jsonError(res, 404, 'Pull request not found', `Pull request #${number} was not found.`);
     request.title = title;
+    state.gitPrBodies[number] = req.body?.body ?? '';
     res.json({ url: request.url });
   });
   app.post('/api/settings/nodes/command', (_req, res) => res.json({ command: 'echo mock-node-setup' }));
@@ -1514,7 +1518,9 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   app.get('/api/git/log', (_req, res) => {
     res.json({ commits: [{ hash: '1111111111111111111111111111111111111111', short: '1111111', subject: 'Mock commit', author: 'GAH', ago: '1 minute ago' }] });
   });
-  app.get('/api/git/prs', (_req, res) => res.json({ prs: state.gitPrs }));
+  app.get('/api/git/prs', (_req, res) => res.json({
+    prs: state.gitPrs.map((pr) => ({ ...pr, body: state.gitPrBodies[pr.number] ?? null }))
+  }));
   app.post('/api/git/suggest', (req, res) => {
     if (req.body?.kind === 'pr_summary') {
       res.json({ kind: 'pr_summary', text: '## Summary\n\n- Describe the change', title: 'Describe the change', body: '## Summary\n\n- Describe the change',

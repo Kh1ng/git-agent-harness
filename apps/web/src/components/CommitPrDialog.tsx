@@ -60,7 +60,8 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged,
       setSelected(new Set(next.files.map(file => file.path)));
       setContinueDirty(next.files.length === 0);
       if (!titleEdited.current) setTitle(next.existing?.title ?? providerRequest?.title ?? mergeRequest?.title ?? next.commits[0]?.subject ?? '');
-      if (!bodyEdited.current) setBody(suggestedBody(next));
+      // A published description must survive an edit: prefill it, not a freshly generated summary.
+      if (!bodyEdited.current) setBody(next.existing?.body?.trim() ? next.existing.body : suggestedBody(next));
       setDraft(next.existing?.draft ?? providerRequest?.isDraft ?? mergeRequest?.draft ?? false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -162,13 +163,13 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged,
   };
 
   const updatePublished = async () => {
-    const number = review?.existing?.number ?? providerRequest?.number ?? Number(mergeRequest?.id);
+    const number = publishedNumber;
     if (!Number.isSafeInteger(number) || number <= 0 || !title.trim() || busy) return;
     if (!window.confirm(`Update published ${review?.providerLabel ?? 'pull request'} title and description?`)) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await gahApi.updateGitPr(profile, { number, title: title.trim(), body, sessionId, nodeId });
+      const result = await gahApi.updateGitPr(profile, { number, title: title.trim(), body, draft: review?.existing?.draft ?? providerRequest?.isDraft ?? mergeRequest?.draft, sessionId, nodeId });
       setPublished(result.url);
       onChanged();
     } catch (cause) {

@@ -2323,20 +2323,21 @@ export function createServer(
   app.post('/api/git/pull-request/update', mutation('git.update'), async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
-    const { number, title, body = '', nodeId } = req.body ?? {};
+    const { number, title, body = '', draft, nodeId } = req.body ?? {};
     if (!Number.isSafeInteger(number) || number <= 0 || typeof title !== 'string' || !title.trim()
-      || typeof body !== 'string' || (nodeId !== undefined && typeof nodeId !== 'string')) {
+      || typeof body !== 'string' || (draft !== undefined && typeof draft !== 'boolean')
+      || (nodeId !== undefined && typeof nodeId !== 'string')) {
       return res.status(400).json({ error: 'Invalid pull request update', message: 'A positive request number, title, and description are required.' });
     }
     try {
       const route = await chatRoute(profile, nodeId, undefined, false);
-      if (route.remote) return res.json(await route.remote.request({ action: 'git-update', sessionId, number, title: title.trim(), body }));
+      if (route.remote) return res.json(await route.remote.request({ action: 'git-update', sessionId, number, title: title.trim(), body, draft }));
       const target = await resolveGitTarget(route.profileName, sessionId);
       if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
       if (target.kind === 'read-only') return res.status(403).json({ error: 'read_only_checkout', message: 'Session is read-only and cannot edit provider pull requests.' });
       const profileInfo = await resolveProfileInfo(route.profileName);
       if (!profileInfo) return res.status(404).json({ error: 'Profile not found' });
-      res.json(await updatePullRequest(profileInfo, target.cwd, { number, title: title.trim(), body }));
+      res.json(await updatePullRequest(profileInfo, target.cwd, { number, title: title.trim(), body, draft }));
     } catch (error) {
       const stderr = typeof (error as { stderr?: unknown })?.stderr === 'string' ? (error as { stderr: string }).stderr.trim() : '';
       res.status(502).json({ error: 'Provider pull request update failed', message: (stderr || (error instanceof Error ? error.message : 'Provider update failed')).slice(0, 4096) });
