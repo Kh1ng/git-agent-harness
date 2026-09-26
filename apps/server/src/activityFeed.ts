@@ -31,8 +31,13 @@ function collapsedPreview(value: string, max: number): string {
   return redactTextSecrets(value).replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
+/** A tool title can carry a full command line; only its leading name may leave the server. */
+export function chatToolName(value?: string): string | null {
+  return value?.match(/^[\p{L}\p{N}_-]{1,40}/u)?.[0] ?? null;
+}
+
 function permissionTool(value?: string): string {
-  const name = value?.match(/^[\p{L}\p{N}_-]+/u)?.[0];
+  const name = chatToolName(value);
   return name ? `${name} requested` : 'Agent tool requested';
 }
 
@@ -85,6 +90,7 @@ export function activityFromController(event: ControllerEvent): ActivityEvent | 
   const profile = event.profile ?? null;
   const shared = {
     id: stableId('controller', event),
+    origin: 'controller' as const,
     occurredAt: event.timestamp,
     profile,
     message: event.details,

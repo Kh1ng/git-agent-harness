@@ -26,84 +26,16 @@
 #![allow(dead_code)] // this file is shared support code, not a test binary — individual helpers are used non-uniformly across consumers
 
 use std::collections::HashMap;
-#[cfg(unix)]
-use std::ffi::CString;
 use std::fs;
 use std::ops::{Deref, DerefMut};
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Output};
 use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
-use tempfile::TempDir;
 
-#[cfg(unix)]
-const TEST_INTEGRATION_MIN_DISPATCH_BYTES: u64 = 10 * 1024 * 1024 * 1024;
-
-/// Keep integration-test repositories and child-process temporary files on
-/// the same filesystem as Cargo's build output. Some development hosts mount
-/// `/tmp` as a small tmpfs; production dispatch capacity checks must remain
-/// strict without making the test suite depend on that unrelated filesystem's
-/// current free-space level.
-pub fn test_temp_root() -> PathBuf {
-    let fallback_root = std::env::temp_dir();
-    let default_root = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|path| path.parent()?.parent().map(Path::to_path_buf))
-        })
-        .unwrap_or_else(|| fallback_root.clone());
-
-    let candidates = [
-        default_root.clone(),
-        PathBuf::from("/dev/shm"),
-        fallback_root.clone(),
-    ];
-    let root = candidates
-        .into_iter()
-        .find(|candidate| has_minimum_dispatch_space(candidate))
-        .unwrap_or(default_root)
-        .join("gah-integration-test-tmp");
-    fs::create_dir_all(&root).unwrap();
-    root
-}
-
-#[cfg(unix)]
-fn has_minimum_dispatch_space(path: &Path) -> bool {
-    match free_space_bytes(path) {
-        Some(available) => available >= TEST_INTEGRATION_MIN_DISPATCH_BYTES,
-        None => false,
-    }
-}
-
-#[cfg(unix)]
-fn free_space_bytes(path: &Path) -> Option<u64> {
-    let filesystem_path = path.ancestors().find(|ancestor| ancestor.exists())?;
-    let path_c = CString::new(filesystem_path.as_os_str().as_bytes()).ok()?;
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(path_c.as_ptr(), &mut stat) } != 0 {
-        return None;
-    }
-    Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
-}
-
-#[cfg(not(unix))]
-fn has_minimum_dispatch_space(_path: &Path) -> bool {
-    true
-}
-
-pub fn test_tempdir() -> TempDir {
-    tempfile::Builder::new()
-        .prefix("gah-test-")
-        .tempdir_in(test_temp_root())
-        .unwrap()
-}
+mod cli;
+pub use cli::*;
 
 /// Owns an integration child created as a process-group leader. Dropping the
 /// guard after a panic or failed assertion terminates and reaps the complete
@@ -161,77 +93,6 @@ impl Drop for ProcessGroupGuard {
             let _ = child.wait();
         }
     }
-}
-
-/// Retains a command's isolated filesystem environment until the command is
-/// finished, then removes it with the fixture. This matters for asynchronously
-/// spawned children: dropping the temporary directory immediately after
-/// `spawn()` would race the child while leaving anything it recreated behind.
-pub struct IsolatedCommand<C> {
-    command: C,
-    state: TempDir,
-}
-
-impl<C> IsolatedCommand<C> {
-    pub fn state_path(&self) -> &Path {
-        self.state.path()
-    }
-}
-
-impl<C> Deref for IsolatedCommand<C> {
-    type Target = C;
-
-    fn deref(&self) -> &Self::Target {
-        &self.command
-    }
-}
-
-impl<C> DerefMut for IsolatedCommand<C> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.command
-    }
-}
-
-pub fn isolate_command<C>(
-    mut command: C,
-    set_env: impl FnOnce(&mut C, &Path),
-) -> IsolatedCommand<C> {
-    let state = test_tempdir();
-    set_env(&mut command, state.path());
-    IsolatedCommand { command, state }
-}
-
-pub trait TestCommandEnvironment {
-    fn env_path(&mut self, key: &str, value: &Path);
-}
-
-impl TestCommandEnvironment for assert_cmd::Command {
-    fn env_path(&mut self, key: &str, value: &Path) {
-        self.env(key, value);
-    }
-}
-
-impl TestCommandEnvironment for std::process::Command {
-    fn env_path(&mut self, key: &str, value: &Path) {
-        self.env(key, value);
-    }
-}
-
-/// Isolate all process-global GAH state used by CLI integration children,
-/// including the node-wide capacity lease registry.
-pub fn isolate_gah_command<C: TestCommandEnvironment>(command: C) -> IsolatedCommand<C> {
-    isolate_command(command, |command, root| {
-        let tmp = root.join("tmp");
-        fs::create_dir_all(&tmp).unwrap();
-        command.env_path("XDG_STATE_HOME", &root.join("xdg-state"));
-        command.env_path("XDG_RUNTIME_DIR", &root.join("xdg-runtime"));
-        command.env_path("GAH_AVAILABILITY_PATH", &root.join("availability.json"));
-        command.env_path(
-            "GAH_VALIDATION_CHECK_PATH",
-            &root.join("validation-check.json"),
-        );
-        command.env_path("TMPDIR", &tmp);
-    })
 }
 
 #[test]
@@ -420,13 +281,7 @@ impl FakeBackend {
         script.push_str("  ;;\nesac\n");
 
         let path = self.bin_dir.join(&self.name);
-        fs::write(&path, script).unwrap();
-        #[cfg(unix)]
-        {
-            let mut perms = fs::metadata(&path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&path, perms).unwrap();
-        }
+        write_executable(&path, &script);
     }
 
     /// Install a GitHub CLI fixture that distinguishes recurring REST
@@ -456,13 +311,7 @@ impl FakeBackend {
         script.push_str(&Self::render_case_body(&default));
 
         let path = self.bin_dir.join(&self.name);
-        fs::write(&path, script).unwrap();
-        #[cfg(unix)]
-        {
-            let mut perms = fs::metadata(&path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&path, perms).unwrap();
-        }
+        write_executable(&path, &script);
     }
 
     /// Install a GitLab CLI fixture that distinguishes the merge-requests
@@ -497,13 +346,7 @@ impl FakeBackend {
         script.push_str("    ;;\nesac\n");
 
         let path = self.bin_dir.join(&self.name);
-        fs::write(&path, script).unwrap();
-        #[cfg(unix)]
-        {
-            let mut perms = fs::metadata(&path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&path, perms).unwrap();
-        }
+        write_executable(&path, &script);
     }
 
     fn render_case_body(s: &Scenario) -> String {

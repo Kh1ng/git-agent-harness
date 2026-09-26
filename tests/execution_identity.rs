@@ -399,21 +399,11 @@ fn execution_identity_route_decision_alias_fold_is_byte_for_byte() {
         .with_config_append(
             "[profiles.test.publishing]\nallow_pull_request_creation = false\nallow_commit_message_generation = false\n",
         );
-    let write_exec = |path: &std::path::Path, body: &str| {
-        std::fs::write(path, body).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(path, perms).unwrap();
-        }
-    };
-    write_exec(
+    support::write_executable(
         &harness.bin_dir.join("openhands"),
         "#!/bin/sh\nprintf 'agent edit\\n' >> README.md\nexit 0\n",
     );
-    write_exec(
+    support::write_executable(
         &harness.bin_dir.join("gh"),
         "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"create\" ]; then printf 'https://github.com/owner/repo/pull/1\\n'; exit 0; fi\nexit 0\n",
     );

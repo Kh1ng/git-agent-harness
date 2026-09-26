@@ -219,7 +219,7 @@ export function GitPage() {
           profile={profile}
           nodeId={status?.ownerNodeId}
           providerRequest={reviewTarget}
-          mergeRequest={reviewTarget ? dashboardStatus?.merge_requests.find(request => request.branch === reviewTarget.headRefName || request.id === String(reviewTarget.number)) : null}
+          mergeRequest={reviewTarget ? dashboardStatus?.merge_requests.find(request => request.branch === reviewTarget.headRefName) : null}
           onClose={() => setReviewOpen(false)}
           onChanged={() => void load()}
         />

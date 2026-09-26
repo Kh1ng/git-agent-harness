@@ -1,9 +1,8 @@
 mod support;
 
-use std::fs;
-
 use support::fake_ledger::TestLedger;
 use support::scenario::ScenarioHarness;
+use support::write_executable as write_exec;
 
 fn usage_entry(
     backend: &str,
@@ -52,17 +51,6 @@ fn attempt_usage(
         "diff_path": null,
         "usage": usage,
     })
-}
-
-fn write_exec(path: &std::path::Path, body: &str) {
-    fs::write(path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(path, perms).unwrap();
-    }
 }
 
 #[test]

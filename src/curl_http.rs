@@ -25,6 +25,25 @@ pub fn request(
     token: Option<&str>,
     timeout_secs: u32,
 ) -> Result<CurlResponse> {
+    request_with_idempotency_key(method, url, body, token, timeout_secs, None)
+}
+
+pub fn request_with_idempotency_key(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    token: Option<&str>,
+    timeout_secs: u32,
+    idempotency_key: Option<&str>,
+) -> Result<CurlResponse> {
+    if idempotency_key.is_some_and(|key| {
+        !(16..=128).contains(&key.len())
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    }) {
+        anyhow::bail!("invalid idempotency key")
+    }
     let mut cmd = Command::new("curl");
     cmd.args([
         "-sS",
@@ -66,6 +85,12 @@ pub fn request(
                 config_value(token)
             ));
         }
+        if let Some(key) = idempotency_key {
+            config.push_str(&format!(
+                "header = \"Idempotency-Key: {}\"\n",
+                config_value(key)
+            ));
+        }
         stdin.write_all(config.as_bytes())?;
     }
     let output = child.wait_with_output().context("waiting for curl")?;
@@ -96,5 +121,27 @@ mod tests {
     #[test]
     fn curl_config_values_cannot_inject_directives() {
         assert_eq!(config_value("a\nheader = \"x\""), "a\\nheader = \\\"x\\\"");
+    }
+
+    #[test]
+    fn idempotency_keys_are_restricted_before_reaching_curl() {
+        assert!(request_with_idempotency_key(
+            "POST",
+            "http://unused",
+            None,
+            None,
+            1,
+            Some("short")
+        )
+        .is_err());
+        assert!(request_with_idempotency_key(
+            "POST",
+            "http://unused",
+            None,
+            None,
+            1,
+            Some("invalid-key-000\nheader")
+        )
+        .is_err());
     }
 }

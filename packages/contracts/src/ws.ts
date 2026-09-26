@@ -66,6 +66,25 @@ export interface ActivityEvent {
   sessionId?: string | null;
   workId?: string | null;
   nodeId?: string | null;
+  /** Where the event was recorded. Only controller-log replay sets this;
+   * absent means the Node server originated the event. */
+  origin?: "controller";
+}
+
+/** The single wake filter: every delivery method (push, APNs, channel,
+ * command hook, in-page system notification) notifies only these kinds. */
+export const NOTIFIABLE_ACTIVITY_KINDS: ReadonlySet<ActivityKind> = new Set<ActivityKind>([
+  "chat_turn_completed",
+  "chat_turn_failed",
+  "chat_permission_requested",
+  "action_required",
+  "dispatch_failed",
+  "review_ready",
+  "node_offline"
+]);
+
+export function notifiableActivity(event: Pick<ActivityEvent, "kind">): boolean {
+  return NOTIFIABLE_ACTIVITY_KINDS.has(event.kind);
 }
 
 export function activityPath(event: Pick<ActivityEvent, "profile" | "sessionId">): string {

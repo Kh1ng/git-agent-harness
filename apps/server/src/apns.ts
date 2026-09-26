@@ -3,7 +3,7 @@ import { connect, type ClientHttp2Session } from 'node:http2';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ActivityEvent } from '@git-agent-harness/contracts';
-import type { ChatLifecycleEvent } from './activityFeed.js';
+import { chatToolName, type ChatLifecycleEvent } from './activityFeed.js';
 import { activityPushPayload } from './webPush.js';
 import { pushRegistrationId, removePushEntries, validPushDeviceLabel, validPushRegistrationId, writePrivatePushStore } from './pushStore.js';
 
@@ -156,7 +156,7 @@ export class ApnsNotifications {
   async deliverChatLifecycle(event: ChatLifecycleEvent): Promise<void> {
     const key = activityKey(event.profile, event.sessionId);
     const state = event.phase === 'start' ? 'thinking'
-      : event.phase === 'tool' ? `running ${event.tool ?? 'tool'}`
+      : event.phase === 'tool' ? `running ${chatToolName(event.tool) ?? 'tool'}`
       : event.phase === 'permission' ? 'waiting for permission'
       : event.outcome === 'complete' ? 'done'
       : event.outcome === 'cancelled' ? 'cancelled' : 'failed';

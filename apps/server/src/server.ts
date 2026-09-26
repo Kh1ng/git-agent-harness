@@ -1,5 +1,5 @@
 import express from 'express';
-import type { NodeRoleStatus } from '@git-agent-harness/contracts';
+import type { ActivityEvent, ActivityKind, NodeRoleStatus } from '@git-agent-harness/contracts';
 import { workerRouteGuard, validateNodeRole } from './nodeRole.js';
 import { workerMemoryRouter } from './workerMemory.js';
 import { paidRouteApprovalsRouter } from './paidRouteApprovals.js';
@@ -62,7 +62,8 @@ import type {
   ChatNodeInfo,
   ChatSessionEvent
 } from '@git-agent-harness/contracts';
-import { getFleetDispatch } from './wsServer.js';
+import { getFleetDispatch, sessionStore } from './wsServer.js';
+import { ActivityFeed } from './activityFeed.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
 import { deriveControllerActivity } from './controllerActivity.js';
 import { authMiddleware, coordinatorTokenMatches, isLocalAddress, requireOwner } from './authMiddleware.js';
@@ -153,7 +154,43 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   messagingBridge?: MessagingBridge;
   webPushNotifications?: WebPushNotifications;
   apnsNotifications?: ApnsNotifications;
+  activityFeed?: ActivityFeed;
 };
+
+const activityKinds = new Set<ActivityKind>([
+  'dispatch_completed', 'dispatch_failed', 'review_ready', 'chat_turn_completed',
+  'chat_turn_failed', 'chat_permission_requested', 'node_offline', 'node_back',
+  'quota_near_limit', 'gateway_down', 'action_required'
+]);
+
+function postedActivity(value: unknown): ActivityEvent | null {
+  if (!value || typeof value !== 'object') return null;
+  const event = value as Record<string, unknown>;
+  const text = (key: string, max: number, nullable = false): string | null | undefined => {
+    const item = event[key];
+    if (item === undefined || (nullable && item === null)) return item as null | undefined;
+    return typeof item === 'string' && item.length > 0 && item.length <= max ? item : undefined;
+  };
+  const id = text('id', 160);
+  const occurredAt = text('occurredAt', 64);
+  const profile = text('profile', 160, true);
+  const title = text('title', 200);
+  const message = text('message', 1_000);
+  const kind = event.kind;
+  const severity = event.severity;
+  if (!id || !occurredAt || profile === undefined || !title || !message
+    || typeof kind !== 'string' || !activityKinds.has(kind as ActivityKind)
+    || !['info', 'success', 'warning', 'error'].includes(String(severity))
+    || !Number.isFinite(Date.parse(occurredAt))) return null;
+  const validOptional = (key: string) => event[key] === undefined || event[key] === null
+    || (typeof event[key] === 'string' && (event[key] as string).length > 0 && (event[key] as string).length <= 160);
+  if (!validOptional('sessionId') || !validOptional('workId') || !validOptional('nodeId')) return null;
+  const sessionId = event.sessionId as string | null | undefined;
+  const workId = event.workId as string | null | undefined;
+  const nodeId = event.nodeId as string | null | undefined;
+  return { id, occurredAt, profile, kind: kind as ActivityKind,
+    severity: severity as ActivityEvent['severity'], title, message, sessionId, workId, nodeId };
+}
 
 const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
   runConfigShowProfile,
@@ -338,6 +375,23 @@ export function createServer(
   const rejectInvalidRequest = (res: express.Response, code: string, error: unknown) => {
     res.status(400).json({ error: code, message: error instanceof Error ? error.message : String(error) });
   };
+  if (node.role === 'central' && configDeps.activityFeed) {
+    // Workers post every Rust-side activity event here; the route writes an
+    // audit receipt, so it is rate-limited like the other writing mounts.
+    app.use('/api/activity', rateLimit({
+      windowMs: 60_000,
+      limit: 600,
+      standardHeaders: true,
+      legacyHeaders: false
+    }));
+    app.post('/api/activity', mutation('activity.record'), (req, res) => {
+      const event = postedActivity(req.body);
+      if (!event) return res.status(400).json({ error: 'invalid_activity', message: 'Supply a valid, length-bounded activity event.' });
+      const recorded = configDeps.activityFeed!.record(event);
+      if (recorded) sessionStore.broadcast({ type: 'activity.event', event }, undefined, event.profile ?? undefined);
+      return res.status(recorded ? 201 : 200).json({ recorded, id: event.id });
+    });
+  }
   if (node.role === 'central' && configDeps.webPushNotifications) {
     const push = configDeps.webPushNotifications;
     app.get('/api/push/public-key', (_req, res) => res.json({ publicKey: push.publicKey() }));
@@ -378,6 +432,14 @@ export function createServer(
     });
   }
   if (node.role === 'central') configureChatRouting(registryService, () => getCoordinatorIdentity(undefined, coordinatorPort));
+  // Worker chat actions start git processes and write files (worktree create,
+  // handoff commits and pushes), so the route is rate-limited like /api/push.
+  app.use('/api/worker-chat', rateLimit({
+    windowMs: 60_000,
+    limit: 240,
+    standardHeaders: true,
+    legacyHeaders: false
+  }));
   app.use('/api/worker-chat', createWorkerChatRouter({ node, nodeId: getCoordinatorIdentity(undefined, coordinatorPort).node_id }));
   app.use('/api/worker-memory', workerMemoryRouter());
   app.use('/api/pm', pmPlansRouter());
@@ -2113,9 +2175,27 @@ export function createServer(
         : await (async () => {
           const target = await resolveGitTarget(route.profileName, sessionId);
           if (target.kind === 'error') throw new Error(target.error);
-          if (target.kind === 'read-only') throw new Error('Session is read-only and has no writable checkout');
           const profileInfo = await resolveProfileInfo(route.profileName);
           if (!profileInfo || !['github', 'gitlab'].includes(profileInfo.provider)) throw new Error('Unsupported repository provider');
+          if (target.kind === 'read-only') {
+            // A read-only checkout still shows its state; publishing stays
+            // disabled client-side through the readOnly field.
+            return {
+              provider: profileInfo.provider,
+              providerLabel: profileInfo.provider === 'gitlab' ? 'merge request' : 'pull request',
+              branch: target.branch,
+              base: '',
+              upstream: null,
+              ahead: 0,
+              behind: 0,
+              files: [],
+              commits: [],
+              changedFiles: [],
+              patch: '',
+              existing: null,
+              readOnly: true
+            };
+          }
           const state = await getGitReviewState(target.cwd, base);
           return {
             ...state,

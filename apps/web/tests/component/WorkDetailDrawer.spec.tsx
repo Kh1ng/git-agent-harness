@@ -56,7 +56,7 @@ test('renders review and attempt evidence and runs hold, clear-attempts, and red
   page.on('dialog', (dialog) => dialog.accept());
   const component = await mount(
     <MockStoreProvider statusData={status()}><WebSocketProvider>
-      <WorkDetailDrawer workId="#42" profile="fixture" connected onClose={() => {}} onRedispatch={() => {}} />
+      <WorkDetailDrawer workId="#42" profile="fixture" connected sessions={[]} onClose={() => {}} onRedispatch={() => {}} />
     </WebSocketProvider></MockStoreProvider>,
   );
   await expect(component.getByRole('heading', { name: 'Drawer work' })).toBeVisible();
@@ -70,7 +70,7 @@ test('renders review and attempt evidence and runs hold, clear-attempts, and red
   await component.getByRole('button', { name: 'Clear attempts' }).click();
   await expect(component.getByRole('status')).toHaveText('Prior attempts cleared.');
   await component.getByRole('button', { name: 'Re-dispatch' }).click();
-  await expect(component.getByRole('status')).toHaveText('Dispatch queued.');
+  await expect(component.getByRole('status')).toHaveText('Dispatch queued. The activity feed reports the outcome.');
   await component.getByRole('button', { name: 'Review in dashboard' }).click();
   await expect(page.getByRole('dialog', { name: 'Commit and pull request review' })).toBeVisible();
 });
@@ -79,7 +79,7 @@ test('clears an active hold', async ({ mount, page }) => {
   await routes(page);
   const component = await mount(
     <MockStoreProvider statusData={status(true)}><WebSocketProvider>
-      <WorkDetailDrawer workId="#42" profile="fixture" connected onClose={() => {}} onRedispatch={() => {}} />
+      <WorkDetailDrawer workId="#42" profile="fixture" connected sessions={[]} onClose={() => {}} onRedispatch={() => {}} />
     </WebSocketProvider></MockStoreProvider>,
   );
   await component.getByRole('button', { name: 'Clear hold' }).click();

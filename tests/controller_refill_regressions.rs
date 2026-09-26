@@ -5,8 +5,7 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
-use support::test_tempdir;
-use support::ProcessGroupGuard;
+use support::{test_tempdir, write_fake_binary as make_fake_bin_with_body, ProcessGroupGuard};
 
 // Every test in this file spawns a real `gah` subprocess and does real
 // timing-sensitive polling against it (worker admission, node-pressure
@@ -129,18 +128,6 @@ fn process_group_guard_drop_reaps_the_entire_test_process_group() {
         !exists,
         "test process group {process_group} survived guard drop"
     );
-}
-
-fn make_fake_bin_with_body(dir: &std::path::Path, name: &str, body: &str) {
-    let path = dir.join(name);
-    fs::write(&path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&path, perms).unwrap();
-    }
 }
 
 fn init_git_repo(path: &std::path::Path) {
