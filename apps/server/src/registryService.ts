@@ -1,7 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, sep } from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
 import { hostname, networkInterfaces } from 'node:os';
 import type {
   DoctorSnapshot,
@@ -107,26 +106,6 @@ export interface NodeLivenessTransition {
 
 function nowIso(ms: number = Date.now()): string {
   return new Date(ms).toISOString();
-}
-
-/** Pipes a single one-line message to a shell command's stdin, matching the
- * Rust side's per-profile `notify_command` shape (`docs/OPERATIONS.md`
- * section 4) so an operator configuring both doesn't learn two conventions.
- * Reads GAH_NODE_LIVENESS_NOTIFY_COMMAND fresh per call (not cached at
- * module load) so tests can vary it. A failing or missing command is
- * logged to stderr and swallowed -- it must never crash the scheduler. */
-function sendLivenessAlert(message: string): void {
-  const command = process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND;
-  if (!command) return;
-  try {
-    const child = spawn('sh', ['-c', command], { stdio: ['pipe', 'ignore', 'pipe'] });
-    child.on('error', (err) => console.error(`Node liveness notify command failed to start: ${err.message}`));
-    child.stderr?.on('data', (chunk) => console.error(`Node liveness notify command stderr: ${chunk}`));
-    child.stdin.write(`${message}\n`);
-    child.stdin.end();
-  } catch (err) {
-    console.error(`Node liveness notify command failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
 }
 
 function parseIsoMillis(value: string | null | undefined): number | null {
@@ -886,7 +865,6 @@ export class RegistryService {
       if (count >= LIVENESS_ALERT_AFTER_CONSECUTIVE_BAD_CHECKS && !this.alreadyAlerted.has(obs.node_id)) {
         this.alreadyAlerted.add(obs.node_id);
         const message = `Node "${obs.display_name}" (${obs.node_id}) has been ${obs.state} for ${count} consecutive checks (last seen: ${obs.last_seen_at ?? 'never'}).`;
-        sendLivenessAlert(message);
         this.livenessChanged({
           nodeId: obs.node_id,
           displayName: obs.display_name,

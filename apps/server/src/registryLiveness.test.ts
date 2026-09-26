@@ -1,11 +1,11 @@
 // Issue #883: node liveness scheduler. Real fake HTTP node servers (not
-// mocked fetch) and a real notify-command subprocess (writing to a temp
-// file, not mocked), matching this repo's existing test convention.
+// mocked fetch). Alert delivery (push, channel, command hook) happens on the
+// activity feed, so these tests assert the transitions the feed receives.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -52,32 +52,24 @@ test('a node that never answers crosses the bad-check threshold and alerts exact
     secret_ref: 'env:UNUSED'
   });
 
-  const alertLog = join(mkdtempSync(join(tmpdir(), 'gah-alert-test-')), 'alerts.log');
-  const originalCommand = process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND;
-  process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND = `cat >> ${alertLog}`;
-  try {
-    // Below threshold (2 checks): no alert yet.
-    await service.runLivenessCheck();
-    await service.runLivenessCheck();
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(existsSync(alertLog), false, 'must not alert before crossing the threshold');
+  const transitions: string[] = [];
+  service.onLivenessTransition((transition) => {
+    transitions.push(transition.state);
+    assert.match(transition.message, /Dead Node/);
+    assert.match(transition.message, /dead-node/);
+  });
+  // Below threshold (2 checks): no alert yet.
+  await service.runLivenessCheck();
+  await service.runLivenessCheck();
+  assert.deepEqual(transitions, [], 'must not alert before crossing the threshold');
 
-    // Crosses the threshold (3rd consecutive bad check).
-    await service.runLivenessCheck();
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(existsSync(alertLog), true, 'must alert once the threshold is crossed');
-    const firstAlertContent = readFileSync(alertLog, 'utf8');
-    assert.match(firstAlertContent, /Dead Node/);
-    assert.match(firstAlertContent, /dead-node/);
+  // Crosses the threshold (3rd consecutive bad check).
+  await service.runLivenessCheck();
+  assert.deepEqual(transitions, ['offline'], 'must alert once the threshold is crossed');
 
-    // A 4th consecutive bad check must NOT alert again (no spam).
-    writeFileSync(alertLog, '');
-    await service.runLivenessCheck();
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(readFileSync(alertLog, 'utf8'), '', 'must not re-alert on every subsequent bad check');
-  } finally {
-    process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND = originalCommand;
-  }
+  // A 4th consecutive bad check must NOT alert again (no spam).
+  await service.runLivenessCheck();
+  assert.deepEqual(transitions, ['offline'], 'must not re-alert on every subsequent bad check');
 });
 
 test('a normally-responsive node never alerts across many checks', async () => {
@@ -93,17 +85,14 @@ test('a normally-responsive node never alerts across many checks', async () => {
     transport_mode: 'loopback',
     secret_ref: 'env:UNUSED'
   });
-  const alertLog = join(mkdtempSync(join(tmpdir(), 'gah-alert-test-')), 'alerts.log');
-  const originalCommand = process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND;
-  process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND = `cat >> ${alertLog}`;
+  const transitions: string[] = [];
+  service.onLivenessTransition((transition) => transitions.push(transition.state));
   try {
     for (let i = 0; i < 5; i++) {
       await service.runLivenessCheck();
     }
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(existsSync(alertLog), false, 'a healthy node must never trigger an alert');
+    assert.deepEqual(transitions, [], 'a healthy node must never trigger an alert');
   } finally {
-    process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND = originalCommand;
     server.close();
   }
 });
@@ -141,25 +130,17 @@ test('recovery resets the counter: a node that goes bad, recovers, then goes bad
   const transitions: string[] = [];
   service.onLivenessTransition((transition) => transitions.push(transition.state));
 
-  const alertLog = join(mkdtempSync(join(tmpdir(), 'gah-alert-test-')), 'alerts.log');
-  const originalCommand = process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND;
-  process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND = `cat >> ${alertLog}`;
   try {
     // Go bad: cross the threshold.
     up = false;
     await service.runLivenessCheck();
     await service.runLivenessCheck();
     await service.runLivenessCheck();
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(existsSync(alertLog), true, 'first outage must alert');
     assert.deepEqual(transitions, ['offline']);
-    writeFileSync(alertLog, '');
 
     // Recover: must not immediately re-alert.
     up = true;
     await service.runLivenessCheck();
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(readFileSync(alertLog, 'utf8'), '', 'recovery must not itself alert');
     assert.deepEqual(transitions, ['offline', 'back']);
 
     // Go bad again: must alert again (not permanently silenced).
@@ -167,11 +148,8 @@ test('recovery resets the counter: a node that goes bad, recovers, then goes bad
     await service.runLivenessCheck();
     await service.runLivenessCheck();
     await service.runLivenessCheck();
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(existsSync(alertLog), true, 'a second outage after recovery must alert again');
     assert.deepEqual(transitions, ['offline', 'back', 'offline']);
   } finally {
-    process.env.GAH_NODE_LIVENESS_NOTIFY_COMMAND = originalCommand;
     server.close();
   }
 });

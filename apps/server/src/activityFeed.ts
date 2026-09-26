@@ -90,6 +90,7 @@ export function activityFromController(event: ControllerEvent): ActivityEvent | 
   const profile = event.profile ?? null;
   const shared = {
     id: stableId('controller', event),
+    origin: 'controller' as const,
     occurredAt: event.timestamp,
     profile,
     message: event.details,

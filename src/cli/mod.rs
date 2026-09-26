@@ -38,6 +38,16 @@ pub fn run() -> Result<()> {
             commands::price_guard::run(commands::price_guard::Args { watchlist, model })?
         }
 
+        Commands::NotifySend {
+            config_path,
+            title,
+            message,
+            url,
+        } => {
+            let cfg = crate::config::load(config_path.as_deref())?;
+            crate::notify_channels::send_activity(&cfg, &title, &message, url.as_deref())?
+        }
+
         Commands::PolicyCheck { config, action } => {
             commands::policy::run(commands::policy::Args { config, action })?
         }

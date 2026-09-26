@@ -708,6 +708,22 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
       "cli_command_path": "gah node register",
       "is_stable": true
     },
+    "notify.send": {
+      "operation_id": "notify.send",
+      "display_name": "Send Channel Notification",
+      "class": "mutation",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "non_idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "security_sensitive",
+      "documentation": "Deliver one message through the configured Telegram or Discord channel",
+      "cli_command_path": "gah notify-send",
+      "is_stable": true
+    },
     "pm.plans.list": {
       "operation_id": "pm.plans.list",
       "display_name": "Read PM plans (gah pm plans)",
@@ -1219,6 +1235,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "gah ledger work": "ledger.work",
     "gah loop": "loop.run",
     "gah node register": "node.register",
+    "gah notify-send": "notify.send",
     "gah pm plans": "pm.plans.list",
     "gah pm publish": "pm.publish",
     "gah pm show": "pm.plans.show",
@@ -1303,6 +1320,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "init.create": "filesystem_access_required",
     "loop.run": "local_backend_execution_required",
     "node.register": "security_sensitive",
+    "notify.send": "security_sensitive",
     "policy.check": "filesystem_access_required",
     "price_guard.check": "filesystem_access_required",
     "profile.show": "filesystem_access_required",

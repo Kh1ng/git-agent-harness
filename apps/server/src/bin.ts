@@ -22,6 +22,7 @@ import { startChatMaintenanceScheduler, stopChatMaintenanceScheduler } from './m
 import { ActivityFeed } from './activityFeed.js';
 import { WebPushNotifications } from './webPush.js';
 import { apnsFromEnvironment } from './apns.js';
+import { channelDelivery, commandDelivery, deliverToAll } from './notifyDelivery.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
 const HOST = resolveBindHost();
@@ -49,10 +50,12 @@ async function main() {
   const registryService = new RegistryService(node.role === 'worker' ? null : undefined, coordinatorIdentity.advertised_url, PORT);
   const webPushNotifications = node.role === 'central' ? new WebPushNotifications() : undefined;
   const apnsNotifications = node.role === 'central' ? apnsFromEnvironment() : undefined;
-  const activityFeed = new ActivityFeed(undefined, (event) => Promise.all([
-    webPushNotifications?.deliverActivity(event),
-    apnsNotifications?.deliverActivity(event)
-  ]).then(() => undefined));
+  const activityFeed = new ActivityFeed(undefined, node.role === 'central' ? deliverToAll([
+    webPushNotifications && ((event) => webPushNotifications.deliverActivity(event)),
+    apnsNotifications && ((event) => apnsNotifications.deliverActivity(event)),
+    channelDelivery(coordinatorIdentity.advertised_url),
+    commandDelivery(coordinatorIdentity.advertised_url)
+  ]) : undefined);
 
   // Create Express app
   const app = createExpressServer({
