@@ -722,6 +722,116 @@ fn manager_wake_url_targets_the_central_chat_api() {
 }
 
 #[test]
+fn activity_payload_is_stable_and_maps_dispatch_failure() {
+    let profile = crate::config::tests::test_profile_for_notifications();
+    let event = NotifyEvent::DispatchFailed {
+        timestamp: "2026-09-26T12:00:00Z",
+        profile: "demo",
+        failure_class: "backend_error",
+        failure_stage: Some("agent_run"),
+        run_id: "run-42",
+        work_id: "#42",
+        attempt_count: Some(2),
+        error_summary: Some("failed"),
+        mr_url: None,
+    };
+    let first = activity_body(&profile, &event);
+    let second = activity_body(&profile, &event);
+    assert_eq!(first, second);
+    let payload: serde_json::Value = serde_json::from_str(&first.1).unwrap();
+    assert_eq!(payload["kind"], "dispatch_failed");
+    assert_eq!(payload["severity"], "error");
+    assert_eq!(payload["workId"], "#42");
+    assert_eq!(
+        activity_url("https://central.example/base/?ignored=1").unwrap(),
+        "https://central.example/base/api/activity"
+    );
+}
+
+#[test]
+fn unavailable_central_falls_back_to_the_direct_channel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_gah_config(None);
+    cfg.defaults.registry_central_url = Some("https://central.example".into());
+    cfg.defaults.notification_channel = crate::notify_channels::NotificationChannel::Discord;
+    cfg.defaults.artifact_root = tmp.path().to_string_lossy().into();
+    let profile = crate::config::tests::test_profile_for_notifications();
+    let delivered = std::cell::Cell::new(false);
+    notify_event_with_deliveries(
+        &cfg,
+        &profile,
+        NotifyEvent::MrCreated {
+            url: "https://example.com/pr/42",
+            work_id: "#42",
+            backend: "codex",
+            model: "gpt",
+        },
+        |_, _, _, _| Ok(()),
+        |_, _, _| anyhow::bail!("central offline"),
+        |_, message| {
+            delivered.set(message.contains("PR/42") || message.contains("pr/42"));
+            Ok(())
+        },
+    );
+    assert!(delivered.get());
+    let events = crate::events::read_events(&cfg).unwrap();
+    assert!(events.iter().any(|event| {
+        event.event_type == crate::events::EventType::NotificationDeliveryFailed.as_str()
+            && event.details.contains("central_activity")
+    }));
+}
+
+#[test]
+fn posted_events_outside_the_channel_relay_set_still_send_directly() {
+    let mut cfg = test_gah_config(None);
+    cfg.defaults.registry_central_url = Some("https://central.example".into());
+    cfg.defaults.notification_channel = crate::notify_channels::NotificationChannel::Discord;
+    let profile = crate::config::tests::test_profile_for_notifications();
+
+    let relayed = std::cell::Cell::new(false);
+    notify_event_with_deliveries(
+        &cfg,
+        &profile,
+        NotifyEvent::MrCreated {
+            url: "https://example.com/pr/42",
+            work_id: "#42",
+            backend: "codex",
+            model: "gpt",
+        },
+        |_, _, _, _| Ok(()),
+        |_, _, _| Ok(()),
+        |_, _| {
+            relayed.set(true);
+            Ok(())
+        },
+    );
+    assert!(
+        !relayed.get(),
+        "a feed-relayed kind skips the direct channel after a successful post"
+    );
+
+    let sent = std::cell::Cell::new(false);
+    notify_event_with_deliveries(
+        &cfg,
+        &profile,
+        NotifyEvent::MrMerged {
+            url: "https://example.com/pr/42",
+            work_id: "#42",
+        },
+        |_, _, _, _| Ok(()),
+        |_, _, _| Ok(()),
+        |_, message| {
+            sent.set(message.contains("42"));
+            Ok(())
+        },
+    );
+    assert!(
+        sent.get(),
+        "a kind the feed does not relay still sends directly"
+    );
+}
+
+#[test]
 fn notify_event_wakes_configured_manager_when_autonomy_set() {
     let tmp = tempfile::tempdir().unwrap();
     let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
