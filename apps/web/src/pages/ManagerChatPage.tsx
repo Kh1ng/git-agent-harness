@@ -13,6 +13,7 @@ import { DEFAULT_CONVERSATION_ID, readNavigation, updateNavigation, type Page } 
 import { ProviderPicker, type ProviderSelection, type ProviderPickerProps } from '../components/ProviderPicker.js';
 import { ProjectRail } from '../components/ProjectRail.js';
 import { CommitPrDialog } from '../components/CommitPrDialog.js';
+import { ChatSessionDetailDrawer, type SessionUsageSummary } from '../components/ChatSessionDetailDrawer.js';
 import { OpenLocalCheckout } from '../components/OpenLocalCheckout.js';
 import { gahApi } from '../api/client.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
@@ -29,7 +30,8 @@ import type {
   ChatReclaimResult,
   SkillBindingSummary,
   ChatPrSummary,
-  ChatIssueSummary
+  ChatIssueSummary,
+  ChatUsage
 } from '@git-agent-harness/contracts';
 
 interface ChatTurn {
@@ -40,6 +42,7 @@ interface ChatTurn {
   model?: string | null;
   nodeId?: string;
   nodeName?: string;
+  usage?: ChatUsage | null;
   /** Optimistic mid-turn steer, removed again if the backend rejects it. */
   steeringRequestId?: string;
   /** Present on tool turns (slice 3): structured info for the activity card. */
@@ -94,6 +97,7 @@ function fromServerTurn(turn: ManagerChatTurn): ChatTurn {
     model: turn.model,
     nodeId: turn.nodeId,
     nodeName: turn.nodeName,
+    usage: turn.usage,
     tool: turn.tool
   };
 }
@@ -441,7 +445,13 @@ function GitStrip({
   );
 }
 
-export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherRequest?: number; onNavigate?: (page: Page) => void }) {
+function associatedWorkId(session: ChatSessionSummary): string | null {
+  if (session.prNumber) return `#${session.prNumber}`;
+  const issue = /^gah\/issue\/.+-(\d+)(?:-[a-z0-9]+)?$/i.exec(session.branch);
+  return issue ? `#${Number(issue[1])}` : null;
+}
+
+export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }: { launcherRequest?: number; onNavigate?: (page: Page) => void; onOpenWork?: (workId: string) => void }) {
   const { sendMessage, messages, isConnected, reconnectSeq } = useWebSocket();
   const wsProfile = useWebSocket().profile;
   const profileOverride = useUiStore((s) => s.profileOverride);
@@ -539,6 +549,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
   const [storageLoading, setStorageLoading] = useState(false);
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
   const [archiveBusy, setArchiveBusy] = useState(false);
+  const [sessionDetailOpen, setSessionDetailOpen] = useState(false);
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === sessionId) ?? null,
     [sessions, sessionId]
@@ -1078,7 +1089,8 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
             backend: last.backend,
             model: last.model,
             nodeId: last.nodeId ?? pendingRequest.nodeId,
-            nodeName: last.nodeName ?? (last.nodeId && last.nodeId !== pendingRequest.nodeId ? undefined : pendingRequest.nodeName)
+            nodeName: last.nodeName ?? (last.nodeId && last.nodeId !== pendingRequest.nodeId ? undefined : pendingRequest.nodeName),
+            usage: last.usage
           }]);
         }
       } else if (last.type === 'error') {
@@ -1298,16 +1310,26 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
     setPermission(null);
   };
 
-  const handleArchiveSession = async () => {
+  const handleArchiveSession = async (resetSelection = false) => {
     if (!activeSession) return;
-    try {
-      const archived = await gahApi.archiveChatSession(profile, activeSession.id);
-      setSessions((current) => current.map((session) => session.id === archived.id ? archived : session));
-      refreshSessions(profile);
-      setSessionId(null);
-    } catch (err) {
-      setTurns((prev) => [...prev, { role: 'error', text: `Failed to archive session: ${err instanceof Error ? err.message : String(err)}` }]);
-    }
+    const archived = await gahApi.archiveChatSession(profile, activeSession.id);
+    setSessions((current) => current.map((session) => session.id === archived.id ? archived : session));
+    refreshSessions(profile);
+    if (resetSelection) setSessionId(null);
+  };
+
+  const handleRestoreSession = async () => {
+    if (!activeSession) return;
+    const restored = await gahApi.restoreChatSession(profile, activeSession.id);
+    setSessions((current) => current.map((session) => session.id === restored.id ? restored : session));
+    refreshSessions(profile);
+  };
+
+  const handleRenameSession = async (title: string) => {
+    if (!activeSession) return;
+    const updated = await gahApi.updateChatSession(profile, activeSession.id, { title });
+    setSessions((current) => current.map((session) => session.id === updated.id ? updated : session));
+    refreshSessions(profile);
   };
 
   const handleBulkArchive = async () => {
@@ -1435,6 +1457,22 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
   const liveChatSessions = sessions.filter((session) => session.outcome === 'live');
   const archivedChatSessions = sessions.filter((session) => session.outcome !== 'live');
   const closeTools = () => setToolsOpen(false);
+  const sessionUsage = useMemo<SessionUsageSummary>(() => {
+    const reported = turns.filter((turn) => turn.role === 'assistant' && turn.usage).map((turn) => turn.usage!);
+    const sum = (field: 'input_tokens' | 'output_tokens' | 'total_tokens') => {
+      const values = reported.map((item) => item[field]).filter((value): value is number => value != null);
+      return values.length ? values.reduce((total, value) => total + value, 0) : null;
+    };
+    const costs = reported.map((item) => item.estimated_cost_usd).filter((value): value is number => value != null);
+    return {
+      turns: reported.length,
+      inputTokens: sum('input_tokens'),
+      outputTokens: sum('output_tokens'),
+      totalTokens: sum('total_tokens'),
+      estimatedCostUsd: costs.length ? costs.reduce((total, value) => total + value, 0) : null,
+      costIncomplete: reported.some((item) => item.estimated_cost_usd == null)
+    };
+  }, [turns]);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
@@ -1509,6 +1547,9 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
           title="New chat: choose project, node, and provider/model — starts in a fresh worktree">
           <Plus size={15} aria-hidden="true" /><span className="hidden sm:inline">New chat</span>
         </button>
+        {activeSession && <button type="button" onClick={() => setSessionDetailOpen(true)} className="btn-secondary shrink-0 !px-2.5 text-xs" aria-label="Session details">
+          <MessageSquare size={15} aria-hidden="true" /><span className="hidden sm:inline">Details</span>
+        </button>}
         <div ref={toolsRef} className="relative shrink-0">
           <button type="button" onClick={() => setToolsOpen((open) => !open)}
             className="btn-secondary relative !px-2.5" aria-label="Chat tools" aria-expanded={toolsOpen} aria-controls="chat-tools">
@@ -1578,13 +1619,8 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
                 <GitBranch size={14} aria-hidden="true" /> Manage projects
               </button>
               {activeSession && activeSession.archivedAt === null && (
-                <button
-                  type="button"
-                  onClick={() => { closeTools(); void handleArchiveSession(); }}
-                  disabled={turnBusy}
-                  className="chat-menu-item"
-                  title="Archive this session (dirty work is saved as a patch; the branch survives)"
-                >
+                <button type="button" onClick={() => { closeTools(); void handleArchiveSession(true).catch((error) => setTurns((current) => [...current, { role: 'error', text: `Failed to archive session: ${error instanceof Error ? error.message : String(error)}` }])); }} disabled={turnBusy} className="chat-menu-item"
+                  title="Archive this session (dirty work is saved as a patch; the branch survives)">
                   <Archive size={14} aria-hidden="true" /> Archive
                 </button>
               )}
@@ -1695,6 +1731,24 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
         onViewAllProjects={onNavigate ? () => onNavigate('projects') : undefined}
         onCreated={handleChatCreated}
       />
+      {sessionDetailOpen && activeSession && (
+        <ChatSessionDetailDrawer
+          session={activeSession}
+          turnBusy={turnBusy}
+          providerPicker={composerPicker}
+          skillBinding={skillBinding}
+          skillBusy={skillBindingChanging}
+          usage={sessionUsage}
+          workId={associatedWorkId(activeSession)}
+          onRename={handleRenameSession}
+          onArchive={() => handleArchiveSession(false)}
+          onRestore={handleRestoreSession}
+          onToggleSkill={handleSkillToggle}
+          onInheritSkills={handleSkillInherit}
+          onOpenWork={onOpenWork}
+          onClose={() => setSessionDetailOpen(false)}
+        />
+      )}
 
       <div className={`relative grid min-h-0 min-w-0 flex-1 gap-4 max-xl:overflow-y-auto ${previewOpen && activeSession && !remoteSession ? 'xl:grid-cols-[15rem_minmax(0,1fr)_minmax(0,26rem)]' : 'xl:grid-cols-[15rem_minmax(0,1fr)]'}`}>
         {/* Below xl the rail floats over the conversation so opening it never reflows the chat. */}

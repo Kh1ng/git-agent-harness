@@ -1022,6 +1022,22 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     return archived;
   }
 
+  function restoreSession(profile: string, id: string): ChatSessionSummary | null {
+    const current = state.sessions.get(id);
+    if (!current || current.profile !== profile || current.outcome === 'settled') return null;
+    const restored = {
+      ...current,
+      worktreePath: current.prNumber ? null : '/mock/in-memory-only',
+      archivedAt: null,
+      outcome: 'live',
+      settledAt: null,
+      settledReason: null,
+      lastActiveAt: FIXED_NOW + state.reset
+    } satisfies ChatSessionSummary;
+    state.sessions.set(id, restored);
+    return restored;
+  }
+
   /** PR → chat: a read-only session seeded with the PR -- worktree-less,
    * riding the PR's head branch, with the PR as the opening message. */
   function createPrSession(profile: string, backend: string | undefined, model: string | null, pr: ChatPrSummary): ChatSessionSummary {
@@ -1744,6 +1760,14 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     const archived = ids.map((sessionId) => archiveSession(profile, sessionId));
     if (archived.some((session) => session === null)) return jsonError(res, 502, 'Failed to archive chat session', 'Mock archive failed');
     res.json(id ? archived[0] : { sessions: archived });
+  });
+  app.post('/api/manager-chat/sessions/restore', (req, res) => {
+    const profile = bodyString(req.body?.profile) ?? 'fixture';
+    const id = bodyString(req.body?.sessionId);
+    if (!id) return jsonError(res, 400, 'Missing required field: sessionId', 'sessionId is required');
+    const restored = restoreSession(profile, id);
+    if (!restored) return jsonError(res, 502, 'Failed to restore chat session', 'Mock restore failed');
+    res.json(restored);
   });
   app.get('/api/manager-chat/preview', (req, res) => {
     const profile = bodyString(req.query.profile) ?? 'fixture';

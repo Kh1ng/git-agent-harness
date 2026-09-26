@@ -98,6 +98,12 @@ test('named scenarios are discoverable, switchable, and resettable in memory', a
     assert.equal(archived.status, 200);
     assert.equal((await archived.json() as { archivedAt: number | null }).archivedAt === null, false);
 
+    const restored = await post(running.baseUrl, '/api/manager-chat/sessions/restore', {
+      profile: 'fixture', sessionId: 'mock-session-1'
+    });
+    assert.equal(restored.status, 200);
+    assert.equal((await restored.json() as { archivedAt: number | null }).archivedAt, null);
+
     await post(running.baseUrl, '/api/mock/reset');
     const sessions = await fetch(`${running.baseUrl}/api/manager-chat/sessions?profile=fixture`).then((response) => response.json()) as {
       sessions: { archivedAt: number | null }[];
