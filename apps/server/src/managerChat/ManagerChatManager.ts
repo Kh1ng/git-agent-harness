@@ -38,6 +38,8 @@ import {
   chatSessionStoreOptions,
   createSession,
   listSessions,
+  publishWorkspace,
+  refreshWorkspace,
   resolveSessionCwd,
   touchSession,
   updateSession,
@@ -883,6 +885,49 @@ export function sendManagerChatMessage(
   nodeId?: string,
   hooks: ManagerChatTurnHooks = {}
 ): Promise<ManagerChatTurnResult> {
+  const recordWorkspaceMove = (from: string, to: string, reason: string) => {
+    const opts = { ...logOptions, sessionId };
+    const events = loadLog(profile, opts);
+    appendEvents(profile, [{
+      type: 'handoff',
+      seq: events.reduce((highest, event) => Math.max(highest, event.seq), 0) + 1,
+      turn: events.reduce((highest, event) => Math.max(highest, event.turn), 0),
+      from,
+      fromModel: null,
+      to,
+      toModel: null,
+      reason,
+      timestamp: Date.now()
+    }], opts);
+  };
+
+  const carryWorkspace = async (
+    session: import('@git-agent-harness/contracts').ChatSessionSummary,
+    previousNode: string,
+    target: ChatRoute
+  ): Promise<boolean> => {
+    let from = previousNode;
+    const to = target.nodeName ?? target.nodeId ?? 'selected node';
+    try {
+      const previous = await chatRoute(profile, previousNode, session.backend, false);
+      from = previous.nodeName ?? previousNode;
+      const result = previous.remote
+        ? await previous.remote.request<{ branch: string; commit: string }>({
+          action: 'handoff', sessionId, backend: session.backend
+        })
+        : await (async () => {
+          const info = await findProfileInfo(previous.profileName);
+          if (!info) throw new Error('Previous node checkout is unavailable.');
+          return publishWorkspace(profile, sessionId!, info, chatSessionStoreOptions);
+        })();
+      recordWorkspaceMove(from, to, `Workspace carried in commit ${result.commit}.`);
+      return true;
+    } catch {
+      recordWorkspaceMove(from, to, `Changes on ${from} were not carried. Its workspace remains on that node.`);
+      return false;
+    }
+  };
+
   // Session-bound turns (WP2): resolve the session's worktree cwd (re-
   // materializing it from the branch if prune reclaimed the idle worktree)
   // and serve the turn from the session's own backend. Unknown or archived
@@ -905,8 +950,10 @@ export function sendManagerChatMessage(
     }
     const previousNode = session.nodeId ?? localChatNodeId();
     if (previousNode && !session.workspaces?.[previousNode]) session = { ...session, workspaces: { ...session.workspaces, [previousNode]: { branch: session.branch, worktreePath: session.worktreePath } } };
+    const moving = !!previousNode && !!route.nodeId && previousNode !== route.nodeId;
+    const carried = moving ? await carryWorkspace(session, previousNode, route) : false;
     if (route.remote) {
-      const prepared = await route.remote.request<{ session: import('@git-agent-harness/contracts').ChatSessionSummary }>({ action: 'prepare', sessionId, backend: session.backend, backendInstance: session.backendInstance, model: session.model, reasoningEffort: session.reasoningEffort, title: session.title });
+      const prepared = await route.remote.request<{ session: import('@git-agent-harness/contracts').ChatSessionSummary }>({ action: 'prepare', sessionId, branch: session.branch, backend: session.backend, backendInstance: session.backendInstance, model: session.model, reasoningEffort: session.reasoningEffort, title: session.title, syncBranch: carried });
       session = storeSession(rememberWorkspace({ ...session, branch: prepared.session.branch, worktreePath: prepared.session.worktreePath }, route), chatSessionStoreOptions);
       return { backend: session.backend, backendInstance: session.backendInstance, model: session.model, reasoningEffort: session.reasoningEffort, route };
     }
@@ -924,6 +971,7 @@ export function sendManagerChatMessage(
     if (!resolved) {
       throw new Error(`No active chat session '${sessionId}' for profile '${profile}'`);
     }
+    if (carried) await refreshWorkspace(profile, sessionId, profileInfo, chatSessionStoreOptions);
     return { cwd: resolved.cwd, backend: resolved.session.backend, backendInstance: resolved.session.backendInstance, model: resolved.session.model, reasoningEffort: resolved.session.reasoningEffort, route };
   };
 
