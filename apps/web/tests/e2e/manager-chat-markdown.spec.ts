@@ -67,8 +67,10 @@ test('chat turns and streaming replies render markdown inside bounded bubbles', 
 
   const link = page.getByRole('link', { name: 'Example docs' });
   await expect(link).toHaveAttribute('href', 'https://example.com/docs');
-  await expect(link).toHaveAttribute('target', '_blank');
-  await expect(link).toHaveAttribute('rel', 'noreferrer');
+  // Host-bridge contract: markdown links are plain anchors routed through
+  // ExternalAnchor; a target would be a dead link in the embedded hosts.
+  await expect(link).not.toHaveAttribute('target');
+  await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
 
   // Assistant replies are unboxed prose; the transcript column bounds their width.
   const transcriptColumn = page.locator('strong', { hasText: 'Bold assistant' })

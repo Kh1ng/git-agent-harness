@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { CircleDot, ExternalLink, GitPullRequest, MessageSquare, Plus } from 'lucide-react';
+import { ExternalAnchor } from '../components/ExternalAnchor';
 import type { ChatIssueSummary, ChatPrSummary, ChatSessionSummary } from '@git-agent-harness/contracts';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
@@ -172,9 +173,9 @@ export function ProjectsPage({ onNavigate }: { onNavigate: (page: Page) => void 
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 {current?.web_url && (
-                  <a href={current.web_url} target="_blank" rel="noopener noreferrer" className="btn-secondary text-xs">
+                  <ExternalAnchor href={current.web_url} className="btn-secondary text-xs">
                     <ExternalLink size={13} aria-hidden="true" /> Repository
-                  </a>
+                  </ExternalAnchor>
                 )}
                 <button type="button" onClick={() => openChat(null)} className="btn-secondary text-xs">
                   <MessageSquare size={13} aria-hidden="true" /> Default conversation
@@ -334,15 +335,13 @@ function WorkList({
                   {item.meta && <span className="block truncate text-[11px] text-muted">{item.meta}</span>}
                 </span>
                 {item.url && (
-                  <a
+                  <ExternalAnchor
                     href={item.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
                     className="touch-target shrink-0 rounded-md p-1.5 text-muted hover:bg-white/5 hover:text-primary"
                     aria-label={`Open #${item.number} at the provider`}
                   >
                     <ExternalLink size={13} aria-hidden="true" />
-                  </a>
+                  </ExternalAnchor>
                 )}
                 <button
                   type="button"

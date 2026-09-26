@@ -47,6 +47,23 @@
             ]
           },
           "local": false
+        },
+        {
+          "identifier": "remote-external-links",
+          "description": "Configured central dashboards may open plain HTTP(S) provider URLs in the OS browser",
+          "windows": [
+            "dashboard"
+          ],
+          "permissions": [
+            "allow-open-external-url"
+          ],
+          "remote": {
+            "urls": [
+              "http://*",
+              "https://*"
+            ]
+          },
+          "local": false
         }
       ]
     },
