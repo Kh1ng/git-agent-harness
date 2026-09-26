@@ -793,4 +793,26 @@ mod tests {
         assert!(!is_process_alive(999_999));
         assert!(state.is_claim_stale("test_profile", "work_dead_pid", 3600));
     }
+
+    #[test]
+    fn work_identity_aliases_collapse_to_one_claim_key() {
+        // The documented collision contract: `71`, `#71`, and `TICKET-071`
+        // must map to the same claim key, or two dispatches of the same
+        // ticket treat each other as distinct work and run concurrently.
+        let canonical = normalize_work_identity("71");
+        assert_eq!(canonical, "#71");
+        assert_eq!(normalize_work_identity("#71"), canonical);
+        assert_eq!(normalize_work_identity("TICKET-071"), canonical);
+        assert_eq!(normalize_work_identity("071"), canonical);
+        assert_eq!(normalize_work_identity("  71 "), canonical);
+    }
+
+    #[test]
+    fn work_identity_non_numeric_ids_pass_through() {
+        assert_eq!(normalize_work_identity(""), "");
+        assert_eq!(normalize_work_identity("0"), "#0");
+        assert_eq!(normalize_work_identity("fix/auth-bug"), "fix/auth-bug");
+        assert_eq!(normalize_work_identity("TICKET-abc"), "TICKET-abc");
+        assert_eq!(normalize_work_identity("TICKET-"), "#0");
+    }
 }

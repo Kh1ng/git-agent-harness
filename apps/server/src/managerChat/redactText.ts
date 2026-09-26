@@ -7,5 +7,8 @@ export function redactTextSecrets(value: string): string {
     .replace(/(authorization\s*:\s*bearer\s+)[^\s"']+/gi, '$1[REDACTED:TOKEN]')
     .replace(/(https?:\/\/)[^/\s@]+@/gi, '$1[REDACTED:URL_CREDENTIAL]@')
     .replace(/([?&](?:access_token|api[_-]?key|token|password)=)[^&#\s]+/gi, '$1[REDACTED:URL_CREDENTIAL]')
-    .replace(/((?:api[_-]?key|token|secret|password)\s*[=:]\s*)[^\s]+/gi, '$1[REDACTED:SECRET]');
+    // Generic keyword assignments. Never re-redact a placeholder emitted by
+    // an earlier rule, and never run the value past a `&` so neighboring
+    // query parameters survive.
+    .replace(/((?:api[_-]?key|token|secret|password)\s*[=:]\s*)(?!\[REDACTED:)[^\s&]+/gi, '$1[REDACTED:SECRET]');
 }

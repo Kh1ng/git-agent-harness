@@ -149,6 +149,100 @@ fn price_guard_blocks_unavailable_model() {
 }
 
 #[test]
+fn price_guard_blocks_model_priced_over_input_ceiling() {
+    let tmp = test_tempdir();
+    let watchlist = tmp.path().join("watchlist.json");
+    fs::write(
+        &watchlist,
+        r#"{"models":[{"id":"pricey/model","status":"available","input_per_1m":0.5,"output_per_1m":0.1,"max_input_per_1m":0.2,"max_output_per_1m":0.4}]}"#,
+    )
+    .unwrap();
+
+    bin()
+        .args([
+            "price-guard",
+            "--watchlist",
+            watchlist.to_str().unwrap(),
+            "--model",
+            "pricey/model",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("blocked"));
+}
+
+#[test]
+fn price_guard_blocks_model_priced_over_output_ceiling() {
+    let tmp = test_tempdir();
+    let watchlist = tmp.path().join("watchlist.json");
+    fs::write(
+        &watchlist,
+        r#"{"models":[{"id":"pricey/model","status":"available","input_per_1m":0.1,"output_per_1m":0.5,"max_input_per_1m":0.2,"max_output_per_1m":0.4}]}"#,
+    )
+    .unwrap();
+
+    bin()
+        .args([
+            "price-guard",
+            "--watchlist",
+            watchlist.to_str().unwrap(),
+            "--model",
+            "pricey/model",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("blocked"));
+}
+
+#[test]
+fn price_guard_blocks_models_missing_from_watchlist() {
+    // Unknown models fail closed: an unwatched model must never be
+    // silently treated as affordable.
+    let tmp = test_tempdir();
+    let watchlist = tmp.path().join("watchlist.json");
+    fs::write(
+        &watchlist,
+        r#"{"models":[{"id":"known/model","status":"available","input_per_1m":0.1,"output_per_1m":0.1,"max_input_per_1m":0.2,"max_output_per_1m":0.4}]}"#,
+    )
+    .unwrap();
+
+    bin()
+        .args([
+            "price-guard",
+            "--watchlist",
+            watchlist.to_str().unwrap(),
+            "--model",
+            "unlisted/model",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("blocked"));
+}
+
+#[test]
+fn price_guard_rejects_malformed_watchlist_as_error_not_decision() {
+    // A corrupt watchlist must fail loudly (exit 1, error on stderr) and
+    // must not print a decision, so callers can distinguish "blocked" from
+    // "could not evaluate".
+    let tmp = test_tempdir();
+    let watchlist = tmp.path().join("watchlist.json");
+    fs::write(&watchlist, "not json").unwrap();
+
+    bin()
+        .args([
+            "price-guard",
+            "--watchlist",
+            watchlist.to_str().unwrap(),
+            "--model",
+            "any/model",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("Error"));
+}
+
+#[test]
 fn work_trust_mode_blocks_provider_mutation() {
     let tmp = test_tempdir();
     let cfg = tmp.path().join("work-readonly.toml");
