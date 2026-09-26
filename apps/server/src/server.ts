@@ -128,6 +128,8 @@ import {
   type AdminUpdateState,
   type StartAdminUpdateResult
 } from './adminUpdate.js';
+import type { WebPushNotifications } from './webPush.js';
+import type { ApnsNotifications } from './apns.js';
 
 const SERVER_VERSION = COORDINATOR_VERSION;
 
@@ -149,6 +151,8 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   readAdminUpdateState?: typeof readAdminUpdateState;
   detectTailscaleIPv4?: typeof detectTailscaleIPv4;
   messagingBridge?: MessagingBridge;
+  webPushNotifications?: WebPushNotifications;
+  apnsNotifications?: ApnsNotifications;
 };
 
 const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
@@ -281,6 +285,12 @@ export function createServer(
   const centralClaims = () => claimsService ??= new ClaimsService();
   const app = express();
   if (node.role === 'central') app.locals.deviceAccess = configDeps.deviceAccess ?? new DeviceAccess();
+  if (node.role === 'central' && (configDeps.webPushNotifications || configDeps.apnsNotifications)) {
+    app.locals.deviceAccess.onRevoke((deviceId: string) => {
+      configDeps.webPushNotifications?.removeForDevice(deviceId);
+      configDeps.apnsNotifications?.removeForDevice(deviceId);
+    });
+  }
   // Trust X-Forwarded-* only when the immediate hop is loopback (a TLS-terminating
   // reverse proxy on this same host). `true` would trust those headers from any
   // direct peer, letting a remote attacker forge `X-Forwarded-Proto: https` and
@@ -317,6 +327,56 @@ export function createServer(
   app.use('/api', authMiddleware);
   const mutation = mutationSafety(getCoordinatorIdentity(undefined, coordinatorPort).node_id);
   app.use(workerRouteGuard(node));
+  if (node.role === 'central' && (configDeps.webPushNotifications || configDeps.apnsNotifications)) {
+    app.use('/api/push', rateLimit({
+      windowMs: 60_000,
+      limit: 60,
+      standardHeaders: true,
+      legacyHeaders: false
+    }));
+  }
+  const rejectInvalidRequest = (res: express.Response, code: string, error: unknown) => {
+    res.status(400).json({ error: code, message: error instanceof Error ? error.message : String(error) });
+  };
+  if (node.role === 'central' && configDeps.webPushNotifications) {
+    const push = configDeps.webPushNotifications;
+    app.get('/api/push/public-key', (_req, res) => res.json({ publicKey: push.publicKey() }));
+    app.get('/api/push/subscriptions', (_req, res) => res.json(push.list()));
+    app.post('/api/push/subscriptions', mutation('push_subscription.add'), (req, res) => {
+      try {
+        res.status(201).json(push.register(req.body?.subscription, req.body?.label, res.locals.authPrincipal?.kind === 'device' ? res.locals.authPrincipal.id : undefined));
+      } catch (error) {
+        rejectInvalidRequest(res, 'invalid_push_subscription', error);
+      }
+    });
+    app.delete('/api/push/subscriptions/:id', mutation('push_subscription.remove'), (req, res) => {
+      try {
+        const result = push.remove(req.params.id);
+        res.status(result.removed ? 200 : 404).json(result);
+      } catch (error) {
+        rejectInvalidRequest(res, 'invalid_push_subscription', error);
+      }
+    });
+  }
+  if (node.role === 'central' && configDeps.apnsNotifications) {
+    const apns = configDeps.apnsNotifications;
+    app.get('/api/push/apns-devices', (_req, res) => res.json(apns.list()));
+    app.post('/api/push/apns-devices', mutation('apns_device.add'), (req, res) => {
+      try {
+        res.status(201).json(apns.register(req.body, res.locals.authPrincipal?.kind === 'device' ? res.locals.authPrincipal.id : undefined));
+      } catch (error) {
+        rejectInvalidRequest(res, 'invalid_apns_device', error);
+      }
+    });
+    app.delete('/api/push/apns-devices/:id', mutation('apns_device.remove'), (req, res) => {
+      try {
+        const result = apns.remove(req.params.id);
+        res.status(result.removed ? 200 : 404).json(result);
+      } catch (error) {
+        rejectInvalidRequest(res, 'invalid_apns_device', error);
+      }
+    });
+  }
   if (node.role === 'central') configureChatRouting(registryService, () => getCoordinatorIdentity(undefined, coordinatorPort));
   app.use('/api/worker-chat', createWorkerChatRouter({ node, nodeId: getCoordinatorIdentity(undefined, coordinatorPort).node_id }));
   app.use('/api/worker-memory', workerMemoryRouter());
@@ -330,7 +390,7 @@ export function createServer(
     });
     app.post('/api/manager-chat/bridge/operators', mutation('messaging_bridge.pair'), (req, res) => {
       try { res.status(201).json({ operator: messagingBridge.pair(req.body ?? {}) }); }
-      catch (error) { res.status(400).json({ error: 'invalid_bridge_operator', message: error instanceof Error ? error.message : String(error) }); }
+      catch (error) { rejectInvalidRequest(res, 'invalid_bridge_operator', error); }
     });
     app.post('/api/manager-chat/bridge/operators/revoke', mutation('messaging_bridge.revoke'), (req, res) => {
       try { res.json({ operator: messagingBridge.revoke(req.body?.operatorId) }); }

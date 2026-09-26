@@ -1,15 +1,34 @@
 import SwiftUI
+import ActivityKit
 import UserNotifications
 import WebKit
 
 @main
 struct GAHApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     var body: some Scene { WindowGroup { ControllerView() } }
+}
+
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    weak static var controller: Controller?
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        Task { @MainActor in AppDelegate.controller?.setDeviceToken(deviceToken.hex) }
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        print("APNs registration failed: \(error.localizedDescription)")
+    }
+}
+
+private extension Data {
+    var hex: String { map { String(format: "%02x", $0) }.joined() }
 }
 
 /// The web dashboard owns authentication and work. This shell owns only navigation and its persistent web view.
 @MainActor
 final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, UNUserNotificationCenterDelegate {
+    private static let notificationsEnabledKey = "backgroundNotificationsEnabled"
     @Published var address: ServerAddress?
     @Published var error: String?
     @Published var loading = false
@@ -24,6 +43,8 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     }
     let webView: WKWebView
     private var locationObservation: NSKeyValueObservation?
+    private var deviceToken: String?
+    private var pushToStartToken: String?
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -32,6 +53,8 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         super.init()
         configuration.userContentController.add(DashboardRequestHandler(controller: self), name: "gahController")
         UNUserNotificationCenter.current().delegate = self
+        AppDelegate.controller = self
+        if notificationsEnabled { UIApplication.shared.registerForRemoteNotifications() }
         webView.isHidden = true
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -42,6 +65,12 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         if let saved = UserDefaults.standard.string(forKey: "centralURL"), let restored = try? ServerAddress(saved) {
             connect(restored)
         }
+        if !notificationsEnabled { removePushRegistration() }
+        observeLiveActivityTokens()
+    }
+
+    private var notificationsEnabled: Bool {
+        UserDefaults.standard.object(forKey: Self.notificationsEnabledKey) as? Bool ?? true
     }
 
     /// Only the configured dashboard's main Settings page can request the camera.
@@ -67,6 +96,13 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
               let body = message.body as? [String: Any], body["type"] as? String == "requestNotifications" else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] granted, _ in
             Task { @MainActor [weak self] in
+                UserDefaults.standard.set(granted, forKey: Self.notificationsEnabledKey)
+                if granted {
+                    UIApplication.shared.registerForRemoteNotifications()
+                } else {
+                    UIApplication.shared.unregisterForRemoteNotifications()
+                    self?.removePushRegistration()
+                }
                 self?.webView.evaluateJavaScript(
                     "window.dispatchEvent(new CustomEvent('gah:notification-permission',{detail:{granted:\(granted)}}))"
                 )
@@ -80,7 +116,104 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         content.title = request.title
         content.body = request.body
         content.sound = .default
+        if let url = request.url { content.userInfo["url"] = url }
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: request.id, content: content, trigger: nil))
+    }
+
+    func setDeviceToken(_ token: String) {
+        deviceToken = token
+        if notificationsEnabled { registerPushTokens() }
+    }
+
+    func requestSignOut(_ message: WKScriptMessage) {
+        guard validDashboardMessage(message) else { return }
+        removePushRegistration(notifyWebView: true)
+    }
+
+    func disableNotifications(_ message: WKScriptMessage) {
+        guard validDashboardMessage(message) else { return }
+        UserDefaults.standard.set(false, forKey: Self.notificationsEnabledKey)
+        UIApplication.shared.unregisterForRemoteNotifications()
+        removePushRegistration()
+    }
+
+    private func removePushRegistration(notifyWebView: Bool = false) {
+        guard let id = UserDefaults.standard.string(forKey: "apnsDeviceId") else {
+            if notifyWebView { finishPushSignOut() }
+            return
+        }
+        authenticatedRequest(path: "/api/push/apns-devices/\(id)", method: "DELETE", body: nil) { [weak self] _, succeeded in
+            if succeeded { UserDefaults.standard.removeObject(forKey: "apnsDeviceId") }
+            if notifyWebView { self?.finishPushSignOut() }
+        }
+    }
+
+    private func finishPushSignOut() {
+        webView.evaluateJavaScript("window.dispatchEvent(new Event('gah:push-signout-complete'))")
+    }
+
+    private func observeLiveActivityTokens() {
+        guard #available(iOS 17.2, *) else { return }
+        Task { [weak self] in
+            for await token in Activity<GAHLiveActivityAttributes>.pushToStartTokenUpdates {
+                await MainActor.run { self?.pushToStartToken = token.hex; self?.registerPushTokens() }
+            }
+        }
+        Task { [weak self] in
+            for await activity in Activity<GAHLiveActivityAttributes>.activityUpdates {
+                Task {
+                    for await token in activity.pushTokenUpdates {
+                        await MainActor.run {
+                            self?.registerPushTokens(liveActivity: [
+                                "profile": activity.attributes.project,
+                                "sessionId": activity.attributes.sessionId,
+                                "token": token.hex
+                            ])
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func registerPushTokens(liveActivity: [String: String]? = nil) {
+        guard notificationsEnabled, let deviceToken else { return }
+        var body: [String: Any] = ["token": deviceToken, "label": UIDevice.current.name]
+        if let pushToStartToken { body["pushToStartToken"] = pushToStartToken }
+        if let liveActivity { body["liveActivity"] = liveActivity }
+        authenticatedRequest(path: "/api/push/apns-devices", method: "POST", body: body) { [weak self] response, succeeded in
+            guard succeeded, let response, let id = (try? JSONSerialization.jsonObject(with: response)) as? [String: Any] else { return }
+            if let id = id["id"] as? String {
+                UserDefaults.standard.set(id, forKey: "apnsDeviceId")
+                if self?.notificationsEnabled == false { self?.removePushRegistration() }
+            }
+        }
+    }
+
+    private func authenticatedRequest(path: String, method: String, body: [String: Any]?, completion: @escaping (Data?, Bool) -> Void) {
+        guard let address, let url = URL(string: path, relativeTo: address.origin)?.absoluteURL else {
+            completion(nil, false)
+            return
+        }
+        webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
+            let scopedCookies = cookies.filter { cookie in
+                let domain = cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                return (url.host == domain || url.host?.hasSuffix("." + domain) == true)
+                    && url.path.hasPrefix(cookie.path) && (!cookie.isSecure || url.scheme == "https")
+            }
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 8
+            request.httpMethod = method
+            request.setValue(UUID().uuidString, forHTTPHeaderField: "Idempotency-Key")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(HTTPCookie.requestHeaderFields(with: scopedCookies)["Cookie"], forHTTPHeaderField: "Cookie")
+            request.setValue(address.origin.absoluteString, forHTTPHeaderField: "Origin")
+            if let body { request.httpBody = try? JSONSerialization.data(withJSONObject: body) }
+            URLSession.shared.dataTask(with: request) { data, response, _ in
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                DispatchQueue.main.async { completion(data, (200..<300).contains(status)) }
+            }.resume()
+        }
     }
 
     private func validDashboardMessage(_ message: WKScriptMessage) -> Bool {
@@ -98,6 +231,18 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                              withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .sound])
+    }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                             withCompletionHandler completionHandler: @escaping () -> Void) {
+        let path = response.notification.request.content.userInfo["url"] as? String
+        Task { @MainActor [weak self] in
+            if let self, let path, path.hasPrefix("/?"), let address = self.address,
+               let target = URL(string: path, relativeTo: address.origin)?.absoluteURL, address.contains(target) {
+                self.webView.load(URLRequest(url: target))
+            }
+            completionHandler()
+        }
     }
 
     func scannedPairing(_ value: String) {
@@ -125,6 +270,12 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         // the dashboard removes its fragment before redemption; retry uses that current URL.
         let current = hasCommittedPage ? webView.url.flatMap { target.contains($0) ? $0 : nil } : nil
         webView.load(URLRequest(url: current ?? target.url))
+    }
+
+    func openChatLink(_ link: URL) -> Bool {
+        guard let url = address?.chatURL(from: link) else { return false }
+        webView.load(URLRequest(url: url))
+        return true
     }
 
     func rememberLocation() {
@@ -182,6 +333,8 @@ private final class DashboardRequestHandler: NSObject, WKScriptMessageHandler {
         guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
         if type == "requestNotifications" { controller?.requestNotificationAccess(message) }
         else if type == "activity" { controller?.postActivityNotification(message) }
+        else if type == "disableNotifications" { controller?.disableNotifications(message) }
+        else if type == "signOut" { controller?.requestSignOut(message) }
     }
 }
 
@@ -258,6 +411,7 @@ private struct ControllerView: View {
                 }.id(proposedAddress)
             }
             .onOpenURL { url in
+                if controller.openChatLink(url) { return }
                 do {
                     proposedAddress = try ServerAddress.fromDeepLink(url).url.absoluteString
                     showingConnection = true

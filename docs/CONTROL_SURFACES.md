@@ -101,8 +101,8 @@ Its tests exercise each adapter's arguments. [Dispatch](../src/dispatch/attempts
 [Review](../src/runner/review.rs) builds its own commands and supervision state. It still omits configured Vibe and OpenCode arguments.
 
 Interactive chat uses a separate [Node adapter registry](../apps/server/src/managerChat/registry.ts).
-Hermes and OpenCode use ACP. Codex and Claude use ACP bridges. Vibe and AGY use headless adapters with transcript replay.
-OpenHands and Cursor are absent from this chat registry. Cursor is also absent from the Rust backend enum.
+Hermes and OpenCode use ACP. Codex and Claude use ACP bridges. Vibe, AGY, and OpenHands use headless adapters with transcript replay.
+Cursor is absent from this chat registry and the Rust backend enum.
 These implementations do not yet form one dispatch, review, chat, skills, plugins, and usage interface.
 
 The [routing module](../src/routing/mod.rs) applies candidate policy, availability, approvals, and reservations.
@@ -142,14 +142,9 @@ The [worker contract](WORKER_ROLE.md) identifies the remaining dispatch-memory r
 
 | Destination | Remaining work | Tracking |
 | --- | --- | --- |
-| Install and manage any node | Validate Windows installation and complete native Windows execution support. | [#938](https://github.com/Kh1ng/git-agent-harness/issues/938), [#942](https://github.com/Kh1ng/git-agent-harness/issues/942) |
-| One node/worker contract | Document registration, transport, lifecycle, queue semantics, and central-store ownership against the existing APIs. Complete inherited environment declarations and readiness provenance. | [#795](https://github.com/Kh1ng/git-agent-harness/issues/795), [#741](https://github.com/Kh1ng/git-agent-harness/issues/741) |
-| Work distribution between computers | Reconcile Node fleet selection with Rust reservations and local loops. Define queue depth and redistribution behavior before adding another scheduler. | [#796](https://github.com/Kh1ng/git-agent-harness/issues/796), [#835](https://github.com/Kh1ng/git-agent-harness/issues/835) |
-| One agent interface | Finish dispatch cleanup, fix review drift, and define the chat capability without discarding its streaming/permission behavior. Complete instance skills/plugins/usage coverage. | [#832](https://github.com/Kh1ng/git-agent-harness/issues/832), [#833](https://github.com/Kh1ng/git-agent-harness/issues/833), [#834](https://github.com/Kh1ng/git-agent-harness/issues/834), [#863](https://github.com/Kh1ng/git-agent-harness/issues/863), [#797](https://github.com/Kh1ng/git-agent-harness/issues/797) |
-| Work as issues | Complete resumable repository onboarding and safe approval/recovery controls. Factory is now the shared home for ticket, session, claim, approval, validation, and provider state. | [#539](https://github.com/Kh1ng/git-agent-harness/issues/539), [#503](https://github.com/Kh1ng/git-agent-harness/issues/503) |
-| Map view | Choose the node and dependency map format. The Factory page already shows ticket lifecycle waypoints and project stage totals. | [#799](https://github.com/Kh1ng/git-agent-harness/issues/799), [#800](https://github.com/Kh1ng/git-agent-harness/issues/800) |
-| Phone control | Complete authenticated reconnect, PWA behavior, and native packaging. Test device-specific interactions and background/resume. | [#529](https://github.com/Kh1ng/git-agent-harness/issues/529), [#534](https://github.com/Kh1ng/git-agent-harness/issues/534), [#526](https://github.com/Kh1ng/git-agent-harness/issues/526), [#936](https://github.com/Kh1ng/git-agent-harness/issues/936), [#798](https://github.com/Kh1ng/git-agent-harness/issues/798) |
-| Safe operational parity | Complete generated read contracts, capability checks, mutation audit/idempotency, and discoverable policy-aware controls. Complete HTTPS onboarding and billing attribution. | [#519](https://github.com/Kh1ng/git-agent-harness/issues/519), [#532](https://github.com/Kh1ng/git-agent-harness/issues/532), [#517](https://github.com/Kh1ng/git-agent-harness/issues/517), [#943](https://github.com/Kh1ng/git-agent-harness/issues/943), [#940](https://github.com/Kh1ng/git-agent-harness/issues/940) |
+| Parked providers | Add Cursor dispatch and chat after its CLI is authenticated; add Grok when an account is available. | [#863](https://github.com/Kh1ng/git-agent-harness/issues/863), [#1229](https://github.com/Kh1ng/git-agent-harness/issues/1229), [#1230](https://github.com/Kh1ng/git-agent-harness/issues/1230), [#1232](https://github.com/Kh1ng/git-agent-harness/issues/1232) |
+| Background notification acceptance | Verify Web Push and APNs/Live Activities on signed physical devices. | [#935](https://github.com/Kh1ng/git-agent-harness/issues/935), [#1227](https://github.com/Kh1ng/git-agent-harness/issues/1227), [#1228](https://github.com/Kh1ng/git-agent-harness/issues/1228) |
+| Physical iPhone acceptance | Verify the installed PWA and native shell over Tailscale after Xcode signing is configured. | [#534](https://github.com/Kh1ng/git-agent-harness/issues/534), [#936](https://github.com/Kh1ng/git-agent-harness/issues/936) |
 
 This inventory consolidates ownership and gaps. It does not replace the detailed API audit, worker contract, or testing procedure.
 

@@ -17,15 +17,27 @@ Pairing controls live in dashboard Settings. The app has no separate globe butto
 
 The native scanner requires camera permission. If scanning is unavailable, paste the full pairing link in Settings. A QR code proposes a connection. The dashboard still requires confirmation. Safari and GAH have separate cookie stores. Pair inside GAH to retain its login after closing the app.
 
-The dashboard Activity page can request local notification permission. While
-GAH is running, completed work, failures, reviews, and node-health events use
-the same durable WebSocket feed as the web and desktop apps. Event IDs become
-iOS notification identifiers, so reconnect replay does not display a duplicate.
-This is local foreground delivery, not background APNs.
+The dashboard Activity page requests notification permission, registers the
+device with the central server, and keeps foreground alerts on the same durable
+WebSocket feed as the web and desktop apps. With APNs configured on central,
+the app also receives background alerts and one Live Activity per chat turn.
+Disconnecting the paired device removes its APNs registration.
+
+The central server needs an Apple APNs token key outside the repository:
+
+```sh
+GAH_APNS_KEY_PATH=/secure/path/AuthKey_KEYID.p8
+GAH_APNS_KEY_ID=KEYID
+GAH_APNS_TEAM_ID=TEAMID
+GAH_APNS_ENVIRONMENT=sandbox # use production for distribution builds
+```
+
+Without all three key settings, APNs is disabled and foreground alerts still
+work. The default app topic is `com.kh1ng.gah.controller`.
 
 This Settings scanner requires the updated iPhone app. Older installed apps do not receive native changes from a dashboard refresh.
 
-HTTPS certificates use the system trust policy. HTTP uses a WebKit-only App Transport Security exception for the existing Tailscale deployment. The native bridge accepts pairing scans and bounded activity notifications only from the configured server's main frame. Pairing scans also require the main Settings page. It rejects iframe requests and provides no credential or general command access. Main-document navigation stays on the chosen server. Pairing links to another server require address confirmation. Other user-selected external HTTP(S) links open in the system browser.
+HTTPS certificates use the system trust policy. HTTP uses a WebKit-only App Transport Security exception for the existing Tailscale deployment. The native bridge accepts pairing scans, notification controls, sign-out, and bounded activity notifications only from the configured server's main frame. Pairing scans also require the main Settings page. It rejects iframe requests and provides no credential or general command access. Main-document navigation stays on the chosen server. Pairing links to another server require address confirmation. Other user-selected external HTTP(S) links open in the system browser.
 
 Only the server address and dashboard routing fields are saved in preferences. Pairing fragments and other query parameters are excluded. WebKit stores the device cookie. The owner can revoke that device in GAH.
 

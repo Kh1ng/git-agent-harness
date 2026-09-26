@@ -97,6 +97,13 @@ export const pairingApi = {
   logout: () => postJson('/api/pairing/logout', {})
 };
 
+export const pushApi = {
+  publicKey: () => getJson<{ publicKey?: string }>('/api/push/public-key'),
+  count: () => getJson<{ count?: number }>('/api/push/subscriptions'),
+  register: (subscription: PushSubscriptionJSON, label: string) => postJson<{ id?: string }, { subscription: PushSubscriptionJSON; label: string }>('/api/push/subscriptions', { subscription, label }),
+  remove: (id: string) => deleteJson(`/api/push/subscriptions/${encodeURIComponent(id)}`)
+};
+
 async function getJson<T>(path: string, params?: Record<string, string | undefined>): Promise<T> {
   const url = new URL(path, SERVER_URL);
   if (params) {
@@ -382,7 +389,7 @@ async function deleteJson<T>(path: string, params?: Record<string, string | unde
       if (value !== undefined) url.searchParams.set(key, value);
     }
   }
-  const res = await fetch(url.toString(), { method: 'DELETE', headers: authHeaders() });
+  const res = await fetch(url.toString(), { method: 'DELETE', headers: mutationHeaders() });
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`;
     try {

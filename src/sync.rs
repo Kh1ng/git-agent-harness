@@ -1,6 +1,6 @@
 use crate::config::{self, GahConfig};
 use crate::job_kind::JobKind;
-use crate::provider::gitlab_api;
+use crate::provider::{gitlab_api, gitlab_project_id};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
@@ -511,10 +511,7 @@ fn gitlab_mrs(
 ) -> Result<Vec<SyncMr>> {
     let mut synced = Vec::new();
     const PAGE_SIZE: usize = 100;
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let state = match scope {
         MrFetchScope::Active => "opened",
         MrFetchScope::FullHistory => "all",
@@ -581,10 +578,7 @@ fn gitlab_latest_pipeline_status(
     profile: &crate::config::Profile,
     iid: &str,
 ) -> Result<Option<String>> {
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let endpoint = format!("projects/{project_id}/merge_requests/{iid}/pipelines");
     let response = crate::provider::gitlab_api(profile, &endpoint, "GET", &[("per_page", "1")])?;
     let pipelines = response.as_array().ok_or_else(|| {

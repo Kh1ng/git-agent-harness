@@ -4,6 +4,7 @@ struct ActivityNotificationRequest: Equatable {
     let id: String
     let title: String
     let body: String
+    let url: String?
 }
 
 func activityNotificationRequest(from value: Any) -> ActivityNotificationRequest? {
@@ -14,5 +15,7 @@ func activityNotificationRequest(from value: Any) -> ActivityNotificationRequest
           !id.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
           !title.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
           !body.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return nil }
-    return ActivityNotificationRequest(id: id, title: title, body: body)
+    let url = value["url"] as? String
+    guard url == nil || (url!.hasPrefix("/?") && url!.count <= 1024) else { return nil }
+    return ActivityNotificationRequest(id: id, title: title, body: body, url: url)
 }

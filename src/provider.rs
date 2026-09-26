@@ -20,7 +20,7 @@ const GAH_REVIEW_STATE_LABELS: [&str; 5] = [
     "gah-review-escalating",
 ];
 const PROVIDER_ERROR_MAX_CHARS: usize = 4_096;
-const PROVIDER_MR_TITLE_MAX_CHARS: usize = 255;
+pub(crate) const PROVIDER_TITLE_MAX_CHARS: usize = 255;
 const PROVIDER_NETWORK_ATTEMPTS: u8 = 3;
 #[cfg(not(test))]
 const PROVIDER_NETWORK_RETRY_BACKOFF: Duration = Duration::from_secs(2);
@@ -34,6 +34,14 @@ fn provider_network_retry_backoff() -> Duration {
     {
         PROVIDER_NETWORK_RETRY_BACKOFF
     }
+}
+
+/// Return the configured GitLab project id used by every GitLab API route.
+pub(crate) fn gitlab_project_id(profile: &Profile) -> Result<&str> {
+    profile
+        .provider_project_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))
 }
 
 /// Run a provider CLI operation with a small, bounded retry only for
@@ -69,11 +77,11 @@ fn provider_output_with_transient_retry(
 
 fn draft_mr_title(title: &str) -> String {
     let prefixed = format!("Draft: {title}");
-    if prefixed.chars().count() <= PROVIDER_MR_TITLE_MAX_CHARS {
+    if prefixed.chars().count() <= PROVIDER_TITLE_MAX_CHARS {
         return prefixed;
     }
 
-    let keep = PROVIDER_MR_TITLE_MAX_CHARS - 3;
+    let keep = PROVIDER_TITLE_MAX_CHARS - 3;
     let mut truncated: String = prefixed.chars().take(keep).collect();
     truncated.push_str("...");
     truncated
@@ -291,10 +299,7 @@ pub(crate) fn get_provider_issue(profile: &Profile, number: &str) -> Result<Prov
             &[],
         )?,
         ProviderKind::Gitlab => {
-            let project_id = profile
-                .provider_project_id
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+            let project_id = gitlab_project_id(profile)?;
             gitlab_api(
                 profile,
                 &format!("projects/{project_id}/issues/{number}"),
@@ -323,9 +328,7 @@ pub(crate) fn list_provider_issues(profile: &Profile) -> Result<Vec<ProviderIssu
                 &[],
             )?,
             ProviderKind::Gitlab => {
-                let project_id = profile.provider_project_id.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("profile missing provider_project_id for gitlab")
-                })?;
+                let project_id = gitlab_project_id(profile)?;
                 gitlab_api(
                     profile,
                     &format!(
@@ -372,9 +375,7 @@ pub(crate) fn list_provider_label_names(profile: &Profile) -> Result<Vec<String>
                 &[],
             )?,
             ProviderKind::Gitlab => {
-                let project_id = profile.provider_project_id.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("profile missing provider_project_id for gitlab")
-                })?;
+                let project_id = gitlab_project_id(profile)?;
                 gitlab_api(
                     profile,
                     &format!("projects/{project_id}/labels?per_page={PAGE_SIZE}&page={page}"),
@@ -422,10 +423,7 @@ pub(crate) fn create_provider_issue(
             )?
         }
         ProviderKind::Gitlab => {
-            let project_id = profile
-                .provider_project_id
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+            let project_id = gitlab_project_id(profile)?;
             let labels = labels.join(",");
             let mut fields = vec![("title", title.as_str()), ("description", body.as_str())];
             if !labels.is_empty() {
@@ -508,10 +506,7 @@ pub fn post_issue_comment(profile: &Profile, issue_number: &str, body: &str) -> 
     match ProviderKind::parse(&profile.provider) {
         Ok(ProviderKind::Github) => github_post_issue_comment(profile, issue_number, &body),
         Ok(ProviderKind::Gitlab) => {
-            let project_id = profile
-                .provider_project_id
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+            let project_id = gitlab_project_id(profile)?;
             let endpoint = format!("projects/{project_id}/issues/{issue_number}/notes");
             let existing = gitlab_api(profile, &endpoint, "GET", &[])?;
             if existing.as_array().is_some_and(|notes| {
@@ -578,10 +573,7 @@ fn gitlab_mr(profile: &Profile, branch: &str, title: &str, body: &str) -> Result
         .provider_api_base
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("profile missing provider_api_base for gitlab"))?;
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let hostname = gitlab_hostname(api_base)?;
     let endpoint = format!("projects/{project_id}/merge_requests");
     let source_branch = format!("source_branch={branch}");
@@ -662,10 +654,7 @@ fn gitlab_post_review_comment(
     body: &str,
     labels: &[&str],
 ) -> Result<()> {
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let mr = gitlab_find_mr_by_branch(profile, branch)?;
     let endpoint = format!("projects/{project_id}/merge_requests/{}/notes", mr.id);
     gitlab_api(profile, &endpoint, "POST", &[("body", body)])?;
@@ -752,10 +741,7 @@ fn github_post_issue_comment(profile: &Profile, pr_number: &str, body: &str) -> 
 }
 
 fn gitlab_set_review_state_labels(profile: &Profile, iid: &str, labels: &[&str]) -> Result<()> {
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let endpoint = format!("projects/{project_id}/merge_requests/{iid}");
     let remove_labels = GAH_REVIEW_STATE_LABELS
         .iter()
@@ -936,10 +922,7 @@ fn gitlab_ready_title(title: &str) -> &str {
 }
 
 fn gitlab_mark_ready_for_review(profile: &Profile, iid: &str, title: &str) -> Result<()> {
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let endpoint = format!("projects/{project_id}/merge_requests/{iid}");
     let ready_title = gitlab_ready_title(title);
     gitlab_api(profile, &endpoint, "PUT", &[("title", ready_title)])?;
@@ -947,10 +930,7 @@ fn gitlab_mark_ready_for_review(profile: &Profile, iid: &str, title: &str) -> Re
 }
 
 fn gitlab_merge_mr(profile: &Profile, iid: &str, source_sha: Option<&str>) -> Result<()> {
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let endpoint = format!("projects/{project_id}/merge_requests/{iid}/merge");
     let mut fields = vec![("squash", "true"), ("should_remove_source_branch", "true")];
     if let Some(source_sha) = source_sha {
@@ -978,10 +958,7 @@ pub fn gitlab_set_mwps(
         anyhow::anyhow!("GitLab MR missing title for ready-for-review transition")
     })?;
     gitlab_mark_ready_for_review(profile, &target.id, title)?;
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let endpoint = format!("projects/{project_id}/merge_requests/{}/merge", target.id);
     let mut fields = vec![
         ("auto_merge", "true"),
@@ -1016,10 +993,7 @@ pub fn gitlab_close_issue(profile: &Profile, issue_number: &str) -> Result<()> {
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
         anyhow::bail!("delivery_mode=handoff: gitlab_close_issue is disallowed in handoff mode");
     }
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let endpoint = format!("projects/{project_id}/issues/{issue_number}");
     gitlab_api(profile, &endpoint, "PUT", &[("state_event", "close")])?;
 
@@ -1048,10 +1022,7 @@ pub fn github_get_issue_state(profile: &Profile, issue_number: &str) -> Result<O
 
 /// Get the state of a GitLab issue.
 pub fn gitlab_get_issue_state(profile: &Profile, issue_number: &str) -> Result<Option<String>> {
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let endpoint = format!("projects/{project_id}/issues/{issue_number}");
     let resp = gitlab_api(profile, &endpoint, "GET", &[])?;
     let state = resp["state"].as_str().map(|s| s.to_string());
@@ -1130,10 +1101,7 @@ pub fn mr_url_for_branch(profile: &Profile, branch: &str) -> Option<String> {
 }
 
 fn gitlab_review_target_by_branch(profile: &Profile, branch: &str) -> Result<ReviewTarget> {
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let endpoint = format!("projects/{project_id}/merge_requests");
     // Issue #551: no state filter -- must see merged/closed MRs too, not
     // just "not found". Highest iid wins if the branch name was reused.
@@ -1266,10 +1234,7 @@ fn parse_gitlab_mr_reference(profile: &Profile, raw: &str) -> Result<String, MrR
 
 fn gitlab_review_target_by_iid(profile: &Profile, mr: &str) -> Result<ReviewTarget> {
     let iid = parse_gitlab_mr_reference(profile, mr)?;
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let endpoint = format!("projects/{project_id}/merge_requests/{iid}");
     let resp = gitlab_api(profile, &endpoint, "GET", &[])?;
     let mut target = gitlab_target_from_value(&resp)?;

@@ -292,6 +292,7 @@ pub fn format_message(event: &NotifyEvent) -> String {
             attempt_count,
             error_summary,
             mr_url,
+            ..
         } => {
             let mut msg = format!(
                 "[gah] dispatch terminal failure [ts={timestamp}] [profile={profile}] [class={failure_class}] [stage={}] [run_id={run_id}] [attempts={}] work_id={work_id}",
@@ -325,6 +326,7 @@ pub fn format_message(event: &NotifyEvent) -> String {
             backend,
             model,
             duration_seconds,
+            ..
         } => format!(
             "[gah] backend stalled work_id={work_id} route={} duration={duration_seconds:.0}s; rerouting",
             route_label(backend, model)
@@ -431,8 +433,9 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
         // The controller owns this bounded reroute. Waking a manager for each
         // malformed intermediate opinion would recreate the notification
         // spam this event is designed to explain.
-        NotifyEvent::ReviewOutputInvalid { .. }
-        | NotifyEvent::PaidRouteApprovalRequired { .. } => return None,
+        NotifyEvent::ReviewOutputInvalid { .. } | NotifyEvent::PaidRouteApprovalRequired { .. } => {
+            return None
+        }
         // Issue #653: external approvals are operator decisions; a woken
         // manager must never grant its own credentials.
         NotifyEvent::ExternalApprovalRequested { .. } => return None,

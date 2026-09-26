@@ -2,12 +2,82 @@ import crypto from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { ActivityEvent, ControllerEvent, GatewayHealthSummary, QuotaSnapshot } from '@git-agent-harness/contracts';
+import { controllerDispatchSucceeded } from './controllerActivity.js';
+import { redactTextSecrets } from './managerChat/redactText.js';
 
 const MAX_STORED_EVENTS = 2_000;
 const REPLAY_LIMIT = 200;
 
+export type ChatLifecycleEvent = {
+  phase: 'start' | 'tool' | 'permission' | 'end';
+  profile: string;
+  sessionId?: string;
+  turn: number;
+  occurredAt: string;
+  backend?: string | null;
+  model?: string | null;
+  tool?: string;
+  permissionId?: string;
+  outcome?: 'complete' | 'error' | 'cancelled';
+  reply?: string;
+  error?: string;
+};
+
 function stableId(prefix: string, value: unknown): string {
   return `${prefix}:${crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 24)}`;
+}
+
+function collapsedPreview(value: string, max: number): string {
+  return redactTextSecrets(value).replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function permissionTool(value?: string): string {
+  const name = value?.match(/^[\p{L}\p{N}_-]+/u)?.[0];
+  return name ? `${name} requested` : 'Agent tool requested';
+}
+
+/** Convert live chat state into the same durable operator feed as dispatch. */
+export function activityFromChat(event: ChatLifecycleEvent): ActivityEvent | null {
+  const sessionId = event.sessionId ?? 'default';
+  const shared = {
+    occurredAt: event.occurredAt,
+    profile: event.profile,
+    sessionId
+  };
+  if (event.phase === 'permission') {
+    return {
+      ...shared,
+      id: stableId('chat_permission', {
+        profile: event.profile,
+        sessionId,
+        turn: event.turn,
+        request: event.permissionId ?? event.occurredAt
+      }),
+      kind: 'chat_permission_requested',
+      severity: 'warning',
+      title: `${event.profile}: permission required`,
+      message: permissionTool(event.tool)
+    };
+  }
+  if (event.phase !== 'end' || event.outcome === 'cancelled') return null;
+  if (event.outcome === 'complete') {
+    return {
+      ...shared,
+      id: `chat:${event.profile}:${sessionId}:${event.turn}:chat_turn_completed`,
+      kind: 'chat_turn_completed',
+      severity: 'success',
+      title: `${event.profile}: reply ready`,
+      message: collapsedPreview(event.reply ?? '', 120) || 'The agent finished its reply.'
+    };
+  }
+  return {
+    ...shared,
+    id: `chat:${event.profile}:${sessionId}:${event.turn}:chat_turn_failed`,
+    kind: 'chat_turn_failed',
+    severity: 'error',
+    title: `${event.profile}: chat failed`,
+    message: collapsedPreview(event.error ?? 'The chat turn failed.', 200)
+  };
 }
 
 /** Convert the existing durable controller log into the small operator feed. */
@@ -33,7 +103,7 @@ export function activityFromController(event: ControllerEvent): ActivityEvent | 
   }
   if (event.event_type !== 'dispatch_finished') return null;
 
-  const succeeded = /:\s*success\s*$/i.test(event.details);
+  const succeeded = controllerDispatchSucceeded(event.details);
   if (succeeded && /^review_mr\s*:/i.test(event.details)) {
     return { ...shared, kind: 'review_ready', severity: 'success', title: 'Review ready' };
   }
@@ -103,7 +173,10 @@ export class ActivityFeed {
   private events: ActivityEvent[] = [];
   private ids = new Set<string>();
 
-  constructor(private path: string | null = process.env.GAH_ACTIVITY_PATH ?? resolve(process.cwd(), 'config/activity.jsonl')) {
+  constructor(
+    private path: string | null = process.env.GAH_ACTIVITY_PATH ?? resolve(process.cwd(), 'config/activity.jsonl'),
+    private onRecorded?: (event: ActivityEvent) => void | Promise<void>
+  ) {
     if (!path || !existsSync(path)) return;
     try {
       for (const line of readFileSync(path, 'utf8').split('\n')) {
@@ -120,7 +193,7 @@ export class ActivityFeed {
     }
   }
 
-  record(event: ActivityEvent): boolean {
+  record(event: ActivityEvent, deliver = true): boolean {
     if (this.ids.has(event.id)) return false;
     this.events.push(event);
     this.ids.add(event.id);
@@ -131,6 +204,11 @@ export class ActivityFeed {
     if (this.events.length > MAX_STORED_EVENTS) {
       this.trim();
       if (this.path) writeFileSync(this.path, this.events.map((item) => JSON.stringify(item)).join('\n') + '\n', { mode: 0o600 });
+    }
+    if (deliver && this.onRecorded) {
+      void Promise.resolve().then(() => this.onRecorded?.(event)).catch((error) => {
+        console.error(`[activity] delivery failed for ${event.id}: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }
     return true;
   }
@@ -143,6 +221,5 @@ export class ActivityFeed {
 
   private trim(): void {
     this.events = this.events.slice(-MAX_STORED_EVENTS);
-    this.ids = new Set(this.events.map((event) => event.id));
   }
 }

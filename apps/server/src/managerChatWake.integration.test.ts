@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
 import { resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
 import { setChatEventPublishers, type UpdatedPublish } from './managerChat/ManagerChatManager.js';
+import type { ChatLifecycleEvent } from './activityFeed.js';
 import { readLog } from './managerChat/sessionLog.js';
 import { createServer } from './server.js';
 
@@ -28,7 +29,8 @@ test('two quick manager wakes share one durable backend session', { timeout: 15_
   delete process.env.TDAI_GATEWAY_API_KEY;
   resetCachedCoordinatorIdentity();
   const updates: Parameters<UpdatedPublish>[0][] = [];
-  setChatEventPublishers({ updated: (event) => updates.push(event) });
+  const lifecycle: ChatLifecycleEvent[] = [];
+  setChatEventPublishers({ updated: (event) => updates.push(event), lifecycle: (event) => lifecycle.push(event) });
 
   const app = createServer({
     runProfileList: async () => [{ name: profile, repo_id: 'stable-repo-id' } as ProfileSummary]
@@ -55,11 +57,14 @@ test('two quick manager wakes share one durable backend session', { timeout: 15_
       replies = readLog(profile, { stateDir })
         .filter((event) => event.type === 'assistant/message')
         .map((event) => event.text);
-      if (replies.length === 2 && updates.length === 4) break;
+      if (replies.length === 2 && updates.length === 4 && lifecycle.filter((event) => event.phase === 'end').length === 2) break;
       await new Promise((resolveWait) => setTimeout(resolveWait, 25));
     }
     assert.deepEqual(replies, ['OK', 'WAKE-QUEUE-819']);
     assert.equal(updates.length, 4, 'each wake publishes both its start and terminal state');
+    assert.deepEqual(lifecycle.map((event) => [event.phase, event.outcome]), [
+      ['start', undefined], ['end', 'complete'], ['start', undefined], ['end', 'complete']
+    ]);
   } finally {
     await new Promise<void>((done) => server.close(() => done()));
     setChatEventPublishers({});

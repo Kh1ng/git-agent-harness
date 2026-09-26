@@ -9,6 +9,7 @@ use crate::config::Profile;
 use crate::job_kind::JobKind;
 use crate::ledger::LedgerEntry;
 use crate::models::ReviewVerdict;
+use crate::provider::PROVIDER_TITLE_MAX_CHARS;
 use std::path::Path;
 
 pub(super) fn ensure_issue_open_for_publish(
@@ -523,7 +524,7 @@ pub(super) fn build_mr_title(
     } else {
         format!("{prefix} {mode_label}: {repo_id}")
     };
-    truncate_title(&title_string, 255)
+    truncate_title(&title_string, PROVIDER_TITLE_MAX_CHARS)
 }
 
 pub(super) fn render_review_comment(verdict: &ReviewVerdict, session_dir: &Path) -> String {

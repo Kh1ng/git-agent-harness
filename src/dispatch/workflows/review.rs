@@ -2,7 +2,7 @@ use super::super::attempts::{
     apply_execution_identity_env, apply_route_to_ledger, decide_route, mark_shutdown_cancelled,
     record_external_approval_consumption_for_last_attempt, record_route_attempt,
     reserve_backend_attempt, review_preflight_for_identity, review_usage,
-    route_after_backend_unavailable, route_identity, route_label, BackendAdmissionGuard,
+    route_after_backend_unavailable, route_identity, route_label,
 };
 use super::super::prompts::enforce_context_budget;
 use super::super::publish::{render_review_comment, review_labels};
@@ -566,13 +566,14 @@ pub(in crate::dispatch) fn review(
             attempt_index += 1;
             let attempt_session = session_dir.join(format!("review-attempt-{attempt_index}"));
             fs::create_dir_all(&attempt_session)?;
-            let review_slot = reserve_review_route(profile, &route, args.route_admission.as_ref())
-                .map_err(|error| {
-                    super::super::contextualize_capacity_deferral(
-                        error,
-                        attempt_index.saturating_sub(1),
-                    )
-                })?;
+            let review_slot =
+                reserve_backend_attempt(profile, &route.identity, args.route_admission.as_ref())
+                    .map_err(|error| {
+                        super::super::contextualize_capacity_deferral(
+                            error,
+                            attempt_index.saturating_sub(1),
+                        )
+                    })?;
             record_route_attempt(ledger, &route)?;
             let mut attempt_env_vars =
                 review_attempt_environment(profile, &route.identity, &env_vars);
@@ -1193,14 +1194,6 @@ fn mark_review_shutdown_cancelled(ledger: &mut LedgerEntry, signal: i32) {
     ledger.confidence_impact = None;
     ledger.human_required = false;
     ledger.human_required_reason_code = None;
-}
-
-fn reserve_review_route(
-    profile: &Profile,
-    route: &RouteDecision,
-    route_admission: Option<&crate::controller::RouteNodeAdmission>,
-) -> Result<BackendAdmissionGuard> {
-    reserve_backend_attempt(profile, &route.identity, route_admission)
 }
 
 fn review_attempt_environment(

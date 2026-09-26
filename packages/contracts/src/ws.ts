@@ -45,6 +45,9 @@ export type ActivityKind =
   | "dispatch_completed"
   | "dispatch_failed"
   | "review_ready"
+  | "chat_turn_completed"
+  | "chat_turn_failed"
+  | "chat_permission_requested"
   | "node_offline"
   | "node_back"
   | "quota_near_limit"
@@ -60,8 +63,16 @@ export interface ActivityEvent {
   severity: "info" | "success" | "warning" | "error";
   title: string;
   message: string;
+  sessionId?: string | null;
   workId?: string | null;
   nodeId?: string | null;
+}
+
+export function activityPath(event: Pick<ActivityEvent, "profile" | "sessionId">): string {
+  if (event.profile && event.sessionId) {
+    return `/?${new URLSearchParams({ page: "chat", profile: event.profile, chat: event.sessionId })}`;
+  }
+  return "/?page=events";
 }
 
 // Session type - manually defined instead of using Effect Schema

@@ -1,16 +1,9 @@
 //! Provider-neutral manager session protocol (issue #815, split from #520).
 //!
-//! `src/notifications.rs::spawn_manager_wake` is today's only "talk to a
-//! manager CLI" mechanism, and it is exactly one verb: spawn a one-shot
-//! process with a single instruction string and never speak to it again --
-//! no session identity is captured, nothing can resume it, steer it with a
-//! follow-up, stream its output back, interrupt it, or query its status.
-//! `ManagerSession` is the real superset that replaces it once real
-//! provider adapters (#816 Hermes, #817 Codex, #818 Claude) land; this
-//! ticket ships only the trait, a stable session-ID type, and a fully
-//! in-memory fake so the contract suite (`contract::run_contract_suite`)
-//! has something deterministic to run against before any real adapter
-//! exists.
+//! Durable manager sessions handle supervision and operator-directed work.
+//! Continuation events first resume the worker session recorded in the
+//! ledger; this manager protocol remains the fallback when that session is
+//! unavailable and the primary path for supervisory events.
 //!
 //! Method naming intentionally lines up with the Agent Client Protocol
 //! (`apps/server/src/managerChat/acpAdapter.ts`, the TS implementation this

@@ -126,14 +126,21 @@ export type UpdatedPublish = (event: {
 }) => void;
 let updatedPublisher: UpdatedPublish | undefined;
 
+type ChatLifecycleEvent = import('../activityFeed.js').ChatLifecycleEvent;
+type ChatLifecycleUpdate = Pick<ChatLifecycleEvent, 'phase'> & Partial<Omit<ChatLifecycleEvent, 'phase' | 'profile' | 'sessionId' | 'turn' | 'occurredAt'>>;
+export type ChatLifecyclePublish = (event: ChatLifecycleEvent) => void;
+let lifecyclePublisher: ChatLifecyclePublish | undefined;
+
 export function setChatEventPublishers(publishers: {
   toolCall?: ToolCallPublish;
   permission?: PermissionPublish;
   updated?: UpdatedPublish;
+  lifecycle?: ChatLifecyclePublish;
 }): void {
   toolCallPublisher = publishers.toolCall;
   permissionPublisher = publishers.permission;
   updatedPublisher = publishers.updated;
+  lifecyclePublisher = publishers.lifecycle;
 }
 
 /** Live preview push (WP3): fired when a session's preview port is set or
@@ -948,6 +955,17 @@ export function sendManagerChatMessage(
       previewSets: []
     };
     activeTurns.set(key, active);
+    const publishLifecycle = (event: ChatLifecycleUpdate, occurredAt = Date.now()): void => {
+      lifecyclePublisher?.({
+        profile,
+        ...(sessionId ? { sessionId } : {}),
+        turn: turnNo,
+        occurredAt: new Date(occurredAt).toISOString(),
+        backend: active.backend,
+        model: sessionContext.model,
+        ...event
+      });
+    };
     appendEvents(profile, [
       ...(compaction ? [{ type: 'compaction/start' as const, seq: ++active.seq, turn: turnNo, timestamp: now }] : []),
       { type: 'turn/start', seq: ++active.seq, turn: turnNo, timestamp: now },
@@ -959,6 +977,7 @@ export function sendManagerChatMessage(
       profile,
       ...(sessionId ? { sessionId } : {})
     });
+    publishLifecycle({ phase: 'start' }, now);
 
     try {
       // Keep slash commands bare so the backend dispatches them instead of
@@ -1053,6 +1072,7 @@ export function sendManagerChatMessage(
           locations: request.locations
         };
         permissionPublisher?.(permissionEvent);
+        publishLifecycle({ phase: 'permission', permissionId, tool: request.title });
         await hooks.onPermission?.(permissionEvent);
       };
       // Slice 3: structured tool-call activity -- logged (durable, replayed
@@ -1106,6 +1126,7 @@ export function sendManagerChatMessage(
           turn: turnNo,
           ...tool
         });
+        publishLifecycle({ phase: 'tool', tool: tool.title });
         if (tool.summary) detectPreview(tool.summary);
       };
       const run = runTurn(
@@ -1218,6 +1239,13 @@ export function sendManagerChatMessage(
             ...(compaction ? [{ type: 'compaction/end' as const, seq: ++active.seq, turn: turnNo, timestamp: Date.now() }] : [])
           ];
       appendEvents(profile, done, sessionOpts);
+      publishLifecycle({
+        phase: 'end',
+        backend,
+        model,
+        outcome: active.cancelled ? 'cancelled' : 'complete',
+        ...(!active.cancelled ? { reply } : {})
+      });
       return { turn: assistant, cancelled: active.cancelled };
     } catch (error) {
       await active.chunkWriter?.close().catch(() => undefined);
@@ -1232,6 +1260,7 @@ export function sendManagerChatMessage(
         appendEvents(profile, [
           { type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'cancelled' }, timestamp: Date.now() }
         ], sessionOpts);
+        publishLifecycle({ phase: 'end', outcome: 'cancelled' });
         return {
           turn: { role: 'assistant', text: '', backend: active.backend, model: null, usage: null, timestamp: Date.now(), nodeId: sessionContext.route.nodeId, nodeName: sessionContext.route.nodeName },
           cancelled: true
@@ -1243,6 +1272,7 @@ export function sendManagerChatMessage(
         { type: 'turn/end', seq: ++active.seq, turn: turnNo, reason: { kind: 'error', message: text }, timestamp: Date.now() }
       ];
       appendEvents(profile, done, sessionOpts);
+      publishLifecycle({ phase: 'end', outcome: 'error', error: text });
       throw error;
     } finally {
       // A turn ending answers any still-live permission fail-closed (e.g.

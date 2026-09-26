@@ -1,6 +1,6 @@
 use super::{
-    gitlab_api, gitlab_find_mr_by_branch, provider_command, provider_output_with_transient_retry,
-    redacted_provider_output, Profile, ProviderKind, Result,
+    gitlab_api, gitlab_find_mr_by_branch, gitlab_project_id, provider_command,
+    provider_output_with_transient_retry, redacted_provider_output, Profile, ProviderKind, Result,
 };
 
 /// Identifies the provider conversation that owns a comment. Review threads
@@ -71,10 +71,7 @@ fn gitlab_endpoint(
     thread: CommentThread<'_>,
     comment_id: &str,
 ) -> Result<String> {
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let (resource, number) = match thread {
         CommentThread::Issue(number) => ("issues", numeric_id("issue", number)?.to_string()),
         CommentThread::Review(branch) => (

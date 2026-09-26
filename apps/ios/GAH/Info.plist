@@ -40,6 +40,10 @@
 	<string>Scan a GAH pairing code to connect this phone to your central server.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connect to your GAH central server on your local network.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

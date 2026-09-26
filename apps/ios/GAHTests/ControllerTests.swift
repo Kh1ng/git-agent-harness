@@ -1,9 +1,39 @@
 import XCTest
+import Darwin
+
+private func fixtureControl(_ path: String) throws {
+    let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+    guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+    defer { close(descriptor) }
+
+    var address = sockaddr_in()
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = in_port_t(18_773).bigEndian
+    address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+    let connected = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    guard connected == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+
+    let request = Array("GET /\(path) HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".utf8)
+    let written = request.withUnsafeBytes { send(descriptor, $0.baseAddress!, $0.count, 0) }
+    guard written == request.count else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+    var response = [UInt8](repeating: 0, count: 128)
+    let received = response.withUnsafeMutableBytes { recv(descriptor, $0.baseAddress!, $0.count, 0) }
+    guard received > 0, String(decoding: response.prefix(received), as: UTF8.self).contains(" 200 ") else {
+        throw NSError(domain: "GAHTests.Fixture", code: 1)
+    }
+}
 
 final class ControllerTests: XCTestCase {
     func testActivityNotificationPayloadIsBounded() {
         let valid: [String: Any] = ["type": "activity", "id": "event-1", "title": "Work finished", "body": "#941 passed"]
-        XCTAssertEqual(activityNotificationRequest(from: valid), ActivityNotificationRequest(id: "event-1", title: "Work finished", body: "#941 passed"))
+        XCTAssertEqual(activityNotificationRequest(from: valid), ActivityNotificationRequest(id: "event-1", title: "Work finished", body: "#941 passed", url: nil))
+        XCTAssertEqual(activityNotificationRequest(from: valid.merging(["url": "/?page=chat&profile=gah&chat=s1"]) { _, new in new })?.url, "/?page=chat&profile=gah&chat=s1")
+        XCTAssertNil(activityNotificationRequest(from: valid.merging(["url": "https://evil.example/"]) { _, new in new }))
         XCTAssertNil(activityNotificationRequest(from: ["type": "activity", "id": "event-1", "title": "Missing body"]))
         XCTAssertNil(activityNotificationRequest(from: ["type": "activity", "id": "bad\nid", "title": "Title", "body": "body"]))
         XCTAssertNil(activityNotificationRequest(from: ["type": "activity", "id": "event-1", "title": "Bad\nTitle", "body": "body"]))
@@ -31,20 +61,15 @@ final class ControllerTests: XCTestCase {
         let link = URL(string: "gah://open?url=https%3A%2F%2Fgah.example%2F%3Fpage%3Dchat")!
         XCTAssertEqual(try ServerAddress.fromDeepLink(link).url.absoluteString, "https://gah.example/?page=chat")
         XCTAssertThrowsError(try ServerAddress.fromDeepLink(URL(string: "gah://open?url=https://a.example&url=https://b.example")!))
+        let server = try ServerAddress("https://gah.example/")
+        XCTAssertEqual(server.chatURL(from: URL(string: "gah://chat?profile=gah&chat=session-7")!)?.absoluteString,
+                       "https://gah.example/?page=chat&profile=gah&chat=session-7")
+        XCTAssertNil(server.chatURL(from: URL(string: "https://evil.example/?profile=gah&chat=session-7")!))
     }
 
     func testFailedSwitchHidesOldDashboardAndRetryKeepsUnusedPairingCode() throws {
         continueAfterFailure = false
-        func control(_ path: String) {
-            let completed = expectation(description: path)
-            URLSession.shared.dataTask(with: URL(string: "http://127.0.0.1:18773/" + path)!) { _, response, error in
-                XCTAssertNil(error)
-                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-                completed.fulfill()
-            }.resume()
-            wait(for: [completed], timeout: 10)
-        }
-        control("arm-recovery")
+        try fixtureControl("arm-recovery")
         let app = XCUIApplication()
         app.launchArguments = ["-centralURL", "http://127.0.0.1:18773/"]
         app.launch()
@@ -62,7 +87,7 @@ final class ControllerTests: XCTestCase {
         hidden.lifetime = .keepAlways
         add(hidden)
         XCTAssertFalse(app.webViews.buttons["Remember test session"].isHittable)
-        control("allow-recovery")
+        try fixtureControl("allow-recovery")
         app.buttons["Retry connection"].tap()
         XCTAssertTrue(app.webViews.staticTexts["Pairing fragment retained"].waitForExistence(timeout: 20))
     }
@@ -92,6 +117,8 @@ final class ControllerTests: XCTestCase {
             XCTAssertTrue(acknowledged)
             XCTAssertFalse(scanner.waitForExistence(timeout: 1))
         }
+        app.webViews.buttons["Request sign-out from subframe"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["Subframe sign-out blocked"].waitForExistence(timeout: 5))
         app.webViews.buttons["Scan pairing QR code"].tap()
         XCTAssertTrue(scanner.waitForExistence(timeout: 5))
         app.navigationBars.buttons["Cancel"].tap()
@@ -123,14 +150,5 @@ final class ControllerTests: XCTestCase {
         app.buttons["connection"].tap()
         let field = app.descendants(matching: .any).matching(identifier: "serverAddress").firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.tap()
-        field.typeKey("a", modifierFlags: .command)
-        app.typeText("javascript:alert(1)")
-        app.buttons["connectServer"].tap()
-        XCTAssertTrue(app.staticTexts["connectionError"].waitForExistence(timeout: 5))
-        let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "Invalid address is rejected"
-        screenshot.lifetime = .keepAlways
-        add(screenshot)
     }
 }

@@ -2,7 +2,7 @@ use super::text::utf8_safe_suffix;
 use super::text::{first_markdown_heading, normalize_match};
 use crate::config::Profile;
 use crate::models::WorkMetadata;
-use crate::provider::{gitlab_api, provider_command};
+use crate::provider::{gitlab_api, gitlab_project_id, provider_command};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
@@ -502,10 +502,7 @@ fn fetch_gitlab_issue(
     issue_number: &str,
     allow_label_override: bool,
 ) -> Result<IssueDetails> {
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let resp = gitlab_api(
         profile,
         &format!("projects/{project_id}/issues/{issue_number}"),
@@ -534,10 +531,7 @@ pub(super) fn fetch_dependency_issue(
                 .context("GitHub REST dependency issue lookup")?
         }
         "glab" => {
-            let project_id = profile
-                .provider_project_id
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+            let project_id = gitlab_project_id(profile)?;
             let value = gitlab_api(
                 profile,
                 &format!("projects/{project_id}/issues/{issue_number}"),
@@ -719,10 +713,7 @@ fn discover_open_github_issues(profile: &Profile) -> Result<IssueIntakeDiscovery
 
 fn discover_open_gitlab_issues(profile: &Profile) -> Result<IssueIntakeDiscovery> {
     const PAGE_SIZE: usize = 100;
-    let project_id = profile
-        .provider_project_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("profile missing provider_project_id for gitlab"))?;
+    let project_id = gitlab_project_id(profile)?;
     let mut allowed = Vec::new();
     let mut rejected = Vec::new();
     let mut page = 1;

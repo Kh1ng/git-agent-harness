@@ -7,7 +7,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { requiresFleetAuthentication, trustedLanWebSocketMode, webSocketAccessValid } from './webSocketAuth.js';
 import { SERVER_VERSION } from './server.js';
 import { createServerPushBus } from './serverPushBus.js';
-import { ActivityFeed, activitiesFromQuota, activityFromController, activityFromGateway, activityFromNode } from './activityFeed.js';
+import { ActivityFeed, activitiesFromQuota, activityFromChat, activityFromController, activityFromGateway, activityFromNode, type ChatLifecycleEvent } from './activityFeed.js';
 import { gatewayHealth } from './managerChat/memoryGatewayClient.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { getSessionManager } from './sessions/SessionManager.js';
@@ -95,6 +95,7 @@ export function createWebSocketHandler(
     runEvents?: typeof gahCli.runEvents;
     runQuota?: typeof gahCli.runQuota;
     gatewayHealth?: typeof gatewayHealth;
+    onChatLifecycle?: (event: ChatLifecycleEvent) => void;
   } = {}
 ) {
   const registryService = deps.registryService ?? new RegistryService(deps.node?.role === 'worker' ? null : undefined);
@@ -122,11 +123,11 @@ export function createWebSocketHandler(
       .then(([events, quota]) => {
         for (const controllerEvent of events) {
           const event = activityFromController(controllerEvent);
-          if (!event || !activityFeed.record(event) || !announce) continue;
+          if (!event || !activityFeed.record(event, announce) || !announce) continue;
           sessionStore.broadcast({ type: 'activity.event', event }, undefined, profile);
         }
         for (const event of quota ? activitiesFromQuota(quota) : []) {
-          if (activityFeed.record(event) && announce) sessionStore.broadcast({ type: 'activity.event', event }, undefined, profile);
+          if (activityFeed.record(event, announce) && announce) sessionStore.broadcast({ type: 'activity.event', event }, undefined, profile);
         }
       })
       .finally(() => syncing.delete(profile));
@@ -135,7 +136,7 @@ export function createWebSocketHandler(
   };
   const syncGateway = (announce: boolean) => {
     const event = activityFromGateway(readGatewayHealth());
-    if (event && activityFeed.record(event) && announce) sessionStore.broadcast({ type: 'activity.event', event });
+    if (event && activityFeed.record(event, announce) && announce) sessionStore.broadcast({ type: 'activity.event', event });
   };
   const unsubscribeFleet = registryService.onChange(() => pushBus.publish({ type: 'fleet.changed' }));
   const unsubscribeLiveness = registryService.onLivenessTransition((transition) => {
@@ -251,7 +252,14 @@ export function createWebSocketHandler(
   setChatEventPublishers({
     toolCall: (event) => pushBus.publish(event),
     permission: (event) => pushBus.publish(event),
-    updated: (event) => pushBus.publish(event)
+    updated: (event) => pushBus.publish(event),
+    lifecycle: (event) => {
+      deps.onChatLifecycle?.(event);
+      const activity = activityFromChat(event);
+      if (activity && activityFeed.record(activity)) {
+        sessionStore.broadcast({ type: 'activity.event', event: activity }, undefined, activity.profile ?? undefined);
+      }
+    }
   });
   // WP3: preview-port detection pushes the same way.
   setPreviewPublisher((event) => pushBus.publish(event));

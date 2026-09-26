@@ -601,6 +601,26 @@ function waitForClose(child: ChildProcess, timeoutMs: number): Promise<boolean> 
   });
 }
 
+function waitForProcessGroupExit(pid: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    const check = () => {
+      try {
+        process.kill(-pid, 0);
+      } catch {
+        resolve(true);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        resolve(false);
+        return;
+      }
+      setTimeout(check, 10);
+    };
+    check();
+  });
+}
+
 const TERMINATE_GRACE_MS = 5000;
 const TERMINATE_KILL_TIMEOUT_MS = 5000;
 
@@ -628,7 +648,11 @@ async function terminateProcessTree(pid: number, child: ChildProcess): Promise<b
     }
   }
 
-  if (await waitForClose(child, TERMINATE_GRACE_MS)) {
+  const graceful = await Promise.all([
+    waitForClose(child, TERMINATE_GRACE_MS),
+    waitForProcessGroupExit(pid, TERMINATE_GRACE_MS)
+  ]);
+  if (graceful.every(Boolean)) {
     return true;
   }
 
@@ -642,7 +666,11 @@ async function terminateProcessTree(pid: number, child: ChildProcess): Promise<b
     }
   }
 
-  return waitForClose(child, TERMINATE_KILL_TIMEOUT_MS);
+  const killed = await Promise.all([
+    waitForClose(child, TERMINATE_KILL_TIMEOUT_MS),
+    waitForProcessGroupExit(pid, TERMINATE_KILL_TIMEOUT_MS)
+  ]);
+  return killed.every(Boolean);
 }
 
 /**

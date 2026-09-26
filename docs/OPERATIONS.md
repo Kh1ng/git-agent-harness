@@ -895,11 +895,20 @@ bounded, de-duplicated feed in `config/activity.jsonl` (override with
 cursor. The durable feed itself does not use a client poller.
 
 The current page always shows a new in-app alert. Select **Enable system
-alerts** on the Activity page to add platform delivery. Browsers use the Web
-Notification permission. The macOS tray app uses a bounded bridge that accepts
-alerts only from its configured central origin. The iPhone app uses local iOS
-notifications while it is running and also shows them in the foreground. This
-does not provide background APNs delivery.
+alerts** on the Activity page to add platform delivery. On an HTTPS dashboard,
+supported browsers register Web Push so alerts can arrive after the page
+closes. The server keeps its VAPID key pair in `config/push/vapid.json` and
+subscriptions in `config/push/subscriptions.json`; both files use mode `0600`.
+To rotate the VAPID key, delete both files, restart the central server, and
+subscribe each device again. Plain HTTP cannot register background push.
+
+The macOS tray app uses a bounded bridge that accepts alerts only from its
+configured central origin. The iPhone shell uses APNs when the central server
+has `GAH_APNS_KEY_PATH`, `GAH_APNS_KEY_ID`, and `GAH_APNS_TEAM_ID`; otherwise
+it retains foreground local notifications. The APNs `.p8` key must remain
+outside the repository. `GAH_APNS_ENVIRONMENT` defaults to `sandbox`; set it to
+`production` for distribution builds. Device tokens are stored with mode
+`0600` in `config/push/apns-devices.json`.
 
 ### Telegram manager bridge
 
@@ -970,13 +979,16 @@ the loop/dispatch. Example (Telegram via a helper script):
 notify_command = "/home/you/bin/telegram-notify"
 ```
 
-### Manager wake (opt-in autonomy)
+### Agent wake (opt-in autonomy)
 
-A Telegram ping still needs a human to act. To have GAH additionally spawn a
-manager agent CLI headlessly on the same events, set two things:
+A Telegram ping still needs a human to act. GAH can instead resume the worker
+that performed the work when a review requests fixes, a dispatch fails, or a
+backend stalls. If that provider session is unavailable, GAH wakes the manager.
+Supervisory events go directly to the manager. Set two things:
 
-- `defaults.current_manager` — global: which agent CLI is on call. One of
-  `claude`, `codex`, `hermes`. Unset/unknown ⇒ no wake even if a profile opts in.
+- `defaults.current_manager` — global fallback and supervisor. One of `claude`,
+  `codex`, `hermes`. The originating Claude or Codex worker does not need to
+  match this setting.
 - `profiles.<name>.manager_wake_autonomy` — per profile:
   - `off` (default) — no wake; `notify_command` behavior unchanged.
   - `review_only` — woken agent reviews and comments, must not merge or write.
@@ -992,8 +1004,8 @@ current_manager = "claude"
 manager_wake_autonomy = "review_only"
 ```
 
-Wakes are fire-and-forget but **always logged**: stdout/stderr of the spawned
-agent go to a timestamped file under the wake log dir
+Wakes are fire-and-forget but **always logged**: stdout/stderr of the resumed
+worker or manager go to a timestamped file under the wake log dir
 (`GAH_MANAGER_WAKE_LOG_DIR`, else `artifact_root/manager-wake-logs`). Inspect
 after the fact to see exactly what an unsupervised agent did — a wake must never
 be unobservable. `MrMerged` never wakes (nothing left to act on).

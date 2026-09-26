@@ -19,6 +19,9 @@ import {
   validateBindHost
 } from './bindHost.js';
 import { startChatMaintenanceScheduler, stopChatMaintenanceScheduler } from './managerChat/chatMaintenance.js';
+import { ActivityFeed } from './activityFeed.js';
+import { WebPushNotifications } from './webPush.js';
+import { apnsFromEnvironment } from './apns.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
 const HOST = resolveBindHost();
@@ -44,13 +47,21 @@ async function main() {
   const coordinatorIdentity = getCoordinatorIdentity(undefined, PORT);
   const deviceAccess = node.role === 'central' ? new DeviceAccess() : undefined;
   const registryService = new RegistryService(node.role === 'worker' ? null : undefined, coordinatorIdentity.advertised_url, PORT);
+  const webPushNotifications = node.role === 'central' ? new WebPushNotifications() : undefined;
+  const apnsNotifications = node.role === 'central' ? apnsFromEnvironment() : undefined;
+  const activityFeed = new ActivityFeed(undefined, (event) => Promise.all([
+    webPushNotifications?.deliverActivity(event),
+    apnsNotifications?.deliverActivity(event)
+  ]).then(() => undefined));
 
   // Create Express app
   const app = createExpressServer({
     coordinatorPort: PORT,
     node,
     deviceAccess,
-    registryService
+    registryService,
+    webPushNotifications,
+    apnsNotifications
   });
   
   // Create HTTP server from Express app
@@ -84,7 +95,13 @@ async function main() {
   createWebSocketHandler(wss, {
     registryService,
     coordinatorIdentity,
-    node
+    node,
+    activityFeed,
+    onChatLifecycle: (event) => {
+      void apnsNotifications?.deliverChatLifecycle(event).catch((error) => {
+        console.error(`[apns] chat lifecycle delivery failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
   });
   markReadinessCheck('webSocket', true);
   

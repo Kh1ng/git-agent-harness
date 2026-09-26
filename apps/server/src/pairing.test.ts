@@ -13,6 +13,8 @@ import { createAuthorizedWebSocketServer, webSocketAccessValid } from './webSock
 import { COORDINATOR_SCHEMA_DIGEST, resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
 import { RegistryService } from './registryService.js';
 import { FIXTURE_GAH_BINARY } from './fixtureGahHarness.js';
+import type { WebPushNotifications } from './webPush.js';
+import type { ApnsNotifications } from './apns.js';
 
 test('real HTTP/WS pairing confirms access, rejects CSRF and owner exports, and revokes existing sockets individually', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'gah-pairing-http-'));
@@ -42,7 +44,23 @@ test('real HTTP/WS pairing confirms access, rejects CSRF and owner exports, and 
   registry.registerNode(registeredNode);
   const originalRegistry = JSON.stringify(registry.getNodes());
   let adminUpdates = 0;
+  const pushOwners: Array<string | undefined> = [];
+  const revokedPushOwners: string[] = [];
+  const webPush = {
+    publicKey: () => 'public-key',
+    list: () => ({ count: 0 }),
+    register: (_subscription: unknown, _label: unknown, deviceId?: string) => { pushOwners.push(deviceId); return { id: 'a'.repeat(24), count: 1 }; },
+    remove: () => ({ removed: true, count: 0 }),
+    removeForDevice: (deviceId: string) => { revokedPushOwners.push(`web:${deviceId}`); }
+  } as unknown as WebPushNotifications;
+  const apns = {
+    list: () => ({ count: 0 }),
+    register: (_input: unknown, deviceId?: string) => { pushOwners.push(deviceId); return { id: 'b'.repeat(24), count: 1 }; },
+    remove: () => ({ removed: true, count: 0 }),
+    removeForDevice: (deviceId: string) => { revokedPushOwners.push(`apns:${deviceId}`); }
+  } as unknown as ApnsNotifications;
   const server = http.createServer(createServer({ deviceAccess: access, registryService: registry, detectTailscaleIPv4: async () => null,
+    webPushNotifications: webPush, apnsNotifications: apns,
     startAdminUpdate: () => {
       adminUpdates++;
       return { started: true, state: { status: 'running', startedAt: '2026-09-08T00:00:00Z', finishedAt: null, exitCode: null, pid: 1234, output: '' } };
@@ -158,8 +176,18 @@ test('real HTTP/WS pairing confirms access, rejects CSRF and owner exports, and 
     socket.send('test');
     await new Promise<void>(resolve => deviceSocket!.once('message', () => resolve()));
     assert.equal(messages, 1);
+    assert.equal((await fetch(`${base}/api/push/subscriptions`, {
+      method: 'POST', headers: { ...paired, 'Content-Type': 'application/json', 'Idempotency-Key': 'paired-web-push-1' },
+      body: JSON.stringify({ subscription: { endpoint: 'https://push.example/device', keys: { p256dh: 'p', auth: 'a' } } })
+    })).status, 201);
+    assert.equal((await fetch(`${base}/api/push/apns-devices`, {
+      method: 'POST', headers: { ...paired, 'Content-Type': 'application/json', 'Idempotency-Key': 'paired-apns-push-1' },
+      body: JSON.stringify({ token: 'c'.repeat(64) })
+    })).status, 201);
+    assert.deepEqual(pushOwners, [result.device.id, result.device.id]);
     const closed = new Promise<void>(resolve => socket.once('close', () => resolve()));
     assert.equal((await fetch(`${base}/api/pairing/devices/${result.device.id}`, { method: 'DELETE', headers: owner })).status, 200);
+    assert.deepEqual(revokedPushOwners.sort(), [`apns:${result.device.id}`, `web:${result.device.id}`]);
     await closed;
     assert.equal(webSocketAccessValid(deviceSocket!), false);
     assert.equal((await fetch(base + '/api/info', { headers: paired })).status, 401);

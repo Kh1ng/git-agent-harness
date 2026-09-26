@@ -80,45 +80,6 @@ export interface ManagerAdapter extends ManagerBackendInfo {
   cancelTurn(gahProfile: string): Promise<void>;
 }
 
-class NotImplementedAdapter implements ManagerAdapter {
-  implemented = false;
-  constructor(
-    public id: string,
-    public displayName: string,
-    private trackingIssue: string
-  ) {}
-
-  async runTurn(): Promise<{ reply: string; model: string | null; usage: ChatUsage | null }> {
-    throw new Error(
-      `${this.displayName} isn't wired up as a manager chat backend yet (${this.trackingIssue}). Pick a different backend in Settings.`
-    );
-  }
-
-  async listCommands(): Promise<ManagerCommandInfo[]> {
-    return [];
-  }
-
-  async listModels() {
-    return { models: [], currentModelId: null, reasoningEfforts: [], currentReasoningEffortId: null, contextUsage: null };
-  }
-
-  async setModel(): Promise<void> {
-    throw new Error(`${this.displayName} isn't wired up as a manager chat backend yet (${this.trackingIssue}).`);
-  }
-
-  async setReasoningEffort(): Promise<void> {
-    throw new Error(`${this.displayName} isn't wired up as a manager chat backend yet (${this.trackingIssue}).`);
-  }
-
-  async cancelTurn(): Promise<void> {
-    throw new Error(`${this.displayName} isn't wired up as a manager chat backend yet (${this.trackingIssue}).`);
-  }
-
-  async steerTurn(): Promise<{ outcome: 'injected' }> {
-    throw new Error(`${this.displayName} isn't wired up as a manager chat backend yet (${this.trackingIssue}).`);
-  }
-}
-
 function acpManagerAdapter(
   id: string,
   displayName: string,

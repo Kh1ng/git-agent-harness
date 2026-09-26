@@ -328,14 +328,6 @@ pub(crate) fn pm(
     Ok(())
 }
 
-fn reserve_pm_backend(
-    profile: &Profile,
-    identity: &crate::execution_identity::ExecutionIdentity,
-    route_admission: Option<&crate::controller::RouteNodeAdmission>,
-) -> Result<super::super::attempts::BackendAdmissionGuard> {
-    reserve_backend_attempt(profile, identity, route_admission)
-}
-
 fn run_pm_backend_attempt<T>(
     profile: &Profile,
     identity: &crate::execution_identity::ExecutionIdentity,
@@ -344,7 +336,7 @@ fn run_pm_backend_attempt<T>(
     run_backend: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     let admission_guard =
-        reserve_pm_backend(profile, identity, route_admission).map_err(|error| {
+        reserve_backend_attempt(profile, identity, route_admission).map_err(|error| {
             super::super::contextualize_capacity_deferral(error, attempts_completed)
         })?;
     let result = run_backend();
