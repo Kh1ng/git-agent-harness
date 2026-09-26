@@ -1,9 +1,8 @@
 //! Provider-neutral manager session protocol (issue #815, split from #520).
 //!
-//! Durable manager sessions handle supervision and operator-directed work.
-//! Continuation events first resume the worker session recorded in the
-//! ledger; this manager protocol remains the fallback when that session is
-//! unavailable and the primary path for supervisory events.
+//! Durable manager sessions handle supervision and operator-directed work,
+//! including continuation events. Resuming the originating worker session
+//! is parked in #1235 and must be rebuilt through dispatch, not here.
 //!
 //! Method naming intentionally lines up with the Agent Client Protocol
 //! (`apps/server/src/managerChat/acpAdapter.ts`, the TS implementation this

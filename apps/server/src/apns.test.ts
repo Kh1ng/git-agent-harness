@@ -95,9 +95,10 @@ test('Live Activity starts remotely, rate-limits updates, and always ends', asyn
     });
     const base = { profile: 'gah', sessionId: 's1', turn: 1, occurredAt: '2026-09-25T12:00:00Z', backend: 'codex', model: 'gpt-5' } as const;
     await setup.service.deliverChatLifecycle({ ...base, phase: 'start' });
-    await setup.service.deliverChatLifecycle({ ...base, phase: 'tool', tool: 'cargo test' });
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'tool', tool: 'cargo test --token=secret-value' });
     await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', permissionId: 'permission-1', tool: 'shell' });
     assert.equal(setup.requests.length, 3);
+    assert.equal((setup.requests[1].payload as { aps: { 'content-state': { state: string } } }).aps['content-state'].state, 'running cargo');
     assert.equal((setup.requests[2].payload as { aps: { 'content-state': { state: string } } }).aps['content-state'].state, 'waiting for permission');
     await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', permissionId: 'permission-1', tool: 'shell' });
     setup.advance(1_000);
