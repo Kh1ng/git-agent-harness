@@ -156,6 +156,27 @@ pub(crate) fn deliver_channel_message(
     }
 }
 
+/// Entry point for `gah notify-send`: one message from the central activity
+/// feed. A missing channel is a no-op, so the feed can call this without
+/// reading GAH config itself.
+pub fn send_activity(cfg: &GahConfig, title: &str, message: &str, url: Option<&str>) -> Result<()> {
+    let text = activity_text(title, message, url);
+    deliver_channel_message(cfg, &crate::redact::redact(&text), &CurlNotifyTransport)
+}
+
+fn activity_text(title: &str, message: &str, url: Option<&str>) -> String {
+    let mut text = format!("[gah] {title}");
+    if !message.trim().is_empty() {
+        text.push_str(": ");
+        text.push_str(message.trim());
+    }
+    if let Some(url) = url.map(str::trim).filter(|url| !url.is_empty()) {
+        text.push(' ');
+        text.push_str(url);
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn deliver(transport: &dyn NotifyTransport, url: &str, body: &str, label: &str) -> Result<()> {
     let (status, response) = transport.post_json(url, body, 10)?;
     if (200..300).contains(&status) {
@@ -226,6 +247,22 @@ mod tests {
         )
         .unwrap();
         assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn activity_text_is_one_line_with_optional_url() {
+        assert_eq!(
+            activity_text(
+                "gah: reply ready",
+                "done\nnext line",
+                Some("https://x/?page=chat")
+            ),
+            "[gah] gah: reply ready: done next line https://x/?page=chat"
+        );
+        assert_eq!(
+            activity_text("node offline", " ", None),
+            "[gah] node offline"
+        );
     }
 
     #[test]

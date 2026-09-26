@@ -147,6 +147,19 @@ pub enum Commands {
         #[arg(long)]
         model: String,
     },
+    /// Deliver one message through the configured notification channel
+    /// (Telegram or Discord). The central server's activity feed calls this
+    /// so chat and node events reach the same channel as dispatch events.
+    NotifySend {
+        #[arg(long, name = "config")]
+        config_path: Option<String>,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        message: String,
+        #[arg(long)]
+        url: Option<String>,
+    },
     /// Check repo policy for a given action
     PolicyCheck {
         #[arg(long)]

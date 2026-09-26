@@ -1,4 +1,4 @@
-import { activityPath, type ActivityEvent } from '@git-agent-harness/contracts';
+import { activityPath, notifiableActivity, type ActivityEvent } from '@git-agent-harness/contracts';
 import { pushApi } from '../api/client.js';
 import { readNavigation } from './navigationState.js';
 
@@ -113,7 +113,7 @@ function focusedChat(event: ActivityEvent): boolean {
 }
 
 export function deliverSystemNotification(event: ActivityEvent): void {
-  if (!systemNotificationsEnabled() || focusedChat(event)) return;
+  if (!notifiableActivity(event) || !systemNotificationsEnabled() || focusedChat(event)) return;
   const url = activityPath(event);
   if (window.__GAH_DESKTOP_NATIVE_NOTIFICATIONS__ === true) {
     const target = new URL('gah://notify');
