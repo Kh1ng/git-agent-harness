@@ -478,6 +478,7 @@ case "$FAKE_CURL_MODE" in
   capture) printf '%s\n__GAH_MEMORY_GATEWAY_STATUS__:200\n' '{"l0_recorded":2,"code":0}' ;;
   non_200) printf '%s\n__GAH_MEMORY_GATEWAY_STATUS__:503\n' '{"error":"offline"}' ;;
   transport_failure) exit 7 ;;
+  malformed) printf '%s\n' 'garbage without a status marker' ;;
   *) exit 9 ;;
 esac
 "#,
@@ -511,6 +512,26 @@ esac
         );
 
         std::env::set_var("FAKE_CURL_MODE", "transport_failure");
+        assert_eq!(
+            capture_for_ticket(&defaults, "gah", "/tmp", "#1247", "task", "result"),
+            None
+        );
+        assert_eq!(
+            recall_for_ticket(&defaults, "gah", "/tmp", "#1247", "query"),
+            None
+        );
+
+        std::env::set_var("FAKE_CURL_MODE", "non_200");
+        assert_eq!(
+            capture_for_ticket(&defaults, "gah", "/tmp", "#1247", "task", "result"),
+            None
+        );
+
+        std::env::set_var("FAKE_CURL_MODE", "malformed");
+        assert_eq!(
+            recall_for_ticket(&defaults, "gah", "/tmp", "#1247", "query"),
+            None
+        );
         assert_eq!(
             capture_for_ticket(&defaults, "gah", "/tmp", "#1247", "task", "result"),
             None
