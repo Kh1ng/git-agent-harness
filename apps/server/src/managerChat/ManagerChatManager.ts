@@ -372,6 +372,16 @@ export async function restoreChatSession(profile: string, sessionId: string) {
   if (stored.archivedAt === null) return stored;
   if (stored.outcome === 'settled') throw new Error('Settled chat sessions cannot be restored.');
 
+  // Mirror the archive path: every node that holds one of the session's
+  // workspaces restores its own (the primary node's restored summary is
+  // fetched below), then the local workspace rematerializes here.
+  if (stored.workspaceNodes?.length) {
+    const localId = localChatNodeId();
+    for (const target of stored.workspaceNodes.filter(id => id !== localId && id !== stored.nodeId)) {
+      const route = await chatRoute(profile, target, stored.backend, false);
+      await route.remote!.request({ action: 'restore', sessionId, backend: stored.backend });
+    }
+  }
   const route = await chatRoute(profile, stored.nodeId, stored.backend, false);
   if (route.remote) {
     const restored = await route.remote.request<import('@git-agent-harness/contracts').ChatSessionSummary>({

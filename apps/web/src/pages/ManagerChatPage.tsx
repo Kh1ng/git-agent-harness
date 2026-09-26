@@ -446,9 +446,10 @@ function GitStrip({
 }
 
 function associatedWorkId(session: ChatSessionSummary): string | null {
-  if (session.prNumber) return `#${session.prNumber}`;
-  const issue = /^gah\/issue\/.+-(\d+)(?:-[a-z0-9]+)?$/i.exec(session.branch);
-  return issue ? `#${Number(issue[1])}` : null;
+  // Only the server knows the issue behind a session (the branch name is
+  // ambiguous once a repo id contains digits); a PR number is a provider
+  // identity, not a work id, so PR chats stay unassociated.
+  return session.issueNumber ? `#${session.issueNumber}` : null;
 }
 
 export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }: { launcherRequest?: number; onNavigate?: (page: Page) => void; onOpenWork?: (workId: string) => void }) {

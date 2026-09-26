@@ -1884,7 +1884,9 @@ export function createServer(
   app.post('/api/manager-chat/sessions/restore', async (req, res) => {
     const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
     const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : undefined;
-    if (!sessionId) return void res.status(400).json({ error: 'Missing required field: sessionId' });
+    // The session id flows into worktree directory names on restore; hold it
+    // to the same shape the worker surface validates before any git access.
+    if (!sessionId || !/^[a-zA-Z0-9_-]{1,128}$/.test(sessionId)) return void res.status(400).json({ error: 'Missing or invalid required field: sessionId' });
     try {
       res.json(await restoreChatSession(profile, sessionId));
     } catch (error) {

@@ -158,6 +158,8 @@ export interface CreateSessionInput {
   profileInfo: Pick<ProfileSummary, 'repo_id' | 'local_path' | 'worktree_base'>;
   /** Pull request identity for PR chats; omitted for issue and general sessions. */
   prNumber?: number;
+  /** Issue identity for issue chats; omitted for other sessions. */
+  issueNumber?: number;
   backend: string;
   backendInstance?: string | null;
   /** Model override for the backend; null = backend default. */
@@ -192,6 +194,7 @@ export async function createSession(input: CreateSessionInput, opts?: ChatSessio
     id: sessionId,
     profile,
     ...(input.prNumber === undefined ? {} : { prNumber: input.prNumber }),
+    ...(input.issueNumber === undefined ? {} : { issueNumber: input.issueNumber }),
     worktreePath: null,
     branch: input.branch ?? sessionBranchName(profileInfo.repo_id, sessionId, input.title),
     backend,
