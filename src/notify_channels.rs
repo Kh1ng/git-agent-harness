@@ -173,6 +173,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     struct RecordingTransport {
         requests: Mutex<Vec<(String, String)>>,
         status: u16,
@@ -228,6 +230,7 @@ mod tests {
 
     #[test]
     fn telegram_delivery_sends_chat_id_and_text_with_env_token() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let transport = RecordingTransport::new(200);
         let cfg = config_with_channel(NotificationChannel::Telegram, Some("12345"));
         // Env guard: single-threaded test binaries may share the process env,
@@ -250,6 +253,7 @@ mod tests {
 
     #[test]
     fn telegram_without_token_fails_descriptively() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let transport = RecordingTransport::new(200);
         let cfg = config_with_channel(NotificationChannel::Telegram, Some("12345"));
         let previous = std::env::var("TELEGRAM_BOT_TOKEN").ok();
@@ -266,6 +270,7 @@ mod tests {
 
     #[test]
     fn telegram_without_chat_id_fails_descriptively() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let transport = RecordingTransport::new(200);
         let cfg = config_with_channel(NotificationChannel::Telegram, None);
         let previous = std::env::var("TELEGRAM_BOT_TOKEN").ok();
@@ -281,6 +286,7 @@ mod tests {
 
     #[test]
     fn discord_delivery_posts_content_from_env_webhook() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let transport = RecordingTransport::new(200);
         let cfg = config_with_channel(NotificationChannel::Discord, None);
         let previous = std::env::var("DISCORD_WEBHOOK_URL").ok();
@@ -303,6 +309,7 @@ mod tests {
 
     #[test]
     fn non_2xx_is_a_descriptive_error_with_a_bounded_snippet() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let transport = RecordingTransport::new(403);
         let cfg = config_with_channel(NotificationChannel::Discord, None);
         let previous = std::env::var("DISCORD_WEBHOOK_URL").ok();
