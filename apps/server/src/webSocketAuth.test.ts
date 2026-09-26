@@ -1,9 +1,63 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import http from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
+import { DeviceAccess, DEVICE_LIFETIME } from './deviceAccess.js';
 import { createAuthorizedWebSocketServer } from './webSocketAuth.js';
+
+test('device expiry terminates its live socket without disconnecting an owner socket', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const directory = mkdtempSync(join(tmpdir(), 'gah-ws-expiry-'));
+  const savedToken = process.env.COORDINATOR_TOKEN;
+  const savedHttp = process.env.GAH_ALLOW_INSECURE_HTTP;
+  process.env.COORDINATOR_TOKEN = 'owner-token';
+  process.env.GAH_ALLOW_INSECURE_HTTP = '1';
+  let now = Date.now();
+  const access = new DeviceAccess(join(directory, 'devices.json'), () => now);
+  const server = http.createServer();
+  const wss = createAuthorizedWebSocketServer(server, 'central', access, () => now);
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  const origin = `http://127.0.0.1:${port}`;
+  const offer = access.create({ id: 'central', name: 'Central', origin });
+  const paired = access.redeem(offer.code, 'central', origin, 'Phone');
+  const connect = (headers: Record<string, string>) => new Promise<WebSocket>((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, ['gah.v1'], { headers });
+    socket.once('open', () => resolve(socket));
+    socket.once('error', reject);
+  });
+
+  let device: WebSocket | undefined;
+  let owner: WebSocket | undefined;
+  try {
+    device = await connect({ Origin: origin, Cookie: `gah_device=${paired.token}` });
+    owner = await connect({ Origin: origin, Authorization: 'Bearer owner-token' });
+    const deviceClosed = new Promise<void>(resolve => device!.once('close', () => resolve()));
+
+    now += DEVICE_LIFETIME;
+    t.mock.timers.tick(2_147_483_647);
+    await deviceClosed;
+
+    assert.equal(device.readyState, WebSocket.CLOSED);
+    assert.equal(owner.readyState, WebSocket.OPEN);
+  } finally {
+    device?.terminate();
+    owner?.terminate();
+    for (const socket of wss.clients) socket.terminate();
+    await new Promise<void>(resolve => wss.close(() => resolve()));
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    t.mock.timers.reset();
+    if (savedToken === undefined) delete process.env.COORDINATOR_TOKEN;
+    else process.env.COORDINATOR_TOKEN = savedToken;
+    if (savedHttp === undefined) delete process.env.GAH_ALLOW_INSECURE_HTTP;
+    else process.env.GAH_ALLOW_INSECURE_HTTP = savedHttp;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('real upgrade authenticates before welcome or mutation handlers can run', async () => {
   const keys = ['COORDINATOR_TOKEN', 'GAH_ALLOW_INSECURE_HTTP', 'GAH_WS_AUTH_MODE', 'GAH_NODE_ROLE', 'GAH_WS_ALLOWED_ORIGINS'] as const;

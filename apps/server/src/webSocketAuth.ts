@@ -61,7 +61,7 @@ function browserToken(req: IncomingMessage): string | null {
 
 /** Reject unauthorized upgrades before a socket can receive welcome data or invoke handlers.
  * Native fleet clients retain Authorization; browsers send a non-echoed credential protocol. */
-export function createAuthorizedWebSocketServer(server: Server, role?: 'central' | 'worker', access?: DeviceAccess): WebSocketServer {
+export function createAuthorizedWebSocketServer(server: Server, role?: 'central' | 'worker', access?: DeviceAccess, now = Date.now): WebSocketServer {
   const compatibilityRequests = new WeakSet<IncomingMessage>();
   const deviceRequests = new WeakMap<IncomingMessage, { id: string; expires_at: string }>();
   const wss = new WebSocketServer({
@@ -101,7 +101,7 @@ export function createAuthorizedWebSocketServer(server: Server, role?: 'central'
       const unsubscribe = access.onRevoke(id => { if (id === device.id) ws.terminate(); });
       let expiry: ReturnType<typeof setTimeout>;
       const expire = () => {
-        const remaining = Date.parse(device.expires_at) - Date.now();
+        const remaining = Date.parse(device.expires_at) - now();
         if (remaining <= 0) { ws.terminate(); return; }
         expiry = setTimeout(expire, Math.min(remaining, 2_147_483_647));
         expiry.unref();
