@@ -36,11 +36,25 @@ test('device expiry terminates its live socket without disconnecting an owner so
   try {
     device = await connect({ Origin: origin, Cookie: `gah_device=${paired.token}` });
     owner = await connect({ Origin: origin, Authorization: 'Bearer owner-token' });
-    const deviceClosed = new Promise<void>(resolve => device!.once('close', () => resolve()));
 
-    now += DEVICE_LIFETIME;
+    // Half of the device lifetime has not passed: both sockets stay open,
+    // so the timer below targets the expiry, not any firing.
+    now += DEVICE_LIFETIME / 2;
     t.mock.timers.tick(2_147_483_647);
-    await deviceClosed;
+    assert.equal(device.readyState, WebSocket.OPEN);
+
+    now += DEVICE_LIFETIME / 2;
+    t.mock.timers.tick(2_147_483_647);
+    // Bounded wait: a regression must fail red, not hang the suite.
+    await new Promise<void>((resolve, reject) => {
+      let turns = 0;
+      const step = () => {
+        if (device!.readyState === WebSocket.CLOSED) resolve();
+        else if (++turns > 500) reject(new Error('device socket did not close at expiry'));
+        else setImmediate(step);
+      };
+      setImmediate(step);
+    });
 
     assert.equal(device.readyState, WebSocket.CLOSED);
     assert.equal(owner.readyState, WebSocket.OPEN);
