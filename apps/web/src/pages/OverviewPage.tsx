@@ -30,11 +30,12 @@ type OverviewPageProps = {
   sessions: Session[];
   onSelectSession: (session: Session) => void;
   onNavigate: (page: Page) => void;
+  onOpenWork?: (workId: string) => void;
 };
 
 const OVERVIEW_REFRESH_MS = 5 * 60 * 1000;
 
-export function OverviewPage({ sessions, onSelectSession, onNavigate }: OverviewPageProps) {
+export function OverviewPage({ sessions, onSelectSession, onNavigate, onOpenWork = () => {} }: OverviewPageProps) {
   const { status, quota, loopStatus, loopAction } = useGahStore();
   const { profile: wsProfile, controllerActivity } = useWebSocket();
   const profileOverride = useUiStore((s) => s.profileOverride);
@@ -193,7 +194,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
                 <p className="text-xs font-medium text-secondary mb-2">
                   Blocked work items — each carries its remediation plan:
                 </p>
-                <BlockedWorkItems blockers={blockedWorkItems} />
+                <BlockedWorkItems blockers={blockedWorkItems} onOpenWork={onOpenWork} />
               </li>
             )}
             {reviewHeldWorkIds.map((workId) => (
@@ -280,18 +281,13 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
                   {needsReviewMrs.map((mr) => {
                     const { tone, label } = classificationTone(mr.classification);
                     return (
-                      <tr key={mr.branch}>
+                      <tr key={mr.branch} className={mr.work_id ? 'cursor-pointer hover:bg-raised/50' : undefined} onClick={() => mr.work_id && onOpenWork(mr.work_id)}>
                         <td className="font-mono text-xs">{mr.branch}</td>
                         <td>
                           <StatusBadge tone={tone} label={label} />
                         </td>
                         <td>
-                          {/* Embedded dashboard hosts may not support new windows. */}
-                          {mr.url && (
-                            <a href={mr.url} rel="noreferrer" className="text-accent hover:underline text-xs">
-                              View MR
-                            </a>
-                          )}
+                          {mr.work_id && <button type="button" onClick={(event) => { event.stopPropagation(); onOpenWork(mr.work_id as string); }} className="min-h-11 text-xs text-accent hover:underline sm:min-h-0">View details</button>}
                         </td>
                       </tr>
                     );
@@ -324,18 +320,12 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
                 </thead>
                 <tbody>
                   {recentMerges.map((mr) => (
-                    <tr key={mr.branch}>
+                    <tr key={mr.branch} className={mr.work_id ? 'cursor-pointer hover:bg-raised/50' : undefined} onClick={() => mr.work_id && onOpenWork(mr.work_id)}>
                       <td className="font-mono text-xs whitespace-nowrap">
                         {mr.work_id ?? <span className="text-muted">—</span>}
                       </td>
                       <td className="text-xs max-w-[16rem] truncate" title={mr.title ?? mr.branch}>
-                        {mr.url ? (
-                          <a href={mr.url} rel="noreferrer" className="text-primary hover:text-accent hover:underline">
-                            {mr.title ?? mr.branch}
-                          </a>
-                        ) : (
-                          (mr.title ?? mr.branch)
-                        )}
+                        {mr.title ?? mr.branch}
                       </td>
                       <td className="text-xs whitespace-nowrap text-secondary">
                         {mr.effective_backend
@@ -363,11 +353,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate }: Overview
                         )}
                       </td>
                       <td>
-                        {mr.url && (
-                          <a href={mr.url} rel="noreferrer" className="text-accent hover:underline text-xs whitespace-nowrap">
-                            View
-                          </a>
-                        )}
+                        {mr.work_id && <button type="button" onClick={(event) => { event.stopPropagation(); onOpenWork(mr.work_id as string); }} className="min-h-11 text-xs text-accent hover:underline sm:min-h-0">View details</button>}
                       </td>
                     </tr>
                   ))}

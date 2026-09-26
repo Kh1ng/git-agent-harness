@@ -12,17 +12,17 @@ import type { Blocker } from '@git-agent-harness/contracts';
  * already authorizes (ledger clear-attempts); paid-route grant/revoke and
  * review holds live in their own surfaces. Unknown/legacy reasons stay
  * visibly unknown. */
-export function BlockedWorkItems({ blockers }: { blockers: Blocker[] }) {
+export function BlockedWorkItems({ blockers, onOpenWork }: { blockers: Blocker[]; onOpenWork?: (workId: string) => void }) {
   return (
     <ul className="space-y-3">
       {blockers.map((b, i) => (
-        <BlockedWorkItem key={`blocked-${i}`} blocker={b} />
+        <BlockedWorkItem key={`blocked-${i}`} blocker={b} onOpenWork={onOpenWork} />
       ))}
     </ul>
   );
 }
 
-function BlockedWorkItem({ blocker }: { blocker: Blocker }) {
+function BlockedWorkItem({ blocker, onOpenWork }: { blocker: Blocker; onOpenWork?: (workId: string) => void }) {
   const [copied, setCopied] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,7 +65,9 @@ function BlockedWorkItem({ blocker }: { blocker: Blocker }) {
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="text-sm text-primary">
-            {workId ? <span className="font-mono">{workId}</span> : <span className="text-muted">Unknown work item</span>}
+            {workId ? (
+              onOpenWork ? <button type="button" onClick={() => onOpenWork(workId)} className="min-h-11 font-mono text-accent hover:underline sm:min-h-0">{workId}</button> : <span className="font-mono">{workId}</span>
+            ) : <span className="text-muted">Unknown work item</span>}
             {isUnknownReason ? (
               <StatusBadge tone="warning" label="Unknown reason" />
             ) : (
@@ -156,5 +158,4 @@ function BlockedWorkItem({ blocker }: { blocker: Blocker }) {
 function authorityLabel(authority: string): string {
   return authority.replace(/_/g, ' ');
 }
-
 
