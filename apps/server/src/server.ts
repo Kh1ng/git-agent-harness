@@ -378,6 +378,14 @@ export function createServer(
     });
   }
   if (node.role === 'central') configureChatRouting(registryService, () => getCoordinatorIdentity(undefined, coordinatorPort));
+  // Worker chat actions start git processes and write files (worktree create,
+  // handoff commits and pushes), so the route is rate-limited like /api/push.
+  app.use('/api/worker-chat', rateLimit({
+    windowMs: 60_000,
+    limit: 240,
+    standardHeaders: true,
+    legacyHeaders: false
+  }));
   app.use('/api/worker-chat', createWorkerChatRouter({ node, nodeId: getCoordinatorIdentity(undefined, coordinatorPort).node_id }));
   app.use('/api/worker-memory', workerMemoryRouter());
   app.use('/api/pm', pmPlansRouter());

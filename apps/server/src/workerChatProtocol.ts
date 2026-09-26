@@ -67,6 +67,7 @@ type WorkerChatReply = import('@git-agent-harness/contracts').ChatSessionSummary
   | Awaited<ReturnType<ManagerAdapter['listModels']>>
   | Awaited<ReturnType<ManagerAdapter['listCommands']>>
   | HelperTaskResult
+  | { branch: string; commit: string }
   | { success: true };
 const timestamp = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 const optionalString = (value: unknown): value is string | undefined => value === undefined || typeof value === 'string';
@@ -75,6 +76,11 @@ const optionalString = (value: unknown): value is string | undefined => value ==
  * Project only the action's response fields before central stores or renders them. */
 export function parseWorkerChatReply(value: unknown, request: Record<string, unknown>): WorkerChatReply {
   const invalid = () => new Error('Worker returned an invalid chat response.');
+  if (request.action === 'handoff') {
+    if (!object(value) || typeof value.branch !== 'string' || !value.branch
+      || typeof value.commit !== 'string' || !/^[0-9a-f]{40,64}$/i.test(value.commit)) throw invalid();
+    return { branch: value.branch, commit: value.commit };
+  }
   if (request.action === 'helper-task') {
     if (!object(value) || value.kind !== request.kind || !['chat_title', 'commit_message', 'pr_summary'].includes(String(value.kind))
       || typeof value.text !== 'string' || value.text.length > 12_000
@@ -118,6 +124,7 @@ export function parseWorkerChatReply(value: unknown, request: Record<string, unk
       || !(session.backendInstance === undefined || nullableString(session.backendInstance))
       || (request.action !== 'archive' && (session.backendInstance ?? null) !== (request.backendInstance ?? null))
       || typeof session.branch !== 'string' || !session.branch || !nullableString(session.worktreePath)
+      || (request.action === 'prepare' && typeof request.branch === 'string' && session.branch !== request.branch)
       || !nullableString(session.model) || !nullableString(session.reasoningEffort) || !nullableString(session.title)
       || !timestamp(session.createdAt) || !timestamp(session.lastActiveAt)
       || !(session.archivedAt === null || timestamp(session.archivedAt))

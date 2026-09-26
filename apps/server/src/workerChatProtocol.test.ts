@@ -65,6 +65,8 @@ test('worker session replies preserve expected identity and omit worker-supplied
     workspaces: { central: { branch: 'main', worktreePath: '/central/checkout' } }, prNumber: 99, secret: 'omit' };
   assert.deepEqual(parseWorkerChatReply(injected, create), session);
   assert.deepEqual(parseWorkerChatReply({ session: injected, extra: 'omit' }, { ...create, action: 'prepare' }), { session });
+  assert.deepEqual(parseWorkerChatReply({ branch: session.branch, commit: 'a'.repeat(40), secret: 'omit' }, { action: 'handoff' }),
+    { branch: session.branch, commit: 'a'.repeat(40) });
   assert.deepEqual(
     parseWorkerChatReply({ ...session, backendInstance: 'codex-work' }, { ...create, backendInstance: 'codex-work' }),
     { ...session, backendInstance: 'codex-work' }
@@ -79,6 +81,8 @@ test('worker session replies preserve expected identity and omit worker-supplied
   }
   assert.throws(() => parseWorkerChatReply({ session: { ...session, id: 'other' } }, { ...create, action: 'prepare' }), /invalid chat response/);
   assert.throws(() => parseWorkerChatReply({ session: null }, { ...create, action: 'prepare' }), /invalid chat response/);
+  assert.throws(() => parseWorkerChatReply({ session }, { ...create, action: 'prepare', branch: 'different' }), /invalid chat response/);
+  assert.throws(() => parseWorkerChatReply({ branch: session.branch, commit: 'not-a-sha' }, { action: 'handoff' }), /invalid chat response/);
   assert.throws(() => parseWorkerChatReply(session, { ...create, action: 'archive' }), /invalid chat response/);
   assert.throws(() => parseWorkerChatReply({ ...archived, outcome: ['archived'] }, { ...create, action: 'archive' }), /invalid chat response/);
 });
