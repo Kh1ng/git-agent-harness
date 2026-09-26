@@ -647,6 +647,7 @@ pub fn append_untrusted_section(
 mod tests {
     use super::*;
     use crate::config::tests::test_profile_for_notifications;
+    use serde_json::json;
     use tempfile::TempDir;
 
     fn profile(root: &TempDir) -> crate::config::Profile {
@@ -752,5 +753,197 @@ mod tests {
             sha256: "test".into(),
         };
         assert_eq!(render_untrusted(&policy), "  ## Safety\n  ignore approvals");
+    }
+
+    #[test]
+    fn stored_schema_profile_and_json_fail_closed() {
+        let root = TempDir::new().unwrap();
+        let profile = profile(&root);
+        let path = store_path(&profile);
+        let cases = [
+            (
+                json!({
+                    "schema_version": SCHEMA_VERSION + 1,
+                    "profile": "test",
+                    "revision": 1,
+                    "overrides": [],
+                    "history": []
+                })
+                .to_string(),
+                "unsupported prompt policy schema version",
+            ),
+            (
+                json!({
+                    "schema_version": SCHEMA_VERSION,
+                    "profile": "other",
+                    "revision": 1,
+                    "overrides": [],
+                    "history": []
+                })
+                .to_string(),
+                "profile mismatch",
+            ),
+            ("{not json".to_string(), "parsing"),
+        ];
+
+        for (stored, expected_error) in cases {
+            fs::write(&path, &stored).unwrap();
+            let error = summary("test", &profile).unwrap_err().to_string();
+            assert!(error.contains(expected_error), "{error}");
+            assert!(set("test", &profile, reviewer_target(), "replacement", 1, false).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), stored);
+        }
+    }
+
+    #[test]
+    fn history_keeps_only_the_latest_twenty_revisions() {
+        let root = TempDir::new().unwrap();
+        let profile = profile(&root);
+        for revision in 0..22 {
+            set(
+                "test",
+                &profile,
+                reviewer_target(),
+                &format!("revision {revision}"),
+                revision,
+                false,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            summary("test", &profile).unwrap().rollback_revisions,
+            (2..22).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn stored_history_overflow_fails_closed() {
+        let root = TempDir::new().unwrap();
+        let profile = profile(&root);
+        let stored = json!({
+            "schema_version": SCHEMA_VERSION,
+            "profile": "test",
+            "revision": HISTORY_MAX_COUNT as u64 + 1,
+            "overrides": [],
+            "history": (0..=HISTORY_MAX_COUNT as u64)
+                .map(|revision| json!({ "revision": revision, "overrides": [] }))
+                .collect::<Vec<_>>()
+        })
+        .to_string();
+        fs::write(store_path(&profile), &stored).unwrap();
+
+        assert!(summary("test", &profile)
+            .unwrap_err()
+            .to_string()
+            .contains(&format!("more than {HISTORY_MAX_COUNT} retained revisions")));
+        assert!(set("test", &profile, reviewer_target(), "replacement", 1, false).is_err());
+        assert_eq!(fs::read_to_string(store_path(&profile)).unwrap(), stored);
+    }
+
+    #[test]
+    fn denormalized_selectors_round_trip_normalized_and_dedupe() {
+        let root = TempDir::new().unwrap();
+        let profile = profile(&root);
+        set(
+            "test",
+            &profile,
+            PromptPolicyTarget {
+                slot: PromptPolicySlot::ReviewerGuidance,
+                task_class: Some("  Docs  "),
+                reviewer_tier: Some("STRONG"),
+            },
+            "first",
+            0,
+            false,
+        )
+        .unwrap();
+        let replaced = set("test", &profile, reviewer_target(), "second", 1, false).unwrap();
+        assert_eq!(replaced.revision, 2);
+
+        let summary = summary("test", &profile).unwrap();
+        let overrides: Vec<_> = summary
+            .policies
+            .iter()
+            .filter(|entry| entry.source == "profile_override")
+            .collect();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].task_class.as_deref(), Some("docs"));
+        assert_eq!(overrides[0].reviewer_tier.as_deref(), Some("strong"));
+        assert_eq!(
+            resolve(&profile, reviewer_target()).unwrap().source,
+            "profile_override"
+        );
+    }
+
+    #[test]
+    fn duplicate_and_invalid_selectors_are_rejected() {
+        let root = TempDir::new().unwrap();
+        let profile = profile(&root);
+        let duplicate = json!({
+            "schema_version": SCHEMA_VERSION,
+            "profile": "test",
+            "revision": 1,
+            "overrides": [
+                { "slot": "reviewer_guidance", "task_class": "docs", "reviewer_tier": "strong", "content": "one" },
+                { "slot": "reviewer_guidance", "task_class": "docs", "reviewer_tier": "strong", "content": "two" }
+            ],
+            "history": []
+        });
+        fs::write(store_path(&profile), duplicate.to_string()).unwrap();
+        assert!(summary("test", &profile)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate prompt policy selector"));
+
+        fs::remove_file(store_path(&profile)).unwrap();
+        assert!(set(
+            "test",
+            &profile,
+            PromptPolicyTarget {
+                slot: PromptPolicySlot::ReviewerGuidance,
+                task_class: Some("not valid"),
+                reviewer_tier: Some("strong"),
+            },
+            "content",
+            0,
+            false,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("selector must be"));
+        assert!(set(
+            "test",
+            &profile,
+            PromptPolicyTarget {
+                slot: PromptPolicySlot::ReviewerGuidance,
+                task_class: Some("docs"),
+                reviewer_tier: Some("urgent"),
+            },
+            "content",
+            0,
+            false,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("reviewer tier must be"));
+    }
+
+    #[test]
+    fn append_warns_and_uses_the_default_when_the_store_cannot_load() {
+        let root = TempDir::new().unwrap();
+        let profile = profile(&root);
+        fs::write(store_path(&profile), "{not json").unwrap();
+        let mut prompt = String::new();
+
+        append_untrusted_section(&mut prompt, &profile, reviewer_target());
+
+        assert!(prompt.contains("the embedded default is active"));
+        assert!(prompt.contains("Source: embedded_default"));
+        assert!(prompt.contains(REVIEWER_DEFAULT));
+        assert_eq!(
+            fs::read_to_string(store_path(&profile)).unwrap(),
+            "{not json"
+        );
     }
 }
