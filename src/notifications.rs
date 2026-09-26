@@ -35,6 +35,7 @@ use crate::config::{GahConfig, Profile, WakeAutonomy};
 use crate::events;
 use anyhow::Context;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use time::format_description::well_known::Rfc3339;
@@ -553,6 +554,97 @@ fn manager_wake_url(central_url: &str) -> anyhow::Result<String> {
     ));
     url.set_query(None);
     Ok(url.to_string())
+}
+
+fn activity_url(central_url: &str) -> anyhow::Result<String> {
+    let mut url = url::Url::parse(central_url).context("parsing registry_central_url")?;
+    url.set_path(&format!(
+        "{}/api/activity",
+        url.path().trim_end_matches('/')
+    ));
+    url.set_query(None);
+    Ok(url.to_string())
+}
+
+fn activity_shape(event: &NotifyEvent<'_>) -> (&'static str, &'static str, &'static str) {
+    match event {
+        NotifyEvent::DispatchFailed { .. } => ("dispatch_failed", "error", "Work failed"),
+        NotifyEvent::MrCreated { .. } | NotifyEvent::HandoffCreated { .. } => {
+            ("review_ready", "success", "Review ready")
+        }
+        NotifyEvent::ReviewVerdict { .. } => ("review_ready", "info", "Review updated"),
+        NotifyEvent::MrMerged { .. }
+        | NotifyEvent::DispatchFailureResolved { .. }
+        | NotifyEvent::ExternalApprovalResolved { .. } => {
+            ("dispatch_completed", "success", "Work updated")
+        }
+        NotifyEvent::HumanRequired { .. }
+        | NotifyEvent::PaidRouteApprovalRequired { .. }
+        | NotifyEvent::ExternalApprovalRequested { .. }
+        | NotifyEvent::ReviewOutputInvalid { .. }
+        | NotifyEvent::BackendStalled { .. } => {
+            ("action_required", "warning", "Operator action required")
+        }
+    }
+}
+
+fn activity_body(profile: &Profile, event: &NotifyEvent<'_>) -> (String, String) {
+    let profile_name = event_profile(event).unwrap_or(profile.display_name.as_str());
+    let message = crate::redact::redact(&format_message(event));
+    let message = crate::dispatch::utf8_safe_prefix(&message, 1_000).to_string();
+    let (kind, severity, title) = activity_shape(event);
+    let id_seed = json!({
+        "event": event_name(event),
+        "profile": profile_name,
+        "work_id": event_work_id(event),
+        "run_id": event_run_id(event),
+        "message": message,
+    });
+    let digest = format!("{:x}", Sha256::digest(id_seed.to_string().as_bytes()));
+    let occurred_at = match event {
+        NotifyEvent::DispatchFailed { timestamp, .. }
+        | NotifyEvent::DispatchFailureResolved { timestamp, .. } => (*timestamp).to_string(),
+        _ => OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_default(),
+    };
+    let body = json!({
+        "id": format!("rust:{}", &digest[..24]),
+        "occurredAt": occurred_at,
+        "profile": profile_name,
+        "kind": kind,
+        "severity": severity,
+        "title": title,
+        "message": message,
+        "workId": event_work_id(event),
+    })
+    .to_string();
+    (format!("worker-activity-{}", &digest[..24]), body)
+}
+
+fn post_activity(
+    central_url: &str,
+    profile: &Profile,
+    event: &NotifyEvent<'_>,
+) -> anyhow::Result<()> {
+    let (key, body) = activity_body(profile, event);
+    let token = std::env::var("COORDINATOR_TOKEN").ok();
+    let response = crate::curl_http::request_with_idempotency_key(
+        "POST",
+        &activity_url(central_url)?,
+        Some(&body),
+        token.as_deref(),
+        5,
+        Some(&key),
+    )?;
+    if !matches!(response.status, 200 | 201 | 409) {
+        anyhow::bail!(
+            "activity API returned {}: {}",
+            response.status,
+            crate::redact::redact(&String::from_utf8_lossy(&response.body))
+        );
+    }
+    Ok(())
 }
 
 fn enqueue_manager_wake(
@@ -1090,6 +1182,34 @@ fn notify_event_with_enqueue<F>(cfg: &GahConfig, profile: &Profile, event: Notif
 where
     F: FnOnce(&str, &str, &str, &std::path::Path) -> anyhow::Result<()>,
 {
+    notify_event_with_deliveries(
+        cfg,
+        profile,
+        event,
+        enqueue,
+        post_activity,
+        |cfg, message| {
+            crate::notify_channels::deliver_channel_message(
+                cfg,
+                message,
+                &crate::notify_channels::CurlNotifyTransport,
+            )
+        },
+    );
+}
+
+fn notify_event_with_deliveries<F, P, C>(
+    cfg: &GahConfig,
+    profile: &Profile,
+    event: NotifyEvent,
+    enqueue: F,
+    post: P,
+    channel: C,
+) where
+    F: FnOnce(&str, &str, &str, &std::path::Path) -> anyhow::Result<()>,
+    P: FnOnce(&str, &Profile, &NotifyEvent<'_>) -> anyhow::Result<()>,
+    C: FnOnce(&GahConfig, &str) -> anyhow::Result<()>,
+{
     if let Some(command) = &profile.notify_command {
         let message = crate::redact::redact(&format_message(&event));
         if let Err(err) = run_notify_command(command, &message) {
@@ -1128,6 +1248,33 @@ where
         }
     }
 
+    let posted_to_central = cfg.defaults.registry_central_url.as_deref().is_some_and(|url| {
+        match post(url, profile, &event) {
+            Ok(()) => true,
+            Err(err) => {
+                eprintln!("[gah] central activity delivery failed; falling back to direct channel (swallowed): {err:#}");
+                let event_profile = event_profile(&event).unwrap_or(profile.display_name.as_str());
+                if let Err(record_err) = events::record(
+                    cfg,
+                    events::EventType::NotificationDeliveryFailed,
+                    Some(event_profile),
+                    event_work_id(&event),
+                    json!({
+                        "event_name": event_name(&event),
+                        "profile": event_profile,
+                        "work_id": event_work_id(&event),
+                        "run_id": event_run_id(&event),
+                        "channel": "central_activity",
+                        "error": format!("{err:#}"),
+                    }).to_string(),
+                ) {
+                    eprintln!("[gah] failed to record activity delivery failure event (swallowed): {record_err:#}");
+                }
+                false
+            }
+        }
+    });
+
     // Issue #653: deliver the same redacted message through the configured
     // channel (Telegram today, Discord webhook). Failures are visible via
     // the recorded delivery-failure event and never block the operation
@@ -1135,13 +1282,11 @@ where
     // approval, it must only be observable. Dedup stays the caller's job:
     // notify paths that would repeat (e.g. paid-route skips) already
     // notify once per occurrence through `claim_notice`.
-    if cfg.defaults.notification_channel != crate::notify_channels::NotificationChannel::None {
+    if !posted_to_central
+        && cfg.defaults.notification_channel != crate::notify_channels::NotificationChannel::None
+    {
         let message = crate::redact::redact(&format_message(&event));
-        if let Err(err) = crate::notify_channels::deliver_channel_message(
-            cfg,
-            &message,
-            &crate::notify_channels::CurlNotifyTransport,
-        ) {
+        if let Err(err) = channel(cfg, &message) {
             eprintln!("[gah] notification channel delivery failed (swallowed): {err:#}");
             let event_profile = event_profile(&event).unwrap_or(profile.display_name.as_str());
             if let Err(record_err) = events::record(

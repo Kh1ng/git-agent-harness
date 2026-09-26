@@ -4,13 +4,6 @@ import { findGahBinary } from './gahCli.js';
 
 export type ActivityDelivery = (event: ActivityEvent) => void | Promise<void>;
 
-/** Controller events are read back from the Rust event log. Rust already
- * delivered their channel message when it recorded them (and a worker's log
- * never reaches this feed), so the channel only takes events Node originates. */
-function fromControllerLog(event: ActivityEvent): boolean {
-  return event.id.startsWith('controller:');
-}
-
 function activityLine(event: ActivityEvent, baseUrl: string): string {
   const url = new URL(activityPath(event), baseUrl).href;
   return `[gah] ${event.title}: ${event.message} ${url}`.replace(/\s+/g, ' ').trim();
@@ -31,7 +24,7 @@ function run(label: string, command: string, args: string[], stdin?: string): Pr
  * The CLI no-ops when no channel is configured. */
 export function channelDelivery(baseUrl: string, gahBinary: () => string = findGahBinary): ActivityDelivery {
   return async (event) => {
-    if (!notifiableActivity(event) || fromControllerLog(event)) return;
+    if (!notifiableActivity(event)) return;
     await run('gah notify-send', gahBinary(), [
       'notify-send',
       '--title', event.title,

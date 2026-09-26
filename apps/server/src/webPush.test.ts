@@ -67,6 +67,10 @@ test('activity delivery uses the bounded four-field payload and ignores non-waki
       id: 'node-back', occurredAt: '2026-09-25T12:00:00Z', profile: null,
       kind: 'node_back', severity: 'success', title: 'Back', message: 'Back.'
     });
+    await f.service.deliverActivity({
+      id: 'controller:old-log-entry', occurredAt: '2026-09-25T12:00:00Z', profile: 'gah',
+      kind: 'dispatch_failed', severity: 'error', title: 'Failed', message: 'Log-derived display copy.'
+    });
     assert.equal(f.sent.length, 1);
   } finally {
     rmSync(f.directory, { recursive: true });

@@ -64,7 +64,8 @@ async function main() {
     deviceAccess,
     registryService,
     webPushNotifications,
-    apnsNotifications
+    apnsNotifications,
+    activityFeed
   });
   
   // Create HTTP server from Express app

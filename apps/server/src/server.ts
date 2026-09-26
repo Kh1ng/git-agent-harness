@@ -1,5 +1,5 @@
 import express from 'express';
-import type { NodeRoleStatus } from '@git-agent-harness/contracts';
+import type { ActivityEvent, ActivityKind, NodeRoleStatus } from '@git-agent-harness/contracts';
 import { workerRouteGuard, validateNodeRole } from './nodeRole.js';
 import { workerMemoryRouter } from './workerMemory.js';
 import { paidRouteApprovalsRouter } from './paidRouteApprovals.js';
@@ -62,7 +62,8 @@ import type {
   ChatNodeInfo,
   ChatSessionEvent
 } from '@git-agent-harness/contracts';
-import { getFleetDispatch } from './wsServer.js';
+import { getFleetDispatch, sessionStore } from './wsServer.js';
+import { ActivityFeed } from './activityFeed.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
 import { deriveControllerActivity } from './controllerActivity.js';
 import { authMiddleware, coordinatorTokenMatches, isLocalAddress, requireOwner } from './authMiddleware.js';
@@ -153,7 +154,43 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   messagingBridge?: MessagingBridge;
   webPushNotifications?: WebPushNotifications;
   apnsNotifications?: ApnsNotifications;
+  activityFeed?: ActivityFeed;
 };
+
+const activityKinds = new Set<ActivityKind>([
+  'dispatch_completed', 'dispatch_failed', 'review_ready', 'chat_turn_completed',
+  'chat_turn_failed', 'chat_permission_requested', 'node_offline', 'node_back',
+  'quota_near_limit', 'gateway_down', 'action_required'
+]);
+
+function postedActivity(value: unknown): ActivityEvent | null {
+  if (!value || typeof value !== 'object') return null;
+  const event = value as Record<string, unknown>;
+  const text = (key: string, max: number, nullable = false): string | null | undefined => {
+    const item = event[key];
+    if (item === undefined || (nullable && item === null)) return item as null | undefined;
+    return typeof item === 'string' && item.length > 0 && item.length <= max ? item : undefined;
+  };
+  const id = text('id', 160);
+  const occurredAt = text('occurredAt', 64);
+  const profile = text('profile', 160, true);
+  const title = text('title', 200);
+  const message = text('message', 1_000);
+  const kind = event.kind;
+  const severity = event.severity;
+  if (!id || !occurredAt || profile === undefined || !title || !message
+    || typeof kind !== 'string' || !activityKinds.has(kind as ActivityKind)
+    || !['info', 'success', 'warning', 'error'].includes(String(severity))
+    || !Number.isFinite(Date.parse(occurredAt))) return null;
+  const validOptional = (key: string) => event[key] === undefined || event[key] === null
+    || (typeof event[key] === 'string' && (event[key] as string).length > 0 && (event[key] as string).length <= 160);
+  if (!validOptional('sessionId') || !validOptional('workId') || !validOptional('nodeId')) return null;
+  const sessionId = event.sessionId as string | null | undefined;
+  const workId = event.workId as string | null | undefined;
+  const nodeId = event.nodeId as string | null | undefined;
+  return { id, occurredAt, profile, kind: kind as ActivityKind,
+    severity: severity as ActivityEvent['severity'], title, message, sessionId, workId, nodeId };
+}
 
 const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
   runConfigShowProfile,
@@ -338,6 +375,15 @@ export function createServer(
   const rejectInvalidRequest = (res: express.Response, code: string, error: unknown) => {
     res.status(400).json({ error: code, message: error instanceof Error ? error.message : String(error) });
   };
+  if (node.role === 'central' && configDeps.activityFeed) {
+    app.post('/api/activity', mutation('activity.record'), (req, res) => {
+      const event = postedActivity(req.body);
+      if (!event) return res.status(400).json({ error: 'invalid_activity', message: 'Supply a valid, length-bounded activity event.' });
+      const recorded = configDeps.activityFeed!.record(event);
+      if (recorded) sessionStore.broadcast({ type: 'activity.event', event }, undefined, event.profile ?? undefined);
+      return res.status(recorded ? 201 : 200).json({ recorded, id: event.id });
+    });
+  }
   if (node.role === 'central' && configDeps.webPushNotifications) {
     const push = configDeps.webPushNotifications;
     app.get('/api/push/public-key', (_req, res) => res.json({ publicKey: push.publicKey() }));

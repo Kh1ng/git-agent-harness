@@ -80,8 +80,8 @@ export const NOTIFIABLE_ACTIVITY_KINDS: ReadonlySet<ActivityKind> = new Set<Acti
   "node_offline"
 ]);
 
-export function notifiableActivity(event: Pick<ActivityEvent, "kind">): boolean {
-  return NOTIFIABLE_ACTIVITY_KINDS.has(event.kind);
+export function notifiableActivity(event: Pick<ActivityEvent, "id" | "kind">): boolean {
+  return !event.id.startsWith("controller:") && NOTIFIABLE_ACTIVITY_KINDS.has(event.kind);
 }
 
 export function activityPath(event: Pick<ActivityEvent, "profile" | "sessionId">): string {
