@@ -32,14 +32,15 @@ function providerRequest(profile: PullRequestProfile, value: unknown): GitReview
     || url.pathname !== `${project.pathname}${suffix}`) throw new Error('Provider returned an unexpected pull request URL');
   const draft = request.isDraft === true || request.draft === true || request.work_in_progress === true
     || GITLAB_DRAFT_PREFIX.test(title);
-  return { number: number as number, title, url: url.href, draft };
+  const description = request.body ?? request.description;
+  return { number: number as number, title, url: url.href, draft, body: typeof description === 'string' ? description : null };
 }
 
 /** Finds the one open PR/MR for a branch. Provider output is validated before
  * it reaches the browser, and an empty result is the ordinary no-PR state. */
 export async function findOpenPullRequest(profile: PullRequestProfile, cwd: string, branch: string): Promise<GitReviewPullRequest | null> {
   if (profile.provider === 'github') {
-    const { stdout } = await execProviderCli('gh', ['pr', 'list', '--head', branch, '--state', 'open', '--limit', '1', '--json', 'number,title,url,isDraft'], cwd);
+    const { stdout } = await execProviderCli('gh', ['pr', 'list', '--head', branch, '--state', 'open', '--limit', '1', '--json', 'number,title,url,isDraft,body'], cwd);
     const rows = JSON.parse(stdout);
     if (!Array.isArray(rows)) throw new Error('GitHub returned an invalid pull request list');
     return rows[0] === undefined ? null : providerRequest(profile, rows[0]);
@@ -141,7 +142,7 @@ export async function publishPullRequest(
 export async function updatePullRequest(
   profile: PullRequestProfile,
   cwd: string,
-  input: { number: number; title: string; body: string }
+  input: { number: number; title: string; body: string; draft?: boolean | null }
 ): Promise<{ url: string }> {
   if (!Number.isSafeInteger(input.number) || input.number <= 0) throw new Error('A valid pull request number is required');
   if (profile.provider === 'github') {
@@ -151,10 +152,16 @@ export async function updatePullRequest(
   }
   if (profile.provider !== 'gitlab') throw new Error('Unsupported repository provider');
   const project = validatedProjectUrl(profile);
+  // The draft prefix is MR state on GitLab: preserve it when the caller
+  // reports the current draft flag, and leave the title untouched when the
+  // caller cannot (an edit must not un-draft the MR by accident).
+  const title = input.draft === undefined || input.draft === null
+    ? input.title
+    : gitLabTitle(input.title, input.draft);
   const { stdout } = await execProviderCli('glab', [
     'api', `projects/${encodeURIComponent(profile.repo)}/merge_requests/${input.number}`,
     '--hostname', project.host, '--method', 'PUT',
-    '--raw-field', `title=${input.title}`, '--raw-field', `description=${input.body}`
+    '--raw-field', `title=${title}`, '--raw-field', `description=${input.body}`
   ], cwd);
   return { url: providerRequest(profile, JSON.parse(stdout)).url };
 }
