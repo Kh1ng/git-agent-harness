@@ -1,7 +1,6 @@
 mod support;
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use support::fake_ledger::TestLedger;
 use support::scenario::ScenarioHarness;
 
@@ -72,13 +71,7 @@ printf 'manual fix test\\n' > .manual_fix_dispatch_change.txt\n\
 exit 0\n"
         .to_string();
     let script_path = fake.bin_dir().join(backend);
-    std::fs::write(&script_path, script).unwrap();
-    #[cfg(unix)]
-    {
-        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script_path, perms).unwrap();
-    }
+    support::write_executable(&script_path, &script);
     harness.install_custom_worker(backend, &fake);
     temp
 }

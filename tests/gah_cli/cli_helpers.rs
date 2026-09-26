@@ -1,29 +1,15 @@
 #![allow(dead_code)]
 
-use super::{isolate_gah_command, test_tempdir, FakeBackend, IsolatedCommand};
-use assert_cmd::Command;
+use super::{test_tempdir, write_executable, FakeBackend};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-pub(crate) fn bin() -> IsolatedCommand<Command> {
-    let cmd = Command::cargo_bin("gah").unwrap();
-    // CLI integration tests may run under the real systemd loop, which sets
-    // XDG_STATE_HOME to the operator's persistent state directory. Never let
-    // fake profiles and work claims leak into (or inherit from) that state.
-    isolate_gah_command(cmd)
-}
-
-pub(crate) fn spawn_bin() -> IsolatedCommand<std::process::Command> {
-    let cmd = std::process::Command::new(
-        std::env::var("CARGO_BIN_EXE_gah").unwrap_or_else(|_| "target/debug/gah".into()),
-    );
-    isolate_gah_command(cmd)
-}
+pub(crate) use super::gah_command as bin;
+pub(crate) use super::gah_process_command as spawn_bin;
 
 pub(crate) fn write_fixture_dir() -> TempDir {
     let tmp = test_tempdir();
@@ -58,20 +44,10 @@ pub(crate) fn latest_child_dir(root: &std::path::Path) -> std::path::PathBuf {
 }
 
 pub(crate) fn make_fake_bin(dir: &Path, name: &str) {
-    let path = dir.join(name);
-    fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
+    write_executable(&dir.join(name), "#!/bin/sh\nexit 0\n");
 }
 
-pub(crate) fn make_fake_bin_with_body(dir: &Path, name: &str, body: &str) {
-    let path = dir.join(name);
-    fs::write(&path, body).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
-}
+pub(crate) use super::write_fake_binary as make_fake_bin_with_body;
 
 pub(crate) fn make_fake_github_review_api(dir: &Path) {
     make_fake_bin_with_body(

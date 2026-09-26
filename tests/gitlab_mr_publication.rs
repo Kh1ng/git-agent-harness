@@ -1,38 +1,11 @@
-use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command as ProcessCommand;
-use std::sync::atomic::{AtomicU64, Ordering};
+use support::{gah_command as bin, write_fake_binary};
 use tempfile::TempDir;
 
 mod support;
-
-fn bin() -> Command {
-    static COMMAND_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let invocation_id = COMMAND_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let invocation_dir = support::test_temp_root().join(format!(
-        "gah-gitlab-publication-{}-{invocation_id}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&invocation_dir).unwrap();
-    let mut cmd = Command::cargo_bin("gah").unwrap();
-    cmd.env("XDG_STATE_HOME", invocation_dir.join("state"));
-    cmd.env("TMPDIR", support::test_temp_root());
-    cmd.env(
-        "GAH_AVAILABILITY_PATH",
-        "/nonexistent-availability-path.json",
-    );
-    cmd.env(
-        "GAH_VALIDATION_CHECK_PATH",
-        invocation_dir.join(format!(
-            "gah-gitlab-publication-validation-{}-{invocation_id}.json",
-            std::process::id()
-        )),
-    );
-    cmd
-}
 
 fn init_git_repo(path: &std::path::Path) {
     fs::create_dir_all(path.join("docs")).unwrap();
@@ -101,14 +74,6 @@ improve_backend = "codex"
     cfg
 }
 
-fn make_executable(dir: &std::path::Path, name: &str, body: &str) {
-    let path = dir.join(name);
-    fs::write(&path, body).unwrap();
-    let mut permissions = fs::metadata(&path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).unwrap();
-}
-
 #[test]
 fn invalid_gitlab_mr_response_fails_publication_closed() {
     let tmp = support::test_tempdir();
@@ -154,12 +119,12 @@ fn invalid_gitlab_mr_response_fails_publication_closed() {
     let ledger_path = tmp.path().join("ledger.jsonl");
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
-    make_executable(
+    write_fake_binary(
         &fake_bin,
         "codex",
         "#!/bin/sh\nprintf 'agent edit\n' >> README.md\nexit 0\n",
     );
-    make_executable(
+    write_fake_binary(
         &fake_bin,
         "glab",
         "#!/bin/sh\nprintf '%s\\n' '{\"message\":\"404 Project Not Found\"}'\nexit 0\n",
