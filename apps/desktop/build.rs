@@ -12,6 +12,7 @@ fn main() {
             "set_node_role",
             "worker_status",
             "set_worker_running",
+            "open_external_url",
             "desktop_open_context",
             "open_local_checkout",
         ]),

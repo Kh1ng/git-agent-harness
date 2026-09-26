@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { GitBranch, GitCommit, GitPullRequest, ExternalLink } from 'lucide-react';
+import { ExternalAnchor } from '../components/ExternalAnchor';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
@@ -198,9 +199,9 @@ export function GitPage() {
                       <td className="font-mono text-xs text-secondary">{pr.headRefName ?? ''}</td>
                       <td>
                         {pr.url ? (
-                          <a href={pr.url} target="_blank" rel="noreferrer" className="text-muted hover:text-primary">
+                          <ExternalAnchor href={pr.url} className="text-muted hover:text-primary">
                             <ExternalLink size={13} />
-                          </a>
+                          </ExternalAnchor>
                         ) : null}
                       </td>
                     </tr>
