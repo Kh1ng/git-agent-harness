@@ -818,6 +818,65 @@ mod tests {
     }
 
     #[test]
+    fn stored_history_overflow_fails_closed() {
+        let root = TempDir::new().unwrap();
+        let profile = profile(&root);
+        let stored = json!({
+            "schema_version": SCHEMA_VERSION,
+            "profile": "test",
+            "revision": HISTORY_MAX_COUNT as u64 + 1,
+            "overrides": [],
+            "history": (0..=HISTORY_MAX_COUNT as u64)
+                .map(|revision| json!({ "revision": revision, "overrides": [] }))
+                .collect::<Vec<_>>()
+        })
+        .to_string();
+        fs::write(store_path(&profile), &stored).unwrap();
+
+        assert!(summary("test", &profile)
+            .unwrap_err()
+            .to_string()
+            .contains(&format!("more than {HISTORY_MAX_COUNT} retained revisions")));
+        assert!(set("test", &profile, reviewer_target(), "replacement", 1, false).is_err());
+        assert_eq!(fs::read_to_string(store_path(&profile)).unwrap(), stored);
+    }
+
+    #[test]
+    fn denormalized_selectors_round_trip_normalized_and_dedupe() {
+        let root = TempDir::new().unwrap();
+        let profile = profile(&root);
+        set(
+            "test",
+            &profile,
+            PromptPolicyTarget {
+                slot: PromptPolicySlot::ReviewerGuidance,
+                task_class: Some("  Docs  "),
+                reviewer_tier: Some("STRONG"),
+            },
+            "first",
+            0,
+            false,
+        )
+        .unwrap();
+        let replaced = set("test", &profile, reviewer_target(), "second", 1, false).unwrap();
+        assert_eq!(replaced.revision, 2);
+
+        let summary = summary("test", &profile).unwrap();
+        let overrides: Vec<_> = summary
+            .policies
+            .iter()
+            .filter(|entry| entry.source == "profile_override")
+            .collect();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].task_class.as_deref(), Some("docs"));
+        assert_eq!(overrides[0].reviewer_tier.as_deref(), Some("strong"));
+        assert_eq!(
+            resolve(&profile, reviewer_target()).unwrap().source,
+            "profile_override"
+        );
+    }
+
+    #[test]
     fn duplicate_and_invalid_selectors_are_rejected() {
         let root = TempDir::new().unwrap();
         let profile = profile(&root);
