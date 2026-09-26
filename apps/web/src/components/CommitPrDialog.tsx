@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ExternalLink, GitCommit, GitPullRequest, RefreshCw, X } from 'lucide-react';
-import type { GitReviewState, HelperSuggestion } from '@git-agent-harness/contracts';
+import type { ChatPrSummary, GitReviewState, HelperSuggestion, MergeRequest } from '@git-agent-harness/contracts';
 import { ExternalAnchor } from './ExternalAnchor.js';
 import { gahApi } from '../api/client.js';
 
@@ -10,6 +10,8 @@ interface CommitPrDialogProps {
   nodeId?: string;
   onClose: () => void;
   onChanged: () => void;
+  mergeRequest?: MergeRequest | null;
+  providerRequest?: ChatPrSummary | null;
 }
 
 function suggestedBody(review: GitReviewState): string {
@@ -20,7 +22,7 @@ function suggestedBody(review: GitReviewState): string {
 
 /** One review-first commit and publish flow shared by Chat and Git. The server
  * resolves every path from profile/session identity on the owning node. */
-export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged }: CommitPrDialogProps) {
+export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged, mergeRequest, providerRequest }: CommitPrDialogProps) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [review, setReview] = useState<GitReviewState | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -57,9 +59,9 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
       setBase(next.base);
       setSelected(new Set(next.files.map(file => file.path)));
       setContinueDirty(next.files.length === 0);
-      if (!titleEdited.current) setTitle(next.existing?.title ?? next.commits[0]?.subject ?? '');
+      if (!titleEdited.current) setTitle(next.existing?.title ?? providerRequest?.title ?? mergeRequest?.title ?? next.commits[0]?.subject ?? '');
       if (!bodyEdited.current) setBody(suggestedBody(next));
-      setDraft(next.existing?.draft ?? false);
+      setDraft(next.existing?.draft ?? providerRequest?.isDraft ?? mergeRequest?.draft ?? false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -144,6 +146,7 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
 
   const publish = async () => {
     if (!review || !title.trim() || busy || base.trim() !== review.base) return;
+    if (!window.confirm(`${review.existing ? 'Update' : 'Publish'} ${draft ? `draft ${review.providerLabel}` : review.providerLabel}?`)) return;
     setBusy(true);
     setError(null);
     try {
@@ -160,8 +163,15 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
 
   const selectedFiles = [...selected];
   const dirty = (review?.files.length ?? 0) > 0;
-  const canReviewPr = !!review && review.commits.length > 0 && (!dirty || continueDirty);
+  const readOnly = review?.readOnly === true;
+  const canReviewPr = !!review && review.commits.length > 0 && (!dirty || continueDirty || readOnly);
   const baseNeedsReview = !!review && base.trim() !== review.base;
+  const providerLink = published ?? review?.existing?.url ?? providerRequest?.url ?? mergeRequest?.url ?? null;
+  const reviewBranch = providerRequest?.headRefName ?? mergeRequest?.branch ?? review?.branch ?? 'Unknown';
+  const stateLabel = mergeRequest?.state ?? (providerRequest ? 'open' : review?.existing ? 'open' : 'Not published');
+  const ciLabel = mergeRequest?.ci_pending ? 'Pending' : mergeRequest?.ci_passed ? 'Passed' : mergeRequest ? 'Not passing' : 'Unknown';
+  const classification = mergeRequest?.classification ?? providerRequest?.reviewState ?? 'Not reviewed';
+  const recommendedAction = mergeRequest?.recommended_action?.replaceAll('_', ' ') ?? 'None';
 
   return (
     <dialog ref={dialog} onClose={onClose} aria-label="Commit and pull request review"
@@ -178,6 +188,14 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
         {busy && !review && <p className="text-sm text-muted">Preparing review…</p>}
         {error && <p role="alert" className="rounded-md border border-critical/40 bg-critical/10 px-3 py-2 text-sm text-critical">{error}</p>}
         <span className="sr-only" aria-live="polite">{suggesting === 'commit' ? 'Generating commit message suggestion' : suggesting === 'pr' ? 'Generating pull request suggestion' : ''}</span>
+        <section aria-label="Provider review state" className="grid gap-3 rounded-md border border-subtle bg-raised p-3 text-xs sm:grid-cols-3">
+          <div><p className="text-muted">Branch</p><p className="mt-1 break-all font-mono text-primary">{reviewBranch}</p></div>
+          <div><p className="text-muted">State</p><p className="mt-1 text-primary">{stateLabel}</p></div>
+          <div><p className="text-muted">CI</p><p className="mt-1 text-primary">{ciLabel}</p></div>
+          <div><p className="text-muted">Classification</p><p className="mt-1 text-primary">{classification.replaceAll('_', ' ')}</p></div>
+          <div><p className="text-muted">Recommended action</p><p className="mt-1 text-primary">{recommendedAction}</p></div>
+          {providerLink && <ExternalAnchor href={providerLink} className="inline-flex min-h-11 items-center gap-1 self-end text-accent hover:underline sm:min-h-0"><ExternalLink size={13} /> Open {review?.providerLabel ?? (mergeRequest?.profile ? 'review' : 'pull request')}</ExternalAnchor>}
+        </section>
         {review && (
           <>
             <section className="grid gap-2 rounded-md border border-subtle bg-raised p-3 text-xs sm:grid-cols-2">
@@ -187,7 +205,7 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
               <p><span className="text-muted">Upstream state:</span> {review.ahead} ahead, {review.behind} behind</p>
             </section>
 
-            {dirty && (
+            {dirty && !readOnly && (
               <section className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
                   <h3 className="text-sm font-semibold">Local changes</h3>
@@ -230,7 +248,7 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
               <section className="space-y-4 border-t border-subtle pt-5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="text-sm font-semibold">Final {review.providerLabel} review</h3>
-                  <button type="button" className="btn-secondary text-xs" disabled={busy} onClick={() => void applyPrSuggestion()}>{suggesting === 'pr' ? 'Suggesting…' : prSuggestion ? 'Regenerate title and body' : 'Suggest title and body'}</button>
+                  <button type="button" className="btn-secondary text-xs" disabled={busy || readOnly} onClick={() => void applyPrSuggestion()}>{suggesting === 'pr' ? 'Suggesting…' : prSuggestion ? 'Regenerate title and body' : 'Suggest title and body'}</button>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <label className="space-y-1 text-xs text-secondary">Base branch
@@ -239,26 +257,27 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
                       bodyRevision.current++;
                       setPrSuggestion(null);
                       setBase(event.target.value);
-                    }}
+                    }} readOnly={readOnly}
                       className="min-w-0 flex-1 rounded-md border border-subtle bg-raised px-3 py-2 text-primary focus:border-accent" />
-                    <button type="button" className="btn-secondary" disabled={busy || !base.trim()} onClick={() => void load(base)} aria-label="Refresh base review"><RefreshCw size={13} /></button></span>
+                    <button type="button" className="btn-secondary" disabled={busy || readOnly || !base.trim()} onClick={() => void load(base)} aria-label="Refresh base review"><RefreshCw size={13} /></button></span>
                   </label>
                   <label className="space-y-1 text-xs text-secondary">Head branch
                     <input value={review.branch} readOnly className="w-full rounded-md border border-subtle bg-raised px-3 py-2 text-muted" />
                   </label>
                 </div>
                 <label className="block space-y-1 text-xs text-secondary">Title
-                  <input aria-label="Pull request title" value={title} onChange={event => { titleEdited.current = true; titleRevision.current++; setPrSuggestion(null); setTitle(event.target.value); }}
+                  <input aria-label="Pull request title" value={title} readOnly={readOnly} onChange={event => { titleEdited.current = true; titleRevision.current++; setPrSuggestion(null); setTitle(event.target.value); }}
                     className="w-full rounded-md border border-subtle bg-raised px-3 py-2 text-sm text-primary focus:border-accent" />
                 </label>
                 <label className="block space-y-1 text-xs text-secondary">Body
-                  <textarea aria-label="Pull request body" rows={7} value={body} onChange={event => { bodyEdited.current = true; bodyRevision.current++; setPrSuggestion(null); setBody(event.target.value); }}
+                  <textarea aria-label="Pull request body" rows={7} value={body} readOnly={readOnly} onChange={event => { bodyEdited.current = true; bodyRevision.current++; setPrSuggestion(null); setBody(event.target.value); }}
                     className="w-full resize-y rounded-md border border-subtle bg-raised px-3 py-2 text-sm text-primary focus:border-accent" />
                 </label>
                 {prSuggestion?.generated && <p className="text-xs text-muted">Suggested by {prSuggestion.backendInstance ?? prSuggestion.backend} · {prSuggestion.actualModel ?? prSuggestion.effectiveModel}</p>}
                 {!!prSuggestion?.skippedFiles?.length && <p className="text-xs text-warning">Not sent to the helper: {prSuggestion.skippedFiles.join(', ')}</p>}
-                <label className="flex items-center gap-2 text-xs text-secondary"><input type="checkbox" checked={draft} onChange={event => setDraft(event.target.checked)} /> Draft</label>
+                <label className="flex items-center gap-2 text-xs text-secondary"><input type="checkbox" checked={draft} disabled={readOnly} onChange={event => setDraft(event.target.checked)} /> Draft</label>
                 {baseNeedsReview && <p role="status" className="text-xs text-warning">Refresh the review before publishing to a different base branch.</p>}
+                {readOnly && <p role="status" className="text-xs text-warning">This checkout is read-only. Review state is available, but publishing is disabled.</p>}
 
                 <div className="grid gap-3 text-xs sm:grid-cols-3">
                   <div className="rounded-md border border-subtle p-3"><p className="mb-2 text-muted">Commits</p>{review.commits.map(commit => <p key={commit.hash}><code>{commit.short}</code> {commit.subject}</p>)}</div>
@@ -267,10 +286,10 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
                 </div>
                 <details className="rounded-md border border-subtle p-3"><summary className="cursor-pointer text-xs font-medium">Committed diff</summary><pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap text-[11px] text-secondary">{review.patch || 'No committed diff.'}</pre></details>
                 <div className="flex flex-wrap items-center gap-3">
-                  <button type="button" className="btn-primary text-xs" disabled={busy || !title.trim() || baseNeedsReview} onClick={() => void publish()}>
+                  <button type="button" className="btn-primary text-xs" disabled={busy || readOnly || !title.trim() || baseNeedsReview} onClick={() => void publish()}>
                     <GitPullRequest size={13} /> Push and {review.existing ? 'update' : 'create'} {draft ? `draft ${review.providerLabel}` : review.providerLabel}
                   </button>
-                  {published && <ExternalAnchor href={published} className="flex items-center gap-1 text-xs text-accent hover:underline"><ExternalLink size={13} /> Open {review.providerLabel}</ExternalAnchor>}
+                  {providerLink && <ExternalAnchor href={providerLink} className="flex items-center gap-1 text-xs text-accent hover:underline"><ExternalLink size={13} /> Open {review.providerLabel}</ExternalAnchor>}
                 </div>
               </section>
             )}

@@ -24,6 +24,7 @@ export function GitPage() {
   const setProfileOverride = useUiStore((s) => s.setProfileOverride);
   const profile = profileOverride ?? wsProfile ?? 'gah';
   const profiles = useGahStore((s) => s.profiles);
+  const dashboardStatus = useGahStore((s) => s.status.data);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
 
   const [tab, setTab] = useState<Tab>('status');
@@ -34,6 +35,7 @@ export function GitPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewTarget, setReviewTarget] = useState<ChatPrSummary | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -87,7 +89,7 @@ export function GitPage() {
               ))}
             </select>
             {status && <OpenLocalCheckout profile={profile} nodeId={status.ownerNodeId} nodeName={status.ownerNodeName} />}
-            <button type="button" className="btn-primary text-xs" onClick={() => setReviewOpen(true)}>Commit / PR</button>
+            <button type="button" className="btn-primary text-xs" onClick={() => { setReviewTarget(null); setReviewOpen(true); }}>Commit / PR</button>
             <div className="flex overflow-hidden rounded-md border border-subtle text-xs">
               {tabs.map((t) => (
                 <button
@@ -170,7 +172,7 @@ export function GitPage() {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold text-primary">Open pull requests</h3>
-            <button type="button" onClick={() => setReviewOpen(true)} className="btn-primary text-xs">Review and create</button>
+            <button type="button" onClick={() => { setReviewTarget(null); setReviewOpen(true); }} className="btn-primary text-xs">Review and create</button>
           </div>
 
           {prs.warning && <p className="text-xs text-muted italic">{prs.warning}</p>}
@@ -190,7 +192,7 @@ export function GitPage() {
                 </thead>
                 <tbody>
                   {prs.prs.map((pr, i) => (
-                    <tr key={i}>
+                    <tr key={i} className="cursor-pointer hover:bg-raised/50" onClick={() => { setReviewTarget(pr); setReviewOpen(true); }}>
                       <td className="text-muted text-xs">#{pr.number}</td>
                       <td className="text-sm text-primary">
                         {pr.title}
@@ -199,7 +201,7 @@ export function GitPage() {
                       <td className="font-mono text-xs text-secondary">{pr.headRefName ?? ''}</td>
                       <td>
                         {pr.url ? (
-                          <ExternalAnchor href={pr.url} className="text-muted hover:text-primary">
+                          <ExternalAnchor href={pr.url} onClick={(event) => event.stopPropagation()} className="text-muted hover:text-primary">
                             <ExternalLink size={13} />
                           </ExternalAnchor>
                         ) : null}
@@ -212,7 +214,16 @@ export function GitPage() {
           )}
         </div>
       )}
-      {reviewOpen && <CommitPrDialog profile={profile} nodeId={status?.ownerNodeId} onClose={() => setReviewOpen(false)} onChanged={() => void load()} />}
+      {reviewOpen && (
+        <CommitPrDialog
+          profile={profile}
+          nodeId={status?.ownerNodeId}
+          providerRequest={reviewTarget}
+          mergeRequest={reviewTarget ? dashboardStatus?.merge_requests.find(request => request.branch === reviewTarget.headRefName || request.id === String(reviewTarget.number)) : null}
+          onClose={() => setReviewOpen(false)}
+          onChanged={() => void load()}
+        />
+      )}
     </div>
   );
 }

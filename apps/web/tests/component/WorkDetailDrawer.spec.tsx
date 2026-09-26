@@ -44,6 +44,11 @@ async function routes(page: import('@playwright/test').Page) {
   await page.route('**/api/hold/set', (route) => route.fulfill({ json: { success: true } }));
   await page.route('**/api/hold/clear', (route) => route.fulfill({ json: { success: true } }));
   await page.route('**/api/ledger/clear-attempts', (route) => route.fulfill({ json: { success: true } }));
+  await page.route('**/api/git/review**', (route) => route.fulfill({ json: {
+    ownerNodeId: 'local', ownerNodeName: 'Local node', provider: 'github', providerLabel: 'pull request', branch: 'feat/42', base: 'main', upstream: 'origin/feat/42',
+    ahead: 0, behind: 0, files: [], commits: [{ hash: 'abcdef1', short: 'abcdef1', subject: 'Drawer work' }], changedFiles: ['README.md'], patch: '',
+    existing: { number: 42, title: 'Drawer work', url: 'https://github.com/example/repo/pull/42', draft: false },
+  } }));
 }
 
 test('renders review and attempt evidence and runs hold, clear-attempts, and redispatch controls', async ({ mount, page }) => {
@@ -66,6 +71,8 @@ test('renders review and attempt evidence and runs hold, clear-attempts, and red
   await expect(component.getByRole('status')).toHaveText('Prior attempts cleared.');
   await component.getByRole('button', { name: 'Re-dispatch' }).click();
   await expect(component.getByRole('status')).toHaveText('Dispatch queued.');
+  await component.getByRole('button', { name: 'Review in dashboard' }).click();
+  await expect(page.getByRole('dialog', { name: 'Commit and pull request review' })).toBeVisible();
 });
 
 test('clears an active hold', async ({ mount, page }) => {
