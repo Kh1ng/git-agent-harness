@@ -629,15 +629,7 @@ mod tests {
     #[test]
     fn release_posts_the_release_url_and_body_without_a_lease_field() {
         let t = FakeTransport::queue(vec![(200, "{}")]);
-        release_claim(
-            &t,
-            "http://central:3773",
-            "node-a",
-            "gah",
-            "ticket-1",
-            None,
-        )
-        .unwrap();
+        release_claim(&t, "http://central:3773", "node-a", "gah", "ticket-1", None).unwrap();
         let calls = t.calls.borrow();
         assert_eq!(calls[0].0, "http://central:3773/api/claims/release");
         let body: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
@@ -652,25 +644,13 @@ mod tests {
         // Drop best-effort ignores the result; the helper itself must still
         // surface transport and non-200 failures so callers can log them.
         let t = fake_with(vec![Err("connection refused".into())]);
-        assert!(release_claim(
-            &t,
-            "http://central:3773",
-            "node-a",
-            "gah",
-            "ticket-1",
-            None,
-        )
-        .is_err());
+        assert!(
+            release_claim(&t, "http://central:3773", "node-a", "gah", "ticket-1", None,).is_err()
+        );
 
         let t = FakeTransport::queue(vec![(500, "internal error")]);
-        assert!(release_claim(
-            &t,
-            "http://central:3773",
-            "node-a",
-            "gah",
-            "ticket-1",
-            None,
-        )
-        .is_err());
+        assert!(
+            release_claim(&t, "http://central:3773", "node-a", "gah", "ticket-1", None,).is_err()
+        );
     }
 }
