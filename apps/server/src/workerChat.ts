@@ -192,7 +192,8 @@ export function createWorkerChatRouter(deps: {
         reasoningEffort: typeof body.reasoningEffort === 'string' ? body.reasoningEffort : null,
         ...(typeof body.title === 'string' ? { title: body.title } : {})
       };
-      const branch = typeof body.branch === 'string' && /^gah\/chat\/[A-Za-z0-9._/-]{1,220}$/.test(body.branch)
+      const branch = typeof body.branch === 'string' && /^[A-Za-z0-9._/-]{1,220}$/.test(body.branch)
+        && !body.branch.startsWith('-') && !body.branch.includes('..')
         ? body.branch
         : undefined;
       if (body.branch !== undefined && !branch) return void res.status(400).json({ error: 'Invalid chat branch.' });
@@ -217,7 +218,15 @@ export function createWorkerChatRouter(deps: {
         cwd = resolved.cwd;
       }
       if (body.action === 'prepare') {
-        if (body.syncBranch === true) await refreshWorkspace(body.profile, sessionId!, profile, deps.sessions);
+        if (body.syncBranch === true && sessionId) {
+          // A failed refresh degrades to the workspace's current state; the
+          // turn must still run rather than fail on a dirty or diverged tree.
+          try {
+            await refreshWorkspace(body.profile, sessionId, profile, deps.sessions);
+          } catch (error) {
+            console.error(`[chat] workspace refresh failed for ${body.profile}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
         return void res.json({ session: getSession(body.profile, sessionId!, deps.sessions) });
       }
       if (active.has(body.requestId) || [...active.values()].some(turn => turn.key === key)) return void res.status(409).json({ error: 'This worker conversation already has an active turn.' });

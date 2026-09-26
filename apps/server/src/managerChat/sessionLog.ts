@@ -87,6 +87,15 @@ export function appendEvents(profile: string, events: ChatSessionEvent[], opts: 
   appendFileSync(path, payload, 'utf8');
 }
 
+/** The log's allocation rule: sequence numbers continue after the highest
+ * recorded seq, and the current turn is the highest recorded turn. */
+export function nextSeqAndTurn(events: ChatSessionEvent[]): { seq: number; turn: number } {
+  return {
+    seq: events.reduce((highest, event) => Math.max(highest, event.seq), 0) + 1,
+    turn: events.reduce((highest, event) => Math.max(highest, event.turn), 0)
+  };
+}
+
 /** Stream high-frequency events without blocking Node's event loop per chunk. */
 export function createEventWriter(profile: string, opts: SessionLogOptions = {}) {
   const path = chatLogPath(profile, opts);
