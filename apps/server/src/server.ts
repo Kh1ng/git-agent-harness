@@ -376,6 +376,14 @@ export function createServer(
     res.status(400).json({ error: code, message: error instanceof Error ? error.message : String(error) });
   };
   if (node.role === 'central' && configDeps.activityFeed) {
+    // Workers post every Rust-side activity event here; the route writes an
+    // audit receipt, so it is rate-limited like the other writing mounts.
+    app.use('/api/activity', rateLimit({
+      windowMs: 60_000,
+      limit: 600,
+      standardHeaders: true,
+      legacyHeaders: false
+    }));
     app.post('/api/activity', mutation('activity.record'), (req, res) => {
       const event = postedActivity(req.body);
       if (!event) return res.status(400).json({ error: 'invalid_activity', message: 'Supply a valid, length-bounded activity event.' });
