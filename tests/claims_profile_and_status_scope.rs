@@ -1,42 +1,10 @@
-use assert_cmd::Command;
+use cli_support::{gah_command as bin, write_fake_binary};
 use serde_json::Value;
 use std::fs;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::tempdir;
 
-fn bin() -> Command {
-    static COMMAND_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let invocation_id = COMMAND_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut cmd = Command::cargo_bin("gah").unwrap();
-    cmd.env(
-        "XDG_STATE_HOME",
-        std::env::temp_dir().join(format!(
-            "gah-cli-test-state-{}-{invocation_id}",
-            std::process::id()
-        )),
-    );
-    cmd.env(
-        "GAH_AVAILABILITY_PATH",
-        "/nonexistent-availability-path.json",
-    );
-    cmd.env(
-        "GAH_VALIDATION_CHECK_PATH",
-        std::env::temp_dir().join(format!(
-            "gah-cli-test-validation-{}-{invocation_id}.json",
-            std::process::id(),
-        )),
-    );
-    cmd
-}
-
-fn make_fake_bin_with_body(dir: &std::path::Path, name: &str, body: &str) {
-    let path = dir.join(name);
-    fs::write(&path, body).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    use std::os::unix::fs::PermissionsExt;
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
-}
+#[path = "support/cli.rs"]
+mod cli_support;
 
 fn prepend_path(dir: &std::path::Path) -> String {
     let old = std::env::var("PATH").unwrap_or_default();
@@ -99,7 +67,7 @@ default_target_branch = "main"
 
     let fake_bin = tmp.path().join("bin");
     fs::create_dir_all(&fake_bin).unwrap();
-    make_fake_bin_with_body(
+    write_fake_binary(
         &fake_bin,
         "gh",
         "#!/bin/sh\nif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then printf '%s\\n' '[]'; fi\nexit 0\n",

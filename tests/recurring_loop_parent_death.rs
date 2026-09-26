@@ -3,7 +3,6 @@
 mod support;
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -74,25 +73,20 @@ fn recurring_loop_exits_and_releases_ownership_when_launcher_dies() {
     run_git(&repo, &["push", "-q", "-u", "origin", "main"]);
     run_git(&other_repo, &["init", "-q", "-b", "main"]);
 
-    let gh = bin_dir.join("gh");
-    fs::write(
-        &gh,
+    support::write_executable(
+        &bin_dir.join("gh"),
         "#!/bin/sh\ncase \"$1 $2\" in\n  \"pr list\"|\"api --method\") echo '[]' ;;\n  *) exit 0 ;;\nesac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let backend_pid_path = tmp.path().join("backend.pid");
     let codex = bin_dir.join("codex");
-    fs::write(
+    support::write_executable(
         &codex,
-        format!(
+        &format!(
             "#!/bin/sh\necho $$ > '{}'\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n",
             backend_pid_path.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let config = tmp.path().join("config.toml");
     fs::write(

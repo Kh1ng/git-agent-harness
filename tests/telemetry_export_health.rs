@@ -10,17 +10,7 @@ use std::thread;
 
 use support::fake_ledger::{ledger_entry_full, TestLedger};
 use support::scenario::ScenarioHarness;
-
-fn write_exec(path: &Path, body: &str) {
-    fs::write(path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(path, perms).unwrap();
-    }
-}
+use support::write_executable as write_exec;
 
 fn install_successful_openhands(harness: &ScenarioHarness) {
     write_exec(

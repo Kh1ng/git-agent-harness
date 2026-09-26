@@ -6,10 +6,12 @@
 //! PTY to validate the interactive `/usage` capture path end-to-end.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use git_agent_harness::claude_monitor::*;
+use support::write_executable;
+
+mod support;
 
 /// Minimal single-argument POSIX shell quoting for embedding fixture text in
 /// the fake `claude` script without breaking the `printf` statement.
@@ -148,10 +150,7 @@ exit 0\n",
         "printf '%s'",
         &format!("printf '%s' {}", shell_quote(usage_output)),
     );
-    fs::write(&bin, script).unwrap();
-    let mut perms = fs::metadata(&bin).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&bin, perms).unwrap();
+    write_executable(&bin, &script);
 }
 
 #[test]

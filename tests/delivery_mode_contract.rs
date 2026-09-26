@@ -1,25 +1,9 @@
 mod support;
 
-use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
-use support::{isolate_command, IsolatedCommand};
+use support::gah_command as bin;
 use tempfile::TempDir;
-
-fn bin() -> IsolatedCommand<Command> {
-    let cmd = Command::cargo_bin("gah").unwrap();
-    isolate_command(cmd, |cmd, root| {
-        let tmp = root.join("tmp");
-        fs::create_dir_all(&tmp).unwrap();
-        cmd.env("XDG_STATE_HOME", root.join("xdg-state"));
-        cmd.env("GAH_AVAILABILITY_PATH", root.join("availability.json"));
-        cmd.env(
-            "GAH_VALIDATION_CHECK_PATH",
-            root.join("validation-check.json"),
-        );
-        cmd.env("TMPDIR", tmp);
-    })
-}
 
 #[test]
 fn profile_cli_supports_delivery_mode_add_set_show() {
