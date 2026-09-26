@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import type { ActivityEvent } from '@git-agent-harness/contracts';
 import type { ChatLifecycleEvent } from './activityFeed.js';
 import { activityPushPayload } from './webPush.js';
-import { pushRegistrationId, validPushDeviceLabel, writePrivatePushStore } from './pushStore.js';
+import { pushRegistrationId, removePushEntries, validPushDeviceLabel, validPushRegistrationId, writePrivatePushStore } from './pushStore.js';
 
 type ApnsConfig = {
   keyPath: string;
@@ -76,6 +76,7 @@ export class ApnsNotifications {
   private readonly key: crypto.KeyObject;
   private jwt: { value: string; issuedAt: number } | null = null;
   private lastActivityUpdate = new Map<string, number>();
+  private lastActivityState = new Map<string, string>();
   private activityStartedAt = new Map<string, number>();
 
   constructor(
@@ -129,17 +130,13 @@ export class ApnsNotifications {
   }
 
   remove(id: string): { removed: boolean; count: number } {
-    if (!/^[a-f0-9]{24}$/.test(id)) throw new Error('Invalid APNs device id.');
-    const before = this.devices();
-    const after = before.filter((device) => device.id !== id);
-    if (after.length !== before.length) writePrivatePushStore(this.devicesPath, after);
-    return { removed: after.length !== before.length, count: after.length };
+    if (!validPushRegistrationId(id)) throw new Error('Invalid APNs device id.');
+    const { removed, remaining } = removePushEntries(this.devicesPath, this.devices(), (device) => device.id === id);
+    return { removed, count: remaining.length };
   }
 
   removeForDevice(deviceId: string): void {
-    const devices = this.devices();
-    const remaining = devices.filter((device) => device.deviceId !== deviceId);
-    if (remaining.length !== devices.length) writePrivatePushStore(this.devicesPath, remaining);
+    removePushEntries(this.devicesPath, this.devices(), (device) => device.deviceId === deviceId);
   }
 
   async deliverActivity(event: ActivityEvent): Promise<void> {
@@ -159,7 +156,11 @@ export class ApnsNotifications {
       : event.phase === 'permission' ? 'waiting for permission'
       : event.outcome === 'complete' ? 'done'
       : event.outcome === 'cancelled' ? 'cancelled' : 'failed';
-    if (event.phase === 'start') this.activityStartedAt.set(key, Date.parse(event.occurredAt));
+    if (event.phase === 'start') {
+      this.activityStartedAt.set(key, Date.parse(event.occurredAt));
+      this.lastActivityUpdate.delete(key);
+      this.lastActivityState.delete(key);
+    }
     const startedAt = this.activityStartedAt.get(key) ?? Date.parse(event.occurredAt);
     const content = { state, backend: event.backend ?? '', model: event.model ?? '', startedAt: Math.floor(startedAt / 1_000) };
     if (event.phase === 'start') {
@@ -179,9 +180,17 @@ export class ApnsNotifications {
     }
     const end = event.phase === 'end';
     const now = this.now();
-    if (!end && event.phase !== 'permission' && now - (this.lastActivityUpdate.get(key) ?? 0) < UPDATE_INTERVAL_MS) return;
-    if (!end) this.lastActivityUpdate.set(key, now); else {
+    const throttled = now - (this.lastActivityUpdate.get(key) ?? 0) < UPDATE_INTERVAL_MS;
+    // Entering the permission state is always delivered: a swallowed prompt
+    // leaves the Live Activity stale until the turn ends or the prompt times out.
+    const entersPermission = event.phase === 'permission' && this.lastActivityState.get(key) !== state;
+    if (!end && throttled && !entersPermission) return;
+    if (!end) {
+      this.lastActivityUpdate.set(key, now);
+      this.lastActivityState.set(key, state);
+    } else {
       this.lastActivityUpdate.delete(key);
+      this.lastActivityState.delete(key);
       this.activityStartedAt.delete(key);
     }
     const aps: Record<string, unknown> = {
@@ -220,7 +229,7 @@ export class ApnsNotifications {
   ): Promise<void> {
     const host = this.config.environment === 'production' ? 'https://api.push.apple.com' : 'https://api.sandbox.push.apple.com';
     const devices = this.devices();
-    const invalid = new Map<string, Map<string, string>>();
+    const invalid = new Map<string, { slot: TokenSlot; token: string }[]>();
     await Promise.all(devices.map(async (device) => {
       try {
         const outgoing = request(device);
@@ -231,9 +240,9 @@ export class ApnsNotifications {
         }
         const response = await this.transport(host, outgoing);
         if (response.status === 410 || response.reason === 'BadDeviceToken' || response.reason === 'Unregistered') {
-          const kinds = invalid.get(device.id) ?? new Map<string, string>();
-          kinds.set(typeof tokenSlot === 'string' ? tokenSlot : tokenSlot.liveActivity, outgoing.token);
-          invalid.set(device.id, kinds);
+          const failures = invalid.get(device.id) ?? [];
+          failures.push({ slot: tokenSlot, token: outgoing.token });
+          invalid.set(device.id, failures);
         } else if (response.status >= 400) {
           console.error(`[apns] delivery failed for device ${device.id}: ${response.reason ?? response.status}`);
         }
@@ -243,16 +252,18 @@ export class ApnsNotifications {
     }));
     if (!invalid.size) return;
     writePrivatePushStore(this.devicesPath, this.devices().flatMap((device) => {
-      const kinds = invalid.get(device.id);
-      if (!kinds) return [device];
-      if (kinds.get('device') === device.token) return [];
+      const failures = invalid.get(device.id);
+      if (!failures) return [device];
+      if (failures.some(({ slot, token }) => slot === 'device' && token === device.token)) return [];
       const liveActivities = { ...device.liveActivities };
-      for (const [kind, failedToken] of kinds) {
-        if (kind !== 'device' && kind !== 'pushToStartToken' && liveActivities[kind] === failedToken) delete liveActivities[kind];
+      for (const { slot, token } of failures) {
+        if (typeof slot !== 'string' && liveActivities[slot.liveActivity] === token) delete liveActivities[slot.liveActivity];
       }
       return [{
         ...device,
-        pushToStartToken: kinds.get('pushToStartToken') === device.pushToStartToken ? null : device.pushToStartToken,
+        pushToStartToken: failures.some(({ slot, token }) => slot === 'pushToStartToken' && token === device.pushToStartToken)
+          ? null
+          : device.pushToStartToken,
         liveActivities
       }];
     }));

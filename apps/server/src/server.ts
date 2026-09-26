@@ -335,6 +335,9 @@ export function createServer(
       legacyHeaders: false
     }));
   }
+  const rejectInvalidRequest = (res: express.Response, code: string, error: unknown) => {
+    res.status(400).json({ error: code, message: error instanceof Error ? error.message : String(error) });
+  };
   if (node.role === 'central' && configDeps.webPushNotifications) {
     const push = configDeps.webPushNotifications;
     app.get('/api/push/public-key', (_req, res) => res.json({ publicKey: push.publicKey() }));
@@ -343,7 +346,7 @@ export function createServer(
       try {
         res.status(201).json(push.register(req.body?.subscription, req.body?.label, res.locals.authPrincipal?.kind === 'device' ? res.locals.authPrincipal.id : undefined));
       } catch (error) {
-        res.status(400).json({ error: 'invalid_push_subscription', message: error instanceof Error ? error.message : String(error) });
+        rejectInvalidRequest(res, 'invalid_push_subscription', error);
       }
     });
     app.delete('/api/push/subscriptions/:id', mutation('push_subscription.remove'), (req, res) => {
@@ -351,7 +354,7 @@ export function createServer(
         const result = push.remove(req.params.id);
         res.status(result.removed ? 200 : 404).json(result);
       } catch (error) {
-        res.status(400).json({ error: 'invalid_push_subscription', message: error instanceof Error ? error.message : String(error) });
+        rejectInvalidRequest(res, 'invalid_push_subscription', error);
       }
     });
   }
@@ -362,7 +365,7 @@ export function createServer(
       try {
         res.status(201).json(apns.register(req.body, res.locals.authPrincipal?.kind === 'device' ? res.locals.authPrincipal.id : undefined));
       } catch (error) {
-        res.status(400).json({ error: 'invalid_apns_device', message: error instanceof Error ? error.message : String(error) });
+        rejectInvalidRequest(res, 'invalid_apns_device', error);
       }
     });
     app.delete('/api/push/apns-devices/:id', mutation('apns_device.remove'), (req, res) => {
@@ -370,7 +373,7 @@ export function createServer(
         const result = apns.remove(req.params.id);
         res.status(result.removed ? 200 : 404).json(result);
       } catch (error) {
-        res.status(400).json({ error: 'invalid_apns_device', message: error instanceof Error ? error.message : String(error) });
+        rejectInvalidRequest(res, 'invalid_apns_device', error);
       }
     });
   }
@@ -387,7 +390,7 @@ export function createServer(
     });
     app.post('/api/manager-chat/bridge/operators', mutation('messaging_bridge.pair'), (req, res) => {
       try { res.status(201).json({ operator: messagingBridge.pair(req.body ?? {}) }); }
-      catch (error) { res.status(400).json({ error: 'invalid_bridge_operator', message: error instanceof Error ? error.message : String(error) }); }
+      catch (error) { rejectInvalidRequest(res, 'invalid_bridge_operator', error); }
     });
     app.post('/api/manager-chat/bridge/operators/revoke', mutation('messaging_bridge.revoke'), (req, res) => {
       try { res.json({ operator: messagingBridge.revoke(req.body?.operatorId) }); }

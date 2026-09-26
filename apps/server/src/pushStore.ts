@@ -6,6 +6,23 @@ export function pushRegistrationId(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 24);
 }
 
+export function validPushRegistrationId(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{24}$/.test(value);
+}
+
+export type StoredPushEntry = { id: string; deviceId?: string };
+
+/** Remove entries matching a predicate and persist the remainder with the same private-write rules. */
+export function removePushEntries<T extends StoredPushEntry>(
+  path: string,
+  entries: T[],
+  matches: (entry: T) => boolean
+): { removed: boolean; remaining: T[] } {
+  const remaining = entries.filter((entry) => !matches(entry));
+  if (remaining.length !== entries.length) writePrivatePushStore(path, remaining);
+  return { removed: remaining.length !== entries.length, remaining };
+}
+
 export function validPushDeviceLabel(value: unknown): boolean {
   return value === undefined
     || (typeof value === 'string' && value.length <= 80 && !/[\x00-\x1f\x7f]/.test(value));

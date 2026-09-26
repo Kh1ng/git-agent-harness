@@ -12,7 +12,7 @@ import {
 import { dirname, resolve } from 'node:path';
 import { activityPath, type ActivityEvent } from '@git-agent-harness/contracts';
 import webPush, { type PushSubscription } from 'web-push';
-import { pushRegistrationId, validPushDeviceLabel, writePrivatePushStore } from './pushStore.js';
+import { pushRegistrationId, removePushEntries, validPushDeviceLabel, validPushRegistrationId, writePrivatePushStore } from './pushStore.js';
 
 const PUSH_ACTIVITY_KINDS = new Set([
   'chat_turn_completed',
@@ -116,17 +116,13 @@ export class WebPushNotifications {
   }
 
   remove(id: string): { removed: boolean; count: number } {
-    if (!/^[a-f0-9]{24}$/.test(id)) throw new Error('Invalid push subscription id.');
-    const before = this.subscriptions();
-    const after = before.filter((entry) => entry.id !== id);
-    if (after.length !== before.length) writePrivatePushStore(this.subscriptionsPath, after);
-    return { removed: after.length !== before.length, count: after.length };
+    if (!validPushRegistrationId(id)) throw new Error('Invalid push subscription id.');
+    const { removed, remaining } = removePushEntries(this.subscriptionsPath, this.subscriptions(), (entry) => entry.id === id);
+    return { removed, count: remaining.length };
   }
 
   removeForDevice(deviceId: string): void {
-    const subscriptions = this.subscriptions();
-    const remaining = subscriptions.filter((entry) => entry.deviceId !== deviceId);
-    if (remaining.length !== subscriptions.length) writePrivatePushStore(this.subscriptionsPath, remaining);
+    removePushEntries(this.subscriptionsPath, this.subscriptions(), (entry) => entry.deviceId === deviceId);
   }
 
   async deliverActivity(event: ActivityEvent): Promise<void> {
