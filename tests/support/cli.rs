@@ -14,6 +14,11 @@ use tempfile::TempDir;
 #[cfg(unix)]
 const TEST_INTEGRATION_MIN_DISPATCH_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
+/// Keep integration-test repositories and child-process temporary files on
+/// the same filesystem as Cargo's build output. Some development hosts mount
+/// `/tmp` as a small tmpfs; production dispatch capacity checks must remain
+/// strict without making the test suite depend on that unrelated filesystem's
+/// current free-space level.
 pub fn test_temp_root() -> PathBuf {
     let fallback_root = std::env::temp_dir();
     let default_root = std::env::var_os("CARGO_TARGET_DIR")
@@ -69,6 +74,10 @@ pub fn test_tempdir() -> TempDir {
         .unwrap()
 }
 
+/// Retains a command's isolated filesystem environment until the command is
+/// finished, then removes it with the fixture. This matters for asynchronously
+/// spawned children: dropping the temporary directory immediately after
+/// `spawn()` would race the child while leaving anything it recreated behind.
 pub struct IsolatedCommand<C> {
     command: C,
     state: TempDir,
@@ -119,6 +128,11 @@ impl TestCommandEnvironment for std::process::Command {
     }
 }
 
+/// Isolate all process-global GAH state used by CLI integration children,
+/// including the node-wide capacity lease registry. CLI integration tests
+/// may run under the real systemd loop, which sets XDG_STATE_HOME to the
+/// operator's persistent state directory; never let fake profiles and work
+/// claims leak into (or inherit from) that state.
 pub fn isolate_gah_command<C: TestCommandEnvironment>(command: C) -> IsolatedCommand<C> {
     isolate_command(command, |command, root| {
         let tmp = root.join("tmp");

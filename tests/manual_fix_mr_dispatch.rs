@@ -1,6 +1,5 @@
 mod support;
 
-#[cfg(unix)]
 use support::fake_ledger::TestLedger;
 use support::scenario::ScenarioHarness;
 
