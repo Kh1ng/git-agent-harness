@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ChevronRight, ListChecks, FileText, Rocket } from 'lucide-react';
+import { ChevronRight, ListChecks, Rocket } from 'lucide-react';
 import { ExternalAnchor } from '../components/ExternalAnchor';
 import type { AvailableTicket, ManagerBackendInfo, MergeRequest, ProviderKind, Session, UsageRollupTicketRow, WorkWaypointEvidence } from '@git-agent-harness/contracts';
 import { generateProviderInstanceId } from '@git-agent-harness/shared';
@@ -12,17 +12,15 @@ import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
-import { LastUpdated } from '../components/ui/LastUpdated.js';
 import { SessionCard } from '../components/SessionCard.js';
-import { AttemptTimeline } from '../components/AttemptTimeline.js';
 import { PaidRouteApprovals } from '../components/PaidRouteApprovals.js';
 import { ExternalApprovals } from '../components/ExternalApprovals.js';
 import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
 import { ProviderPicker } from '../components/ProviderPicker.js';
 import { formatCost, formatPercent } from '../lib/format.js';
+import { workKey } from '../lib/workKey.js';
 import {
   WAYPOINTS,
-  WaypointHistory,
   WaypointStrip,
   currentWorkWaypoint,
   type WaypointEvidence
@@ -117,6 +115,7 @@ function NewDispatchForm({ profile, repo, backends }: { profile: string; repo: s
 type WorkPageProps = {
   sessions: Session[];
   onSelectSession: (session: Session) => void;
+  onOpenWork: (workId: string) => void;
 };
 
 type ProjectWorkItem = {
@@ -128,16 +127,6 @@ type ProjectWorkItem = {
   session: Session | undefined;
   ledgerEvidence: WorkWaypointEvidence | undefined;
 };
-
-function workKey(workId: string): string {
-  const trimmed = workId.trim();
-  if (/^\d+$/.test(trimmed)) return `#${Number(trimmed)}`;
-  const issue = trimmed.match(/^#0*(\d+)$/);
-  if (issue) return `#${Number(issue[1])}`;
-  const ticket = trimmed.match(/^ticket-0*(\d+)$/i);
-  if (ticket) return `#${Number(ticket[1])}`;
-  return trimmed.toLowerCase();
-}
 
 function projectWorkItems(
   tickets: AvailableTicket[],
@@ -203,57 +192,7 @@ function itemEvidence(item: ProjectWorkItem): WaypointEvidence {
   };
 }
 
-function WorkDetail({ item, onBack }: { item: ProjectWorkItem; onBack: () => void }) {
-  const workId = item.workId as string;
-  const timeline = useGahStore((s) => s.workTimelines[workId]);
-  const fetchWorkTimeline = useGahStore((s) => s.fetchWorkTimeline);
-
-  useEffect(() => {
-    fetchWorkTimeline(workId);
-  }, [workId, fetchWorkTimeline]);
-
-  const refresh = () => fetchWorkTimeline(workId, { force: true });
-  useAutoRefresh(refresh, WORK_REFRESH_MS);
-  useWsReconnectRefresh(refresh);
-
-  return (
-    <div>
-      <button onClick={onBack} className="inline-flex items-center gap-1.5 text-sm text-secondary hover:text-primary mb-4">
-        <ArrowLeft size={15} aria-hidden="true" />
-        Back to work list
-      </button>
-      <div className="flex items-start justify-between gap-4 mb-1">
-        <h2 className="text-lg font-semibold text-primary">{workId}</h2>
-        <LastUpdated at={timeline?.fetchedAt ?? null} />
-      </div>
-      <p className="text-sm text-muted mb-5">
-        Dispatch → attempt → fallback → validation → repair → review → merge, in order.
-      </p>
-
-      {timeline?.loading && !timeline.data ? (
-        <LoadingState label="Loading attempt history…" />
-      ) : timeline?.error ? (
-        <ErrorState
-          message={timeline.error}
-          endpoint={`/api/work/${workId}`}
-          onRetry={() => fetchWorkTimeline(workId, { force: true })}
-        />
-      ) : !timeline?.data || timeline.data.length === 0 ? (
-        <div className="space-y-4">
-          <WaypointHistory evidence={itemEvidence(item)} label={workId} />
-          <EmptyState icon={FileText} title="No ledger history for this work item yet" />
-        </div>
-      ) : (
-        <div className="space-y-4">
-          <WaypointHistory evidence={{ ...itemEvidence(item), entries: timeline.data }} label={workId} />
-          <AttemptTimeline entries={timeline.data} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
+export function WorkPage({ sessions, onSelectSession, onOpenWork }: WorkPageProps) {
   const { profile: wsProfile, controllerActivity } = useWebSocket();
   const profileOverride = useUiStore((s) => s.profileOverride);
   const profile = profileOverride ?? wsProfile;
@@ -263,7 +202,6 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
   const report = useGahStore((s) => s.report);
   const fetchReport = useGahStore((s) => s.fetchReport);
-  const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
   const [holdPending, setHoldPending] = useState<string | null>(null);
   const [holdError, setHoldError] = useState<string | null>(null);
   const [factoryData, setFactoryData] = useState<{ profile: string | null; usageTickets: UsageRollupTicketRow[]; managerBackends: ManagerBackendInfo[] }>({
@@ -328,11 +266,6 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
     ),
     [status.data?.available_tickets, status.data?.merge_requests, status.data?.work_waypoint_evidence, sessions]
   );
-
-  if (selectedWorkId) {
-    const selectedItem = projectItems.find((item) => item.workId === selectedWorkId);
-    if (selectedItem) return <WorkDetail item={selectedItem} onBack={() => setSelectedWorkId(null)} />;
-  }
 
   const activeSessions = sessions.filter((s) => s.status === 'running');
   const queuedSessions = sessions.filter((s) => s.status === 'starting');
@@ -473,12 +406,12 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
               <ul className="card divide-y divide-subtle" aria-label="Review queue">
                 {[...reviewWork.values()].map(item => (
                   <li key={workKey(item.workId)} className="flex flex-wrap items-center justify-between gap-3 px-3 py-3">
-                    <div className="min-w-0">
+                    <button type="button" onClick={() => onOpenWork(item.workId)} className="min-h-11 min-w-0 text-left sm:min-h-0">
                       <p className="text-sm text-primary"><span className="font-mono text-xs text-muted">{item.workId}</span>{item.title ? ` ${item.title}` : ''}</p>
                       <div className="mt-1 flex flex-wrap gap-1">
                         {[...item.reasons].map(reason => <StatusBadge key={reason} tone="warning" label={reason} />)}
                       </div>
-                    </div>
+                    </button>
                     <div className="flex items-center gap-2">
                       {item.url && <ExternalAnchor href={item.url} className="text-xs text-accent hover:underline">Open PR</ExternalAnchor>}
                       {item.reasons.has('Review hold') && (
@@ -630,7 +563,7 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                   const evidence = itemEvidence(item);
                   const currentWaypoint = currentWorkWaypoint(evidence);
                   return (
-                  <tr key={item.key}>
+                  <tr key={item.key} className={item.workId ? 'cursor-pointer hover:bg-raised/50' : undefined} onClick={() => item.workId && onOpenWork(item.workId)}>
                     <td className="text-primary">
                       {item.workId && <span className="font-mono text-xs text-muted mr-1.5">{item.workId}</span>}
                       {item.title !== item.workId ? item.title : null}
@@ -660,7 +593,7 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                             <button
                               type="button"
                               disabled={holdPending !== null}
-                              onClick={() => clearHold(t.work_id as string)}
+                              onClick={(event) => { event.stopPropagation(); void clearHold(t.work_id as string); }}
                               className="px-2 py-0.5 border border-subtle rounded text-xs text-secondary hover:text-primary"
                             >
                               {holdPending === t.work_id ? '…' : 'Release'}
@@ -669,7 +602,7 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                             <button
                               type="button"
                               disabled={holdPending !== null}
-                              onClick={() => setHold(t.work_id as string, 'operator review hold from dashboard')}
+                              onClick={(event) => { event.stopPropagation(); void setHold(t.work_id as string, 'operator review hold from dashboard'); }}
                               className="px-2 py-0.5 border border-subtle rounded text-xs text-secondary hover:text-primary"
                             >
                               {holdPending === t.work_id ? '…' : 'Hold'}
@@ -694,10 +627,10 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                     <td>
                       {item.workId && (
                         <button
-                          onClick={() => setSelectedWorkId(item.workId)}
+                          onClick={(event) => { event.stopPropagation(); onOpenWork(item.workId as string); }}
                           className="inline-flex min-h-11 items-center text-xs text-accent underline-offset-4 hover:underline focus-visible:underline sm:min-h-0 sm:py-1"
                         >
-                          View history
+                          View details
                         </button>
                       )}
                     </td>

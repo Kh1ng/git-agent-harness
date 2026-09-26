@@ -8,6 +8,9 @@ import { SessionDetailModal } from './components/SessionDetailModal.js';
 import { activityPath, type Session } from '@git-agent-harness/contracts';
 import { readNavigation, updateNavigation, type Page } from './lib/navigationState.js';
 import { ActivityToast } from './components/ActivityToast.js';
+import { WorkDetailDrawer } from './components/WorkDetailDrawer.js';
+import { generateProviderInstanceId } from '@git-agent-harness/shared';
+import { useUiStore } from './store/uiStore.js';
 
 const WorkPage = lazy(() => import('./pages/WorkPage.js').then((module) => ({ default: module.WorkPage })));
 const TelemetryPage = lazy(() => import('./pages/TelemetryPage.js').then((module) => ({ default: module.TelemetryPage })));
@@ -26,15 +29,17 @@ export function App() {
   const [chatLauncherRequest, setChatLauncherRequest] = useState(0);
   useEffect(() => updateNavigation({ page: currentPage }), [currentPage]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
+  const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
   const [dismissedActivityId, setDismissedActivityId] = useState<string | null>(null);
-  const { isConnected, isConnecting, sessions, liveActivity, activityUnreadCount } = useWebSocket();
+  const profileOverride = useUiStore((state) => state.profileOverride);
+  const { isConnected, isConnecting, sessions, liveActivity, activityUnreadCount, profile, sendMessage } = useWebSocket();
 
   const renderPage = () => {
     switch (currentPage) {
       case 'nodes':
         return <NodesPage />;
       case 'work':
-        return <WorkPage sessions={sessions} onSelectSession={setSelectedSession} />;
+        return <WorkPage sessions={sessions} onSelectSession={setSelectedSession} onOpenWork={setSelectedWorkId} />;
       case 'telemetry':
         return <TelemetryPage />;
       case 'quota':
@@ -56,6 +61,7 @@ export function App() {
             sessions={sessions}
             onSelectSession={setSelectedSession}
             onNavigate={setCurrentPage}
+            onOpenWork={setSelectedWorkId}
           />
         );
     }
@@ -88,6 +94,26 @@ export function App() {
 
       {selectedSession && (
         <SessionDetailModal session={selectedSession} onClose={() => setSelectedSession(null)} />
+      )}
+      {selectedWorkId && (
+        <WorkDetailDrawer
+          workId={selectedWorkId}
+          profile={profileOverride ?? profile ?? 'gah'}
+          connected={isConnected}
+          sessions={sessions}
+          onClose={() => setSelectedWorkId(null)}
+          onRedispatch={({ profile, repo, workId, backend }) => sendMessage({
+            type: 'session.start',
+            requestId: `redispatch_${Date.now()}`,
+            profile,
+            providerKind: backend,
+            instanceId: generateProviderInstanceId(backend, 0),
+            repo,
+            mode: 'fix',
+            backend,
+            target: workId,
+          })}
+        />
       )}
       {liveActivity && liveActivity.id !== dismissedActivityId && currentPage !== 'events' && (
         <ActivityToast
