@@ -7,7 +7,7 @@ import { runProfileList } from './gahCli.js';
 import { resolveInstanceAdapter, type ManagerAdapter } from './managerChat/registry.js';
 import { archiveSession, chatKey, createSession, getSession, publishWorkspace, refreshWorkspace, resolveSessionCwd, touchSession, updateSession, type ChatSessionStoreOptions } from './managerChat/chatSessions.js';
 import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewChangesForHelper, getSelectedChangesForHelper } from './gitCache.js';
-import { findOpenPullRequest, publishPullRequest } from './gitPullRequest.js';
+import { findOpenPullRequest, publishPullRequest, updatePullRequest } from './gitPullRequest.js';
 
 import { isUsageLimitError } from './managerChat/acpAdapter.js';
 import type { WorkerChatEvent } from './workerChatProtocol.js';
@@ -42,7 +42,7 @@ export function createWorkerChatRouter(deps: {
     if (!body || typeof body.profile !== 'string' || !body.profile || typeof body.action !== 'string') {
       return void res.status(400).json({ error: 'A profile and worker chat action are required.' });
     }
-    const actions = ['create', 'prepare', 'handoff', 'archive', 'models', 'commands', 'run', 'cancel', 'steer', 'permission', 'git-status', 'git-review', 'git-commit', 'git-publish', 'helper-task'];
+    const actions = ['create', 'prepare', 'handoff', 'archive', 'models', 'commands', 'run', 'cancel', 'steer', 'permission', 'git-status', 'git-review', 'git-commit', 'git-publish', 'git-update', 'helper-task'];
     if (!actions.includes(body.action)) return void res.status(400).json({ error: 'Unknown worker chat action.' });
     const sessionId = body.sessionId;
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(sessionId))) {
@@ -54,7 +54,7 @@ export function createWorkerChatRouter(deps: {
       if (!profile) return void res.status(404).json({ error: 'This worker does not have that profile.' });
       if (!profile.web_url || body.repo !== profile.repo || body.provider !== profile.provider || body.origin !== new URL(profile.web_url).origin) return void res.status(409).json({ error: 'The worker profile refers to a different repository or provider host.' });
       const key = chatKey(body.profile, sessionId);
-      if (['create', 'prepare', 'handoff', 'archive', 'run', 'git-commit', 'git-publish'].includes(body.action)) {
+      if (['create', 'prepare', 'handoff', 'archive', 'run', 'git-commit', 'git-publish', 'git-update'].includes(body.action)) {
         if (workspaceOperations.has(key) || [...active.values()].some(turn => turn.key === key)) {
           return void res.status(409).json({ error: 'Stop the active turn before changing this worker workspace.' });
         }
@@ -163,6 +163,13 @@ export function createWorkerChatRouter(deps: {
             return void res.status(400).json({ error: 'A commit message and valid file selection are required.' });
           }
           return void res.json(await commitGitChanges(body.profile, cwd, body.message.trim(), sessionId, body.files));
+        }
+        if (body.action === 'git-update') {
+          if (!Number.isSafeInteger(body.number) || body.number <= 0 || typeof body.title !== 'string' || !body.title.trim() || typeof body.body !== 'string'
+            || (body.draft !== undefined && typeof body.draft !== 'boolean')) {
+            return void res.status(400).json({ error: 'A valid pull request update is required.' });
+          }
+          return void res.json(await updatePullRequest(profile, cwd, { number: body.number, title: body.title.trim(), body: body.body, draft: body.draft }));
         }
         if (typeof body.title !== 'string' || !body.title.trim() || typeof body.body !== 'string'
           || typeof body.base !== 'string' || !body.base.trim() || typeof body.draft !== 'boolean') {

@@ -19,6 +19,7 @@ type Operation =
   | 'backend_instance.configure'
   | 'git.commit'
   | 'git.publish'
+  | 'git.update'
   | 'config.routing_candidate.add'
   | 'config.routing_candidate.remove'
   | 'config.routing_candidate.move'

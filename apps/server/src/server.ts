@@ -106,7 +106,7 @@ import { createWorkerChatRouter } from './workerChat.js';
 import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitReviewState, getReviewChangesForHelper, getSelectedChangesForHelper, commitGitChanges, cliInDir } from './gitCache.js';
 import { commitMessageInput, helperFallback, linkedIssueNumbers, prSummaryInput, publicSuggestion, readHelperUsage, recordHelperUsage, runHelperTask, type HelperTaskResult } from './managerChat/helperTasks.js';
 import { fetchLinkedChatIssues } from './managerChat/issueChats.js';
-import { createGitLabMergeRequest, findOpenPullRequest, publishPullRequest } from './gitPullRequest.js';
+import { createGitLabMergeRequest, findOpenPullRequest, publishPullRequest, updatePullRequest } from './gitPullRequest.js';
 import {
   addCanonicalSkillBinding,
   clearSkillBindings,
@@ -2408,6 +2408,30 @@ export function createServer(
       res.json(await publishPullRequest(profileInfo, target.cwd, { title: title.trim(), body, base: review.base, draft }));
     } catch {
       res.status(502).json({ error: 'Push or provider request failed' });
+    }
+  });
+
+  app.post('/api/git/pull-request/update', mutation('git.update'), async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
+    const { number, title, body = '', draft, nodeId } = req.body ?? {};
+    if (!Number.isSafeInteger(number) || number <= 0 || typeof title !== 'string' || !title.trim()
+      || typeof body !== 'string' || (draft !== undefined && typeof draft !== 'boolean')
+      || (nodeId !== undefined && typeof nodeId !== 'string')) {
+      return res.status(400).json({ error: 'Invalid pull request update', message: 'A positive request number, title, and description are required.' });
+    }
+    try {
+      const route = await chatRoute(profile, nodeId, undefined, false);
+      if (route.remote) return res.json(await route.remote.request({ action: 'git-update', sessionId, number, title: title.trim(), body, draft }));
+      const target = await resolveGitTarget(route.profileName, sessionId);
+      if (target.kind === 'error') return res.status(target.status).json({ error: target.error });
+      if (target.kind === 'read-only') return res.status(403).json({ error: 'read_only_checkout', message: 'Session is read-only and cannot edit provider pull requests.' });
+      const profileInfo = await resolveProfileInfo(route.profileName);
+      if (!profileInfo) return res.status(404).json({ error: 'Profile not found' });
+      res.json(await updatePullRequest(profileInfo, target.cwd, { number, title: title.trim(), body, draft }));
+    } catch (error) {
+      const stderr = typeof (error as { stderr?: unknown })?.stderr === 'string' ? (error as { stderr: string }).stderr.trim() : '';
+      res.status(502).json({ error: 'Provider pull request update failed', message: (stderr || (error instanceof Error ? error.message : 'Provider update failed')).slice(0, 4096) });
     }
   });
 

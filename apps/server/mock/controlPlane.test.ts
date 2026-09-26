@@ -304,8 +304,12 @@ test('new non-chat mutations return success and persist in memory', async () => 
 
     const pullRequest = await post(running.baseUrl, '/api/git/pr', { title: 'Mock pull request' });
     assert.equal(pullRequest.status, 200);
-    const prs = await fetch(`${running.baseUrl}/api/git/prs`).then((response) => response.json()) as { prs: { title: string }[] };
+    const prs = await fetch(`${running.baseUrl}/api/git/prs`).then((response) => response.json()) as { prs: { number: number; title: string }[] };
     assert.equal(prs.prs[0]?.title, 'Mock pull request');
+    const update = await post(running.baseUrl, '/api/git/pull-request/update', { number: prs.prs[0].number, title: 'Edited mock pull request', body: 'Edited body' });
+    assert.equal(update.status, 200);
+    const updatedPrs = await fetch(`${running.baseUrl}/api/git/prs`).then((response) => response.json()) as { prs: { title: string }[] };
+    assert.equal(updatedPrs.prs[0]?.title, 'Edited mock pull request');
 
     const createdSkill = await post(running.baseUrl, '/api/skills', {
       id: 'review', version: '1.0.0', displayName: 'Review', content: '# Review', backends: ['codex']

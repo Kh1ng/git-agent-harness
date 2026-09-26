@@ -23,7 +23,7 @@ test('all API routes require remote authentication while health and trusted loca
   try {
     await withFixtureServer(async base => {
       // Start with a harmless fixture read so the pre-fix negative control has no side effects.
-      for (const path of ['/api/profiles', '/api/config', '/api/manager-chat/sessions', '/api/dispatch', '/api/loop/start', '/api/ledger/clear-attempts', '/api/hold/set', '/api/availability/clear', '/api/git/pr', '/api/not-yet-implemented']) {
+      for (const path of ['/api/profiles', '/api/config', '/api/manager-chat/sessions', '/api/dispatch', '/api/loop/start', '/api/ledger/clear-attempts', '/api/hold/set', '/api/availability/clear', '/api/git/pr', '/api/git/pull-request/update', '/api/not-yet-implemented']) {
         const response = await fetch(base + path, { headers: remote });
         assert.equal(response.status, 401, path);
       }
@@ -745,6 +745,10 @@ test('git routes reject stale sessions and expose worktree-less sessions as read
       body: JSON.stringify({ message: 'should not land' })
     });
     const status = (sessionId: string) => fetch(`${baseUrl}/api/git/status?profile=${profile}&sessionId=${sessionId}`);
+    const updatePullRequest = (sessionId: string) => fetch(`${baseUrl}/api/git/pull-request/update?profile=${profile}&sessionId=${sessionId}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `git-update-test-${sessionId}` },
+      body: JSON.stringify({ number: 7, title: 'Should not land', body: '' })
+    });
 
     const unknownResponse = await commit('does-not-exist');
     assert.equal(unknownResponse.status, 404, 'unknown session id must be rejected, not routed to local_path');
@@ -766,6 +770,8 @@ test('git routes reject stale sessions and expose worktree-less sessions as read
     assert.equal(prSession.worktreePath, null, 'PR chat is worktree-less by design');
     const prResponse = await commit(prSession.id);
     assert.equal(prResponse.status, 403, 'worktree-less read-only PR session must be rejected, not routed to local_path');
+    const prUpdateResponse = await updatePullRequest(prSession.id);
+    assert.equal(prUpdateResponse.status, 403, 'worktree-less read-only PR session must not mutate its provider request');
     const prStatusResponse = await status(prSession.id);
     assert.equal(prStatusResponse.status, 200);
     assert.deepEqual(await prStatusResponse.json(), {
