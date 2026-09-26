@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Copy, Check, ExternalLink, Hammer } from 'lucide-react';
 import { StatusBadge } from './ui/StatusBadge.js';
+import { ExternalAnchor } from './ExternalAnchor.js';
 import { gahApi, GahApiError } from '../api/client.js';
 import type { Blocker } from '@git-agent-harness/contracts';
 
@@ -82,14 +83,12 @@ function BlockedWorkItem({ blocker }: { blocker: Blocker }) {
           </p>
         </div>
         {prUrl && (
-          <a
+          <ExternalAnchor
             href={prUrl}
-            target="_blank"
-            rel="noreferrer"
             className="text-xs text-secondary hover:text-primary inline-flex items-center gap-1"
           >
             PR/MR <ExternalLink size={12} aria-hidden="true" />
-          </a>
+          </ExternalAnchor>
         )}
       </div>
 

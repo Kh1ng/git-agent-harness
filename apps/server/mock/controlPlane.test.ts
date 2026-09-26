@@ -66,6 +66,11 @@ function frontendApiRoutes(): { method: string; path: string }[] {
   const deadClientMethods = new Set([
     'POST /api/projects',
     'DELETE /api/projects/:param',
+    // Same dead deleteProject call site: its `?nodeId=` query-string
+    // ternary parses as a second template span, so the route shows up as
+    // /api/projects/:param:param -- the query string, not a real path
+    // segment.
+    'DELETE /api/projects/:param:param',
     'POST /api/context/recall',
     'GET /api/git/branches'
   ]);

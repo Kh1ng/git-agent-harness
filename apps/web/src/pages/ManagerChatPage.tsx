@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { MoreHorizontal, Send, Square, MessageSquare, GitBranch, Plus, Archive, Wrench, ShieldAlert, MonitorPlay, X, ExternalLink, HardDrive, RefreshCw, Sparkles, GitPullRequest, AlertTriangle } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
+import { ExternalAnchor } from '../components/ExternalAnchor';
 import { useUiStore } from '../store/uiStore.js';
 import { ChatNodePicker } from '../components/ChatNodePicker.js';
 import { useChatNodes } from '../hooks/useChatNodes.js';
@@ -103,7 +104,7 @@ function MarkdownMessage({ text }: { text: string }) {
       <ReactMarkdown
         components={{
           a: ({ node: _node, ...props }) => (
-            <a {...props} target="_blank" rel="noreferrer" />
+            <ExternalAnchor {...props} />
           )
         }}
       >
@@ -273,16 +274,14 @@ function GitStripEntries({
   return (
     <span className="flex items-center gap-1.5 truncate">
       {items.slice(0, GIT_STRIP_MAX_ENTRIES).map((item) => (
-        <a
+        <ExternalAnchor
           key={item.number}
           href={item.url ?? undefined}
-          target="_blank"
-          rel="noopener noreferrer"
           title={item.title}
           className={`truncate max-w-[6rem] hover:underline ${className}`}
         >
           #{item.number}
-        </a>
+        </ExternalAnchor>
       ))}
       {items.length > GIT_STRIP_MAX_ENTRIES && (
         <span className="text-muted shrink-0">+{items.length - GIT_STRIP_MAX_ENTRIES}</span>
@@ -405,16 +404,14 @@ function GitStrip({
             </button>
           )}
           {activePrUrl && (
-            <a
+            <ExternalAnchor
               href={activePrUrl}
-              target="_blank"
-              rel="noopener noreferrer"
               className="flex items-center gap-1 text-muted hover:text-primary hover:underline"
               title={branchPr ? `View #${branchPr.number}: ${branchPr.title}` : `View PR #${activePrNumber}`}
             >
               <ExternalLink size={13} />
               View PR
-            </a>
+            </ExternalAnchor>
           )}
           <button
             type="button"
@@ -1735,15 +1732,13 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
             </h3>
             <div className="flex items-center gap-1">
               {preview && safePreviewUrl(preview.url) !== null && (
-                <a
+                <ExternalAnchor
                   href={safePreviewUrl(preview.url) ?? undefined}
-                  target="_blank"
-                  rel="noreferrer"
                   className="rounded p-1 text-muted hover:bg-white/5 hover:text-primary"
-                  title="Open in a new tab"
+                  title="Open preview"
                 >
                   <ExternalLink size={13} aria-hidden="true" />
-                </a>
+                </ExternalAnchor>
               )}
               <button
                 onClick={() => setPreviewOpen(false)}
@@ -1777,14 +1772,12 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate }: { launcherR
                       Opening it in a new tab works — the preview URL is served over the
                       tailnet.
                     </p>
-                    <a
+                    <ExternalAnchor
                       href={safePreviewUrl(preview.url) ?? '#'}
-                      target="_blank"
-                      rel="noreferrer"
                       className="btn-primary text-xs"
                     >
                       <ExternalLink size={13} aria-hidden="true" /> Open preview
-                    </a>
+                    </ExternalAnchor>
                   </div>
                 )}
               </div>

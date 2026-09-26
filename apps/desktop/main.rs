@@ -159,16 +159,21 @@ fn save_presence(
     Ok(settings.presence)
 }
 
+/// Shared predicate behind both central-address and external-link
+/// validation: plain HTTP(S) with a host and no embedded credentials.
+fn is_plain_http_url(url: &tauri::Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
 fn central_url(value: &str) -> Result<tauri::Url, String> {
     let url: tauri::Url = value
         .trim()
         .parse()
         .map_err(|_| "Enter a full http:// or https:// address.")?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
+    if !is_plain_http_url(&url) {
         return Err("Use an HTTP or HTTPS address without embedded credentials.".into());
     }
     Ok(url)
@@ -176,6 +181,38 @@ fn central_url(value: &str) -> Result<tauri::Url, String> {
 
 fn central_origin(value: &str) -> Result<String, String> {
     Ok(central_url(value)?.origin().ascii_serialization())
+}
+
+/// External links must be plain HTTP(S) URLs without embedded credentials.
+/// Everything the dashboard opens in the OS browser goes through this
+/// validation so a compromised page cannot aim file://, javascript:, or
+/// credential-bearing URLs at the host opener.
+fn external_url(value: &str) -> Result<tauri::Url, String> {
+    let url: tauri::Url = value
+        .trim()
+        .parse()
+        .map_err(|_| "Enter a full http:// or https:// URL.".to_string())?;
+    if !is_plain_http_url(&url) {
+        return Err("Use an HTTP or HTTPS URL without embedded credentials.".into());
+    }
+    Ok(url)
+}
+
+#[tauri::command]
+async fn open_external_url(window: tauri::WebviewWindow, url: String) -> Result<(), String> {
+    open_project::configured_central(&window)?;
+    let parsed = external_url(&url)?;
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(target_os = "windows")]
+    let opener = "explorer.exe";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let opener = "xdg-open";
+    command(opener)
+        .arg(parsed.as_str())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not open the link in your browser: {error}"))
 }
 
 fn owner_credential(origin: &str) -> Result<keyring::Entry, String> {
@@ -859,6 +896,7 @@ fn main() {
             set_node_role,
             worker_status,
             set_worker_running,
+            open_external_url,
             open_project::desktop_open_context,
             open_project::open_local_checkout
         ])
@@ -876,9 +914,9 @@ fn main() {
             // An inert UI marker; remote pages still have no IPC permissions.
             .initialization_script(
                 if cfg!(target_os = "macos") {
-                    "if (window === window.top) { window.__GAH_DESKTOP_SETTINGS__ = true; window.__GAH_DESKTOP_NATIVE_NOTIFICATIONS__ = true; window.__GAH_DESKTOP_OPEN_PROJECT__ = true; }"
+                    "if (window === window.top) { window.__GAH_DESKTOP_SETTINGS__ = true; window.__GAH_DESKTOP_NATIVE_NOTIFICATIONS__ = true; window.__GAH_DESKTOP_OPEN_PROJECT__ = true; window.__GAH_DESKTOP_EXTERNAL_LINKS__ = true; }"
                 } else {
-                    "if (window === window.top) { window.__GAH_DESKTOP_SETTINGS__ = true; window.__GAH_DESKTOP_OPEN_PROJECT__ = true; }"
+                    "if (window === window.top) { window.__GAH_DESKTOP_SETTINGS__ = true; window.__GAH_DESKTOP_OPEN_PROJECT__ = true; window.__GAH_DESKTOP_EXTERNAL_LINKS__ = true; }"
                 },
             )
             .on_page_load(|window, payload| {
@@ -1189,5 +1227,27 @@ mod tests {
             .parse()
             .unwrap();
         assert!(notification_payload(&oversized).is_none());
+    }
+
+    #[test]
+    fn external_url_accepts_only_plain_http_links() {
+        for value in [
+            "https://github.com/owner/repo/pull/12",
+            "http://central.example:3773/api/health",
+        ] {
+            assert!(external_url(value).is_ok(), "{value}");
+        }
+        for value in [
+            "file:///Users/secret/notes.txt",
+            "javascript:alert(1)",
+            "ftp://example.com/file",
+            "gah://settings",
+            "https://user:pass@example.com/pr/1",
+            "https://user@example.com/pr/1",
+            "not a url",
+            "",
+        ] {
+            assert!(external_url(value).is_err(), "{value}");
+        }
     }
 }

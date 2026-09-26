@@ -77,4 +77,5 @@ common API guard is applied.
 This does not complete #532. Fine-grained device scopes, capability policy, idempotency,
 policy parity, and append-only operation auditing remain open. Paired devices can be
 revoked individually, including existing sockets. Changing the coordinator token still
-affects new upgrades only; it does not revoke already-open owner sockets. Physical Windows, iOS, and Android validation remains pending.
+affects new upgrades only; it does not revoke already-open owner sockets. Live
+termination on device-token expiry is ticketed as #1249. Physical Windows, iOS, and Android validation remains pending.

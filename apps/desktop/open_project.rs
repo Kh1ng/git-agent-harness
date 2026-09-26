@@ -57,7 +57,9 @@ struct Checkout {
     path: String,
 }
 
-fn configured_central(window: &tauri::WebviewWindow) -> Result<(), String> {
+/// The trust boundary shared by every remote-dashboard bridge command: only
+/// the configured central dashboard may invoke them.
+pub(crate) fn configured_central(window: &tauri::WebviewWindow) -> Result<(), String> {
     if window.label() != "dashboard" {
         return Err("The local checkout bridge is unavailable in this window.".into());
     }

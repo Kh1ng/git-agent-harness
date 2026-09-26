@@ -782,6 +782,56 @@ fn unavailable_central_falls_back_to_the_direct_channel() {
 }
 
 #[test]
+fn posted_events_outside_the_channel_relay_set_still_send_directly() {
+    let mut cfg = test_gah_config(None);
+    cfg.defaults.registry_central_url = Some("https://central.example".into());
+    cfg.defaults.notification_channel = crate::notify_channels::NotificationChannel::Discord;
+    let profile = crate::config::tests::test_profile_for_notifications();
+
+    let relayed = std::cell::Cell::new(false);
+    notify_event_with_deliveries(
+        &cfg,
+        &profile,
+        NotifyEvent::MrCreated {
+            url: "https://example.com/pr/42",
+            work_id: "#42",
+            backend: "codex",
+            model: "gpt",
+        },
+        |_, _, _, _| Ok(()),
+        |_, _, _| Ok(()),
+        |_, _| {
+            relayed.set(true);
+            Ok(())
+        },
+    );
+    assert!(
+        !relayed.get(),
+        "a feed-relayed kind skips the direct channel after a successful post"
+    );
+
+    let sent = std::cell::Cell::new(false);
+    notify_event_with_deliveries(
+        &cfg,
+        &profile,
+        NotifyEvent::MrMerged {
+            url: "https://example.com/pr/42",
+            work_id: "#42",
+        },
+        |_, _, _, _| Ok(()),
+        |_, _, _| Ok(()),
+        |_, message| {
+            sent.set(message.contains("42"));
+            Ok(())
+        },
+    );
+    assert!(
+        sent.get(),
+        "a kind the feed does not relay still sends directly"
+    );
+}
+
+#[test]
 fn notify_event_wakes_configured_manager_when_autonomy_set() {
     let tmp = tempfile::tempdir().unwrap();
     let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

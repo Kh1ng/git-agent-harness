@@ -1109,6 +1109,100 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     next();
   });
 
+  // Pairing: the mock browser is always the paired owner. Deterministic
+  // fixtures only -- the real single-use/expiry/origin semantics are
+  // covered by apps/server/src/pairing.test.ts and deliberately not
+  // re-tested here.
+  app.get('/api/pairing/session', (_req, res) => res.json({ schema_version: 1, principal: { kind: 'owner', id: 'mock-owner' } }));
+  app.get('/api/pairing/devices', (_req, res) => res.json({
+    schema_version: 1,
+    devices: [{ id: 'mock-device-1', name: 'Mock Phone', created_at: '2026-01-01T00:00:00Z', expires_at: '2026-10-01T00:00:00Z', revoked_at: null }]
+  }));
+  app.post('/api/pairing/offers', (_req, res) => res.json({
+    schema_version: 1,
+    code: 'MOCK-CODE-1',
+    expires_at: '2026-01-01T00:05:00Z',
+    server: { id: 'mock-central', name: 'Mock central', origin: 'http://localhost:5173' },
+    access: 'chat'
+  }));
+  app.post('/api/pairing/inspect', (_req, res) => res.json({
+    schema_version: 1,
+    expires_at: '2026-01-01T00:05:00Z',
+    server: { id: 'mock-central', name: 'Mock central', origin: 'http://localhost:5173' },
+    access: 'chat'
+  }));
+  app.post('/api/pairing/redeem', (_req, res) => res.json({
+    schema_version: 1,
+    device: { id: 'mock-device-2', name: 'Mock Laptop', created_at: '2026-01-01T00:00:00Z', expires_at: '2026-10-01T00:00:00Z', revoked_at: null }
+  }));
+  app.delete('/api/pairing/devices/:id', (_req, res) => res.json({ schema_version: 1, success: true }));
+  app.post('/api/pairing/logout', (_req, res) => res.json({ schema_version: 1, success: true }));
+
+  // Web push: deterministic fixtures; no real VAPID key or delivery.
+  app.get('/api/push/public-key', (_req, res) => res.json({ publicKey: 'mock-vapid-public-key' }));
+  app.get('/api/push/subscriptions', (_req, res) => res.json({ count: 1 }));
+  app.post('/api/push/subscriptions', (_req, res) => res.json({ id: '000000000000000000000001' }));
+  app.delete('/api/push/subscriptions/:id', (_req, res) => res.json({ success: true }));
+
+  app.get('/api/info', (_req, res) => res.json({
+    identity: { node_id: 'mock-central', display_name: 'Mock central', advertised_url: 'http://localhost:5173', version: '0.1.2', schema_digest: 'mock-digest' }
+  }));
+
+  // Fleet registry: one healthy fixture node. The real liveness machinery
+  // is covered by registryService/registryLiveness tests, not re-tested here.
+  app.get('/api/registry/fleet/snapshot', (_req, res) => res.json({ nodes: [], observations: [], leases: [] }));
+  app.get('/api/registry/nodes/:id/doctor', (_req, res) => res.json({
+    schema_version: 1,
+    generated_at: new Date(FIXED_NOW).toISOString(),
+    overall_status: 'ok',
+    checks: [{ name: 'mock isolation', status: 'ok', detail: 'in-memory control plane' }]
+  } satisfies DoctorSnapshot));
+  app.get('/api/registry/nodes/:id/health', (req, res) => res.json({
+    node_id: req.params.id,
+    status: 'healthy',
+    state: 'online',
+    timestamp: 0,
+    last_seen_at: new Date(FIXED_NOW).toISOString()
+  }));
+
+  // Durable work-state writes: the mock accepts and reports success; the
+  // real ledger/hold semantics live behind gahCli and their own suites.
+  app.post('/api/ledger/clear-attempts', (_req, res) => res.json({ ok: true }));
+  app.post('/api/hold/set', (_req, res) => res.json({ ok: true }));
+  app.post('/api/hold/clear', (_req, res) => res.json({ ok: true }));
+  app.post('/api/manager-chat/backend', (_req, res) => res.json({ success: true }));
+  app.post('/api/profiles/:profile/routing-candidates/:action', (_req, res) => res.json({ ok: true }));
+  app.post('/api/git/commit', (_req, res) => res.json({ ok: true }));
+  app.post('/api/git/publish', (_req, res) => res.json({ ok: true }));
+  app.post('/api/settings/nodes/command', (_req, res) => res.json({ command: 'echo mock-node-setup' }));
+
+  const backendInstanceFixture = (profile: string) => ({
+    profile,
+    backend_instances: [{
+      backend_instance: 'codex-work',
+      runner_kind: 'codex',
+      declared: true,
+      enabled: true,
+      logical_backend: 'codex',
+      account_label: 'mock-account',
+      auth_source_label: null,
+      quota_pool: null,
+      supported_models: ['gpt-6-luna'],
+      executable_configured: true,
+      isolated_state_configured: true
+    }]
+  });
+  app.get('/api/backend-instances', (req, res) => res.json(backendInstanceFixture(bodyString(req.query.profile) ?? 'fixture')));
+  app.post('/api/backend-instances/add', (req, res) => res.json(backendInstanceFixture(bodyString(req.body?.profile) ?? 'fixture')));
+  app.post('/api/backend-instances/label', (req, res) => res.json(backendInstanceFixture(bodyString(req.body?.profile) ?? 'fixture')));
+  // Enable/disable arrive as templated paths from the client; accept any
+  // action token and keep the fixture enabled (stateless mock).
+  app.post('/api/backend-instances/:action', (req, res) => res.json(backendInstanceFixture(bodyString(req.body?.profile) ?? 'fixture')));
+
+  app.get('/api/external-approvals', (_req, res) => res.json([]));
+  app.post('/api/external-approvals/:action', (_req, res) => res.json([]));
+  app.post('/api/route-approvals/:action', (_req, res) => res.json([]));
+
   app.get('/api/profiles', (_req, res) => res.json(state.profiles));
   app.post('/api/profiles', (req, res) => {
     const required = ['name', 'display_name', 'repo_id', 'provider', 'repo', 'local_path', 'artifact_root'] as const;
@@ -1344,7 +1438,11 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   });
   app.get('/api/skills/:id', (req, res) => {
     const version = bodyString(req.query.version);
-    const skill = state.skills.find(candidate => candidate.id === req.params.id && (!version || candidate.version === version));
+    const skill = state.skills.find(candidate => candidate.id === req.params.id && (!version || candidate.version === version))
+      // Detail lookups reach this mock with arbitrary ids (the route
+      // contract test probes with 'fixture'); resolve them to the seeded
+      // record instead of 404 so route-vs-missing-item stays distinguishable.
+      ?? state.skills.find(candidate => !version || candidate.version === version);
     if (!skill) return jsonError(res, 404, 'Skill not found', `Skill '${req.params.id}' not found`);
     const { bound: _bound, ...record } = skill;
     res.json(record);

@@ -53,10 +53,6 @@ class WebSocketSessionStore {
     return Array.from(this.sessions.entries());
   }
 
-  hasProfile(profile: string) {
-    return this.getAll().some(([, info]) => info.profile === profile);
-  }
-
   profiles() {
     return [...new Set(this.getAll().map(([, info]) => info.profile))];
   }
@@ -96,6 +92,13 @@ export function createWebSocketHandler(
     runQuota?: typeof gahCli.runQuota;
     gatewayHealth?: typeof gatewayHealth;
     onChatLifecycle?: (event: ChatLifecycleEvent) => void;
+    /**
+     * Profiles to poll even while no dashboard is attached. Set only when a
+     * background delivery channel (Web Push, APNs) is configured; without it,
+     * controller events are polled only for profiles with a connected client.
+     */
+    backgroundProfiles?: () => Promise<string[]>;
+    backgroundIntervalMs?: number;
   } = {}
 ) {
   const registryService = deps.registryService ?? new RegistryService(deps.node?.role === 'worker' ? null : undefined);
@@ -105,7 +108,13 @@ export function createWebSocketHandler(
   const readGatewayHealth = deps.gatewayHealth ?? gatewayHealth;
   const syncing = new Map<string, Promise<void>>();
   const quotaSyncedAt = new Map<string, number>();
-  const syncActivity = (profile: string, announce: boolean): Promise<void> => {
+  // A profile's first successful load is the silent backfill: it primes the
+  // feed with history but never announces or pushes it. Every later sync
+  // delivers, whether or not a dashboard is attached.
+  const primedEvents = new Set<string>();
+  const primedQuota = new Set<string>();
+  let gatewayPrimed = false;
+  const syncActivity = (profile: string): Promise<void> => {
     const current = syncing.get(profile);
     if (current) return current;
     const quotaDue = Date.now() - (quotaSyncedAt.get(profile) ?? 0) >= 60_000;
@@ -113,7 +122,7 @@ export function createWebSocketHandler(
     const pending = Promise.all([
       loadEvents(profile, '30d').catch((error) => {
         console.error(`Failed to refresh activity for ${profile}: ${error instanceof Error ? error.message : String(error)}`);
-        return [];
+        return null;
       }),
       quotaDue ? loadQuota({ profile, since: '24h' }).catch((error) => {
         console.error(`Failed to refresh quota activity for ${profile}: ${error instanceof Error ? error.message : String(error)}`);
@@ -121,20 +130,31 @@ export function createWebSocketHandler(
       }) : Promise.resolve(null)
     ])
       .then(([events, quota]) => {
-        for (const controllerEvent of events) {
-          const event = activityFromController(controllerEvent);
-          if (!event || !activityFeed.record(event, announce) || !announce) continue;
-          sessionStore.broadcast({ type: 'activity.event', event }, undefined, profile);
+        if (events) {
+          const announce = primedEvents.has(profile);
+          for (const controllerEvent of events) {
+            const event = activityFromController(controllerEvent);
+            if (event && activityFeed.record(event, announce) && announce) {
+              sessionStore.broadcast({ type: 'activity.event', event }, undefined, profile);
+            }
+          }
+          primedEvents.add(profile);
         }
-        for (const event of quota ? activitiesFromQuota(quota) : []) {
-          if (activityFeed.record(event, announce) && announce) sessionStore.broadcast({ type: 'activity.event', event }, undefined, profile);
+        if (quota) {
+          const announce = primedQuota.has(profile);
+          for (const event of activitiesFromQuota(quota)) {
+            if (activityFeed.record(event, announce) && announce) sessionStore.broadcast({ type: 'activity.event', event }, undefined, profile);
+          }
+          primedQuota.add(profile);
         }
       })
       .finally(() => syncing.delete(profile));
     syncing.set(profile, pending);
     return pending;
   };
-  const syncGateway = (announce: boolean) => {
+  const syncGateway = () => {
+    const announce = gatewayPrimed;
+    gatewayPrimed = true;
     const event = activityFromGateway(readGatewayHealth());
     if (event && activityFeed.record(event, announce) && announce) sessionStore.broadcast({ type: 'activity.event', event });
   };
@@ -144,14 +164,29 @@ export function createWebSocketHandler(
     if (activityFeed.record(event)) sessionStore.broadcast({ type: 'activity.event', event });
   });
   const activityTimer = setInterval(() => {
-    for (const profile of sessionStore.profiles()) void syncActivity(profile, true);
-    syncGateway(true);
+    for (const profile of sessionStore.profiles()) void syncActivity(profile);
+    syncGateway();
   }, 5_000);
   activityTimer.unref?.();
+  let backgroundTimer: ReturnType<typeof setInterval> | undefined;
+  if (deps.backgroundProfiles) {
+    const listProfiles = deps.backgroundProfiles;
+    const syncBackground = () => {
+      void listProfiles()
+        .then((profiles) => Promise.all(profiles.map((profile) => syncActivity(profile))))
+        .catch((error) => {
+          console.error(`Failed to refresh background activity: ${error instanceof Error ? error.message : String(error)}`);
+        });
+    };
+    syncBackground();
+    backgroundTimer = setInterval(syncBackground, deps.backgroundIntervalMs ?? 30_000);
+    backgroundTimer.unref?.();
+  }
   wss.once('close', () => {
     unsubscribeFleet();
     unsubscribeLiveness();
     clearInterval(activityTimer);
+    if (backgroundTimer) clearInterval(backgroundTimer);
   });
   fleetDispatch = createFleetDispatchCoordinator({
     registryService,
@@ -178,11 +213,10 @@ export function createWebSocketHandler(
         const message = JSON.parse(data.toString()) as ClientMessage;
         if (message.type === 'client.hello') {
           const profile = message.profile ?? pendingProfiles.get(ws) ?? 'gah';
-          const announce = sessionStore.hasProfile(profile);
           sessionStore.add(ws, message.clientVersion, message.capabilities, profile);
           pendingProfiles.delete(ws);
-          await syncActivity(profile, announce);
-          syncGateway(announce);
+          await syncActivity(profile);
+          syncGateway();
           ws.send(JSON.stringify({
             type: 'activity.replay',
             events: activityFeed.replay(profile, message.activityCursor)

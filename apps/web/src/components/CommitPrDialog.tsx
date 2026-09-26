@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ExternalLink, GitCommit, GitPullRequest, RefreshCw, X } from 'lucide-react';
 import type { GitReviewState, HelperSuggestion } from '@git-agent-harness/contracts';
+import { ExternalAnchor } from './ExternalAnchor.js';
 import { gahApi } from '../api/client.js';
 
 interface CommitPrDialogProps {
@@ -269,7 +270,7 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged 
                   <button type="button" className="btn-primary text-xs" disabled={busy || !title.trim() || baseNeedsReview} onClick={() => void publish()}>
                     <GitPullRequest size={13} /> Push and {review.existing ? 'update' : 'create'} {draft ? `draft ${review.providerLabel}` : review.providerLabel}
                   </button>
-                  {published && <a href={published} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-xs text-accent hover:underline"><ExternalLink size={13} /> Open {review.providerLabel}</a>}
+                  {published && <ExternalAnchor href={published} className="flex items-center gap-1 text-xs text-accent hover:underline"><ExternalLink size={13} /> Open {review.providerLabel}</ExternalAnchor>}
                 </div>
               </section>
             )}

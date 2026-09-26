@@ -1275,6 +1275,14 @@ fn notify_event_with_deliveries<F, P, C>(
         }
     });
 
+    // The central feed only relays wake-notifiable kinds to the channel;
+    // a posted event outside that set would otherwise be lost, so it still
+    // takes the direct send.
+    let feed_relays_to_channel = matches!(
+        activity_shape(&event).0,
+        "dispatch_failed" | "review_ready" | "action_required"
+    );
+
     // Issue #653: deliver the same redacted message through the configured
     // channel (Telegram today, Discord webhook). Failures are visible via
     // the recorded delivery-failure event and never block the operation
@@ -1282,7 +1290,7 @@ fn notify_event_with_deliveries<F, P, C>(
     // approval, it must only be observable. Dedup stays the caller's job:
     // notify paths that would repeat (e.g. paid-route skips) already
     // notify once per occurrence through `claim_notice`.
-    if !posted_to_central
+    if (!posted_to_central || !feed_relays_to_channel)
         && cfg.defaults.notification_channel != crate::notify_channels::NotificationChannel::None
     {
         let message = crate::redact::redact(&format_message(&event));

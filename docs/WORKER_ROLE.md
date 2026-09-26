@@ -18,7 +18,7 @@ The existing WebSocket session protocol still supports remote execution.
 Worker dispatch capture uses central's authenticated `/api/worker-memory` relay. Central owns the gateway credential and checks its memory settings for the requested profile.
 The relay accepts only recall, capture, and session-end operations. Clients must provide `profile` and the existing operation fields.
 A disabled profile skips gateway access. An unavailable gateway does not block dispatch.
-Rust recall still has no production dispatch caller; wiring that behavior belongs to #830.
+Dispatch recall runs through the backend memory hooks that `gah setup memory-hooks` installs (#830). Rust recall has no production dispatch caller.
 
 For Linux or macOS worker setup, supply `GAH_CENTRAL_URL` and `COORDINATOR_TOKEN` when you run the installer.
 The installer saves the token in `~/.config/gah/gah-loop.env` with mode `0600`.

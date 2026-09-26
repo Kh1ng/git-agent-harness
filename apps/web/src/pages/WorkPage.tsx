@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ChevronRight, ListChecks, FileText, Rocket } from 'lucide-react';
+import { ExternalAnchor } from '../components/ExternalAnchor';
 import type { AvailableTicket, ManagerBackendInfo, MergeRequest, ProviderKind, Session, UsageRollupTicketRow, WorkWaypointEvidence } from '@git-agent-harness/contracts';
 import { generateProviderInstanceId } from '@git-agent-harness/shared';
 import { gahApi, GahApiError } from '../api/client.js';
@@ -479,7 +480,7 @@ export function WorkPage({ sessions, onSelectSession }: WorkPageProps) {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      {item.url && <a href={item.url} target="_blank" rel="noreferrer" className="text-xs text-accent hover:underline">Open PR</a>}
+                      {item.url && <ExternalAnchor href={item.url} className="text-xs text-accent hover:underline">Open PR</ExternalAnchor>}
                       {item.reasons.has('Review hold') && (
                         <button type="button" disabled={holdPending !== null} onClick={() => clearHold(item.workId)} className="btn-secondary min-h-11 sm:min-h-0 sm:py-1">
                           {holdPending === item.workId ? 'Releasing…' : 'Release hold'}

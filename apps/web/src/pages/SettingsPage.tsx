@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Sun, Moon, Info, ExternalLink, Save, Loader2, RefreshCw, Eye, EyeOff, Copy, Check, ChevronRight } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
+import { ExternalAnchor } from '../components/ExternalAnchor';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
@@ -161,15 +162,13 @@ export function SettingsPage() {
             </select>
           )}
           {selected?.web_url && (
-            <a
+            <ExternalAnchor
               href={selected.web_url}
-              target="_blank"
-              rel="noopener noreferrer"
               className="mt-2 inline-flex items-center gap-1 text-xs text-accent hover:underline"
             >
               <ExternalLink size={12} aria-hidden="true" />
               {selected.repo}
-            </a>
+            </ExternalAnchor>
           )}
           {activeScmProvider && (
             <div className="mt-3 pt-3 border-t border-subtle">

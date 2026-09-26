@@ -8,6 +8,7 @@ import type {
   RoutingDiagnostics
 } from '@git-agent-harness/contracts';
 import { StatusBadge, type StatusTone } from './ui/StatusBadge.js';
+import { ExternalAnchor } from './ExternalAnchor.js';
 import { formatCount, formatCost, formatDuration, formatTokens } from '../lib/format.js';
 
 const DISPATCH_REASON_LABEL: Record<string, string> = {
@@ -381,15 +382,13 @@ export function AttemptTimeline({ entries }: { entries: LedgerEntry[] }) {
               )}
 
               {entry.mr_url && (
-                <a
+                <ExternalAnchor
                   href={entry.mr_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
                   className="mt-3 inline-flex items-center gap-1.5 text-xs text-accent hover:underline"
                 >
                   <GitPullRequest size={12} aria-hidden="true" />
                   View MR/PR
-                </a>
+                </ExternalAnchor>
               )}
             </div>
           </li>

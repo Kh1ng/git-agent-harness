@@ -136,7 +136,7 @@ states separate. Instance overrides merge by field over the canonical entry.
 
 Provider issues, dependency checks, claims, attempts, review results, and publication already feed deterministic work decisions.
 [PM plans](PM_PLAN_API.md) add persisted decomposition and publication dry-run operations.
-The [worker contract](WORKER_ROLE.md) identifies the remaining dispatch-memory recall gap under #830.
+The [worker contract](WORKER_ROLE.md) describes how dispatch memory capture and recall reach the central gateway.
 
 ### Gap map for the destination
 
