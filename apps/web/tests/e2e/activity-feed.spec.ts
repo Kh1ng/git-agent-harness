@@ -154,6 +154,32 @@ test('iOS keeps system alerts off when notification permission is denied', async
   await expect(page.getByRole('button', { name: 'Enable system alerts' })).toHaveAttribute('aria-pressed', 'false');
 });
 
+test('iOS unregisters native push when system alerts are turned off', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.webkit = { messageHandlers: {
+      gahController: { postMessage: (message: unknown) => {
+        sessionStorage.setItem('nativeMessage', JSON.stringify(message));
+        if ((message as { type?: string }).type === 'requestNotifications') {
+          window.dispatchEvent(new CustomEvent('gah:notification-permission', { detail: { granted: true } }));
+        }
+      } }
+    } };
+  });
+  await page.routeWebSocket('**/ws**', (ws) => {
+    ws.send(JSON.stringify(welcome));
+    ws.onMessage((raw) => {
+      if (JSON.parse(String(raw)).type === 'client.hello') ws.send(JSON.stringify({ type: 'activity.replay', events: [] }));
+    });
+  });
+  await page.goto('/?page=events');
+  await page.getByRole('button', { name: 'Enable system alerts' }).click();
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('nativeMessage')))
+    .toBe('{"type":"requestNotifications"}');
+  await page.getByRole('button', { name: 'System alerts on' }).click();
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('nativeMessage')))
+    .toBe('{"type":"disableNotifications"}');
+});
+
 test('chat activity opens the originating session and suppresses a focused-chat notification', async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem('gah.activity.systemNotifications', '1');

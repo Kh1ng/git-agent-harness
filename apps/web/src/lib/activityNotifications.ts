@@ -90,6 +90,8 @@ export async function setSystemNotificationsEnabled(enabled: boolean): Promise<b
       });
       ios.postMessage({ type: 'requestNotifications' });
       if (!await granted) return false;
+    } else if (ios) {
+      ios.postMessage({ type: 'disableNotifications' });
     } else if (enabled && window.__GAH_DESKTOP_SETTINGS__ !== true) {
       if (!('Notification' in window)) return false;
       if (Notification.permission !== 'granted' && await Notification.requestPermission() !== 'granted') return false;

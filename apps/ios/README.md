@@ -37,7 +37,7 @@ work. The default app topic is `com.kh1ng.gah.controller`.
 
 This Settings scanner requires the updated iPhone app. Older installed apps do not receive native changes from a dashboard refresh.
 
-HTTPS certificates use the system trust policy. HTTP uses a WebKit-only App Transport Security exception for the existing Tailscale deployment. The native bridge accepts pairing scans and bounded activity notifications only from the configured server's main frame. Pairing scans also require the main Settings page. It rejects iframe requests and provides no credential or general command access. Main-document navigation stays on the chosen server. Pairing links to another server require address confirmation. Other user-selected external HTTP(S) links open in the system browser.
+HTTPS certificates use the system trust policy. HTTP uses a WebKit-only App Transport Security exception for the existing Tailscale deployment. The native bridge accepts pairing scans, notification controls, sign-out, and bounded activity notifications only from the configured server's main frame. Pairing scans also require the main Settings page. It rejects iframe requests and provides no credential or general command access. Main-document navigation stays on the chosen server. Pairing links to another server require address confirmation. Other user-selected external HTTP(S) links open in the system browser.
 
 Only the server address and dashboard routing fields are saved in preferences. Pairing fragments and other query parameters are excluded. WebKit stores the device cookie. The owner can revoke that device in GAH.
 

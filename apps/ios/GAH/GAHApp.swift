@@ -28,6 +28,7 @@ private extension Data {
 /// The web dashboard owns authentication and work. This shell owns only navigation and its persistent web view.
 @MainActor
 final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, UNUserNotificationCenterDelegate {
+    private static let notificationsEnabledKey = "backgroundNotificationsEnabled"
     @Published var address: ServerAddress?
     @Published var error: String?
     @Published var loading = false
@@ -53,7 +54,7 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         configuration.userContentController.add(DashboardRequestHandler(controller: self), name: "gahController")
         UNUserNotificationCenter.current().delegate = self
         AppDelegate.controller = self
-        UIApplication.shared.registerForRemoteNotifications()
+        if notificationsEnabled { UIApplication.shared.registerForRemoteNotifications() }
         webView.isHidden = true
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -64,7 +65,12 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         if let saved = UserDefaults.standard.string(forKey: "centralURL"), let restored = try? ServerAddress(saved) {
             connect(restored)
         }
+        if !notificationsEnabled { removePushRegistration() }
         observeLiveActivityTokens()
+    }
+
+    private var notificationsEnabled: Bool {
+        UserDefaults.standard.object(forKey: Self.notificationsEnabledKey) as? Bool ?? true
     }
 
     /// Only the configured dashboard's main Settings page can request the camera.
@@ -90,7 +96,13 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
               let body = message.body as? [String: Any], body["type"] as? String == "requestNotifications" else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] granted, _ in
             Task { @MainActor [weak self] in
-                if granted { UIApplication.shared.registerForRemoteNotifications() }
+                UserDefaults.standard.set(granted, forKey: Self.notificationsEnabledKey)
+                if granted {
+                    UIApplication.shared.registerForRemoteNotifications()
+                } else {
+                    UIApplication.shared.unregisterForRemoteNotifications()
+                    self?.removePushRegistration()
+                }
                 self?.webView.evaluateJavaScript(
                     "window.dispatchEvent(new CustomEvent('gah:notification-permission',{detail:{granted:\(granted)}}))"
                 )
@@ -110,17 +122,29 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
 
     func setDeviceToken(_ token: String) {
         deviceToken = token
-        registerPushTokens()
+        if notificationsEnabled { registerPushTokens() }
     }
 
-    func signOut() {
+    func requestSignOut(_ message: WKScriptMessage) {
+        guard validDashboardMessage(message) else { return }
+        removePushRegistration(notifyWebView: true)
+    }
+
+    func disableNotifications(_ message: WKScriptMessage) {
+        guard validDashboardMessage(message) else { return }
+        UserDefaults.standard.set(false, forKey: Self.notificationsEnabledKey)
+        UIApplication.shared.unregisterForRemoteNotifications()
+        removePushRegistration()
+    }
+
+    private func removePushRegistration(notifyWebView: Bool = false) {
         guard let id = UserDefaults.standard.string(forKey: "apnsDeviceId") else {
-            finishPushSignOut()
+            if notifyWebView { finishPushSignOut() }
             return
         }
-        authenticatedRequest(path: "/api/push/apns-devices/\(id)", method: "DELETE", body: nil) { [weak self] _ in
-            UserDefaults.standard.removeObject(forKey: "apnsDeviceId")
-            self?.finishPushSignOut()
+        authenticatedRequest(path: "/api/push/apns-devices/\(id)", method: "DELETE", body: nil) { [weak self] _, succeeded in
+            if succeeded { UserDefaults.standard.removeObject(forKey: "apnsDeviceId") }
+            if notifyWebView { self?.finishPushSignOut() }
         }
     }
 
@@ -153,19 +177,19 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     }
 
     private func registerPushTokens(liveActivity: [String: String]? = nil) {
-        guard let deviceToken else { return }
+        guard notificationsEnabled, let deviceToken else { return }
         var body: [String: Any] = ["token": deviceToken, "label": UIDevice.current.name]
         if let pushToStartToken { body["pushToStartToken"] = pushToStartToken }
         if let liveActivity { body["liveActivity"] = liveActivity }
-        authenticatedRequest(path: "/api/push/apns-devices", method: "POST", body: body) { response in
-            guard let response, let id = (try? JSONSerialization.jsonObject(with: response)) as? [String: Any] else { return }
+        authenticatedRequest(path: "/api/push/apns-devices", method: "POST", body: body) { response, succeeded in
+            guard succeeded, let response, let id = (try? JSONSerialization.jsonObject(with: response)) as? [String: Any] else { return }
             if let id = id["id"] as? String { UserDefaults.standard.set(id, forKey: "apnsDeviceId") }
         }
     }
 
-    private func authenticatedRequest(path: String, method: String, body: [String: Any]?, completion: @escaping (Data?) -> Void) {
+    private func authenticatedRequest(path: String, method: String, body: [String: Any]?, completion: @escaping (Data?, Bool) -> Void) {
         guard let address, let url = URL(string: path, relativeTo: address.origin)?.absoluteURL else {
-            completion(nil)
+            completion(nil, false)
             return
         }
         webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
@@ -184,7 +208,7 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
             if let body { request.httpBody = try? JSONSerialization.data(withJSONObject: body) }
             URLSession.shared.dataTask(with: request) { data, response, _ in
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                DispatchQueue.main.async { completion((200..<300).contains(status) ? data : nil) }
+                DispatchQueue.main.async { completion(data, (200..<300).contains(status)) }
             }.resume()
         }
     }
@@ -306,7 +330,8 @@ private final class DashboardRequestHandler: NSObject, WKScriptMessageHandler {
         guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
         if type == "requestNotifications" { controller?.requestNotificationAccess(message) }
         else if type == "activity" { controller?.postActivityNotification(message) }
-        else if type == "signOut" { controller?.signOut() }
+        else if type == "disableNotifications" { controller?.disableNotifications(message) }
+        else if type == "signOut" { controller?.requestSignOut(message) }
     }
 }
 

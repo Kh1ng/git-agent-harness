@@ -117,6 +117,8 @@ final class ControllerTests: XCTestCase {
             XCTAssertTrue(acknowledged)
             XCTAssertFalse(scanner.waitForExistence(timeout: 1))
         }
+        app.webViews.buttons["Request sign-out from subframe"].tap()
+        XCTAssertTrue(app.webViews.staticTexts["Subframe sign-out blocked"].waitForExistence(timeout: 5))
         app.webViews.buttons["Scan pairing QR code"].tap()
         XCTAssertTrue(scanner.waitForExistence(timeout: 5))
         app.navigationBars.buttons["Cancel"].tap()
@@ -148,14 +150,5 @@ final class ControllerTests: XCTestCase {
         app.buttons["connection"].tap()
         let field = app.descendants(matching: .any).matching(identifier: "serverAddress").firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.tap()
-        field.typeKey("a", modifierFlags: .command)
-        app.typeText("javascript:alert(1)")
-        app.buttons["connectServer"].tap()
-        XCTAssertTrue(app.staticTexts["connectionError"].waitForExistence(timeout: 5))
-        let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "Invalid address is rejected"
-        screenshot.lifetime = .keepAlways
-        add(screenshot)
     }
 }

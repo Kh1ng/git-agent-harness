@@ -37,6 +37,9 @@ class Fixture(BaseHTTPRequestHandler):
         if path == "/frame":
             self.wfile.write(b"<script>try{window.webkit.messageHandlers.gahController.postMessage('scanPairingCode');parent.postMessage('frame-sent','*')}catch(e){parent.postMessage('frame-error '+e.message,'*')}</script>")
             return
+        if path == "/signout-frame":
+            self.wfile.write(b"<script>try{window.webkit.messageHandlers.gahController.postMessage({type:'signOut'});parent.postMessage('signout-frame-sent','*')}catch(e){parent.postMessage('frame-error '+e.message,'*')}</script>")
+            return
         retained = urlsplit(self.path).path == '/remember' or 'gah_test=retained' in self.headers.get('Cookie', '')
         body = '<p>Session retained</p>' if retained else '<p>No test session</p>'
         self.wfile.write(('''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -49,6 +52,7 @@ class Fixture(BaseHTTPRequestHandler):
 <label>Draft <textarea></textarea></label>
 <button onclick="try{statusText.textContent='Frame started';requestFrame(false)}catch(e){statusText.textContent='Frame error '+e.message}">Request scan from subframe</button>
 <button onclick="requestFrame(true)">Request scan from other origin</button>
+<button onclick="requestSignOutFrame()">Request sign-out from subframe</button>
 <button onclick="scan()">Scan pairing QR code</button>
 <a href="http://localhost:18773/recovery#pair=abcdefghijklmnopqrstuvwxyzABCDEF&server=e58dbf8c-9c0d-4bd4-b0f9-be02d42e16a8">Open test pairing server</a>
 <p id="statusText"></p><script>
@@ -63,6 +67,15 @@ function requestFrame(otherOrigin) {
   statusText.textContent = label + ' sent'; window.removeEventListener('message', sent); frame.remove();
  });
  frame.src = (otherOrigin ? 'http://localhost:18773' : '') + '/frame'; document.body.append(frame);
+}
+function requestSignOutFrame() {
+ let completed = false; const frame = document.createElement('iframe'); frame.style.display = 'none';
+ window.addEventListener('gah:push-signout-complete', function escaped() { completed = true; }, {once:true});
+ window.addEventListener('message', function sent(event) {
+  if (event.source !== frame.contentWindow || event.data !== 'signout-frame-sent') return;
+  window.setTimeout(() => { statusText.textContent = completed ? 'Subframe sign-out escaped' : 'Subframe sign-out blocked'; frame.remove(); }, 100);
+ }, {once:true});
+ frame.src = '/signout-frame'; document.body.append(frame);
 }
 </script>
 <p id="pairing"></p><script>if(location.hash === "#pair=abcdefghijklmnopqrstuvwxyzABCDEF&server=e58dbf8c-9c0d-4bd4-b0f9-be02d42e16a8")
