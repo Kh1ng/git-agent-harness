@@ -1199,7 +1199,9 @@ test('authMiddleware timing-safe comparison rejects invalid tokens', () => {
 
 test('fleet snapshot reuses liveness observations and exposes metadata and current leases without secrets', async () => {
   const registryPath = createTempRegistryFile();
-  const claimsPath = createTempRegistryFile();
+  // A claims store, not a registry file: the claims store rejects
+  // wrong-shape JSON, and ClaimsService creates a fresh one when absent.
+  const claimsPath = resolve(process.cwd(), `config-test-claims-${crypto.randomBytes(6).toString('hex')}.json`);
   const worker = new MockNodeServer();
   let polls = 0;
   worker.behavior = (req, res) => {
@@ -1248,7 +1250,8 @@ test('fleet snapshot reuses liveness observations and exposes metadata and curre
     unsubscribe();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await worker.stop();
-    unlinkSync(registryPath); unlinkSync(claimsPath);
+    unlinkSync(registryPath);
+    if (existsSync(claimsPath)) unlinkSync(claimsPath);
   }
 });
 
