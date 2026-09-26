@@ -101,9 +101,9 @@ test.describe('ExternalAnchor', () => {
     const component = await mount(
       <ExternalAnchor href="https://github.com/owner/repo/pull/12">View PR</ExternalAnchor>
     );
-    // Control is the portable modified-click modifier; Meta is not
-    // delivered reliably by the Linux CI runners.
-    await component.click({ modifiers: ['Control'] });
+    // Shift is the portable modified-click modifier; Meta is not delivered
+    // reliably by the Linux CI runners, and Control is the macOS context-menu gesture.
+    await component.click({ modifiers: ['Shift'] });
     await expect.poll(() => component.evaluate(defaultPrevented)).toEqual(false);
     await expect.poll(() => component.evaluate(externalOpens)).toEqual([]);
   });
