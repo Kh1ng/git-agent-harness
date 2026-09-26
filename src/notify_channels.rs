@@ -252,10 +252,17 @@ mod tests {
     #[test]
     fn activity_text_is_one_line_with_optional_url() {
         assert_eq!(
-            activity_text("gah: reply ready", "done\nnext line", Some("https://x/?page=chat")),
+            activity_text(
+                "gah: reply ready",
+                "done\nnext line",
+                Some("https://x/?page=chat")
+            ),
             "[gah] gah: reply ready: done next line https://x/?page=chat"
         );
-        assert_eq!(activity_text("node offline", " ", None), "[gah] node offline");
+        assert_eq!(
+            activity_text("node offline", " ", None),
+            "[gah] node offline"
+        );
     }
 
     #[test]
