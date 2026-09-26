@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { ExternalLink, Hammer, Pause, Play, RefreshCw, X } from 'lucide-react';
+import { ExternalLink, GitPullRequest, Hammer, Pause, Play, RefreshCw, X } from 'lucide-react';
 import type { ProviderKind, Session } from '@git-agent-harness/contracts';
 import { gahApi, GahApiError } from '../api/client.js';
 import { workKey } from '../lib/workKey.js';
+import { ciLabelFor } from '../lib/reviewLabels.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -12,6 +13,7 @@ import { WaypointHistory, type WaypointEvidence } from './WaypointProgress.js';
 import { EmptyState, ErrorState, LoadingState } from './ui/EmptyState.js';
 import { LastUpdated } from './ui/LastUpdated.js';
 import { StatusBadge, classificationTone } from './ui/StatusBadge.js';
+import { CommitPrDialog } from './CommitPrDialog.js';
 
 const REFRESH_MS = 30_000;
 
@@ -43,6 +45,7 @@ export function WorkDetailDrawer({ workId, profile, connected, sessions, onClose
   const [pending, setPending] = useState<'hold' | 'release' | 'clear' | 'dispatch' | null>(null);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
 
   const refresh = async () => {
     await Promise.all([
@@ -122,9 +125,10 @@ export function WorkDetailDrawer({ workId, profile, connected, sessions, onClose
   };
 
   const reviewTone = mergeRequest ? classificationTone(mergeRequest.classification) : { tone: 'unknown' as const, label: 'No review' };
-  const ci = mergeRequest?.ci_pending ? 'Pending' : mergeRequest?.ci_passed ? 'Passed' : mergeRequest ? 'Not passing' : 'Unknown';
+  const ci = ciLabelFor(mergeRequest);
 
   return (
+    <>
     <dialog
       ref={dialog}
       aria-labelledby="work-detail-title"
@@ -183,6 +187,11 @@ export function WorkDetailDrawer({ workId, profile, connected, sessions, onClose
               <button type="button" disabled={pending !== null || !connected || !repo} onClick={redispatch} className="btn-primary min-h-11" title={!repo ? 'Repository details are not available yet.' : undefined}>
                 <RefreshCw size={14} aria-hidden="true" /> {pending === 'dispatch' ? 'Dispatching…' : 'Re-dispatch'}
               </button>
+              {mergeRequest && (
+                <button type="button" disabled={pending !== null} onClick={() => setReviewOpen(true)} className="btn-secondary min-h-11">
+                  <GitPullRequest size={14} aria-hidden="true" /> Review in dashboard
+                </button>
+              )}
             </div>
             {result && <p role="status" className="mt-2 text-xs text-good">{result}</p>}
             {error && <p role="alert" className="mt-2 text-xs text-critical">{error}</p>}
@@ -209,5 +218,7 @@ export function WorkDetailDrawer({ workId, profile, connected, sessions, onClose
         </div>
       </aside>
     </dialog>
+    {reviewOpen && <CommitPrDialog profile={profile} sessionId={session?.id} nodeId={session?.nodeId} mergeRequest={mergeRequest} onClose={() => setReviewOpen(false)} onChanged={() => void refresh()} />}
+    </>
   );
 }

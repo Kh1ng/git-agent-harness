@@ -46,9 +46,12 @@ test('commits selected files, preserves excluded work, and publishes only after 
   });
 
   const component = await mount(
-    <CommitPrDialog profile="gah" sessionId="session-1" nodeId="worker-1" onClose={() => {}} onChanged={() => {}} />
+    <CommitPrDialog profile="gah" sessionId="session-1" nodeId="worker-1" onClose={() => {}} onChanged={() => {}}
+      mergeRequest={{ branch: 'feature/review', work_id: '#12', id: '12', url: 'https://github.com/owner/repo/pull/12', title: 'Existing work', state: 'OPEN', draft: false, merge_status: 'CLEAN', merged: false, ci_passed: true, ci_pending: false, review_contract_version: 1, classification: 'NEEDS_REVIEW', recommended_action: 'RUN_REVIEW' }} />
   );
   await expect(component.getByText('Windows worker')).toBeVisible();
+  await expect(component.getByRole('region', { name: 'Provider review state' })).toContainText('NEEDS REVIEW');
+  await expect(component.getByRole('region', { name: 'Provider review state' })).toContainText('RUN REVIEW');
   await component.getByText('src/keep.ts').click();
   await component.getByLabel('Commit message').fill('Update alpha');
   await component.getByRole('button', { name: 'Commit selected' }).click();
@@ -70,12 +73,22 @@ test('commits selected files, preserves excluded work, and publishes only after 
   await expect(publish).toBeDisabled();
   await component.getByLabel('Base branch').fill('main');
   await expect(publish).toBeEnabled();
+  page.once('dialog', dialog => dialog.accept());
   await publish.click();
-  await expect(component.getByRole('link', { name: 'Open pull request' })).toHaveAttribute('href', 'https://github.com/owner/repo/pull/12');
+  await expect(component.getByRole('link', { name: 'Open pull request' }).first()).toHaveAttribute('href', 'https://github.com/owner/repo/pull/12');
   expect(requests[1]).toEqual({
     path: '/api/git/publish',
     body: { title: 'Manual title', body: 'Manual body', base: 'main', draft: true, nodeId: 'worker-1' }
   });
+});
+
+test('read-only reviews expose state but disable editing and publishing', async ({ mount, page }) => {
+  await page.route('**/api/git/review**', route => route.fulfill({ json: { ...initial, readOnly: true } }));
+  const component = await mount(<CommitPrDialog profile="gah" onClose={() => {}} onChanged={() => {}} />);
+  await expect(component.getByLabel('Pull request title')).toHaveAttribute('readonly', '');
+  await expect(component.getByLabel('Pull request body')).toHaveAttribute('readonly', '');
+  await expect(component.getByText('This checkout is read-only.')).toBeVisible();
+  await expect(component.getByRole('button', { name: /Push and create/ })).toBeDisabled();
 });
 
 test('requested model suggestions stay attributed until the user edits them', async ({ mount, page }) => {

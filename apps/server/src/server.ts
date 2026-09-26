@@ -2175,9 +2175,27 @@ export function createServer(
         : await (async () => {
           const target = await resolveGitTarget(route.profileName, sessionId);
           if (target.kind === 'error') throw new Error(target.error);
-          if (target.kind === 'read-only') throw new Error('Session is read-only and has no writable checkout');
           const profileInfo = await resolveProfileInfo(route.profileName);
           if (!profileInfo || !['github', 'gitlab'].includes(profileInfo.provider)) throw new Error('Unsupported repository provider');
+          if (target.kind === 'read-only') {
+            // A read-only checkout still shows its state; publishing stays
+            // disabled client-side through the readOnly field.
+            return {
+              provider: profileInfo.provider,
+              providerLabel: profileInfo.provider === 'gitlab' ? 'merge request' : 'pull request',
+              branch: target.branch,
+              base: '',
+              upstream: null,
+              ahead: 0,
+              behind: 0,
+              files: [],
+              commits: [],
+              changedFiles: [],
+              patch: '',
+              existing: null,
+              readOnly: true
+            };
+          }
           const state = await getGitReviewState(target.cwd, base);
           return {
             ...state,
