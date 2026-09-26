@@ -18,6 +18,7 @@ type ApnsResponse = { status: number; reason?: string };
 export type ApnsRequest = { token: string; headers: Record<string, string>; payload: object };
 type ApnsTransport = (host: string, request: ApnsRequest) => Promise<ApnsResponse>;
 type LiveActivityRegistration = { profile: string; sessionId: string; token: string };
+type LiveActivityDelivery = { startedAt: number; lastUpdate: number; lastIdentity: string };
 type TokenSlot = 'device' | 'pushToStartToken' | { liveActivity: string };
 type StoredDevice = {
   id: string;
@@ -75,9 +76,7 @@ function defaultTransport(host: string, request: ApnsRequest): Promise<ApnsRespo
 export class ApnsNotifications {
   private readonly key: crypto.KeyObject;
   private jwt: { value: string; issuedAt: number } | null = null;
-  private lastActivityUpdate = new Map<string, number>();
-  private lastActivityState = new Map<string, string>();
-  private activityStartedAt = new Map<string, number>();
+  private activityDeliveries = new Map<string, LiveActivityDelivery>();
 
   constructor(
     private readonly config: ApnsConfig,
@@ -157,12 +156,18 @@ export class ApnsNotifications {
       : event.outcome === 'complete' ? 'done'
       : event.outcome === 'cancelled' ? 'cancelled' : 'failed';
     if (event.phase === 'start') {
-      this.activityStartedAt.set(key, Date.parse(event.occurredAt));
-      this.lastActivityUpdate.delete(key);
-      this.lastActivityState.delete(key);
+      this.activityDeliveries.set(key, {
+        startedAt: Date.parse(event.occurredAt),
+        lastUpdate: 0,
+        lastIdentity: state
+      });
     }
-    const startedAt = this.activityStartedAt.get(key) ?? Date.parse(event.occurredAt);
-    const content = { state, backend: event.backend ?? '', model: event.model ?? '', startedAt: Math.floor(startedAt / 1_000) };
+    const delivery = this.activityDeliveries.get(key) ?? {
+      startedAt: Date.parse(event.occurredAt),
+      lastUpdate: 0,
+      lastIdentity: ''
+    };
+    const content = { state, backend: event.backend ?? '', model: event.model ?? '', startedAt: Math.floor(delivery.startedAt / 1_000) };
     if (event.phase === 'start') {
       const payload = {
         aps: {
@@ -180,18 +185,16 @@ export class ApnsNotifications {
     }
     const end = event.phase === 'end';
     const now = this.now();
-    const throttled = now - (this.lastActivityUpdate.get(key) ?? 0) < UPDATE_INTERVAL_MS;
-    // Entering the permission state is always delivered: a swallowed prompt
-    // leaves the Live Activity stale until the turn ends or the prompt times out.
-    const entersPermission = event.phase === 'permission' && this.lastActivityState.get(key) !== state;
-    if (!end && throttled && !entersPermission) return;
+    const identity = event.phase === 'permission'
+      ? `permission:${event.permissionId ?? event.occurredAt}`
+      : state;
+    const throttled = now - delivery.lastUpdate < UPDATE_INTERVAL_MS;
+    const newPermission = event.phase === 'permission' && delivery.lastIdentity !== identity;
+    if (!end && throttled && !newPermission) return;
     if (!end) {
-      this.lastActivityUpdate.set(key, now);
-      this.lastActivityState.set(key, state);
+      this.activityDeliveries.set(key, { ...delivery, lastUpdate: now, lastIdentity: identity });
     } else {
-      this.lastActivityUpdate.delete(key);
-      this.lastActivityState.delete(key);
-      this.activityStartedAt.delete(key);
+      this.activityDeliveries.delete(key);
     }
     const aps: Record<string, unknown> = {
       timestamp: Math.floor(now / 1_000), event: end ? 'end' : 'update', 'content-state': content

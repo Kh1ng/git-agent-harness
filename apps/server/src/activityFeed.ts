@@ -51,7 +51,7 @@ export function activityFromChat(event: ChatLifecycleEvent): ActivityEvent | nul
         profile: event.profile,
         sessionId,
         turn: event.turn,
-        request: event.permissionId ?? event.tool ?? 'permission'
+        request: event.permissionId ?? event.occurredAt
       }),
       kind: 'chat_permission_requested',
       severity: 'warning',

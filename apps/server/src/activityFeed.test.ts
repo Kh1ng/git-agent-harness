@@ -122,4 +122,12 @@ test('live chat lifecycle maps only actionable outcomes with stable bounded cont
   assert.equal(permission?.message, 'Run requested');
   const secondPermission = activityFromChat({ ...base, phase: 'permission', permissionId: 'permission-2', tool: 'Edit file' });
   assert.notEqual(permission?.id, secondPermission?.id);
+  const fallbackPermission = activityFromChat({ ...base, phase: 'permission', tool: 'Edit file' });
+  const nextFallbackPermission = activityFromChat({
+    ...base,
+    phase: 'permission',
+    tool: 'Edit file',
+    occurredAt: '2026-09-25T12:00:01.000Z'
+  });
+  assert.notEqual(fallbackPermission?.id, nextFallbackPermission?.id);
 });

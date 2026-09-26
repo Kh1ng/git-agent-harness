@@ -56,11 +56,14 @@ test('Live Activity starts remotely, rate-limits updates, and always ends', asyn
     const base = { profile: 'gah', sessionId: 's1', turn: 1, occurredAt: '2026-09-25T12:00:00Z', backend: 'codex', model: 'gpt-5' } as const;
     await setup.service.deliverChatLifecycle({ ...base, phase: 'start' });
     await setup.service.deliverChatLifecycle({ ...base, phase: 'tool', tool: 'cargo test' });
-    await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', tool: 'shell' });
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', permissionId: 'permission-1', tool: 'shell' });
     assert.equal(setup.requests.length, 3);
     assert.equal((setup.requests[2].payload as { aps: { 'content-state': { state: string } } }).aps['content-state'].state, 'waiting for permission');
-    setup.advance(5_000);
-    await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', tool: 'shell' });
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', permissionId: 'permission-1', tool: 'shell' });
+    setup.advance(1_000);
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'tool', tool: 'cargo fmt' });
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', permissionId: 'permission-2', tool: 'shell' });
+    assert.equal(setup.requests.length, 4);
     await setup.service.deliverChatLifecycle({ ...base, phase: 'end', outcome: 'complete' });
     assert.equal(setup.requests.length, 5);
     assert.equal(setup.requests[0].token, token('b'));
@@ -68,7 +71,7 @@ test('Live Activity starts remotely, rate-limits updates, and always ends', asyn
     assert.equal(setup.requests[0].headers['apns-topic'], 'com.kh1ng.gah.controller.push-type.liveactivity');
     assert.deepEqual(setup.requests.slice(1).map((request) => (request.payload as { aps: { event: string } }).aps.event), ['update', 'update', 'update', 'end']);
     const dismissal = (setup.requests.at(-1)!.payload as { aps: { 'dismissal-date': number } }).aps['dismissal-date'];
-    assert.equal(dismissal, Math.floor((Date.parse('2026-09-25T12:00:05Z') + 15 * 60_000) / 1_000));
+    assert.equal(dismissal, Math.floor((Date.parse('2026-09-25T12:00:01Z') + 15 * 60_000) / 1_000));
   } finally { rmSync(setup.directory, { recursive: true, force: true }); }
 });
 
