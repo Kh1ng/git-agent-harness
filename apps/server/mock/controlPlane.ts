@@ -1174,6 +1174,15 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   app.post('/api/profiles/:profile/routing-candidates/:action', (_req, res) => res.json({ ok: true }));
   app.post('/api/git/commit', (_req, res) => res.json({ ok: true }));
   app.post('/api/git/publish', (_req, res) => res.json({ ok: true }));
+  app.post('/api/git/pull-request/update', (req, res) => {
+    const number = Number(req.body?.number);
+    const title = bodyString(req.body?.title);
+    if (!Number.isSafeInteger(number) || number <= 0 || !title || typeof req.body?.body !== 'string') return jsonError(res, 400, 'Invalid pull request update', 'A positive request number, title, and description are required.');
+    const request = state.gitPrs.find(candidate => candidate.number === number);
+    if (!request) return jsonError(res, 404, 'Pull request not found', `Pull request #${number} was not found.`);
+    request.title = title;
+    res.json({ url: request.url });
+  });
   app.post('/api/settings/nodes/command', (_req, res) => res.json({ command: 'echo mock-node-setup' }));
 
   const backendInstanceFixture = (profile: string) => ({

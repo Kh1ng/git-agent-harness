@@ -83,12 +83,42 @@ test('commits selected files, preserves excluded work, and publishes only after 
 });
 
 test('read-only reviews expose state but disable editing and publishing', async ({ mount, page }) => {
-  await page.route('**/api/git/review**', route => route.fulfill({ json: { ...initial, readOnly: true } }));
+  await page.route('**/api/git/review**', route => route.fulfill({ json: { ...initial, readOnly: true, existing: { number: 12, title: 'Existing work', url: 'https://github.com/owner/repo/pull/12', draft: false } } }));
   const component = await mount(<CommitPrDialog profile="gah" onClose={() => {}} onChanged={() => {}} />);
   await expect(component.getByLabel('Pull request title')).toHaveAttribute('readonly', '');
   await expect(component.getByLabel('Pull request body')).toHaveAttribute('readonly', '');
   await expect(component.getByText('This checkout is read-only.')).toBeVisible();
-  await expect(component.getByRole('button', { name: /Push and create/ })).toBeDisabled();
+  await expect(component.getByRole('button', { name: /Push and update/ })).toBeDisabled();
+  await expect(component.getByRole('button', { name: 'Update published title and description' })).toBeDisabled();
+});
+
+test('updates published prose without pushing and surfaces provider stderr', async ({ mount, page }) => {
+  let update: Record<string, unknown> | null = null;
+  let fail = false;
+  await page.route('**/api/git/review**', route => route.fulfill({ json: {
+    ...initial,
+    files: [],
+    existing: { number: 12, title: 'Existing work', url: 'https://github.com/owner/repo/pull/12', draft: false },
+  } }));
+  await page.route('**/api/git/pull-request/update**', async route => {
+    update = route.request().postDataJSON();
+    return fail
+      ? route.fulfill({ status: 502, json: { error: 'Provider update failed', message: 'provider stderr detail' } })
+      : route.fulfill({ json: { url: 'https://github.com/owner/repo/pull/12' } });
+  });
+  const component = await mount(<CommitPrDialog profile="gah" nodeId="worker-1" onClose={() => {}} onChanged={() => {}} />);
+  await component.getByLabel('Pull request title').fill('Updated title');
+  await component.getByLabel('Pull request body').fill('Updated description');
+  page.once('dialog', dialog => dialog.accept());
+  await component.getByRole('button', { name: 'Update published title and description' }).click();
+  expect(update).toEqual({ number: 12, title: 'Updated title', body: 'Updated description', nodeId: 'worker-1' });
+  await expect(component.getByRole('link', { name: 'Open pull request' }).first()).toHaveAttribute('href', 'https://github.com/owner/repo/pull/12');
+
+  fail = true;
+  await component.getByLabel('Pull request title').fill('Another title');
+  page.once('dialog', dialog => dialog.accept());
+  await component.getByRole('button', { name: 'Update published title and description' }).click();
+  await expect(component.getByRole('alert')).toContainText('provider stderr detail');
 });
 
 test('requested model suggestions stay attributed until the user edits them', async ({ mount, page }) => {

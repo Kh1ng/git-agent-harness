@@ -282,6 +282,7 @@ export interface GahDataSource {
   createGitPr(profile: string, data: { title: string; body?: string; base?: string; draft?: boolean }): Promise<{ url: string }>;
   createGitCommit(profile: string, message: string, sessionId?: string, files?: string[], nodeId?: string): Promise<{ hash: string }>;
   publishGitPr(profile: string, data: { title: string; body: string; base: string; draft: boolean; sessionId?: string; nodeId?: string }): Promise<{ url: string; existing: boolean }>;
+  updateGitPr(profile: string, data: { number: number; title: string; body: string; sessionId?: string; nodeId?: string }): Promise<{ url: string }>;
   getManagerChatCommands(profile: string, nodeId?: string): Promise<{ commands: ManagerCommandInfo[] }>;
   getManagerChatModels(profile: string, nodeId?: string): Promise<ManagerModelsSummary>;
   setManagerChatModel(profile: string, modelId: string, nodeId?: string): Promise<{ success: boolean }>;
@@ -633,6 +634,11 @@ export const gahApi: GahDataSource = {
     const query = new URLSearchParams({ profile });
     if (sessionId) query.set('sessionId', sessionId);
     return postJson(`/api/git/publish?${query.toString()}`, data);
+  },
+  updateGitPr(profile, { sessionId, ...data }) {
+    const query = new URLSearchParams({ profile });
+    if (sessionId) query.set('sessionId', sessionId);
+    return postJson(`/api/git/pull-request/update?${query.toString()}`, data);
   },
   getManagerChatCommands(profile, nodeId) {
     return getJson<{ commands: ManagerCommandInfo[] }>('/api/manager-chat/commands', { profile, nodeId });

@@ -136,3 +136,25 @@ export async function publishPullRequest(
   ], cwd);
   return { url: providerRequest(profile, JSON.parse(stdout)).url, existing: true };
 }
+
+/** Edits provider prose without pushing the checkout or changing PR/MR state. */
+export async function updatePullRequest(
+  profile: PullRequestProfile,
+  cwd: string,
+  input: { number: number; title: string; body: string }
+): Promise<{ url: string }> {
+  if (!Number.isSafeInteger(input.number) || input.number <= 0) throw new Error('A valid pull request number is required');
+  if (profile.provider === 'github') {
+    await execProviderCli('gh', ['pr', 'edit', String(input.number), '--title', input.title, '--body', input.body], cwd);
+    const project = validatedProjectUrl(profile);
+    return { url: new URL(`${project.pathname}/pull/${input.number}`, project).href };
+  }
+  if (profile.provider !== 'gitlab') throw new Error('Unsupported repository provider');
+  const project = validatedProjectUrl(profile);
+  const { stdout } = await execProviderCli('glab', [
+    'api', `projects/${encodeURIComponent(profile.repo)}/merge_requests/${input.number}`,
+    '--hostname', project.host, '--method', 'PUT',
+    '--raw-field', `title=${input.title}`, '--raw-field', `description=${input.body}`
+  ], cwd);
+  return { url: providerRequest(profile, JSON.parse(stdout)).url };
+}

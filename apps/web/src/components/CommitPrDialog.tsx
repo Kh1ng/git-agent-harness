@@ -161,9 +161,27 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged,
     }
   };
 
+  const updatePublished = async () => {
+    const number = review?.existing?.number ?? providerRequest?.number ?? Number(mergeRequest?.id);
+    if (!Number.isSafeInteger(number) || number <= 0 || !title.trim() || busy) return;
+    if (!window.confirm(`Update published ${review?.providerLabel ?? 'pull request'} title and description?`)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await gahApi.updateGitPr(profile, { number, title: title.trim(), body, sessionId, nodeId });
+      setPublished(result.url);
+      onChanged();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const selectedFiles = [...selected];
   const dirty = (review?.files.length ?? 0) > 0;
   const readOnly = review?.readOnly === true;
+  const publishedNumber = review?.existing?.number ?? providerRequest?.number ?? Number(mergeRequest?.id);
   const canReviewPr = !!review && review.commits.length > 0 && (!dirty || continueDirty || readOnly);
   const baseNeedsReview = !!review && base.trim() !== review.base;
   const providerLink = published ?? review?.existing?.url ?? providerRequest?.url ?? mergeRequest?.url ?? null;
@@ -289,6 +307,11 @@ export function CommitPrDialog({ profile, sessionId, nodeId, onClose, onChanged,
                   <button type="button" className="btn-primary text-xs" disabled={busy || readOnly || !title.trim() || baseNeedsReview} onClick={() => void publish()}>
                     <GitPullRequest size={13} /> Push and {review.existing ? 'update' : 'create'} {draft ? `draft ${review.providerLabel}` : review.providerLabel}
                   </button>
+                  {Number.isSafeInteger(publishedNumber) && publishedNumber > 0 && (
+                    <button type="button" className="btn-secondary text-xs" disabled={busy || readOnly || !title.trim()} onClick={() => void updatePublished()}>
+                      Update published title and description
+                    </button>
+                  )}
                   {providerLink && <ExternalAnchor href={providerLink} className="flex items-center gap-1 text-xs text-accent hover:underline"><ExternalLink size={13} /> Open {review.providerLabel}</ExternalAnchor>}
                 </div>
               </section>
