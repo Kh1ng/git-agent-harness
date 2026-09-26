@@ -1,16 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-<<<<<<< HEAD
 import { ExternalLink, GitPullRequest, Hammer, Pause, Play, RefreshCw, X } from 'lucide-react';
-import type { ProviderKind } from '@git-agent-harness/contracts';
-||||||| 4473c4bf
-import { ExternalLink, Hammer, Pause, Play, RefreshCw, X } from 'lucide-react';
-import type { ProviderKind } from '@git-agent-harness/contracts';
-=======
-import { ExternalLink, Hammer, Pause, Play, RefreshCw, X } from 'lucide-react';
 import type { ProviderKind, Session } from '@git-agent-harness/contracts';
->>>>>>> origin/feat/1254-work-detail-drawer
 import { gahApi, GahApiError } from '../api/client.js';
 import { workKey } from '../lib/workKey.js';
+import { ciLabelFor } from '../lib/reviewLabels.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -132,7 +125,7 @@ export function WorkDetailDrawer({ workId, profile, connected, sessions, onClose
   };
 
   const reviewTone = mergeRequest ? classificationTone(mergeRequest.classification) : { tone: 'unknown' as const, label: 'No review' };
-  const ci = mergeRequest?.ci_pending ? 'Pending' : mergeRequest?.ci_passed ? 'Passed' : mergeRequest ? 'Not passing' : 'Unknown';
+  const ci = ciLabelFor(mergeRequest);
 
   return (
     <>
@@ -225,7 +218,7 @@ export function WorkDetailDrawer({ workId, profile, connected, sessions, onClose
         </div>
       </aside>
     </dialog>
-    {reviewOpen && <CommitPrDialog profile={profile} mergeRequest={mergeRequest} onClose={() => setReviewOpen(false)} onChanged={() => void refresh()} />}
+    {reviewOpen && <CommitPrDialog profile={profile} sessionId={session?.id} nodeId={session?.nodeId} mergeRequest={mergeRequest} onClose={() => setReviewOpen(false)} onChanged={() => void refresh()} />}
     </>
   );
 }
