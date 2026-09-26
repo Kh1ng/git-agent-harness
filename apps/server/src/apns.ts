@@ -54,7 +54,13 @@ function sendApnsRequest(client: ClientHttp2Session, request: ApnsRequest): Prom
       clearTimeout(timer);
       reject(error);
     };
-    const timer = setTimeout(() => { stream.close(); fail(new Error('APNs request timed out')); }, 10_000);
+    // A timeout can mean the connection died without GOAWAY or a socket error.
+    // Destroying the session drops it from the pool so the next send reconnects.
+    const timer = setTimeout(() => {
+      stream.close();
+      client.destroy();
+      fail(new Error('APNs request timed out'));
+    }, 10_000);
     stream.on('response', (headers) => { status = Number(headers[':status'] ?? 0); });
     stream.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
     stream.on('end', () => {

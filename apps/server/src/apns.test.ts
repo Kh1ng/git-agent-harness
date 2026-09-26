@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import type { ClientHttp2Session } from 'node:http2';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import { ApnsNotifications, type ApnsRequest } from './apns.js';
 import type { ActivityEvent } from '@git-agent-harness/contracts';
 
@@ -32,21 +32,30 @@ function fixture(
   return { directory, devicesPath, requests, service, advance: (milliseconds: number) => { clock += milliseconds; } };
 }
 
-function fakeSession(): ClientHttp2Session {
+/** `silent` models a connection that died without GOAWAY: requests never answer. */
+function fakeSession(silent = false): ClientHttp2Session {
   const session = new EventEmitter() as EventEmitter & {
     closed: boolean;
     destroyed: boolean;
+    destroy: () => void;
     request: () => EventEmitter & { close: () => void; end: (payload: string) => void };
   };
   session.closed = false;
   session.destroyed = false;
+  session.destroy = () => {
+    session.destroyed = true;
+    session.emit('close');
+  };
   session.request = () => {
     const stream = new EventEmitter() as EventEmitter & { close: () => void; end: (payload: string) => void };
     stream.close = () => undefined;
-    stream.end = () => queueMicrotask(() => {
-      stream.emit('response', { ':status': 200 });
-      stream.emit('end');
-    });
+    stream.end = () => {
+      if (silent) return;
+      queueMicrotask(() => {
+        stream.emit('response', { ':status': 200 });
+        stream.emit('end');
+      });
+    };
     return stream;
   };
   return session as unknown as ClientHttp2Session;
@@ -142,4 +151,26 @@ test('APNs reconnects after a GOAWAY', async () => {
     await setup.service.deliverActivity(activity('after-goaway'));
     assert.equal(created.length, 2);
   } finally { rmSync(setup.directory, { recursive: true, force: true }); }
+});
+
+test('APNs drops a silently dead session after a request timeout', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const created: ClientHttp2Session[] = [];
+  const setup = fixture(undefined, () => {
+    const session = fakeSession(created.length === 0);
+    created.push(session);
+    return session;
+  });
+  try {
+    setup.service.register({ token: token('a') });
+    const stalled = setup.service.deliverActivity(activity('dead-connection'));
+    mock.timers.tick(10_000);
+    await stalled;
+    assert.equal(created[0].destroyed, true);
+    await setup.service.deliverActivity(activity('after-timeout'));
+    assert.equal(created.length, 2);
+  } finally {
+    mock.timers.reset();
+    rmSync(setup.directory, { recursive: true, force: true });
+  }
 });
