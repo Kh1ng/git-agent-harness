@@ -66,6 +66,9 @@ export interface ActivityEvent {
   sessionId?: string | null;
   workId?: string | null;
   nodeId?: string | null;
+  /** Where the event was recorded. Only controller-log replay sets this;
+   * absent means the Node server originated the event. */
+  origin?: "controller";
 }
 
 /** The single wake filter: every delivery method (push, APNs, channel,

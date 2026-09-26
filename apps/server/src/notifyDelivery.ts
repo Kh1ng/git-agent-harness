@@ -8,7 +8,7 @@ export type ActivityDelivery = (event: ActivityEvent) => void | Promise<void>;
  * delivered their channel message when it recorded them (and a worker's log
  * never reaches this feed), so the channel only takes events Node originates. */
 function fromControllerLog(event: ActivityEvent): boolean {
-  return event.id.startsWith('controller:');
+  return event.origin === 'controller';
 }
 
 function activityLine(event: ActivityEvent, baseUrl: string): string {

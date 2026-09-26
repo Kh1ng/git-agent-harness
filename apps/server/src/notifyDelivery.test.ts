@@ -53,7 +53,7 @@ test('the channel sends Node-originated events through gah notify-send, not cont
   writeFileSync(gah, `#!/bin/sh\nprintf '%s\\n' "$@" >> ${log}\n`);
   chmodSync(gah, 0o755);
   const deliver = channelDelivery(BASE, () => gah);
-  await deliver(event({ id: 'controller:abc', kind: 'dispatch_failed' }));
+  await deliver(event({ origin: 'controller', kind: 'dispatch_failed' }));
   await deliver(event({ id: 'quota:abc', kind: 'quota_near_limit' }));
   assert.equal(existsSync(log), false);
   await deliver(event());
