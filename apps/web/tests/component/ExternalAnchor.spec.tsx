@@ -27,15 +27,19 @@ async function installHost(page: import('@playwright/test').Page, host: HostStat
     if (webkit) w.webkit = webkit;
     if (desktop) w.__GAH_DESKTOP_EXTERNAL_LINKS__ = true;
     (w as unknown as { __defaultPrevented?: boolean | null }).__defaultPrevented = null;
-    document.addEventListener(
-      'click',
-      (event) => {
-        setTimeout(() => {
-          (w as unknown as { __defaultPrevented?: boolean | null }).__defaultPrevented = event.defaultPrevented;
-        });
-      },
-      { capture: true }
-    );
+    const marked = w as unknown as { __clickRecorderInstalled?: boolean };
+    if (!marked.__clickRecorderInstalled) {
+      marked.__clickRecorderInstalled = true;
+      document.addEventListener(
+        'click',
+        (event) => {
+          setTimeout(() => {
+            (w as unknown as { __defaultPrevented?: boolean | null }).__defaultPrevented = event.defaultPrevented;
+          });
+        },
+        { capture: true }
+      );
+    }
   }, host);
 }
 
@@ -97,7 +101,9 @@ test.describe('ExternalAnchor', () => {
     const component = await mount(
       <ExternalAnchor href="https://github.com/owner/repo/pull/12">View PR</ExternalAnchor>
     );
-    await component.click({ modifiers: ['Meta'] });
+    // Control is the portable modified-click modifier; Meta is not
+    // delivered reliably by the Linux CI runners.
+    await component.click({ modifiers: ['Control'] });
     await expect.poll(() => component.evaluate(defaultPrevented)).toEqual(false);
     await expect.poll(() => component.evaluate(externalOpens)).toEqual([]);
   });
