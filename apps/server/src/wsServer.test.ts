@@ -246,6 +246,43 @@ test('activity reconnect replays only events after the client cursor', async () 
   }
 });
 
+test('background activity is delivered without a dashboard and backfill stays silent', async () => {
+  const server = http.createServer();
+  const wss = new WebSocketServer({ server });
+  const events: ControllerEvent[] = [{
+    timestamp: '2026-09-12T12:00:00.000Z', event_type: 'dispatch_finished', profile: 'gah',
+    work_id: '#941', details: 'dispatch_ticket: success'
+  }];
+  const delivered: string[] = [];
+  let loads = 0;
+  createWebSocketHandler(wss, {
+    activityFeed: new ActivityFeed(null, (event) => { delivered.push(event.id); }),
+    runEvents: async () => { loads += 1; return [...events]; },
+    runQuota: (async () => { throw new Error('quota unavailable'); }) as never,
+    backgroundProfiles: async () => ['gah'],
+    backgroundIntervalMs: 10
+  });
+  const waitForLoads = async (count: number) => {
+    const deadline = Date.now() + 2000;
+    while (loads < count) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${count} activity loads`);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  };
+  try {
+    await waitForLoads(2);
+    assert.deepEqual(delivered, [], 'history loaded at startup must not be pushed');
+    events.push({
+      timestamp: '2026-09-12T12:01:00.000Z', event_type: 'dispatch_finished', profile: 'gah',
+      work_id: '#942', details: 'review_mr: success'
+    });
+    await waitForLoads(loads + 2);
+    assert.deepEqual(delivered, [activityFromController(events[1])!.id]);
+  } finally {
+    await new Promise<void>((resolve) => wss.close(() => resolve()));
+  }
+});
 
 test('worker websocket authenticates execution handshake and rejects manager chat', { timeout: 5000 }, async () => {
   const previousToken = process.env.COORDINATOR_TOKEN;

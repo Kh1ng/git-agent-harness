@@ -6,7 +6,7 @@ import { createServer as createExpressServer, initializeSkillBank } from './serv
 import { createServer as createHttpServer } from 'http';
 import { createWebSocketHandler } from './wsServer.js';
 import { validateNodeRole, workerMemoryEnvironment } from './nodeRole.js';
-import { runNodeRole } from './gahCli.js';
+import { runNodeRole, runProfileList } from './gahCli.js';
 import { isGahCliAvailable } from './gahCli.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { RegistryService } from './registryService.js';
@@ -97,6 +97,14 @@ async function main() {
     coordinatorIdentity,
     node,
     activityFeed,
+    // Background delivery must not depend on an open dashboard. Poll every
+    // configured profile, but only while some device is registered for push.
+    backgroundProfiles: node.role === 'central' && cliAvailable
+      ? async () => {
+        const devices = (webPushNotifications?.list().count ?? 0) + (apnsNotifications?.list().count ?? 0);
+        return devices > 0 ? (await runProfileList()).map((profile) => profile.name) : [];
+      }
+      : undefined,
     onChatLifecycle: (event) => {
       void apnsNotifications?.deliverChatLifecycle(event).catch((error) => {
         console.error(`[apns] chat lifecycle delivery failed: ${error instanceof Error ? error.message : String(error)}`);
