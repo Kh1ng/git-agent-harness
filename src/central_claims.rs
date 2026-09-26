@@ -208,40 +208,23 @@ pub fn acquire(
         // can't outlive this function's stack frame.
         let token = token.map(String::from);
         std::thread::spawn(move || {
-            let renew_every = Duration::from_secs(DEFAULT_LEASE_SECONDS / 3);
-            let mut consecutive_failures = 0u32;
-            while !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(renew_every);
-                if stop.load(Ordering::Relaxed) {
-                    break;
-                }
-                match acquire_or_renew(
-                    &CurlClaimsTransport,
-                    "renew",
-                    &central_url,
-                    &node_id,
-                    &profile,
-                    &work_id,
-                    token.as_deref(),
-                    DEFAULT_LEASE_SECONDS,
-                ) {
-                    Ok(_) => consecutive_failures = 0,
-                    Err(e) => {
-                        consecutive_failures += 1;
-                        eprintln!("gah: central claim renewal failed for {profile}/{work_id} ({consecutive_failures} consecutive failure(s)): {e:#}");
-                        // 3 missed renewals at lease/3 spacing == roughly one
-                        // full lease window with no successful renewal --
-                        // the claim has almost certainly lapsed centrally by
-                        // now. Keep trying (the central node or network may
-                        // recover), but stop pretending exclusivity is still
-                        // guaranteed; see module docs for why this doesn't
-                        // kill the in-progress backend outright.
-                        if consecutive_failures == 3 {
-                            eprintln!("gah: WARNING -- central claim for {profile}/{work_id} has likely lapsed; another node may now be able to claim it. Dispatch is continuing (not killed), but exclusivity is no longer guaranteed.");
-                        }
-                    }
-                }
-            }
+            renewal_loop(
+                &CurlClaimsTransport,
+                &central_url,
+                &node_id,
+                &profile,
+                &work_id,
+                token.as_deref(),
+                DEFAULT_LEASE_SECONDS,
+                Duration::from_secs(DEFAULT_LEASE_SECONDS / 3),
+                &stop,
+                &|consecutive_failures, e| {
+                    eprintln!("gah: central claim renewal failed for {profile}/{work_id} ({consecutive_failures} consecutive failure(s)): {e:#}");
+                },
+                &|| {
+                    eprintln!("gah: WARNING -- central claim for {profile}/{work_id} has likely lapsed; another node may now be able to claim it. Dispatch is continuing (not killed), but exclusivity is no longer guaranteed.");
+                },
+            );
         })
     };
 
@@ -254,6 +237,86 @@ pub fn acquire(
         stop,
         renewal_thread: Some(renewal_thread),
     })
+}
+
+/// The guard's background renewal pass, extracted so the
+/// consecutive-failure counting and lapse-warning policy can be tested
+/// without real time or a real transport. Sleeps `renew_every` between
+/// attempts, resets the count on any successful renewal, and fires
+/// `on_lapse_warning` once when the count reaches 3 -- roughly one full
+/// lease window with no successful renewal. Exits only when `stop` is
+/// set (checked before sleeping and again after each sleep).
+#[allow(clippy::too_many_arguments)]
+fn renewal_loop(
+    transport: &dyn ClaimsTransport,
+    central_url: &str,
+    node_id: &str,
+    profile: &str,
+    work_id: &str,
+    token: Option<&str>,
+    lease_seconds: u64,
+    renew_every: Duration,
+    stop: &AtomicBool,
+    on_failure: &dyn Fn(u32, &anyhow::Error),
+    on_lapse_warning: &dyn Fn(),
+) {
+    let mut consecutive_failures = 0u32;
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(renew_every);
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match acquire_or_renew(
+            transport,
+            "renew",
+            central_url,
+            node_id,
+            profile,
+            work_id,
+            token,
+            lease_seconds,
+        ) {
+            Ok(_) => consecutive_failures = 0,
+            Err(e) => {
+                consecutive_failures += 1;
+                on_failure(consecutive_failures, &e);
+                // 3 missed renewals at lease/3 spacing == roughly one
+                // full lease window with no successful renewal --
+                // the claim has almost certainly lapsed centrally by
+                // now. Keep trying (the central node or network may
+                // recover), but stop pretending exclusivity is still
+                // guaranteed; see module docs for why this doesn't
+                // kill the in-progress backend outright.
+                if consecutive_failures == 3 {
+                    on_lapse_warning();
+                }
+            }
+        }
+    }
+}
+
+/// Posts the release call for a held claim. `Err` on transport failure
+/// or a non-200 response; the guard's Drop treats both as best-effort
+/// (the lease simply expires server-side).
+fn release_claim(
+    transport: &dyn ClaimsTransport,
+    central_url: &str,
+    node_id: &str,
+    profile: &str,
+    work_id: &str,
+    token: Option<&str>,
+) -> Result<()> {
+    let url = claims_url(central_url, "release")?;
+    let body = request_body(node_id, profile, work_id, None);
+    let (status, response_body) = transport.post(&url, &body, token, 5)?;
+    if status == 200 {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "central claims API returned status {status} releasing claim: {}",
+            String::from_utf8_lossy(&response_body)
+        );
+    }
 }
 
 pub struct ClaimGuard {
@@ -272,12 +335,14 @@ impl Drop for ClaimGuard {
         // Best-effort release -- a failure here just means the lease
         // expires naturally on the server side instead of being cleared
         // early. Never panics or blocks dispatch's own exit on this.
-        let url = match claims_url(&self.central_url, "release") {
-            Ok(u) => u,
-            Err(_) => return,
-        };
-        let body = request_body(&self.node_id, &self.profile, &self.work_id, None);
-        let _ = CurlClaimsTransport.post(&url, &body, self.token.as_deref(), 5);
+        let _ = release_claim(
+            &CurlClaimsTransport,
+            &self.central_url,
+            &self.node_id,
+            &self.profile,
+            &self.work_id,
+            self.token.as_deref(),
+        );
         // Don't join the renewal thread here: it's sleeping in
         // renew_every-sized increments and may not wake for minutes. The
         // stop flag it already saw means it exits on its next wake; the
@@ -459,5 +524,153 @@ mod tests {
         let result = resolve_node_id();
         std::env::remove_var("GAH_COORDINATOR_IDENTITY_PATH");
         assert!(result.is_err());
+    }
+
+    fn fake_with(responses: Vec<FakeResponse>) -> FakeTransport {
+        FakeTransport {
+            responses: RefCell::new(std::collections::VecDeque::from(responses)),
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn renewal_counts_consecutive_failures_and_warns_exactly_once_at_three() {
+        // An exhausted queue fails every renewal, like a dead central node.
+        let t = fake_with(Vec::new());
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let failures: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+        let warnings = std::cell::Cell::new(0u32);
+
+        renewal_loop(
+            &t,
+            "http://central:3773",
+            "node-a",
+            "gah",
+            "ticket-1",
+            None,
+            900,
+            Duration::from_millis(1),
+            &stop,
+            &|count, _e| {
+                failures.borrow_mut().push(count);
+                if count >= 4 {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            },
+            &|| warnings.set(warnings.get() + 1),
+        );
+
+        assert_eq!(*failures.borrow(), vec![1, 2, 3, 4]);
+        assert_eq!(warnings.get(), 1, "lapse warning must fire once, at 3");
+    }
+
+    #[test]
+    fn renewal_failure_count_resets_after_a_successful_renewal() {
+        // Two failures, one success, then failures again: the warning must
+        // key off CONSECUTIVE failures, not the total.
+        let t = fake_with(vec![
+            Err("connection refused".into()),
+            Err("connection refused".into()),
+            Ok((200, br#"{"expires_at":"x"}"#.to_vec())),
+            Err("connection refused".into()),
+            Err("connection refused".into()),
+            Err("connection refused".into()),
+            Err("connection refused".into()),
+        ]);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let failures: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+        let warnings = std::cell::Cell::new(0u32);
+
+        renewal_loop(
+            &t,
+            "http://central:3773",
+            "node-a",
+            "gah",
+            "ticket-1",
+            None,
+            900,
+            Duration::from_millis(1),
+            &stop,
+            &|count, _e| {
+                failures.borrow_mut().push(count);
+                if count >= 4 {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            },
+            &|| warnings.set(warnings.get() + 1),
+        );
+
+        assert_eq!(*failures.borrow(), vec![1, 2, 1, 2, 3, 4]);
+        assert_eq!(warnings.get(), 1);
+    }
+
+    #[test]
+    fn renewal_makes_no_calls_once_the_guard_has_stopped_it() {
+        let t = fake_with(Vec::new());
+        let stop = std::sync::atomic::AtomicBool::new(true);
+
+        renewal_loop(
+            &t,
+            "http://central:3773",
+            "node-a",
+            "gah",
+            "ticket-1",
+            None,
+            900,
+            Duration::from_millis(1),
+            &stop,
+            &|_count, _e| panic!("no renewal should be attempted after stop"),
+            &|| panic!("no lapse warning should fire after stop"),
+        );
+
+        assert!(t.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn release_posts_the_release_url_and_body_without_a_lease_field() {
+        let t = FakeTransport::queue(vec![(200, "{}")]);
+        release_claim(
+            &t,
+            "http://central:3773",
+            "node-a",
+            "gah",
+            "ticket-1",
+            None,
+        )
+        .unwrap();
+        let calls = t.calls.borrow();
+        assert_eq!(calls[0].0, "http://central:3773/api/claims/release");
+        let body: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(body["node_id"], "node-a");
+        assert_eq!(body["profile"], "gah");
+        assert_eq!(body["work_id"], "ticket-1");
+        assert!(body.get("lease_seconds").is_none());
+    }
+
+    #[test]
+    fn release_failures_are_reported_not_swallowed_by_the_helper() {
+        // Drop best-effort ignores the result; the helper itself must still
+        // surface transport and non-200 failures so callers can log them.
+        let t = fake_with(vec![Err("connection refused".into())]);
+        assert!(release_claim(
+            &t,
+            "http://central:3773",
+            "node-a",
+            "gah",
+            "ticket-1",
+            None,
+        )
+        .is_err());
+
+        let t = FakeTransport::queue(vec![(500, "internal error")]);
+        assert!(release_claim(
+            &t,
+            "http://central:3773",
+            "node-a",
+            "gah",
+            "ticket-1",
+            None,
+        )
+        .is_err());
     }
 }

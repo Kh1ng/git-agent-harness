@@ -10,10 +10,86 @@ import {
   findGahBinary,
   loopSystemctlArgs,
   runDispatchCancellable,
+  runDoctor,
   runPromptPolicyMutation,
+  runQuota,
   startLoop,
   stopLoop,
 } from './gahCli.js';
+
+/** Writes a fake `gah` shell script, pins GAH_BINARY to it, and returns a
+ * cleanup that restores the previous override. */
+function pinFakeGah(body: string): () => void {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-fake-bin-'));
+  const bin = join(dir, 'gah');
+  writeFileSync(bin, `#!/bin/sh\n${body}\n`);
+  chmodSync(bin, 0o755);
+  const original = process.env.GAH_BINARY;
+  process.env.GAH_BINARY = bin;
+  return () => {
+    if (original === undefined) delete process.env.GAH_BINARY;
+    else process.env.GAH_BINARY = original;
+    rmSync(dir, { recursive: true, force: true });
+  };
+}
+
+test('read commands reject with the exit code and stderr when gah fails', async () => {
+  const restore = pinFakeGah('echo "quota exploded" >&2\nexit 3');
+  try {
+    await assert.rejects(
+      runQuota({ profile: 'fixture' }),
+      (error: unknown) => error instanceof Error
+        && /exit code 3/.test(error.message)
+        && /quota exploded/.test(error.message)
+    );
+  } finally {
+    restore();
+  }
+});
+
+test('read commands reject with the offending output when gah prints malformed JSON', async () => {
+  const restore = pinFakeGah("printf 'not json\\n'");
+  try {
+    await assert.rejects(
+      runDoctor('fixture'),
+      (error: unknown) => error instanceof Error
+        && /Failed to parse gah doctor output/.test(error.message)
+        && /not json/.test(error.message)
+    );
+  } finally {
+    restore();
+  }
+});
+
+test('doctor treats a valid JSON failure snapshot as a successful transport response', async () => {
+  // runDoctor passes acceptStructuredFailure: the CLI exits non-zero when
+  // checks fail, but the JSON snapshot must still reach the operator UI.
+  const restore = pinFakeGah("printf '{\"overall_status\":\"failed\"}\\n'\nexit 1");
+  try {
+    const snapshot = await runDoctor('fixture');
+    assert.equal((snapshot as { overall_status: string }).overall_status, 'failed');
+  } finally {
+    restore();
+  }
+});
+
+test('read commands reject with a spawn failure when the pinned binary cannot execute', async () => {
+  // A directory passes findGahBinary's X_OK probe but cannot be spawned,
+  // exercising the transport-level failure path without any real gah build.
+  const dir = mkdtempSync(join(tmpdir(), 'gah-unspawnable-'));
+  const original = process.env.GAH_BINARY;
+  process.env.GAH_BINARY = dir;
+  try {
+    await assert.rejects(
+      runQuota({ profile: 'fixture' }),
+      (error: unknown) => error instanceof Error && /Failed to spawn gah/.test(error.message)
+    );
+  } finally {
+    if (original === undefined) delete process.env.GAH_BINARY;
+    else process.env.GAH_BINARY = original;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('config set args deduplicate clear values and use the CLI config flag', () => {
   assert.deepEqual(
