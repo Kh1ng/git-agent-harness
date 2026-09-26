@@ -97,3 +97,39 @@ Worker installation still needs a matching CLI release and device acceptance.
 The WSL installer rejects an old CLI before overwriting active settings.
 WebSocket authentication does not finish #532's legacy REST authorization,
 capability, audit, idempotency, or per-device credential requirements.
+
+## Follow-up, 26 September 2026
+
+PR #1238 merged as `642da594` after every check passed, covering the
+sensitive seams this audit's earlier passes left open.
+
+The mock control-plane route contract now registers every frontend API
+call: 27 previously missing routes across pairing, push, fleet registry,
+info, hold and ledger writes, git commit/publish, routing candidates,
+backend instances, approvals, skills detail, and the node setup command.
+The mock suite also runs as part of `npm test --workspace=apps/server`
+instead of only via `test:mock`, so frontend/mock route drift fails the
+default suite instead of an opt-in one.
+
+Central claim renewal now has direct unit coverage: the renewal loop
+warns exactly once at three consecutive failures, resets its count after
+a successful renewal, and makes no calls once the guard has stopped it;
+release posts the release URL and body without a lease field. The gah CLI
+read path covers nonzero-exit-with-stderr, malformed-JSON, doctor
+structured-failure pass-through, and spawn failures, pinned through
+`GAH_BINARY` fixture binaries. Coordinator identity and the shared push
+store gained dedicated suites (persist/reuse, corrupt-file fallback,
+unwritable directory, cache keying; atomic 0600 replace, temporary-file
+cleanup, no-op removal, validator matrices).
+
+Validation at merge: 2,174 Rust tests, 484 server checks plus 8 mock
+checks, and 88 browser e2e checks passed. Clippy and both server
+typechecks are clean.
+
+Remaining gaps are ticketed rather than left implicit: #1244 removes the
+dead provider service/driver layer, #1245 bounds CLI read-wrapper output,
+#1246 covers prompt-policy failure paths, #1247 covers the memory
+gateway's real curl transport, #1248 covers claims-service corruption
+and cross-process races, #1249 covers live WebSocket termination on
+device-token expiry, and #1250 deduplicates the CLI test harness
+helpers.
