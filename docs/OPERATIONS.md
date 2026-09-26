@@ -669,10 +669,15 @@ might be a transient network blip.
 **Storage**: `apps/server/src/claimsService.ts` keeps leases in a plain
 JSON file (`config/claims-config.json` by default,
 `GAH_CLAIMS_CONFIG_PATH` to override) plus an in-memory `Map`, not a real
-database -- correctness comes from acquire/renew/release being
-synchronous functions with no `await` between the read-check and the
-write, which Node's single-threaded event loop already makes atomic, the
-same guarantee a `WHERE` clause buys you in SQL.
+database. Within one server process, correctness comes from
+acquire/renew/release being synchronous functions with no `await` between
+the read-check and the write. Across processes, saves replace the whole
+file atomically (temp file + rename, owner-only permissions), so
+independent writers are explicitly last-write-wins -- a concurrent
+writer's lease can be lost, but the file is never left half-written or
+corrupt. A store that fails to load (corrupt or wrong-shape JSON) makes
+every claims route return a 500 with a server-side log; it is never
+silently reset to empty.
 
 See `src/central_claims.rs` (Rust client, `gah`'s side) and
 `apps/server/src/claimsService.ts` (server, holds the leases) for the

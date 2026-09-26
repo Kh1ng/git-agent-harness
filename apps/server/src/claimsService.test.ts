@@ -129,12 +129,20 @@ test('claims use atomic owner-only replacement', { skip: process.platform === 'w
 test('independent writers are explicitly last-write-wins and leave valid JSON', () => {
   const path = tempClaimsPath();
   const first = new ClaimsService(path);
-  const second = new ClaimsService(path);
-
   first.acquire('node-a', 'gah', 'ticket-1');
+
+  // The second writer loads the state holding ticket-1, then the first
+  // writer records ticket-3 before the second writer saves. The second
+  // writer's whole-file replacement clobbers ticket-3: last write wins,
+  // and the store stays valid JSON either way.
+  const second = new ClaimsService(path);
+  first.acquire('node-a', 'gah', 'ticket-3');
   second.acquire('node-b', 'gah', 'ticket-2');
 
   const stored = JSON.parse(readFileSync(path, 'utf8'));
-  assert.deepEqual(stored.leases.map((lease: { work_id: string }) => lease.work_id), ['ticket-2']);
+  assert.deepEqual(
+    stored.leases.map((lease: { work_id: string }) => lease.work_id),
+    ['ticket-1', 'ticket-2']
+  );
   assert.equal(new ClaimsService(path).getLease('gah', 'ticket-2')?.node_id, 'node-b');
 });
