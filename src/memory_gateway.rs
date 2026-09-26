@@ -428,6 +428,115 @@ pub fn capture_attempt_and_update_ledger(
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    #[cfg(unix)]
+    use std::{fs, path::Path};
+
+    #[cfg(unix)]
+    fn write_fake_curl(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, body).unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_curl_transport_is_hermetic_secret_safe_and_fail_open() {
+        const TEST_NAME: &str =
+            "memory_gateway::tests::real_curl_transport_is_hermetic_secret_safe_and_fail_open";
+        if std::env::var_os("GAH_MEMORY_CURL_TEST_CHILD").is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env("GAH_MEMORY_CURL_TEST_CHILD", "1")
+                .env("GAH_NODE_ROLE", "central")
+                .env("TDAI_GATEWAY_URL", "https://memory.test")
+                .env("TDAI_GATEWAY_API_KEY", "super-secret-token")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let argv_path = dir.path().join("argv.txt");
+        let stdin_path = dir.path().join("stdin.txt");
+        write_fake_curl(
+            &dir.path().join("curl"),
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "$FAKE_CURL_ARGV"
+config=$(cat)
+printf '%s' "$config" > "$FAKE_CURL_STDIN"
+case "$FAKE_CURL_MODE" in
+  recall) printf '%s\n__GAH_MEMORY_GATEWAY_STATUS__:200\n' '{"context":"remembered","code":0}' ;;
+  capture) printf '%s\n__GAH_MEMORY_GATEWAY_STATUS__:200\n' '{"l0_recorded":2,"code":0}' ;;
+  non_200) printf '%s\n__GAH_MEMORY_GATEWAY_STATUS__:503\n' '{"error":"offline"}' ;;
+  transport_failure) exit 7 ;;
+  malformed) printf '%s\n' 'garbage without a status marker' ;;
+  *) exit 9 ;;
+esac
+"#,
+        );
+        std::env::set_var("FAKE_CURL_ARGV", &argv_path);
+        std::env::set_var("FAKE_CURL_STDIN", &stdin_path);
+        let _path_guard = crate::test_support::PathGuard::set(dir.path());
+        let defaults = crate::config::Defaults::default();
+
+        std::env::set_var("FAKE_CURL_MODE", "recall");
+        assert_eq!(
+            recall_for_ticket(&defaults, "gah", "/tmp", "#1247", "query"),
+            Some("remembered".to_string())
+        );
+        let argv = fs::read_to_string(&argv_path).unwrap();
+        let stdin = fs::read_to_string(&stdin_path).unwrap();
+        assert!(!argv.contains("super-secret-token"), "got argv: {argv}");
+        assert!(stdin.contains("Authorization: Bearer super-secret-token"));
+        assert!(stdin.contains("gah:worker:gah:#1247"));
+
+        std::env::set_var("FAKE_CURL_MODE", "capture");
+        assert_eq!(
+            capture_for_ticket(&defaults, "gah", "/tmp", "#1247", "task", "result"),
+            Some(2)
+        );
+
+        std::env::set_var("FAKE_CURL_MODE", "non_200");
+        assert_eq!(
+            recall_for_ticket(&defaults, "gah", "/tmp", "#1247", "query"),
+            None
+        );
+
+        std::env::set_var("FAKE_CURL_MODE", "transport_failure");
+        assert_eq!(
+            capture_for_ticket(&defaults, "gah", "/tmp", "#1247", "task", "result"),
+            None
+        );
+        assert_eq!(
+            recall_for_ticket(&defaults, "gah", "/tmp", "#1247", "query"),
+            None
+        );
+
+        std::env::set_var("FAKE_CURL_MODE", "non_200");
+        assert_eq!(
+            capture_for_ticket(&defaults, "gah", "/tmp", "#1247", "task", "result"),
+            None
+        );
+
+        std::env::set_var("FAKE_CURL_MODE", "malformed");
+        assert_eq!(
+            recall_for_ticket(&defaults, "gah", "/tmp", "#1247", "query"),
+            None
+        );
+        assert_eq!(
+            capture_for_ticket(&defaults, "gah", "/tmp", "#1247", "task", "result"),
+            None
+        );
+    }
 
     #[test]
     fn normalize_remote_url_handles_https_and_scp_and_git_suffix() {
