@@ -100,6 +100,7 @@ export function App() {
           workId={selectedWorkId}
           profile={profileOverride ?? profile ?? 'gah'}
           connected={isConnected}
+          sessions={sessions}
           onClose={() => setSelectedWorkId(null)}
           onRedispatch={({ profile, repo, workId, backend }) => sendMessage({
             type: 'session.start',

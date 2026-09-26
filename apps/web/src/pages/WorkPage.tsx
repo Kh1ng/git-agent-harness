@@ -18,6 +18,7 @@ import { ExternalApprovals } from '../components/ExternalApprovals.js';
 import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
 import { ProviderPicker } from '../components/ProviderPicker.js';
 import { formatCost, formatPercent } from '../lib/format.js';
+import { workKey } from '../lib/workKey.js';
 import {
   WAYPOINTS,
   WaypointStrip,
@@ -126,16 +127,6 @@ type ProjectWorkItem = {
   session: Session | undefined;
   ledgerEvidence: WorkWaypointEvidence | undefined;
 };
-
-function workKey(workId: string): string {
-  const trimmed = workId.trim();
-  if (/^\d+$/.test(trimmed)) return `#${Number(trimmed)}`;
-  const issue = trimmed.match(/^#0*(\d+)$/);
-  if (issue) return `#${Number(issue[1])}`;
-  const ticket = trimmed.match(/^ticket-0*(\d+)$/i);
-  if (ticket) return `#${Number(ticket[1])}`;
-  return trimmed.toLowerCase();
-}
 
 function projectWorkItems(
   tickets: AvailableTicket[],

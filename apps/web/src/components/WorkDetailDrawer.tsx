@@ -1,25 +1,28 @@
 import { useEffect, useRef, useState } from 'react';
+<<<<<<< HEAD
 import { ExternalLink, GitPullRequest, Hammer, Pause, Play, RefreshCw, X } from 'lucide-react';
 import type { ProviderKind } from '@git-agent-harness/contracts';
+||||||| 4473c4bf
+import { ExternalLink, Hammer, Pause, Play, RefreshCw, X } from 'lucide-react';
+import type { ProviderKind } from '@git-agent-harness/contracts';
+=======
+import { ExternalLink, Hammer, Pause, Play, RefreshCw, X } from 'lucide-react';
+import type { ProviderKind, Session } from '@git-agent-harness/contracts';
+>>>>>>> origin/feat/1254-work-detail-drawer
 import { gahApi, GahApiError } from '../api/client.js';
+import { workKey } from '../lib/workKey.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { useGahStore } from '../store/gahStore.js';
 import { AttemptTimeline } from './AttemptTimeline.js';
 import { ExternalAnchor } from './ExternalAnchor.js';
+import { WaypointHistory, type WaypointEvidence } from './WaypointProgress.js';
 import { EmptyState, ErrorState, LoadingState } from './ui/EmptyState.js';
 import { LastUpdated } from './ui/LastUpdated.js';
 import { StatusBadge, classificationTone } from './ui/StatusBadge.js';
 import { CommitPrDialog } from './CommitPrDialog.js';
 
 const REFRESH_MS = 30_000;
-
-function workKey(workId: string): string {
-  const trimmed = workId.trim();
-  if (/^#?0*\d+$/.test(trimmed)) return `#${Number(trimmed.replace('#', ''))}`;
-  const ticket = trimmed.match(/^ticket-0*(\d+)$/i);
-  return ticket ? `#${Number(ticket[1])}` : trimmed.toLowerCase();
-}
 
 type Redispatch = (input: {
   profile: string;
@@ -32,11 +35,12 @@ type WorkDetailDrawerProps = {
   workId: string;
   profile: string;
   connected: boolean;
+  sessions: Session[];
   onClose: () => void;
   onRedispatch: Redispatch;
 };
 
-export function WorkDetailDrawer({ workId, profile, connected, onClose, onRedispatch }: WorkDetailDrawerProps) {
+export function WorkDetailDrawer({ workId, profile, connected, sessions, onClose, onRedispatch }: WorkDetailDrawerProps) {
   const closeButton = useRef<HTMLButtonElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const status = useGahStore((state) => state.status);
@@ -80,6 +84,19 @@ export function WorkDetailDrawer({ workId, profile, connected, onClose, onRedisp
   const repo = profiles.data?.find((item) => item.name === profile)?.repo ?? lastEntry?.repo ?? null;
   const backend = (ticket?.recommended_backend ?? lastEntry?.effective_backend ?? 'auto') as ProviderKind;
   const title = ticket?.title ?? mergeRequest?.title ?? lastEntry?.work_title ?? workId;
+  const session = sessions.find((item) => item.target && workKey(item.target) === key);
+  const ledgerEvidence = Object.entries(status.data?.work_waypoint_evidence ?? {})
+    .find(([id]) => workKey(id) === key)?.[1];
+  const evidence: WaypointEvidence = {
+    priorAttemptCount: ticket?.prior_attempt_count,
+    hasActiveClaim: ticket?.has_active_claim,
+    hasActiveMergeRequest: ticket?.has_active_mr,
+    humanRequired: ticket?.human_required,
+    sessionStatus: session?.status === 'idle' || session?.status === 'stopping' ? undefined : session?.status,
+    sessionStartedAt: session?.startedAt,
+    ledgerEvidence,
+    mergeRequest
+  };
 
   const run = async (action: typeof pending, mutation: () => Promise<unknown>, success: string) => {
     setPending(action);
@@ -101,20 +118,17 @@ export function WorkDetailDrawer({ workId, profile, connected, onClose, onRedisp
     void run('clear', () => gahApi.ledgerClearAttempts({ profile, work_id: workId }), 'Prior attempts cleared.');
   };
 
-  const redispatch = async () => {
+  const redispatch = () => {
     if (!repo || !window.confirm(`Re-dispatch ${workId} with ${backend}?`)) return;
     setPending('dispatch');
     setError(null);
     setResult(null);
-    try {
-      onRedispatch({ profile, repo, workId, backend });
-      await refresh();
-      setResult('Dispatch queued.');
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : 'Dispatch failed.');
-    } finally {
-      setPending(null);
-    }
+    // Dispatch is fire-and-forget over the socket; the outcome arrives as
+    // activity-feed events, so the drawer reports queuing, not completion.
+    onRedispatch({ profile, repo, workId, backend });
+    setResult('Dispatch queued. The activity feed reports the outcome.');
+    setPending(null);
+    void refresh();
   };
 
   const reviewTone = mergeRequest ? classificationTone(mergeRequest.classification) : { tone: 'unknown' as const, label: 'No review' };
@@ -170,14 +184,14 @@ export function WorkDetailDrawer({ workId, profile, connected, onClose, onRedisp
                   <Play size={14} aria-hidden="true" /> {pending === 'release' ? 'Clearing…' : 'Clear hold'}
                 </button>
               ) : (
-                <button type="button" disabled={pending !== null} onClick={() => void run('hold', () => gahApi.holdSet({ profile, work_id: workId, reason: 'operator review hold from work details' }), 'Hold set.')} className="btn-secondary min-h-11">
+                <button type="button" disabled={pending !== null} onClick={() => void run('hold', () => gahApi.holdSet({ profile, work_id: workId, reason: 'operator review hold from dashboard' }), 'Hold set.')} className="btn-secondary min-h-11">
                   <Pause size={14} aria-hidden="true" /> {pending === 'hold' ? 'Setting…' : 'Set hold'}
                 </button>
               )}
               <button type="button" disabled={pending !== null} onClick={clearAttempts} className="btn-secondary min-h-11">
                 <Hammer size={14} aria-hidden="true" /> {pending === 'clear' ? 'Clearing…' : 'Clear attempts'}
               </button>
-              <button type="button" disabled={pending !== null || !connected || !repo} onClick={() => void redispatch()} className="btn-primary min-h-11" title={!repo ? 'Repository details are not available yet.' : undefined}>
+              <button type="button" disabled={pending !== null || !connected || !repo} onClick={redispatch} className="btn-primary min-h-11" title={!repo ? 'Repository details are not available yet.' : undefined}>
                 <RefreshCw size={14} aria-hidden="true" /> {pending === 'dispatch' ? 'Dispatching…' : 'Re-dispatch'}
               </button>
               {mergeRequest && (
@@ -197,9 +211,15 @@ export function WorkDetailDrawer({ workId, profile, connected, onClose, onRedisp
             ) : timeline?.error ? (
               <ErrorState message={timeline.error} endpoint={`/api/work/${workId}`} onRetry={() => fetchWorkTimeline(workId, { force: true })} />
             ) : entries.length === 0 ? (
-              <EmptyState icon={Hammer} title="No ledger history for this work item yet" />
+              <div className="space-y-4">
+                <WaypointHistory evidence={evidence} label={workId} />
+                <EmptyState icon={Hammer} title="No ledger history for this work item yet" />
+              </div>
             ) : (
-              <AttemptTimeline entries={entries} />
+              <div className="space-y-4">
+                <WaypointHistory evidence={{ ...evidence, entries }} label={workId} />
+                <AttemptTimeline entries={entries} />
+              </div>
             )}
           </section>
         </div>

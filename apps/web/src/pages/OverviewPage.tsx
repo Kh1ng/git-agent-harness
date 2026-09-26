@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { ExternalAnchor } from '../components/ExternalAnchor';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import {
@@ -287,7 +288,15 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate, onOpenWork
                           <StatusBadge tone={tone} label={label} />
                         </td>
                         <td>
-                          {mr.work_id && <button type="button" onClick={(event) => { event.stopPropagation(); onOpenWork(mr.work_id as string); }} className="min-h-11 text-xs text-accent hover:underline sm:min-h-0">View details</button>}
+                          <div className="flex items-center gap-3">
+                            {mr.work_id && <button type="button" onClick={(event) => { event.stopPropagation(); onOpenWork(mr.work_id as string); }} className="min-h-11 text-xs text-accent hover:underline sm:min-h-0">View details</button>}
+                            {/* Rows without a work id (recent merges) still reach the provider. */}
+                            {mr.url && (
+                              <ExternalAnchor href={mr.url} className="min-h-11 text-xs text-accent hover:underline sm:min-h-0">
+                                View MR
+                              </ExternalAnchor>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -325,7 +334,13 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate, onOpenWork
                         {mr.work_id ?? <span className="text-muted">—</span>}
                       </td>
                       <td className="text-xs max-w-[16rem] truncate" title={mr.title ?? mr.branch}>
-                        {mr.title ?? mr.branch}
+                        {mr.url ? (
+                          <ExternalAnchor href={mr.url} className="text-primary hover:text-accent hover:underline">
+                            {mr.title ?? mr.branch}
+                          </ExternalAnchor>
+                        ) : (
+                          (mr.title ?? mr.branch)
+                        )}
                       </td>
                       <td className="text-xs whitespace-nowrap text-secondary">
                         {mr.effective_backend
@@ -353,7 +368,14 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate, onOpenWork
                         )}
                       </td>
                       <td>
-                        {mr.work_id && <button type="button" onClick={(event) => { event.stopPropagation(); onOpenWork(mr.work_id as string); }} className="min-h-11 text-xs text-accent hover:underline sm:min-h-0">View details</button>}
+                        <div className="flex items-center gap-3">
+                          {mr.work_id && <button type="button" onClick={(event) => { event.stopPropagation(); onOpenWork(mr.work_id as string); }} className="min-h-11 text-xs text-accent hover:underline sm:min-h-0">View details</button>}
+                          {mr.url && (
+                            <ExternalAnchor href={mr.url} className="min-h-11 text-xs text-accent hover:underline sm:min-h-0">
+                              View
+                            </ExternalAnchor>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
