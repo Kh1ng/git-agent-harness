@@ -104,7 +104,6 @@ pub(crate) fn run_with_executable(
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
-        agent_session: None,
         final_summary,
         agy_cli_log_delta: None,
         internal_log_delta: log_delta(&opencode_log, opencode_log_pre_offset),

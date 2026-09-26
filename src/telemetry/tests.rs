@@ -813,7 +813,6 @@ pub(crate) mod telemetry_tests {
             predicted_duration_seconds: None,
             branch: Some("main".to_string()),
             session_dir: None,
-            origin_agent_session: None,
             duration_seconds: Some(100.0),
             backend_exit_code: Some(0),
             validation_result: Some("pass".to_string()),

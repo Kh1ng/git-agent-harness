@@ -90,8 +90,6 @@ pub struct RunResult {
     pub exit_code: i32,
     pub duration_secs: f64,
     pub log_path: String,
-    /// Resumable provider conversation for follow-up work notifications.
-    pub agent_session: Option<crate::ledger::AgentSessionRef>,
     /// Authoritative final assistant text selected by the backend adapter.
     /// Raw stdout/stderr is never promoted into this field.
     pub final_summary: Option<String>,

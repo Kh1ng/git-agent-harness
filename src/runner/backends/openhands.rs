@@ -98,7 +98,6 @@ pub(crate) fn run_with_executable(
         exit_code,
         duration_secs,
         log_path: log_path.to_string_lossy().into_owned(),
-        agent_session: None,
         final_summary: fs::read_to_string(&log_path)
             .ok()
             .and_then(|text| output::extract_openhands_jsonl_summary(&text)),

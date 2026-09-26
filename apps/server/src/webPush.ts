@@ -25,6 +25,8 @@ const PUSH_ACTIVITY_KINDS = new Set([
 ]);
 const MAX_PAYLOAD_BYTES = 3 * 1024;
 const FAILURE_LOG_INTERVAL_MS = 60 * 60 * 1_000;
+const PUSH_ENDPOINT_HOSTS = new Set(['fcm.googleapis.com', 'updates.push.services.mozilla.com']);
+const PUSH_ENDPOINT_SUFFIXES = ['.push.apple.com', '.notify.windows.com'];
 
 type VapidKeys = { publicKey: string; privateKey: string };
 type StoredSubscription = {
@@ -60,7 +62,10 @@ function validSubscription(value: unknown): value is PushSubscription {
   const input = value as Record<string, unknown>;
   if (typeof input.endpoint !== 'string') return false;
   try {
-    if (new URL(input.endpoint).protocol !== 'https:') return false;
+    const endpoint = new URL(input.endpoint);
+    if (endpoint.protocol !== 'https:'
+      || (!PUSH_ENDPOINT_HOSTS.has(endpoint.hostname)
+        && !PUSH_ENDPOINT_SUFFIXES.some((suffix) => endpoint.hostname.endsWith(suffix)))) return false;
   } catch {
     return false;
   }

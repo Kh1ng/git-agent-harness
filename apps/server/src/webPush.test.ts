@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { WebPushNotifications } from './webPush.js';
 
 const subscription = {
-  endpoint: 'https://push.example.test/device-1',
+  endpoint: 'https://fcm.googleapis.com/device-1',
   keys: { p256dh: 'public-material', auth: 'auth-material' }
 };
 
@@ -78,7 +78,7 @@ test('expired subscriptions are pruned and other delivery failures do not escape
   const f = fixture(async () => { throw Object.assign(new Error('push failed'), { statusCode: status }); });
   try {
     f.service.register(subscription);
-    f.service.register({ ...subscription, endpoint: 'https://push.example.test/device-2' });
+    f.service.register({ ...subscription, endpoint: 'https://fcm.googleapis.com/device-2' });
     const event = {
       id: 'failed', occurredAt: '2026-09-25T12:00:00Z', profile: 'gah', kind: 'dispatch_failed' as const,
       severity: 'error' as const, title: 'Failed', message: 'No secret details.'
@@ -98,7 +98,7 @@ test('revoking a paired device removes only its subscriptions', () => {
   const f = fixture();
   try {
     f.service.register(subscription, 'Phone', 'device-1');
-    f.service.register({ ...subscription, endpoint: 'https://push.example.test/device-2' }, 'Tablet', 'device-2');
+    f.service.register({ ...subscription, endpoint: 'https://fcm.googleapis.com/device-2' }, 'Tablet', 'device-2');
     f.service.removeForDevice('device-1');
     const stored = JSON.parse(readFileSync(f.subscriptions, 'utf8')) as { deviceId?: string }[];
     assert.deepEqual(stored.map((entry) => entry.deviceId), ['device-2']);
@@ -117,11 +117,37 @@ test('pruning an expired send preserves a subscription registered in flight', as
       severity: 'error', title: 'Failed', message: 'No secret details.'
     });
     await new Promise((resolve) => setImmediate(resolve));
-    f.service.register({ ...subscription, endpoint: 'https://push.example.test/device-2' });
+    f.service.register({ ...subscription, endpoint: 'https://fcm.googleapis.com/device-2' });
     rejectDelivery?.(Object.assign(new Error('expired'), { statusCode: 410 }));
     await delivery;
     const stored = JSON.parse(readFileSync(f.subscriptions, 'utf8')) as { subscription: { endpoint: string } }[];
-    assert.deepEqual(stored.map((entry) => entry.subscription.endpoint), ['https://push.example.test/device-2']);
+    assert.deepEqual(stored.map((entry) => entry.subscription.endpoint), ['https://fcm.googleapis.com/device-2']);
+  } finally {
+    rmSync(f.directory, { recursive: true });
+  }
+});
+
+test('subscriptions accept only known push-service hosts and ignore unsafe stored endpoints', () => {
+  const f = fixture();
+  try {
+    for (const endpoint of [
+      'https://fcm.googleapis.com/device',
+      'https://web.push.apple.com/device',
+      'https://updates.push.services.mozilla.com/device',
+      'https://wns.notify.windows.com/device'
+    ]) f.service.register({ ...subscription, endpoint });
+    assert.equal(f.service.list().count, 4);
+    for (const endpoint of [
+      'https://push.apple.com/device',
+      'https://push.apple.com.attacker.test/device',
+      'https://central-node.tailnet/device'
+    ]) assert.throws(() => f.service.register({ ...subscription, endpoint }), /valid HTTPS push subscription/);
+
+    writeFileSync(f.subscriptions, JSON.stringify([{
+      id: 'unsafe', label: null, createdAt: new Date().toISOString(),
+      subscription: { ...subscription, endpoint: 'https://central-node.tailnet/device' }
+    }]));
+    assert.deepEqual(f.service.list(), { count: 0 });
   } finally {
     rmSync(f.directory, { recursive: true });
   }

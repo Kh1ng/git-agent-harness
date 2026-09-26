@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import type { ClientHttp2Session } from 'node:http2';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -9,7 +11,10 @@ import type { ActivityEvent } from '@git-agent-harness/contracts';
 
 const token = (character: string) => character.repeat(64);
 
-function fixture(response: (request: ApnsRequest) => { status: number; reason?: string } = () => ({ status: 200 })) {
+function fixture(
+  response: (request: ApnsRequest) => { status: number; reason?: string } = () => ({ status: 200 }),
+  sessionFactory?: (host: string) => ClientHttp2Session
+) {
   const directory = mkdtempSync(join(tmpdir(), 'gah-apns-'));
   const keyPath = join(directory, 'AuthKey.p8');
   const devicesPath = join(directory, 'devices.json');
@@ -20,11 +25,37 @@ function fixture(response: (request: ApnsRequest) => { status: number; reason?: 
   const service = new ApnsNotifications(
     { keyPath, keyId: 'KEY123', teamId: 'TEAM123', bundleId: 'com.kh1ng.gah.controller', environment: 'sandbox' },
     devicesPath,
-    async (_host, request) => { requests.push(request); return response(request); },
-    () => clock
+    sessionFactory ? undefined : async (_host, request) => { requests.push(request); return response(request); },
+    () => clock,
+    sessionFactory
   );
   return { directory, devicesPath, requests, service, advance: (milliseconds: number) => { clock += milliseconds; } };
 }
+
+function fakeSession(): ClientHttp2Session {
+  const session = new EventEmitter() as EventEmitter & {
+    closed: boolean;
+    destroyed: boolean;
+    request: () => EventEmitter & { close: () => void; end: (payload: string) => void };
+  };
+  session.closed = false;
+  session.destroyed = false;
+  session.request = () => {
+    const stream = new EventEmitter() as EventEmitter & { close: () => void; end: (payload: string) => void };
+    stream.close = () => undefined;
+    stream.end = () => queueMicrotask(() => {
+      stream.emit('response', { ':status': 200 });
+      stream.emit('end');
+    });
+    return stream;
+  };
+  return session as unknown as ClientHttp2Session;
+}
+
+const activity = (id: string): ActivityEvent => ({
+  id, occurredAt: '2026-09-25T12:00:00Z', profile: 'gah', sessionId: 's1',
+  kind: 'chat_turn_completed', severity: 'success', title: 'gah: reply ready', message: 'Done.'
+});
 
 test('APNs alert uses token auth, shared payload, collapse id, private storage, and prunes 410', async () => {
   const setup = fixture(() => ({ status: 410, reason: 'Unregistered' }));
@@ -84,5 +115,31 @@ test('revoking a paired device removes only its APNs registration', () => {
     assert.deepEqual(setup.service.list(), { count: 1 });
     const stored = JSON.parse(readFileSync(setup.devicesPath, 'utf8')) as { deviceId?: string }[];
     assert.deepEqual(stored.map((entry) => entry.deviceId), ['device-2']);
+  } finally { rmSync(setup.directory, { recursive: true, force: true }); }
+});
+
+test('APNs reuses one HTTP/2 session for sequential sends', async () => {
+  let sessions = 0;
+  const setup = fixture(undefined, () => { sessions += 1; return fakeSession(); });
+  try {
+    setup.service.register({ token: token('a') });
+    for (let index = 0; index < 10; index += 1) await setup.service.deliverActivity(activity(`event-${index}`));
+    assert.equal(sessions, 1);
+  } finally { rmSync(setup.directory, { recursive: true, force: true }); }
+});
+
+test('APNs reconnects after a GOAWAY', async () => {
+  const created: ClientHttp2Session[] = [];
+  const setup = fixture(undefined, () => {
+    const session = fakeSession();
+    created.push(session);
+    return session;
+  });
+  try {
+    setup.service.register({ token: token('a') });
+    await setup.service.deliverActivity(activity('before-goaway'));
+    created[0].emit('goaway', 0, 0, Buffer.alloc(0));
+    await setup.service.deliverActivity(activity('after-goaway'));
+    assert.equal(created.length, 2);
   } finally { rmSync(setup.directory, { recursive: true, force: true }); }
 });

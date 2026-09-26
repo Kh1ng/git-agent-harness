@@ -1,4 +1,6 @@
 import { expect, test } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 
 const welcome = {
   type: 'server.welcome',
@@ -52,6 +54,52 @@ const chatFinished = {
   workId: null,
   sessionId: 'session-7'
 };
+
+test('service worker always shows valid pushes and opens a window when navigation fails', async () => {
+  const listeners = new Map<string, (event: never) => void>();
+  const shown: unknown[][] = [];
+  const opened: string[] = [];
+  const client = {
+    url: 'http://localhost:3000/',
+    visibilityState: 'visible',
+    navigate: async () => { throw new Error('navigation failed'); },
+    focus: async () => undefined
+  };
+  const worker = {
+    location: { origin: 'http://localhost:3000' },
+    registration: { showNotification: async (...args: unknown[]) => { shown.push(args); } },
+    clients: {
+      matchAll: async () => [client],
+      openWindow: async (url: string) => { opened.push(url); },
+      claim: async () => undefined
+    },
+    skipWaiting: async () => undefined,
+    addEventListener: (name: string, listener: (event: never) => void) => listeners.set(name, listener)
+  };
+  runInNewContext(readFileSync(new URL('../../public/sw.js', import.meta.url), 'utf8'), {
+    self: worker,
+    caches: {},
+    fetch: async () => undefined,
+    URL,
+    Response
+  });
+
+  let push: Promise<void> | undefined;
+  listeners.get('push')!({
+    data: { json: () => ({ id: 'event-1', title: 'Ready', body: 'Done', url: '/?page=events' }) },
+    waitUntil: (promise: Promise<void>) => { push = promise; }
+  } as never);
+  await push;
+  expect(shown).toHaveLength(1);
+
+  let click: Promise<void> | undefined;
+  listeners.get('notificationclick')!({
+    notification: { close: () => undefined, data: { url: 'http://localhost:3000/?page=events' } },
+    waitUntil: (promise: Promise<void>) => { click = promise; }
+  } as never);
+  await click;
+  expect(opened).toEqual(['http://localhost:3000/?page=events']);
+});
 
 test('replay de-duplicates durable activity', async ({ page }) => {
   await page.routeWebSocket('**/ws**', (ws) => {

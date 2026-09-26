@@ -50,8 +50,6 @@ self.addEventListener('push', (event) => {
     let target;
     try { target = new URL(payload.url, self.location.origin); } catch { return; }
     if (target.origin !== self.location.origin) return;
-    const visible = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    if (visible.some((client) => client.visibilityState === 'visible')) return;
     await self.registration.showNotification(payload.title, {
       body: payload.body,
       tag: payload.id,
@@ -66,12 +64,16 @@ self.addEventListener('notificationclick', (event) => {
     let target;
     try { target = new URL(event.notification.data?.url, self.location.origin); } catch { return; }
     if (target.origin !== self.location.origin) return;
-    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    const existing = windows[0];
+    const windows = await self.clients.matchAll({ type: 'window' });
+    const existing = windows.find((client) => {
+      try { return new URL(client.url).origin === self.location.origin; } catch { return false; }
+    });
     if (existing) {
-      await existing.navigate(target.href);
-      await existing.focus();
-      return;
+      try {
+        await existing.navigate(target.href);
+        await existing.focus();
+        return;
+      } catch { /* Open a new window below. */ }
     }
     await self.clients.openWindow(target.href);
   })());

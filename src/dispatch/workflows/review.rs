@@ -976,7 +976,6 @@ pub(in crate::dispatch) fn review(
                 NotifyEvent::ReviewVerdict {
                     verdict: &verdict.verdict,
                     mr_url: mr_url.as_deref().unwrap_or("unknown"),
-                    work_id: ledger.work_id.as_deref().unwrap_or("unknown"),
                 },
             );
             if verdict.human_required {

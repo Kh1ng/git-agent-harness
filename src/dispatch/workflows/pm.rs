@@ -192,7 +192,6 @@ pub(crate) fn pm(
                     exit_code: -1,
                     duration_secs: 0.0,
                     log_path: log_path.to_string_lossy().into_owned(),
-                    agent_session: None,
                     final_summary: None,
                     agy_cli_log_delta: None,
                     internal_log_delta: None,
@@ -208,9 +207,6 @@ pub(crate) fn pm(
             result.exit_code, result.duration_secs, result.log_path
         );
         ledger.backend_exit_code = Some(result.exit_code);
-        if result.agent_session.is_some() {
-            ledger.origin_agent_session = result.agent_session.clone();
-        }
         ledger.validation_result = Some("not_run".into());
         record_external_approval_consumption_for_last_attempt(cfg, profile_name, profile, ledger);
         let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();

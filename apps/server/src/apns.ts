@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { connect } from 'node:http2';
+import { connect, type ClientHttp2Session } from 'node:http2';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ActivityEvent } from '@git-agent-harness/contracts';
@@ -17,6 +17,7 @@ type ApnsConfig = {
 type ApnsResponse = { status: number; reason?: string };
 export type ApnsRequest = { token: string; headers: Record<string, string>; payload: object };
 type ApnsTransport = (host: string, request: ApnsRequest) => Promise<ApnsResponse>;
+type ApnsSessionFactory = (host: string) => ClientHttp2Session;
 type LiveActivityRegistration = { profile: string; sessionId: string; token: string };
 type LiveActivityDelivery = { startedAt: number; lastUpdate: number; lastIdentity: string };
 type TokenSlot = 'device' | 'pushToStartToken' | { liveActivity: string };
@@ -41,9 +42,8 @@ function validToken(value: unknown): value is string {
   return typeof value === 'string' && TOKEN_PATTERN.test(value);
 }
 
-function defaultTransport(host: string, request: ApnsRequest): Promise<ApnsResponse> {
+function sendApnsRequest(client: ClientHttp2Session, request: ApnsRequest): Promise<ApnsResponse> {
   return new Promise((resolveRequest, reject) => {
-    const client = connect(host);
     const stream = client.request({ ':method': 'POST', ':path': `/3/device/${request.token}`, ...request.headers });
     const chunks: Buffer[] = [];
     let status = 0;
@@ -52,7 +52,6 @@ function defaultTransport(host: string, request: ApnsRequest): Promise<ApnsRespo
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      client.close();
       reject(error);
     };
     const timer = setTimeout(() => { stream.close(); fail(new Error('APNs request timed out')); }, 10_000);
@@ -62,13 +61,11 @@ function defaultTransport(host: string, request: ApnsRequest): Promise<ApnsRespo
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      client.close();
       let reason: string | undefined;
       try { reason = JSON.parse(Buffer.concat(chunks).toString('utf8')).reason; } catch { /* APNs success has no body. */ }
       resolveRequest({ status, reason });
     });
     stream.on('error', fail);
-    client.on('error', fail);
     stream.end(JSON.stringify(request.payload));
   });
 }
@@ -77,12 +74,14 @@ export class ApnsNotifications {
   private readonly key: crypto.KeyObject;
   private jwt: { value: string; issuedAt: number } | null = null;
   private activityDeliveries = new Map<string, LiveActivityDelivery>();
+  private sessions = new Map<string, ClientHttp2Session>();
 
   constructor(
     private readonly config: ApnsConfig,
     private readonly devicesPath = process.env.GAH_APNS_DEVICES_PATH ?? resolve(process.cwd(), 'config/push/apns-devices.json'),
-    private readonly transport: ApnsTransport = defaultTransport,
-    private readonly now: () => number = Date.now
+    private readonly transport: ApnsTransport | undefined = undefined,
+    private readonly now: () => number = Date.now,
+    private readonly sessionFactory: ApnsSessionFactory = connect
   ) {
     this.key = crypto.createPrivateKey(readFileSync(config.keyPath));
   }
@@ -241,7 +240,9 @@ export class ApnsNotifications {
           console.error(`[apns] skipped oversized payload for device ${device.id}`);
           return;
         }
-        const response = await this.transport(host, outgoing);
+        const response = this.transport
+          ? await this.transport(host, outgoing)
+          : await sendApnsRequest(this.session(host), outgoing);
         if (response.status === 410 || response.reason === 'BadDeviceToken' || response.reason === 'Unregistered') {
           const failures = invalid.get(device.id) ?? [];
           failures.push({ slot: tokenSlot, token: outgoing.token });
@@ -270,6 +271,20 @@ export class ApnsNotifications {
         liveActivities
       }];
     }));
+  }
+
+  private session(host: string): ClientHttp2Session {
+    const existing = this.sessions.get(host);
+    if (existing && !existing.closed && !existing.destroyed) return existing;
+    const session = this.sessionFactory(host);
+    this.sessions.set(host, session);
+    const discard = () => {
+      if (this.sessions.get(host) === session) this.sessions.delete(host);
+    };
+    session.on('goaway', discard);
+    session.on('error', discard);
+    session.on('close', discard);
+    return session;
   }
 
   private devices(): StoredDevice[] {

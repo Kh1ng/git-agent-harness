@@ -18,10 +18,14 @@
 //! The message-formatting logic is separated from shell execution so it can be
 //! unit-tested without spawning a shell (see tests at the bottom of this file).
 //!
-//! Continuation events resume the worker session recorded in the ledger.
-//! Supervisory events, or continuation events without a resumable worker,
-//! fall back to the profile's durable manager session. Both paths require
-//! explicit `manager_wake_autonomy`; `WakeAutonomy::Full` (unsupervised
+//! Manager wake (operator ask, 2026-07-10): a Telegram ping alone still
+//! requires a human to notice it and go start/resume a manager agent
+//! session. When a profile explicitly opts in via `manager_wake_autonomy`
+//! and `Defaults::current_manager` names a known agent CLI, GAH
+//! additionally queues an instruction on that profile's durable manager
+//! session -- so the next actionable
+//! event (MR ready, human required, etc.) can get picked up without the
+//! operator being the one to trigger it. `WakeAutonomy::Full` (unsupervised
 //! merge authority) requires the operator to explicitly opt a specific
 //! profile in -- it is never the default for a newly-added profile, and a
 //! profile with no `manager_wake_autonomy` set behaves exactly as before
@@ -95,11 +99,7 @@ pub enum NotifyEvent<'a> {
         model: &'a str,
     },
     /// A review verdict was recorded.
-    ReviewVerdict {
-        verdict: &'a str,
-        mr_url: &'a str,
-        work_id: &'a str,
-    },
+    ReviewVerdict { verdict: &'a str, mr_url: &'a str },
     /// A reviewer completed but did not provide machine-safe repair context.
     /// This is an automatic reroute signal, not a terminal human request.
     ReviewOutputInvalid {
@@ -265,9 +265,7 @@ pub fn format_message(event: &NotifyEvent) -> String {
                 route_label(backend, model)
             )
         }
-        NotifyEvent::ReviewVerdict {
-            verdict, mr_url, ..
-        } => {
+        NotifyEvent::ReviewVerdict { verdict, mr_url } => {
             format!("[gah] review {verdict} on {mr_url}")
         }
         NotifyEvent::ReviewOutputInvalid {
@@ -429,9 +427,7 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
             }
             context
         }
-        NotifyEvent::ReviewVerdict {
-            verdict, mr_url, ..
-        } => {
+        NotifyEvent::ReviewVerdict { verdict, mr_url } => {
             format!("A review verdict was recorded: {verdict} on {mr_url}.")
         }
         // The controller owns this bounded reroute. Waking a manager for each
@@ -470,9 +466,15 @@ pub fn format_wake_instruction(event: &NotifyEvent, autonomy: WakeAutonomy) -> O
             context
         }
         NotifyEvent::DispatchFailureResolved { .. } => return None,
-        // The controller already owns the reroute. A second agent in the same
-        // worktree would race the fallback attempt.
-        NotifyEvent::BackendStalled { .. } => return None,
+        NotifyEvent::BackendStalled {
+            work_id,
+            backend,
+            model,
+            duration_seconds,
+        } => format!(
+            "Backend stalled for work_id={work_id} on {} after {duration_seconds:.0}s; GAH is rerouting.",
+            route_label(backend, model)
+        ),
         // Already resolved -- nothing for a woken agent to act on.
         NotifyEvent::MrMerged { .. } => return None,
         NotifyEvent::HandoffCreated { .. } => return None,
@@ -509,8 +511,23 @@ fn wake_manager_session_with<F>(
 {
     use std::io::Write;
 
-    let (log_path, audit) = create_private_wake_log(log_dir, None);
-    let audit = audit.and_then(|mut file| {
+    if let Err(err) = std::fs::create_dir_all(log_dir) {
+        eprintln!("[gah] manager_wake: failed to create log dir (swallowed): {err:#}");
+    }
+    let ts = time::OffsetDateTime::now_utc().unix_timestamp();
+    let log_path = log_dir.join(format!(
+        "{ts}-{}-{}.log",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let audit = options.open(&log_path).and_then(|mut file| {
         writeln!(
             file,
             "manager: {manager}\nrepo_id: {repo_id}\ndisplay_name: {display_name}\ninstruction: {instruction}"
@@ -526,30 +543,6 @@ fn wake_manager_session_with<F>(
     if let Err(err) = enqueue(manager, repo_id, instruction, &log_path) {
         eprintln!("[gah] manager_wake failed (swallowed): {err:#}");
     }
-}
-
-fn create_private_wake_log(
-    log_dir: &std::path::Path,
-    marker: Option<&str>,
-) -> (std::path::PathBuf, std::io::Result<std::fs::File>) {
-    let marker = marker.map(|value| format!("-{value}")).unwrap_or_default();
-    let log_path = log_dir.join(format!(
-        "{}-{}{marker}-{}.log",
-        time::OffsetDateTime::now_utc().unix_timestamp(),
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    let file = std::fs::create_dir_all(log_dir).and_then(|()| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        options.open(&log_path)
-    });
-    (log_path, file)
 }
 
 fn manager_wake_url(central_url: &str) -> anyhow::Result<String> {
@@ -962,7 +955,6 @@ fn event_work_id<'a>(event: &'a NotifyEvent<'a>) -> Option<&'a str> {
         NotifyEvent::ExternalApprovalRequested { work_id, .. }
         | NotifyEvent::ExternalApprovalResolved { work_id, .. } => Some(work_id),
         NotifyEvent::DispatchFailed { work_id, .. } => Some(work_id),
-        NotifyEvent::ReviewVerdict { work_id, .. } => Some(work_id),
         NotifyEvent::DispatchFailureResolved { work_id, .. } => Some(work_id),
         NotifyEvent::HandoffCreated { ticket, .. } => Some(ticket),
         _ => None,
@@ -1076,51 +1068,26 @@ pub(crate) fn notify_terminal_failure_resolved_with_run_id(
 }
 
 /// Fire a notification for `event`: the existing `notify_command` hook (if
-/// the profile defines one), resume the originating worker for continuation
-/// events, or wake the configured manager for supervision and fallback.
+/// the profile defines one), and additionally wake the configured manager
+/// agent (if the profile opts in via `manager_wake_autonomy` and
+/// `cfg.defaults.current_manager` names a known agent CLI).
 ///
 /// This is the single public entry point. It is infallible by design: any
 /// error from either path is logged to stderr and swallowed so the
 /// caller's flow continues exactly as if no hook existed.
 pub fn notify_event(cfg: &GahConfig, profile: &Profile, event: NotifyEvent) {
-    let origin_woken = format_origin_wake_instruction(&event, profile.manager_wake_autonomy)
-        .and_then(|instruction| {
-            event_work_id(&event).map(|work_id| {
-                wake_originating_agent(cfg, profile, work_id, &crate::redact::redact(&instruction))
-            })
-        })
-        .transpose()
-        .unwrap_or_else(|error| {
-            eprintln!("[gah] origin-agent wake failed; falling back to manager: {error:#}");
-            Some(false)
-        })
-        .unwrap_or(false);
-    notify_event_with_origin_and_enqueue(
+    notify_event_with_enqueue(
         cfg,
         profile,
         event,
-        origin_woken,
         |manager, repo_id, instruction, _log_path| {
             enqueue_manager_wake(cfg, manager, repo_id, instruction)
         },
     );
 }
 
-#[cfg(test)]
 fn notify_event_with_enqueue<F>(cfg: &GahConfig, profile: &Profile, event: NotifyEvent, enqueue: F)
 where
-    F: FnOnce(&str, &str, &str, &std::path::Path) -> anyhow::Result<()>,
-{
-    notify_event_with_origin_and_enqueue(cfg, profile, event, false, enqueue);
-}
-
-fn notify_event_with_origin_and_enqueue<F>(
-    cfg: &GahConfig,
-    profile: &Profile,
-    event: NotifyEvent,
-    origin_woken: bool,
-    enqueue: F,
-) where
     F: FnOnce(&str, &str, &str, &std::path::Path) -> anyhow::Result<()>,
 {
     if let Some(command) = &profile.notify_command {
@@ -1147,19 +1114,17 @@ fn notify_event_with_origin_and_enqueue<F>(
         }
     }
 
-    if !origin_woken {
-        if let Some(instruction) = format_wake_instruction(&event, profile.manager_wake_autonomy) {
-            let instruction = crate::redact::redact(&instruction);
-            if let Some(manager) = cfg.defaults.current_manager.as_deref() {
-                wake_manager_session_with(
-                    manager,
-                    &profile.display_name,
-                    &profile.repo_id,
-                    &instruction,
-                    &cfg.defaults.manager_wake_log_dir(),
-                    enqueue,
-                );
-            }
+    if let Some(instruction) = format_wake_instruction(&event, profile.manager_wake_autonomy) {
+        let instruction = crate::redact::redact(&instruction);
+        if let Some(manager) = cfg.defaults.current_manager.as_deref() {
+            wake_manager_session_with(
+                manager,
+                &profile.display_name,
+                &profile.repo_id,
+                &instruction,
+                &cfg.defaults.manager_wake_log_dir(),
+                enqueue,
+            );
         }
     }
 
@@ -1198,146 +1163,6 @@ fn notify_event_with_origin_and_enqueue<F>(
             }
         }
     }
-}
-
-fn format_origin_wake_instruction(
-    event: &NotifyEvent<'_>,
-    autonomy: WakeAutonomy,
-) -> Option<String> {
-    let action = match autonomy {
-        WakeAutonomy::Off => return None,
-        WakeAutonomy::ReviewOnly => "Inspect the failure and report what should change. Do not modify files or take provider actions.",
-        WakeAutonomy::Full => "Continue the work in the same provider conversation. Fix the failure, validate the result, and report the outcome. Do not merge your own change.",
-    };
-    let context = match event {
-        NotifyEvent::ReviewVerdict {
-            verdict,
-            mr_url,
-            work_id,
-        } if verdict.eq_ignore_ascii_case("NEEDS_FIX") => {
-            format!("Review requested fixes for work {work_id} at {mr_url}.")
-        }
-        NotifyEvent::DispatchFailed { .. } | NotifyEvent::BackendStalled { .. } => return None,
-        _ => return None,
-    };
-    Some(format!("[gah origin wake] {context} {action}"))
-}
-
-fn wake_originating_agent(
-    cfg: &GahConfig,
-    profile: &Profile,
-    work_id: &str,
-    instruction: &str,
-) -> anyhow::Result<bool> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-
-    let Some(entry) = crate::ledger::entries_for_work_id(cfg, work_id)?
-        .into_iter()
-        .rev()
-        .find(|entry| entry.repo_id == profile.repo_id && entry.origin_agent_session.is_some())
-    else {
-        return Ok(false);
-    };
-    let session = entry.origin_agent_session.expect("filtered above");
-    let Some(working_directory) = session
-        .working_directory
-        .as_deref()
-        .filter(|path| std::path::Path::new(path).is_dir())
-    else {
-        return Ok(false);
-    };
-    let (program, args): (String, Vec<String>) = match session.backend {
-        crate::ledger::AgentSessionBackend::Claude => {
-            let mut args = vec![
-                "-p".into(),
-                instruction.into(),
-                "--resume".into(),
-                session.provider_session_id.clone(),
-                "--output-format".into(),
-                "text".into(),
-            ];
-            args.extend(crate::runner::filtered_backend_args(
-                "claude",
-                &profile.claude_args,
-            ));
-            (
-                session
-                    .executable
-                    .clone()
-                    .or_else(|| profile.claude_path.clone())
-                    .unwrap_or_else(|| "claude".into()),
-                args,
-            )
-        }
-        crate::ledger::AgentSessionBackend::Codex => {
-            let mut args = vec![
-                "exec".into(),
-                "resume".into(),
-                "--json".into(),
-                session.provider_session_id.clone(),
-                instruction.into(),
-            ];
-            args.extend(crate::runner::filtered_codex_args(&profile.codex_args));
-            (
-                session
-                    .executable
-                    .clone()
-                    .or_else(|| profile.codex_path.clone())
-                    .unwrap_or_else(|| "codex".into()),
-                args,
-            )
-        }
-        crate::ledger::AgentSessionBackend::Unknown => return Ok(false),
-    };
-    let (_log_path, log) =
-        create_private_wake_log(&cfg.defaults.manager_wake_log_dir(), Some("origin"));
-    let mut log = log?;
-    writeln!(
-        log,
-        "origin_backend: {}\nwork_id: {work_id}\ninstruction: {instruction}",
-        session.backend
-    )?;
-    let stderr = log.try_clone()?;
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(working_directory)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(stderr));
-    if let Some(home) = session.home.as_deref() {
-        command.env("HOME", home);
-        match session.backend {
-            crate::ledger::AgentSessionBackend::Codex => {
-                command.env("CODEX_HOME", std::path::Path::new(home).join(".codex"));
-            }
-            crate::ledger::AgentSessionBackend::Claude => {
-                command.env(
-                    "CLAUDE_CONFIG_DIR",
-                    std::path::Path::new(home).join(".claude"),
-                );
-            }
-            crate::ledger::AgentSessionBackend::Unknown => {}
-        }
-    }
-    let mut child = command
-        .spawn()
-        .context("spawning originating agent session")?;
-    let startup_deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
-    while std::time::Instant::now() < startup_deadline {
-        if let Some(status) = child.try_wait()? {
-            if status.success() {
-                return Ok(true);
-            }
-            anyhow::bail!("originating agent session exited during startup with {status}");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(true)
 }
 
 #[cfg(test)]

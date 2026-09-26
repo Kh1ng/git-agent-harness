@@ -1,4 +1,3 @@
-mod agent_session;
 mod approvals;
 mod dispatch_notify;
 mod entry;
@@ -10,8 +9,6 @@ pub use paid_routes::{paid_route_approvals_from_entries, PaidRouteApproval};
 
 pub(crate) use paid_route_notify::notify_paid_route_skips;
 
-#[allow(unused_imports)]
-pub use self::agent_session::{AgentSessionBackend, AgentSessionRef};
 pub use self::approvals::{
     active_external_approval_env_vars_from_entries,
     active_paid_route_approval_destinations_from_entries,

@@ -179,7 +179,13 @@ pub(crate) fn find_codex_transcript(
     env_vars: &[(String, String)],
     raw_stdout: &str,
 ) -> Option<PathBuf> {
-    let thread_id = crate::runner::output::extract_codex_thread_id(raw_stdout)?;
+    let thread_id = raw_stdout.lines().find_map(|line| {
+        let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+        (value.get("type").and_then(serde_json::Value::as_str) == Some("thread.started"))
+            .then(|| value.get("thread_id").and_then(serde_json::Value::as_str))
+            .flatten()
+            .map(str::to_string)
+    })?;
     let home = env_path(env_vars, "CODEX_HOME")
         .or_else(|| env::var_os("CODEX_HOME").map(PathBuf::from))
         .or_else(|| env_path(env_vars, "HOME").map(|home| home.join(".codex")))

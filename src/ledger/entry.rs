@@ -1,4 +1,4 @@
-use super::{agent_session::AgentSessionRef, resources::AttemptResourceUsage};
+use super::resources::AttemptResourceUsage;
 use crate::config::Profile;
 use crate::routing::RoutingRuntimeState;
 use serde::{Deserialize, Serialize};
@@ -547,8 +547,6 @@ pub struct LedgerEntry {
     #[serde(default)]
     pub predicted_duration_seconds: Option<f64>,
     pub session_dir: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin_agent_session: Option<AgentSessionRef>,
     pub duration_seconds: Option<f64>,
     pub backend_exit_code: Option<i32>,
     pub validation_result: Option<String>,
@@ -799,7 +797,6 @@ impl LedgerEntry {
             predicted_duration_seconds: None,
             branch: None,
             session_dir: session_dir.map(|p| p.display().to_string()),
-            origin_agent_session: None,
             duration_seconds: None,
             backend_exit_code: None,
             validation_result: None,
@@ -914,7 +911,6 @@ impl LedgerEntry {
             predicted_duration_seconds: None,
             branch: None,
             session_dir: None,
-            origin_agent_session: None,
             duration_seconds: None,
             backend_exit_code: None,
             validation_result: None,
