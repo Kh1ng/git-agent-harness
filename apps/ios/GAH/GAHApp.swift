@@ -181,9 +181,12 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         var body: [String: Any] = ["token": deviceToken, "label": UIDevice.current.name]
         if let pushToStartToken { body["pushToStartToken"] = pushToStartToken }
         if let liveActivity { body["liveActivity"] = liveActivity }
-        authenticatedRequest(path: "/api/push/apns-devices", method: "POST", body: body) { response, succeeded in
+        authenticatedRequest(path: "/api/push/apns-devices", method: "POST", body: body) { [weak self] response, succeeded in
             guard succeeded, let response, let id = (try? JSONSerialization.jsonObject(with: response)) as? [String: Any] else { return }
-            if let id = id["id"] as? String { UserDefaults.standard.set(id, forKey: "apnsDeviceId") }
+            if let id = id["id"] as? String {
+                UserDefaults.standard.set(id, forKey: "apnsDeviceId")
+                if self?.notificationsEnabled == false { self?.removePushRegistration() }
+            }
         }
     }
 
