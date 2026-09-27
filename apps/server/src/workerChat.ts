@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { ChatSessionSummary, ChatTranscriptTurn, HelperRoutePreference, HelperTaskKind, NodeRoleStatus, ProfileSummary } from '@git-agent-harness/contracts';
 import { runProfileList } from './gahCli.js';
 import { resolveInstanceAdapter, type ManagerAdapter } from './managerChat/registry.js';
-import { archiveSession, chatKey, createSession, getSession, publishWorkspace, refreshWorkspace, resolveSessionCwd, touchSession, updateSession, type ChatSessionStoreOptions } from './managerChat/chatSessions.js';
+import { archiveSession, chatKey, createSession, getSession, publishWorkspace, refreshWorkspace, resolveSessionCwd, restoreSession, touchSession, updateSession, type ChatSessionStoreOptions } from './managerChat/chatSessions.js';
 import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewChangesForHelper, getSelectedChangesForHelper } from './gitCache.js';
 import { findOpenPullRequest, publishPullRequest, updatePullRequest } from './gitPullRequest.js';
 
@@ -42,7 +42,7 @@ export function createWorkerChatRouter(deps: {
     if (!body || typeof body.profile !== 'string' || !body.profile || typeof body.action !== 'string') {
       return void res.status(400).json({ error: 'A profile and worker chat action are required.' });
     }
-    const actions = ['create', 'prepare', 'handoff', 'archive', 'models', 'commands', 'run', 'cancel', 'steer', 'permission', 'git-status', 'git-review', 'git-commit', 'git-publish', 'git-update', 'helper-task'];
+    const actions = ['create', 'prepare', 'handoff', 'archive', 'restore', 'models', 'commands', 'run', 'cancel', 'steer', 'permission', 'git-status', 'git-review', 'git-commit', 'git-publish', 'git-update', 'helper-task'];
     if (!actions.includes(body.action)) return void res.status(400).json({ error: 'Unknown worker chat action.' });
     const sessionId = body.sessionId;
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(sessionId))) {
@@ -54,7 +54,7 @@ export function createWorkerChatRouter(deps: {
       if (!profile) return void res.status(404).json({ error: 'This worker does not have that profile.' });
       if (!profile.web_url || body.repo !== profile.repo || body.provider !== profile.provider || body.origin !== new URL(profile.web_url).origin) return void res.status(409).json({ error: 'The worker profile refers to a different repository or provider host.' });
       const key = chatKey(body.profile, sessionId);
-      if (['create', 'prepare', 'handoff', 'archive', 'run', 'git-commit', 'git-publish', 'git-update'].includes(body.action)) {
+      if (['create', 'prepare', 'handoff', 'archive', 'restore', 'run', 'git-commit', 'git-publish', 'git-update'].includes(body.action)) {
         if (workspaceOperations.has(key) || [...active.values()].some(turn => turn.key === key)) {
           return void res.status(409).json({ error: 'Stop the active turn before changing this worker workspace.' });
         }
@@ -211,6 +211,10 @@ export function createWorkerChatRouter(deps: {
         if (!sessionId) return void res.status(400).json({ error: 'A session is required.' });
         if ([...active.values()].some(turn => turn.key === key)) return void res.status(409).json({ error: 'Stop the active turn before archiving its workspace.' });
         return void res.json(await archiveSession(body.profile, sessionId, profile, deps.sessions));
+      }
+      if (body.action === 'restore') {
+        if (!sessionId) return void res.status(400).json({ error: 'A session is required.' });
+        return void res.json(await restoreSession(body.profile, sessionId, profile, deps.sessions));
       }
       let session: ChatSessionSummary | null = null;
       let cwd = profile.local_path;

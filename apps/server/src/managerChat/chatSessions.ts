@@ -158,6 +158,8 @@ export interface CreateSessionInput {
   profileInfo: Pick<ProfileSummary, 'repo_id' | 'local_path' | 'worktree_base'>;
   /** Pull request identity for PR chats; omitted for issue and general sessions. */
   prNumber?: number;
+  /** Issue identity for issue chats; omitted for other sessions. */
+  issueNumber?: number;
   backend: string;
   backendInstance?: string | null;
   /** Model override for the backend; null = backend default. */
@@ -192,6 +194,7 @@ export async function createSession(input: CreateSessionInput, opts?: ChatSessio
     id: sessionId,
     profile,
     ...(input.prNumber === undefined ? {} : { prNumber: input.prNumber }),
+    ...(input.issueNumber === undefined ? {} : { issueNumber: input.issueNumber }),
     worktreePath: null,
     branch: input.branch ?? sessionBranchName(profileInfo.repo_id, sessionId, input.title),
     backend,
@@ -415,6 +418,47 @@ export async function archiveSession(
       timestamp: completedAt
     }], logOpts);
   }
+  return session;
+}
+
+/** Restores an operator-archived session from its surviving branch and the
+ * newest saved dirty-work patch. Settled sessions remain terminal. */
+export async function restoreSession(
+  profile: string,
+  sessionId: string,
+  profileInfo: Pick<ProfileSummary, 'repo_id' | 'local_path' | 'worktree_base'>,
+  opts?: ChatSessionStoreOptions
+): Promise<ChatSessionSummary> {
+  const sessions = readIndex(profile, opts);
+  const session = sessions.find((candidate) => candidate.id === sessionId);
+  if (!session) throw new Error(`No chat session '${sessionId}' for profile '${profile}'`);
+  if (session.archivedAt === null) return session;
+  if (session.outcome === 'settled') throw new Error(`Chat session '${sessionId}' is settled and cannot be restored`);
+
+  let restoredPath: string | null = null;
+  if (!session.prNumber && profileInfo.worktree_base.trim()) {
+    restoredPath = join(profileInfo.worktree_base, worktreeDirName(profileInfo.repo_id, sessionId));
+    mkdirSync(profileInfo.worktree_base, { recursive: true });
+    await git(profileInfo.local_path, 'worktree', 'add', restoredPath, session.branch);
+    try {
+      const dir = join(profileDir(profile, opts), `session-${encodeURIComponent(sessionId)}`);
+      const patch = existsSync(dir)
+        ? readdirSync(dir).filter((name) => /^archive-\d+\.patch$/.test(name)).sort().at(-1)
+        : undefined;
+      if (patch) await git(restoredPath, 'apply', join(dir, patch));
+    } catch (error) {
+      await git(profileInfo.local_path, 'worktree', 'remove', '--force', restoredPath).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  session.worktreePath = restoredPath;
+  session.archivedAt = null;
+  session.outcome = 'live';
+  session.settledAt = null;
+  session.settledReason = null;
+  session.lastActiveAt = Date.now();
+  writeIndex(profile, sessions, opts);
   return session;
 }
 

@@ -87,6 +87,7 @@ import {
   listChatSessions,
   createChatSession,
   archiveChatSession,
+  restoreChatSession,
   updateChatSession,
   getChatPreview as getManagerChatPreview,
   setChatPreview as setManagerChatPreview,
@@ -1963,6 +1964,22 @@ export function createServer(
     } catch (error) {
       res.status(502).json({
         error: 'Failed to archive chat session',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post('/api/manager-chat/sessions/restore', async (req, res) => {
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : DEFAULT_PROFILE;
+    const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : undefined;
+    // The session id flows into worktree directory names on restore; hold it
+    // to the same shape the worker surface validates before any git access.
+    if (!sessionId || !/^[a-zA-Z0-9_-]{1,128}$/.test(sessionId)) return void res.status(400).json({ error: 'Missing or invalid required field: sessionId' });
+    try {
+      res.json(await restoreChatSession(profile, sessionId));
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to restore chat session',
         message: error instanceof Error ? error.message : String(error)
       });
     }

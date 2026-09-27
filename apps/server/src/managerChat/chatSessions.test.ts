@@ -14,6 +14,7 @@ import {
   listSessions,
   profileStorage,
   resolveSessionCwd,
+  restoreSession,
   setChatSessionStoreOptions,
   storeSession,
   touchSession,
@@ -140,7 +141,7 @@ test('legacy indexes derive live/archive outcomes without a migration command', 
   assert.equal(legacy.settledReason, null);
 }));
 
-test('archiveSession saves a dirty worktree as a patch and keeps the branch', withEnv(async (env) => {
+test('archiveSession saves dirty work and restoreSession rematerializes it idempotently', withEnv(async (env) => {
   const session = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'hermes' });
   writeFileSync(join(session.worktreePath!, 'dirty.txt'), 'uncommitted work\n');
   const archived = await archiveSession('p', session.id, env.profileInfo);
@@ -158,6 +159,13 @@ test('archiveSession saves a dirty worktree as a patch and keeps the branch', wi
   assert.equal(patches.length, 1, 'exactly one patch');
   const patch = readFileSync(join(sessionDir, patches[0]), 'utf8');
   assert.match(patch, /dirty\.txt/, 'patch captures the uncommitted file');
+
+  const restored = await restoreSession('p', session.id, env.profileInfo);
+  assert.equal(restored.outcome, 'live');
+  assert.equal(restored.archivedAt, null);
+  assert.ok(restored.worktreePath && existsSync(restored.worktreePath));
+  assert.equal(readFileSync(join(restored.worktreePath!, 'dirty.txt'), 'utf8'), 'uncommitted work\n');
+  assert.equal((await restoreSession('p', session.id, env.profileInfo)).worktreePath, restored.worktreePath);
 }));
 
 test('settled archive keeps the same patch and branch safety while recording a distinct outcome', withEnv(async (env) => {
@@ -172,6 +180,7 @@ test('settled archive keeps the same patch and branch safety while recording a d
   assert.ok(execFileSync('git', ['branch', '--list', session.branch], { cwd: env.checkout, encoding: 'utf8' }).includes(session.branch));
   const sessionDir = join(env.stateDir, 'project-p', `session-${session.id}`);
   assert.equal(readdirSync(sessionDir).filter((file) => file.endsWith('.patch')).length, 1);
+  await assert.rejects(restoreSession('p', session.id, env.profileInfo), /settled/);
 }));
 
 test('settled archive appends a session/settled event recording why (#1036)', withEnv(async (env) => {

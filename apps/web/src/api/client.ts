@@ -292,6 +292,7 @@ export interface GahDataSource {
   createChatSession(profile: string, backend?: string, model?: string | null, title?: string, nodeId?: string, backendInstance?: string | null): Promise<ChatSessionSummary>;
   updateChatSession(profile: string, sessionId: string, patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string }): Promise<ChatSessionSummary>;
   archiveChatSession(profile: string, sessionId: string): Promise<ChatSessionSummary>;
+  restoreChatSession(profile: string, sessionId: string): Promise<ChatSessionSummary>;
   bulkArchiveChatSessions(profile: string, sessionIds: string[]): Promise<{ sessions: ChatSessionSummary[] }>;
   getChatStorage(profile: string): Promise<ChatReclaimResult>;
   reclaimChatSessions(profile: string, dryRun: boolean): Promise<ChatReclaimResult>;
@@ -671,6 +672,9 @@ export const gahApi: GahDataSource = {
   },
   archiveChatSession(profile, sessionId) {
     return postJson<ChatSessionSummary, { profile: string; sessionId: string }>('/api/manager-chat/sessions/archive', { profile, sessionId });
+  },
+  restoreChatSession(profile, sessionId) {
+    return postJson<ChatSessionSummary, { profile: string; sessionId: string }>('/api/manager-chat/sessions/restore', { profile, sessionId });
   },
   bulkArchiveChatSessions(profile, sessionIds) {
     return postJson<{ sessions: ChatSessionSummary[] }, { profile: string; sessionIds: string[] }>('/api/manager-chat/sessions/archive', { profile, sessionIds });

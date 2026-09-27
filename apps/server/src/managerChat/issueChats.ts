@@ -209,6 +209,7 @@ export async function startIssueChat(input: StartIssueChatInput): Promise<StartI
       profile,
       profileInfo,
       backend,
+      issueNumber,
       model: input.model ?? null,
       title: `#${issueNumber} ${issue.title}`,
       branch: existingBranches.trim() ? `${canonicalBranch}-${Date.now().toString(36)}` : canonicalBranch

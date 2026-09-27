@@ -334,6 +334,9 @@ export interface ChatSessionSummary {
   profile: string;
   /** Pull request identity for PR chats; absent for legacy, issue, and general sessions. */
   prNumber?: number;
+  /** Issue identity for issue chats (the provider issue this session
+   * implements); absent for other sessions. */
+  issueNumber?: number;
   /** Absolute worktree path; null once the worktree was reclaimed. */
   worktreePath: string | null;
   /** Branch backing the session (survives worktree reclamation). */

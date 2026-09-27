@@ -49,7 +49,7 @@ export function App() {
       case 'settings':
         return <SettingsPage />;
       case 'chat':
-        return <ManagerChatPage launcherRequest={chatLauncherRequest} onNavigate={setCurrentPage} />;
+        return <ManagerChatPage launcherRequest={chatLauncherRequest} onNavigate={setCurrentPage} onOpenWork={setSelectedWorkId} />;
       case 'projects':
         return <ProjectsPage onNavigate={setCurrentPage} />;
       case 'git':

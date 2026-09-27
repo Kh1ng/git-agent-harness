@@ -41,6 +41,7 @@ import {
   publishWorkspace,
   refreshWorkspace,
   resolveSessionCwd,
+  restoreSession,
   touchSession,
   updateSession,
   type SettleDetails,
@@ -362,6 +363,37 @@ export async function archiveChatSession(
     await previewProxy.clear(profile, sessionId);
   }
   } finally { activeProfiles.delete(key); }
+}
+
+/** Restores an archived chat session; active and settled sessions retain
+ * their existing lifecycle semantics. */
+export async function restoreChatSession(profile: string, sessionId: string) {
+  if (activeProfiles.has(chatKey(profile, sessionId))) throw new Error('Stop this turn before restoring its workspaces.');
+  const stored = getSession(profile, sessionId, chatSessionStoreOptions);
+  if (!stored) throw new Error(`No chat session '${sessionId}' for profile '${profile}'`);
+  if (stored.archivedAt === null) return stored;
+  if (stored.outcome === 'settled') throw new Error('Settled chat sessions cannot be restored.');
+
+  // Mirror the archive path: every node that holds one of the session's
+  // workspaces restores its own (the primary node's restored summary is
+  // fetched below), then the local workspace rematerializes here.
+  if (stored.workspaceNodes?.length) {
+    const localId = localChatNodeId();
+    for (const target of stored.workspaceNodes.filter(id => id !== localId && id !== stored.nodeId)) {
+      const route = await chatRoute(profile, target, stored.backend, false);
+      await route.remote!.request({ action: 'restore', sessionId, backend: stored.backend });
+    }
+  }
+  const route = await chatRoute(profile, stored.nodeId, stored.backend, false);
+  if (route.remote) {
+    const restored = await route.remote.request<import('@git-agent-harness/contracts').ChatSessionSummary>({
+      action: 'restore', sessionId, backend: stored.backend
+    });
+    return storeSession(rememberWorkspace({ ...stored, ...restored, profile }, route), chatSessionStoreOptions);
+  }
+  const profileInfo = await findProfileInfo(route.profileName);
+  if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
+  return storeSession(rememberWorkspace(await restoreSession(profile, sessionId, profileInfo, chatSessionStoreOptions), route), chatSessionStoreOptions);
 }
 
 /** WP3 preview state for one session (null when none). */
