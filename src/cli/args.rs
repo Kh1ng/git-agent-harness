@@ -113,47 +113,14 @@ pub enum SetupCommands {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Guided install: choose what this machine is for, check and provide
-    /// its prerequisites, install GAH, and add a first project. Run it again
-    /// any time; it only does what is missing.
+    /// Guided install: choose what this machine is for, provide its
+    /// prerequisites, install GAH, and add a first project. Safe to re-run.
     #[command(args_conflicts_with_subcommands = true)]
     Setup {
         #[command(subcommand)]
         command: Option<SetupCommands>,
-        /// central (dashboard), worker, or cli-only.
-        #[arg(long, value_parser = ["central", "worker", "cli-only"])]
-        role: Option<String>,
-        #[arg(long, value_parser = ["claude", "codex", "opencode"])]
-        agent: Option<String>,
-        #[arg(long, value_parser = ["github", "gitlab"])]
-        provider: Option<String>,
-        /// Shared memory: off, colocated (run the gateway here), or remote.
-        #[arg(long, value_parser = ["off", "colocated", "remote"])]
-        memory: Option<String>,
-        /// A repository checkout to add as the first project.
-        #[arg(long)]
-        project: Option<PathBuf>,
-        /// Central node address (worker role). The token comes from COORDINATOR_TOKEN.
-        #[arg(long)]
-        central_url: Option<String>,
-        /// Memory gateway address (remote memory). The key comes from GAH_GATEWAY_API_KEY.
-        #[arg(long)]
-        gateway_url: Option<String>,
-        /// MemoryCore checkout (colocated memory). The LLM key comes from GAH_GATEWAY_LLM_API_KEY.
-        #[arg(long)]
-        memorycore: Option<PathBuf>,
-        /// The git-agent-harness checkout to build (default: the one this gah came from).
-        #[arg(long)]
-        source: Option<PathBuf>,
-        /// Take every default and accept every offer, without prompting.
-        #[arg(long)]
-        yes: bool,
-        /// Only report what this machine has and lacks; change nothing.
-        #[arg(long)]
-        check: bool,
-        /// With --check: print the machine-readable report.
-        #[arg(long, requires = "check")]
-        json: bool,
+        #[command(flatten)]
+        args: crate::setup::Args,
     },
     /// Inspect or set global GAH config defaults (cross-profile facts such as
     /// `current_manager`). Per-profile settings live under `profile set`.

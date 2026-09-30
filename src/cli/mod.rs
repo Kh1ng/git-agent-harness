@@ -25,56 +25,8 @@ pub fn run() -> Result<()> {
         } => commands::setup::run(command)?,
         Commands::Setup {
             command: None,
-            role,
-            agent,
-            provider,
-            memory,
-            project,
-            central_url,
-            gateway_url,
-            memorycore,
-            source,
-            yes,
-            check,
-            json,
-        } => {
-            use crate::setup::requirements::{Agent, MemoryMode, Provider, Role};
-            let options = crate::setup::wizard::Options {
-                role: role.map(|role| match role.as_str() {
-                    "worker" => Role::Worker,
-                    "cli-only" => Role::CliOnly,
-                    _ => Role::Central,
-                }),
-                agent: agent.map(|agent| match agent.as_str() {
-                    "codex" => Agent::Codex,
-                    "opencode" => Agent::Opencode,
-                    _ => Agent::Claude,
-                }),
-                provider: provider.map(|provider| {
-                    if provider == "gitlab" {
-                        Provider::Gitlab
-                    } else {
-                        Provider::Github
-                    }
-                }),
-                memory: memory.map(|memory| match memory.as_str() {
-                    "colocated" => MemoryMode::Colocated,
-                    "remote" => MemoryMode::Remote,
-                    _ => MemoryMode::Off,
-                }),
-                project,
-                central_url,
-                gateway_url,
-                memorycore,
-                source: if check {
-                    std::path::PathBuf::new()
-                } else {
-                    crate::setup::wizard::find_source(source)?
-                },
-                yes,
-            };
-            crate::setup::run(options, check.then_some(crate::setup::CheckArgs { json }))?
-        }
+            args,
+        } => crate::setup::run(args)?,
         Commands::Availability { json, action } => {
             commands::availability::run(commands::availability::Args { json, action })?
         }

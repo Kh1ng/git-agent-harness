@@ -33,7 +33,7 @@ impl Feature {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Central,
@@ -41,7 +41,7 @@ pub enum Role {
     CliOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Agent {
     Claude,
@@ -85,7 +85,7 @@ impl Agent {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
     Github,
@@ -101,7 +101,7 @@ impl Provider {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryMode {
     Off,

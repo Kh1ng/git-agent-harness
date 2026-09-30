@@ -11,7 +11,7 @@ pub mod wizard;
 
 use anyhow::{bail, Result};
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Prompts on the terminal. Hidden input turns echo off with `stty`.
@@ -141,22 +141,58 @@ impl wizard::Effects for SystemEffects {
     }
 }
 
-pub struct CheckArgs {
-    pub json: bool,
+/// `gah setup` flags. Choices only: secrets come from the environment or a
+/// hidden prompt, so they stay out of shell history and process lists.
+#[derive(clap::Args)]
+pub struct Args {
+    /// What this machine is for: central runs the dashboard.
+    #[arg(long, value_enum)]
+    role: Option<requirements::Role>,
+    #[arg(long, value_enum)]
+    agent: Option<requirements::Agent>,
+    #[arg(long, value_enum)]
+    provider: Option<requirements::Provider>,
+    /// Shared memory for chats and dispatched work (default: off).
+    #[arg(long, value_enum)]
+    memory: Option<requirements::MemoryMode>,
+    /// A repository checkout to add as the first project.
+    #[arg(long)]
+    project: Option<PathBuf>,
+    /// Central node address (worker role). The token comes from COORDINATOR_TOKEN.
+    #[arg(long)]
+    central_url: Option<String>,
+    /// Memory gateway address (remote memory). The key comes from GAH_GATEWAY_API_KEY.
+    #[arg(long)]
+    gateway_url: Option<String>,
+    /// MemoryCore checkout (colocated memory). The LLM key comes from GAH_GATEWAY_LLM_API_KEY.
+    #[arg(long)]
+    memorycore: Option<PathBuf>,
+    /// The git-agent-harness checkout to build (default: the one this gah came from).
+    #[arg(long)]
+    source: Option<PathBuf>,
+    /// Take every default and accept every offer, without prompting.
+    #[arg(long)]
+    yes: bool,
+    /// Only report what this machine has and lacks; change nothing.
+    #[arg(long)]
+    check: bool,
+    /// With --check: print the machine-readable report.
+    #[arg(long, requires = "check")]
+    json: bool,
 }
 
 /// `gah setup`: the guided install, or `--check` for a read-only report.
-pub fn run(options: wizard::Options, check: Option<CheckArgs>) -> Result<()> {
+pub fn run(args: Args) -> Result<()> {
     let host = host::SystemHost;
-    if let Some(check) = check {
+    if args.check {
         let selection = requirements::Selection {
-            role: options.role.unwrap_or(requirements::Role::Central),
-            agent: options.agent.unwrap_or(requirements::Agent::Claude),
-            provider: options.provider.unwrap_or(requirements::Provider::Github),
-            memory: options.memory.unwrap_or(requirements::MemoryMode::Off),
+            role: args.role.unwrap_or(requirements::Role::Central),
+            agent: args.agent.unwrap_or(requirements::Agent::Claude),
+            provider: args.provider.unwrap_or(requirements::Provider::Github),
+            memory: args.memory.unwrap_or(requirements::MemoryMode::Off),
         };
         let report = requirements::report(selection, &host);
-        if check.json {
+        if args.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
             for requirement in &report.requirements {
@@ -180,6 +216,18 @@ pub fn run(options: wizard::Options, check: Option<CheckArgs>) -> Result<()> {
         }
         return Ok(());
     }
+    let options = wizard::Options {
+        role: args.role,
+        agent: args.agent,
+        provider: args.provider,
+        memory: args.memory,
+        project: args.project,
+        central_url: args.central_url,
+        gateway_url: args.gateway_url,
+        memorycore: args.memorycore,
+        source: wizard::find_source(args.source)?,
+        yes: args.yes,
+    };
     if !options.yes && !std::io::stdin().is_terminal() {
         bail!("gah setup asks questions; run it in a terminal, or pass --yes with the choices as flags.");
     }
