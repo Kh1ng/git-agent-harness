@@ -24,6 +24,7 @@ pub struct EventsArgs {
 pub struct StatusArgs {
     pub profile: Option<String>,
     pub role: bool,
+    pub light: bool,
     pub json: bool,
     pub config_path: Option<String>,
 }
@@ -271,6 +272,7 @@ pub fn run_status(args: StatusArgs) -> Result<()> {
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("--profile is required unless --role is used"))?,
             args.json,
+            args.light,
         )?;
     }
     Ok(())

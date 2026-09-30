@@ -428,6 +428,8 @@ export class RegistryService {
     const start = Date.now();
     const observedAt = nowIso(start);
     const snapshotUrl = new URL('/api/status', node.advertised_url);
+    // Health needs backends and availability, not the forge-backed ticket queue.
+    snapshotUrl.searchParams.set('light', '1');
     // Workers may not have a profile named "gah" (the status endpoint's default).
     const observedProfile = profile ?? node.profiles?.[0];
     if (observedProfile) {

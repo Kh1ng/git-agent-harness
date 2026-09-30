@@ -88,3 +88,19 @@ test('a late node response cannot replace the newly selected project readiness',
   await expect(picker).toHaveValue('worker');
   await expect(picker).toBeEnabled();
 });
+
+test('a project whose owner is unavailable defaults to an eligible node (#1275)', async ({ mount, page }) => {
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith('/nodes')) return route.fulfill({ json: { nodes } });
+    if (url.pathname.endsWith('/settings')) return route.fulfill({ json: { profileOverrides: {}, defaultBackend: 'claude' } });
+    if (url.pathname.endsWith('/models')) return route.fulfill({ json: { models: [], currentModelId: null } });
+    return route.fulfill({ json: {} });
+  });
+  const ownedByStale: ChatProfile = { ...local, node_id: 'stale' };
+  const modal = await mount(<NewChatModal open currentProfile="gah" profiles={[ownedByStale]} backends={backends}
+    onClose={() => {}} onCreated={() => {}} />);
+  await expect(modal.getByRole('combobox', { name: 'Run on node' })).toHaveValue('central');
+  await modal.getByRole('textbox', { name: 'Chat name' }).fill('Blank chat');
+  await expect(modal.getByRole('button', { name: 'Start chat' })).toBeEnabled();
+});

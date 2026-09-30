@@ -545,6 +545,7 @@ fn closed_ticket_numbers(profile: &Profile) -> std::collections::HashSet<String>
     ids
 }
 
+#[derive(Default)]
 pub(crate) struct TicketScan {
     pub(crate) available_tickets: Vec<AvailableTicket>,
     pub(crate) dependency_blockers: Vec<DependencyBlocker>,

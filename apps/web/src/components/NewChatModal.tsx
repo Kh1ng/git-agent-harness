@@ -89,9 +89,13 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
   const nodeSnapshot = useChatNodes(project, backend || null, open, nodesRefreshKey);
   const projectInfo = profiles.find(candidate => candidate.name === project);
   const remoteProject = projectInfo?.remote ?? false;
-  const nodeId = mode !== 'blank' ? nodeSnapshot.nodes.find(node => node.role === 'central')?.nodeId ?? ''
+  const centralId = nodeSnapshot.nodes.find(node => node.role === 'central')?.nodeId ?? '';
+  // Prefer the owning node, but never default to one that can't take the chat (#1275).
+  const ownerId = projectInfo?.node_id;
+  const ownerUsable = !!ownerId && nodeSnapshot.nodes.find(node => node.nodeId === ownerId)?.eligible !== false;
+  const nodeId = mode !== 'blank' ? centralId
     : nodeChoice?.project === project ? nodeChoice.nodeId
-    : projectInfo?.node_id ?? nodeSnapshot.nodes.find(node => node.role === 'central')?.nodeId ?? '';
+    : ownerUsable ? ownerId : nodeSnapshot.nodes.find(node => node.eligible)?.nodeId ?? centralId;
   const selectedNode = nodeSnapshot.nodes.find(node => node.nodeId === nodeId);
   const nodeReady = !nodeSnapshot.loading && !nodeSnapshot.error && !!(selectedNode?.eligible ?? selectedNode?.chatCapable);
   const implementedBackends = backends.filter((b) => b.implemented);

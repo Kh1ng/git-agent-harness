@@ -912,10 +912,11 @@ export function createServer(
   // still access it without credentials via authMiddleware's local exemption.
   app.get('/api/status', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const light = req.query.light === '1';
     try {
       const [status, nodes] = await Promise.all([
-        runStatus(profile),
-        node.role === 'worker' ? Promise.resolve([]) : registryService.getNodeObservations(profile)
+        runStatus(profile, undefined, light),
+        node.role === 'worker' || light ? Promise.resolve([]) : registryService.getNodeObservations(profile)
       ]);
       const identity = getCoordinatorIdentity(undefined, coordinatorPort);
       const enriched = {
