@@ -1481,21 +1481,5 @@ fn handoff_mode_rejects_all_remote_provider_calls() {
 
 #[path = "tests/comment_tests.rs"]
 mod comment_tests;
-
-#[test]
-fn parallel_provider_map_keeps_order_and_the_test_path_override() {
-    super::set_test_provider_path("/fake/provider/bin");
-    let items: Vec<usize> = (0..20).collect();
-    let results = super::parallel_provider_map(&items, 4, |item| {
-        let path = TEST_PATH_OVERRIDE.with(|p| p.borrow().clone());
-        (*item, path)
-    });
-    super::clear_test_provider_path();
-    assert_eq!(
-        results.iter().map(|(item, _)| *item).collect::<Vec<_>>(),
-        items
-    );
-    assert!(results
-        .iter()
-        .all(|(_, path)| path.as_deref() == Some("/fake/provider/bin")));
-}
+#[path = "tests/parallel_tests.rs"]
+mod parallel_tests;
