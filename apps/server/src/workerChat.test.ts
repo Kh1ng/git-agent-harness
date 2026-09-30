@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -106,4 +107,41 @@ test('remote agent runs only in the worker profile and streams permission, steer
     await connection.request({ action: 'prepare', backend: 'claude', sessionId: 'test-session' });
     assert.throws(() => workerChatConnection(registry, 'worker', 'not-declared', profile), /not registered/);
     await assert.rejects(workerChatConnection(registry, 'worker', 'demo', { ...profile, web_url: 'https://other-gitlab.test/team/repo' }).request({ action: 'prepare', backend: 'claude', sessionId: 'test-session' }), /409/);
+});
+
+test('a worker opens a worktree-less PR chat in its checkout (#1276)', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'gah-worker-pr-chat-'));
+  const cwd = join(root, 'checkout');
+  mkdirSync(cwd);
+  for (const args of [['init', '--quiet', '--initial-branch=main'], ['config', 'user.email', 'test@gah'], ['config', 'user.name', 'Test'], ['commit', '--quiet', '--allow-empty', '-m', 'initial']]) execFileSync('git', args, { cwd });
+  const profile: ProfileSummary = { ...JSON.parse(readFileSync(new URL('../tests/fixtures/gah/responses/profile-list.json', import.meta.url), 'utf8'))[0], name: 'demo', local_path: cwd, worktree_base: join(root, 'worktrees') };
+  const adapter = { id: 'claude' } as ManagerAdapter;
+  const app = express();
+  app.use(express.json());
+  app.use('/api/worker-chat', createWorkerChatRouter({ node: { role: 'worker', central_url: 'https://central.test' }, nodeId: 'worker', profiles: async () => [profile], adapter: () => adapter, sessions: { stateDir: join(root, 'state') } }));
+  const server = createServer(app);
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const create = (extra: Record<string, unknown>) => fetch(`http://127.0.0.1:${address.port}/api/worker-chat`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'create', profile: 'demo', backend: 'claude', nodeId: 'worker', repo: profile.repo, provider: profile.provider, origin: new URL(profile.web_url!).origin, ...extra })
+  });
+
+  const pr = await create({ sessionId: 'pr-session', branch: 'fix/worker', worktree: false });
+  assert.equal(pr.status, 201);
+  const session = await pr.json() as { branch: string; worktreePath: string | null };
+  assert.deepEqual([session.branch, session.worktreePath], ['fix/worker', null]);
+  assert.equal(execFileSync('git', ['branch', '--list', 'fix/worker'], { cwd, encoding: 'utf8' }), '', 'no branch is cut for a PR chat');
+
+  assert.equal((await create({ sessionId: 'no-branch', worktree: false })).status, 400);
+  assert.equal((await create({ sessionId: 'bad-flag', branch: 'fix/worker', worktree: 'no' })).status, 400);
+  const blank = await create({ sessionId: 'blank-session' });
+  assert.equal(blank.status, 201);
+  assert.ok((await blank.json() as { worktreePath: string | null }).worktreePath?.startsWith(profile.worktree_base));
 });

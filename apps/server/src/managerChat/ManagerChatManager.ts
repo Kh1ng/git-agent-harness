@@ -300,18 +300,25 @@ export function listChatSessions(profile: string) {
 
 /** Creates a chat session bound to a fresh worktree (WP2). The backend
  * resolves at create time: explicit request, else the profile default. */
-export async function createChatSession(profile: string, backend?: string, model?: string | null, title?: string, reasoningEffort?: string | null, nodeId?: string, backendInstance?: string | null, branch?: string) {
+/** `workspace` names the session branch; `worktree: false` runs turns in the
+ * project checkout instead of a new worktree (PR chats). */
+export async function createChatSession(profile: string, backend?: string, model?: string | null, title?: string, reasoningEffort?: string | null, nodeId?: string, backendInstance?: string | null, workspace?: { branch: string; worktree: boolean }) {
   const selectedBackend = backend ?? backendForProfile(profile);
   const route = await chatRoute(profile, nodeId, selectedBackend);
   if (backendInstance && !route.remote) await resolveInstanceAdapter(profile, selectedBackend, backendInstance);
   if (route.remote) {
-    const session = await route.remote.request<import('@git-agent-harness/contracts').ChatSessionSummary>({ action: 'create', sessionId: randomUUID(), backend: selectedBackend, backendInstance, model, title, reasoningEffort, ...(branch ? { branch } : {}) });
+    const session = await route.remote.request<import('@git-agent-harness/contracts').ChatSessionSummary>({ action: 'create', sessionId: randomUUID(), backend: selectedBackend, backendInstance, model, title, reasoningEffort, ...workspace });
+    // A worker older than this protocol ignores `worktree` and branches a
+    // worktree from its current HEAD, which would not hold the PR's code.
+    if (workspace?.worktree === false && session.worktreePath !== null) {
+      throw new Error(`${route.nodeName ?? 'The worker'} runs an older GAH that cannot open pull request chats. Update it with \`gah update --role worker\`, then archive the chat it created.`);
+    }
     return storeSession(rememberWorkspace({ ...session, profile }, route), chatSessionStoreOptions);
   }
   const profileInfo = await findProfileInfo(route.profileName);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   const session = await createSession(
-    { profile, profileInfo, backend: backend ?? backendForProfile(profile), backendInstance: backendInstance ?? null, model: model ?? null, reasoningEffort: reasoningEffort ?? null, title, ...(branch ? { branch } : {}) },
+    { profile, profileInfo, backend: backend ?? backendForProfile(profile), backendInstance: backendInstance ?? null, model: model ?? null, reasoningEffort: reasoningEffort ?? null, title, ...workspace },
     chatSessionStoreOptions
   );
   return storeSession(rememberWorkspace(session, route), chatSessionStoreOptions);
@@ -450,7 +457,7 @@ export async function startChatFromIssue(
     model: model ?? null,
     ...(remote ? {
       create: async ({ title, branch }: { title: string; branch: string }) => storeSession(
-        { ...await createChatSession(profile, selectedBackend, model, title, null, undefined, null, branch), issueNumber },
+        { ...await createChatSession(profile, selectedBackend, model, title, null, undefined, null, { branch, worktree: true }), issueNumber },
         chatSessionStoreOptions
       )
     } : {})
@@ -459,8 +466,7 @@ export async function startChatFromIssue(
 
 /** PR → chat: open PRs for the profile's repo. */
 export async function listChatPrsForProfile(profile: string) {
-  if (profile.startsWith('gah-node:')) throw new Error('Start a blank chat for this worker project. Remote MR-seeded chats are not available yet.');
-  const profileInfo = await findProfileInfo(profile);
+  const profileInfo = profile.startsWith('gah-node:') ? await workerProjectInfo(profile) : await findProfileInfo(profile);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   const { listChatPrs } = await import('./prChats.js');
   return listChatPrs(profileInfo);
@@ -474,16 +480,23 @@ export async function startChatFromPr(
   backend?: string,
   model?: string | null
 ) {
-  if (profile.startsWith('gah-node:')) throw new Error('Start a blank chat for this worker project. Remote issue and MR seeded chats are not available yet.');
-  const profileInfo = await findProfileInfo(profile);
+  const remote = profile.startsWith('gah-node:');
+  const profileInfo = remote ? await workerProjectInfo(profile) : await findProfileInfo(profile);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   const { startPrChat } = await import('./prChats.js');
+  const selectedBackend = backend ?? backendForProfile(profile);
   return startPrChat({
     profile,
     profileInfo,
     prNumber,
-    backend: backend ?? backendForProfile(profile),
-    model: model ?? null
+    backend: selectedBackend,
+    model: model ?? null,
+    ...(remote ? {
+      create: async ({ title, branch }: { title: string; branch: string }) => storeSession(
+        { ...await createChatSession(profile, selectedBackend, model, title, null, undefined, null, { branch, worktree: false }), prNumber },
+        chatSessionStoreOptions
+      )
+    } : {})
   });
 }
 
