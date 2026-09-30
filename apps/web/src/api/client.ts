@@ -1,5 +1,5 @@
 import { coordinatorToken } from './coordinatorToken.js';
-import type { PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harness/contracts';
+import type { ActivityEvent, PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harness/contracts';
 /**
  * Typed data-source client for GAH's pull-data REST endpoints.
  *
@@ -102,6 +102,13 @@ export const pushApi = {
   count: () => getJson<{ count?: number }>('/api/push/subscriptions'),
   register: (subscription: PushSubscriptionJSON, label: string) => postJson<{ id?: string }, { subscription: PushSubscriptionJSON; label: string }>('/api/push/subscriptions', { subscription, label }),
   remove: (id: string) => deleteJson(`/api/push/subscriptions/${encodeURIComponent(id)}`)
+};
+
+export const activityApi = {
+  notifications: () => getJson<{ events: ActivityEvent[]; unread: number }>('/api/activity/notifications'),
+  markRead: (ids: string[] | 'all') => postJson<{ changed: number; unread: number }, { ids: string[] } | { all: true }>(
+    '/api/activity/read', ids === 'all' ? { all: true } : { ids }
+  )
 };
 
 async function getJson<T>(path: string, params?: Record<string, string | undefined>): Promise<T> {

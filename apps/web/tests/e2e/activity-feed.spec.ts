@@ -201,7 +201,8 @@ test('chat activity opens the originating session and suppresses a focused-chat 
   await page.goto('/?page=chat&profile=gah&chat=session-7');
   await expect.poll(() => page.evaluate(() => (window as typeof window & { notificationCount?: number }).notificationCount ?? 0)).toBe(0);
   await page.goto('/?page=events');
-  await expect(page.getByRole('link', { name: /gah: reply ready/ })).toHaveAttribute('href', '/?page=chat&profile=gah&chat=session-7');
+  await expect(page.getByRole('listitem').filter({ hasText: 'gah: reply ready' }).getByRole('link', { name: 'Open chat' }))
+    .toHaveAttribute('href', `/?page=chat&profile=gah&chat=session-7&event=${encodeURIComponent(chatFinished.id)}`);
 });
 
 test('background push subscribes, unsubscribes, and hides the toggle on insecure HTTP', async ({ page }) => {
@@ -276,4 +277,42 @@ test('disabling alerts clears local state even when server cleanup fails', async
     pushId: localStorage.getItem('gah.activity.pushSubscriptionId'),
     unsubscribed: (window as typeof window & { pushUnsubscribed?: boolean }).pushUnsubscribed
   }))).toEqual({ enabled: '0', pushId: null, unsubscribed: true });
+});
+
+test('a push link opens its notification unread, highlighted, with delivery receipts (#1273)', async ({ page }) => {
+  const pinged = {
+    ...offline,
+    deliveries: [
+      { method: 'apns', target: 'iPhone', ok: true, at: '2026-09-12T12:02:01.000Z' },
+      { method: 'channel', target: 'Telegram', ok: false, reason: 'HTTP 401', at: '2026-09-12T12:02:01.000Z' }
+    ]
+  };
+  const read: unknown[] = [];
+  await page.route('**/api/activity/notifications', (route) => route.fulfill({ json: { events: [pinged], unread: 1 } }));
+  await page.route('**/api/activity/read', (route) => {
+    read.push(route.request().postDataJSON());
+    return route.fulfill({ json: { changed: 1, unread: 0 } });
+  });
+  await page.routeWebSocket('**/ws**', (ws) => {
+    ws.send(JSON.stringify(welcome));
+    ws.onMessage((raw) => {
+      if (JSON.parse(String(raw)).type === 'client.hello') {
+        ws.send(JSON.stringify({ type: 'activity.replay', events: [finished] }));
+        ws.send(JSON.stringify({ type: 'activity.unread', count: 1 }));
+      }
+    });
+  });
+  await page.goto(`/?page=events&event=${encodeURIComponent(pinged.id)}`);
+  await expect(page.getByRole('tab', { name: /^Notifications/ })).toHaveAttribute('aria-selected', 'true');
+  const item = page.locator('li[data-highlighted]');
+  await expect(item).toContainText('Mac worker is offline');
+  await expect(item.getByRole('img', { name: 'Unread' })).toBeVisible();
+  await expect(item.getByText('iPhone ✓')).toBeVisible();
+  await expect(item.getByText('Telegram ✗ (HTTP 401)')).toBeVisible();
+  // Dev StrictMode may repeat the effect; marking read is idempotent.
+  await expect.poll(() => read[0]).toEqual({ ids: [pinged.id] });
+  expect(new Set(read.map((body) => JSON.stringify(body))).size).toBe(1);
+  await expect(page).not.toHaveURL(/event=/);
+  await page.getByRole('tab', { name: 'All activity' }).click();
+  await expect(page.getByRole('listitem').filter({ hasText: 'Work finished' })).toHaveCount(1);
 });

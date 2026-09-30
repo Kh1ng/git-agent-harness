@@ -45,7 +45,13 @@ pub fn run() -> Result<()> {
             url,
         } => {
             let cfg = crate::config::load(config_path.as_deref())?;
-            crate::notify_channels::send_activity(&cfg, &title, &message, url.as_deref())?
+            let (channel, outcome) =
+                crate::notify_channels::send_activity(&cfg, &title, &message, url.as_deref());
+            println!(
+                "{}",
+                crate::notify_channels::activity_receipt_line(channel, &outcome)
+            );
+            outcome?
         }
 
         Commands::PolicyCheck { config, action } => {

@@ -159,6 +159,13 @@ export function createWebSocketHandler(
     if (event && activityFeed.record(event, announce) && announce) sessionStore.broadcast({ type: 'activity.event', event });
   };
   const unsubscribeFleet = registryService.onChange(() => pushBus.publish({ type: 'fleet.changed' }));
+  // Read state and delivery receipts change events already sent. Both go to
+  // every client: the Notifications view spans profiles.
+  const unsubscribeActivity = activityFeed.onChange((change) => {
+    sessionStore.broadcast(change.kind === 'unread'
+      ? { type: 'activity.unread', count: change.count }
+      : { type: 'activity.updated', event: change.event });
+  });
   const unsubscribeLiveness = registryService.onLivenessTransition((transition) => {
     const event = activityFromNode(transition);
     if (activityFeed.record(event)) sessionStore.broadcast({ type: 'activity.event', event });
@@ -185,6 +192,7 @@ export function createWebSocketHandler(
   wss.once('close', () => {
     unsubscribeFleet();
     unsubscribeLiveness();
+    unsubscribeActivity();
     clearInterval(activityTimer);
     if (backgroundTimer) clearInterval(backgroundTimer);
   });
@@ -221,6 +229,7 @@ export function createWebSocketHandler(
             type: 'activity.replay',
             events: activityFeed.replay(profile, message.activityCursor)
           } satisfies ServerMessage));
+          ws.send(JSON.stringify({ type: 'activity.unread', count: activityFeed.unreadCount() } satisfies ServerMessage));
           console.log(`Client hello from ${message.clientVersion} with profile: ${profile}`);
           return;
         }

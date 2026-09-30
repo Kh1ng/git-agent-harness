@@ -30,12 +30,13 @@ function withDirectory(run: (directory: string) => Promise<void>): Promise<void>
 test('the command hook gets one line per notifiable event and skips the rest', () => withDirectory(async (directory) => {
   const log = join(directory, 'hook.log');
   const deliver = commandDelivery(BASE, { GAH_NOTIFY_COMMAND: `cat >> ${log}` })!;
-  await deliver(event());
-  await deliver(event({ id: 'node:x', kind: 'node_back', title: 'mac is back online' }));
+  const [receipt] = (await deliver(event())) ?? [];
+  assert.deepEqual(await deliver(event({ id: 'node:x', kind: 'node_back', title: 'mac is back online' })), []);
   assert.equal(
     readFileSync(log, 'utf8'),
-    '[gah] gah: reply ready: Done. Tests pass. https://central.example/?page=chat&profile=gah&chat=s1\n'
+    '[gah] gah: reply ready: Done. Tests pass. https://central.example/?page=chat&profile=gah&chat=s1&event=chat%3Agah%3As1%3A1%3Achat_turn_completed\n'
   );
+  assert.deepEqual({ ...receipt, at: undefined }, { method: 'command', target: 'Command hook', ok: true, at: undefined });
 }));
 
 test('the liveness variable still works as an alias for the command hook', () => withDirectory(async (directory) => {
@@ -43,7 +44,7 @@ test('the liveness variable still works as an alias for the command hook', () =>
   const deliver = commandDelivery(BASE, { GAH_NODE_LIVENESS_NOTIFY_COMMAND: `cat >> ${log}` });
   assert.ok(deliver);
   await deliver(event({ id: 'node:y', kind: 'node_offline', profile: null, sessionId: null, title: 'mac is offline', message: 'no answer' }));
-  assert.match(readFileSync(log, 'utf8'), /^\[gah\] mac is offline: no answer https:\/\/central\.example\/\?page=events\n$/);
+  assert.match(readFileSync(log, 'utf8'), /^\[gah\] mac is offline: no answer https:\/\/central\.example\/\?page=events&event=node%3Ay\n$/);
   assert.equal(commandDelivery(BASE, {}), undefined);
 }));
 
@@ -62,16 +63,32 @@ test('the channel sends Node-originated events through gah notify-send, not cont
     '--title', 'gah: reply ready',
     '--message', 'Done.',
     'Tests pass.',
-    '--url', 'https://central.example/?page=chat&profile=gah&chat=s1'
+    '--url', 'https://central.example/?page=chat&profile=gah&chat=s1&event=chat%3Agah%3As1%3A1%3Achat_turn_completed'
   ]);
+}));
+
+test('channel and command receipts name the target and a short failure reason (#1273)', () => withDirectory(async (directory) => {
+  const gah = join(directory, 'gah');
+  writeFileSync(gah, `#!/bin/sh\necho '{"channel":"telegram","ok":false}'\necho 'Error: Telegram notification rejected with HTTP 401: {"ok":false}' >&2\nexit 1\n`);
+  chmodSync(gah, 0o755);
+  const [telegram] = (await channelDelivery(BASE, () => gah)(event())) ?? [];
+  assert.deepEqual({ ...telegram, at: undefined }, { method: 'channel', target: 'Telegram', ok: false, reason: 'HTTP 401', at: undefined });
+
+  writeFileSync(gah, `#!/bin/sh\necho '{"channel":"none","ok":true}'\n`);
+  assert.deepEqual(await channelDelivery(BASE, () => gah)(event()), [], 'no channel configured records no receipt');
+
+  const [hook] = (await commandDelivery(BASE, { GAH_NOTIFY_COMMAND: 'exit 3' })!(event())) ?? [];
+  assert.deepEqual({ ...hook, at: undefined }, { method: 'command', target: 'Command hook', ok: false, reason: 'exit 3', at: undefined });
 }));
 
 test('one failing delivery method does not stop the others', async () => {
   const delivered: string[] = [];
-  await deliverToAll([
+  const receipts = await deliverToAll([
     async () => { throw new Error('push service down'); },
     undefined,
-    (item) => { delivered.push(item.id); }
+    (item) => { delivered.push(item.id); },
+    () => [{ method: 'apns', target: 'iPhone', ok: true, at: '2026-09-26T12:00:01Z' }]
   ])(event());
   assert.deepEqual(delivered, ['chat:gah:s1:1:chat_turn_completed']);
+  assert.deepEqual(receipts.map((receipt) => receipt.target), ['iPhone']);
 });

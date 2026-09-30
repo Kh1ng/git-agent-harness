@@ -76,7 +76,11 @@ test('APNs alert uses token auth, shared payload, collapse id, private storage, 
       id: 'chat:gah:s1:1:complete', occurredAt: '2026-09-25T12:00:00Z', profile: 'gah', sessionId: 's1',
       kind: 'chat_turn_completed', severity: 'success', title: 'gah: reply ready', message: 'Done.'
     };
-    await setup.service.deliverActivity(event);
+    const receipts = await setup.service.deliverActivity(event);
+    assert.deepEqual(receipts.map(({ target, ok, reason }) => ({ target, ok, reason })).sort((x, y) => x.target.localeCompare(y.target)), [
+      { target: 'iPad', ok: false, reason: 'Unregistered' },
+      { target: 'iPhone', ok: false, reason: 'Unregistered' }
+    ], 'an invalid token shows on the notification as a failed chip (#1273)');
     assert.equal(setup.requests.length, 2);
     assert.match(setup.requests[0].headers.authorization, /^bearer [^.]+\.[^.]+\.[^.]+$/);
     assert.equal(setup.requests[0].headers['apns-collapse-id'], event.id);

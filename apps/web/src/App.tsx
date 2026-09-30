@@ -6,7 +6,8 @@ import { Navbar } from './components/Navbar.js';
 import { PwaStatusBars } from './components/PwaStatusBars.js';
 import { SessionDetailModal } from './components/SessionDetailModal.js';
 import { activityPath, type Session } from '@git-agent-harness/contracts';
-import { readNavigation, updateNavigation, type Page } from './lib/navigationState.js';
+import { readNavigation, takeActivityDeepLink, updateNavigation, type Page } from './lib/navigationState.js';
+import { activityApi } from './api/client.js';
 import { ActivityToast } from './components/ActivityToast.js';
 import { WorkDetailDrawer } from './components/WorkDetailDrawer.js';
 import { generateProviderInstanceId } from '@git-agent-harness/shared';
@@ -31,6 +32,11 @@ export function App() {
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
   const [dismissedActivityId, setDismissedActivityId] = useState<string | null>(null);
+  // A push or feed link names the notification it opened; opening it reads it.
+  const [openedActivityId] = useState(takeActivityDeepLink);
+  useEffect(() => {
+    if (openedActivityId) void activityApi.markRead([openedActivityId]).catch(() => { /* It stays unread and visible. */ });
+  }, [openedActivityId]);
   const profileOverride = useUiStore((state) => state.profileOverride);
   const { isConnected, isConnecting, sessions, liveActivity, activityUnreadCount, profile, sendMessage } = useWebSocket();
 
@@ -45,7 +51,7 @@ export function App() {
       case 'quota':
         return <QuotaPage />;
       case 'events':
-        return <EventsPage />;
+        return <EventsPage openedEventId={openedActivityId} />;
       case 'settings':
         return <SettingsPage />;
       case 'chat':

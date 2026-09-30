@@ -393,6 +393,22 @@ export function createServer(
       if (recorded) sessionStore.broadcast({ type: 'activity.event', event }, undefined, event.profile ?? undefined);
       return res.status(recorded ? 201 : 200).json({ recorded, id: event.id });
     });
+    app.get('/api/activity/notifications', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const feed = configDeps.activityFeed!;
+      res.json({ events: feed.notifications(), unread: feed.unreadCount() });
+    });
+    // Idempotent by nature, so no replay receipt; the mount above rate-limits it.
+    app.post('/api/activity/read', (req, res) => {
+      const ids: unknown = req.body?.ids;
+      const all = req.body?.all === true;
+      if (!all && !(Array.isArray(ids) && ids.length > 0 && ids.length <= 200 && ids.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 256))) {
+        return res.status(400).json({ error: 'invalid_activity_read', message: 'Supply up to 200 notification ids, or all: true.' });
+      }
+      const feed = configDeps.activityFeed!;
+      const changed = feed.markRead(all ? 'all' : ids as string[]);
+      return res.json({ changed, unread: feed.unreadCount() });
+    });
   }
   if (node.role === 'central' && configDeps.webPushNotifications) {
     const push = configDeps.webPushNotifications;

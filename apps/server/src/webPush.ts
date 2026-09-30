@@ -10,7 +10,8 @@ import {
   writeFileSync
 } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { activityPath, notifiableActivity, type ActivityEvent } from '@git-agent-harness/contracts';
+import { activityPath, notifiableActivity, type ActivityEvent, type DeliveryReceipt } from '@git-agent-harness/contracts';
+import { deliveryReceipt } from './notifyDelivery.js';
 import webPush, { type PushSubscription } from 'web-push';
 import { pushRegistrationId, removePushEntries, validPushDeviceLabel, validPushRegistrationId, writePrivatePushStore } from './pushStore.js';
 
@@ -121,33 +122,39 @@ export class WebPushNotifications {
     removePushEntries(this.subscriptionsPath, this.subscriptions(), (entry) => entry.deviceId === deviceId);
   }
 
-  async deliverActivity(event: ActivityEvent): Promise<void> {
+  /** Sends to every subscription; one receipt per subscription. */
+  async deliverActivity(event: ActivityEvent): Promise<DeliveryReceipt[]> {
     const publicPayload = activityPushPayload(event);
     if (!publicPayload) {
       if (notifiableActivity(event)) console.error(`[webPush] skipped oversized activity payload ${event.id}`);
-      return;
+      return [];
     }
     const payload = JSON.stringify(publicPayload);
     const subscriptions = this.subscriptions();
     const expired = new Set<string>();
-    await Promise.all(subscriptions.map(async (entry) => {
+    const receipts = await Promise.all(subscriptions.map(async (entry) => {
+      const target = entry.label ?? 'Browser';
       try {
         await this.transport.sendNotification(entry.subscription, payload, { TTL: 60 * 60, timeout: 10_000 });
         this.failures.delete(entry.id);
+        return deliveryReceipt('web_push', target);
       } catch (error) {
         const status = (error as { statusCode?: number }).statusCode;
+        const reason = status ? `HTTP ${status}` : error;
         if (status === 404 || status === 410) {
           expired.add(entry.id);
-          return;
+          return deliveryReceipt('web_push', target, reason);
         }
         const now = Date.now();
         if (now - (this.failures.get(entry.id) ?? 0) >= FAILURE_LOG_INTERVAL_MS) {
           this.failures.set(entry.id, now);
           console.error(`[webPush] delivery failed for subscription ${entry.id}: ${error instanceof Error ? error.message : String(error)}`);
         }
+        return deliveryReceipt('web_push', target, reason);
       }
     }));
     if (expired.size) writePrivatePushStore(this.subscriptionsPath, this.subscriptions().filter((entry) => !expired.has(entry.id)));
+    return receipts;
   }
 
   private loadOrCreateKeys(): VapidKeys {

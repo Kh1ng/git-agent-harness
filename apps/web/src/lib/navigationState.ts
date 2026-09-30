@@ -27,3 +27,20 @@ export function updateNavigation(update: Partial<NavigationState>): void {
   }
   if (url.href !== window.location.href) window.history.replaceState(window.history.state, '', url);
 }
+
+let openedActivity: string | null | undefined;
+
+/** The notification a push or feed link opened (`event=<id>`). The parameter
+ * is removed so later navigation doesn't carry it along; repeat calls in the
+ * same page load return the same id. */
+export function takeActivityDeepLink(): string | null {
+  if (openedActivity !== undefined) return openedActivity;
+  const url = new URL(window.location.href);
+  const id = url.searchParams.get('event');
+  if (id !== null) {
+    url.searchParams.delete('event');
+    window.history.replaceState(window.history.state, '', url);
+  }
+  openedActivity = id && id.length <= 256 && !/[\x00-\x1f\x7f]/.test(id) ? id : null;
+  return openedActivity;
+}
