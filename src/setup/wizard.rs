@@ -427,7 +427,7 @@ impl<'a> Setup<'a> {
             } else {
                 "Install"
             };
-            let password = if action.sudo {
+            let sudo_note = if action.sudo {
                 " It asks for your password."
             } else {
                 ""
@@ -435,7 +435,7 @@ impl<'a> Setup<'a> {
             self.prompter.say(&format!("{}: {}", next.label, next.why));
             let default = !next.optional;
             if self.ask_confirm(
-                &format!("{verb} now with `{}`?{password}", action.command),
+                &format!("{verb} now with `{}`?{sudo_note}", action.command),
                 default,
             )? {
                 let command = action.command.clone();
