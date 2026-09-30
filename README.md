@@ -2,6 +2,10 @@
 
 `gah` is a CLI that runs coding agents against real repositories with guardrails around git worktrees, validation, pushing, draft MR/PR creation, PM ticket decomposition, session logging, and cleanup.
 
+**New here? Start with [Getting started](docs/GETTING_STARTED.md).** One pasted
+line builds GAH and runs `gah setup`, which asks what the machine is for and
+installs only what that needs.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for coding and review standards.
 
 ## Binary releases (no build required)
@@ -73,15 +77,10 @@ gah doctor
 
 ## Requirements
 
-- `git`
-- Rust toolchain (`cargo` and `rustup`)
-- One backend CLI:
-  - `codex`
-  - `claude`
-  - `openhands`
-- Provider tooling:
-  - GitHub: `gh`
-  - GitLab: `glab` for provider API access, plus token env vars for pushes
+What a machine needs depends on what it is for. The full list, generated from
+the checks `gah setup` runs, is in
+[Getting started](docs/GETTING_STARTED.md#what-each-choice-needs). Check a
+machine without changing it with `gah setup --check`.
 
 ## Install
 
@@ -89,7 +88,9 @@ For an external Windows test, see [Windows tester guide](docs/WINDOWS_TESTER_GUI
 For maintainer details, see [Windows node setup](docs/WINDOWS_NODE_SETUP.md).
 For the current capability inventory, device roles, and QR pairing, see [Control surfaces](docs/CONTROL_SURFACES.md).
 
-Install the CLI and control-plane server through the deterministic host
+`gah setup` (see [Getting started](docs/GETTING_STARTED.md)) runs the steps
+below for you, after checking and offering every prerequisite. To run them by
+hand, install the CLI and control-plane server through the deterministic host
 installer from a clean checkout of the default branch:
 
 ```bash
