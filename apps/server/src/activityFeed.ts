@@ -218,8 +218,11 @@ export class ActivityFeed {
     return () => { this.listeners.delete(listener); };
   }
 
+  /** A delivered notification starts unread; a silently backfilled one never
+   * reached anyone, so it starts read. */
   record(event: ActivityEvent, deliver = true): boolean {
     if (this.ids.has(event.id)) return false;
+    if (notifiableActivity(event)) event.readAt = deliver ? null : new Date(this.now()).toISOString();
     this.events.push(event);
     this.ids.add(event.id);
     if (this.path) {
@@ -227,7 +230,7 @@ export class ActivityFeed {
       appendFileSync(this.path, `${JSON.stringify(event)}\n`, { mode: 0o600 });
     }
     if (this.events.length > MAX_STORED_EVENTS && this.trim()) this.persist();
-    if (notifiableActivity(event) && !event.readAt) this.emit({ kind: 'unread', count: this.unreadCount() });
+    if (event.readAt === null) this.emit({ kind: 'unread', count: this.unreadCount() });
     if (deliver && this.deliver) {
       void Promise.resolve()
         .then(() => this.deliver!(event))
@@ -247,18 +250,19 @@ export class ActivityFeed {
 
   /** Every retained event that passed the wake filter, across profiles, newest first. */
   notifications(): ActivityEvent[] {
-    return this.events.filter(notifiableActivity).reverse();
+    // Recording order is not event order: controller history can arrive late.
+    return this.events.filter(notifiableActivity).sort((a, b) => Date.parse(b.occurredAt) - Date.parse(a.occurredAt));
   }
 
   unreadCount(): number {
-    return this.events.filter((event) => notifiableActivity(event) && !event.readAt).length;
+    return this.events.filter((event) => event.readAt === null).length;
   }
 
   /** Marks the named notifications read, or all of them. Returns how many changed. */
   markRead(ids: string[] | 'all'): number {
     const wanted = ids === 'all' ? null : new Set(ids);
     const readAt = new Date(this.now()).toISOString();
-    const changed = this.events.filter((event) => notifiableActivity(event) && !event.readAt && (!wanted || wanted.has(event.id)));
+    const changed = this.events.filter((event) => event.readAt === null && (!wanted || wanted.has(event.id)));
     if (changed.length === 0) return 0;
     for (const event of changed) event.readAt = readAt;
     this.persist();

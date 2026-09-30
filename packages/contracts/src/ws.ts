@@ -71,8 +71,8 @@ export interface ActivityEvent {
   /** Where the event was recorded. Only controller-log replay sets this;
    * absent means the Node server originated the event. */
   origin?: "controller";
-  /** When the operator opened this notification; absent or null is unread.
-   * Only notifiable events carry read state. */
+  /** When the operator opened this notification. `null` is unread. Absent
+   * means it was recorded before read tracking or is not a notification. */
   readAt?: string | null;
   /** One entry per delivery attempt (device, channel, or hook). */
   deliveries?: DeliveryReceipt[];

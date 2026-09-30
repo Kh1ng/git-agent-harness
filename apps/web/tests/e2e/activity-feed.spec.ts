@@ -282,6 +282,7 @@ test('disabling alerts clears local state even when server cleanup fails', async
 test('a push link opens its notification unread, highlighted, with delivery receipts (#1273)', async ({ page }) => {
   const pinged = {
     ...offline,
+    readAt: null,
     deliveries: [
       { method: 'apns', target: 'iPhone', ok: true, at: '2026-09-12T12:02:01.000Z' },
       { method: 'channel', target: 'Telegram', ok: false, reason: 'HTTP 401', at: '2026-09-12T12:02:01.000Z' }

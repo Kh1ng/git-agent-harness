@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Bell, CheckCircle2, CircleDot, DatabaseZap, Gauge, KeyRound, MessageCircle, Radio, ShieldAlert, Wifi, WifiOff, XCircle } from 'lucide-react';
-import { activityPath, notifiableActivity, type ActivityEvent, type ActivityKind, type DeliveryReceipt } from '@git-agent-harness/contracts';
+import { activityPath, type ActivityEvent, type ActivityKind, type DeliveryReceipt } from '@git-agent-harness/contracts';
 import type { LucideIcon } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { activityApi } from '../api/client.js';
@@ -71,7 +71,7 @@ function DeliveryChips({ deliveries }: { deliveries?: DeliveryReceipt[] }) {
 function ActivityRow({ event, highlighted, onRead }: { event: ActivityEvent; highlighted: boolean; onRead: (id: string) => void }) {
   const Icon = EVENT_ICON[event.kind];
   const age = formatAge(event.occurredAt);
-  const unread = notifiableActivity(event) && !event.readAt;
+  const unread = event.readAt === null;
   const chat = !!(event.profile && event.sessionId);
   return (
     <li id={`activity-${event.id}`} data-highlighted={highlighted || undefined}>
@@ -134,7 +134,7 @@ export function EventsPage({ openedEventId = null }: { openedEventId?: string | 
 
   const markRead = async (ids: string[] | 'all') => {
     const readAt = new Date().toISOString();
-    setNotifications((current) => current?.map((event) => ids === 'all' || ids.includes(event.id) ? { ...event, readAt: event.readAt ?? readAt } : event) ?? null);
+    setNotifications((current) => current?.map((event) => event.readAt === null && (ids === 'all' || ids.includes(event.id)) ? { ...event, readAt } : event) ?? null);
     try { await activityApi.markRead(ids); }
     catch (error) { setNotificationsError(error instanceof Error ? error.message : String(error)); }
   };
@@ -191,7 +191,7 @@ export function EventsPage({ openedEventId = null }: { openedEventId?: string | 
           {tab('notifications', activityUnreadCount > 0 ? `Notifications (${activityUnreadCount})` : 'Notifications')}
           {tab('all', 'All activity')}
         </div>
-        {view === 'notifications' && notifications?.some((event) => !event.readAt) && (
+        {view === 'notifications' && notifications?.some((event) => event.readAt === null) && (
           <button type="button" className="btn-secondary ml-auto text-xs" onClick={() => void markRead('all')}>Mark all read</button>
         )}
       </div>

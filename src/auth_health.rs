@@ -500,9 +500,18 @@ mod tests {
         assert!(is_auth_failure("vibe", "Error: invalid API key provided"));
         assert!(is_auth_failure("agy", "Error: not logged into Antigravity"));
         assert!(is_auth_failure("opencode", "Error: HTTP 401 Unauthorized"));
-        assert!(is_auth_failure("codex", "error: 403 Forbidden from the model API"));
-        assert!(is_auth_failure("claude", "OAuth token has expired. Please run /login."));
-        assert!(is_auth_failure("claude", "Not logged in · Please run /login"));
+        assert!(is_auth_failure(
+            "codex",
+            "error: 403 Forbidden from the model API"
+        ));
+        assert!(is_auth_failure(
+            "claude",
+            "OAuth token has expired. Please run /login."
+        ));
+        assert!(is_auth_failure(
+            "claude",
+            "Not logged in · Please run /login"
+        ));
         assert!(!is_auth_failure("claude", "The tests failed on line 401."));
         assert!(!is_auth_failure("claude", "Fixed issue #403 and pushed."));
     }

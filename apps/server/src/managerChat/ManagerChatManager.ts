@@ -300,8 +300,8 @@ export function listChatSessions(profile: string) {
 }
 
 /** Creates a chat session bound to a fresh worktree (WP2). The backend
- * resolves at create time: explicit request, else the profile default. */
-/** `workspace` names the session branch; `worktree: false` runs turns in the
+ * resolves at create time: explicit request, else the profile default.
+ * `workspace` names the session branch; `worktree: false` runs turns in the
  * project checkout instead of a new worktree (PR chats). */
 export async function createChatSession(profile: string, backend?: string, model?: string | null, title?: string, reasoningEffort?: string | null, nodeId?: string, backendInstance?: string | null, workspace?: { branch: string; worktree: boolean }) {
   const selectedBackend = backend ?? backendForProfile(profile);

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -151,15 +151,29 @@ test('opening one notification marks only it read; mark all is explicit (#1273)'
   const feed = new ActivityFeed(null, undefined, () => NOW);
   const changes: string[] = [];
   feed.onChange((change) => changes.push(change.kind === 'unread' ? `unread:${change.count}` : `updated:${change.event.id}`));
-  feed.record(feedEvent('a', 'review_ready', NOW - 2), false);
-  feed.record(feedEvent('b', 'dispatch_failed', NOW - 1), false);
-  feed.record(feedEvent('routine', 'dispatch_completed', NOW), false);
-  assert.equal(feed.unreadCount(), 2);
+  feed.record(feedEvent('a', 'review_ready', NOW - 2));
+  feed.record(feedEvent('b', 'dispatch_failed', NOW - 1));
+  feed.record(feedEvent('routine', 'dispatch_completed', NOW));
+  feed.record(feedEvent('backfilled', 'dispatch_failed', NOW - 3), false);
+  assert.equal(feed.unreadCount(), 2, 'a silently backfilled event never reached anyone');
   assert.equal(feed.markRead(['a', 'routine']), 1, 'routine events carry no read state');
-  assert.deepEqual(feed.notifications().map((event) => [event.id, !!event.readAt]), [['b', false], ['a', true]]);
+  assert.deepEqual(feed.notifications().map((event) => [event.id, !!event.readAt]), [['b', false], ['a', true], ['backfilled', true]]);
   assert.equal(feed.markRead('all'), 1);
   assert.equal(feed.markRead('all'), 0);
   assert.deepEqual(changes, ['unread:1', 'unread:2', 'updated:a', 'unread:1', 'updated:b', 'unread:0']);
+});
+
+test('events recorded before read tracking load as read (#1273)', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'gah-activity-legacy-'));
+  const path = join(directory, 'activity.jsonl');
+  try {
+    writeFileSync(path, `${JSON.stringify(feedEvent('legacy', 'review_ready', NOW - DAY))}\n`);
+    const feed = new ActivityFeed(path, undefined, () => NOW);
+    assert.equal(feed.notifications().length, 1);
+    assert.equal(feed.unreadCount(), 0);
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
 });
 
 test('delivery receipts are stored on the event, announced, and survive a restart (#1273)', async () => {
