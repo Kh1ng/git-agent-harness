@@ -93,7 +93,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
   // Prefer the owning node, but never default to one that can't take the chat (#1275).
   const ownerId = projectInfo?.node_id;
   const ownerUsable = !!ownerId && nodeSnapshot.nodes.find(node => node.nodeId === ownerId)?.eligible !== false;
-  const nodeId = mode !== 'blank' ? centralId
+  const nodeId = mode !== 'blank' ? (remoteProject && ownerId ? ownerId : centralId)
     : nodeChoice?.project === project ? nodeChoice.nodeId
     : ownerUsable ? ownerId : nodeSnapshot.nodes.find(node => node.eligible)?.nodeId ?? centralId;
   const selectedNode = nodeSnapshot.nodes.find(node => node.nodeId === nodeId);
@@ -157,7 +157,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
 
   // PR list follows the selected project in PR mode.
   useEffect(() => {
-    if (!open || mode !== 'pr') return;
+    if (!open || mode !== 'pr' || remoteProject) return;
     let cancelled = false;
     setPrsError(null);
     setPrsLoading(true);
@@ -168,7 +168,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
       .finally(() => { if (!cancelled) setPrsLoading(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, mode, project, sourceRetry]);
+  }, [open, mode, project, sourceRetry, remoteProject]);
 
   useEffect(() => {
     if (!open) return;
@@ -253,7 +253,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
   };
 
   const startFromSource = async (source: Exclude<ChatSource, 'blank'>, number: number) => {
-    if (!backend || remoteProject || creating) return;
+    if (!backend || (source === 'pr' && remoteProject) || creating) return;
     setCreating(true);
     setError(null);
     try {
@@ -270,7 +270,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
   };
 
   const create = async () => {
-    if (!backend || (mode === 'blank' && !nodeReady) || (mode !== 'blank' && remoteProject)) return;
+    if (!backend || (mode === 'blank' && !nodeReady) || (mode === 'pr' && remoteProject)) return;
     setCreating(true);
     setError(null);
     try {
@@ -329,14 +329,14 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
                       <span className="block truncate text-sm font-medium text-primary">{candidate.display_name || candidate.name}</span>
                       <span className="block truncate text-[11px] text-muted">{candidate.repo}</span>
                     </button>
-                    <button type="button" onClick={() => chooseProject(candidate.name, 'issue')} disabled={candidate.remote}
+                    <button type="button" onClick={() => chooseProject(candidate.name, 'issue')}
                       className="touch-target rounded-md p-2 text-muted hover:bg-white/5 hover:text-primary disabled:opacity-30"
-                      aria-label={`Start from an issue in ${candidate.display_name || candidate.name}`} title={candidate.remote ? 'Issue lookup runs on the central node' : 'Start from an issue'}>
+                      aria-label={`Start from an issue in ${candidate.display_name || candidate.name}`} title="Start from an issue">
                       <CircleDot size={15} aria-hidden="true" />
                     </button>
-                    <button type="button" onClick={() => chooseProject(candidate.name, 'pr')} disabled={candidate.remote}
+                    <button type="button" onClick={() => chooseProject(candidate.name, 'pr')}
                       className="touch-target rounded-md p-2 text-muted hover:bg-white/5 hover:text-primary disabled:opacity-30"
-                      aria-label={`Start from a pull request in ${candidate.display_name || candidate.name}`} title={candidate.remote ? 'Pull request lookup runs on the central node' : 'Start from a pull request'}>
+                      aria-label={`Start from a pull request in ${candidate.display_name || candidate.name}`} title="Start from a pull request">
                       <GitPullRequest size={15} aria-hidden="true" />
                     </button>
                     <button type="button" onClick={() => togglePinnedProject(candidate.name)} aria-pressed={pinned}
@@ -378,7 +378,6 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
             type="button"
             role="tab"
             aria-selected={mode === 'issue'}
-            disabled={remoteProject}
             onClick={() => setMode('issue')}
             className={`flex-1 disabled:opacity-50 rounded-md px-2 py-1.5 text-xs inline-flex items-center justify-center gap-1.5 ${mode === 'issue' ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-white/5'}`}
           >
@@ -396,7 +395,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
           </button>
         </div>
 
-        {remoteProject && <p className="text-sm text-secondary">Use a blank chat for projects on another node. Issue and PR chat setup runs on the central node.</p>}
+        {remoteProject && <p className="text-sm text-secondary">Pull request chats aren't available yet for projects on another node. Issue and blank chats run on that node.</p>}
         {mode !== 'blank' && (
           <label className="block space-y-1 text-sm text-secondary">
             <span>Filter {mode === 'issue' ? 'issues' : 'pull requests'}</span>
@@ -518,7 +517,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
           <ChatNodePicker {...nodeSnapshot} value={nodeId} disabled={creating}
             onChange={nodeId => setNodeChoice({ project, nodeId })} />
           <p className="text-sm text-secondary">Each node uses its own checkout; files do not move.</p>
-        </> : <p className="text-sm text-secondary">Issue and PR chat setup runs on the central node.</p>}
+        </> : <p className="text-sm text-secondary">{remoteProject ? 'This chat runs on the node that owns the project.' : 'Issue and PR chat setup runs on the central node.'}</p>}
 
         <section className="space-y-2">
           <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
@@ -591,7 +590,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
           <button
             type="button"
             onClick={create}
-            disabled={creating || !backend || profiles.length === 0 || (mode === 'blank' && (!title.trim() || !nodeReady)) || (mode !== 'blank' && remoteProject) || (mode === 'issue' && !issue) || (mode === 'pr' && !pr)}
+            disabled={creating || !backend || profiles.length === 0 || (mode === 'blank' && (!title.trim() || !nodeReady)) || (mode === 'pr' && remoteProject) || (mode === 'issue' && !issue) || (mode === 'pr' && !pr)}
             className="btn-primary text-xs"
           >
             {creating ? 'Creating…' : 'Start chat'}

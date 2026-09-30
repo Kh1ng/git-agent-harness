@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
 import { ISSUE_IN_PROGRESS_LABEL, issueBranchName, listChatIssues, startIssueChat } from './issueChats.js';
-import { archiveSession, setChatSessionStoreOptions, listSessions } from './chatSessions.js';
+import { archiveSession, createSession, setChatSessionStoreOptions, listSessions, storeSession } from './chatSessions.js';
 import { setSessionLogOptions } from './ManagerChatManager.js';
 
 const fixtures = resolve(dirname(fileURLToPath(import.meta.url)), '../../tests/fixtures');
@@ -205,4 +205,36 @@ test('startIssueChat refuses closed issues loudly', withEnv(async (env) => {
     /is closed, not open/
   );
   assert.ok(!existsSync(env.stateFile), 'nothing was marked in progress');
+}));
+
+test('a worker-only project lists and starts issue chats with an explicit repository (#1276)', withEnv(async (env) => {
+  const workerProject: ProfileSummary = { ...env.profileInfo, name: 'gah-node:w:p', local_path: '' };
+  const issues = await listChatIssues(workerProject);
+  assert.ok(issues.length > 0);
+
+  const created: { title: string; branch: string }[] = [];
+  const { session, existing } = await startIssueChat({
+    profile: workerProject.name,
+    profileInfo: workerProject,
+    issueNumber: 42,
+    backend: 'hermes',
+    create: async (settings) => {
+      created.push(settings);
+      // Stands in for the worker's `create`: central only records the session.
+      return storeSession({ ...(await createSession({ profile: workerProject.name, profileInfo: env.profileInfo, backend: 'hermes', model: null, title: settings.title, branch: settings.branch, worktree: false })), issueNumber: 42 });
+    }
+  });
+  assert.equal(existing, false);
+  assert.deepEqual(created, [{ title: '#42 Fix the retry loop', branch: issueBranchName('repo', 42) }]);
+  assert.equal(session.issueNumber, 42);
+
+  // Every forge call named the repository, since central has no checkout.
+  const calls = readFileSync(env.callsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as string[]);
+  assert.ok(calls.length >= 3);
+  for (const call of calls) assert.deepEqual(call.slice(-2), ['-R', 'owner/repo'], call.join(' '));
+
+  // The issue is still the opening message, replayed to the worker as history.
+  const projectDir = readdirSync(join(env.root, 'state')).find((dir) => existsSync(join(env.root, 'state', dir, `session-${session.id}`)))!;
+  const log = readFileSync(join(env.root, 'state', projectDir, `session-${session.id}`, 'session.jsonl'), 'utf8');
+  assert.match(JSON.parse(log.trim().split('\n')[1]).text, /#42 Fix the retry loop/);
 }));

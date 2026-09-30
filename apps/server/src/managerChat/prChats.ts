@@ -13,7 +13,7 @@
 
 import type { ChatPrSummary, ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
 import { AsyncTtlCache } from '../asyncTtlCache.js';
-import { execProviderCli } from './providerCli.js';
+import { type ForgeProject, execProjectCli } from './providerCli.js';
 import { appendEvents } from './sessionLog.js';
 import {
   chatSessionStoreOptions,
@@ -61,15 +61,15 @@ function normalizePr(raw: ProviderPr): ChatPrSummary & { body: string | null; st
 
 /** Open PRs for a profile's repo, newest-first. Cached per profile. */
 export async function listChatPrs(
-  profileInfo: Pick<ProfileSummary, 'provider' | 'repo' | 'local_path'>,
+  profileInfo: ForgeProject,
   limit = 30
 ): Promise<ChatPrSummary[]> {
   const cacheKey = `${profileInfo.provider}:${profileInfo.repo}:${profileInfo.local_path}:${limit}`;
   return prsCache.get(cacheKey, async () => {
     const isGitLab = profileInfo.provider === 'gitlab';
     const { stdout } = isGitLab
-      ? await execProviderCli('glab', ['mr', 'list', '--output=json'], profileInfo.local_path)
-      : await execProviderCli('gh', ['pr', 'list', '--json', 'number,title,url,headRefName,isDraft,updatedAt,state,author,reviewDecision', `--limit=${limit}`], profileInfo.local_path);
+      ? await execProjectCli('glab', ['mr', 'list', '--output=json'], profileInfo)
+      : await execProjectCli('gh', ['pr', 'list', '--json', 'number,title,url,headRefName,isDraft,updatedAt,state,author,reviewDecision', `--limit=${limit}`], profileInfo);
     const parsed = JSON.parse(stdout) as ProviderPr[];
     const isOpen = (state: string): boolean => {
       const normalized = state.toLowerCase();
@@ -94,13 +94,13 @@ export async function listChatPrs(
 }
 
 async function fetchPr(
-  profileInfo: Pick<ProfileSummary, 'provider' | 'local_path'>,
+  profileInfo: ForgeProject,
   prNumber: number
 ): Promise<ReturnType<typeof normalizePr>> {
   const isGitLab = profileInfo.provider === 'gitlab';
   const { stdout } = isGitLab
-    ? await execProviderCli('glab', ['mr', 'view', String(prNumber), '--output=json'], profileInfo.local_path)
-    : await execProviderCli('gh', ['pr', 'view', String(prNumber), '--json', 'number,title,body,state,url,headRefName,isDraft,author,reviewDecision'], profileInfo.local_path);
+    ? await execProjectCli('glab', ['mr', 'view', String(prNumber), '--output=json'], profileInfo)
+    : await execProjectCli('gh', ['pr', 'view', String(prNumber), '--json', 'number,title,body,state,url,headRefName,isDraft,author,reviewDecision'], profileInfo);
   return normalizePr(JSON.parse(stdout) as ProviderPr);
 }
 
