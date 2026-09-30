@@ -104,6 +104,7 @@ import { MessagingBridge } from './managerChat/messagingBridge.js';
 import { projectRoutes } from './projectRoutes.js';
 import { chatNodes, chatRoute, configureChatRouting } from './chatRouting.js';
 import { timed } from './serverTiming.js';
+import type { AuthHealthMonitor, AuthHealthProber } from './authHealth.js';
 import { createWorkerChatRouter } from './workerChat.js';
 import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitReviewState, getReviewChangesForHelper, getSelectedChangesForHelper, commitGitChanges, cliInDir } from './gitCache.js';
 import { commitMessageInput, helperFallback, linkedIssueNumbers, prSummaryInput, publicSuggestion, readHelperUsage, recordHelperUsage, runHelperTask, type HelperTaskResult } from './managerChat/helperTasks.js';
@@ -157,6 +158,10 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   webPushNotifications?: WebPushNotifications;
   apnsNotifications?: ApnsNotifications;
   activityFeed?: ActivityFeed;
+  /** This node's login checks, reported in /api/status (#1271). */
+  authHealthProber?: AuthHealthProber;
+  /** Central's fleet view of logins. */
+  authHealthMonitor?: AuthHealthMonitor;
 };
 
 const activityKinds = new Set<ActivityKind>([
@@ -797,6 +802,11 @@ export function createServer(
     }
   });
 
+  app.get('/api/auth-health', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ rows: configDeps.authHealthMonitor?.rows() ?? [] });
+  });
+
   app.get('/api/registry/fleet/snapshot', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
@@ -947,6 +957,7 @@ export function createServer(
         schema_digest: identity.schema_digest,
         resource_pressure: getLocalResourcePressure(),
         event_cursor: status.recent_ledger?.most_recent_dispatch_timestamp ?? status.generated_at,
+        auth_health: configDeps.authHealthProber?.latest() ?? null,
         nodes
       };
       res.json(enriched);

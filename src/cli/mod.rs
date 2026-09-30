@@ -54,6 +54,24 @@ pub fn run() -> Result<()> {
             outcome?
         }
 
+        Commands::AuthHealth { classify } => match classify {
+            Some(backend) => {
+                let mut text = String::new();
+                std::io::Read::read_to_string(
+                    &mut std::io::Read::take(std::io::stdin(), 64 * 1024),
+                    &mut text,
+                )?;
+                println!(
+                    "{}",
+                    serde_json::json!({ "auth_failure": crate::auth_health::is_auth_failure(&backend, &text) })
+                );
+            }
+            None => println!(
+                "{}",
+                serde_json::to_string(&crate::auth_health::probe_node())?
+            ),
+        },
+
         Commands::PolicyCheck { config, action } => {
             commands::policy::run(commands::policy::Args { config, action })?
         }

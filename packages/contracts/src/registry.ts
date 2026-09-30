@@ -101,6 +101,34 @@ export interface NodeObservationSnapshot {
   event_cursor: string | null;
   resource_pressure: NodeResourcePressure;
   error?: NodeObservationError | null;
+  /** The worker's latest login checks (#1271); absent from older workers. */
+  auth_health?: NodeAuthHealth | null;
+}
+
+export type AuthState = 'ok' | 'expired' | 'missing' | 'unknown' | 'error';
+
+/** One login on one node: a backend, or a provider behind it. */
+export interface AuthProbe {
+  backend: string;
+  provider: string | null;
+  state: AuthState;
+  /** A fixed explanation chosen by GAH; never provider output. */
+  detail?: string;
+  /** probe: `gah auth-health`; dispatch: a failed dispatch attempt; chat: a failed chat turn. */
+  source: 'probe' | 'dispatch' | 'chat';
+  /** When this login entered its current state, as the node saw it. */
+  since?: string;
+}
+
+export interface NodeAuthHealth {
+  checked_at: string;
+  probes: AuthProbe[];
+}
+
+/** A login row as central reports it across the fleet. */
+export interface AuthHealthRow extends AuthProbe {
+  node_id: string;
+  node_name: string;
 }
 
 export interface NodeHealthCheckResult {

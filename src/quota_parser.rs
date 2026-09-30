@@ -125,7 +125,7 @@ fn authentication_error_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"(?i)(invalid api key|api key (?:is )?(?:invalid|expired|revoked)|missing [A-Z0-9_-]*api key|authentication failed|not authenticated)",
+            r"(?i)(invalid api key|api key (?:is )?(?:invalid|expired|revoked)|missing [A-Z0-9_-]*api key|authentication failed|not authenticated|not logged in|(?:access |refresh |oauth )?token (?:has |is )?expired|\b(?:http|status)(?: code)?[: ]+40[13]\b|\b40[13] (?:unauthorized|forbidden)\b)",
         )
         .unwrap()
     })

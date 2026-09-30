@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { parseNodeAuthHealth } from './authHealth.js';
 import { resolve, dirname, sep } from 'node:path';
 import crypto from 'node:crypto';
 import { hostname, networkInterfaces } from 'node:os';
@@ -630,6 +631,7 @@ export class RegistryService {
         : {},
       backend_instances: Array.isArray(payload.backend_instances) ? payload.backend_instances : [],
       availability: Array.isArray(payload.availability) ? payload.availability : [],
+      auth_health: parseNodeAuthHealth(payload.auth_health),
       recent_ledger: payload.recent_ledger ?? null,
       active_claims: Array.isArray(payload.active_claims) ? payload.active_claims : [],
       active_work: dedupeNodeWorkItems(node.node_id, Array.isArray(payload.active_claims) ? payload.active_claims : []),

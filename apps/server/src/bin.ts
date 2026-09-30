@@ -23,6 +23,7 @@ import { ActivityFeed } from './activityFeed.js';
 import { WebPushNotifications } from './webPush.js';
 import { apnsFromEnvironment } from './apns.js';
 import { channelDelivery, commandDelivery, deliverToAll } from './notifyDelivery.js';
+import { AuthHealthMonitor, AuthHealthProber, configureChatAuthHealth } from './authHealth.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
 const HOST = resolveBindHost();
@@ -63,6 +64,19 @@ async function main() {
     commandDelivery(coordinatorIdentity.advertised_url)
   ]) : undefined);
 
+  // Every node checks its own logins; central watches the fleet's (#1271).
+  const authHealthProber = new AuthHealthProber();
+  const authHealthMonitor = node.role === 'central'
+    ? new AuthHealthMonitor(
+      { nodeId: coordinatorIdentity.node_id, nodeName: coordinatorIdentity.display_name, prober: authHealthProber },
+      () => registryService.getCachedObservations()
+    )
+    : undefined;
+  if (authHealthMonitor) {
+    registryService.onChange(() => authHealthMonitor.observationsChanged());
+    configureChatAuthHealth(authHealthMonitor);
+  }
+
   // Create Express app
   const app = createExpressServer({
     coordinatorPort: PORT,
@@ -71,7 +85,9 @@ async function main() {
     registryService,
     webPushNotifications,
     apnsNotifications,
-    activityFeed
+    activityFeed,
+    authHealthProber,
+    authHealthMonitor
   });
   
   // Create HTTP server from Express app
@@ -107,6 +123,7 @@ async function main() {
     coordinatorIdentity,
     node,
     activityFeed,
+    authHealthMonitor,
     // Background delivery must not depend on an open dashboard. Poll every
     // configured profile, but only while some device is registered for push.
     backgroundProfiles: node.role === 'central' && cliAvailable
@@ -144,6 +161,8 @@ async function main() {
     if (warning) {
       console.warn(warning);
     }
+    // After listening: login checks spawn provider CLIs and must never delay health.
+    if (cliAvailable) authHealthProber.start();
   });
   
   // Exit at once: waiting on open keep-alive or WebSocket connections would
@@ -152,6 +171,7 @@ async function main() {
     logLifecycle('Shutting down...');
     registryService.stopLivenessScheduler();
     stopChatMaintenanceScheduler();
+    authHealthProber.stop();
     server.close();
     process.exit(0);
   };

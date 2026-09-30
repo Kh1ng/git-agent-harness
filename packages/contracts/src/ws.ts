@@ -52,7 +52,9 @@ export type ActivityKind =
   | "node_back"
   | "quota_near_limit"
   | "gateway_down"
-  | "action_required";
+  | "action_required"
+  | "auth_expired"
+  | "auth_restored";
 
 /** Durable, de-duplicated operator event shared by web, desktop, and mobile. */
 export interface ActivityEvent {
@@ -98,7 +100,9 @@ export const NOTIFIABLE_ACTIVITY_KINDS: ReadonlySet<ActivityKind> = new Set<Acti
   "action_required",
   "dispatch_failed",
   "review_ready",
-  "node_offline"
+  "node_offline",
+  "auth_expired",
+  "auth_restored"
 ]);
 
 export function notifiableActivity(event: Pick<ActivityEvent, "kind">): boolean {

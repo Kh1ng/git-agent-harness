@@ -2,8 +2,6 @@ use super::{CandidateConfig, Defaults, Profile, RoutingPolicy};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
 
 /// Provider-neutral declaration of one concrete runner/account binding.
 /// Map keys are stable backend-instance identifiers. Credentials are never
@@ -58,44 +56,13 @@ pub fn backend_instance_auth_ready(instance: &BackendInstanceConfig) -> Option<b
     else {
         return Some(false);
     };
-    let mut command = Command::new(executable);
-    match instance.runner_kind.as_str() {
-        "codex" => {
-            command.args(["login", "status"]);
-        }
-        "claude" => {
-            command.args(["auth", "status", "--json"]);
-        }
+    let state_root = instance.state_root.as_deref().map(Path::new);
+    let health = match instance.runner_kind.as_str() {
+        "codex" => crate::auth_health::codex_login(&executable, state_root),
+        "claude" => crate::auth_health::claude_login(&executable, state_root),
         _ => return None,
-    }
-    if let Some(root) = instance.state_root.as_deref() {
-        command.env("HOME", root);
-        if instance.runner_kind == "codex" {
-            command.env("CODEX_HOME", Path::new(root).join(".codex"));
-        } else {
-            command.env("CLAUDE_CONFIG_DIR", Path::new(root).join(".claude"));
-        }
-    }
-    let output = crate::runner::process::run_bounded(command, Duration::from_secs(10))?;
-    if instance.runner_kind == "claude" {
-        let status = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()?;
-        return Some(
-            output.status.success()
-                && status.get("loggedIn").and_then(|value| value.as_bool()) == Some(true),
-        );
-    }
-    let text = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
-    .to_lowercase();
-    Some(
-        output.status.success()
-            && text
-                .lines()
-                .any(|line| line.contains("logged in") && !line.contains("not logged in")),
-    )
+    }?;
+    Some(health.state == crate::auth_health::AuthState::Ok)
 }
 
 pub(crate) fn merge_instance_maps(

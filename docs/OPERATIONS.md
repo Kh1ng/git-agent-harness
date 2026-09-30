@@ -886,8 +886,8 @@ events, without any external wrapper.
 Events enter the central server's activity feed. One filter,
 `notifiableActivity` in `packages/contracts`, decides which events can wake a
 person: a chat reply, a chat failure, a chat permission request, an operator
-action, a failed dispatch, a ready review, and an offline node. Every
-delivery method below uses that filter.
+action, a failed dispatch, a ready review, an offline node, and a provider
+login that expired or came back. Every delivery method below uses that filter.
 
 | Method | Receives | Enable |
 | --- | --- | --- |
@@ -948,6 +948,35 @@ it retains foreground local notifications. The APNs `.p8` key must remain
 outside the repository. `GAH_APNS_ENVIRONMENT` defaults to `sandbox`; set it to
 `production` for distribution builds. Device tokens are stored with mode
 `0600` in `config/push/apns-devices.json`.
+
+### Notification history
+
+The Activity page opens on **Notifications** when it is opened from a push,
+a link, or with unread notifications. It lists every notifiable event from
+the last 30 days, newest first, whatever the routine-event cap has evicted.
+Opening one notification marks only that one read; **Mark all read** is
+explicit. Each item shows one chip per delivery target, for example
+"iPhone ✓ · Telegram ✗ (HTTP 401)", so a failed delivery is visible without
+reading server logs. Every pushed URL carries `event=<id>`: a push for an
+event with no chat scrolls to that event and highlights it.
+
+### Provider login health
+
+Every node runs `gah auth-health` at server start and every 30 minutes. It
+checks claude, codex, hermes, each opencode provider (a saved credential that
+lists no models counts as expired), `gh`, `glab`, and `MISTRAL_API_KEY` /
+`NOUS_API_KEY` when set. It also reports backends that a dispatch attempt
+marked unavailable for an authentication failure. The command prints fixed,
+secret-free details, never provider output. A worker reports the result in
+its `/api/status`, so central sees it in the observation it already polls.
+
+Central shows each broken login as a red row under **Nodes → Logins** and
+records `auth_expired` when a login that worked stops working, or when a
+check reports it expired. A chat turn that fails to authenticate (401/403,
+"not logged in", an expired token, an invalid API key) records it at once.
+The next successful turn, or a check that turns ok after a new login,
+records `auth_restored`. A CLI that was never logged in is shown but not
+pushed.
 
 ### Telegram manager bridge
 

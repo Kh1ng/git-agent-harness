@@ -7,6 +7,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { requiresFleetAuthentication, trustedLanWebSocketMode, webSocketAccessValid } from './webSocketAuth.js';
 import { SERVER_VERSION } from './server.js';
 import { createServerPushBus } from './serverPushBus.js';
+import type { AuthHealthMonitor } from './authHealth.js';
 import { ActivityFeed, activitiesFromQuota, activityFromChat, activityFromController, activityFromGateway, activityFromNode, type ChatLifecycleEvent } from './activityFeed.js';
 import { gatewayHealth } from './managerChat/memoryGatewayClient.js';
 import { getProviderRegistry } from './provider/ProviderRegistry.js';
@@ -88,6 +89,7 @@ export function createWebSocketHandler(
     coordinatorIdentity?: ReturnType<typeof getCoordinatorIdentity>;
     node?: import('@git-agent-harness/contracts').NodeRoleStatus;
     activityFeed?: ActivityFeed;
+    authHealthMonitor?: AuthHealthMonitor;
     runEvents?: typeof gahCli.runEvents;
     runQuota?: typeof gahCli.runQuota;
     gatewayHealth?: typeof gatewayHealth;
@@ -170,6 +172,9 @@ export function createWebSocketHandler(
     const event = activityFromNode(transition);
     if (activityFeed.record(event)) sessionStore.broadcast({ type: 'activity.event', event });
   });
+  const unsubscribeAuth = deps.authHealthMonitor?.onTransition(({ event }) => {
+    if (activityFeed.record(event)) sessionStore.broadcast({ type: 'activity.event', event });
+  });
   const activityTimer = setInterval(() => {
     for (const profile of sessionStore.profiles()) void syncActivity(profile);
     syncGateway();
@@ -193,6 +198,7 @@ export function createWebSocketHandler(
     unsubscribeFleet();
     unsubscribeLiveness();
     unsubscribeActivity();
+    unsubscribeAuth?.();
     clearInterval(activityTimer);
     if (backgroundTimer) clearInterval(backgroundTimer);
   });

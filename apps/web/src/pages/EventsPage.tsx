@@ -20,7 +20,9 @@ const EVENT_ICON: Record<ActivityKind, LucideIcon> = {
   node_back: Wifi,
   quota_near_limit: Gauge,
   gateway_down: DatabaseZap,
-  action_required: Bell
+  action_required: Bell,
+  auth_expired: KeyRound,
+  auth_restored: KeyRound
 };
 
 const SEVERITY_COLOR = {

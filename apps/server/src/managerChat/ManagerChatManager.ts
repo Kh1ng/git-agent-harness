@@ -54,6 +54,7 @@ import type { ChatSessionEvent, ChatTranscriptTurn, ChatUsage, Skill } from '@gi
 import type { ProfileSummary } from '@git-agent-harness/contracts';
 import { resolveSkillBindings } from '../skillBank.js';
 import { chatRoute, localChatNodeId, rememberWorkspace, type ChatRoute } from '../chatRouting.js';
+import { reportChatTurn } from '../authHealth.js';
 import { resolveChatProject } from '../projectCatalog.js';
 import { createWorkspace, getSession, sessionBranchName, storeSession } from './chatSessions.js';
 import type { ManagerAdapter } from './registry.js';
@@ -797,11 +798,16 @@ export async function runTurn(
         });
         return r;
       };
+      const nodeId = context.route?.nodeId ?? localChatNodeId();
       try {
-        return await attempt();
+        const result = await attempt();
+        reportChatTurn(nodeId, backendId);
+        return result;
       } catch (error) {
         if (isUsageLimitError(error)) {
           await flushSession(profile).catch(() => undefined);
+        } else if (!active.cancelled) {
+          reportChatTurn(nodeId, backendId, errorMessage(error));
         }
         throw error;
       }

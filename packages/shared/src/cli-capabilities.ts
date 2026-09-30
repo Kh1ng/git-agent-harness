@@ -69,6 +69,22 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
   "schema_version": 1,
   "manifest_version": "v1",
   "operations": {
+    "auth.health": {
+      "operation_id": "auth.health",
+      "display_name": "Check Provider Logins",
+      "class": "read",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "local_backend_execution_required",
+      "documentation": "Probe each backend and provider login on this node; the server reports the result in its status snapshot",
+      "cli_command_path": "gah auth-health",
+      "is_stable": true
+    },
     "availability.clear": {
       "operation_id": "availability.clear",
       "display_name": "Clear Availability Status",
@@ -1199,6 +1215,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     }
   },
   "command_path_to_operation_id": {
+    "gah auth-health": "auth.health",
     "gah availability": "availability.get",
     "gah availability clear": "availability.clear",
     "gah candidates": "candidates.convert",
@@ -1316,6 +1333,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "claims.reclaim"
   ],
   "local_only_operations": {
+    "auth.health": "local_backend_execution_required",
     "candidates.convert": "filesystem_access_required",
     "init.create": "filesystem_access_required",
     "loop.run": "local_backend_execution_required",

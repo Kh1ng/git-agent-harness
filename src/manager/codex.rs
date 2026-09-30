@@ -551,31 +551,20 @@ fn parse_version_from_output(output: &std::process::Output) -> Option<String> {
 }
 
 fn classify_auth_state(output: &std::process::Output) -> CodexAuthState {
-    if !output.status.success() {
-        return CodexAuthState::Error(format!(
+    use crate::auth_health::AuthState;
+    let health = crate::auth_health::classify_status_output(
+        output.status.success(),
+        &output.stdout,
+        &output.stderr,
+    );
+    match health.state {
+        AuthState::Ok => CodexAuthState::LoggedIn,
+        AuthState::Missing | AuthState::Expired => CodexAuthState::LoggedOut,
+        AuthState::Unknown => CodexAuthState::Unknown,
+        AuthState::Error => CodexAuthState::Error(format!(
             "login status command exited with {}",
             output.status
-        ));
-    }
-
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let lower = combined.to_lowercase();
-    let logged_in = lower
-        .lines()
-        .any(|line| line.contains("logged in") && !line.contains("not logged in"));
-    if logged_in {
-        CodexAuthState::LoggedIn
-    } else if lower.contains("not logged in")
-        || lower.contains("logged out")
-        || lower.contains("no credentials")
-    {
-        CodexAuthState::LoggedOut
-    } else {
-        CodexAuthState::Unknown
+        )),
     }
 }
 
