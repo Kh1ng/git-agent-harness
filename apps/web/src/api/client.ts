@@ -1,5 +1,5 @@
 import { coordinatorToken } from './coordinatorToken.js';
-import type { ActivityEvent, AuthHealthRow, PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harness/contracts';
+import type { ActivityEvent, AuthHealthRow, LoginRepairView, PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harness/contracts';
 /**
  * Typed data-source client for GAH's pull-data REST endpoints.
  *
@@ -106,6 +106,27 @@ export const pushApi = {
 
 export const authHealthApi = {
   rows: () => getJson<{ rows: AuthHealthRow[] }>('/api/auth-health')
+};
+
+/** A repair's key is returned once at start and authorizes every later call
+ * for it; keep it in memory only. */
+async function repairRequest<T>(method: 'GET' | 'POST' | 'DELETE', path: string, key: string, body?: unknown): Promise<T> {
+  const res = await fetch(new URL(path, SERVER_URL).toString(), {
+    method,
+    headers: { ...authHeaders(), 'X-Login-Repair-Key': key, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) })
+  });
+  const payload = await res.json().catch(() => null) as { message?: unknown } | null;
+  if (!res.ok) throw new GahApiError(typeof payload?.message === 'string' ? payload.message : `${res.status} ${res.statusText}`, res.status, path);
+  return payload as T;
+}
+
+export const loginRepairApi = {
+  start: (login: { node_id: string; backend: string; provider: string | null }) =>
+    postJson<{ key: string; repair: LoginRepairView }, typeof login>('/api/auth-health/repairs', login),
+  view: (id: string, key: string) => repairRequest<LoginRepairView>('GET', `/api/auth-health/repairs/${encodeURIComponent(id)}`, key),
+  submit: (id: string, key: string, text: string) => repairRequest<LoginRepairView>('POST', `/api/auth-health/repairs/${encodeURIComponent(id)}/input`, key, { text }),
+  cancel: (id: string, key: string) => repairRequest<{ cancelled: boolean }>('DELETE', `/api/auth-health/repairs/${encodeURIComponent(id)}`, key)
 };
 
 export const activityApi = {

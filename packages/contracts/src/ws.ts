@@ -76,6 +76,8 @@ export interface ActivityEvent {
   readAt?: string | null;
   /** One entry per delivery attempt (device, channel, or hook). */
   deliveries?: DeliveryReceipt[];
+  /** The login an auth_expired/auth_restored event is about, on `nodeId`. */
+  login?: { backend: string; provider: string | null };
 }
 
 export type DeliveryMethod = "web_push" | "apns" | "channel" | "command";

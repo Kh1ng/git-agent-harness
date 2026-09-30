@@ -1164,6 +1164,11 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   app.delete('/api/push/subscriptions/:id', (_req, res) => res.json({ success: true }));
   app.get('/api/activity/notifications', (_req, res) => res.json({ events: [], unread: 0 }));
   app.get('/api/auth-health', (_req, res) => res.json({ rows: [] }));
+  const mockRepair = { id: 'mock-repair', node_id: 'mock-node', backend: 'hermes', provider: null, expires_at: new Date(Date.now() + 600_000).toISOString(), status: 'manual', instructions: 'Open a terminal on this machine and log in with the hermes CLI.' };
+  app.post('/api/auth-health/repairs', (_req, res) => res.status(201).json({ key: '0'.repeat(64), repair: mockRepair }));
+  app.get('/api/auth-health/repairs/:id', (_req, res) => res.json(mockRepair));
+  app.post('/api/auth-health/repairs/:id/input', (_req, res) => res.json(mockRepair));
+  app.delete('/api/auth-health/repairs/:id', (_req, res) => res.json({ cancelled: true }));
   app.post('/api/activity/read', (_req, res) => res.json({ changed: 0, unread: 0 }));
 
   app.get('/api/info', (_req, res) => res.json({

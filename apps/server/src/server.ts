@@ -105,6 +105,7 @@ import { projectRoutes } from './projectRoutes.js';
 import { chatNodes, chatRoute, configureChatRouting } from './chatRouting.js';
 import { timed } from './serverTiming.js';
 import type { AuthHealthMonitor, AuthHealthProber } from './authHealth.js';
+import { LoginRepairError, type LoginRepairBroker, type LoginRepairs, type RepairPrincipal } from './loginRepair.js';
 import { createWorkerChatRouter } from './workerChat.js';
 import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitReviewState, getReviewChangesForHelper, getSelectedChangesForHelper, commitGitChanges, cliInDir } from './gitCache.js';
 import { commitMessageInput, helperFallback, linkedIssueNumbers, prSummaryInput, publicSuggestion, readHelperUsage, recordHelperUsage, runHelperTask, type HelperTaskResult } from './managerChat/helperTasks.js';
@@ -162,6 +163,9 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   authHealthProber?: AuthHealthProber;
   /** Central's fleet view of logins. */
   authHealthMonitor?: AuthHealthMonitor;
+  /** This node's login repairs (#1272); central reaches a worker's through its route. */
+  loginRepairs?: LoginRepairs;
+  loginRepairBroker?: LoginRepairBroker;
 };
 
 const activityKinds = new Set<ActivityKind>([
@@ -806,6 +810,82 @@ export function createServer(
     res.setHeader('Cache-Control', 'no-store');
     res.json({ rows: configDeps.authHealthMonitor?.rows() ?? [] });
   });
+
+  // #1272: repairing a login is the one credential change a paired device may
+  // start (owner decision, 2026-09-30). The node that owns the credential runs
+  // it; only the starting principal, holding the returned key, can read the
+  // code or submit a key.
+  if (node.role === 'central' && configDeps.loginRepairBroker) {
+    const broker = configDeps.loginRepairBroker;
+    app.use('/api/auth-health/repairs', rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false }));
+    const principal = (res: express.Response): RepairPrincipal | null => {
+      const value = res.locals.authPrincipal;
+      if (value?.kind === 'owner') return { kind: 'owner' };
+      if (value?.kind === 'device' && typeof value.id === 'string') return { kind: 'device', id: value.id };
+      return null;
+    };
+    const repairRoute = (handler: (req: express.Request, res: express.Response, who: RepairPrincipal) => Promise<unknown>) =>
+      async (req: express.Request, res: express.Response) => {
+        res.setHeader('Cache-Control', 'no-store');
+        const who = principal(res);
+        if (!who) return res.status(401).json({ error: 'unauthorized', message: 'Authenticate before repairing a login.' });
+        try {
+          return await handler(req, res, who);
+        } catch (error) {
+          const status = error instanceof LoginRepairError ? error.status : 500;
+          return res.status(status).json({ error: 'login_repair_failed', message: error instanceof LoginRepairError ? error.message : 'The login repair failed.' });
+        }
+      };
+    app.post('/api/auth-health/repairs', mutation('auth.repair.start'), repairRoute(async (req, res, who) => {
+      const { node_id: nodeId, backend, provider } = req.body ?? {};
+      const text = (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 64;
+      if (!text(nodeId) || !text(backend) || !(provider === null || text(provider))) {
+        return res.status(400).json({ error: 'invalid_login', message: 'Name the node, backend, and provider of the login.' });
+      }
+      const known = configDeps.authHealthMonitor?.rows().some((row) => row.node_id === nodeId && row.backend === backend && row.provider === provider);
+      if (!known) return res.status(404).json({ error: 'unknown_login', message: 'GAH has not seen this login on that node.' });
+      res.status(201).json(await broker.start(who, nodeId, { backend, provider }));
+    }));
+    app.get('/api/auth-health/repairs/:id', repairRoute(async (req, res, who) => {
+      res.json(await broker.view(req.params.id, who, req.get('X-Login-Repair-Key')));
+    }));
+    app.post('/api/auth-health/repairs/:id/input', repairRoute(async (req, res, who) => {
+      res.json(await broker.submit(req.params.id, who, req.get('X-Login-Repair-Key'), req.body?.text));
+    }));
+    app.delete('/api/auth-health/repairs/:id', repairRoute(async (req, res, who) => {
+      await broker.cancel(req.params.id, who, req.get('X-Login-Repair-Key'));
+      res.json({ cancelled: true });
+    }));
+  }
+
+  // A worker runs repairs for its own logins; central is its only caller.
+  if (node.role === 'worker' && configDeps.loginRepairs) {
+    const repairs = configDeps.loginRepairs;
+    app.post('/api/login-repair', requireOwner, async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const body = req.body ?? {};
+      const id = typeof body.id === 'string' ? body.id : '';
+      try {
+        if (body.action === 'start') {
+          if (typeof body.backend !== 'string' || !(body.provider === null || typeof body.provider === 'string')) {
+            return res.status(400).json({ message: 'Name the backend and provider of the login.' });
+          }
+          const known = configDeps.authHealthProber?.latest()?.probes.some((probe) => probe.backend === body.backend && probe.provider === body.provider);
+          if (!known) return res.status(404).json({ message: 'This machine has not checked that login.' });
+          return res.status(201).json(repairs.start({ backend: body.backend, provider: body.provider }));
+        }
+        if (body.action === 'status') {
+          const view = repairs.view(id);
+          return view ? res.json(view) : res.status(404).json({ message: 'This login repair is no longer available.' });
+        }
+        if (body.action === 'input') return res.json(await repairs.submit(id, body.text));
+        if (body.action === 'cancel') { repairs.cancel(id); return res.json({ cancelled: true }); }
+        return res.status(400).json({ message: 'Unknown login repair action.' });
+      } catch (error) {
+        return res.status(error instanceof LoginRepairError ? error.status : 500).json({ message: error instanceof LoginRepairError ? error.message : 'The login repair failed.' });
+      }
+    });
+  }
 
   app.get('/api/registry/fleet/snapshot', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');

@@ -154,3 +154,47 @@ export interface FleetSnapshot {
   observations: NodeObservationSnapshot[];
   leases: ClaimLease[];
 }
+
+/** How a broken login is repaired from another device (#1272). */
+export type LoginRepairMethod =
+  /** The CLI prints a verification URL and a one-time code (codex). */
+  | 'device_cli'
+  /** GAH runs GitHub's device flow and stores the token (gh, opencode Copilot). */
+  | 'github_device'
+  /** The CLI prints a URL, then reads a code pasted back (claude). */
+  | 'paste_code'
+  /** The operator pastes an API key; the node stores it (opencode providers, Mistral, Nous). */
+  | 'api_key'
+  /** Only a terminal on that machine can do it. */
+  | 'manual';
+
+/** One rule for web and server: which method repairs a login. */
+export function loginRepairMethod(login: { backend: string; provider: string | null }): LoginRepairMethod {
+  if (login.backend === 'codex' && login.provider === null) return 'device_cli';
+  if (login.backend === 'claude' && login.provider === null) return 'paste_code';
+  if (login.backend === 'gh' && login.provider === 'github') return 'github_device';
+  if (login.backend === 'opencode' && login.provider === 'github-copilot') return 'github_device';
+  if (login.backend === 'opencode' && login.provider !== null && /^[a-z0-9][a-z0-9-]{0,63}$/.test(login.provider)) return 'api_key';
+  if (login.backend === 'api' && (login.provider === 'mistral' || login.provider === 'nous')) return 'api_key';
+  return 'manual';
+}
+
+/** What a device may see of a login repair: never CLI output, only the link,
+ * the one-time code, fixed prompt text, and the outcome. */
+export type LoginRepairState =
+  | { status: 'starting' }
+  | { status: 'open_url'; url: string; code: string | null }
+  | { status: 'awaiting_input'; url: string | null; prompt: string; secret: boolean }
+  | { status: 'waiting' }
+  | { status: 'succeeded' }
+  | { status: 'failed'; reason: string }
+  | { status: 'expired' }
+  | { status: 'manual'; instructions: string };
+
+export type LoginRepairView = LoginRepairState & {
+  id: string;
+  node_id: string;
+  backend: string;
+  provider: string | null;
+  expires_at: string;
+};

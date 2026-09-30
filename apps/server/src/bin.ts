@@ -24,6 +24,7 @@ import { WebPushNotifications } from './webPush.js';
 import { apnsFromEnvironment } from './apns.js';
 import { channelDelivery, commandDelivery, deliverToAll } from './notifyDelivery.js';
 import { AuthHealthMonitor, AuthHealthProber, configureChatAuthHealth } from './authHealth.js';
+import { LoginRepairBroker, LoginRepairs, loadProviderKeys } from './loginRepair.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
 const HOST = resolveBindHost();
@@ -46,6 +47,8 @@ async function main() {
   }
 
   logLifecycle('Starting Git Agent Harness server...');
+  // Keys repaired from another device (#1272) apply to checks and backends.
+  loadProviderKeys();
 
   const node = validateNodeRole(await runNodeRole());
   Object.assign(process.env, workerMemoryEnvironment(node, process.env.COORDINATOR_TOKEN));
@@ -76,6 +79,16 @@ async function main() {
     registryService.onChange(() => authHealthMonitor.observationsChanged());
     configureChatAuthHealth(authHealthMonitor);
   }
+  // A repair reports success only after this node's login check has re-run.
+  const loginRepairs = new LoginRepairs({ nodeId: coordinatorIdentity.node_id, onSuccess: () => authHealthProber.refresh() });
+  const loginRepairBroker = node.role === 'central'
+    ? new LoginRepairBroker({
+      localNodeId: coordinatorIdentity.node_id,
+      local: loginRepairs,
+      registry: registryService,
+      onRemoteSuccess: (nodeId) => { void registryService.checkNodeHealth(nodeId).catch(() => undefined); }
+    })
+    : undefined;
 
   // Create Express app
   const app = createExpressServer({
@@ -87,7 +100,9 @@ async function main() {
     apnsNotifications,
     activityFeed,
     authHealthProber,
-    authHealthMonitor
+    authHealthMonitor,
+    loginRepairs,
+    loginRepairBroker
   });
   
   // Create HTTP server from Express app

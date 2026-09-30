@@ -978,6 +978,30 @@ The next successful turn, or a check that turns ok after a new login,
 records `auth_restored`. A CLI that was never logged in is shown but not
 pushed.
 
+### Repairing a login from another device
+
+A broken login row on **Nodes → Logins**, and an `auth_expired`
+notification on the Activity page, has **Fix login**. The login runs on the
+machine that owns the credential; the device sees only a link, a one-time
+code, fixed prompt text, and the result. A pending repair is stopped after
+10 minutes.
+
+| Login | Flow on the owning machine |
+| --- | --- |
+| codex | `codex login --device-auth`; the device shows its link and code |
+| claude | `claude auth login --claudeai`; the device opens the link, then pastes the code back |
+| opencode · github-copilot, gh | GitHub's device flow; the token goes to opencode's `auth.json` or to `gh auth login --with-token` |
+| other opencode providers | a pasted API key, saved to opencode's `auth.json` |
+| Mistral, Nous | a pasted API key, saved to `~/.config/gah/provider-keys.env` (`GAH_PROVIDER_KEYS_PATH`, mode `0600`) and loaded by the server at start |
+| hermes, agy, glab | shown as needing a terminal on that machine |
+
+A paired device may start a repair; it is the only credential change open
+to paired devices. Only the device that started a repair, holding the key
+returned when it started, can read its code or submit a key. A key never
+reaches central's storage or logs. A successful repair re-runs the login
+check, which records `auth_restored`. Processes the server started before
+a key repair (such as a running `gah loop`) see the key after they restart.
+
 ### Telegram manager bridge
 
 The central server accepts authenticated Telegram webhook updates at

@@ -241,7 +241,8 @@ export function authActivity(row: AuthHealthRow, kind: 'auth_expired' | 'auth_re
     message: kind === 'auth_expired'
       ? `${row.detail ?? 'The login no longer works.'} Log in again on ${row.node_name}.`
       : 'The login works again.',
-    nodeId: row.node_id
+    nodeId: row.node_id,
+    login: { backend: row.backend, provider: row.provider }
   };
 }
 

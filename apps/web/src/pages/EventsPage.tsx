@@ -4,6 +4,7 @@ import { activityPath, type ActivityEvent, type ActivityKind, type DeliveryRecei
 import type { LucideIcon } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { activityApi } from '../api/client.js';
+import { LoginRepairPanel } from '../components/LoginRepairPanel.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState } from '../components/ui/EmptyState.js';
 import { formatLocalTime, formatAge } from '../lib/format.js';
@@ -92,6 +93,9 @@ function ActivityRow({ event, highlighted, onRead }: { event: ActivityEvent; hig
           <p className="text-xs text-secondary mt-1 break-words max-w-[75ch]">{event.message}</p>
           <DeliveryChips deliveries={event.deliveries} />
           {chat && <a href={activityPath(event)} className="mt-1.5 inline-flex min-h-11 items-center text-xs text-accent underline sm:min-h-0">Open chat</a>}
+          {event.kind === 'auth_expired' && event.nodeId && event.login && <div className="mt-2">
+            <LoginRepairPanel login={{ node_id: event.nodeId, backend: event.login.backend, provider: event.login.provider }} />
+          </div>}
         </div>
       </div>
     </li>

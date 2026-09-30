@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AuthHealthRow, DoctorSnapshot, FleetSnapshot, NodeHealthCheckResult, NodeObservationSnapshot, PairedDevice } from '@git-agent-harness/contracts';
 import { authHealthApi, gahApi, pairingApi, type CoordinatorInfo } from '../api/client.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
+import { LoginRepairPanel } from '../components/LoginRepairPanel.js';
 import { AddNodeSection } from './SettingsPage.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { formatUpdatedAge } from '../lib/format.js';
@@ -55,6 +56,7 @@ function Logins({ revision }: { revision: string }) {
           <span className="text-sm text-critical">{LOGIN_PROBLEM[row.state]} · detected {age(row.since)}</span>
         </div>
         {row.detail && <p className="text-sm text-secondary">{row.detail}</p>}
+        <LoginRepairPanel login={row} />
       </li>)}
     </ul>}
   </section>;
