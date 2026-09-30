@@ -103,6 +103,7 @@ import { usageRollup } from './managerChat/usageRollup.js';
 import { MessagingBridge } from './managerChat/messagingBridge.js';
 import { projectRoutes } from './projectRoutes.js';
 import { chatNodes, chatRoute, configureChatRouting } from './chatRouting.js';
+import { timed } from './serverTiming.js';
 import { createWorkerChatRouter } from './workerChat.js';
 import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitReviewState, getReviewChangesForHelper, getSelectedChangesForHelper, commitGitChanges, cliInDir } from './gitCache.js';
 import { commitMessageInput, helperFallback, linkedIssueNumbers, prSummaryInput, publicSuggestion, readHelperUsage, recordHelperUsage, runHelperTask, type HelperTaskResult } from './managerChat/helperTasks.js';
@@ -758,7 +759,7 @@ export function createServer(
   app.get('/api/registry/nodes/:nodeId/health', async (req, res) => {
     try {
       const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
-      const health = await registryService.checkNodeHealth(req.params.nodeId, profile);
+      const health = await timed(res, 'probe', () => registryService.checkNodeHealth(req.params.nodeId, profile));
       res.json(health);
     } catch (error) {
       res.status(404).json({
@@ -796,7 +797,7 @@ export function createServer(
   app.get('/api/registry/fleet', async (req, res) => {
     try {
       const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
-      res.json(await registryService.getNodeObservations(profile));
+      res.json(await timed(res, 'probe', () => registryService.getNodeObservations(profile)));
     } catch (error) {
       res.status(500).json({
         error: 'Internal Server Error',
@@ -907,17 +908,18 @@ export function createServer(
   // (sessions, provider status) stays on the WebSocket; this is
   // additive, it does not replace or narrow the existing WS contract.
   //
-  // `/api/status` fans out to registered nodes and returns an aggregated
-  // fleet snapshot, so it must be auth-gated even though loopback callers may
+  // `/api/status` returns an aggregated fleet snapshot (cached worker
+  // observations), so it must be auth-gated even though loopback callers may
   // still access it without credentials via authMiddleware's local exemption.
   app.get('/api/status', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const light = req.query.light === '1';
     try {
-      const [status, nodes] = await Promise.all([
-        runStatus(profile, undefined, light),
-        node.role === 'worker' || light ? Promise.resolve([]) : registryService.getNodeObservations(profile)
-      ]);
+      const status = await timed(res, 'gah', () => runStatus(profile, undefined, light));
+      // Workers are never waited on here: an offline one would cost a probe
+      // timeout on every dashboard load. The observations are fleet-wide and
+      // refresh in the background.
+      const nodes = node.role === 'worker' || light ? [] : registryService.getObservationsWithoutWaiting();
       const identity = getCoordinatorIdentity(undefined, coordinatorPort);
       const enriched = {
         ...status,

@@ -153,3 +153,44 @@ test('recovery resets the counter: a node that goes bad, recovers, then goes bad
     server.close();
   }
 });
+
+test('status observations answer from cache while one background poll refreshes them (#1277)', async () => {
+  let requests = 0;
+  let release!: () => void;
+  const answered = new Promise<void>((resolve) => { release = resolve; });
+  const server = http.createServer((req, res) => {
+    requests++;
+    // Hold the probe open: a read that waited on it would never return.
+    void answered.then(() => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ version: '0.1.0', schema_digest: COORDINATOR_SCHEMA_DIGEST, generated_at: new Date().toISOString() }));
+    });
+  });
+  const advertisedUrl = await listen(server);
+  const service = new RegistryService(tempRegistryPath());
+  service.registerNode({
+    node_id: 'slow-node',
+    display_name: 'Slow Node',
+    advertised_url: advertisedUrl,
+    version: '0.1.0',
+    schema_digest: COORDINATOR_SCHEMA_DIGEST,
+    transport_mode: 'loopback',
+    secret_ref: 'env:UNUSED'
+  });
+  try {
+    const first = service.getObservationsWithoutWaiting();
+    assert.deepEqual(first.map((observation) => [observation.node_id, observation.state]), [['slow-node', 'stale']]);
+    service.getObservationsWithoutWaiting();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(requests, 1, 'concurrent reads share one background poll');
+
+    const refreshed = new Promise<void>((resolve) => { const stop = service.onChange(() => { stop(); resolve(); }); });
+    release();
+    await refreshed;
+    assert.equal(service.getObservationsWithoutWaiting()[0].state, 'healthy');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(requests, 1, 'a fresh observation starts no new poll');
+  } finally {
+    server.close();
+  }
+});
