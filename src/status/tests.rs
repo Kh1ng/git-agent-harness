@@ -127,6 +127,35 @@ fn empty_clean_profile_snapshot() {
 }
 
 #[test]
+fn light_snapshot_never_calls_the_provider() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _exec_guard = ExecGuard::new();
+    let tmp = TempDir::new().unwrap();
+    let cfg = make_test_cfg(&tmp);
+    let _availability_guard =
+        crate::test_support::AvailabilityEnvGuard::set(tmp.path().join("avail.json"));
+    let bin = tmp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let marker = tmp.path().join("gh-called");
+    let gh = bin.join("gh");
+    fs::write(
+        &gh,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    let _path = PathGuard::set(&bin);
+
+    let snap = build_snapshot_with(&cfg, "test", OffsetDateTime::now_utc(), false).unwrap();
+
+    assert!(!marker.exists(), "light status must not invoke gh");
+    assert_eq!(snap.observations.sync.status, "skipped");
+    assert!(snap.available_tickets.is_empty());
+    assert!(snap.errors.is_empty());
+}
+
+#[test]
 fn path_only_backend_is_reported_as_resolved() {
     use std::os::unix::fs::PermissionsExt;
 

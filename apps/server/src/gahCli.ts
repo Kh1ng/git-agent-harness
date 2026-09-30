@@ -142,14 +142,16 @@ function getSpawnOptions(config?: string, detached?: boolean): SpawnOptions {
 /**
  * Run `gah status --profile <profile> --json` and parse the output
  */
-export async function runStatus(profile: string, config?: string): Promise<StatusSnapshot> {
-  const key = JSON.stringify([profile, config ?? null]);
-  return statusCache.get(key, () => runStatusUncached(profile, config));
+export async function runStatus(profile: string, config?: string, light = false): Promise<StatusSnapshot> {
+  const key = JSON.stringify([profile, config ?? null, light]);
+  return statusCache.get(key, () => runStatusUncached(profile, config, light));
 }
 
-async function runStatusUncached(profile: string, config?: string): Promise<StatusSnapshot> {
+/** `light` skips the forge calls (open MRs, ticket queue); see #1275. */
+async function runStatusUncached(profile: string, config?: string, light = false): Promise<StatusSnapshot> {
   const args = ['status', '--profile', profile, '--json'];
-  
+  if (light) args.push('--light');
+
   if (config) {
     args.push('--config-path', config);
   }

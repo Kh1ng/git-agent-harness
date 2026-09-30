@@ -1205,7 +1205,10 @@ test('fleet snapshot reuses liveness observations and exposes metadata and curre
   const worker = new MockNodeServer();
   let polls = 0;
   worker.behavior = (req, res) => {
-    assert.equal(new URL(req.url!, 'http://worker').searchParams.get('profile'), 'other');
+    const url = new URL(req.url!, 'http://worker');
+    assert.equal(url.searchParams.get('profile'), 'other');
+    // #1275: health must not wait on the worker's forge-backed ticket queue.
+    assert.equal(url.searchParams.get('light'), '1');
     polls++;
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify(statusPayload({ generated_at: new Date().toISOString(), profile: { profile: 'other' } })));

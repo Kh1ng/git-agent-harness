@@ -370,9 +370,29 @@ pub fn build_snapshot(
     profile_name: &str,
     now: OffsetDateTime,
 ) -> Result<StatusSnapshot> {
+    build_snapshot_with(cfg, profile_name, now, true)
+}
+
+/// `include_provider = false` skips the forge calls (open MRs, ticket queue)
+/// and reports the sync observation as "skipped". Everything else is local.
+pub fn build_snapshot_with(
+    cfg: &GahConfig,
+    profile_name: &str,
+    now: OffsetDateTime,
+    include_provider: bool,
+) -> Result<StatusSnapshot> {
     match ledger::read_entries(cfg) {
-        Ok(entries) => build_snapshot_inner(cfg, profile_name, now, &entries, None),
-        Err(error) => build_snapshot_inner(cfg, profile_name, now, &[], Some(format!("{error:#}"))),
+        Ok(entries) => {
+            build_snapshot_inner(cfg, profile_name, now, &entries, None, include_provider)
+        }
+        Err(error) => build_snapshot_inner(
+            cfg,
+            profile_name,
+            now,
+            &[],
+            Some(format!("{error:#}")),
+            include_provider,
+        ),
     }
 }
 
@@ -382,7 +402,7 @@ pub fn build_snapshot_from_entries(
     now: OffsetDateTime,
     entries: &[LedgerEntry],
 ) -> Result<StatusSnapshot> {
-    build_snapshot_inner(cfg, profile_name, now, entries, None)
+    build_snapshot_inner(cfg, profile_name, now, entries, None, true)
 }
 
 fn build_snapshot_inner(
@@ -391,6 +411,7 @@ fn build_snapshot_inner(
     now: OffsetDateTime,
     entries: &[LedgerEntry],
     ledger_error: Option<String>,
+    include_provider: bool,
 ) -> Result<StatusSnapshot> {
     let profile = crate::config::get_profile(cfg, profile_name)?;
     let generated_at = now.format(&Rfc3339).unwrap_or_default();
@@ -441,7 +462,15 @@ fn build_snapshot_inner(
     let ledger_entries_by_work_id = ledger::index_entries_by_work_id(entries);
     let work_waypoint_evidence =
         project_work_waypoint_evidence(&ledger_entries_by_work_id, &profile.repo_id);
-    match sync::fetch_active_mrs(profile) {
+    if !include_provider {
+        sync_obs.status = "skipped";
+    }
+    let fetched = if include_provider {
+        sync::fetch_active_mrs(profile)
+    } else {
+        Ok(Vec::new())
+    };
+    match fetched {
         Ok(mrs) => {
             merge_requests = mrs
                 .iter()
@@ -608,11 +637,15 @@ fn build_snapshot_inner(
 
     // 5. Available tickets (TICKET-078): reuses the already-fetched `raw_mrs`
     // rather than calling sync::fetch_mrs a second time.
-    let ticket_scan = crate::dispatch::scan_available_tickets_with_dependencies(
-        profile,
-        &raw_mrs,
-        &ledger_entries_by_work_id,
-    );
+    let ticket_scan = if include_provider {
+        crate::dispatch::scan_available_tickets_with_dependencies(
+            profile,
+            &raw_mrs,
+            &ledger_entries_by_work_id,
+        )
+    } else {
+        crate::dispatch::TicketScan::default()
+    };
     let mut available_tickets = ticket_scan.available_tickets;
     let dependency_blockers = ticket_scan.dependency_blockers;
     let issue_intake_rejections = ticket_scan.issue_intake_rejections;
@@ -1047,9 +1080,9 @@ fn build_snapshot_inner(
     Ok(snapshot)
 }
 
-pub fn run(cfg: &GahConfig, profile_name: &str, json: bool) -> Result<()> {
+pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, light: bool) -> Result<()> {
     let now = OffsetDateTime::now_utc();
-    let snapshot = build_snapshot(cfg, profile_name, now)?;
+    let snapshot = build_snapshot_with(cfg, profile_name, now, !light)?;
 
     let node = crate::node_role::NodeRoleStatus::resolve(&cfg.defaults)?;
     if json {

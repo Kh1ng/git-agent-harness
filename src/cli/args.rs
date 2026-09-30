@@ -339,6 +339,10 @@ pub enum Commands {
         /// Report this host's role and central URL without querying a repository.
         #[arg(long)]
         role: bool,
+        /// Skip provider calls (open MRs and the ticket queue). Central's worker
+        /// health probe uses this so it never waits on the forge (#1275).
+        #[arg(long)]
+        light: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
         #[arg(long, name = "config")]
