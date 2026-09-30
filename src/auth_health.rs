@@ -281,13 +281,55 @@ fn probe(backend: &str, provider: Option<&str>, health: AuthHealth) -> AuthProbe
     }
 }
 
+/// The HTTP status of one authenticated GET. The key reaches curl through a
+/// config on stdin, never argv. Unlike coordinator requests, no TLS override
+/// applies: a provider key is only sent over verified TLS.
+fn bearer_status(url: &str, key: &str) -> Option<u16> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let quote = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut child = Command::new("curl")
+        .args([
+            "-sS",
+            "--proto",
+            "=https",
+            "--max-time",
+            "10",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-K",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    child
+        .stdin
+        .take()?
+        .write_all(
+            format!(
+                "url = \"{}\"\nheader = \"Authorization: Bearer {}\"\n",
+                quote(url),
+                quote(key)
+            )
+            .as_bytes(),
+        )
+        .ok()?;
+    let output = child.wait_with_output().ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
 fn api_key_probe(provider: &str, env_var: &str, models_url: &str) -> Option<AuthProbe> {
     let key = std::env::var(env_var)
         .ok()
-        .filter(|key| !key.trim().is_empty())?;
-    let health = match crate::curl_http::request("GET", models_url, None, Some(key.trim()), 10) {
-        Ok(response) => classify_http_status(response.status),
-        Err(_) => AuthHealth::new(
+        .filter(|key| !key.trim().is_empty() && !key.contains(['\n', '\r']))?;
+    let health = match bearer_status(models_url, key.trim()) {
+        Some(status) if status > 0 => classify_http_status(status),
+        _ => AuthHealth::new(
             AuthState::Error,
             Some("The provider did not answer the key check."),
         ),

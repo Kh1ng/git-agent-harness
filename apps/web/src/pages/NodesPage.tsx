@@ -45,7 +45,7 @@ function Logins({ revision }: { revision: string }) {
   const problems = rows?.filter((row) => LOGIN_PROBLEM[row.state]) ?? [];
   return <section className="mb-6 space-y-3" aria-labelledby="logins-title">
     <h2 id="logins-title" className="text-base font-semibold text-primary">Logins</h2>
-    {error && <p role="alert" className="text-sm text-critical">Cannot load login health: {error}</p>}
+    {error && <p className="text-sm text-warning">Login health is unavailable: {error}</p>}
     {rows && rows.length === 0 && <p className="text-sm text-secondary">No login checks reported yet. Nodes check their logins at start and every 30 minutes.</p>}
     {rows && rows.length > 0 && problems.length === 0 && <p className="text-sm text-secondary">All {rows.length} checked logins work.</p>}
     {problems.length > 0 && <ul className="divide-y divide-subtle border-y border-critical/40">
