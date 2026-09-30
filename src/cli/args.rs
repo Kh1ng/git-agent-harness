@@ -113,10 +113,14 @@ pub enum SetupCommands {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Set up optional machine-local integrations.
+    /// Guided install: choose what this machine is for, provide its
+    /// prerequisites, install GAH, and add a first project. Safe to re-run.
+    #[command(args_conflicts_with_subcommands = true)]
     Setup {
         #[command(subcommand)]
-        command: SetupCommands,
+        command: Option<SetupCommands>,
+        #[command(flatten)]
+        args: crate::setup::Args,
     },
     /// Inspect or set global GAH config defaults (cross-profile facts such as
     /// `current_manager`). Per-profile settings live under `profile set`.

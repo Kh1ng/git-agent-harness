@@ -376,10 +376,12 @@ Two things make this easier to actually do:
   clicks **Reveal setup command**, then offers the returned command for
   copying. Credential bytes are absent from ordinary Settings JSON and the
   initial page DOM.
-- **A machine with nothing installed yet**: `scripts/bootstrap.sh` installs
-  missing prerequisites via their own official installers (rustup, nvm),
-  clones this repo, and execs `scripts/install.sh` — same `GAH_GATEWAY_*`
-  env vars, just usable from a one-liner on a brand-new machine:
+- **A machine with nothing installed yet**: `scripts/bootstrap.sh` asks
+  before installing Rust, clones this repo, builds `gah`, and runs
+  `gah setup`, which checks and offers every other prerequisite before it
+  runs `scripts/install.sh`. The same `GAH_GATEWAY_*` env vars preselect the
+  memory choice, so the one-liner still works on a brand-new machine (see
+  [Getting started](GETTING_STARTED.md)):
   ```bash
   curl -fsSL https://raw.githubusercontent.com/Kh1ng/git-agent-harness/main/scripts/bootstrap.sh \
     | GAH_GATEWAY_MODE=remote GAH_GATEWAY_URL=http://gateway-host:8420 \

@@ -50,6 +50,7 @@ pub mod report;
 pub mod routing;
 pub mod runner;
 pub mod server;
+pub mod setup;
 pub mod skill_bindings;
 pub mod skill_inventory;
 pub mod status;

@@ -1081,6 +1081,22 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
       "cli_command_path": "gah server",
       "is_stable": true
     },
+    "setup.guided": {
+      "operation_id": "setup.guided",
+      "display_name": "Guided Setup",
+      "class": "mutation",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "interactive_terminal_required",
+      "documentation": "Choose what this machine is for, check and provide its prerequisites, install GAH, and add a first project",
+      "cli_command_path": "gah setup",
+      "is_stable": true
+    },
     "setup.memory_hooks": {
       "operation_id": "setup.memory_hooks",
       "display_name": "Set Up Agent Memory Hooks",
@@ -1272,6 +1288,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "gah route-approval list": "route_approval.list",
     "gah route-approval revoke": "route_approval.revoke",
     "gah server": "server.start",
+    "gah setup": "setup.guided",
     "gah setup memory-hooks": "setup.memory_hooks",
     "gah status": "status.get",
     "gah sync": "sync.classify",
@@ -1344,6 +1361,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "profile.show": "filesystem_access_required",
     "prune.sessions": "filesystem_access_required",
     "server.start": "local_backend_execution_required",
+    "setup.guided": "interactive_terminal_required",
     "setup.memory_hooks": "filesystem_access_required",
     "telemetry.export": "filesystem_access_required",
     "telemetry.status": "filesystem_access_required",
