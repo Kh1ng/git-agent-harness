@@ -91,4 +91,7 @@ config/manager-chat-settings.json
 config/dispatch-leases.json
 config/activity.jsonl
 apps/server/config/activity.jsonl
+# Server-generated VAPID keys, Web Push subscriptions, and APNs device tokens.
+config/push/
+apps/server/config/push/
 **/config/mutations/

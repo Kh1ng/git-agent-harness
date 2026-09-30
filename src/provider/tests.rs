@@ -1481,3 +1481,5 @@ fn handoff_mode_rejects_all_remote_provider_calls() {
 
 #[path = "tests/comment_tests.rs"]
 mod comment_tests;
+#[path = "tests/parallel_tests.rs"]
+mod parallel_tests;

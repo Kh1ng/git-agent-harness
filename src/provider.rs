@@ -175,6 +175,43 @@ pub fn clear_test_provider_path() {
     TEST_PATH_OVERRIDE.with(|p| *p.borrow_mut() = None);
 }
 
+/// Maps `f` over `items` on up to `width` scoped threads at a time, keeping
+/// input order. Test builds carry this thread's provider PATH override into
+/// each worker so fake `gh`/`glab` scripts still resolve.
+// ponytail: fixed-width chunks; a batched GraphQL query would make this one call.
+pub(crate) fn parallel_provider_map<T: Sync, R: Send>(
+    items: &[T],
+    width: usize,
+    f: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    #[cfg(test)]
+    let path = TEST_PATH_OVERRIDE.with(|p| p.borrow().clone());
+    let f = &f;
+    std::thread::scope(|scope| {
+        let mut results = Vec::with_capacity(items.len());
+        for chunk in items.chunks(width.max(1)) {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|item| {
+                    #[cfg(test)]
+                    let path = path.clone();
+                    scope.spawn(move || {
+                        #[cfg(test)]
+                        TEST_PATH_OVERRIDE.with(|p| *p.borrow_mut() = path);
+                        f(item)
+                    })
+                })
+                .collect();
+            results.extend(
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("provider worker panicked")),
+            );
+        }
+        results
+    })
+}
+
 /// Construct a Command for an external provider CLI (`gh`, `glab`). In test
 /// builds, honors a thread-local PATH override so tests can hide/replace
 /// these binaries without touching the process-wide PATH.

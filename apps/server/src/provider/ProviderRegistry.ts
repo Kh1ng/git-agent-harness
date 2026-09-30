@@ -121,7 +121,8 @@ class ProviderRegistryImpl {
   private async doRefreshAllFromGah(): Promise<void> {
     try {
       // Get fresh status from gah CLI
-      const snapshot = await runStatus(this.defaultProfile);
+      // Only availability is read, so skip the forge-backed ticket queue (#1277).
+      const snapshot = await runStatus(this.defaultProfile, undefined, true);
       this.cachedStatus = {
         snapshot,
         timestamp: Date.now(),

@@ -699,11 +699,13 @@ pub(super) fn evaluate_issue_dependencies(
         }
     }
 
-    // 2. Collect native provider relationships
-    // For now, we'll attempt to fetch native relationships for each issue
-    // In a real implementation, this would be batched for efficiency
-    for issue in issues {
-        let native_deps = match fetch_native_dependencies(profile, &issue.number) {
+    // 2. Collect native provider relationships. One provider call per issue,
+    // run concurrently: serially this dominated `gah status` (#1277).
+    let fetched = crate::provider::parallel_provider_map(issues, 16, |issue| {
+        fetch_native_dependencies(profile, &issue.number)
+    });
+    for (issue, fetched) in issues.iter().zip(fetched) {
+        let native_deps = match fetched {
             Ok(deps) => deps,
             Err(error) => {
                 let reason_code = match &error {
@@ -774,6 +776,27 @@ pub(super) fn evaluate_issue_dependencies(
             }),
         );
     }
+
+    // Prefetch first-level targets concurrently so the serial walk below hits
+    // the cache; only deeper body-declared chains still fetch one at a time.
+    let mut missing: Vec<String> = deduplicated
+        .values()
+        .flatten()
+        .map(|dep| dep.target_issue.clone())
+        .filter(|number| is_local_issue_reference(number) && !cache.contains_key(number))
+        .collect();
+    missing.sort();
+    missing.dedup();
+    let prefetched =
+        crate::provider::parallel_provider_map(
+            &missing,
+            16,
+            |number| match fetch_dependency_issue(profile, number) {
+                Ok(issue) => CachedIssue::Found(issue),
+                Err(error) => CachedIssue::Error(format!("{error:#}")),
+            },
+        );
+    cache.extend(missing.into_iter().zip(prefetched));
 
     let mut resolver = Resolver {
         provider: &profile.provider,
