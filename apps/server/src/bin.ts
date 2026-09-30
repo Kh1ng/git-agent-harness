@@ -27,6 +27,12 @@ import { channelDelivery, commandDelivery, deliverToAll } from './notifyDelivery
 const PORT = parseInt(process.env.PORT || '3773');
 const HOST = resolveBindHost();
 
+// launchd and systemd logs carry no timestamps; restart timing is diagnosed
+// from these lines.
+function logLifecycle(message: string) {
+  console.log(`${new Date().toISOString()} ${message}`);
+}
+
 async function main() {
   try {
     validateBindHost(HOST);
@@ -38,7 +44,7 @@ async function main() {
     throw error;
   }
 
-  console.log('Starting Git Agent Harness server...');
+  logLifecycle('Starting Git Agent Harness server...');
 
   const node = validateNodeRole(await runNodeRole());
   Object.assign(process.env, workerMemoryEnvironment(node, process.env.COORDINATOR_TOKEN));
@@ -131,7 +137,7 @@ async function main() {
 
   // Start HTTP server
   server.listen(PORT, HOST, () => {
-    console.log(`Git Agent Harness server listening on ${HOST}:${PORT}`);
+    logLifecycle(`Git Agent Harness server listening on ${HOST}:${PORT}`);
     console.log(`WebSocket server available on ws://${HOST}:${PORT}`);
     console.log(`Health check available on http://${HOST}:${PORT}/health`);
     const warning = networkExposureWarning(HOST);
@@ -140,22 +146,17 @@ async function main() {
     }
   });
   
-  // Handle graceful shutdown
-  process.on('SIGINT', () => {
-    console.log('Shutting down...');
+  // Exit at once: waiting on open keep-alive or WebSocket connections would
+  // hold the port and delay the replacement process.
+  const shutdown = () => {
+    logLifecycle('Shutting down...');
     registryService.stopLivenessScheduler();
     stopChatMaintenanceScheduler();
     server.close();
     process.exit(0);
-  });
-
-  process.on('SIGTERM', () => {
-    console.log('Shutting down...');
-    registryService.stopLivenessScheduler();
-    stopChatMaintenanceScheduler();
-    server.close();
-    process.exit(0);
-  });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
 main().catch((error) => {

@@ -55,6 +55,7 @@ with tempfile.TemporaryDirectory(prefix='gah-launchd-') as temporary:
     worker_path = agents / 'dev.git-agent-harness.worker.plist'
     worker = plistlib.loads(worker_path.read_bytes())
     assert worker['ProgramArguments'][-2] == str(repo.resolve() / 'apps/server/dist/bin.js')
+    assert worker['ProgramArguments'][:2] == ['/bin/bash', '-c'], 'a login shell adds seconds to every worker start'
     assert worker['EnvironmentVariables']['HOST'] == '127.0.0.1'
     assert worker['EnvironmentVariables']['PORT'] == '4774'
     assert worker['EnvironmentVariables']['GAH_BINARY'] == '/Users/test/.cargo/bin/gah'
