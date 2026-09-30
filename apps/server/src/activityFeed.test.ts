@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -130,4 +130,67 @@ test('live chat lifecycle maps only actionable outcomes with stable bounded cont
     occurredAt: '2026-09-25T12:00:01.000Z'
   });
   assert.notEqual(fallbackPermission?.id, nextFallbackPermission?.id);
+});
+
+const NOW = Date.parse('2026-09-30T12:00:00.000Z');
+const DAY = 24 * 60 * 60 * 1000;
+function feedEvent(id: string, kind: ActivityEvent['kind'], occurredAt: number): ActivityEvent {
+  return { id, occurredAt: new Date(occurredAt).toISOString(), profile: 'gah', kind, severity: 'info', title: id, message: id };
+}
+
+test('a notification survives a flood of routine events for 30 days (#1273)', () => {
+  const feed = new ActivityFeed(null, undefined, () => NOW);
+  feed.record(feedEvent('ping-20d', 'review_ready', NOW - 20 * DAY), false);
+  feed.record(feedEvent('ping-31d', 'review_ready', NOW - 31 * DAY), false);
+  for (let index = 0; index < 5_000; index++) feed.record(feedEvent(`routine-${index}`, 'dispatch_completed', NOW), false);
+  assert.deepEqual(feed.notifications().map((event) => event.id), ['ping-20d']);
+  assert.equal(feed.replay('gah').length, 200);
+});
+
+test('opening one notification marks only it read; mark all is explicit (#1273)', () => {
+  const feed = new ActivityFeed(null, undefined, () => NOW);
+  const changes: string[] = [];
+  feed.onChange((change) => changes.push(change.kind === 'unread' ? `unread:${change.count}` : `updated:${change.event.id}`));
+  feed.record(feedEvent('a', 'review_ready', NOW - 2));
+  feed.record(feedEvent('b', 'dispatch_failed', NOW - 1));
+  feed.record(feedEvent('routine', 'dispatch_completed', NOW));
+  feed.record(feedEvent('backfilled', 'dispatch_failed', NOW - 3), false);
+  assert.equal(feed.unreadCount(), 2, 'a silently backfilled event never reached anyone');
+  assert.equal(feed.markRead(['a', 'routine']), 1, 'routine events carry no read state');
+  assert.deepEqual(feed.notifications().map((event) => [event.id, !!event.readAt]), [['b', false], ['a', true], ['backfilled', true]]);
+  assert.equal(feed.markRead('all'), 1);
+  assert.equal(feed.markRead('all'), 0);
+  assert.deepEqual(changes, ['unread:1', 'unread:2', 'updated:a', 'unread:1', 'updated:b', 'unread:0']);
+});
+
+test('events recorded before read tracking load as read (#1273)', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'gah-activity-legacy-'));
+  const path = join(directory, 'activity.jsonl');
+  try {
+    writeFileSync(path, `${JSON.stringify(feedEvent('legacy', 'review_ready', NOW - DAY))}\n`);
+    const feed = new ActivityFeed(path, undefined, () => NOW);
+    assert.equal(feed.notifications().length, 1);
+    assert.equal(feed.unreadCount(), 0);
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+
+test('delivery receipts are stored on the event, announced, and survive a restart (#1273)', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'gah-activity-receipts-'));
+  const path = join(directory, 'activity.jsonl');
+  try {
+    const feed = new ActivityFeed(path, () => [
+      { method: 'apns', target: 'iPhone', ok: true, at: '2026-09-30T12:00:01.000Z' },
+      { method: 'channel', target: 'Telegram', ok: false, reason: 'HTTP 401', at: '2026-09-30T12:00:01.000Z' }
+    ], () => NOW);
+    const updated = new Promise<ActivityEvent>((resolve) => feed.onChange((change) => { if (change.kind === 'updated') resolve(change.event); }));
+    feed.record(feedEvent('ping', 'node_offline', NOW));
+    assert.deepEqual((await updated).deliveries?.map((receipt) => `${receipt.target}:${receipt.ok}`), ['iPhone:true', 'Telegram:false']);
+    const reloaded = new ActivityFeed(path, undefined, () => NOW).notifications()[0];
+    assert.equal(reloaded.deliveries?.[1].reason, 'HTTP 401');
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
 });

@@ -1211,6 +1211,28 @@ export async function runConfigSet(options: ConfigSetOptions): Promise<void> {
 }
 
 /** Host status needs no profile or repository/provider access. */
+/** This node's login checks (#1271). The CLI never prints provider output. */
+export async function runAuthHealth(): Promise<{ checked_at: string; probes: Omit<import('@git-agent-harness/contracts').AuthProbe, 'since'>[] }> {
+  return runJsonCommand(['auth-health']);
+}
+
+/** Whether a failed turn's output is an authentication failure for this
+ * backend, using the dispatch failure parser's markers. */
+export function classifyAuthFailure(backend: string, text: string): Promise<boolean> {
+  return new Promise((resolvePromise) => {
+    const child = spawn(findGahBinary(), ['auth-health', '--classify', backend], { ...getSpawnOptions(), stdio: ['pipe', 'pipe', 'ignore'] });
+    let stdout = '';
+    child.stdout?.on('data', (data) => { stdout = (stdout + data).slice(-1_000); });
+    child.on('error', () => resolvePromise(false));
+    child.on('close', () => {
+      try { resolvePromise((JSON.parse(stdout) as { auth_failure?: unknown }).auth_failure === true); }
+      catch { resolvePromise(false); }
+    });
+    child.stdin?.on('error', () => undefined);
+    child.stdin?.end(text.slice(0, 64 * 1024));
+  });
+}
+
 export async function runNodeRole(): Promise<import('@git-agent-harness/contracts').NodeRoleStatus> {
   const config = getConfigPath(process.env.GAH_CONFIG ?? process.env.GAH_CONFIG_PATH);
   return runJsonCommand(['status', '--role', '--json', ...(config ? ['--config-path', config] : [])], config);

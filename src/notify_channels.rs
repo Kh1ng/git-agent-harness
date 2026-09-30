@@ -158,10 +158,23 @@ pub(crate) fn deliver_channel_message(
 
 /// Entry point for `gah notify-send`: one message from the central activity
 /// feed. A missing channel is a no-op, so the feed can call this without
-/// reading GAH config itself.
-pub fn send_activity(cfg: &GahConfig, title: &str, message: &str, url: Option<&str>) -> Result<()> {
+/// reading GAH config itself. Returns the channel it used alongside the
+/// outcome, so the feed can show a delivery receipt for it.
+pub fn send_activity(
+    cfg: &GahConfig,
+    title: &str,
+    message: &str,
+    url: Option<&str>,
+) -> (NotificationChannel, Result<()>) {
     let text = activity_text(title, message, url);
-    deliver_channel_message(cfg, &crate::redact::redact(&text), &CurlNotifyTransport)
+    let channel = cfg.defaults.notification_channel;
+    let outcome = deliver_channel_message(cfg, &crate::redact::redact(&text), &CurlNotifyTransport);
+    (channel, outcome)
+}
+
+/// The one JSON line `gah notify-send` prints for the activity feed's receipt.
+pub fn activity_receipt_line(channel: NotificationChannel, outcome: &Result<()>) -> String {
+    serde_json::json!({ "channel": channel.as_str(), "ok": outcome.is_ok() }).to_string()
 }
 
 fn activity_text(title: &str, message: &str, url: Option<&str>) -> String {
@@ -247,6 +260,21 @@ mod tests {
         )
         .unwrap();
         assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn activity_receipt_line_names_the_channel_and_outcome() {
+        assert_eq!(
+            activity_receipt_line(NotificationChannel::Telegram, &Ok(())),
+            r#"{"channel":"telegram","ok":true}"#
+        );
+        assert_eq!(
+            activity_receipt_line(
+                NotificationChannel::None,
+                &Err(anyhow::anyhow!("never shown"))
+            ),
+            r#"{"channel":"none","ok":false}"#
+        );
     }
 
     #[test]

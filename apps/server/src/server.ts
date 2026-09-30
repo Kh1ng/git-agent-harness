@@ -103,6 +103,9 @@ import { usageRollup } from './managerChat/usageRollup.js';
 import { MessagingBridge } from './managerChat/messagingBridge.js';
 import { projectRoutes } from './projectRoutes.js';
 import { chatNodes, chatRoute, configureChatRouting } from './chatRouting.js';
+import { timed } from './serverTiming.js';
+import type { AuthHealthMonitor, AuthHealthProber } from './authHealth.js';
+import { LoginRepairError, type LoginRepairBroker, type LoginRepairs, type RepairPrincipal } from './loginRepair.js';
 import { createWorkerChatRouter } from './workerChat.js';
 import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitReviewState, getReviewChangesForHelper, getSelectedChangesForHelper, commitGitChanges, cliInDir } from './gitCache.js';
 import { commitMessageInput, helperFallback, linkedIssueNumbers, prSummaryInput, publicSuggestion, readHelperUsage, recordHelperUsage, runHelperTask, type HelperTaskResult } from './managerChat/helperTasks.js';
@@ -156,6 +159,13 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   webPushNotifications?: WebPushNotifications;
   apnsNotifications?: ApnsNotifications;
   activityFeed?: ActivityFeed;
+  /** This node's login checks, reported in /api/status (#1271). */
+  authHealthProber?: AuthHealthProber;
+  /** Central's fleet view of logins. */
+  authHealthMonitor?: AuthHealthMonitor;
+  /** This node's login repairs (#1272); central reaches a worker's through its route. */
+  loginRepairs?: LoginRepairs;
+  loginRepairBroker?: LoginRepairBroker;
 };
 
 const activityKinds = new Set<ActivityKind>([
@@ -391,6 +401,22 @@ export function createServer(
       const recorded = configDeps.activityFeed!.record(event);
       if (recorded) sessionStore.broadcast({ type: 'activity.event', event }, undefined, event.profile ?? undefined);
       return res.status(recorded ? 201 : 200).json({ recorded, id: event.id });
+    });
+    app.get('/api/activity/notifications', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const feed = configDeps.activityFeed!;
+      res.json({ events: feed.notifications(), unread: feed.unreadCount() });
+    });
+    // Idempotent by nature, so no replay receipt; the mount above rate-limits it.
+    app.post('/api/activity/read', (req, res) => {
+      const ids: unknown = req.body?.ids;
+      const all = req.body?.all === true;
+      if (!all && !(Array.isArray(ids) && ids.length > 0 && ids.length <= 200 && ids.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 256))) {
+        return res.status(400).json({ error: 'invalid_activity_read', message: 'Supply up to 200 notification ids, or all: true.' });
+      }
+      const feed = configDeps.activityFeed!;
+      const changed = feed.markRead(all ? 'all' : ids as string[]);
+      return res.json({ changed, unread: feed.unreadCount() });
     });
   }
   if (node.role === 'central' && configDeps.webPushNotifications) {
@@ -758,7 +784,7 @@ export function createServer(
   app.get('/api/registry/nodes/:nodeId/health', async (req, res) => {
     try {
       const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
-      const health = await registryService.checkNodeHealth(req.params.nodeId, profile);
+      const health = await timed(res, 'probe', () => registryService.checkNodeHealth(req.params.nodeId, profile));
       res.json(health);
     } catch (error) {
       res.status(404).json({
@@ -780,6 +806,87 @@ export function createServer(
     }
   });
 
+  app.get('/api/auth-health', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ rows: configDeps.authHealthMonitor?.rows() ?? [] });
+  });
+
+  // #1272: repairing a login is the one credential change a paired device may
+  // start (owner decision, 2026-09-30). The node that owns the credential runs
+  // it; only the starting principal, holding the returned key, can read the
+  // code or submit a key.
+  if (node.role === 'central' && configDeps.loginRepairBroker) {
+    const broker = configDeps.loginRepairBroker;
+    app.use('/api/auth-health/repairs', rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false }));
+    const principal = (res: express.Response): RepairPrincipal | null => {
+      const value = res.locals.authPrincipal;
+      if (value?.kind === 'owner') return { kind: 'owner' };
+      if (value?.kind === 'device' && typeof value.id === 'string') return { kind: 'device', id: value.id };
+      return null;
+    };
+    const repairRoute = (handler: (req: express.Request, res: express.Response, who: RepairPrincipal) => Promise<unknown>) =>
+      async (req: express.Request, res: express.Response) => {
+        res.setHeader('Cache-Control', 'no-store');
+        const who = principal(res);
+        if (!who) return res.status(401).json({ error: 'unauthorized', message: 'Authenticate before repairing a login.' });
+        try {
+          return await handler(req, res, who);
+        } catch (error) {
+          const status = error instanceof LoginRepairError ? error.status : 500;
+          return res.status(status).json({ error: 'login_repair_failed', message: error instanceof LoginRepairError ? error.message : 'The login repair failed.' });
+        }
+      };
+    app.post('/api/auth-health/repairs', mutation('auth.repair.start'), repairRoute(async (req, res, who) => {
+      const { node_id: nodeId, backend, provider } = req.body ?? {};
+      const text = (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 64;
+      if (!text(nodeId) || !text(backend) || !(provider === null || text(provider))) {
+        return res.status(400).json({ error: 'invalid_login', message: 'Name the node, backend, and provider of the login.' });
+      }
+      const known = configDeps.authHealthMonitor?.rows().some((row) => row.node_id === nodeId && row.backend === backend && row.provider === provider);
+      if (!known) return res.status(404).json({ error: 'unknown_login', message: 'GAH has not seen this login on that node.' });
+      res.status(201).json(await broker.start(who, nodeId, { backend, provider }));
+    }));
+    app.get('/api/auth-health/repairs/:id', repairRoute(async (req, res, who) => {
+      res.json(await broker.view(req.params.id, who, req.get('X-Login-Repair-Key')));
+    }));
+    app.post('/api/auth-health/repairs/:id/input', repairRoute(async (req, res, who) => {
+      res.json(await broker.submit(req.params.id, who, req.get('X-Login-Repair-Key'), req.body?.text));
+    }));
+    app.delete('/api/auth-health/repairs/:id', repairRoute(async (req, res, who) => {
+      await broker.cancel(req.params.id, who, req.get('X-Login-Repair-Key'));
+      res.json({ cancelled: true });
+    }));
+  }
+
+  // A worker runs repairs for its own logins; central is its only caller.
+  if (node.role === 'worker' && configDeps.loginRepairs) {
+    const repairs = configDeps.loginRepairs;
+    app.post('/api/login-repair', requireOwner, async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const body = req.body ?? {};
+      const id = typeof body.id === 'string' ? body.id : '';
+      try {
+        if (body.action === 'start') {
+          if (typeof body.backend !== 'string' || !(body.provider === null || typeof body.provider === 'string')) {
+            return res.status(400).json({ message: 'Name the backend and provider of the login.' });
+          }
+          const known = configDeps.authHealthProber?.latest()?.probes.some((probe) => probe.backend === body.backend && probe.provider === body.provider);
+          if (!known) return res.status(404).json({ message: 'This machine has not checked that login.' });
+          return res.status(201).json(repairs.start({ backend: body.backend, provider: body.provider }));
+        }
+        if (body.action === 'status') {
+          const view = repairs.view(id);
+          return view ? res.json(view) : res.status(404).json({ message: 'This login repair is no longer available.' });
+        }
+        if (body.action === 'input') return res.json(await repairs.submit(id, body.text));
+        if (body.action === 'cancel') { repairs.cancel(id); return res.json({ cancelled: true }); }
+        return res.status(400).json({ message: 'Unknown login repair action.' });
+      } catch (error) {
+        return res.status(error instanceof LoginRepairError ? error.status : 500).json({ message: error instanceof LoginRepairError ? error.message : 'The login repair failed.' });
+      }
+    });
+  }
+
   app.get('/api/registry/fleet/snapshot', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
@@ -796,7 +903,7 @@ export function createServer(
   app.get('/api/registry/fleet', async (req, res) => {
     try {
       const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
-      res.json(await registryService.getNodeObservations(profile));
+      res.json(await timed(res, 'probe', () => registryService.getNodeObservations(profile)));
     } catch (error) {
       res.status(500).json({
         error: 'Internal Server Error',
@@ -907,17 +1014,18 @@ export function createServer(
   // (sessions, provider status) stays on the WebSocket; this is
   // additive, it does not replace or narrow the existing WS contract.
   //
-  // `/api/status` fans out to registered nodes and returns an aggregated
-  // fleet snapshot, so it must be auth-gated even though loopback callers may
+  // `/api/status` returns an aggregated fleet snapshot (cached worker
+  // observations), so it must be auth-gated even though loopback callers may
   // still access it without credentials via authMiddleware's local exemption.
   app.get('/api/status', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const light = req.query.light === '1';
     try {
-      const [status, nodes] = await Promise.all([
-        runStatus(profile, undefined, light),
-        node.role === 'worker' || light ? Promise.resolve([]) : registryService.getNodeObservations(profile)
-      ]);
+      const status = await timed(res, 'gah', () => runStatus(profile, undefined, light));
+      // Workers are never waited on here: an offline one would cost a probe
+      // timeout on every dashboard load. The observations are fleet-wide and
+      // refresh in the background.
+      const nodes = node.role === 'worker' || light ? [] : registryService.getObservationsWithoutWaiting();
       const identity = getCoordinatorIdentity(undefined, coordinatorPort);
       const enriched = {
         ...status,
@@ -929,6 +1037,7 @@ export function createServer(
         schema_digest: identity.schema_digest,
         resource_pressure: getLocalResourcePressure(),
         event_cursor: status.recent_ledger?.most_recent_dispatch_timestamp ?? status.generated_at,
+        auth_health: configDeps.authHealthProber?.latest() ?? null,
         nodes
       };
       res.json(enriched);

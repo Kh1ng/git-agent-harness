@@ -19,6 +19,7 @@ import type {
   DependencyBlocker,
   ActivityEvent
 } from '@git-agent-harness/contracts';
+import { notifiableActivity } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
 import { deliverSystemNotification, mergeActivityEvents } from '../lib/activityNotifications.js';
 
@@ -64,9 +65,12 @@ type WebSocketContextType = {
   controllerActivity: ControllerActivity[];
   activityEvents: ActivityEvent[];
   liveActivity: ActivityEvent | null;
+  /** Unread notifications across profiles, as the server counts them. */
   activityUnreadCount: number;
   activitySyncedAt: number | null;
-  markActivityRead: () => void;
+  /** Changes whenever a notification arrives or changes (read, receipts);
+   * the Notifications view refetches on it. */
+  activityRevision: number;
   /** Increments each time the socket re-establishes a connection after
    * having previously been connected (i.e. actual reconnects, not the
    * initial connect on mount). Pages use this to re-trigger a fresh REST
@@ -133,12 +137,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const activityIdsRef = useRef(new Set<string>());
 
   const activityProfile = profileOverride ?? profile ?? 'gah';
-  const markActivityRead = useCallback(() => setActivityUnreadCount(0), []);
+  const [activityRevision, setActivityRevision] = useState(0);
   useEffect(() => {
     activityIdsRef.current.clear();
     setActivityEvents([]);
     setLiveActivity(null);
-    setActivityUnreadCount(0);
     setActivitySyncedAt(null);
     setActivityCursor(null);
   }, [profileOverride]);
@@ -228,10 +231,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
               setActivitySyncedAt(Date.now());
               const fresh = message.events.filter((item) => !activityIdsRef.current.has(item.id));
               for (const item of fresh) activityIdsRef.current.add(item.id);
-              if (fresh.length > 0) {
-                setActivityEvents((current) => mergeActivityEvents(current, fresh));
-                setActivityUnreadCount((count) => count + fresh.length);
-              }
+              if (fresh.length > 0) setActivityEvents((current) => mergeActivityEvents(current, fresh));
               const last = message.events.at(-1);
               if (last) setActivityCursor(last.id);
               break;
@@ -241,11 +241,22 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
               if (!activityIdsRef.current.has(message.event.id)) {
                 activityIdsRef.current.add(message.event.id);
                 setActivityEvents((current) => mergeActivityEvents(current, [message.event]));
-                setActivityUnreadCount((count) => count + 1);
+                if (notifiableActivity(message.event)) setActivityRevision((revision) => revision + 1);
                 setLiveActivity(message.event);
                 setActivityCursor(message.event.id);
                 deliverSystemNotification(message.event);
               }
+              break;
+
+            case 'activity.updated':
+              if (activityIdsRef.current.has(message.event.id)) {
+                setActivityEvents((current) => mergeActivityEvents(current, [message.event]));
+              }
+              setActivityRevision((revision) => revision + 1);
+              break;
+
+            case 'activity.unread':
+              setActivityUnreadCount(message.count);
               break;
 
             case 'server.welcome':
@@ -441,7 +452,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     liveActivity,
     activityUnreadCount,
     activitySyncedAt,
-    markActivityRead,
+    activityRevision,
     reconnectSeq,
     sendMessage,
     reconnect,

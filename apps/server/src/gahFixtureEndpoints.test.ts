@@ -20,6 +20,7 @@ test('GET /api/status returns 200 with a parseable typed payload from the real C
     assert.equal(body.schema_version, 1);
     assert.equal(body.profile.repo_id, 'fixture-repo');
     assert.deepEqual(body.errors, []);
+    assert.match(response.headers.get('server-timing') ?? '', /^gah;dur=\d+(\.\d+)?$/, 'devtools must show where /api/status spent its time (#1277)');
   });
 });
 

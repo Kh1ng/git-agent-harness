@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { DoctorSnapshot, FleetSnapshot, NodeHealthCheckResult, NodeObservationSnapshot, PairedDevice } from '@git-agent-harness/contracts';
-import { gahApi, pairingApi, type CoordinatorInfo } from '../api/client.js';
+import type { AuthHealthRow, DoctorSnapshot, FleetSnapshot, NodeHealthCheckResult, NodeObservationSnapshot, PairedDevice } from '@git-agent-harness/contracts';
+import { authHealthApi, gahApi, pairingApi, type CoordinatorInfo } from '../api/client.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
+import { LoginRepairPanel } from '../components/LoginRepairPanel.js';
 import { AddNodeSection } from './SettingsPage.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { formatUpdatedAge } from '../lib/format.js';
@@ -28,11 +29,44 @@ function Resources({ observation }: { observation?: NodeObservationSnapshot }) {
   </p>;
 }
 
+const LOGIN_PROBLEM: Partial<Record<AuthHealthRow['state'], string>> = { expired: 'Login expired', missing: 'Not logged in' };
+
+/** Every node's provider logins, as central last saw them (#1271). A broken
+ * login is a red row naming the node, backend, and provider. */
+function Logins({ revision }: { revision: string }) {
+  const [rows, setRows] = useState<AuthHealthRow[] | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    authHealthApi.rows()
+      .then(({ rows }) => { if (!cancelled) { setRows(rows); setError(''); } })
+      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : String(err)); });
+    return () => { cancelled = true; };
+  }, [revision]);
+  const problems = rows?.filter((row) => LOGIN_PROBLEM[row.state]) ?? [];
+  return <section className="mb-6 space-y-3" aria-labelledby="logins-title">
+    <h2 id="logins-title" className="text-base font-semibold text-primary">Logins</h2>
+    {error && <p className="text-sm text-warning">Login health is unavailable: {error}</p>}
+    {rows && rows.length === 0 && <p className="text-sm text-secondary">No login checks reported yet. Nodes check their logins at start and every 30 minutes.</p>}
+    {rows && rows.length > 0 && problems.length === 0 && <p className="text-sm text-secondary">All {rows.length} checked logins work.</p>}
+    {problems.length > 0 && <ul className="divide-y divide-subtle border-y border-critical/40">
+      {problems.map((row) => <li key={`${row.node_id}|${row.backend}|${row.provider ?? ''}`} className="py-3 space-y-1">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <span className="font-semibold text-critical">{[row.node_name, row.backend, row.provider].filter(Boolean).join(' · ')}</span>
+          <span className="text-sm text-critical">{LOGIN_PROBLEM[row.state]} · detected {age(row.since)}</span>
+        </div>
+        {row.detail && <p className="text-sm text-secondary">{row.detail}</p>}
+        <LoginRepairPanel login={row} />
+      </li>)}
+    </ul>}
+  </section>;
+}
+
 /** Fleet data comes from the existing liveness scheduler. WebSocket messages
  * only invalidate this authenticated snapshot; they never carry node details.
  */
 export function NodesPage() {
-  const { messages, reconnectSeq, isConnected, profile } = useWebSocket();
+  const { messages, reconnectSeq, isConnected, profile, activityRevision } = useWebSocket();
   const [fleet, setFleet] = useState<FleetSnapshot | null>(null);
   const [coordinator, setCoordinator] = useState<CoordinatorInfo['identity'] | null>(null);
   const [controllers, setControllers] = useState<PairedDevice[] | null>(null);
@@ -117,6 +151,7 @@ export function NodesPage() {
         </dl>
       </div>
     </section>}
+    <Logins revision={`${lastChange}:${reconnectSeq}:${activityRevision}`} />
     {controllers && <section className="mb-6 space-y-3" aria-labelledby="controller-devices-title">
       <h2 id="controller-devices-title" className="text-base font-semibold text-primary">Controller devices</h2>
       {controllerNotice && <p className="text-sm text-secondary">{controllerNotice}</p>}

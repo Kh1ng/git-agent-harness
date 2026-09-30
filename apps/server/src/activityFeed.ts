@@ -1,12 +1,22 @@
 import crypto from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import type { ActivityEvent, ControllerEvent, GatewayHealthSummary, QuotaSnapshot } from '@git-agent-harness/contracts';
+import { notifiableActivity, type ActivityEvent, type ControllerEvent, type DeliveryReceipt, type GatewayHealthSummary, type QuotaSnapshot } from '@git-agent-harness/contracts';
 import { controllerDispatchSucceeded } from './controllerActivity.js';
 import { redactTextSecrets } from './managerChat/redactText.js';
 
+/** Routine events kept; notified events within the retention window don't count. */
 const MAX_STORED_EVENTS = 2_000;
+const NOTIFIED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const REPLAY_LIMIT = 200;
+
+/** Sends one recorded event through every delivery method and reports what
+ * happened to each target. */
+export type ActivityDeliverer = (event: ActivityEvent) => Promise<DeliveryReceipt[] | void> | DeliveryReceipt[] | void;
+
+export type ActivityFeedChange =
+  | { kind: 'updated'; event: ActivityEvent }
+  | { kind: 'unread'; count: number };
 
 export type ChatLifecycleEvent = {
   phase: 'start' | 'tool' | 'permission' | 'end';
@@ -175,13 +185,17 @@ export function activityFromGateway(health: GatewayHealthSummary): ActivityEvent
   };
 }
 
+/** The durable operator feed. It owns retention, per-notification read state,
+ * and delivery receipts; callers record events and listen for changes. */
 export class ActivityFeed {
   private events: ActivityEvent[] = [];
   private ids = new Set<string>();
+  private listeners = new Set<(change: ActivityFeedChange) => void>();
 
   constructor(
     private path: string | null = process.env.GAH_ACTIVITY_PATH ?? resolve(process.cwd(), 'config/activity.jsonl'),
-    private onRecorded?: (event: ActivityEvent) => void | Promise<void>
+    private deliver?: ActivityDeliverer,
+    private now: () => number = Date.now
   ) {
     if (!path || !existsSync(path)) return;
     try {
@@ -199,22 +213,31 @@ export class ActivityFeed {
     }
   }
 
+  onChange(listener: (change: ActivityFeedChange) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
+  /** A delivered notification starts unread; a silently backfilled one never
+   * reached anyone, so it starts read. */
   record(event: ActivityEvent, deliver = true): boolean {
     if (this.ids.has(event.id)) return false;
+    if (notifiableActivity(event)) event.readAt = deliver ? null : new Date(this.now()).toISOString();
     this.events.push(event);
     this.ids.add(event.id);
     if (this.path) {
       mkdirSync(dirname(this.path), { recursive: true });
       appendFileSync(this.path, `${JSON.stringify(event)}\n`, { mode: 0o600 });
     }
-    if (this.events.length > MAX_STORED_EVENTS) {
-      this.trim();
-      if (this.path) writeFileSync(this.path, this.events.map((item) => JSON.stringify(item)).join('\n') + '\n', { mode: 0o600 });
-    }
-    if (deliver && this.onRecorded) {
-      void Promise.resolve().then(() => this.onRecorded?.(event)).catch((error) => {
-        console.error(`[activity] delivery failed for ${event.id}: ${error instanceof Error ? error.message : String(error)}`);
-      });
+    if (this.events.length > MAX_STORED_EVENTS && this.trim()) this.persist();
+    if (event.readAt === null) this.emit({ kind: 'unread', count: this.unreadCount() });
+    if (deliver && this.deliver) {
+      void Promise.resolve()
+        .then(() => this.deliver!(event))
+        .then((receipts) => this.recordDeliveries(event.id, receipts ?? []))
+        .catch((error) => {
+          console.error(`[activity] delivery failed for ${event.id}: ${error instanceof Error ? error.message : String(error)}`);
+        });
     }
     return true;
   }
@@ -225,7 +248,59 @@ export class ActivityFeed {
     return (cursorIndex >= 0 ? relevant.slice(cursorIndex + 1) : relevant.slice(-REPLAY_LIMIT));
   }
 
-  private trim(): void {
-    this.events = this.events.slice(-MAX_STORED_EVENTS);
+  /** Every retained event that passed the wake filter, across profiles, newest first. */
+  notifications(): ActivityEvent[] {
+    // Recording order is not event order: controller history can arrive late.
+    return this.events.filter(notifiableActivity).sort((a, b) => Date.parse(b.occurredAt) - Date.parse(a.occurredAt));
+  }
+
+  unreadCount(): number {
+    return this.events.filter((event) => event.readAt === null).length;
+  }
+
+  /** Marks the named notifications read, or all of them. Returns how many changed. */
+  markRead(ids: string[] | 'all'): number {
+    const wanted = ids === 'all' ? null : new Set(ids);
+    const readAt = new Date(this.now()).toISOString();
+    const changed = this.events.filter((event) => event.readAt === null && (!wanted || wanted.has(event.id)));
+    if (changed.length === 0) return 0;
+    for (const event of changed) event.readAt = readAt;
+    this.persist();
+    for (const event of changed) this.emit({ kind: 'updated', event });
+    this.emit({ kind: 'unread', count: this.unreadCount() });
+    return changed.length;
+  }
+
+  private recordDeliveries(id: string, receipts: DeliveryReceipt[]): void {
+    const event = this.events.find((candidate) => candidate.id === id);
+    if (!event || receipts.length === 0) return;
+    event.deliveries = [...(event.deliveries ?? []), ...receipts];
+    this.persist();
+    this.emit({ kind: 'updated', event });
+  }
+
+  private emit(change: ActivityFeedChange): void {
+    for (const listener of this.listeners) listener(change);
+  }
+
+  /** Keeps the newest routine events up to the cap, plus every notified event
+   * inside the retention window, so a flood of routine events cannot evict
+   * the notification an operator is looking for. Returns whether it dropped any. */
+  private trim(): boolean {
+    const cutoff = this.now() - NOTIFIED_RETENTION_MS;
+    const retained = (event: ActivityEvent) => notifiableActivity(event) && Date.parse(event.occurredAt) >= cutoff;
+    const routine = this.events.filter((event) => !retained(event));
+    if (routine.length <= MAX_STORED_EVENTS) return false;
+    const evicted = new Set(routine.slice(0, routine.length - MAX_STORED_EVENTS));
+    this.events = this.events.filter((event) => !evicted.has(event));
+    return true;
+  }
+
+  private persist(): void {
+    if (!this.path) return;
+    mkdirSync(dirname(this.path), { recursive: true });
+    const temporary = `${this.path}.${process.pid}.tmp`;
+    writeFileSync(temporary, this.events.map((item) => JSON.stringify(item)).join('\n') + '\n', { mode: 0o600 });
+    renameSync(temporary, this.path);
   }
 }

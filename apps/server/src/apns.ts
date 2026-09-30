@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 import { connect, type ClientHttp2Session } from 'node:http2';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { ActivityEvent } from '@git-agent-harness/contracts';
+import type { ActivityEvent, DeliveryReceipt } from '@git-agent-harness/contracts';
+import { deliveryReceipt } from './notifyDelivery.js';
 import { chatToolName, type ChatLifecycleEvent } from './activityFeed.js';
 import { activityPushPayload } from './webPush.js';
 import { pushRegistrationId, removePushEntries, validPushDeviceLabel, validPushRegistrationId, writePrivatePushStore } from './pushStore.js';
@@ -143,10 +144,11 @@ export class ApnsNotifications {
     removePushEntries(this.devicesPath, this.devices(), (device) => device.deviceId === deviceId);
   }
 
-  async deliverActivity(event: ActivityEvent): Promise<void> {
+  /** Sends the alert to every registered device; one receipt per device. */
+  async deliverActivity(event: ActivityEvent): Promise<DeliveryReceipt[]> {
     const payload = activityPushPayload(event);
-    if (!payload) return;
-    await this.sendToDevices((device) => ({
+    if (!payload) return [];
+    return this.sendToDevices((device) => ({
       token: device.token,
       headers: this.headers('alert', this.config.bundleId, event.id),
       payload: { aps: { alert: { title: payload.title, body: payload.body }, sound: 'default' }, ...payload }
@@ -231,36 +233,41 @@ export class ApnsNotifications {
     return this.jwt.value;
   }
 
+  /** Returns one receipt per device the request applied to. */
   private async sendToDevices(
     request: (device: StoredDevice) => ApnsRequest | null,
     tokenSlot: TokenSlot
-  ): Promise<void> {
+  ): Promise<DeliveryReceipt[]> {
     const host = this.config.environment === 'production' ? 'https://api.push.apple.com' : 'https://api.sandbox.push.apple.com';
     const devices = this.devices();
     const invalid = new Map<string, { slot: TokenSlot; token: string }[]>();
-    await Promise.all(devices.map(async (device) => {
+    const receipts = (await Promise.all(devices.map(async (device): Promise<DeliveryReceipt | null> => {
+      const target = device.label ?? 'iOS device';
       try {
         const outgoing = request(device);
-        if (!outgoing) return;
+        if (!outgoing) return null;
         if (Buffer.byteLength(JSON.stringify(outgoing.payload)) > 4_096) {
           console.error(`[apns] skipped oversized payload for device ${device.id}`);
-          return;
+          return deliveryReceipt('apns', target, 'payload too large');
         }
         const response = this.transport
           ? await this.transport(host, outgoing)
           : await sendApnsRequest(this.session(host), outgoing);
+        if (response.status < 400) return deliveryReceipt('apns', target);
         if (response.status === 410 || response.reason === 'BadDeviceToken' || response.reason === 'Unregistered') {
           const failures = invalid.get(device.id) ?? [];
           failures.push({ slot: tokenSlot, token: outgoing.token });
           invalid.set(device.id, failures);
-        } else if (response.status >= 400) {
+        } else {
           console.error(`[apns] delivery failed for device ${device.id}: ${response.reason ?? response.status}`);
         }
+        return deliveryReceipt('apns', target, response.reason ?? `HTTP ${response.status}`);
       } catch (error) {
         console.error(`[apns] delivery failed for device ${device.id}: ${error instanceof Error ? error.message : String(error)}`);
+        return deliveryReceipt('apns', target, error);
       }
-    }));
-    if (!invalid.size) return;
+    }))).filter((receipt): receipt is DeliveryReceipt => receipt !== null);
+    if (!invalid.size) return receipts;
     writePrivatePushStore(this.devicesPath, this.devices().flatMap((device) => {
       const failures = invalid.get(device.id);
       if (!failures) return [device];
@@ -277,6 +284,7 @@ export class ApnsNotifications {
         liveActivities
       }];
     }));
+    return receipts;
   }
 
   private session(host: string): ClientHttp2Session {

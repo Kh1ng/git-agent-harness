@@ -32,7 +32,8 @@ type Operation =
   | 'push_subscription.remove'
   | 'apns_device.add'
   | 'apns_device.remove'
-  | 'activity.record';
+  | 'activity.record'
+  | 'auth.repair.start';
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 
 // JSON object order is not part of the request's meaning; array order is.

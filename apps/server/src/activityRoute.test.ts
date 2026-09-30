@@ -53,6 +53,16 @@ test('posted worker activity is authenticated, audited, bounded, and deduplicate
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(delivered, [event.id]);
     assert.match(readFileSync(join(root, 'mutations/audit.jsonl'), 'utf8'), /"operation":"activity.record"/);
+
+    // #1273: the Notifications view lists it unread, and opening it marks it read.
+    const remote = { Host: 'central.test', 'X-Forwarded-For': '203.0.113.10', Authorization: 'Bearer activity-route-token', 'Content-Type': 'application/json' };
+    const list = async () => (await fetch(`${url}/notifications`, { headers: remote })).json() as Promise<{ events: ActivityEvent[]; unread: number }>;
+    assert.deepEqual((await list()).events.map((item) => [item.id, item.readAt ?? null]), [[event.id, null]]);
+    assert.equal((await fetch(`${url}/notifications`, { headers: { Host: 'central.test', 'X-Forwarded-For': '203.0.113.10' } })).status, 401);
+    const read = (body: object) => fetch(`${url}/read`, { method: 'POST', headers: remote, body: JSON.stringify(body) });
+    assert.equal((await read({ ids: [] })).status, 400);
+    assert.deepEqual(await (await read({ ids: [event.id] })).json(), { changed: 1, unread: 0 });
+    assert.equal((await list()).unread, 0);
   } finally {
     await new Promise<void>((done) => server.close(() => done()));
     process.env = saved;

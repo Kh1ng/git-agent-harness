@@ -45,8 +45,32 @@ pub fn run() -> Result<()> {
             url,
         } => {
             let cfg = crate::config::load(config_path.as_deref())?;
-            crate::notify_channels::send_activity(&cfg, &title, &message, url.as_deref())?
+            let (channel, outcome) =
+                crate::notify_channels::send_activity(&cfg, &title, &message, url.as_deref());
+            println!(
+                "{}",
+                crate::notify_channels::activity_receipt_line(channel, &outcome)
+            );
+            outcome?
         }
+
+        Commands::AuthHealth { classify } => match classify {
+            Some(backend) => {
+                let mut text = String::new();
+                std::io::Read::read_to_string(
+                    &mut std::io::Read::take(std::io::stdin(), 64 * 1024),
+                    &mut text,
+                )?;
+                println!(
+                    "{}",
+                    serde_json::json!({ "auth_failure": crate::auth_health::is_auth_failure(&backend, &text) })
+                );
+            }
+            None => println!(
+                "{}",
+                serde_json::to_string(&crate::auth_health::probe_node())?
+            ),
+        },
 
         Commands::PolicyCheck { config, action } => {
             commands::policy::run(commands::policy::Args { config, action })?

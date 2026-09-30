@@ -205,7 +205,12 @@ export function createWorkerChatRouter(deps: {
         : undefined;
       if (body.branch !== undefined && !branch) return void res.status(400).json({ error: 'Invalid chat branch.' });
       if (body.action === 'create') {
-        return void res.status(201).json(await createSession({ profile: body.profile, profileInfo: profile, ...settings, sessionId, branch }, deps.sessions));
+        // A worktree-less session (PR chat) runs in the checkout, so it must
+        // name the branch it is about.
+        if (body.worktree !== undefined && (typeof body.worktree !== 'boolean' || (!body.worktree && !branch))) {
+          return void res.status(400).json({ error: 'A worktree-less chat requires a branch.' });
+        }
+        return void res.status(201).json(await createSession({ profile: body.profile, profileInfo: profile, ...settings, sessionId, branch, worktree: body.worktree !== false }, deps.sessions));
       }
       if (body.action === 'archive') {
         if (!sessionId) return void res.status(400).json({ error: 'A session is required.' });

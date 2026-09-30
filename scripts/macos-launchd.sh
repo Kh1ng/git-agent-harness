@@ -34,6 +34,30 @@ plist_value() {
   /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$1" "$plist"
 }
 
+# Startup time varies with the machine and with what the server loads first,
+# so give it a minute and show progress. On timeout, the worker log explains
+# the failure better than the installer can.
+wait_for_worker_health() {
+  local url="$1" limit="${GAH_WORKER_HEALTH_TIMEOUT:-60}" log="$HOME/.local/state/gah/worker.log"
+  local started="$SECONDS" reported=0
+  until /usr/bin/curl "${curl_args[@]}" "$url" >/dev/null 2>&1; do
+    local waited=$((SECONDS - started))
+    if [ "$waited" -ge "$limit" ]; then
+      echo "ERROR: the macOS worker did not become healthy at ${url%/health} within ${limit}s" >&2
+      if [ -f "$log" ]; then
+        echo "Last 20 lines of $log:" >&2
+        tail -n 20 "$log" >&2
+      fi
+      return 1
+    fi
+    if [ "$waited" -ge $((reported + 5)) ]; then
+      reported="$waited"
+      echo "Waiting for the macOS worker at ${url%/health} (${waited}s of ${limit}s)..."
+    fi
+    sleep 1
+  done
+}
+
 register_worker() {
   [ "${GAH_LAUNCHD_DRY_RUN:-}" = 1 ] && return
   gah_path="$(plist_value GAH_BINARY)"
@@ -47,31 +71,25 @@ register_worker() {
   set +a
   curl_args=(-fsS -m 2)
   [ -z "${COORDINATOR_TOKEN:-}" ] || curl_args+=(-H "Authorization: Bearer $COORDINATOR_TOKEN")
-  for _ in $(seq 1 20); do
-    if /usr/bin/curl "${curl_args[@]}" "http://$host:$port/health" >/dev/null 2>&1; then
-      registration="$(GAH_COORDINATOR_IDENTITY_PATH="$identity_path" "$gah_path" node register --transport-mode "$transport_mode")"
-      printf '%s\n' "$registration"
-      central_url="$(printf '%s\n' "$registration" | sed -n 's/^Registered node against //p' | tail -n 1)"
-      [ -n "$central_url" ] || { echo 'ERROR: gah node register did not report the central URL.' >&2; return 1; }
-      node_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["node_id"])' "$identity_path")"
-      health_url="${central_url%/}/api/registry/nodes/$node_id/health"
-      health_args=(-fsS -m 15)
-      [ -z "${COORDINATOR_TOKEN:-}" ] || health_args+=(-H "Authorization: Bearer $COORDINATOR_TOKEN")
-      health=''
-      for _ in 1 2 3; do
-        health="$(/usr/bin/curl "${health_args[@]}" "$health_url" 2>/dev/null || true)"
-        if printf '%s' "$health" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("status") == "healthy" else 1)' 2>/dev/null; then
-          return
-        fi
-        sleep 1
-      done
-      detail="$(printf '%s' "$health" | python3 -c 'import json,sys; value=json.load(sys.stdin); error=value.get("error") or {}; print(error.get("message") or value.get("state") or "no health response")' 2>/dev/null || echo 'no health response')"
-      echo "ERROR: central registered this worker but cannot reach its advertised URL: $detail" >&2
-      return 1
+  wait_for_worker_health "http://$host:$port/health" || return 1
+  registration="$(GAH_COORDINATOR_IDENTITY_PATH="$identity_path" "$gah_path" node register --transport-mode "$transport_mode")"
+  printf '%s\n' "$registration"
+  central_url="$(printf '%s\n' "$registration" | sed -n 's/^Registered node against //p' | tail -n 1)"
+  [ -n "$central_url" ] || { echo 'ERROR: gah node register did not report the central URL.' >&2; return 1; }
+  node_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["node_id"])' "$identity_path")"
+  health_url="${central_url%/}/api/registry/nodes/$node_id/health"
+  health_args=(-fsS -m 15)
+  [ -z "${COORDINATOR_TOKEN:-}" ] || health_args+=(-H "Authorization: Bearer $COORDINATOR_TOKEN")
+  health=''
+  for _ in 1 2 3; do
+    health="$(/usr/bin/curl "${health_args[@]}" "$health_url" 2>/dev/null || true)"
+    if printf '%s' "$health" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("status") == "healthy" else 1)' 2>/dev/null; then
+      return
     fi
     sleep 1
   done
-  echo "ERROR: the macOS worker did not become healthy at http://$host:$port" >&2
+  detail="$(printf '%s' "$health" | python3 -c 'import json,sys; value=json.load(sys.stdin); error=value.get("error") or {}; print(error.get("message") or value.get("state") or "no health response")' 2>/dev/null || echo 'no health response')"
+  echo "ERROR: central registered this worker but cannot reach its advertised URL: $detail" >&2
   return 1
 }
 
@@ -298,7 +316,7 @@ else:
         raise SystemExit('ERROR: worker build is missing; run gah update --role worker first')
     source = 'set -a; [ ! -f "$HOME/.config/gah/gah-loop.env" ] || . "$HOME/.config/gah/gah-loop.env"; set +a; export GAH_COORDINATOR_IDENTITY_PATH="$2"; exec "$0" "$1"'
     common.update(
-        ProgramArguments=['/bin/bash', '-lc', source, os.environ['GAH_LAUNCHD_NODE'], str(server), str(worker_identity)],
+        ProgramArguments=['/bin/bash', '-c', source, os.environ['GAH_LAUNCHD_NODE'], str(server), str(worker_identity)],
         EnvironmentVariables={
             'HOME': str(home), 'PATH': path, 'NODE_ENV': 'production', 'HOST': worker_host,
             'PORT': port, 'GAH_CONFIG': str(home / '.config/gah/config.toml'),

@@ -52,7 +52,9 @@ export type ActivityKind =
   | "node_back"
   | "quota_near_limit"
   | "gateway_down"
-  | "action_required";
+  | "action_required"
+  | "auth_expired"
+  | "auth_restored";
 
 /** Durable, de-duplicated operator event shared by web, desktop, and mobile. */
 export interface ActivityEvent {
@@ -69,6 +71,26 @@ export interface ActivityEvent {
   /** Where the event was recorded. Only controller-log replay sets this;
    * absent means the Node server originated the event. */
   origin?: "controller";
+  /** When the operator opened this notification. `null` is unread. Absent
+   * means it was recorded before read tracking or is not a notification. */
+  readAt?: string | null;
+  /** One entry per delivery attempt (device, channel, or hook). */
+  deliveries?: DeliveryReceipt[];
+  /** The login an auth_expired/auth_restored event is about, on `nodeId`. */
+  login?: { backend: string; provider: string | null };
+}
+
+export type DeliveryMethod = "web_push" | "apns" | "channel" | "command";
+
+/** The outcome of delivering one notification to one target. */
+export interface DeliveryReceipt {
+  method: DeliveryMethod;
+  /** What the operator recognizes: a device label, "Telegram", "Command hook". */
+  target: string;
+  ok: boolean;
+  /** A short failure reason such as "HTTP 401" or "exit 2". */
+  reason?: string;
+  at: string;
 }
 
 /** The single wake filter: every delivery method (push, APNs, channel,
@@ -80,18 +102,22 @@ export const NOTIFIABLE_ACTIVITY_KINDS: ReadonlySet<ActivityKind> = new Set<Acti
   "action_required",
   "dispatch_failed",
   "review_ready",
-  "node_offline"
+  "node_offline",
+  "auth_expired",
+  "auth_restored"
 ]);
 
 export function notifiableActivity(event: Pick<ActivityEvent, "kind">): boolean {
   return NOTIFIABLE_ACTIVITY_KINDS.has(event.kind);
 }
 
-export function activityPath(event: Pick<ActivityEvent, "profile" | "sessionId">): string {
+/** Where a notification opens. The event id rides along so the app can mark
+ * that one notification read and, on the Activity page, highlight it. */
+export function activityPath(event: Pick<ActivityEvent, "id" | "profile" | "sessionId">): string {
   if (event.profile && event.sessionId) {
-    return `/?${new URLSearchParams({ page: "chat", profile: event.profile, chat: event.sessionId })}`;
+    return `/?${new URLSearchParams({ page: "chat", profile: event.profile, chat: event.sessionId, event: event.id })}`;
   }
-  return "/?page=events";
+  return `/?${new URLSearchParams({ page: "events", event: event.id })}`;
 }
 
 // Session type - manually defined instead of using Effect Schema
@@ -126,6 +152,12 @@ export type ServerMessage =
   | { type: "activity.replay"; events: ActivityEvent[] }
 
   | { type: "activity.event"; event: ActivityEvent }
+
+  /** A known event changed (read state or delivery receipts). Never notify for it. */
+  | { type: "activity.updated"; event: ActivityEvent }
+
+  /** Unread notifications across all profiles, for the navigation badge. */
+  | { type: "activity.unread"; count: number }
 
   | {
       type: "server.welcome";

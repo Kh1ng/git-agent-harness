@@ -50,8 +50,7 @@ test('node readiness retries, unavailable workers stay disabled, and remote crea
   await modal.getByRole('button', { name: 'Remote project' }).click();
   await expect(picker).toHaveValue('worker');
   await expect(modal.getByRole('tab', { name: 'From issue' })).toBeEnabled();
-  await expect(modal.getByRole('tab', { name: 'From PR' })).toBeDisabled();
-  await expect(modal.getByText("Pull request chats aren't available yet for projects on another node.", { exact: false })).toBeVisible();
+  await expect(modal.getByRole('tab', { name: 'From PR' })).toBeEnabled();
   await expect(modal.getByText('Each node uses its own checkout; files do not move.')).toBeVisible();
   await modal.getByRole('textbox', { name: 'Chat name' }).fill('Remote repair');
   await expect(modal.getByRole('button', { name: 'Start chat' })).toBeEnabled();
@@ -127,4 +126,26 @@ test('a worker-only project starts a chat from an issue (#1276)', async ({ mount
   // Picking an issue starts the chat immediately.
   await modal.getByText('Worker bug').click();
   await expect.poll(() => started).toMatchObject({ profile: remote.name, issueNumber: 7, backend: 'claude' });
+});
+
+test('a worker-only project starts a chat from a pull request (#1276)', async ({ mount, page }) => {
+  let started: unknown;
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith('/nodes')) return route.fulfill({ json: { nodes } });
+    if (url.pathname.endsWith('/settings')) return route.fulfill({ json: { profileOverrides: {}, defaultBackend: 'claude' } });
+    if (url.pathname.endsWith('/models')) return route.fulfill({ json: { models: [], currentModelId: null } });
+    if (url.pathname.endsWith('/prs')) return route.fulfill({ json: { prs: [{ number: 9, title: 'Worker fix', url: 'https://example/9', author: 'octo', headRefName: 'fix/worker', isDraft: false, reviewState: null, updatedAt: null }] } });
+    if (url.pathname.endsWith('/prs/start')) {
+      started = route.request().postDataJSON();
+      return route.fulfill({ status: 201, json: { session: { id: 's2' }, existing: false } });
+    }
+    return route.fulfill({ json: {} });
+  });
+  const modal = await mount(<NewChatModal open currentProfile={remote.name} profiles={[remote]} backends={backends}
+    onClose={() => {}} onCreated={() => {}} />);
+  await modal.getByRole('tab', { name: 'From PR' }).click();
+  await expect(modal.getByText('This chat runs on the node that owns the project.')).toBeVisible();
+  await modal.getByText('Worker fix').click();
+  await expect.poll(() => started).toMatchObject({ profile: remote.name, prNumber: 9, backend: 'claude' });
 });

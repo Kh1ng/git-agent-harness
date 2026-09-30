@@ -157,7 +157,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
 
   // PR list follows the selected project in PR mode.
   useEffect(() => {
-    if (!open || mode !== 'pr' || remoteProject) return;
+    if (!open || mode !== 'pr') return;
     let cancelled = false;
     setPrsError(null);
     setPrsLoading(true);
@@ -168,7 +168,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
       .finally(() => { if (!cancelled) setPrsLoading(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, mode, project, sourceRetry, remoteProject]);
+  }, [open, mode, project, sourceRetry]);
 
   useEffect(() => {
     if (!open) return;
@@ -253,7 +253,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
   };
 
   const startFromSource = async (source: Exclude<ChatSource, 'blank'>, number: number) => {
-    if (!backend || (source === 'pr' && remoteProject) || creating) return;
+    if (!backend || creating) return;
     setCreating(true);
     setError(null);
     try {
@@ -270,7 +270,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
   };
 
   const create = async () => {
-    if (!backend || (mode === 'blank' && !nodeReady) || (mode === 'pr' && remoteProject)) return;
+    if (!backend || (mode === 'blank' && !nodeReady)) return;
     setCreating(true);
     setError(null);
     try {
@@ -387,7 +387,6 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
             type="button"
             role="tab"
             aria-selected={mode === 'pr'}
-            disabled={remoteProject}
             onClick={() => setMode('pr')}
             className={`flex-1 disabled:opacity-50 rounded-md px-2 py-1.5 text-xs inline-flex items-center justify-center gap-1.5 ${mode === 'pr' ? 'bg-accent/15 border border-accent/40 text-primary' : 'border border-subtle text-secondary hover:bg-white/5'}`}
           >
@@ -395,7 +394,6 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
           </button>
         </div>
 
-        {remoteProject && <p className="text-sm text-secondary">Pull request chats aren't available yet for projects on another node. Issue and blank chats run on that node.</p>}
         {mode !== 'blank' && (
           <label className="block space-y-1 text-sm text-secondary">
             <span>Filter {mode === 'issue' ? 'issues' : 'pull requests'}</span>
@@ -590,7 +588,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
           <button
             type="button"
             onClick={create}
-            disabled={creating || !backend || profiles.length === 0 || (mode === 'blank' && (!title.trim() || !nodeReady)) || (mode === 'pr' && remoteProject) || (mode === 'issue' && !issue) || (mode === 'pr' && !pr)}
+            disabled={creating || !backend || profiles.length === 0 || (mode === 'blank' && (!title.trim() || !nodeReady)) || (mode === 'issue' && !issue) || (mode === 'pr' && !pr)}
             className="btn-primary text-xs"
           >
             {creating ? 'Creating…' : 'Start chat'}

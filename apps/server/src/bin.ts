@@ -23,9 +23,17 @@ import { ActivityFeed } from './activityFeed.js';
 import { WebPushNotifications } from './webPush.js';
 import { apnsFromEnvironment } from './apns.js';
 import { channelDelivery, commandDelivery, deliverToAll } from './notifyDelivery.js';
+import { AuthHealthMonitor, AuthHealthProber, configureChatAuthHealth } from './authHealth.js';
+import { LoginRepairBroker, LoginRepairs, loadProviderKeys } from './loginRepair.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
 const HOST = resolveBindHost();
+
+// launchd and systemd logs carry no timestamps; restart timing is diagnosed
+// from these lines.
+function logLifecycle(message: string) {
+  console.log(`${new Date().toISOString()} ${message}`);
+}
 
 async function main() {
   try {
@@ -38,7 +46,9 @@ async function main() {
     throw error;
   }
 
-  console.log('Starting Git Agent Harness server...');
+  logLifecycle('Starting Git Agent Harness server...');
+  // Keys repaired from another device (#1272) apply to checks and backends.
+  loadProviderKeys();
 
   const node = validateNodeRole(await runNodeRole());
   Object.assign(process.env, workerMemoryEnvironment(node, process.env.COORDINATOR_TOKEN));
@@ -57,6 +67,29 @@ async function main() {
     commandDelivery(coordinatorIdentity.advertised_url)
   ]) : undefined);
 
+  // Every node checks its own logins; central watches the fleet's (#1271).
+  const authHealthProber = new AuthHealthProber();
+  const authHealthMonitor = node.role === 'central'
+    ? new AuthHealthMonitor(
+      { nodeId: coordinatorIdentity.node_id, nodeName: coordinatorIdentity.display_name, prober: authHealthProber },
+      () => registryService.getCachedObservations()
+    )
+    : undefined;
+  if (authHealthMonitor) {
+    registryService.onChange(() => authHealthMonitor.observationsChanged());
+    configureChatAuthHealth(authHealthMonitor);
+  }
+  // A repair reports success only after this node's login check has re-run.
+  const loginRepairs = new LoginRepairs({ nodeId: coordinatorIdentity.node_id, onSuccess: () => authHealthProber.refresh() });
+  const loginRepairBroker = node.role === 'central'
+    ? new LoginRepairBroker({
+      localNodeId: coordinatorIdentity.node_id,
+      local: loginRepairs,
+      registry: registryService,
+      onRemoteSuccess: (nodeId) => { void registryService.checkNodeHealth(nodeId).catch(() => undefined); }
+    })
+    : undefined;
+
   // Create Express app
   const app = createExpressServer({
     coordinatorPort: PORT,
@@ -65,7 +98,11 @@ async function main() {
     registryService,
     webPushNotifications,
     apnsNotifications,
-    activityFeed
+    activityFeed,
+    authHealthProber,
+    authHealthMonitor,
+    loginRepairs,
+    loginRepairBroker
   });
   
   // Create HTTP server from Express app
@@ -101,6 +138,7 @@ async function main() {
     coordinatorIdentity,
     node,
     activityFeed,
+    authHealthMonitor,
     // Background delivery must not depend on an open dashboard. Poll every
     // configured profile, but only while some device is registered for push.
     backgroundProfiles: node.role === 'central' && cliAvailable
@@ -131,31 +169,29 @@ async function main() {
 
   // Start HTTP server
   server.listen(PORT, HOST, () => {
-    console.log(`Git Agent Harness server listening on ${HOST}:${PORT}`);
+    logLifecycle(`Git Agent Harness server listening on ${HOST}:${PORT}`);
     console.log(`WebSocket server available on ws://${HOST}:${PORT}`);
     console.log(`Health check available on http://${HOST}:${PORT}/health`);
     const warning = networkExposureWarning(HOST);
     if (warning) {
       console.warn(warning);
     }
+    // After listening: login checks spawn provider CLIs and must never delay health.
+    if (cliAvailable) authHealthProber.start();
   });
   
-  // Handle graceful shutdown
-  process.on('SIGINT', () => {
-    console.log('Shutting down...');
+  // Exit at once: waiting on open keep-alive or WebSocket connections would
+  // hold the port and delay the replacement process.
+  const shutdown = () => {
+    logLifecycle('Shutting down...');
     registryService.stopLivenessScheduler();
     stopChatMaintenanceScheduler();
+    authHealthProber.stop();
     server.close();
     process.exit(0);
-  });
-
-  process.on('SIGTERM', () => {
-    console.log('Shutting down...');
-    registryService.stopLivenessScheduler();
-    stopChatMaintenanceScheduler();
-    server.close();
-    process.exit(0);
-  });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
 main().catch((error) => {

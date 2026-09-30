@@ -54,14 +54,15 @@ test('activity delivery uses the bounded four-field payload and ignores non-waki
     const registered = f.service.register(subscription, 'Phone');
     assert.equal(registered.count, 1);
     assert.equal(statSync(f.subscriptions).mode & 0o777, 0o600);
-    await f.service.deliverActivity({
+    const receipts = await f.service.deliverActivity({
       id: 'chat:gah:s1:1:complete', occurredAt: '2026-09-25T12:00:00Z', profile: 'gah', sessionId: 's1',
       kind: 'chat_turn_completed', severity: 'success', title: 'gah: reply ready', message: 'Done.'
     });
+    assert.deepEqual(receipts.map(({ method, target, ok }) => ({ method, target, ok })), [{ method: 'web_push', target: 'Phone', ok: true }]);
     assert.equal(f.sent.length, 1);
     const payload = JSON.parse(f.sent[0][1] as string);
     assert.deepEqual(Object.keys(payload).sort(), ['body', 'id', 'title', 'url']);
-    assert.equal(payload.url, '/?page=chat&profile=gah&chat=s1');
+    assert.equal(payload.url, '/?page=chat&profile=gah&chat=s1&event=chat%3Agah%3As1%3A1%3Acomplete');
     assert.ok(Buffer.byteLength(f.sent[0][1] as string) < 3 * 1024);
     await f.service.deliverActivity({
       id: 'node-back', occurredAt: '2026-09-25T12:00:00Z', profile: null,
@@ -93,7 +94,8 @@ test('expired subscriptions are pruned and other delivery failures do not escape
     assert.deepEqual(JSON.parse(readFileSync(f.subscriptions, 'utf8')), []);
     f.service.register(subscription);
     status = 500;
-    await assert.doesNotReject(f.service.deliverActivity(event));
+    const [failed] = await f.service.deliverActivity(event);
+    assert.deepEqual([failed.ok, failed.reason], [false, 'HTTP 500'], 'a failure is visible on the notification');
     assert.equal(f.service.list().count, 1);
   } finally {
     rmSync(f.directory, { recursive: true });

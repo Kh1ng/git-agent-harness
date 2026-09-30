@@ -160,6 +160,14 @@ pub enum Commands {
         #[arg(long)]
         url: Option<String>,
     },
+    /// Report whether each backend and provider login on this node still
+    /// works (#1271). Prints one JSON report; never prints provider output.
+    AuthHealth {
+        /// Instead of probing, read a failed turn's output on stdin and
+        /// report whether it failed to authenticate for this backend.
+        #[arg(long, value_name = "BACKEND")]
+        classify: Option<String>,
+    },
     /// Check repo policy for a given action
     PolicyCheck {
         #[arg(long)]

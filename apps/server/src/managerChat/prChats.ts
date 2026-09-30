@@ -112,6 +112,9 @@ export interface StartPrChatInput {
   model?: string | null;
   /** Store override (tests). */
   storeOptions?: ChatSessionStoreOptions;
+  /** Creates the worktree-less session on a worker for a project with no
+   * checkout on central (#1276). Absent means a local session. */
+  create?: (settings: { title: string; branch: string }) => Promise<ChatSessionSummary>;
 }
 
 export interface StartPrChatResult {
@@ -144,19 +147,22 @@ export async function startPrChat(input: StartPrChatInput): Promise<StartPrChatR
 
   // Worktree-less on purpose: the conversation is about the PR's diff, not
   // a fresh branch from it, and nothing at the provider may be touched.
-  const session = await createSession(
-    {
-      profile,
-      profileInfo,
-      prNumber,
-      backend,
-      model: input.model ?? null,
-      title: `#${prNumber} ${pr.title}`,
-      branch: canonicalBranch,
-      worktree: false
-    },
-    storeOptions
-  );
+  const title = `#${prNumber} ${pr.title}`;
+  const session = input.create
+    ? await input.create({ title, branch: canonicalBranch })
+    : await createSession(
+      {
+        profile,
+        profileInfo,
+        prNumber,
+        backend,
+        model: input.model ?? null,
+        title,
+        branch: canonicalBranch,
+        worktree: false
+      },
+      storeOptions
+    );
 
   // Seed the log: the PR is the opening message of the conversation --
   // rendered in the transcript and replayed into every backend's context.

@@ -369,31 +369,19 @@ fn parse_version_from_output(output: &std::process::Output) -> Option<String> {
 }
 
 fn classify_auth_state(output: &std::process::Output) -> HermesAuthState {
-    if !output.status.success() {
-        return HermesAuthState::Error(format!("status command exited with {}", output.status));
-    }
-
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    use crate::auth_health::AuthState;
+    let health = crate::auth_health::classify_status_output(
+        output.status.success(),
+        &output.stdout,
+        &output.stderr,
     );
-    let lower = combined.to_lowercase();
-    let logged_in = lower.lines().any(|line| {
-        (line.contains("logged in") && !line.contains("not logged in"))
-            || (line.contains("authenticated")
-                && !line.contains("not authenticated")
-                && !line.contains("unauthenticated"))
-    });
-    if logged_in {
-        HermesAuthState::LoggedIn
-    } else if lower.contains("not logged in")
-        || lower.contains("logged out")
-        || lower.contains("no credentials")
-    {
-        HermesAuthState::LoggedOut
-    } else {
-        HermesAuthState::Unknown
+    match health.state {
+        AuthState::Ok => HermesAuthState::LoggedIn,
+        AuthState::Missing | AuthState::Expired => HermesAuthState::LoggedOut,
+        AuthState::Unknown => HermesAuthState::Unknown,
+        AuthState::Error => {
+            HermesAuthState::Error(format!("status command exited with {}", output.status))
+        }
     }
 }
 

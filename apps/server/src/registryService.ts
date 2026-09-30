@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { parseNodeAuthHealth } from './authHealth.js';
 import { resolve, dirname, sep } from 'node:path';
 import crypto from 'node:crypto';
 import { hostname, networkInterfaces } from 'node:os';
@@ -292,6 +293,7 @@ export function resolveSecret(secretRef: string): string {
 export class RegistryService {
   private observationRequests = new Map<string, number>();
   private observations = new Map<string, NodeObservationSnapshot>();
+  private revalidation: Promise<unknown> | null = null;
   private listeners = new Set<() => void>();
   private livenessListeners = new Set<(transition: NodeLivenessTransition) => void>();
   private configPath: string | null;
@@ -380,6 +382,32 @@ export class RegistryService {
   /** Reads observations already collected by liveness checks; never contacts a node. */
   getCachedObservations(): NodeObservationSnapshot[] {
     return [...this.observations.values()];
+  }
+
+  /** One observation per registered node, answered from cache without waiting
+   * on any worker. A node never observed, or observed longer ago than one
+   * liveness interval, starts a single shared background poll whose result the
+   * next read serves (stale-while-revalidate). */
+  getObservationsWithoutWaiting(now: number = Date.now()): NodeObservationSnapshot[] {
+    let revalidate = false;
+    const observations = this.getNodes().map((node) => {
+      const cached = this.observations.get(node.node_id);
+      const observedAt = parseIsoMillis(cached?.observed_at ?? node.last_observed_at);
+      if (observedAt === null || now - observedAt > LIVENESS_POLL_INTERVAL_MS) revalidate = true;
+      return cached ?? emptyNodeObservation(
+        node,
+        node.last_observed_at ?? nowIso(0),
+        node.last_observed_state ?? 'stale',
+        node.last_seen_at ?? null,
+        node.last_error_kind ? { kind: node.last_error_kind, message: node.last_error_message ?? '' } : null
+      );
+    });
+    if (revalidate && !this.revalidation) {
+      this.revalidation = this.getNodeObservations()
+        .catch((error) => console.error(`Node observation refresh failed: ${error instanceof Error ? error.message : String(error)}`))
+        .finally(() => { this.revalidation = null; });
+    }
+    return observations;
   }
 
   async getNodeObservations(profile?: string): Promise<NodeObservationSnapshot[]> {
@@ -603,6 +631,7 @@ export class RegistryService {
         : {},
       backend_instances: Array.isArray(payload.backend_instances) ? payload.backend_instances : [],
       availability: Array.isArray(payload.availability) ? payload.availability : [],
+      auth_health: parseNodeAuthHealth(payload.auth_health),
       recent_ledger: payload.recent_ledger ?? null,
       active_claims: Array.isArray(payload.active_claims) ? payload.active_claims : [],
       active_work: dedupeNodeWorkItems(node.node_id, Array.isArray(payload.active_claims) ? payload.active_claims : []),
