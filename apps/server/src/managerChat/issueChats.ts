@@ -15,7 +15,7 @@
 
 import type { ChatIssueSummary, ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
 import { AsyncTtlCache } from '../asyncTtlCache.js';
-import { execProviderCli } from './providerCli.js';
+import { type ForgeProject, execProjectCli, execProviderCli } from './providerCli.js';
 import { appendEvents } from './sessionLog.js';
 import {
   chatSessionStoreOptions,
@@ -67,15 +67,15 @@ function normalizeIssue(raw: ProviderIssue): ChatIssueSummary & { body: string |
 
 /** Open issues for a profile's repo, newest-first. Cached per profile. */
 export async function listChatIssues(
-  profileInfo: Pick<ProfileSummary, 'provider' | 'repo' | 'local_path'>,
+  profileInfo: ForgeProject,
   limit = 30
 ): Promise<ChatIssueSummary[]> {
   const cacheKey = `${profileInfo.provider}:${profileInfo.repo}:${profileInfo.local_path}:${limit}`;
   return issuesCache.get(cacheKey, async () => {
     const isGitLab = profileInfo.provider === 'gitlab';
     const { stdout } = isGitLab
-      ? await execProviderCli('glab', ['issue', 'list', '--output=json'], profileInfo.local_path)
-      : await execProviderCli('gh', ['issue', 'list', '--json', 'number,title,url,labels,updatedAt,state', `--limit=${limit}`], profileInfo.local_path);
+      ? await execProjectCli('glab', ['issue', 'list', '--output=json'], profileInfo)
+      : await execProjectCli('gh', ['issue', 'list', '--json', 'number,title,url,labels,updatedAt,state', `--limit=${limit}`], profileInfo);
     const parsed = JSON.parse(stdout) as ProviderIssue[];
     const isOpen = (state: string): boolean => {
       const normalized = state.toLowerCase();
@@ -93,26 +93,26 @@ export async function listChatIssues(
 }
 
 export async function fetchChatIssue(
-  profileInfo: Pick<ProfileSummary, 'provider' | 'local_path'>,
+  profileInfo: ForgeProject,
   issueNumber: number
 ): Promise<ReturnType<typeof normalizeIssue>> {
   const isGitLab = profileInfo.provider === 'gitlab';
   const { stdout } = isGitLab
-    ? await execProviderCli('glab', ['issue', 'view', String(issueNumber), '--output=json'], profileInfo.local_path)
-    : await execProviderCli('gh', ['issue', 'view', String(issueNumber), '--json', 'number,title,body,state,url,labels'], profileInfo.local_path);
+    ? await execProjectCli('glab', ['issue', 'view', String(issueNumber), '--output=json'], profileInfo)
+    : await execProjectCli('gh', ['issue', 'view', String(issueNumber), '--json', 'number,title,body,state,url,labels'], profileInfo);
   return normalizeIssue(JSON.parse(stdout) as ProviderIssue);
 }
 
 /** Provider state lookup shared by issue-chat creation and maintenance. */
 export async function fetchChatIssueState(
-  profileInfo: Pick<ProfileSummary, 'provider' | 'local_path'>,
+  profileInfo: ForgeProject,
   issueNumber: number
 ): Promise<string> {
   return (await fetchChatIssue(profileInfo, issueNumber)).state;
 }
 
 export async function fetchLinkedChatIssues(
-  profileInfo: Pick<ProfileSummary, 'provider' | 'local_path'>,
+  profileInfo: ForgeProject,
   issueNumbers: number[]
 ): Promise<ChatIssueSummary[]> {
   const issues = await Promise.all(issueNumbers.map(number => fetchChatIssue(profileInfo, number).catch(() => null)));
@@ -120,16 +120,16 @@ export async function fetchLinkedChatIssues(
 }
 
 async function labelExists(
-  profileInfo: Pick<ProfileSummary, 'provider' | 'local_path'>,
+  profileInfo: ForgeProject,
   label: string
 ): Promise<boolean> {
   try {
     const isGitLab = profileInfo.provider === 'gitlab';
     const { stdout } = isGitLab
-      ? await execProviderCli('glab', ['label', 'list', '--output=json'], profileInfo.local_path)
+      ? await execProjectCli('glab', ['label', 'list', '--output=json'], profileInfo)
       : // gh defaults to 30 labels per page -- repos routinely have more
         // (this one has ~35), which made the in-progress check miss.
-      await execProviderCli('gh', ['label', 'list', '--json', 'name', '--limit', '200'], profileInfo.local_path);
+      await execProjectCli('gh', ['label', 'list', '--json', 'name', '--limit', '200'], profileInfo);
     const parsed = JSON.parse(stdout) as { name?: string }[];
     return parsed.some((entry) => entry.name === label);
   } catch {
@@ -141,7 +141,7 @@ async function labelExists(
  * when it exists. Failures surface -- silently claiming an issue nobody
  * can see claimed is worse than an error. */
 async function markIssueInProgress(
-  profileInfo: Pick<ProfileSummary, 'provider' | 'local_path'>,
+  profileInfo: ForgeProject,
   issueNumber: number,
   label: string
 ): Promise<void> {
@@ -153,7 +153,7 @@ async function markIssueInProgress(
     if (isGitLab) args.push('--label', label);
     else args.push('--add-label', label);
   }
-  await execProviderCli(isGitLab ? 'glab' : 'gh', args, profileInfo.local_path);
+  await execProjectCli(isGitLab ? 'glab' : 'gh', args, profileInfo);
 }
 
 export function issueBranchName(repoId: string, issueNumber: number): string {
@@ -170,6 +170,9 @@ export interface StartIssueChatInput {
   inProgressLabel?: string;
   /** Store override (tests). */
   storeOptions?: ChatSessionStoreOptions;
+  /** Creates the session on a worker for a project with no checkout on
+   * central (#1276). Absent means a local session. */
+  create?: (settings: { title: string; branch: string }) => Promise<ChatSessionSummary>;
 }
 
 export interface StartIssueChatResult {
@@ -199,23 +202,19 @@ export async function startIssueChat(input: StartIssueChatInput): Promise<StartI
 
   // After an archive the canonical branch still exists (branches survive
   // by design); a fresh grab for the same issue gets a suffixed branch.
-  const { stdout: existingBranches } = await execProviderCli(
-    'git',
-    ['branch', '--list', canonicalBranch],
-    profileInfo.local_path
-  );
-  const session = await createSession(
-    {
-      profile,
-      profileInfo,
-      backend,
-      issueNumber,
-      model: input.model ?? null,
-      title: `#${issueNumber} ${issue.title}`,
-      branch: existingBranches.trim() ? `${canonicalBranch}-${Date.now().toString(36)}` : canonicalBranch
-    },
-    storeOptions
-  );
+  // Central can't list a worker's branches, so a remote grab checks central's
+  // own session records for an earlier use of the branch instead.
+  const branchTaken = input.create
+    ? listSessions(profile, storeOptions).some((session) => session.branch === canonicalBranch)
+    : !!(await execProviderCli('git', ['branch', '--list', canonicalBranch], profileInfo.local_path)).stdout.trim();
+  const title = `#${issueNumber} ${issue.title}`;
+  const branch = branchTaken ? `${canonicalBranch}-${Date.now().toString(36)}` : canonicalBranch;
+  const session = input.create
+    ? await input.create({ title, branch })
+    : await createSession(
+      { profile, profileInfo, backend, issueNumber, model: input.model ?? null, title, branch },
+      storeOptions
+    );
 
   // Seed the log: the issue is the opening message of the conversation --
   // rendered in the transcript and replayed into every backend's context.
