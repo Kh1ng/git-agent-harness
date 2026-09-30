@@ -1217,7 +1217,7 @@ export function createServer(
   app.get('/api/hold', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     try {
-      const status = await runStatus(profile);
+      const status = await runStatus(profile, undefined, true);
       res.json({ profile, workIds: status.review_held_work_ids ?? [] });
     } catch (error) {
       res.status(502).json({
