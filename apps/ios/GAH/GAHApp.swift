@@ -54,7 +54,7 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         configuration.userContentController.add(DashboardRequestHandler(controller: self), name: "gahController")
         UNUserNotificationCenter.current().delegate = self
         AppDelegate.controller = self
-        if notificationsEnabled { UIApplication.shared.registerForRemoteNotifications() }
+        if notificationsEnabled { syncNotificationAuthorization() }
         webView.isHidden = true
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -94,6 +94,31 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     func requestNotificationAccess(_ message: WKScriptMessage) {
         guard validDashboardMessage(message),
               let body = message.body as? [String: Any], body["type"] as? String == "requestNotifications" else { return }
+        promptForNotifications()
+    }
+
+    /// The stored opt-in defaults to on and survives reinstalls, so it can
+    /// claim notifications are enabled when iOS never granted them. Launch
+    /// reconciles it with the real authorization before registering a token.
+    private func syncNotificationAuthorization() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            let status = settings.authorizationStatus
+            Task { @MainActor [weak self] in
+                switch status {
+                case .authorized, .provisional, .ephemeral:
+                    UIApplication.shared.registerForRemoteNotifications()
+                case .notDetermined:
+                    self?.promptForNotifications()
+                default:
+                    UserDefaults.standard.set(false, forKey: Self.notificationsEnabledKey)
+                    UIApplication.shared.unregisterForRemoteNotifications()
+                    self?.removePushRegistration()
+                }
+            }
+        }
+    }
+
+    private func promptForNotifications() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] granted, _ in
             Task { @MainActor [weak self] in
                 UserDefaults.standard.set(granted, forKey: Self.notificationsEnabledKey)
