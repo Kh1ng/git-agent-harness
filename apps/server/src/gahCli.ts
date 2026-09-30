@@ -1228,6 +1228,7 @@ export function classifyAuthFailure(backend: string, text: string): Promise<bool
       try { resolvePromise((JSON.parse(stdout) as { auth_failure?: unknown }).auth_failure === true); }
       catch { resolvePromise(false); }
     });
+    child.stdin?.on('error', () => undefined);
     child.stdin?.end(text.slice(0, 64 * 1024));
   });
 }

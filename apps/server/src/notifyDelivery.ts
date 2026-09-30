@@ -42,14 +42,16 @@ class ExitError extends Error {
 
 function run(label: string, command: string, args: string[], stdin?: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout?.on('data', (chunk) => { stdout = (stdout + chunk).slice(-2_000); });
     child.stderr?.on('data', (chunk) => { stderr = (stderr + chunk).slice(-500); });
     child.on('error', reject);
     child.on('close', (code) => code === 0 ? resolve(stdout) : reject(new ExitError(label, code, stdout, stderr)));
-    child.stdin.end(stdin ?? '');
+    // A hook may exit without reading its input; its exit code decides the outcome.
+    child.stdin?.on('error', () => undefined);
+    child.stdin?.end(stdin);
   });
 }
 
