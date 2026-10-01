@@ -349,18 +349,59 @@ pub(crate) fn get_provider_issue(profile: &Profile, number: &str) -> Result<Prov
 }
 
 pub(crate) fn list_provider_issues(profile: &Profile) -> Result<Vec<ProviderIssue>> {
+    let kind = require_provider_kind(profile)?;
+    list_provider_issue_values(profile)?
+        .iter()
+        .map(|value| provider_issue_from_value(kind, value))
+        .collect()
+}
+
+/// Every issue (open and closed, pull requests excluded) as the provider's
+/// own JSON, for readers that need fields `ProviderIssue` does not carry.
+pub(crate) fn list_provider_issue_values(profile: &Profile) -> Result<Vec<serde_json::Value>> {
+    let kind = require_provider_kind(profile)?;
+    let values = list_all_pages(
+        profile,
+        "issue",
+        "issues?state=all",
+        "issues?scope=all&state=all",
+    )?;
+    Ok(values
+        .into_iter()
+        .filter(|value| kind != ProviderKind::Github || value.get("pull_request").is_none())
+        .collect())
+}
+
+pub(crate) fn list_provider_label_names(profile: &Profile) -> Result<Vec<String>> {
+    Ok(list_all_pages(profile, "label", "labels?", "labels?")?
+        .iter()
+        .filter_map(|value| value["name"].as_str().map(ToOwned::to_owned))
+        .collect())
+}
+
+/// Reads every page of a repository collection. `github` and `gitlab` are the
+/// path and query under the repository or project. Fails rather than return
+/// a partial snapshot, which callers use for idempotency and taxonomy checks.
+fn list_all_pages(
+    profile: &Profile,
+    what: &str,
+    github: &str,
+    gitlab: &str,
+) -> Result<Vec<serde_json::Value>> {
     const PAGE_SIZE: usize = 100;
     const MAX_PAGES: usize = 100;
     let kind = require_provider_kind(profile)?;
-    let mut issues = Vec::new();
+    let separator = |query: &str| if query.ends_with('?') { "" } else { "&" };
+    let mut values = Vec::new();
     for page in 1..=MAX_PAGES {
         let value = match kind {
             ProviderKind::Github => github_json_api(
                 profile,
                 "GET",
                 &format!(
-                    "repos/{}/issues?state=all&per_page={PAGE_SIZE}&page={page}",
-                    profile.repo
+                    "repos/{}/{github}{}per_page={PAGE_SIZE}&page={page}",
+                    profile.repo,
+                    separator(github)
                 ),
                 &[],
             )?,
@@ -369,7 +410,8 @@ pub(crate) fn list_provider_issues(profile: &Profile) -> Result<Vec<ProviderIssu
                 gitlab_api(
                     profile,
                     &format!(
-                        "projects/{project_id}/issues?scope=all&state=all&per_page={PAGE_SIZE}&page={page}"
+                        "projects/{project_id}/{gitlab}{}per_page={PAGE_SIZE}&page={page}",
+                        separator(gitlab)
                     ),
                     "GET",
                     &[],
@@ -378,64 +420,14 @@ pub(crate) fn list_provider_issues(profile: &Profile) -> Result<Vec<ProviderIssu
         };
         let page_values = value
             .as_array()
-            .ok_or_else(|| anyhow::anyhow!("provider issue listing was not an array"))?;
-        for value in page_values {
-            if kind == ProviderKind::Github && value.get("pull_request").is_some() {
-                continue;
-            }
-            issues.push(provider_issue_from_value(kind, value)?);
-        }
+            .ok_or_else(|| anyhow::anyhow!("provider {what} listing was not an array"))?;
+        values.extend(page_values.iter().cloned());
         if page_values.len() < PAGE_SIZE {
-            return Ok(issues);
+            return Ok(values);
         }
     }
     anyhow::bail!(
-        "provider issue listing reached {} pages; refusing an incomplete idempotency snapshot",
-        MAX_PAGES
-    )
-}
-
-pub(crate) fn list_provider_label_names(profile: &Profile) -> Result<Vec<String>> {
-    const PAGE_SIZE: usize = 100;
-    const MAX_PAGES: usize = 100;
-    let kind = require_provider_kind(profile)?;
-    let mut labels = Vec::new();
-    for page in 1..=MAX_PAGES {
-        let value = match kind {
-            ProviderKind::Github => github_json_api(
-                profile,
-                "GET",
-                &format!(
-                    "repos/{}/labels?per_page={PAGE_SIZE}&page={page}",
-                    profile.repo
-                ),
-                &[],
-            )?,
-            ProviderKind::Gitlab => {
-                let project_id = gitlab_project_id(profile)?;
-                gitlab_api(
-                    profile,
-                    &format!("projects/{project_id}/labels?per_page={PAGE_SIZE}&page={page}"),
-                    "GET",
-                    &[],
-                )?
-            }
-        };
-        let page_values = value
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("provider label listing was not an array"))?;
-        labels.extend(
-            page_values
-                .iter()
-                .filter_map(|value| value["name"].as_str().map(ToOwned::to_owned)),
-        );
-        if page_values.len() < PAGE_SIZE {
-            return Ok(labels);
-        }
-    }
-    anyhow::bail!(
-        "provider label listing reached {} pages; refusing an incomplete taxonomy snapshot",
-        MAX_PAGES
+        "provider {what} listing reached {MAX_PAGES} pages; refusing an incomplete snapshot"
     )
 }
 

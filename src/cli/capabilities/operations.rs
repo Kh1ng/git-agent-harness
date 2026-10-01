@@ -1309,3 +1309,28 @@ pub(super) fn add_node_operations(manifest: &mut CapabilityManifest) {
         is_stable: true,
     });
 }
+
+pub(super) fn add_planning_operations(manifest: &mut CapabilityManifest) {
+    manifest.add_operation(OperationDefinition {
+        operation_id: "planning.map".to_string(),
+        display_name: "Read an epic's planning map (gah map)".to_string(),
+        class: OperationClass::Read,
+        profile_scope: ProfileScope::ProfileRequired,
+        request_schema: None,
+        response_schema: Some(SchemaReference {
+            rust_type: "PlanMap".to_string(),
+            ts_type: Some("PlanningMap".to_string()),
+            is_primitive: false,
+        }),
+        streaming: StreamingBehavior::None,
+        idempotency: Idempotency::Idempotent,
+        secret_fields: vec![],
+        remote_disposition: RemoteDisposition::RemoteAvailable,
+        local_only_reason: None,
+        documentation: Some(
+            "Reads provider issues and their relations; never writes to the provider.".to_string(),
+        ),
+        cli_command_path: "gah map".to_string(),
+        is_stable: true,
+    });
+}

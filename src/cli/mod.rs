@@ -19,6 +19,7 @@ pub mod commands;
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Map(args) => crate::planning::run(args)?,
         Commands::Setup {
             command: Some(command),
             ..

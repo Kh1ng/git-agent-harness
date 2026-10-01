@@ -51,8 +51,12 @@ import type {
   Skill,
   SkillBindingSummary,
   StatusSnapshot,
-  UsageRollupSummary
+  UsageRollupSummary,
+  PlanningEpicList,
+  PlanningMap,
+  PlanningSettings
 } from '@git-agent-harness/contracts';
+import { DEFAULT_PLANNING_SETTINGS } from '@git-agent-harness/contracts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = resolve(HERE, '../tests/fixtures/gah/responses');
@@ -663,6 +667,38 @@ function bodyString(value: unknown): string | undefined {
 function wait(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
+
+const planningNode = (number: number, title: string, state: PlanningMap['nodes'][number]['state'], depth: number | null, waiting_on: number[] = []) =>
+  ({ number, title, url: `https://github.com/fixture/repo/issues/${number}`, labels: [], state, depth, waiting_on });
+
+/** One epic with every node state, a two-level subtree, and an outside blocker. */
+const MOCK_PLANNING_MAP: PlanningMap = {
+  epic: 900,
+  nodes: [
+    planningNode(900, 'Offline mode', 'parent', 0),
+    planningNode(901, 'Decide the sync model', 'done', 1),
+    planningNode(902, 'Local event store', 'ready', 1),
+    planningNode(903, 'Conflict resolution', 'blocked', 1, [902]),
+    planningNode(904, 'Offline UI', 'parent', 1),
+    planningNode(905, 'Stale data banner', 'ready', 2),
+    planningNode(906, 'Queue view', 'blocked', 2, [903]),
+    planningNode(907, 'Service worker cache', 'blocked', 1, [880]),
+    planningNode(880, 'Upgrade the PWA shell', 'ready', null)
+  ],
+  edges: [
+    { from: 900, to: 901, kind: 'child' }, { from: 900, to: 902, kind: 'child' }, { from: 900, to: 903, kind: 'child' },
+    { from: 900, to: 904, kind: 'child' }, { from: 900, to: 907, kind: 'child' },
+    { from: 904, to: 905, kind: 'child' }, { from: 904, to: 906, kind: 'child' },
+    { from: 901, to: 902, kind: 'blocks' }, { from: 902, to: 903, kind: 'blocks' },
+    { from: 903, to: 906, kind: 'blocks' }, { from: 880, to: 907, kind: 'blocks' }
+  ],
+  frontier: [902, 905],
+  missing: []
+};
+
+const MOCK_PLANNING_EPICS: PlanningEpicList['epics'] = [
+  { number: 900, title: 'Offline mode', url: 'https://github.com/fixture/repo/issues/900', open: true, children: 5, open_children: 4 }
+];
 
 export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   const app = express();
@@ -1656,6 +1692,36 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     } satisfies ChatTranscriptTurn);
     res.status(201).json({ session, existing: false } satisfies ChatIssueStartResult);
   });
+  // Planning (#1241): a fixed epic, in-memory answer settings.
+  const planningSettings = new Map<string, PlanningSettings>();
+  app.get('/api/planning/epics', (_req, res) => res.json({ epics: MOCK_PLANNING_EPICS } satisfies PlanningEpicList));
+  app.get('/api/planning/map', (req, res) => {
+    if (Number(req.query.epic) !== MOCK_PLANNING_MAP.epic) {
+      return jsonError(res, 502, 'map_unavailable', 'Cannot read issues for this project.');
+    }
+    res.json(MOCK_PLANNING_MAP);
+  });
+  app.get('/api/planning/settings', (req, res) => {
+    res.json(planningSettings.get(bodyString(req.query.profile) ?? 'fixture') ?? DEFAULT_PLANNING_SETTINGS);
+  });
+  app.put('/api/planning/settings', (req, res) => {
+    const answers = req.body?.answers === 'file' ? 'file' : req.body?.answers === 'issues' ? 'issues' : null;
+    const path = bodyString(req.body?.path);
+    if (!answers || !path?.endsWith('.md')) return jsonError(res, 400, 'invalid_request', 'Answers go to issues or a .md file.');
+    const settings: PlanningSettings = { answers, path };
+    planningSettings.set(bodyString(req.body?.profile) ?? 'fixture', settings);
+    res.json(settings);
+  });
+  app.post('/api/planning/chats', (req, res) => {
+    const kind = req.body?.kind;
+    const ticket = Number(req.body?.ticket);
+    if (kind !== 'grill' && !(kind === 'ticket' && Number.isInteger(ticket))) {
+      return jsonError(res, 400, 'invalid_request', 'A planning chat is grill or ticket.');
+    }
+    const title = kind === 'ticket' ? `Ticket #${ticket}` : req.body?.epic ? `Plan: #${req.body.epic}` : 'Plan';
+    res.status(201).json(createSession(bodyString(req.body?.profile) ?? 'fixture', bodyString(req.body?.backend), null, title));
+  });
+
   app.get('/api/manager-chat/prs', (_req, res) => res.json({ prs: state.gitPrs }));
   app.post('/api/manager-chat/prs/start', (req, res) => {
     const profile = bodyString(req.body?.profile) ?? 'fixture';

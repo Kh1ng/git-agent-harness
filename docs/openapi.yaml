@@ -44,6 +44,66 @@ tags:
 security: [{ nodeAuth: [] }]
 
 paths:
+  /api/planning/epics:
+    get:
+      operationId: planning.epics
+      summary: List the issues a central-node profile can map (parents, or labelled epic or wayfinder:map)
+      description: Types in packages/contracts/src/planning.ts. Read-only; runs `gah map --json`. Cached for 60 seconds.
+      parameters:
+        - { name: profile, in: query, required: true, schema: { type: string } }
+        - { name: refresh, in: query, schema: { type: string, enum: ["1"] } }
+      responses:
+        "200": { description: PlanningEpicList }
+        "502": { description: The provider could not be read }
+  /api/planning/map:
+    get:
+      operationId: planning.map
+      summary: Read one epic as nodes, child and blocker edges, and the frontier
+      parameters:
+        - { name: profile, in: query, required: true, schema: { type: string } }
+        - { name: epic, in: query, required: true, schema: { type: integer, minimum: 1 } }
+        - { name: refresh, in: query, schema: { type: string, enum: ["1"] } }
+      responses:
+        "200": { description: PlanningMap }
+        "502": { description: The provider could not be read }
+  /api/planning/settings:
+    get:
+      operationId: planning.settings.get
+      summary: Where grill-me records answers for a profile (issues, or a repository Markdown file)
+      parameters:
+        - { name: profile, in: query, required: true, schema: { type: string } }
+      responses:
+        "200": { description: PlanningSettings }
+    put:
+      operationId: planning.settings.set
+      summary: Choose where grill-me records answers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile, answers, path]
+              properties:
+                profile: { type: string }
+                answers: { type: string, enum: [issues, file] }
+                path: { type: string, description: Repository-relative path ending in .md }
+      responses:
+        "200": { description: PlanningSettings }
+        "400": { description: Invalid answers mode or path }
+  /api/planning/chats:
+    post:
+      operationId: planning.chats.start
+      summary: Start a grill-me chat or a ticket discussion seeded with the map
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { description: PlanningChatRequest }
+      responses:
+        "201": { description: ChatSessionSummary }
+        "400": { description: Invalid request }
+        "422": { description: The chat session could not be created }
   /api/pm/plans:
     get:
       operationId: pm.plans.list

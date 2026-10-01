@@ -1,11 +1,31 @@
 //! Install the bundled memory hook and merge opt-in tool configuration.
-use crate::cli::args::SetupCommands;
 use anyhow::{bail, Context, Result};
+use clap::Subcommand;
 use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
 };
+
+/// Machine-local, explicitly requested integrations.
+#[derive(Subcommand)]
+pub enum SetupCommands {
+    /// Install shared memory hooks without replacing existing tool hooks.
+    MemoryHooks {
+        /// Tools to configure. Repeat this flag or use comma-separated names.
+        #[arg(long, required = true, value_delimiter = ',', value_parser = ["claude", "codex", "hermes"])]
+        tool: Vec<String>,
+        /// Target home directory (defaults to the current user's home).
+        #[arg(long)]
+        home_dir: Option<PathBuf>,
+        /// Python 3.10+ interpreter; Hermes setup uses its installed Python by default.
+        #[arg(long)]
+        python: Option<PathBuf>,
+        /// Memory gateway address, without credentials. Omit to retain existing setup.
+        #[arg(long)]
+        gateway_url: Option<String>,
+    },
+}
 
 pub fn run(command: SetupCommands) -> Result<()> {
     let SetupCommands::MemoryHooks {

@@ -87,6 +87,18 @@ export function appendEvents(profile: string, events: ChatSessionEvent[], opts: 
   appendFileSync(path, payload, 'utf8');
 }
 
+/** Opens a new session's log with `text` as its first, already-answered user
+ * turn: rendered in the transcript and replayed into every backend's context.
+ * PR, issue, and planning chats start this way. */
+export function seedOpeningMessage(profile: string, text: string, opts: SessionLogOptions): void {
+  const now = Date.now();
+  appendEvents(profile, [
+    { type: 'turn/start', seq: 1, turn: 1, timestamp: now },
+    { type: 'user/message', seq: 2, turn: 1, text, source: 'prompt', timestamp: now },
+    { type: 'turn/end', seq: 3, turn: 1, reason: { kind: 'complete' }, timestamp: now }
+  ], opts);
+}
+
 /** The log's allocation rule: sequence numbers continue after the highest
  * recorded seq, and the current turn is the highest recorded turn. */
 export function nextSeqAndTurn(events: ChatSessionEvent[]): { seq: number; turn: number } {

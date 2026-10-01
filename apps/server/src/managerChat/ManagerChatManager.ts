@@ -30,7 +30,7 @@ import {
   setReasoningEffortOverrideForProfile
 } from './settingsStore.js';
 import { effectiveContextPolicy, applyContextBudget } from '../gatewaySettingsStore.js';
-import { appendEvents, createEventWriter, deriveModelHistory, foldSession, loadLog, nextSeqAndTurn, type SessionLogOptions } from './sessionLog.js';
+import { appendEvents, createEventWriter, deriveModelHistory, foldSession, loadLog, nextSeqAndTurn, seedOpeningMessage, type SessionLogOptions } from './sessionLog.js';
 import {
   archiveSession,
   chatTitleFromText,
@@ -499,6 +499,23 @@ export async function startChatFromPr(
       )
     } : {})
   });
+}
+
+/** Planning (#1241): a session opened with `seed.text` as its first message.
+ * Only central projects: the map reads the central node's own profiles. */
+export async function startSeededChat(
+  profile: string,
+  seed: { title: string; text: string; worktree: boolean },
+  backend?: string
+) {
+  if (profile.startsWith('gah-node:')) throw new Error('Planning works on projects configured on this node.');
+  const profileInfo = await findProfileInfo(profile);
+  if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
+  const session = await createSession({
+    profile, profileInfo, backend: backend ?? backendForProfile(profile), model: null, title: seed.title, worktree: seed.worktree
+  }, chatSessionStoreOptions);
+  seedOpeningMessage(profile, seed.text, { stateDir: chatSessionStoreOptions.stateDir, sessionId: session.id });
+  return session;
 }
 
 export async function listCommandsForProfile(profile: string, nodeId?: string): Promise<ManagerCommandInfo[]> {

@@ -10,7 +10,8 @@ import {
   X,
   MessageSquare,
   GitBranch,
-  Server
+  Server,
+  Orbit
 } from 'lucide-react';
 import type { Page } from '../App.js';
 
@@ -26,6 +27,7 @@ const navItems: { id: Page; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'chat', label: 'Chat', icon: MessageSquare },
   { id: 'git', label: 'Git', icon: GitBranch },
+  { id: 'planning', label: 'Planning', icon: Orbit },
   { id: 'nodes', label: 'Nodes', icon: Server },
   { id: 'work', label: 'Factory', icon: ListChecks },
   { id: 'telemetry', label: 'Telemetry', icon: BarChart3 },
