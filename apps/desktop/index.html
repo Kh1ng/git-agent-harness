@@ -23,6 +23,9 @@
       table { width: 100%; border-collapse: collapse; font-size: .875rem; font-variant-numeric: tabular-nums; } th, td { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid #232936; }
       #error { color: #ffb4b4; } #status:empty, #error:empty { display: none; } [hidden] { display: none !important; }
       .actions { display: flex; gap: .75rem; flex-wrap: wrap; }
+      .checklist { list-style: none; padding: 0; margin: .5rem 0 0; } .checklist li { padding: .35rem 0; border-bottom: 1px solid #232936; }
+      .checklist .mark { display: inline-block; width: 1.5rem; } .checklist .ok { color: #9be09b; } .checklist .missing { color: #ffb4b4; } .checklist .optional { color: #b4bdcc; }
+      .checklist small { display: block; color: #b4bdcc; margin-left: 1.5rem; } code { font-size: .875rem; background: #11151f; padding: .1rem .3rem; border-radius: .25rem; overflow-wrap: anywhere; }
       @media (prefers-reduced-motion: reduce) { button { transition: none; } }
     </style>
   </head>
@@ -31,6 +34,16 @@
       <button id="back" type="button">← Back to Settings</button>
       <h1>Settings · This computer</h1>
       <p>Change this computer’s connection, app presence, and worker. Pair devices and manage central from the dashboard’s Settings page.</p>
+      <section id="setup-section" aria-labelledby="setup-heading">
+        <h2 id="setup-heading">Set up this computer</h2>
+        <p id="setup-state" role="status">Checking what this computer has…</p>
+        <ul id="setup-list" class="checklist" hidden></ul>
+        <p id="setup-command" hidden>Run in a terminal: <code></code></p>
+        <div class="actions">
+          <button id="setup-terminal" type="button" hidden>Finish setup in Terminal</button>
+          <button id="setup-refresh" type="button">Check again</button>
+        </div>
+      </section>
       <h2>Connection</h2>
       <form id="connection">
         <label for="central-url">Central node address</label>

@@ -87,29 +87,10 @@ fi
 
 upsert_env_line() {
   local file="$1" key="$2" value="$3" as="$4"
-  # Quote for both shell sourcing and systemd EnvironmentFile. Values travel
-  # through stdin, never sed replacement syntax or process arguments.
-  printf '%s\0%s' "$key" "$value" | $as python3 -c '
-import os, pathlib, sys, tempfile
-key, value = sys.stdin.read().split("\0", 1)
-if any(ord(c) < 32 or ord(c) == 127 for c in value):
-    raise SystemExit("ERROR: gateway environment values must not contain control characters.")
-for character in ["\\", "\"", "$", "`"]:
-    value = value.replace(character, "\\" + character)
-path = pathlib.Path(sys.argv[1])
-path.parent.mkdir(parents=True, exist_ok=True)
-lines = path.read_text().splitlines() if path.exists() else []
-lines = [line for line in lines if not line.startswith(key + "=")]
-lines.append(key + "=\"" + value + "\"")
-fd, temporary = tempfile.mkstemp(dir=path.parent)
-try:
-    with os.fdopen(fd, "w") as output:
-        output.write("\n".join(lines) + "\n")
-    os.replace(temporary, path)
-finally:
-    if os.path.exists(temporary):
-        os.unlink(temporary)
-' "$file"
+  # Quoted for both shell sourcing and systemd EnvironmentFile. The value
+  # travels on stdin, never in sed replacement syntax or process arguments;
+  # sudo needs gah's full path.
+  printf '%s' "$value" | $as "$(command -v gah || echo "$HOME/.cargo/bin/gah")" installer env-set --file "$file" "$key"
 }
 
 # Used by both the remote and colocated branches below so they can't drift
@@ -253,7 +234,7 @@ fi
 if [ -n "${GAH_IMPORT_REPO:-}" ]; then
   : "${GAH_IMPORT_SESSION_KEY:?GAH_IMPORT_REPO requires GAH_IMPORT_SESSION_KEY (e.g. gah:manager:github.com/org/repo)}"
   echo "Importing project context from $GAH_IMPORT_REPO under $GAH_IMPORT_SESSION_KEY..."
-  python3 "$repo_root/scripts/backfill_project_docs.py" \
+  "$(command -v gah || echo "$HOME/.cargo/bin/gah")" installer import-docs \
     --repo "$GAH_IMPORT_REPO" \
     --session-key "$GAH_IMPORT_SESSION_KEY" \
     ${GAH_IMPORT_DOCS:+--docs "$GAH_IMPORT_DOCS"}

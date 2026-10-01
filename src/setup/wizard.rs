@@ -725,7 +725,6 @@ mod tests {
                 true,
                 "✓ Logged in to github.com account octo",
             )
-            .with("python3 --version", true, "Python 3.11.2")
             .with("curl --version", true, "curl 8.5.0")
             .with("systemctl --version", true, "systemd 255")
             .with("tailscale version", true, "1.76.0")

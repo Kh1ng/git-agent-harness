@@ -170,7 +170,7 @@ npm run --workspace=apps/server typecheck
 npm run --workspace=apps/web typecheck
 npm run --workspace=apps/desktop typecheck
 npm exec tsx -- --test apps/server/src/nodeSetup.test.ts apps/server/src/fleetDispatch.test.ts
-python3 scripts/test-wsl-worker-config.py
+cargo test --test installer_scripts
 pwsh -NoProfile -File scripts/test-windows-installer.ps1
 CARGO_BUILD_JOBS=1 cargo test --manifest-path apps/desktop/Cargo.toml --bin gah-desktop -- --test-threads=1
 CARGO_BUILD_JOBS=1 cargo clippy --manifest-path apps/desktop/Cargo.toml --bin gah-desktop -- -D warnings
@@ -197,6 +197,7 @@ Native Windows agent execution remains outside this setup. Agents run inside WSL
 tracked source export, and rejection of ambiguous installers or stale output directories.
 Windows CI runs `scripts/test-windows-installer.ps1` against malformed and mixed bundles.
 
-`python3 scripts/test-worker-installers.py` executes the Linux and macOS shell entrypoints
-in a scratch home. Strict command substitutes verify setup order and prohibit privileged
-or central setup on workers. This does not prove a Cargo installation or service startup.
+`cargo test --test installer_scripts` runs the Linux, macOS, and WSL shell installers
+against the built `gah` in a scratch home. Strict command substitutes verify setup order,
+private credentials, and LaunchAgent contents, and prohibit privileged or central setup on
+workers. This does not prove a Cargo installation or service startup.

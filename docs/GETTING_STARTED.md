@@ -64,12 +64,21 @@ settings are environment variables, documented in
 [OPERATIONS.md](OPERATIONS.md); run it directly only if you already know
 which ones you need.
 
+### The desktop app (macOS)
+
+The GAH app from the releases page opens on **Set up this computer**: the
+same checklist `gah setup --check` prints. **Install GAH in Terminal** (or
+**Finish setup in Terminal** once GAH is installed) runs the paste line or
+`gah setup` in Terminal, where it can ask questions and request your
+password. **Check again** refreshes the list afterwards. With a GitHub
+login in `gh`, the app's paste line also works while the repository is
+private.
+
 ### Windows
 
 The desktop app and its WSL worker install from the releases page; see the
-[Windows tester guide](WINDOWS_TESTER_GUIDE.md). A guided installer for
-Windows and macOS that runs the same checks is planned. Until it ships, use
-the paste line on macOS.
+[Windows tester guide](WINDOWS_TESTER_GUIDE.md). The worker runs inside WSL,
+so its setup happens there rather than in the app's checklist.
 
 ## What each choice needs
 
@@ -86,7 +95,6 @@ code, so it cannot fall out of date.
 | Your coding agent's login | Everything | The agent needs its own account to do any work. |
 | `gh` (GitHub) or `glab` (GitLab) | Everything | Reads issues and opens pull requests on your repositories. |
 | `gh` or `glab` login | Everything | Lets GAH read issues and push branches as you. |
-| Python 3 | Dashboard, Worker | The service installer uses it to write its settings files. |
 | curl | Dashboard, Worker | The installer uses it to check that services came up. |
 | systemd (Linux) or launchd (macOS) | Dashboard, Worker | Keeps the GAH server running and restarts it after a reboot. |
 | Tailscale | Dashboard, Worker (recommended) | Reach the dashboard from your phone and other machines over HTTPS, privately. |

@@ -93,6 +93,9 @@ pub enum PmCommands {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// The install scripts' file work (environment files, LaunchAgents, WSL).
+    #[command(hide = true, subcommand)]
+    Installer(crate::installer::Command),
     /// Read-only planning map of an epic: its issues, blockers, and the work
     /// that can start now. Without --epic, lists the issues that can be mapped.
     Map(crate::planning::Args),

@@ -90,6 +90,25 @@ pub(super) fn add_policy_operations(manifest: &mut CapabilityManifest) {
     });
 
     manifest.add_operation(OperationDefinition {
+        operation_id: "installer.files".to_string(),
+        display_name: "Installer File Support".to_string(),
+        class: OperationClass::Mutation,
+        profile_scope: ProfileScope::Global,
+        request_schema: None,
+        response_schema: None,
+        streaming: StreamingBehavior::None,
+        idempotency: Idempotency::Idempotent,
+        secret_fields: vec![],
+        remote_disposition: RemoteDisposition::LocalOnly,
+        local_only_reason: Some(LocalOnlyReason::FilesystemAccessRequired),
+        documentation: Some(
+            "Write the environment files, LaunchAgents, and WSL worker files the install scripts own".to_string(),
+        ),
+        cli_command_path: "gah installer".to_string(),
+        is_stable: true,
+    });
+
+    manifest.add_operation(OperationDefinition {
         operation_id: "setup.guided".to_string(),
         display_name: "Guided Setup".to_string(),
         class: OperationClass::Mutation,

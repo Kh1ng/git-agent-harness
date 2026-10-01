@@ -531,6 +531,22 @@
       "cli_command_path": "gah init",
       "is_stable": true
     },
+    "installer.files": {
+      "operation_id": "installer.files",
+      "display_name": "Installer File Support",
+      "class": "mutation",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "filesystem_access_required",
+      "documentation": "Write the environment files, LaunchAgents, and WSL worker files the install scripts own",
+      "cli_command_path": "gah installer",
+      "is_stable": true
+    },
     "ledger.clear_attempts": {
       "operation_id": "ledger.clear_attempts",
       "display_name": "Clear Ledger Attempts",
@@ -1214,6 +1230,7 @@
     "gah hold clear": "hold.clear",
     "gah hold set": "hold.set",
     "gah init": "init.create",
+    "gah installer": "installer.files",
     "gah ledger clear-attempts": "ledger.clear_attempts",
     "gah ledger reconcile": "ledger.reconcile",
     "gah ledger repair-tail": "ledger.repair_tail",
@@ -1308,6 +1325,7 @@
     "auth.health": "local_backend_execution_required",
     "candidates.convert": "filesystem_access_required",
     "init.create": "filesystem_access_required",
+    "installer.files": "filesystem_access_required",
     "loop.run": "local_backend_execution_required",
     "node.register": "security_sensitive",
     "notify.send": "security_sensitive",

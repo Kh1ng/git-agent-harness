@@ -16,6 +16,8 @@ label="$server_label"
 domain="gui/${GAH_LAUNCHD_UID:-$(id -u)}"
 agents_dir="${GAH_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
 plist="$agents_dir/$label.plist"
+# gah writes and reads the agents' files (`gah installer`).
+cli="${GAH_CLI_PATH:-$(command -v gah || echo "$HOME/.cargo/bin/gah")}"
 
 run_launchctl() {
   if [ "${GAH_LAUNCHD_DRY_RUN:-}" != 1 ]; then launchctl "$@"; fi
@@ -31,7 +33,7 @@ bootstrap_agent() {
 }
 
 plist_value() {
-  /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$1" "$plist"
+  "$cli" installer plist-get --file "$plist" "$1"
 }
 
 # Startup time varies with the machine and with what the server loads first,
@@ -76,19 +78,21 @@ register_worker() {
   printf '%s\n' "$registration"
   central_url="$(printf '%s\n' "$registration" | sed -n 's/^Registered node against //p' | tail -n 1)"
   [ -n "$central_url" ] || { echo 'ERROR: gah node register did not report the central URL.' >&2; return 1; }
-  node_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["node_id"])' "$identity_path")"
+  node_id="$("$cli" installer json --file "$identity_path" --pointer /node_id)"
   health_url="${central_url%/}/api/registry/nodes/$node_id/health"
   health_args=(-fsS -m 15)
   [ -z "${COORDINATOR_TOKEN:-}" ] || health_args+=(-H "Authorization: Bearer $COORDINATOR_TOKEN")
   health=''
   for _ in 1 2 3; do
     health="$(/usr/bin/curl "${health_args[@]}" "$health_url" 2>/dev/null || true)"
-    if printf '%s' "$health" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("status") == "healthy" else 1)' 2>/dev/null; then
+    if [ "$(printf '%s' "$health" | "$cli" installer json --pointer /status 2>/dev/null || true)" = healthy ]; then
       return
     fi
     sleep 1
   done
-  detail="$(printf '%s' "$health" | python3 -c 'import json,sys; value=json.load(sys.stdin); error=value.get("error") or {}; print(error.get("message") or value.get("state") or "no health response")' 2>/dev/null || echo 'no health response')"
+  detail="$(printf '%s' "$health" | "$cli" installer json --pointer /error/message 2>/dev/null \
+    || printf '%s' "$health" | "$cli" installer json --pointer /state 2>/dev/null \
+    || echo 'no health response')"
   echo "ERROR: central registered this worker but cannot reach its advertised URL: $detail" >&2
   return 1
 }
@@ -111,9 +115,9 @@ disable_worker_transport() {
   run_launchctl bootout "$domain/$tunnel_label" >/dev/null 2>&1 || true
   worker_plist="$agents_dir/$worker_label.plist"
   [ -f "$worker_plist" ] || return 0
-  [ "$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:GAH_TAILSCALE_SERVE' "$worker_plist" 2>/dev/null || true)" = 1 ] || return 0
-  tailscale_path="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:GAH_TAILSCALE_CLI' "$worker_plist")"
-  port="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:PORT' "$worker_plist")"
+  [ "$("$cli" installer plist-get --file "$worker_plist" GAH_TAILSCALE_SERVE 2>/dev/null || true)" = 1 ] || return 0
+  tailscale_path="$("$cli" installer plist-get --file "$worker_plist" GAH_TAILSCALE_CLI)"
+  port="$("$cli" installer plist-get --file "$worker_plist" PORT)"
   "$tailscale_path" serve --https="$port" off >/dev/null 2>&1 || true
 }
 
@@ -149,6 +153,7 @@ node_path="${GAH_NODE_PATH:-$(command -v node || true)}"
 gah_path="${GAH_CLI_PATH:-$(command -v gah || true)}"
 if [ -z "$node_path" ]; then echo "ERROR: node is required for $role mode" >&2; exit 1; fi
 if [ "$role" = worker ] && [ -z "$gah_path" ]; then echo 'ERROR: gah is required for worker mode' >&2; exit 1; fi
+[ -x "$cli" ] || { echo "ERROR: gah is required to write the LaunchAgents (looked for $cli)." >&2; exit 1; }
 
 explicit_port="${GAH_DESKTOP_SERVER_PORT:-}"
 port="$explicit_port"
@@ -165,7 +170,7 @@ if [ "$role" = worker ] && [ -z "$advertised_url" ] && [ -f "$plist" ]; then
   advertised_url="$(plist_value GAH_NODE_ADVERTISED_URL 2>/dev/null || true)"
 fi
 if [ "$role" = worker ] && [ -z "$advertised_url" ] && [ -f "$worker_identity" ]; then
-  advertised_url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("advertised_url", ""))' "$worker_identity" 2>/dev/null || true)"
+  advertised_url="$("$cli" installer json --file "$worker_identity" --pointer /advertised_url 2>/dev/null || true)"
 fi
 if [ "$role" = worker ] && [ -z "$explicit_advertised_url" ] && [ -z "$transport_mode" ] && [ -f "$plist" ]; then
   transport_mode="$(plist_value GAH_REGISTRY_TRANSPORT_MODE 2>/dev/null || true)"
@@ -183,207 +188,18 @@ if [ -z "$tailscale_path" ] && [ -x /Applications/Tailscale.app/Contents/MacOS/T
 fi
 if [ "$role" = worker ] && [ -z "$advertised_url" ]; then
   [ -n "$tailscale_path" ] || { echo 'ERROR: Tailscale is required for a macOS worker.' >&2; exit 1; }
-  tailscale_ip="$($tailscale_path status --json | python3 -c 'import json,sys; print(next((value for value in json.load(sys.stdin)["Self"]["TailscaleIPs"] if ":" not in value), ""))')"
+  tailscale_ip="$("$tailscale_path" status --json | "$cli" installer json --pointer /Self/TailscaleIPs --lines | grep -v : | head -n 1 || true)"
   [ -n "$tailscale_ip" ] || { echo 'ERROR: cannot find this Mac tailnet IPv4 address.' >&2; exit 1; }
   advertised_url="http://$tailscale_ip:$port"
 fi
 
-export GAH_LAUNCHD_ACTION="$action" GAH_LAUNCHD_ROLE="$role" GAH_LAUNCHD_REPO="$repo"
-export GAH_LAUNCHD_PROFILE="$profile" GAH_LAUNCHD_PLIST="$plist" GAH_LAUNCHD_LABEL="$label"
-export GAH_LAUNCHD_NODE="$node_path" GAH_LAUNCHD_GAH="$gah_path"
-export GAH_LAUNCHD_PORT="$port" GAH_LAUNCHD_ADVERTISED_URL="$advertised_url"
-export GAH_LAUNCHD_TAILSCALE="$tailscale_path"
-export GAH_LAUNCHD_TRANSPORT_MODE="$transport_mode"
-export GAH_LAUNCHD_TUNNEL_TARGET="$tunnel_target" GAH_LAUNCHD_TUNNEL_REMOTE_PORT="$tunnel_remote_port"
-export GAH_LAUNCHD_NPX="${GAH_NPX_PATH:-$(command -v npx || true)}"
-python3 - <<'PY'
-import ipaddress, json, os, pathlib, plistlib, socket, tempfile, urllib.parse, uuid
-
-def replace_file(path, data, mode):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(dir=path.parent)
-    try:
-        with os.fdopen(fd, 'wb') as output:
-            output.write(data)
-        os.chmod(temporary, mode)
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary): os.unlink(temporary)
-
-home = pathlib.Path.home()
-repo = pathlib.Path(os.environ['GAH_LAUNCHD_REPO'])
-role = os.environ['GAH_LAUNCHD_ROLE']
-profile = os.environ['GAH_LAUNCHD_PROFILE']
-label = os.environ['GAH_LAUNCHD_LABEL']
-plist_path = pathlib.Path(os.environ['GAH_LAUNCHD_PLIST'])
-port = os.environ['GAH_LAUNCHD_PORT']
-if not port.isdigit() or not 1024 <= int(port) <= 65535:
-    raise SystemExit('ERROR: GAH_DESKTOP_SERVER_PORT must be between 1024 and 65535')
-for value in [str(repo), profile, os.environ['GAH_LAUNCHD_ADVERTISED_URL']]:
-    if any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise SystemExit('ERROR: launchd values must not contain control characters')
-
-worker_identity = home / '.local/share/gah/worker/identity.json'
-worker_host = ''
-worker_transport = ''
-tailscale_serve = False
-if role == 'worker':
-    advertised_url = os.environ['GAH_LAUNCHD_ADVERTISED_URL']
-    parsed = urllib.parse.urlsplit(advertised_url)
-    if parsed.scheme not in ('http', 'https') or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ('', '/'):
-        raise SystemExit('ERROR: GAH_NODE_ADVERTISED_URL must be an HTTP(S) origin without credentials or a path')
-    transport_override = os.environ['GAH_LAUNCHD_TRANSPORT_MODE']
-    loopback = False
-    try:
-        loopback = ipaddress.ip_address(parsed.hostname or '').is_loopback
-    except ValueError:
-        pass
-    worker_transport = transport_override or ('loopback' if loopback else 'authenticated_remote' if parsed.scheme == 'https' else 'trusted_lan')
-    if worker_transport not in ('loopback', 'authenticated_remote', 'trusted_lan'):
-        raise SystemExit('ERROR: GAH_NODE_TRANSPORT_MODE must be loopback, authenticated_remote, or trusted_lan')
-    if worker_transport != 'loopback' and parsed.port != int(port):
-        raise SystemExit('ERROR: a non-loopback GAH_NODE_ADVERTISED_URL must use GAH_DESKTOP_SERVER_PORT')
-    if worker_transport == 'loopback':
-        if parsed.scheme != 'http' or not loopback:
-            raise SystemExit('ERROR: loopback transport requires an http://127.0.0.1 advertised URL')
-        worker_host = '127.0.0.1'
-    elif worker_transport == 'authenticated_remote':
-        if parsed.scheme != 'https':
-            raise SystemExit('ERROR: authenticated_remote transport requires an HTTPS advertised URL')
-        if not os.environ['GAH_LAUNCHD_TAILSCALE']:
-            raise SystemExit('ERROR: Tailscale is required for an HTTPS macOS worker')
-        worker_host = '127.0.0.1'
-        tailscale_serve = True
-    else:
-        if parsed.scheme != 'http':
-            raise SystemExit('ERROR: trusted_lan transport requires an HTTP advertised URL')
-        try:
-            worker_host = str(ipaddress.IPv4Address(parsed.hostname or ''))
-        except ipaddress.AddressValueError:
-            raise SystemExit('ERROR: an HTTP GAH_NODE_ADVERTISED_URL must use this Mac IPv4 address')
-    legacy_identity = repo / 'config/coordinator-identity.json'
-    identity_source = worker_identity if worker_identity.exists() else legacy_identity
-    try:
-        identity = json.loads(identity_source.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        identity = {}
-    identity.update(
-        node_id=identity.get('node_id') or str(uuid.uuid4()),
-        display_name=(identity.get('display_name') if identity.get('display_name') != 'GAH Coordinator' else None) or socket.gethostname(),
-        advertised_url=advertised_url,
-    )
-    replace_file(worker_identity, (json.dumps(identity, indent=2) + '\n').encode(), 0o600)
-
-settings_path = home / '.config/gah/desktop.json'
-try:
-    settings = json.loads(settings_path.read_text())
-except (FileNotFoundError, json.JSONDecodeError):
-    settings = {}
-gateway_repo = os.environ.get('GAH_GATEWAY_MEMORYCORE_PATH') or settings.get('gateway_repository_path', '')
-settings.update(repository_path=str(repo), server_port=int(port))
-if os.environ.get('GAH_GATEWAY_MEMORYCORE_PATH'):
-    settings['gateway_repository_path'] = str(pathlib.Path(gateway_repo).resolve())
-replace_file(settings_path, (json.dumps(settings, indent=2) + '\n').encode(), 0o600)
-
-path = os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin')
-common = {
-    'Label': label,
-    'WorkingDirectory': str(repo),
-    'ProcessType': 'Background',
-    'StandardOutPath': str(home / f'.local/state/gah/{role}.log'),
-    'StandardErrorPath': str(home / f'.local/state/gah/{role}.log'),
-}
-if role == 'central':
-    server = repo / 'apps/server/dist/bin.js'
-    web = repo / 'apps/web/dist/index.html'
-    if not server.is_file() or not web.is_file():
-        raise SystemExit('ERROR: central build is missing; run gah update --role central first')
-    source = 'set -a; [ ! -f "$HOME/.config/gah/server.env" ] || . "$HOME/.config/gah/server.env"; [ ! -f "$HOME/.config/gah/tdai-gateway.env" ] || . "$HOME/.config/gah/tdai-gateway.env"; set +a; exec "$0" "$1"'
-    common.update(
-        ProgramArguments=['/bin/bash', '-lc', source, os.environ['GAH_LAUNCHD_NODE'], str(server)],
-        EnvironmentVariables={
-            'HOME': str(home), 'PATH': path, 'NODE_ENV': 'production', 'HOST': '127.0.0.1',
-            'PORT': port, 'GAH_CONFIG_PATH': str(home / '.config/gah/config.toml'),
-            'GAH_WEB_ROOT': str(repo / 'apps/web/dist'), 'GAH_ENABLE_ADMIN_UPDATE': '1',
-        },
-        RunAtLoad=True,
-        KeepAlive=True,
-        ThrottleInterval=5,
-    )
-else:
-    server = repo / 'apps/server/dist/bin.js'
-    if not server.is_file():
-        raise SystemExit('ERROR: worker build is missing; run gah update --role worker first')
-    source = 'set -a; [ ! -f "$HOME/.config/gah/gah-loop.env" ] || . "$HOME/.config/gah/gah-loop.env"; set +a; export GAH_COORDINATOR_IDENTITY_PATH="$2"; exec "$0" "$1"'
-    common.update(
-        ProgramArguments=['/bin/bash', '-c', source, os.environ['GAH_LAUNCHD_NODE'], str(server), str(worker_identity)],
-        EnvironmentVariables={
-            'HOME': str(home), 'PATH': path, 'NODE_ENV': 'production', 'HOST': worker_host,
-            'PORT': port, 'GAH_CONFIG': str(home / '.config/gah/config.toml'),
-            'GAH_CONFIG_PATH': str(home / '.config/gah/config.toml'),
-            'GAH_BINARY': os.environ['GAH_LAUNCHD_GAH'],
-            'GAH_COORDINATOR_IDENTITY_PATH': str(worker_identity),
-            'GAH_NODE_ADVERTISED_URL': advertised_url,
-            'GAH_ALLOW_INSECURE_HTTP': '1' if worker_transport == 'trusted_lan' else '0',
-            'GAH_REGISTRY_TRANSPORT_MODE': worker_transport,
-            'GAH_TAILSCALE_CLI': os.environ['GAH_LAUNCHD_TAILSCALE'],
-            'GAH_TAILSCALE_SERVE': '1' if tailscale_serve else '0',
-            'XDG_STATE_HOME': str(home / '.local/state'),
-            'TMPDIR': str(home / '.cache/gah/tmp'),
-        },
-        RunAtLoad=False,
-        KeepAlive=True,
-        ThrottleInterval=5,
-    )
-
-tunnel_plist = plist_path.parent / 'dev.git-agent-harness.worker-tunnel.plist'
-tunnel_target = os.environ['GAH_LAUNCHD_TUNNEL_TARGET']
-if role == 'worker' and tunnel_target:
-    remote_port = os.environ['GAH_LAUNCHD_TUNNEL_REMOTE_PORT']
-    if any(character.isspace() for character in tunnel_target) or tunnel_target.startswith('-'):
-        raise SystemExit('ERROR: GAH_NODE_SSH_TARGET must be one SSH destination without options')
-    if not remote_port.isdigit() or not 1024 <= int(remote_port) <= 65535:
-        raise SystemExit('ERROR: GAH_NODE_SSH_REMOTE_PORT must be between 1024 and 65535')
-    if worker_transport != 'loopback' or urllib.parse.urlsplit(advertised_url).port != int(remote_port):
-        raise SystemExit('ERROR: an SSH tunnel requires loopback transport and an advertised URL on its remote port')
-    tunnel = {
-        'Label': 'dev.git-agent-harness.worker-tunnel',
-        'ProgramArguments': ['/usr/bin/ssh', '-NT', '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes',
-            '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3',
-            '-R', f'127.0.0.1:{remote_port}:127.0.0.1:{port}', tunnel_target],
-        'EnvironmentVariables': {'HOME': str(home), 'PATH': path},
-        'RunAtLoad': False, 'KeepAlive': True, 'ThrottleInterval': 5, 'ProcessType': 'Background',
-        'StandardOutPath': str(home / '.local/state/gah/worker-tunnel.log'),
-        'StandardErrorPath': str(home / '.local/state/gah/worker-tunnel.log'),
-    }
-    replace_file(tunnel_plist, plistlib.dumps(tunnel, sort_keys=False), 0o644)
-elif role == 'central' or (role == 'worker' and worker_transport != 'loopback'):
-    tunnel_plist.unlink(missing_ok=True)
-
-replace_file(plist_path, plistlib.dumps(common, sort_keys=False), 0o644)
-
-gateway_plist = plist_path.parent / 'dev.git-agent-harness.memory-gateway.plist'
-if role == 'central' and gateway_repo:
-    gateway_repo = pathlib.Path(gateway_repo).resolve()
-    gateway_server = gateway_repo / 'src/gateway/server.ts'
-    gateway_config = gateway_repo / 'tdai-gateway.local.yaml'
-    gateway_env = home / '.config/gah/tdai-gateway.env'
-    npx = os.environ['GAH_LAUNCHD_NPX']
-    if not gateway_server.is_file() or not gateway_config.is_file() or not gateway_env.is_file() or not npx:
-        raise SystemExit('ERROR: the saved TDAI gateway is incomplete; rerun install-macos.sh with GAH_GATEWAY_MODE=colocated')
-    gateway = {
-        'Label': 'dev.git-agent-harness.memory-gateway',
-        'ProgramArguments': ['/bin/bash', '-lc', 'set -a; . "$HOME/.config/gah/tdai-gateway.env"; set +a; exec "$0" tsx src/gateway/server.ts', npx],
-        'WorkingDirectory': str(gateway_repo),
-        'EnvironmentVariables': {'HOME': str(home), 'PATH': path, 'TDAI_GATEWAY_CONFIG': str(gateway_config)},
-        'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 5, 'ProcessType': 'Background',
-        'StandardOutPath': str(home / '.local/state/gah/memory-gateway.log'),
-        'StandardErrorPath': str(home / '.local/state/gah/memory-gateway.log'),
-    }
-    replace_file(gateway_plist, plistlib.dumps(gateway, sort_keys=False), 0o644)
-elif role == 'worker':
-    gateway_plist.unlink(missing_ok=True)
-PY
+"$cli" installer launchd \
+  --role "$role" --repo "$repo" --profile "$profile" --label "$label" --plist "$plist" \
+  --node "$node_path" --gah "$gah_path" --port "$port" --advertised-url "$advertised_url" \
+  --tailscale "$tailscale_path" --transport-mode "$transport_mode" \
+  --tunnel-target="$tunnel_target" --tunnel-remote-port="$tunnel_remote_port" \
+  --npx "${GAH_NPX_PATH:-$(command -v npx || true)}" \
+  --memorycore "${GAH_GATEWAY_MEMORYCORE_PATH:-}"
 
 other="$worker_label"
 [ "$role" = worker ] && other="$server_label"

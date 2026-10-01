@@ -38,6 +38,75 @@ function showRole(result: RoleStatus) {
 }
 
 
+type SetupStatus = { state: 'ok' | 'missing' | 'outdated' | 'not_logged_in' | 'unsupported'; found?: string; reason?: string };
+type SetupRequirement = { id: string; label: string; why: string; optional: boolean; status: SetupStatus; action: { command: string; sudo: boolean } | null };
+type SetupCheck = {
+  installed: boolean;
+  report: { ready: boolean; requirements: SetupRequirement[] } | null;
+  error: string | null;
+  command: string;
+  terminal: boolean;
+};
+let nodeRole: 'central' | 'worker' = 'central';
+
+function statusText(status: SetupStatus): string {
+  switch (status.state) {
+    case 'ok': return status.found ? `found ${status.found}` : 'ready';
+    case 'missing': return 'missing';
+    case 'outdated': return `too old (found ${status.found})`;
+    case 'not_logged_in': return 'not logged in';
+    case 'unsupported': return status.reason ?? 'not supported here';
+  }
+}
+
+/** `gah setup --check` as a checklist; the work itself happens in Terminal. */
+async function refreshSetup() {
+  const result = await invoke<SetupCheck>('setup_check', { role: nodeRole });
+  const state = document.querySelector<HTMLElement>('#setup-state')!;
+  const list = document.querySelector<HTMLElement>('#setup-list')!;
+  const button = document.querySelector<HTMLButtonElement>('#setup-terminal')!;
+  const commandLine = document.querySelector<HTMLElement>('#setup-command')!;
+  list.replaceChildren();
+  const pending = !result.installed || !result.report?.ready;
+  if (!result.installed) {
+    state.textContent = 'GAH is not installed on this computer yet. Setup builds it, asks what this computer is for, and offers each missing tool before installing it.';
+    button.textContent = 'Install GAH in Terminal';
+  } else if (result.error || !result.report) {
+    state.textContent = result.error ?? 'Setup could not check this computer.';
+    button.textContent = 'Finish setup in Terminal';
+  } else {
+    const missing = result.report.requirements.filter((item) => item.status.state !== 'ok' && !item.optional).length;
+    state.textContent = result.report.ready
+      ? 'Everything this computer needs is in place.'
+      : `${missing} required ${missing === 1 ? 'item is' : 'items are'} missing. Setup offers each one before installing it.`;
+    button.textContent = 'Finish setup in Terminal';
+    for (const item of result.report.requirements) {
+      const ok = item.status.state === 'ok';
+      const row = document.createElement('li');
+      const mark = document.createElement('span');
+      mark.className = `mark ${ok ? 'ok' : item.optional ? 'optional' : 'missing'}`;
+      mark.textContent = ok ? '✓' : item.optional ? '·' : '✗';
+      mark.setAttribute('aria-label', ok ? 'Ready' : item.optional ? 'Optional' : 'Missing');
+      row.append(mark, `${item.label}: ${statusText(item.status)}${item.optional && !ok ? ' (optional)' : ''}`);
+      const why = document.createElement('small');
+      why.textContent = item.why;
+      row.append(why);
+      if (!ok && item.action) {
+        const how = document.createElement('small');
+        const code = document.createElement('code');
+        code.textContent = item.action.command;
+        how.append(code, item.action.sudo ? ' (asks for your password)' : '');
+        row.append(how);
+      }
+      list.append(row);
+    }
+  }
+  list.hidden = list.childElementCount === 0;
+  button.hidden = !pending || !result.terminal;
+  commandLine.hidden = !pending || result.terminal;
+  commandLine.querySelector('code')!.textContent = result.command;
+}
+
 async function perform(action: () => Promise<void>) {
   error.textContent = '';
   document.querySelectorAll('button').forEach((button) => { button.disabled = true; });
@@ -117,6 +186,13 @@ document.querySelector('#presence')!.addEventListener('submit', (event) => {
 dock.addEventListener('change', constrainPresence);
 tray.addEventListener('change', constrainPresence);
 document.querySelector('#refresh')!.addEventListener('click', () => { void perform(refresh); });
+document.querySelector('#setup-refresh')!.addEventListener('click', () => { void perform(refreshSetup); });
+document.querySelector('#setup-terminal')!.addEventListener('click', () => {
+  void perform(async () => {
+    await invoke('open_setup_terminal');
+    document.querySelector('#setup-state')!.textContent = 'Setup is running in Terminal. Check again when it finishes.';
+  });
+});
 for (const [id, running] of [['start', true], ['stop', false]] as const) {
   document.querySelector(`#${id}`)!.addEventListener('click', () => {
     void perform(async () => { await invoke('set_worker_running', { running }); await refresh(); });
@@ -140,5 +216,11 @@ void perform(async () => {
     distribution.hidden = false;
     document.querySelector<HTMLElement>('#wsl-label')!.hidden = false;
   }
-  showRole(await invoke<RoleStatus>('node_role_status'));
+  const role = await invoke<RoleStatus>('node_role_status');
+  showRole(role);
+  nodeRole = role.role;
+  // Windows workers install through the Windows installer and WSL.
+  const setup = document.querySelector<HTMLElement>('#setup-section')!;
+  setup.hidden = navigator.userAgent.includes('Windows');
+  if (!setup.hidden) await refreshSetup();
 });
