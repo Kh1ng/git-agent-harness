@@ -2043,6 +2043,22 @@
       ],
       "type": "object"
     },
+    "planning.map": {
+      "properties": {
+        "epic": {
+          "description": "Epic issue number to map; omit to list the issues that can be mapped.",
+          "type": "number"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile"
+      ],
+      "type": "object"
+    },
     "pm.plans.list": {
       "properties": {
         "cursor": {

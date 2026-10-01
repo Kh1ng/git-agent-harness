@@ -433,6 +433,18 @@ pub(super) fn add_request_schemas(manifest: &mut CapabilityManifest) {
         ]),
     );
     set(
+        "planning.map",
+        object(&[
+            ("profile", "string", true, PROFILE),
+            (
+                "epic",
+                "number",
+                false,
+                "Epic issue number to map; omit to list the issues that can be mapped.",
+            ),
+        ]),
+    );
+    set(
         "pm.plans.show",
         object(&[
             ("profile", "string", true, PROFILE),
