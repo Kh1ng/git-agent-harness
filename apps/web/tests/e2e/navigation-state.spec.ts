@@ -2,13 +2,16 @@ import { expect, test } from '@playwright/test';
 import { readNavigation } from '../../src/lib/navigationState.js';
 
 test('navigation links accept known pages and bounded conversation identifiers', () => {
-  expect(readNavigation('?page=chat&profile=fixture&chat=mock-session-1')).toEqual({ page: 'chat', profile: 'fixture', chat: 'mock-session-1' });
-  expect(readNavigation('?page=chat&profile=gah-node%3Aworker%3Amy%2520project&chat=abc_123')).toEqual({ page: 'chat', profile: 'gah-node:worker:my%20project', chat: 'abc_123' });
-  expect(readNavigation('?page=unknown&profile=%0Asecret&chat=abc')).toEqual({ page: 'overview', profile: null, chat: null });
+  expect(readNavigation('?page=chat&profile=fixture&chat=mock-session-1')).toEqual({ page: 'chat', profile: 'fixture', chat: 'mock-session-1', epic: null });
+  expect(readNavigation('?page=chat&profile=gah-node%3Aworker%3Amy%2520project&chat=abc_123')).toEqual({ page: 'chat', profile: 'gah-node:worker:my%20project', chat: 'abc_123', epic: null });
+  expect(readNavigation('?page=unknown&profile=%0Asecret&chat=abc')).toEqual({ page: 'overview', profile: null, chat: null, epic: null });
   expect(readNavigation('?page=chat&profile=fixture&chat=../../other').chat).toBeNull();
   expect(readNavigation(`?profile=${'a'.repeat(513)}&chat=abc`).profile).toBeNull();
   expect(readNavigation(`?profile=fixture&chat=${'a'.repeat(129)}`).chat).toBeNull();
   expect(readNavigation('?chat=abc').chat).toBeNull();
+  expect(readNavigation('?page=planning&profile=fixture&epic=900')).toEqual({ page: 'planning', profile: 'fixture', chat: null, epic: '900' });
+  for (const epic of ['0', '-1', '9x', '1'.repeat(11)]) expect(readNavigation(`?profile=fixture&epic=${epic}`).epic).toBeNull();
+  expect(readNavigation('?epic=900').epic).toBeNull();
 });
 
 test('a mobile conversation link restores its project and chat after reload and page navigation', async ({ page, request }) => {
