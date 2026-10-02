@@ -180,4 +180,13 @@ test('trusted-device sign-in binds approval to the requesting browser and only g
   assert.equal(compatibilityCounts.at(-1), 0);
   const eventDisk = readFileSync(join(directory, 'activity.jsonl'), 'utf8');
   for (const value of [requested.matching_code, cookie.split('.').at(-1)!, 'owner-fixture-secret']) assert.ok(!eventDisk.includes(value));
+  const localResponse = await post('/access/request', { name: 'Local browser' }, { Origin: base });
+  assert.equal(localResponse.status, 202);
+  const local = await localResponse.json() as PairingAccessRequest;
+  const localRequestCookie = localResponse.headers.getSetCookie()[0];
+  assert.match(localRequestCookie, /Secure/, 'The new request secret is Secure even when local transport is HTTP');
+  assert.equal((await post(`/access/requests/${local.id}/approve`, { matching_code: local.matching_code, confirm: true }, owner)).status, 200);
+  const localClaim = await post('/access/claim', { confirm: true }, { Origin: base, Cookie: localRequestCookie.split(';')[0] });
+  assert.equal(localClaim.status, 200);
+  for (const header of localClaim.headers.getSetCookie()) assert.match(header, /Secure/, 'Claim and request-cookie clearing retain Secure');
 });

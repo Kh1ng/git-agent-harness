@@ -28,7 +28,7 @@ export function pairingRouter(access: DeviceAccess, identity: CoordinatorIdentit
       const origin = new URL(`${req.protocol}://${req.headers.host}`).origin;
       const result = access.createAccessRequest({ id: identity.node_id, name: identity.display_name, origin }, req.body.name);
       requested?.(result.request);
-      res.cookie(PAIRING_REQUEST_COOKIE, result.cookie, { httpOnly: true, sameSite: 'strict', secure: req.secure, path: '/api/pairing/access', maxAge: 5 * 60_000 });
+      res.cookie(PAIRING_REQUEST_COOKIE, result.cookie, { httpOnly: true, sameSite: 'strict', secure: true, path: '/api/pairing/access', maxAge: 5 * 60_000 });
       res.status(202).json(result.request);
     } catch (error) { res.status(400).json({ message: error instanceof Error ? error.message : 'Cannot request device access.' }); }
   });
@@ -43,7 +43,7 @@ export function pairingRouter(access: DeviceAccess, identity: CoordinatorIdentit
       if (!req.body || req.body.confirm !== true || Object.keys(req.body).some(key => key !== 'confirm')) throw new Error('Confirm this server and controller access before continuing.');
       const origin = new URL(`${req.protocol}://${req.headers.host}`).origin;
       const paired = access.claimAccessRequest(credentialCookie(req.headers.cookie, PAIRING_REQUEST_COOKIE), origin);
-      const options = { httpOnly: true, sameSite: 'strict' as const, secure: req.secure };
+      const options = { httpOnly: true, sameSite: 'strict' as const, secure: true };
       res.cookie(DEVICE_COOKIE, paired.token, { ...options, path: '/', maxAge: DEVICE_LIFETIME });
       res.clearCookie(PAIRING_REQUEST_COOKIE, { ...options, path: '/api/pairing/access' });
       res.json({ schema_version: 1, device: paired.device });

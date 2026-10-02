@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import ts from 'typescript';
 import { WebSocket } from 'ws';
-import type { ClientMessage, ProjectImportResult, ServerMessage } from '@git-agent-harness/contracts';
+import type { ClientMessage, ProjectImportResult, ServerMessage, PairingAccessRequest, PairedDevice } from '@git-agent-harness/contracts';
 import { createMockControlPlane, MOCK_SCENARIOS } from './controlPlane.js';
 
 async function post(baseUrl: string, path: string, body: unknown = {}): Promise<Response> {
@@ -374,4 +374,33 @@ test('every used frontend API call has a registered mock route', async () => {
   } finally {
     await running.close();
   }
+});
+
+test('mock approval requests and device delegation round-trip through fixtures and reset', async () => {
+  const running = await createMockControlPlane().listen(0);
+  try {
+    const session = await (await fetch(`${running.baseUrl}/api/pairing/session`)).json() as { can_approve_pairing: boolean };
+    assert.equal(session.can_approve_pairing, true);
+    const request = await (await post(running.baseUrl, '/api/pairing/access/request', { name: 'Linux browser' })).json() as PairingAccessRequest;
+    assert.equal(request.status, 'pending');
+    assert.equal(request.name, 'Linux browser');
+    assert.equal((await post(running.baseUrl, '/api/pairing/access/claim', { confirm: true })).status, 400);
+    const approved = await post(running.baseUrl, `/api/pairing/access/requests/${request.id}/approve`, { matching_code: request.matching_code, confirm: true });
+    assert.equal((await approved.json() as PairingAccessRequest).status, 'approved');
+    const status = await (await fetch(`${running.baseUrl}/api/pairing/access/status`)).json() as PairingAccessRequest;
+    assert.equal(status.id, request.id);
+    assert.equal(status.status, 'approved');
+    const claim = await (await post(running.baseUrl, '/api/pairing/access/claim', { confirm: true })).json() as { device: PairedDevice };
+    assert.equal(claim.device.name, request.name);
+    assert.equal(claim.device.can_approve_pairing, false);
+    assert.equal((await post(running.baseUrl, '/api/pairing/access/claim', { confirm: true })).status, 400);
+    const delegated = await fetch(`${running.baseUrl}/api/pairing/devices/mock-device-1`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ can_approve_pairing: true }) });
+    assert.equal((await delegated.json() as { device: PairedDevice }).device.can_approve_pairing, true);
+    const denied = await (await post(running.baseUrl, '/api/pairing/access/request', { name: 'Denied browser' })).json() as PairingAccessRequest;
+    assert.equal((await (await post(running.baseUrl, `/api/pairing/access/requests/${denied.id}/deny`)).json() as PairingAccessRequest).status, 'denied');
+    await post(running.baseUrl, '/api/mock/reset');
+    const devices = await (await fetch(`${running.baseUrl}/api/pairing/devices`)).json() as { devices: PairedDevice[] };
+    assert.equal(devices.devices.length, 1);
+    assert.equal(devices.devices[0].can_approve_pairing, false);
+  } finally { await running.close(); }
 });
