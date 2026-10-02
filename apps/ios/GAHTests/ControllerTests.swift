@@ -67,6 +67,19 @@ final class ControllerTests: XCTestCase {
         XCTAssertNil(server.chatURL(from: URL(string: "https://evil.example/?profile=gah&chat=session-7")!))
     }
 
+    func testColdLaunchHTTP404OffersConnectionRecovery() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-centralURL", "http://127.0.0.1:18773/not-found"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Your central server returned HTTP 404. Check its address and port in Connection settings."].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["Retry connection"].exists)
+        app.buttons["connection"].tap()
+        let field = app.descendants(matching: .any).matching(identifier: "serverAddress").firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "http://127.0.0.1:18773/")
+    }
+
     func testFailedSwitchHidesOldDashboardAndRetryKeepsUnusedPairingCode() throws {
         continueAfterFailure = false
         try fixtureControl("arm-recovery")
