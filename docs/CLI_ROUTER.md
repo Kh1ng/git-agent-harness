@@ -81,3 +81,11 @@ npm run --workspace=apps/web test:component -- CliRouterPanel.spec.tsx
 ```
 
 [Video evidence and timestamps](analysis/cli-router-2026-10-02/README.md) explain the upstream choice and the custom dashboard differences.
+
+## Work scheduling and cache reuse
+
+GAH chooses the job, runner, and model. The proxy chooses an eligible account for that model. A quota limit should move work to another eligible account or GAH candidate. A healthy session should retain its account and stable prompt prefix so provider caches can be reused. Reset pressure should choose where new work starts without interrupting productive cached sessions.
+
+GAH's weekly pacing compares remaining quota with the target remaining balance. Unused quota becomes more urgent as reset approaches. Explicit candidate priorities still take precedence. This weekly calculation does not model monthly or five-hour windows.
+
+Router account readings currently stay in the dashboard cache. They do not feed GAH's durable quota observations or select the account with the earliest reset. Completing that connection requires fresh model/pool-scoped observations, distinct short-term limits and subscription budgets, and reset-aware selection for new sessions. Unknown or failed readings must remain unknown; one exhausted model pool must not disable an account's other pools. Cache savings must use provider-reported cache tokens rather than inferred savings.

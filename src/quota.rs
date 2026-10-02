@@ -93,13 +93,11 @@ pub fn quota_pace(
         return Err(QuotaPacingError::InvalidDays(days_remaining));
     }
 
-    // 3. Target linear pace calculation: target_pct = 100 - (100 / 7) * days_remaining
-    let target_pct = 100.0 - (100.0 / 7.0) * days_remaining;
-
-    // 4. Pace delta: actual_pct - target_pct
-    // where actual_pct is remaining quota percentage (100 - usage_pct)
-    let actual_pct = 100.0 - usage_pct;
-    let delta = actual_pct - target_pct;
+    // A weekly quota starts with 100% remaining and targets 0% at reset.
+    // Compare remaining to remaining: a positive delta is unused headroom.
+    let target_remaining_pct = ((100.0 / 7.0) * days_remaining).min(100.0);
+    let actual_remaining_pct = 100.0 - usage_pct;
+    let delta = actual_remaining_pct - target_remaining_pct;
 
     // 5. Threshold bands
     if delta >= config.aggressive {
@@ -123,15 +121,13 @@ mod tests {
     fn test_default_pacing() {
         let config = PacingConfig::default();
 
-        // Start of week, target is 0% used, we used 0%. Delta is (100 - 0) - 0 = +100.
-        // This is >= 20.0, so AggressiveBurn.
+        // At the start of the week, all quota remaining is on pace.
         assert_eq!(
             quota_pace(Some(0.0), Some(7.0), &config).unwrap(),
-            PaceBand::AggressiveBurn
+            PaceBand::Normal
         );
 
-        // Halfway through the week (3.5 days remaining). Target is 100 - (100/7)*3.5 = 50.0% used.
-        // If we used 50%, delta is (100 - 50) - 50 = 0.
+        // Halfway through the week, 50% remaining matches the target.
         // Between -7 and +7, so Normal.
         assert_eq!(
             quota_pace(Some(50.0), Some(3.5), &config).unwrap(),
@@ -164,6 +160,19 @@ mod tests {
         assert_eq!(
             quota_pace(Some(70.0), Some(3.5), &config).unwrap(),
             PaceBand::HardConserve
+        );
+    }
+
+    #[test]
+    fn unused_weekly_quota_becomes_more_urgent_as_reset_approaches() {
+        let config = PacingConfig::default();
+        assert_eq!(
+            quota_pace(Some(50.0), Some(7.0), &config).unwrap(),
+            PaceBand::HardConserve
+        );
+        assert_eq!(
+            quota_pace(Some(50.0), Some(1.0 / 24.0), &config).unwrap(),
+            PaceBand::AggressiveBurn
         );
     }
 

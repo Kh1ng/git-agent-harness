@@ -403,7 +403,7 @@ mod tests {
         assert_eq!(diagnostics.candidates[0].consideration_order, Some(0));
         assert_eq!(
             diagnostics.human_summary.as_deref(),
-            Some("selected codex/gpt-5.4-mini (included quota aggressive-burn, priority 2); quota pool codex-main; pace aggressive_burn; cost included_quota; policy reordered defaults over vibe/devstral-small; skipped vibe/devstral-small: quota_exhausted until tomorrow")
+            Some("selected codex/gpt-5.4-mini (included quota mild-burn, priority 2); quota pool codex-main; pace mild_burn; cost included_quota; policy reordered defaults over vibe/devstral-small; skipped vibe/devstral-small: quota_exhausted until tomorrow")
         );
     }
 

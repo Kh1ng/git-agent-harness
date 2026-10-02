@@ -97,7 +97,7 @@ fn cost_aware_ordering_uses_live_quota_store_data_when_config_does_not_hardcode_
     assert!(diagnostics.policy_reordered_candidates);
     assert_eq!(
         diagnostics.selected_pace_band.as_deref(),
-        Some("aggressive_burn"),
+        Some("mild_burn"),
         "live quota_store data (20% used, 5 days to reset) must reach quota_pace \
          the same way a hardcoded config value would"
     );
