@@ -52,6 +52,9 @@ pub struct QuotaObservation {
 pub struct QuotaCandidateStatus {
     pub modes: Vec<String>,
     pub backend: String,
+    /// Billing/subscription service; the runner and model vendor may differ.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
     pub model: Option<String>,
@@ -444,6 +447,10 @@ fn build_candidates(
 
             QuotaCandidateStatus {
                 modes: aggregate.modes,
+                provider: quota_provider(
+                    &identity.logical_backend,
+                    identity.effective_model.as_deref(),
+                ),
                 backend: key.backend,
                 backend_instance: Some(key.backend_instance),
                 model: key.model,
@@ -471,6 +478,19 @@ fn build_candidates(
             }
         })
         .collect()
+}
+
+pub(super) fn quota_provider(backend: &str, model: Option<&str>) -> Option<String> {
+    if model.is_some_and(|model| model.starts_with("nous-portal/")) {
+        return Some("nous".to_string());
+    }
+    if model.is_some_and(|model| model.starts_with("gah-router/")) {
+        return None; // The router's account inventory identifies the supplying subscription.
+    }
+    if matches!(backend, "agy" | "agy-main" | "agy-second") {
+        return Some("antigravity".to_string());
+    }
+    crate::usage_attribution::provider_for_model(Some(backend), model)
 }
 
 fn find_scope_status(
@@ -575,7 +595,7 @@ fn aggregate_observations(
                 .map(convert_group_observation),
         );
     }
-    if let Some(account) = quota_store::latest_for_identity(account_quota, identity) {
+    for account in quota_store::latest_windows_for_identity(account_quota, identity) {
         out.push(QuotaObservation {
             backend: account.backend.clone(),
             backend_instance: account.backend_instance.clone(),
@@ -696,6 +716,27 @@ fn filtered_entries<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_provider_identifies_the_billed_service_instead_of_the_harness() {
+        assert_eq!(
+            quota_provider("opencode", Some("nous-portal/deepseek/deepseek-v4")),
+            Some("nous".into())
+        );
+        assert_eq!(
+            quota_provider("vibe", Some("devstral-small")),
+            Some("mistral".into())
+        );
+        assert_eq!(
+            quota_provider("agy-second", Some("Claude Sonnet 4.6")),
+            Some("antigravity".into())
+        );
+        assert_eq!(quota_provider("opencode", None), None);
+        assert_eq!(
+            quota_provider("opencode", Some("gah-router/gemini-3.1-pro")),
+            None
+        );
+    }
     use crate::availability::{BlockScope, Reason, ScopeStatus, Source};
     use crate::config::tests::test_profile_for_notifications;
     use crate::ledger::summary::GroupQuotaObservation;

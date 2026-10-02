@@ -1357,12 +1357,18 @@ pub enum TelemetryCommands {
 /// Quota/usage observation management (issue #151 / #166).
 #[derive(Subcommand)]
 pub enum QuotaCommands {
+    /// Record one validated, account-scoped quota observation from JSON on stdin.
+    Record {
+        #[arg(long, name = "store")]
+        store_path: Option<String>,
+    },
     /// Refresh account-level quota (e.g. Codex app-server, or the
     /// Mistral Admin API for `--backend vibe`) and persist the observation
     /// so the Quota/Telemetry pages show real data.
     Refresh {
         /// Backend whose account quota to refresh (e.g. "codex"). "vibe"
-        /// refreshes from the Mistral Admin API (`MISTRAL_ADMIN_API_KEY`)
+        /// refreshes from the Mistral Admin API (`MISTRAL_ADMIN_API_KEY`);
+        /// "nous" reads the Nous account API (`NOUS_API_KEY`).
         /// instead of running a CLI subprocess.
         #[arg(long, default_value = "codex")]
         backend: String,

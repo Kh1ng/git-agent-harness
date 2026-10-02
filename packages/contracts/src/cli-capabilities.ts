@@ -991,6 +991,22 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
       "cli_command_path": "gah quota list",
       "is_stable": true
     },
+    "quota.record": {
+      "operation_id": "quota.record",
+      "display_name": "Record Quota Observation",
+      "class": "mutation",
+      "profile_scope": "global",
+      "request_schema": null,
+      "response_schema": null,
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "local_only",
+      "local_only_reason": "security_sensitive",
+      "documentation": "Append one account-scoped provider quota observation from JSON stdin.",
+      "cli_command_path": "gah quota record",
+      "is_stable": true
+    },
     "quota.refresh": {
       "operation_id": "quota.refresh",
       "display_name": "Refresh Quota",
@@ -1319,6 +1335,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "gah profile show": "profile.show",
     "gah prune": "prune.sessions",
     "gah quota list": "quota.list",
+    "gah quota record": "quota.record",
     "gah quota refresh": "quota.refresh",
     "gah quota snapshot": "quota.snapshot",
     "gah report": "report.generate",
@@ -1400,6 +1417,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "price_guard.check": "filesystem_access_required",
     "profile.show": "filesystem_access_required",
     "prune.sessions": "filesystem_access_required",
+    "quota.record": "security_sensitive",
     "server.start": "local_backend_execution_required",
     "setup.guided": "interactive_terminal_required",
     "setup.memory_hooks": "filesystem_access_required",

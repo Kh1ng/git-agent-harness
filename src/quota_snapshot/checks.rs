@@ -16,6 +16,14 @@ pub enum QuotaCheckStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct QuotaCheck {
     pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_instance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_pool: Option<String>,
     pub checked_at: String,
     pub status: QuotaCheckStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,7 +63,7 @@ fn check_timestamp(record: &QuotaObservationRecord) -> Option<String> {
 }
 
 pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<QuotaCheck> {
-    let mut latest = BTreeMap::<String, (&QuotaObservationRecord, String, OffsetDateTime)>::new();
+    let mut latest = BTreeMap::new();
     for record in records {
         let Some(checked_at) = check_timestamp(record) else {
             continue;
@@ -63,35 +71,51 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
         let Ok(parsed) = OffsetDateTime::parse(&checked_at, &Rfc3339) else {
             continue;
         };
+        let key = (
+            record.backend.clone(),
+            record.backend_instance.clone(),
+            record.model.clone(),
+            record.quota_pool.clone(),
+        );
         if latest
-            .get(&record.backend)
+            .get(&key)
             .is_none_or(|(_, _, current)| parsed >= *current)
         {
-            latest.insert(record.backend.clone(), (record, checked_at, parsed));
+            latest.insert(key, (record, checked_at, parsed));
         }
     }
     latest
         .into_iter()
-        .map(|(backend, (record, checked_at, _))| {
-            let has_data = record.quota_window.is_some()
-                || record.quota_used_percent.is_some()
-                || record.quota_remaining_percent.is_some()
-                || record.quota_reset_at.is_some()
-                || record.mistral_admin.is_some();
-            let status = if record.check_error.is_some() {
-                QuotaCheckStatus::Failed
-            } else if has_data {
-                QuotaCheckStatus::Data
-            } else {
-                QuotaCheckStatus::NoData
-            };
-            QuotaCheck {
-                backend,
-                checked_at,
-                status,
-                error: record.check_error.as_deref().map(crate::redact::redact),
-            }
-        })
+        .map(
+            |((backend, backend_instance, model, quota_pool), (record, checked_at, _))| {
+                let has_data = record.quota_window.is_some()
+                    || record.quota_used_percent.is_some()
+                    || record.quota_remaining_percent.is_some()
+                    || record.quota_reset_at.is_some()
+                    || record.mistral_admin.is_some();
+                let status = if record.check_error.is_some() {
+                    QuotaCheckStatus::Failed
+                } else if has_data {
+                    QuotaCheckStatus::Data
+                } else {
+                    QuotaCheckStatus::NoData
+                };
+                QuotaCheck {
+                    provider: if record.usage_source.as_deref() == Some("nous_portal_account") {
+                        Some("nous".into())
+                    } else {
+                        super::quota_provider(&backend, model.as_deref())
+                    },
+                    backend,
+                    backend_instance,
+                    model,
+                    quota_pool,
+                    checked_at,
+                    status,
+                    error: record.check_error.as_deref().map(crate::redact::redact),
+                }
+            },
+        )
         .collect()
 }
 
@@ -133,6 +157,7 @@ mod tests {
             QuotaCheckStatus::NoData,
         )];
         let candidates = vec![QuotaCandidateStatus {
+            provider: Some("openai".to_string()),
             modes: vec!["default".to_string()],
             backend: "codex".to_string(),
             backend_instance: None,
@@ -216,5 +241,31 @@ mod tests {
         assert_eq!(status("agy"), Some(QuotaCheckStatus::Data));
         assert_eq!(status("codex"), Some(QuotaCheckStatus::Failed));
         assert_eq!(status("vibe"), Some(QuotaCheckStatus::NoData));
+    }
+
+    #[test]
+    fn sibling_accounts_keep_independent_check_health() {
+        let mut first = record(
+            "vibe",
+            Some("2026-10-02T23:00:00Z"),
+            Some("2026-10-02T23:00:00Z"),
+            QuotaCheckStatus::Data,
+        );
+        first.backend_instance = Some("vibe-1".into());
+        first.quota_pool = Some("vibe-1-monthly".into());
+        let mut second = record(
+            "vibe",
+            None,
+            Some("2026-10-02T23:01:00Z"),
+            QuotaCheckStatus::Failed,
+        );
+        second.backend_instance = Some("vibe-2".into());
+        second.quota_pool = Some("vibe-2-monthly".into());
+        let checks = build_quota_checks(&[first, second]);
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].backend_instance.as_deref(), Some("vibe-1"));
+        assert_eq!(checks[0].status, QuotaCheckStatus::Data);
+        assert_eq!(checks[1].status, QuotaCheckStatus::Failed);
+        assert_eq!(checks[0].provider.as_deref(), Some("mistral"));
     }
 }

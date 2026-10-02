@@ -1183,6 +1183,24 @@ pub(super) fn add_telemetry_operations(manifest: &mut CapabilityManifest) {
 }
 
 pub(super) fn add_quota_operations(manifest: &mut CapabilityManifest) {
+    manifest.add_operation(OperationDefinition {
+        operation_id: "quota.record".to_string(),
+        display_name: "Record Quota Observation".to_string(),
+        class: OperationClass::Mutation,
+        profile_scope: ProfileScope::Global,
+        request_schema: None,
+        response_schema: None,
+        streaming: StreamingBehavior::None,
+        idempotency: Idempotency::Idempotent,
+        secret_fields: vec![],
+        remote_disposition: RemoteDisposition::LocalOnly,
+        local_only_reason: Some(LocalOnlyReason::SecuritySensitive),
+        documentation: Some(
+            "Append one account-scoped provider quota observation from JSON stdin.".to_string(),
+        ),
+        cli_command_path: "gah quota record".to_string(),
+        is_stable: true,
+    });
     // gah quota refresh
     manifest.add_operation(OperationDefinition {
         operation_id: "quota.refresh".to_string(),

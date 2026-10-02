@@ -117,6 +117,87 @@ pub fn load_account_observations() -> Vec<QuotaObservationRecord> {
     load(&store_path()).unwrap_or_default()
 }
 
+/// Validate secret-free provider observations supplied by a local collector.
+/// Explicit instance identity is required so another account cannot inherit them.
+pub fn parse_external_observation(input: &str) -> Result<QuotaObservationRecord> {
+    let value: serde_json::Value =
+        serde_json::from_str(input).context("parse quota observation JSON")?;
+    let fields = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("quota observation must be an object"))?;
+    let allowed = [
+        "backend",
+        "backend_instance",
+        "model",
+        "quota_pool",
+        "quota_window",
+        "quota_used_percent",
+        "quota_remaining_percent",
+        "quota_reset_at",
+        "observed_at",
+        "checked_at",
+        "check_error",
+        "usage_source",
+    ];
+    if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
+        anyhow::bail!("unsupported quota observation field");
+    }
+    let mut record: QuotaObservationRecord = serde_json::from_value(value)?;
+    for (name, value) in [
+        ("backend", Some(record.backend.as_str())),
+        ("backend instance", record.backend_instance.as_deref()),
+        ("quota pool", record.quota_pool.as_deref()),
+        ("usage source", record.usage_source.as_deref()),
+    ] {
+        if let Some(value) = value {
+            if crate::execution_identity::validate_operator_label(name, value)? != value {
+                anyhow::bail!("{name} must not contain surrounding whitespace");
+            }
+        }
+    }
+    if record.backend_instance.is_none()
+        || record.checked_at.is_none()
+        || record.usage_source.is_none()
+    {
+        anyhow::bail!("backend_instance, checked_at and usage_source are required");
+    }
+    for value in [record.quota_used_percent, record.quota_remaining_percent]
+        .into_iter()
+        .flatten()
+    {
+        if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+            anyhow::bail!("quota percentages must be between 0 and 100");
+        }
+    }
+    for value in [
+        record.checked_at.as_deref(),
+        record.observed_at.as_deref(),
+        record.quota_reset_at.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        OffsetDateTime::parse(value, &Rfc3339).context("quota timestamp must be RFC 3339")?;
+    }
+    for (name, value, limit) in [
+        ("model", record.model.as_deref(), 512),
+        ("quota window", record.quota_window.as_deref(), 128),
+        ("check error", record.check_error.as_deref(), 1024),
+    ] {
+        if let Some(value) = value {
+            if value.is_empty() || value.len() > limit || value.chars().any(char::is_control) {
+                anyhow::bail!("invalid {name}");
+            }
+        }
+    }
+    if has_quota_data(&record) && record.observed_at.is_none() {
+        anyhow::bail!("quota data requires observed_at");
+    }
+    record.backend = crate::config::canonical_backend_name(&record.backend).to_string();
+    record.check_error = record.check_error.as_deref().map(crate::redact::redact);
+    Ok(record)
+}
+
 fn has_ledger_usage_data(usage: &crate::ledger::LedgerUsage) -> bool {
     usage.usage_source.is_some()
         || usage.input_tokens.is_some()
@@ -201,9 +282,15 @@ pub fn latest_for<'a>(
                 && r.model.as_deref() == model
                 && r.backend_instance.is_none()
                 && r.quota_pool.is_none()
-                && has_quota_data(r)
         })
-        .max_by(|a, b| a.observed_at.cmp(&b.observed_at))
+        .max_by_key(|record| {
+            record
+                .checked_at
+                .as_deref()
+                .or(record.observed_at.as_deref())
+                .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+        })
+        .filter(|record| record.check_error.is_none() && has_quota_data(record))
 }
 
 /// Most-recent observation for an exact execution identity, with a
@@ -213,22 +300,81 @@ pub fn latest_for_identity<'a>(
     records: &'a [QuotaObservationRecord],
     identity: &crate::execution_identity::ExecutionIdentity,
 ) -> Option<&'a QuotaObservationRecord> {
-    records
-        .iter()
-        .filter(|record| {
-            record.backend == identity.logical_backend
-                && (record.model.is_none() || record.model == identity.effective_model)
-                && record
-                    .backend_instance
-                    .as_deref()
-                    .is_none_or(|instance| instance == identity.backend_instance)
-                && record
-                    .quota_pool
-                    .as_deref()
-                    .is_none_or(|pool| Some(pool) == identity.quota_pool.as_deref())
-                && has_quota_data(record)
-        })
+    latest_windows_for_identity(records, identity)
+        .into_iter()
         .max_by(|left, right| left.observed_at.cmp(&right.observed_at))
+}
+
+fn observation_matches_identity(
+    record: &QuotaObservationRecord,
+    identity: &crate::execution_identity::ExecutionIdentity,
+) -> bool {
+    record.backend == identity.logical_backend
+        && (record.model.is_none() || record.model == identity.effective_model)
+        && record
+            .backend_instance
+            .as_deref()
+            .is_none_or(|instance| instance == identity.backend_instance)
+        && record
+            .quota_pool
+            .as_deref()
+            .is_none_or(|pool| Some(pool) == identity.quota_pool.as_deref())
+}
+
+/// Latest reading for each limit window belonging to this execution identity.
+/// A five-hour refresh must not replace an independent weekly balance.
+pub fn latest_windows_for_identity<'a>(
+    records: &'a [QuotaObservationRecord],
+    identity: &crate::execution_identity::ExecutionIdentity,
+) -> Vec<&'a QuotaObservationRecord> {
+    let matching: Vec<_> = records
+        .iter()
+        .filter(|record| observation_matches_identity(record, identity))
+        .collect();
+    let timestamp = |record: &QuotaObservationRecord| {
+        record
+            .checked_at
+            .as_deref()
+            .or(record.observed_at.as_deref())
+            .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+    };
+    let mut windows = std::collections::BTreeMap::<_, &QuotaObservationRecord>::new();
+    let mut invalidated = std::collections::BTreeMap::<_, OffsetDateTime>::new();
+    for check in matching
+        .iter()
+        .filter(|check| check.check_error.is_some() || !has_quota_data(check))
+    {
+        if let Some(checked) = timestamp(check) {
+            let current = invalidated.entry(&check.quota_window).or_insert(checked);
+            *current = (*current).max(checked);
+        }
+    }
+    for record in matching
+        .iter()
+        .copied()
+        .filter(|record| has_quota_data(record) && record.check_error.is_none())
+    {
+        // A failed or empty check invalidates earlier data for that window.
+        // An account-wide check with no window invalidates all its windows.
+        if [
+            invalidated.get(&None),
+            invalidated.get(&record.quota_window),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|checked| timestamp(record).is_none_or(|observed| *checked >= observed))
+        {
+            continue;
+        }
+        let key = (&record.model, &record.quota_window);
+        if windows
+            .get(&key)
+            .is_none_or(|current| timestamp(record) >= timestamp(current))
+        {
+            windows.insert(key, record);
+        }
+    }
+    windows.into_values().collect()
 }
 
 fn has_quota_data(record: &QuotaObservationRecord) -> bool {
@@ -399,6 +545,33 @@ pub fn refresh_stale_quota_observations(
         .clone()
         .unwrap_or_else(|| "codex".to_string());
     let mut handles = Vec::new();
+    if std::env::var("NOUS_API_KEY").is_ok_and(|key| !key.is_empty()) {
+        if let Some(handle) = maybe_refresh_backend_instance(
+            store_path,
+            "opencode",
+            Some("opencode:nous-portal-api"),
+            now,
+            {
+                let path = store_path.to_path_buf();
+                move || {
+                    let record = match crate::usage::nous::refresh() {
+                        Ok(record) => record,
+                        Err(error) => {
+                            let mut record =
+                                crate::usage::nous::parse(b"{}", OffsetDateTime::now_utc())?;
+                            record.check_error = Some(crate::redact::redact(&error.to_string()));
+                            record.observed_at = None;
+                            record
+                        }
+                    };
+                    append(&path, &record)?;
+                    Ok(Some(record))
+                }
+            },
+        ) {
+            handles.push(handle);
+        }
+    }
     if let Some(handle) = maybe_refresh_backend(store_path, "codex", now, {
         let codex_cmd = codex_cmd.clone();
         let path = store_path.to_path_buf();
@@ -454,10 +627,22 @@ fn maybe_refresh_backend(
     now: OffsetDateTime,
     refresh: impl FnOnce() -> Result<Option<QuotaObservationRecord>> + Send + 'static,
 ) -> Option<std::thread::JoinHandle<()>> {
+    maybe_refresh_backend_instance(path, backend, None, now, refresh)
+}
+
+fn maybe_refresh_backend_instance(
+    path: &Path,
+    backend: &str,
+    instance: Option<&str>,
+    now: OffsetDateTime,
+    refresh: impl FnOnce() -> Result<Option<QuotaObservationRecord>> + Send + 'static,
+) -> Option<std::thread::JoinHandle<()>> {
     let records = load(path).unwrap_or_default();
     let last_checked = records
         .iter()
-        .filter(|record| record.backend == backend)
+        .filter(|record| {
+            record.backend == backend && record.backend_instance.as_deref() == instance
+        })
         .filter_map(|record| {
             record
                 .checked_at
@@ -473,12 +658,13 @@ fn maybe_refresh_backend(
     if !due {
         return None;
     }
+    let in_flight_key = format!("{backend}\0{}", instance.unwrap_or_default());
     {
         let mut in_flight = IN_FLIGHT
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let set = in_flight.get_or_insert_with(std::collections::HashSet::new);
-        if !set.insert(backend.to_string()) {
+        if !set.insert(in_flight_key.clone()) {
             // A previous tick's refresh for this exact backend hasn't
             // returned yet -- don't pile on a second attempt on top of it.
             return None;
@@ -486,6 +672,7 @@ fn maybe_refresh_backend(
     }
     let path = path.to_path_buf();
     let backend = backend.to_string();
+    let instance = instance.map(str::to_string);
     Some(std::thread::spawn(move || {
         // `refresh_*_and_store` already appends a real record when it
         // finds data (Ok(Some(_))); on Ok(None)/Err, append a data-free
@@ -496,7 +683,7 @@ fn maybe_refresh_backend(
         if !matches!(&refresh, Ok(Some(_))) {
             let marker = QuotaObservationRecord {
                 backend: backend.clone(),
-                backend_instance: None,
+                backend_instance: instance,
                 model: None,
                 quota_pool: None,
                 quota_window: None,
@@ -515,7 +702,7 @@ fn maybe_refresh_backend(
         }
         if let Ok(mut in_flight) = IN_FLIGHT.lock() {
             if let Some(set) = in_flight.as_mut() {
-                set.remove(&backend);
+                set.remove(&in_flight_key);
             }
         }
     }))
@@ -1066,6 +1253,71 @@ mod tests {
         );
         identity.backend_instance = instance.into();
         identity
+    }
+
+    #[test]
+    fn latest_windows_keep_short_and_weekly_limits_on_the_right_account() {
+        let mut weekly = scoped_record(Some("account-a"), 20.0, "2026-07-20T10:00:00Z");
+        weekly.quota_window = Some("weekly".into());
+        let mut short = scoped_record(Some("account-a"), 90.0, "2026-07-20T11:00:00Z");
+        short.quota_window = Some("5h".into());
+        let mut old = weekly.clone();
+        old.observed_at = Some("2026-07-19T10:00:00Z".into());
+        let mut sibling = weekly.clone();
+        sibling.backend_instance = Some("account-b".into());
+        sibling.quota_used_percent = Some(99.0);
+        let records = [weekly, short, old, sibling];
+        let windows = latest_windows_for_identity(&records, &identity("account-a"));
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].quota_used_percent, Some(90.0));
+        assert_eq!(windows[1].quota_used_percent, Some(20.0));
+    }
+
+    #[test]
+    fn newer_failed_or_empty_check_invalidates_only_its_account() {
+        let success = scoped_record(Some("account-a"), 20.0, "2026-07-20T10:00:00Z");
+        let sibling = scoped_record(Some("account-b"), 70.0, "2026-07-20T10:00:00Z");
+        let mut failure = success.clone();
+        failure.quota_window = None;
+        failure.quota_used_percent = None;
+        failure.quota_remaining_percent = None;
+        failure.observed_at = None;
+        failure.checked_at = Some("2026-07-20T11:00:00Z".into());
+        for error in [None, Some("failed".into())] {
+            failure.check_error = error;
+            let records = [success.clone(), sibling.clone(), failure.clone()];
+            assert!(latest_for_identity(&records, &identity("account-a")).is_none());
+            assert_eq!(
+                latest_for_identity(&records, &identity("account-b"))
+                    .unwrap()
+                    .quota_used_percent,
+                Some(70.0)
+            );
+        }
+    }
+
+    #[test]
+    fn external_observation_rejects_invalid_or_unscoped_provider_data() {
+        let valid = serde_json::json!({"backend":"agy", "backend_instance":"agy-primary", "quota_pool":"agy:external", "quota_window":"weekly", "quota_remaining_percent":42.0, "checked_at":"2026-10-02T23:00:00Z", "observed_at":"2026-10-02T23:00:00Z", "usage_source":"cli_router"});
+        assert_eq!(
+            parse_external_observation(&valid.to_string())
+                .unwrap()
+                .quota_remaining_percent,
+            Some(42.0)
+        );
+        for (field, value) in [
+            ("backend_instance", serde_json::Value::Null),
+            ("checked_at", serde_json::json!("bad time")),
+            ("quota_remaining_percent", serde_json::json!(101)),
+            ("access_token", serde_json::json!("private")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(
+                parse_external_observation(&invalid.to_string()).is_err(),
+                "accepted invalid {field}"
+            );
+        }
     }
 
     #[test]
