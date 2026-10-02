@@ -17,7 +17,7 @@ export function pairingRouter(access: DeviceAccess, identity: CoordinatorIdentit
   router.get(['/session', '/access/status', '/access/requests'], rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false,
     message: { message: 'Too many approval status checks. Retry in a minute.' } }));
   router.all(['/access/request', '/access/status', '/access/claim'], (req, res, next) => {
-    if ((!req.secure && !isTrustedLocalRequest(req) && process.env.GAH_ALLOW_INSECURE_HTTP !== '1') || !sameOriginRequest(req)) {
+    if ((!req.secure && !isTrustedLocalRequest(req)) || !sameOriginRequest(req)) {
       return res.status(403).json({ message: 'Device approval requires the same server origin and TLS.' });
     }
     next();

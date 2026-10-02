@@ -84,6 +84,15 @@ test('trusted-device sign-in binds approval to the requesting browser and only g
   assert.equal((await (await get('/session', phoneHeaders)).json() as { can_approve_pairing: boolean }).can_approve_pairing, true);
   assert.equal((await post('/access/request', { name: 'Linux' }, { ...remote, Origin: 'https://attacker.test' })).status, 403);
   assert.equal((await post('/access/request', { name: 'Linux' }, { ...remote, 'X-Forwarded-Proto': 'http', Origin: base })).status, 403);
+  process.env.GAH_ALLOW_INSECURE_HTTP = '1';
+  for (const [path, method, body] of [
+    ['/access/request', 'POST', { name: 'Insecure remote' }],
+    ['/access/status', 'GET', undefined],
+    ['/access/claim', 'POST', { confirm: true }],
+  ] as const) {
+    assert.equal((await send(path, method, body, { ...remote, 'X-Forwarded-Proto': 'http', Origin: base })).status, 403, 'New approval flow rejects remote HTTP even with legacy HTTP opt-in');
+  }
+  delete process.env.GAH_ALLOW_INSECURE_HTTP;
   const connected = await Promise.all([connect(owner), connect(phoneHeaders), connect(ordinaryHeaders)]);
   for (const socket of connected) assert.ok(socket instanceof WebSocket);
   const received: ActivityEvent[][] = connected.map(() => []);
