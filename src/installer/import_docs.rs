@@ -105,9 +105,9 @@ pub fn run(args: &Args, home: &Path) -> Result<()> {
     if let Some(limit) = args.limit {
         docs.truncate(limit);
     }
+    // The caller (install-linux.sh) already prints the target session.
     println!(
-        "Gateway: {gateway}\nSession key: {}\nDocs to seed: {}\nMode: {}\n",
-        args.session_key,
+        "Gateway: {gateway}\nDocs to seed: {}\nMode: {}\n",
         docs.len(),
         if args.dry_run { "DRY RUN" } else { "LIVE" }
     );
