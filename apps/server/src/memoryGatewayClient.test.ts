@@ -188,7 +188,7 @@ test('a gateway that accepts but never responds cannot block a turn indefinitely
 
   try {
     const startedAt = Date.now();
-    assert.equal(await flushSession('does-not-exist'), false);
+    assert.equal((await recall('does-not-exist', 'current project')).degraded, true);
     assert.ok(Date.now() - startedAt < 6_000, 'gateway request should time out within five seconds');
   } finally {
     if (saved === undefined) delete process.env.TDAI_GATEWAY_URL;
@@ -287,4 +287,24 @@ test('idle captures flush once after the last turn; explicit settle cancels the 
       assert.equal(flushed.length, 2, 'explicit settle must not flush again on the old timer');
     }, key => flushed.push(key));
   } finally { delete process.env.GAH_GATEWAY_SETTINGS_PATH; }
+});
+
+
+test('settlement waits for extraction that exceeds the ordinary turn timeout', async () => {
+  const server = http.createServer((req, res) => {
+    req.resume();
+    setTimeout(() => {
+      res.writeHead(200, { 'Content-Type':'application/json' });
+      res.end(JSON.stringify({flushed:true}));
+    }, 5200);
+  });
+  await new Promise<void>(resolve => server.listen(0,resolve));
+  const saved = process.env.TDAI_GATEWAY_URL;
+  process.env.TDAI_GATEWAY_URL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try { assert.equal(await flushSession('slow-extraction'), true); }
+  finally {
+    if (saved === undefined) delete process.env.TDAI_GATEWAY_URL; else process.env.TDAI_GATEWAY_URL = saved;
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 });

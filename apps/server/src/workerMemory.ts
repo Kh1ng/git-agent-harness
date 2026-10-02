@@ -45,7 +45,7 @@ export function workerMemoryRouter(): Router {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-GAH-Caller':'worker-relay', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
           body: JSON.stringify({ ...Object.fromEntries(required.map((key) => [key, req.body[key]])), ...(operation === 'memories/list' ? {limit:req.body.limit, offset:req.body.offset} : {}) }),
-          signal: AbortSignal.timeout(operation === 'memories/migrate-english' ? 300_000 : 5_000),
+          signal: AbortSignal.timeout(operation === 'memories/migrate-english' || operation === 'session/end' ? 300_000 : 5_000),
           redirect: 'error',
         });
         if (!response.ok) {

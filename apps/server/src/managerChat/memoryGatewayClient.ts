@@ -184,7 +184,7 @@ async function postJsonBestEffort<T>(path: string, body: unknown): Promise<T | n
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(5_000)
+      signal: AbortSignal.timeout(path === '/session/end' ? 300_000 : 5_000)
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
