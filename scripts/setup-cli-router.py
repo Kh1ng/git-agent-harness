@@ -92,10 +92,13 @@ def download_binary(directory, version):
     base = f"https://github.com/router-for-me/CLIProxyAPI/releases/download/v{version}"
     with tempfile.TemporaryDirectory() as temporary:
         archive = Path(temporary) / asset
-        urllib.request.urlretrieve(f"{base}/{asset}", archive)
+        with urllib.request.urlopen(f"{base}/{asset}", timeout=30) as response, archive.open("wb") as target:
+            shutil.copyfileobj(response, target)
         with urllib.request.urlopen(f"{base}/checksums.txt", timeout=30) as response:
             checksums = response.read().decode().splitlines()
-        expected = next(line.split()[0] for line in checksums if line.split()[-1].lstrip("*") == asset)
+        expected = next((line.split()[0] for line in checksums if line.split() and line.split()[-1].lstrip("*") == asset), None)
+        if not expected:
+            raise ValueError("CLIProxyAPI release checksum entry is missing.")
         if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
             raise ValueError("CLIProxyAPI release checksum mismatch.")
         with tarfile.open(archive) as bundle:

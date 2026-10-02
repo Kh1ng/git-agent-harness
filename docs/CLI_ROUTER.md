@@ -49,6 +49,8 @@ For a direct CLI check on the central node:
   --model gah-router/gemini-3.1-pro-low 'Reply with ROUTER_OK.'
 ```
 
+A different router origin requires both new keys. Blank key fields preserve saved keys only for the existing origin.
+
 The wrapper discovers current models and reads current connection keys at process start. Keys never appear in command arguments. OpenCode state uses a separate home. Automatic conversation sharing is disabled.
 
 The installer adds one explicit backend instance. It preserves existing defaults and candidate priorities. For factory jobs, add the instance and model to the relevant profile candidates through GAH configuration. The proxy balances accounts that support that model. Cross-provider model fallback still uses GAH candidates.

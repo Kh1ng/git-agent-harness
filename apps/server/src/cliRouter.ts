@@ -511,6 +511,9 @@ export function cliRouterRouter(
     const loaded = loadStored(res);
     if (!loaded) return;
     const existing = loaded.stored;
+    if (existing && validatedUrl.origin !== new URL(existing.url).origin && (!body.apiKey || !body.managementKey)) {
+      return res.status(400).json({ error: 'keys_required', message: 'A different router requires both keys. Saved keys only apply to the existing router.' });
+    }
     const apiKey = typeof body.apiKey === 'string' && body.apiKey ? body.apiKey : existing?.apiKey;
     const managementKey = typeof body.managementKey === 'string' && body.managementKey ? body.managementKey : existing?.managementKey;
 

@@ -28,7 +28,7 @@ function scopeIdentity(backend: string, model: string | null, pool?: string | nu
   if (instance && instance !== backend) parts.push(instance);
   if (pool) parts.push(pool);
   if (model) parts.push(model);
-  return parts.join(' / ');
+  return [...new Set(parts)].join(' / ');
 }
 
 function formatQuotaMetadata(q: {

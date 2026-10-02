@@ -814,3 +814,17 @@ test('URL validation: localhost DNS name is rejected over HTTP', () => {
   assert.throws(() => validateRouterUrl('http://localhost:8317'));
   assert.doesNotThrow(() => validateRouterUrl('http://[::1]:8317'));
 });
+
+test('changing router origin requires both new keys before any connection attempt', async () => {
+  const rec = recordingFetch(() => ({ status: 200, body: {} }));
+  const ctx = await createTestServer({ settings: { url: 'https://old.example.com', apiKey: 'old-api', managementKey: 'old-management' }, mockFetch: rec.fn });
+  try {
+    for (const keys of [{}, { apiKey: 'new-api' }, { managementKey: 'new-management' }]) {
+      const res = await mutation(ctx.base, 'PUT', '/settings', { url: 'https://new.example.com', ...keys }, freshKey());
+      assert.equal(res.status, 400);
+      assert.equal((await res.json() as { error: string }).error, 'keys_required');
+    }
+    assert.equal(rec.calls.length, 0);
+    assert.equal(ctx.currentSettings?.url, 'https://old.example.com');
+  } finally { await ctx.cleanup(); }
+});
