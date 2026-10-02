@@ -20,14 +20,11 @@ const SNAPSHOT_REFRESH_MS = 5 * 60 * 1000;
  * (model) + pool must never be collapsed, per the spec: "agy" and
  * "agy-second" are different instances, "5-hour" and "weekly" are
  * different windows. This is used as the React key and the card title. */
-function scopeIdentity(backend: string, model: string | null, pool?: string | null, instance?: string | null): string {
-  // OpenCode is a runner. Its model namespace identifies the configured API provider.
-  const provider = backend === 'opencode' && model?.includes('/') ? model.split('/')[0] : null;
-  const name = provider === 'gah-router' ? 'CLI subscription router' : provider ?? backend;
-  const parts = [name];
-  if (instance && instance !== backend) parts.push(instance);
-  if (pool) parts.push(pool);
-  if (model) parts.push(model);
+function scopeIdentity(candidate: Pick<QuotaCandidateStatus, 'backend' | 'provider' | 'backend_instance' | 'quota_pool'> & { model?: string | null }): string {
+  const parts = [providerLabel(candidateProvider(candidate))];
+  if (candidate.backend_instance) parts.push(candidate.backend_instance);
+  if (candidate.quota_pool) parts.push(candidate.quota_pool);
+  if (candidate.model) parts.push(candidate.model);
   return [...new Set(parts)].join(' / ');
 }
 
@@ -123,9 +120,9 @@ export function QuotaFreshnessPanel({
                   ? 'unknown'
                   : 'good';
               return (
-                <div key={check.backend} data-testid={`quota-check-${check.backend}`} className="text-xs text-secondary">
+                <div key={scopeIdentity(check)} data-testid={`quota-check-${check.backend}`} className="text-xs text-secondary">
                   <div className="flex items-center justify-between gap-2">
-                    <span>{check.backend}</span>
+                    <span>{scopeIdentity(check)}</span>
                     <span className="inline-flex items-center gap-2">
                       {isStale(check.checked_at) && <StatusBadge tone="serious" label="Stale" />}
                       <StatusBadge tone={tone} label={label} />
@@ -204,7 +201,7 @@ export function QuotaPage() {
 
       <CliRouterPanel />
 
-      <QuotaCandidateLedger candidates={candidates} />
+      <QuotaCandidateLedger candidates={candidates} quotaChecks={snapshot?.quota_checks ?? []} />
 
       <details className="quota-settings">
         <summary className="text-sm text-secondary cursor-pointer py-3">Usage and data freshness</summary>
@@ -233,7 +230,7 @@ export function QuotaPage() {
               label="Candidates"
               value={String(candidates.length)}
               icon={Timer}
-              hint={candidates.length > 0 ? `${candidates.filter((c) => c.eligible_now).length} eligible now` : undefined}
+              hint={candidates.length > 0 ? `${candidates.filter((c) => c.eligible_now).length} not blocked` : undefined}
             />
           </section>
 
@@ -244,13 +241,20 @@ export function QuotaPage() {
 }
 
 /** A provider groups routing scopes, without treating distinct models as accounts. */
-function candidateProvider(candidate: QuotaCandidateStatus): string {
+function candidateProvider(candidate: Pick<QuotaCandidateStatus, 'backend' | 'provider'> & { model?: string | null }): string {
+  if (candidate.provider) return candidate.provider;
+  // The legacy second AGY runner is another account of the same provider.
+  if (candidate.backend === 'agy-second') return 'agy';
   return candidate.backend === 'opencode' && candidate.model?.includes('/')
     ? candidate.model.split('/')[0]
-    : candidate.backend;
+    : candidate.backend === 'opencode' ? 'Unknown provider' : candidate.backend;
 }
 
-function QuotaCandidateLedger({ candidates }: { candidates: QuotaCandidateStatus[] }) {
+function providerLabel(provider: string): string {
+  return ({ nous: 'Nous', 'nous-portal': 'Nous', mistral: 'Mistral', antigravity: 'Antigravity', anthropic: 'Anthropic', openai: 'OpenAI', 'gah-router': 'CLI subscription router' } as Record<string, string>)[provider] ?? provider;
+}
+
+function QuotaCandidateLedger({ candidates, quotaChecks }: { candidates: QuotaCandidateStatus[]; quotaChecks: QuotaCheck[] }) {
   const [providerFilter, setProviderFilter] = useState('All');
   const providers = [...new Set(candidates.map(candidateProvider))];
   const activeFilter = providers.includes(providerFilter) ? providerFilter : 'All';
@@ -258,6 +262,11 @@ function QuotaCandidateLedger({ candidates }: { candidates: QuotaCandidateStatus
   return (
     <section className="quota-candidates">
       <h3 className="text-base font-semibold text-primary mb-3">Configured candidates</h3>
+      {quotaChecks.filter(check => check.status === 'failed').map((check, index) => (
+        <p key={index} role="alert" className="text-xs text-critical mb-3">
+          {scopeIdentity(check)} · Quota check failed{check.error ? `: ${check.error}` : '. Refresh the account quota check.'}
+        </p>
+      ))}
       {candidates.length === 0 ? (
         <EmptyState icon={Gauge} title="No canonical candidates recorded" description="Add routing candidates to the profile to see availability and quota state here." />
       ) : (
@@ -265,7 +274,7 @@ function QuotaCandidateLedger({ candidates }: { candidates: QuotaCandidateStatus
           <div className="quota-provider-tabs" role="group" aria-label="Filter candidates by provider">
             {['All', ...providers].map(provider => (
               <button key={provider} className="quota-provider-tab" aria-pressed={activeFilter === provider} onClick={() => setProviderFilter(provider)}>
-                <Gauge size={15} aria-hidden="true" />{provider}
+                <Gauge size={15} aria-hidden="true" />{providerLabel(provider)}
                 <span className="quota-provider-count">({provider === 'All' ? candidates.length : candidates.filter(candidate => candidateProvider(candidate) === provider).length})</span>
               </button>
             ))}
@@ -276,8 +285,8 @@ function QuotaCandidateLedger({ candidates }: { candidates: QuotaCandidateStatus
               const observations = scopes.flatMap(candidate => candidate.quota_observations ?? []);
               return (
                 <section key={provider} className="quota-provider-summary">
-                  <div className="flex items-center justify-between gap-3 mb-3"><h4 className="text-sm font-semibold text-primary">{provider}</h4><span className="text-xs text-muted">{scopes.length} {scopes.length === 1 ? 'candidate' : 'candidates'}</span></div>
-                  <p className="text-2xl font-semibold text-primary tabular-nums">{scopes.filter(candidate => candidate.eligible_now).length}<span className="text-sm font-normal text-muted"> / {scopes.length} eligible</span></p>
+                  <div className="flex items-center justify-between gap-3 mb-3"><h4 className="text-sm font-semibold text-primary">{providerLabel(provider)}</h4><span className="text-xs text-muted">{scopes.length} {scopes.length === 1 ? 'candidate' : 'candidates'}</span></div>
+                  <p className="text-2xl font-semibold text-primary tabular-nums">{scopes.filter(candidate => candidate.eligible_now).length}<span className="text-sm font-normal text-muted"> / {scopes.length} not blocked</span></p>
                   <p className="text-xs text-muted mt-2">{observations.length} quota {observations.length === 1 ? 'observation' : 'observations'} · {observations.filter(observation => quotaPercentages(observation) !== null).length} with percentages</p>
                 </section>
               );
@@ -286,13 +295,17 @@ function QuotaCandidateLedger({ candidates }: { candidates: QuotaCandidateStatus
           <div className="quota-provider-ledgers">
             {filteredProviders.map(provider => (
               <section key={provider}>
-                <h4 className="text-sm font-semibold text-primary mb-2">{provider}</h4>
+                <h4 className="text-sm font-semibold text-primary mb-2">{providerLabel(provider)}</h4>
                 {candidates.filter(candidate => candidateProvider(candidate) === provider).map((candidate, index) => (
                   <div key={index} className="quota-candidate-row" data-testid={`quota-candidate-${candidate.backend}-${index}`}>
                     <div className="min-w-0">
-                      <p className="text-sm font-medium text-primary break-words">{scopeIdentity(candidate.backend, candidate.model, candidate.quota_pool, candidate.backend_instance)}</p>
+                      <p className="text-sm font-medium text-primary break-words">{scopeIdentity(candidate)}</p>
                       <p className="text-xs text-muted mt-1">{candidate.modes.length > 0 ? candidate.modes.join(', ') : 'candidate'}{candidate.backend === 'opencode' && ' · OpenCode runner'}{!candidate.configured && ' · no profile runner override'}</p>
-                      <div className="mt-2 flex flex-wrap gap-2"><StatusBadge tone={candidate.eligible_now ? 'good' : 'critical'} label={candidate.eligible_now ? 'Eligible' : 'Unavailable'} />{isStale(candidate.observed_at) && <StatusBadge tone="serious" label="Stale" />}</div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <StatusBadge tone={!candidate.eligible_now ? 'critical' : candidate.observed_at ? 'good' : 'unknown'} label={!candidate.eligible_now ? 'Unavailable' : candidate.observed_at ? 'Eligible' : 'Availability unverified'} />
+                        {!(candidate.quota_observations ?? []).some(observation => quotaPercentages(observation) !== null) && <StatusBadge tone="unknown" label="Quota unknown" />}
+                        {isStale(candidate.observed_at) && <StatusBadge tone="serious" label="Stale" />}
+                      </div>
                       {!candidate.eligible_now && <p className="text-xs text-secondary mt-2">{candidate.reason ?? 'Unknown reason'} · {formatRemaining(candidate.unavailable_until) ? `Resets in ${formatRemaining(candidate.unavailable_until)}` : 'No known reset time'}</p>}
                       <p className="text-xs text-muted mt-2">{formatAge(candidate.observed_at) ? `Observed ${formatAge(candidate.observed_at)}` : 'No observation'}</p>
                     </div>

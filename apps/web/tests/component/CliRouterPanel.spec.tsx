@@ -265,7 +265,7 @@ test('routing write failure shows partial error', async ({ mount, page }) => {
 // Unavailable / error states
 // ---------------------------------------------------------------------------
 
-test('unavailable status shows badge and no accounts section', async ({ mount, page }) => {
+test('unavailable status without an inventory shows the failure and no account rows', async ({ mount, page }) => {
   await mockRouter(page, makeSnapshot({
     status: 'unavailable',
     accounts: [],
@@ -273,9 +273,9 @@ test('unavailable status shows badge and no accounts section', async ({ mount, p
   }));
 
   const component = await mount(<CliRouterPanel />);
-  await expect(component.getByText('unavailable')).toBeVisible();
-  // Accounts section should not render since status is not connected
-  await expect(component.getByText('Accounts')).toHaveCount(0);
+  await expect(component.getByText('unavailable', { exact: true })).toBeVisible();
+  await expect(component.getByRole('alert')).toContainText('Router unavailable');
+  await expect(component.locator('[data-testid^="account-"]')).toHaveCount(0);
 });
 
 test('API fetch error shows error state with retry', async ({ mount, page }) => {
@@ -411,6 +411,43 @@ test('account quota error is displayed', async ({ mount, page }) => {
 
   const component = await mount(<CliRouterPanel />);
   await expect(component.getByText('Unsupported provider for quota check')).toBeVisible();
+});
+
+test('partial router outages preserve supplied account inventory and its unknown quotas', async ({ mount, page }) => {
+  await mockRouter(page, makeSnapshot({ status: 'unavailable' }));
+  const component = await mount(<CliRouterPanel />);
+  await expect(component.getByText('unavailable', { exact: true })).toBeVisible();
+  await expect(component.getByTestId('account-acc-1')).toBeVisible();
+  await expect(component.getByTestId('account-acc-3')).toBeVisible();
+  await expect(component.getByTestId('account-acc-3').getByText(/Quota not checked/)).toBeVisible();
+});
+
+test('connection loss retains known accounts until a successful empty inventory confirms removal', async ({ mount, page }) => {
+  let snapshot = makeSnapshot();
+  await page.route('**/api/cli-router', route => route.fulfill({ json: snapshot }));
+  const component = await mount(<CliRouterPanel />);
+  await expect(component.getByTestId('account-acc-1')).toBeVisible();
+  snapshot = makeSnapshot({ status: 'unavailable', accounts: [] });
+  await component.getByRole('button', { name: 'Refresh router', exact: true }).click();
+  await expect(component.getByRole('alert')).toContainText('Router unavailable');
+  await expect(component.getByTestId('account-acc-1')).toBeVisible();
+  snapshot = makeSnapshot({ accounts: [] });
+  await component.getByRole('button', { name: 'Refresh router', exact: true }).click();
+  await expect(component.getByText('No router accounts configured.')).toBeVisible();
+  await expect(component.getByTestId('account-acc-1')).toHaveCount(0);
+});
+
+test('account refresh keeps newly read quotas when the models or routing read fails', async ({ mount, page }) => {
+  await mockRouter(page, makeSnapshot());
+  const updated = makeSnapshot({ status: 'unavailable' });
+  updated.accounts[0].quotas[0].remainingPercent = 42;
+  await page.route('**/api/cli-router/accounts/refresh', route => route.fulfill({ json: updated }));
+  const component = await mount(<CliRouterPanel />);
+  const account = component.getByTestId('account-acc-1');
+  await expect(account.getByText('72% remaining')).toBeVisible();
+  await account.getByRole('button', { name: /Refresh quota/ }).click();
+  await expect(account.getByText('42% remaining')).toBeVisible();
+  await expect(component.getByRole('alert')).toContainText('Router unavailable');
 });
 
 
