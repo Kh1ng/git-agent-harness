@@ -29,6 +29,12 @@ class Fixture(BaseHTTPRequestHandler):
         if path == "/unavailable" or (path == "/recovery" and Fixture.recovery_unavailable):
             self.close_connection = True
             return
+        if path == "/not-found":
+            self.send_response(404)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(b"<h1>404 Not Found</h1>")
+            return
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         if urlsplit(self.path).path == '/remember':

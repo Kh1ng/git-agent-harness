@@ -330,6 +330,19 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         }
     }
 
+    func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        guard response.isForMainFrame,
+              let http = response.response as? HTTPURLResponse, http.statusCode >= 400 else {
+            decisionHandler(.allow)
+            return
+        }
+        loading = false
+        hasCommittedPage = false
+        error = "Your central server returned HTTP \(http.statusCode). Check its address and port in Connection settings."
+        decisionHandler(.cancel)
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) { loading = true; error = nil }
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         hasCommittedPage = webView.url.map { address?.contains($0) == true } ?? false
@@ -338,7 +351,7 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError failure: Error) { failed(failure) }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError failure: Error) { failed(failure) }
     private func failed(_ failure: Error) {
-        guard (failure as NSError).code != NSURLErrorCancelled else { return }
+        guard error == nil, (failure as NSError).code != NSURLErrorCancelled else { return }
         loading = false
         error = "Cannot load your central server. Check Tailscale and the server address, then retry."
     }
