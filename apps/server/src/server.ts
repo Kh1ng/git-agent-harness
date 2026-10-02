@@ -106,6 +106,7 @@ import { usageRollup } from './managerChat/usageRollup.js';
 import { MessagingBridge } from './managerChat/messagingBridge.js';
 import { projectRoutes } from './projectRoutes.js';
 import { chatNodes, chatRoute, configureChatRouting } from './chatRouting.js';
+import { cliRouterRouter } from './cliRouter.js';
 import { timed } from './serverTiming.js';
 import type { AuthHealthMonitor, AuthHealthProber } from './authHealth.js';
 import { LoginRepairError, type LoginRepairBroker, type LoginRepairs, type RepairPrincipal } from './loginRepair.js';
@@ -477,6 +478,15 @@ export function createServer(
   app.use('/api/route-approvals', paidRouteApprovalsRouter(mutation));
   app.use('/api/external-approvals', externalApprovalsRouter(mutation));
   app.use('/api/backend-instances', backendInstancesRouter(mutation));
+  if (node.role === 'central') {
+    app.use('/api/cli-router', rateLimit({
+      windowMs: 60_000,
+      limit: 60,
+      standardHeaders: true,
+      legacyHeaders: false
+    }));
+    app.use('/api/cli-router', cliRouterRouter(mutation));
+  }
   if (node.role === 'central') {
     app.get('/api/manager-chat/bridge/operators', requireOwner, (_req, res) => {
       res.json({ operators: messagingBridge.listOperators() });
