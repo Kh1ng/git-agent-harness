@@ -20,6 +20,9 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 import { runProfileList } from '../gahCli.js';
 import { AsyncTtlCache } from '../asyncTtlCache.js';
 import {
@@ -57,16 +60,19 @@ export interface CaptureResult {
  * (e.g. GET /api/settings/gateway) so a configured-but-failing gateway is
  * noticeable outside the chat transcript too. */
 export interface GatewayHealth {
+  captureFailures: number;
+  hookCaptureFailures: number;
   degraded: boolean;
   lastError: string | null;
   lastFailedAt: number | null;
   lastOkAt: number | null;
 }
 
-const healthState: { lastError: string | null; lastFailedAt: number | null; lastOkAt: number | null } = {
-  lastError: null,
-  lastFailedAt: null,
-  lastOkAt: null
+const healthState = {
+  captureFailures: 0,
+  lastError: null as string | null,
+  lastFailedAt: null as number | null,
+  lastOkAt: null as number | null,
 };
 
 function recordGatewayOk(): void {
@@ -81,7 +87,15 @@ function recordGatewayFailure(error: unknown): void {
 }
 
 export function gatewayHealth(): GatewayHealth {
+  let hookCaptureFailures = 0;
+  try {
+    const config = process.env.GAH_MEMORY_HOOK_CONFIG || resolve(homedir(), '.config/gah/memory-hooks.json');
+    const count = JSON.parse(readFileSync(resolve(config, '..', 'memory-hook-health.json'), 'utf8')).captureFailures;
+    if (Number.isSafeInteger(count) && count >= 0) hookCaptureFailures = count;
+  } catch { /* A machine without hooks has no hook failures. */ }
   return {
+    captureFailures: healthState.captureFailures,
+    hookCaptureFailures,
     degraded: healthState.lastFailedAt !== null,
     lastError: healthState.lastError,
     lastFailedAt: healthState.lastFailedAt,
@@ -161,10 +175,10 @@ export async function sessionKeyForTicket(profile: string, ticketId: string): Pr
  * degradation on any failure (transport, non-2xx, malformed JSON) and
  * returns null; returns the parsed JSON and records success otherwise. */
 async function postJsonBestEffort<T>(path: string, body: unknown): Promise<T | null> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  const apiKey = gatewayApiKey();
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-GAH-Caller': 'server' };
   try {
+    const apiKey = gatewayApiKey();
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
     const res = await fetch(`${gatewayBaseUrl()}${path}`, {
       method: 'POST',
       headers,
@@ -179,6 +193,7 @@ async function postJsonBestEffort<T>(path: string, body: unknown): Promise<T | n
     recordGatewayOk();
     return data;
   } catch (error) {
+    if (path === '/capture') healthState.captureFailures++;
     recordGatewayFailure(error);
     return null;
   }

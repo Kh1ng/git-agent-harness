@@ -1,5 +1,40 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
+import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
+
+export function gatewayKeyFile(): string {
+  return resolve(homedir(), '.config/gah/tdai-gateway.env');
+}
+
+function fileApiKey(): string | undefined {
+  try {
+    const line = readFileSync(gatewayKeyFile(), 'utf8').split('\n').reverse().find((line) => line.startsWith('TDAI_GATEWAY_API_KEY='));
+    let key = line?.slice('TDAI_GATEWAY_API_KEY='.length).trim();
+    if (key?.startsWith('"') && key.endsWith('"')) key = key.slice(1, -1).replace(/\\(.)/g, '$1');
+    else if (key?.startsWith("'") && key.endsWith("'")) key = key.slice(1, -1);
+    return key || undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return undefined;
+  }
+}
+
+function writeApiKey(key: string | null): void {
+  if (key && /[\x00-\x1f\x7f]/.test(key)) throw new Error('TDAI_GATEWAY_API_KEY must not contain control characters');
+  const path = gatewayKeyFile();
+  mkdirSync(dirname(path), { recursive: true });
+  const before = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const lines = before.split('\n').filter((line) => line && !line.startsWith('TDAI_GATEWAY_API_KEY='));
+  if (key) lines.push(`TDAI_GATEWAY_API_KEY="${key.replace(/[\\"$`]/g, '\\$&')}"`);
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, `${lines.join('\n')}\n`, { mode: 0o600, flag: 'wx' });
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
 
 /** Per-profile memory context policy (#961). Everything is optional so a
  * profile with no gateway configured is completely unaffected -- no new
@@ -74,12 +109,22 @@ function normalizePolicy(value: Record<string, unknown>): MemoryContextPolicy {
 }
 
 export function writeGatewaySettings(settings: Partial<GatewaySettings>): void {
-  const current = readGatewaySettings();
-  const next: GatewaySettings = { ...current, ...settings };
+    const current = readGatewaySettings();
+  // Migrate the legacy settings credential instead of maintaining another copy.
+  if ('apiKey' in settings) writeApiKey(settings.apiKey ?? null);
+  else if (current.apiKey && !fileApiKey()) writeApiKey(current.apiKey);
+    const next: GatewaySettings = { ...current, ...settings };
+  next.apiKey = null;
   const path = settingsPath();
   const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(path, JSON.stringify(next, null, 2));
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, JSON.stringify(next, null, 2), { mode: 0o600, flag: 'wx' });
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
 }
 
 /** Effective gateway URL: store wins over env var. */
@@ -88,10 +133,13 @@ export function effectiveGatewayUrl(): string {
   return stored || process.env.TDAI_GATEWAY_URL || 'http://127.0.0.1:8420';
 }
 
-/** Effective API key: store wins over env var. */
+/** Same credential order as the CLI and hooks: environment, then private env file. */
 export function effectiveGatewayApiKey(): string | undefined {
-  const stored = readGatewaySettings().apiKey;
-  return stored || process.env.TDAI_GATEWAY_API_KEY || undefined;
+  const legacy = readGatewaySettings().apiKey;
+  if (legacy) writeGatewaySettings({});
+  const key = process.env.TDAI_GATEWAY_API_KEY || fileApiKey();
+  if (key && /[\x00-\x1f\x7f]/.test(key)) throw new Error('TDAI_GATEWAY_API_KEY must not contain control characters');
+  return key;
 }
 
 /** Returns true if the gateway should be used for this profile -- requires an explicitly configured URL (#878), not just an API key. */

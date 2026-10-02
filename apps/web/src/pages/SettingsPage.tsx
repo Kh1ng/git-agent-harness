@@ -1783,6 +1783,9 @@ function GatewaySettingsSection({ configuredProfiles }: { configuredProfiles: Pr
         <p className="text-xs text-muted mt-2">
           Last success: {settings.degraded.lastOkAt ? new Date(settings.degraded.lastOkAt).toLocaleString() : 'not observed'}
         </p>
+        <p className="text-xs text-muted mt-1">
+          Failed captures: {settings.degraded.captureFailures ?? 0} server, {settings.degraded.hookCaptureFailures ?? 0} local hooks
+        </p>
         {settings.degraded.lastFailedAt && (
           <p className="text-xs text-critical mt-1 break-words">
             Last failure: {new Date(settings.degraded.lastFailedAt).toLocaleString()}

@@ -21,6 +21,35 @@ SOURCE = Path(__file__).with_name('gah-memory-hook.py').read_text()
 
 
 class MemoryHooks(unittest.TestCase):
+    def test_stop_captures_before_the_final_reply_is_written_to_transcript(self):
+        # Claude Code 2.1.287 Stop fired before the text block reached JSONL.
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / 'turn.jsonl'
+            transcript.write_text(json.dumps({'message': {'role': 'user', 'content': 'current request'}}) + '\n')
+            with patch.object(hook, 'gateway_post') as post:
+                hook.do_capture(directory, str(transcript), 'current reply')
+            post.assert_called_once()
+            self.assertEqual(post.call_args.args[1]['assistant_content'], 'current reply')
+            self.assertEqual(post.call_args.args[1]['user_content'], 'current request')
+
+    def test_remote_install_requires_and_persists_a_key(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict('os.environ', {}, clear=True):
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, 'TDAI_GATEWAY_API_KEY'):
+                setup.install(root, ['claude'], SOURCE, 'https://gateway.test')
+            self.assertFalse((root / '.claude/settings.json').exists())
+            with patch.dict('os.environ', {'TDAI_GATEWAY_API_KEY': 'env-key'}):
+                setup.install(root, ['claude'], SOURCE, 'https://gateway.test')
+            key_file = root / '.config/gah/tdai-gateway.env'
+            self.assertEqual(key_file.stat().st_mode & 0o777, 0o600)
+            with patch.object(hook, 'TDAI_API_KEY_FILE', key_file):
+                self.assertEqual(hook.api_key(), 'env-key')
+                with patch.dict('os.environ', {'TDAI_GATEWAY_API_KEY': 'override-key'}):
+                    self.assertEqual(hook.api_key(), 'override-key')
+            with patch.object(hook, 'SETTINGS_FILE', root / '.config/gah/memory-hooks.json'), patch.object(hook, 'TDAI_API_KEY_FILE', root / 'missing.env'):
+                self.assertIsNone(hook.gateway_post('/capture', {}))
+            self.assertEqual(json.loads((root / '.config/gah/memory-hook-health.json').read_text())['captureFailures'], 1)
+
     def test_merge_preserves_other_hooks_comments_consent_and_is_repeatable(self):
         with tempfile.TemporaryDirectory(prefix="gah hooks '$() ") as directory:
             root = Path(directory)
@@ -33,7 +62,7 @@ class MemoryHooks(unittest.TestCase):
             codex.write_text(json.dumps({'hooks': {'Stop': [{'hooks': [{'type':'command', 'command': shlex.join([str(root / '.local/bin/gah-memory-hook'), '--tool', 'codex', '--phase', 'capture'])}]}]}}))
             hermes = root / '.hermes/config.yaml'
             hermes.write_text('# Keep this note\nmodel: "existing-model"\nhooks_auto_accept: false\nhooks:\n  on_session_start:\n    - command: "petdex keep-me"\n')
-            setup.install(root, ['claude', 'codex', 'hermes'], SOURCE, 'http://127.0.0.1:9')
+            setup.install(root, ['claude', 'codex', 'hermes'], SOURCE, 'http://127.0.0.1:9', 'fixture-key')
             result = json.loads(claude.read_text())
             self.assertEqual(result['permissions'], {'allow':['Read']})
             self.assertEqual(result['hooks']['SessionStart'][0]['hooks'], [old_hook])
@@ -123,7 +152,8 @@ class MemoryHooks(unittest.TestCase):
                 request.assert_not_called()
                 config.write_text('{"gateway_url":"http://127.0.0.1:9"}')
                 request.side_effect = hook.urllib.error.URLError('fixture unavailable')
-                self.assertIsNone(hook.gateway_post('/recall', {}))
+                with patch.dict('os.environ', {'TDAI_GATEWAY_API_KEY':'fixture-key'}):
+                    self.assertIsNone(hook.gateway_post('/recall', {}))
                 self.assertEqual(request.call_count, 1)
                 self.assertIsNone(hook.NoGatewayRedirect().redirect_request(None, None, 302, '', {}, 'https://other.test'))
 

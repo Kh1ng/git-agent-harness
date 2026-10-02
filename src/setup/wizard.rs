@@ -333,7 +333,7 @@ impl<'a> Setup<'a> {
                     Some(200..=299) => self
                         .prompter
                         .say("✓ The memory gateway answered and accepted the key."),
-                    Some(401 | 403) => bail!("The memory gateway rejected that key."),
+                    Some(401 | 403) => bail!("The memory gateway rejected that key; fix TDAI_GATEWAY_API_KEY in ~/.config/gah/tdai-gateway.env and run setup again."),
                     Some(status) => bail!("The memory gateway answered HTTP {status}."),
                     None => bail!("Nothing answered at {url}/recall."),
                 }

@@ -37,6 +37,13 @@ pub fn run(command: SetupCommands) -> Result<()> {
     let home = home_dir
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .context("Cannot find your home directory; pass --home-dir")?;
+    let gateway_url = gateway_url
+        .or_else(|| std::env::var("TDAI_GATEWAY_URL").ok())
+        .or_else(|| {
+            let contents = std::fs::read(home.join(".config/gah/memory-hooks.json")).ok()?;
+            let settings: serde_json::Value = serde_json::from_slice(&contents).ok()?;
+            settings.get("gateway_url")?.as_str().map(str::to_owned)
+        });
     let hermes_python = home.join(".hermes/hermes-agent/venv/bin/python");
     let python = python.unwrap_or_else(|| {
         if tool.iter().any(|t| t == "hermes") && hermes_python.is_file() {
@@ -47,6 +54,7 @@ pub fn run(command: SetupCommands) -> Result<()> {
     });
     let input = serde_json::to_vec(&serde_json::json!({
         "home": home, "tools": tool, "gateway_url": gateway_url,
+        "gateway_api_key": crate::memory_gateway::gateway_api_key(&home)?,
         "hook_source": include_str!("../../../scripts/gah-memory-hook.py"),
     }))?;
     let mut child = Command::new(&python)
@@ -71,6 +79,23 @@ pub fn run(command: SetupCommands) -> Result<()> {
     written.context("sending memory-hook setup input")?;
     if !status.success() {
         bail!("Memory-hook setup failed; see the diagnostic above");
+    }
+    if let Some(url) = gateway_url {
+        use crate::memory_gateway::{CurlMemoryGatewayTransport, MemoryGatewayTransport};
+        let key = crate::memory_gateway::gateway_api_key(&home)?;
+        let (status, _) = CurlMemoryGatewayTransport.post(
+            &format!("{}/recall", url.trim_end_matches('/')),
+            r#"{"query":"gah setup auth check","session_key":"gah:setup-check"}"#,
+            key.as_deref(),
+            10,
+        )?;
+        if status != 200 {
+            bail!(
+                "Memory gateway check failed (HTTP {status}); fix TDAI_GATEWAY_API_KEY in {}",
+                home.join(".config/gah/tdai-gateway.env").display()
+            );
+        }
+        println!("Memory gateway authenticated recall check passed.");
     }
     Ok(())
 }
