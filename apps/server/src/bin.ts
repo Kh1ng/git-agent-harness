@@ -61,8 +61,8 @@ async function main() {
   const webPushNotifications = node.role === 'central' ? new WebPushNotifications() : undefined;
   const apnsNotifications = node.role === 'central' ? apnsFromEnvironment() : undefined;
   const activityFeed = new ActivityFeed(undefined, node.role === 'central' ? deliverToAll([
-    webPushNotifications && ((event) => webPushNotifications.deliverActivity(event)),
-    apnsNotifications && ((event) => apnsNotifications.deliverActivity(event)),
+    webPushNotifications && ((event) => webPushNotifications.deliverActivity(event, id => deviceAccess!.canApprovePairing(id))),
+    apnsNotifications && ((event) => apnsNotifications.deliverActivity(event, id => deviceAccess!.canApprovePairing(id))),
     channelDelivery(coordinatorIdentity.advertised_url),
     commandDelivery(coordinatorIdentity.advertised_url)
   ]) : undefined);

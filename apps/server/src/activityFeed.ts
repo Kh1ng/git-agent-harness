@@ -276,20 +276,24 @@ export class ActivityFeed {
   }
 
   /** Every retained event that passed the wake filter, across profiles, newest first. */
-  notifications(): ActivityEvent[] {
+  notifications(canApprovePairing = true): ActivityEvent[] {
     // Recording order is not event order: controller history can arrive late.
-    return this.events.filter(notifiableActivity).sort((a, b) => Date.parse(b.occurredAt) - Date.parse(a.occurredAt));
+    return this.events.filter(event => notifiableActivity(event) && this.pairingVisible(event, canApprovePairing)).sort((a, b) => Date.parse(b.occurredAt) - Date.parse(a.occurredAt));
   }
 
-  unreadCount(): number {
-    return this.events.filter((event) => notifiableActivity(event) && event.readAt === null).length;
+  private pairingVisible(event: ActivityEvent, canApprovePairing: boolean): boolean {
+    return canApprovePairing || !event.pairingRequestId;
+  }
+
+  unreadCount(canApprovePairing = true): number {
+    return this.events.filter((event) => notifiableActivity(event) && event.readAt === null && this.pairingVisible(event, canApprovePairing)).length;
   }
 
   /** Marks the named notifications read, or all of them. Returns how many changed. */
-  markRead(ids: string[] | 'all'): number {
+  markRead(ids: string[] | 'all', canApprovePairing = true): number {
     const wanted = ids === 'all' ? null : new Set(ids);
     const readAt = new Date(this.now()).toISOString();
-    const changed = this.events.filter((event) => event.readAt === null && (!wanted || wanted.has(event.id)));
+    const changed = this.events.filter((event) => event.readAt === null && (!wanted || wanted.has(event.id)) && this.pairingVisible(event, canApprovePairing));
     if (changed.length === 0) return 0;
     for (const event of changed) event.readAt = readAt;
     this.persist();

@@ -66,6 +66,21 @@ const activity = (id: string): ActivityEvent => ({
   kind: 'chat_turn_completed', severity: 'success', title: 'gah: reply ready', message: 'Done.'
 });
 
+test('APNs pairing approval shares the targeted owner and approver delivery rule', async () => {
+  const f = fixture();
+  try {
+    f.service.register({ token: token('a'), label: 'Owner' });
+    f.service.register({ token: token('b'), label: 'Approver' }, 'enabled-device');
+    f.service.register({ token: token('c'), label: 'Controller' }, 'ordinary-device');
+    const event: ActivityEvent = { ...activity('pairing:request-id'), profile: null, kind: 'action_required', pairingRequestId: 'request-id' };
+    assert.deepEqual((await f.service.deliverActivity(event, id => id === 'enabled-device')).map(receipt => receipt.target), ['Owner', 'Approver']);
+    assert.deepEqual(f.requests.map(request => request.token), [token('a'), token('b')]);
+    assert.equal((f.requests[0].payload as { url: string }).url, '/?page=settings&pairingRequest=request-id&event=pairing%3Arequest-id');
+    assert.deepEqual((await f.service.deliverActivity(event)).map(receipt => receipt.target), ['Owner']);
+    assert.equal((await f.service.deliverActivity({ ...event, pairingRequestId: undefined })).length, 3);
+  } finally { rmSync(f.directory, { recursive: true, force: true }); }
+});
+
 test('APNs alert uses token auth, shared payload, collapse id, private storage, and prunes 410', async () => {
   const setup = fixture(() => ({ status: 410, reason: 'Unregistered' }));
   try {

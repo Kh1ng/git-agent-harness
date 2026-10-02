@@ -1,13 +1,15 @@
 import crypto from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import type { PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harness/contracts';
+import type { PairedDevice, PairingOffer, PairingPreview, PairingAccessRequest } from '@git-agent-harness/contracts';
 
 export const DEVICE_COOKIE = 'gah_device';
+export const PAIRING_REQUEST_COOKIE = 'gah_pairing_request';
 export const DEVICE_ACCESS = 'Dashboard control: read projects and chats, run agent work, and choose chat models. The owner controls pairing, credentials, worker registration, global settings, and destructive administration.';
 const CODE_LIFETIME = 5 * 60_000;
 export const DEVICE_LIFETIME = 30 * 24 * 60 * 60_000;
 type StoredDevice = PairedDevice & { token_hash: string };
+type PendingAccess = { request: PairingAccessRequest; claim_hash: string; approvedBy?: string };
 const hash = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -15,6 +17,7 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
  * Synchronous redemption/persistence leaves no async gap for a second redemption. */
 export class DeviceAccess {
   private offers = new Map<string, PairingOffer>();
+  private requests = new Map<string, PendingAccess>();
   private devices: StoredDevice[] | undefined;
   private revokedListeners = new Set<(id: string) => void>();
   constructor(private path = process.env.GAH_DEVICE_STORE_PATH ?? resolve('config/paired-devices.json'), private now = Date.now) {}
@@ -48,7 +51,8 @@ export class DeviceAccess {
           || typeof d.token_hash !== 'string' || !/^[0-9a-f]{64}$/.test(d.token_hash)
           || typeof d.created_at !== 'string' || !Number.isFinite(Date.parse(d.created_at))
           || typeof d.expires_at !== 'string' || !Number.isFinite(Date.parse(d.expires_at))
-          || (d.revoked_at !== null && (typeof d.revoked_at !== 'string' || !Number.isFinite(Date.parse(d.revoked_at))))) throw new Error();
+          || (d.revoked_at !== null && (typeof d.revoked_at !== 'string' || !Number.isFinite(Date.parse(d.revoked_at))))
+          || (d.can_approve_pairing !== undefined && typeof d.can_approve_pairing !== 'boolean')) throw new Error();
         ids.add(d.id);
       }
       return this.devices = stored.devices;
@@ -88,14 +92,83 @@ export class DeviceAccess {
 
   redeem(code: unknown, serverId: unknown, origin: string, name: unknown): { device: PairedDevice; token: string } {
     this.inspect(code, serverId, origin);
+    const paired = this.pair(name);
+    this.offers.delete(code as string);
+    return paired;
+  }
+
+  /** Every approved flow issues only the existing controller credential. */
+  private pair(name: unknown): { device: PairedDevice; token: string } {
     if (typeof name !== 'string' || !name.trim() || name.length > 80 || /[\x00-\x1f\x7f]/.test(name)) throw new Error('Enter a device name of 1–80 characters.');
     const records = this.records();
     if (records.length >= 1000) throw new Error('Paired device storage is full. Ask the owner to maintain the device store.');
     const token = crypto.randomBytes(32).toString('base64url');
     const device: PairedDevice = { id: crypto.randomUUID(), name: name.trim(), created_at: new Date(this.now()).toISOString(), expires_at: new Date(this.now() + DEVICE_LIFETIME).toISOString(), revoked_at: null };
     this.persist([...records, { ...device, token_hash: hash(token) }]);
-    this.offers.delete(code as string);
     return { device, token: `${device.id}.${token}` };
+  }
+
+  createAccessRequest(server: PairingOffer['server'], name: unknown): { request: PairingAccessRequest; cookie: string } {
+    if (typeof name !== 'string' || !name.trim() || name.length > 80 || /[\x00-\x1f\x7f]/.test(name)) throw new Error('Enter a device name of 1–80 characters.');
+    for (const [id, entry] of this.requests) if (Date.parse(entry.request.expires_at) <= this.now()) this.requests.delete(id);
+    if (this.requests.size >= 20) throw new Error('Too many pending access requests. Retry after five minutes.');
+    const secret = crypto.randomBytes(32).toString('base64url');
+    const request: PairingAccessRequest = {
+      schema_version: 1, id: crypto.randomUUID(), name: name.trim(), matching_code: crypto.randomBytes(4).toString('hex').toUpperCase(),
+      expires_at: new Date(this.now() + CODE_LIFETIME).toISOString(), server, access: DEVICE_ACCESS, status: 'pending',
+    };
+    this.requests.set(request.id, { request, claim_hash: hash(secret) });
+    return { request: { ...request }, cookie: `${request.id}.${secret}` };
+  }
+
+  private refreshRequest(entry: PendingAccess): PairingAccessRequest {
+    if (Date.parse(entry.request.expires_at) <= this.now() && entry.request.status !== 'claimed') entry.request.status = 'expired';
+    return { ...entry.request };
+  }
+
+  private boundRequest(cookie: string | undefined, origin: string): PendingAccess {
+    const [id, secret, extra] = (cookie ?? '').split('.');
+    const entry = uuid.test(id ?? '') && /^[A-Za-z0-9_-]{43}$/.test(secret ?? '') && extra === undefined ? this.requests.get(id) : undefined;
+    if (!entry || entry.request.server.origin !== origin || !crypto.timingSafeEqual(Buffer.from(entry.claim_hash, 'hex'), Buffer.from(hash(secret), 'hex'))) throw new Error('No access request is bound to this browser.');
+    return entry;
+  }
+
+  accessRequestStatus(cookie: string | undefined, origin: string): PairingAccessRequest {
+    return this.refreshRequest(this.boundRequest(cookie, origin));
+  }
+
+  accessRequests(): PairingAccessRequest[] {
+    return [...this.requests.values()].map(entry => this.refreshRequest(entry)).filter(request => request.status === 'pending' || request.status === 'approved');
+  }
+
+  /** Owner-delegated approvers remain ordinary controllers; each action rechecks their live grant. */
+  canApprovePairing(id: string): boolean {
+    return this.active(id) && this.records().some(device => device.id === id && device.can_approve_pairing === true);
+  }
+
+  setCanApprovePairing(id: string, enabled: boolean): PairedDevice {
+    if (!this.active(id)) throw new Error('An active paired device is required.');
+    this.persist(this.records().map(device => device.id === id ? { ...device, can_approve_pairing: enabled } : device));
+    return this.list().find(device => device.id === id)!;
+  }
+
+  decideAccessRequest(id: string, approve: boolean, matchingCode: unknown, approver: string): PairingAccessRequest {
+    if (approver !== 'owner' && !this.canApprovePairing(approver)) throw new Error('Pairing approval is not enabled for this device.');
+    const entry = this.requests.get(id);
+    if (!entry || this.refreshRequest(entry).status !== 'pending') throw new Error('This access request is no longer pending.');
+    if (approve && matchingCode !== entry.request.matching_code) throw new Error('Compare the matching code on the requesting device before approving.');
+    entry.request.status = approve ? 'approved' : 'denied';
+    if (approve) entry.approvedBy = approver;
+    return { ...entry.request };
+  }
+
+  claimAccessRequest(cookie: string | undefined, origin: string): { device: PairedDevice; token: string } {
+    const entry = this.boundRequest(cookie, origin);
+    if (this.refreshRequest(entry).status !== 'approved') throw new Error('This request is not approved or has already been claimed.');
+    if (entry.approvedBy !== 'owner' && (!entry.approvedBy || !this.canApprovePairing(entry.approvedBy))) throw new Error('The approving device no longer has pairing approval enabled.');
+    const paired = this.pair(entry.request.name);
+    entry.request.status = 'claimed';
+    return paired;
   }
 
   authenticate(token: string): PairedDevice | null {
@@ -129,6 +202,11 @@ export class DeviceAccess {
 
 /** Reject duplicate cookie credentials rather than guessing which authority wins. */
 export function deviceCookie(header: string | undefined): string | undefined {
-  const values = (header ?? '').split(';').map(part => part.trim()).filter(part => part.startsWith(`${DEVICE_COOKIE}=`));
-  return values.length === 0 ? undefined : values.length === 1 ? values[0].slice(DEVICE_COOKIE.length + 1) : '';
+  return credentialCookie(header, DEVICE_COOKIE);
+}
+
+/** Duplicate credentials fail closed for both controller and request cookies. */
+export function credentialCookie(header: string | undefined, name: string): string | undefined {
+  const values = (header ?? '').split(';').map(part => part.trim()).filter(part => part.startsWith(`${name}=`));
+  return values.length === 0 ? undefined : values.length === 1 ? values[0].slice(name.length + 1) : '';
 }
