@@ -44,9 +44,9 @@ test('quota windows compare exact percentages and distinguish missing, stale, an
   await page.goto('/');
   await page.getByRole('button', { name: 'Quota', exact: true }).click();
 
-  const codex = page.locator('.card-padded').filter({ hasText: 'codex / subscription / gpt-5.3' });
-  const claude = page.locator('.card-padded').filter({ hasText: 'claude / subscription / opus' });
-  const vibe = page.locator('.card-padded').filter({ hasText: 'vibe / metered' });
+  const codex = page.getByTestId('quota-candidate-codex-0');
+  const claude = page.getByTestId('quota-candidate-claude-0');
+  const vibe = page.getByTestId('quota-candidate-vibe-0');
 
   await expect(codex.getByRole('progressbar', { name: '5-hour · gpt-5.3: 40% used, 60% remaining' })).toBeVisible();
   await expect(claude.getByRole('progressbar', { name: 'weekly · opus: 75% used, 25% remaining' })).toBeVisible();
@@ -55,6 +55,12 @@ test('quota windows compare exact percentages and distinguish missing, stale, an
   await expect(vibe.getByText('Stale', { exact: true })).toHaveCount(2);
   await expect(vibe.getByText('No usage percentage available', { exact: true })).toBeVisible();
   await expect(vibe.getByRole('progressbar')).toHaveCount(0);
+
+  await page.getByRole('group', { name: 'Filter candidates by provider' }).getByRole('button', { name: 'claude (1)', exact: true }).click();
+  await expect(claude).toBeVisible();
+  await expect(codex).toHaveCount(0);
+  await expect(vibe).toHaveCount(0);
+  await page.getByRole('group', { name: 'Filter candidates by provider' }).getByRole('button', { name: 'All (3)', exact: true }).click();
 
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);

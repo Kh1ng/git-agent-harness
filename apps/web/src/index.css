@@ -350,3 +350,84 @@
   border-radius: 0.5rem;
   overflow: auto;
 }
+
+/* Quota management uses one joined provider band and ruled account ledgers.
+   Bars represent the labelled allowance, never a guessed token capacity. */
+.quota-provider-tabs {
+  display: flex;
+  gap: 1.25rem;
+  overflow-x: auto;
+  border-bottom: 1px solid rgb(var(--border-subtle));
+  margin-bottom: 1rem;
+}
+.quota-provider-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+  min-height: 44px;
+  padding: .65rem .15rem;
+  border-bottom: 2px solid transparent;
+  color: rgb(var(--ink-muted));
+  font-size: .875rem;
+  white-space: nowrap;
+}
+.quota-provider-tab[aria-pressed='true'] {
+  border-color: rgb(var(--ink-primary));
+  color: rgb(var(--ink-primary));
+}
+.quota-provider-tab:hover { color: rgb(var(--ink-primary)); }
+.quota-provider-count {
+  background: rgb(var(--surface-raised));
+  padding: .1rem .3rem;
+  border-radius: 6px;
+  font-size: .7rem;
+  font-variant-numeric: tabular-nums;
+}
+.quota-summary-band {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  border: 1px solid rgb(var(--border-subtle));
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgb(var(--surface-card));
+}
+.quota-provider-summary { padding: 1.1rem; border-right: 1px solid rgb(var(--border-subtle)); }
+.quota-provider-summary:last-child { border-right: 0; }
+.quota-summary-window + .quota-summary-window { margin-top: 1rem; }
+.quota-summary-band .usage-progress, .quota-account-row .usage-progress, .quota-candidate-row .usage-progress { height: 4px; }
+.quota-unknown-segment { display: block; height: 4px; border: 1px solid rgb(var(--ink-muted)); border-radius: 99px; }
+.quota-provider-ledgers { display: grid; gap: 2rem; margin-top: 2rem; }
+.quota-account-row, .quota-candidate-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(0, 2fr) auto;
+  column-gap: 2rem;
+  row-gap: .75rem;
+  padding: 1.2rem 0;
+  border-bottom: 1px solid rgb(var(--border-subtle));
+}
+.quota-candidate-row { grid-template-columns: minmax(180px, 1fr) minmax(0, 2fr); }
+.quota-account-windows { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 1.25rem; align-content: start; }
+.quota-account-actions { display: flex; align-items: start; gap: .5rem; }
+.quota-account-actions .btn-secondary { background: transparent; border-color: transparent; padding-inline: .35rem; }
+.quota-account-actions .btn-secondary:hover { background: rgb(var(--surface-raised)); }
+.quota-row-feedback { grid-column: 1 / -1; }
+.quota-settings { border-bottom: 1px solid rgb(var(--border-subtle)); }
+.quota-settings > summary { min-height: 44px; }
+@media (max-width: 1100px) {
+  .quota-account-row { grid-template-columns: minmax(160px, 1fr) minmax(0, 2fr); }
+  .quota-account-actions { grid-column: 1 / -1; justify-content: flex-end; }
+}
+@media (max-width: 639px) {
+  .quota-provider-tabs { gap: 1rem; }
+  .quota-summary-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .quota-provider-summary { padding: .9rem; border-bottom: 1px solid rgb(var(--border-subtle)); }
+  .quota-provider-summary:nth-child(2n) { border-right: 0; }
+  .quota-provider-summary:last-child { border-bottom: 0; }
+  .quota-provider-summary:only-child { grid-column: 1 / -1; }
+  .quota-account-row, .quota-candidate-row { grid-template-columns: minmax(0, 1fr); gap: 1rem; padding: 1rem 0; }
+  .quota-account-windows { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+  .quota-account-actions { justify-content: start; }
+}
+.quota-page h2 { font-size: 1.875rem; line-height: 1.2; letter-spacing: -.025em; }
+@media (max-width: 639px) { .quota-page h2 { font-size: 1.5rem; } }
+.quota-summary-secondary { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .25rem .5rem; margin-top: .8rem; padding-top: .6rem; border-top: 1px solid rgb(var(--border-subtle)); }

@@ -24,7 +24,7 @@ const ROUTES: { label: string; heading: string }[] = [
   { label: 'Nodes', heading: 'Nodes' },
   { label: 'Factory', heading: 'Factory' },
   { label: 'Telemetry', heading: 'Telemetry' },
-  { label: 'Quota', heading: 'Quota' },
+  { label: 'Quota', heading: 'Quota management' },
   { label: 'Activity', heading: 'Activity' },
   { label: 'Settings', heading: 'Settings' }
 ];
@@ -97,7 +97,7 @@ test.describe('desktop content', () => {
     // whatever the data state, the literal string "0%" must never appear:
     // an unknown/errored observation renders as "No observation" text or
     // an explicit error card, never a silently-zeroed progress indicator.
-    await expect(page.getByRole('heading', { name: 'Quota', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Quota management', exact: true })).toBeVisible();
     await expect(page.getByText('0%', { exact: true })).toHaveCount(0);
   });
 });

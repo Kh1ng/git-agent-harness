@@ -61,6 +61,7 @@ test('renders connected panel with accounts, models, strategy, and provider tabs
   await expect(component.getByTestId('account-acc-2')).toBeVisible();
   await expect(component.getByTestId('account-acc-3')).toBeVisible();
 
+  await component.getByText('Router settings and models', { exact: true }).click();
   // Models list
   await expect(component.getByText('gah-router/claude-sonnet-4-20250514')).toBeVisible();
   await expect(component.getByText('gah-router/gemini-2.5-pro')).toBeVisible();
@@ -207,6 +208,7 @@ test('connection save failure shows error', async ({ mount, page }) => {
   });
 
   const component = await mount(<CliRouterPanel />);
+  await component.getByText('Router settings and models', { exact: true }).click();
   await component.getByText('Connection settings').click();
   await component.getByRole('textbox', { name: /Router URL/i }).fill('http://external.example.com');
   await component.getByRole('button', { name: 'Save connection' }).click();
@@ -226,6 +228,7 @@ test('changing strategy calls routing API', async ({ mount, page }) => {
   });
 
   const component = await mount(<CliRouterPanel />);
+  await component.getByText('Router settings and models', { exact: true }).click();
   await component.getByRole('combobox').selectOption('fill-first');
   await expect(component.getByText('Routing updated')).toBeVisible();
   expect(routingPayload).toEqual({ strategy: 'fill-first', sessionAffinity: false });
@@ -240,6 +243,7 @@ test('toggling session affinity calls routing API', async ({ mount, page }) => {
   });
 
   const component = await mount(<CliRouterPanel />);
+  await component.getByText('Router settings and models', { exact: true }).click();
   await component.getByLabel('Session affinity').click();
   await expect(component.getByText('Routing updated')).toBeVisible();
   expect(routingPayload).toEqual({ strategy: 'round-robin', sessionAffinity: true });
@@ -252,6 +256,7 @@ test('routing write failure shows partial error', async ({ mount, page }) => {
   });
 
   const component = await mount(<CliRouterPanel />);
+  await component.getByText('Router settings and models', { exact: true }).click();
   await component.getByRole('combobox').selectOption('weighted-round-robin');
   await expect(component.getByRole('alert')).toContainText('Upstream timeout');
 });
@@ -311,6 +316,8 @@ test('null quota shows Unknown, not 0%', async ({ mount, page }) => {
   const account = component.getByTestId('account-acc-null');
   await expect(account.getByText('Unknown')).toBeVisible();
   await expect(account.locator('progress')).toHaveCount(0);
+  await expect(component.getByText('Totals add reported account percentages', { exact: false })).toHaveCount(0);
+  await expect(component.getByTestId('quota-summary-Claude').getByText('1 account', { exact: true })).toBeVisible();
 });
 
 // ---------------------------------------------------------------------------
@@ -369,6 +376,7 @@ test('model IDs use gah-router/<id> format', async ({ mount, page }) => {
   await mockRouter(page, makeSnapshot());
 
   const component = await mount(<CliRouterPanel />);
+  await component.getByText('Router settings and models', { exact: true }).click();
   await expect(component.getByText('gah-router/claude-sonnet-4-20250514')).toBeVisible();
   await expect(component.getByText('gah-router/gemini-2.5-pro')).toBeVisible();
 });
@@ -403,4 +411,46 @@ test('account quota error is displayed', async ({ mount, page }) => {
 
   const component = await mount(<CliRouterPanel />);
   await expect(component.getByText('Unsupported provider for quota check')).toBeVisible();
+});
+
+
+test('provider summaries keep windows separate, omit unknown denominators, and include new providers', async ({ mount, page }) => {
+  const accounts: CliRouterSnapshot['accounts'] = [
+    { id: 'c1', name: 'Claude one', provider: 'Claude', label: '', disabled: false, unavailable: false, resetAt: null, quotas: [{ label: 'weekly', remainingPercent: 30, resetAt: null }, { label: '5-hour', remainingPercent: 80, resetAt: null }] },
+    { id: 'c2', name: 'Claude two', provider: 'Claude', label: '', disabled: true, unavailable: false, resetAt: null, quotas: [{ label: 'weekly', remainingPercent: 60, resetAt: null }] },
+    { id: 'c3', name: 'Claude three', provider: 'Claude', label: '', disabled: false, unavailable: true, resetAt: null, quotas: [{ label: 'weekly', remainingPercent: null, resetAt: null }] },
+    { id: 'x1', name: 'xAI one', provider: 'xAI', label: '', disabled: false, unavailable: false, resetAt: null, quotas: [] },
+  ];
+  await mockRouter(page, makeSnapshot({ accounts }));
+  const component = await mount(<CliRouterPanel />);
+  const summary = component.getByTestId('quota-summary-Claude');
+  await expect(summary.getByText('90%', { exact: true })).toBeVisible();
+  await expect(summary.getByText('of 200%', { exact: true })).toBeVisible();
+  await expect(summary.getByText('2/3 accounts reported', { exact: true })).toBeVisible();
+  await expect(summary.getByText('80% of 100% · 1/3 reported', { exact: true })).toBeVisible();
+  await component.getByRole('button', { name: 'xAI (1)', exact: true }).click();
+  await expect(component.getByTestId('account-x1')).toBeVisible();
+  await expect(component.getByTestId('account-c1')).toHaveCount(0);
+  await expect(component.getByTestId('quota-summary-xAI').getByText('Quota not checked')).toBeVisible();
+  await expect(component.getByTestId('quota-summary-xAI').getByRole('progressbar')).toHaveCount(0);
+});
+
+
+test('summary identities stay masked and the next reset excludes elapsed timestamps', async ({ mount, page }) => {
+  const snapshot = makeSnapshot({ accounts: [
+    { id: 'private-owner@example.com', name: 'private-owner@example.com', provider: 'Claude', label: 'Owner label', disabled: false, unavailable: false, resetAt: null, quotas: [{ label: 'weekly', remainingPercent: 30, resetAt: new Date(Date.now() - 3600_000).toISOString() }] },
+    { id: 'private-second@example.com', name: 'private-second@example.com', provider: 'Claude', label: 'Second label', disabled: false, unavailable: false, resetAt: null, quotas: [{ label: 'weekly', remainingPercent: 60, resetAt: new Date(Date.now() + 3600_000).toISOString() }, { label: 'daily', remainingPercent: null, resetAt: null }] },
+    { id: 'private-unknown@example.com', name: 'private-unknown@example.com', provider: 'Claude', label: '', disabled: false, unavailable: false, resetAt: null, quotas: [{ label: 'weekly', remainingPercent: null, resetAt: null }] },
+  ] });
+  await mockRouter(page, snapshot);
+  const component = await mount(<CliRouterPanel />);
+  const summary = component.getByTestId('quota-summary-Claude');
+  await expect(summary.getByText(/Next reset in (59m|1h 0m)/)).toBeVisible();
+  const identities = await summary.locator('[aria-label], [title]').evaluateAll(elements => elements.map(element => `${element.getAttribute('aria-label') ?? ''} ${element.getAttribute('title') ?? ''}`).join(' '));
+  expect(identities).not.toContain('private-owner@example.com');
+  expect(identities).not.toContain('private-second@example.com');
+  expect(identities).not.toContain('private-unknown@example.com');
+  await expect(summary.getByRole('progressbar', { name: 'Claude · private-, weekly: 30% remaining', exact: true })).toBeVisible();
+  await component.getByText('Show labels').click();
+  await expect(summary.getByRole('progressbar', { name: 'Owner label, weekly: 30% remaining', exact: true })).toBeVisible();
 });

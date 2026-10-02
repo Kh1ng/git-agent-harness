@@ -15,7 +15,9 @@ import { fileURLToPath } from 'node:url';
 import cors from 'cors';
 import express, { type Response } from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
+import { DEFAULT_ACTIVITY_NOTIFICATION_PREFERENCES } from '@git-agent-harness/contracts';
 import type {
+  ActivityNotificationPreferences,
   AdminUpdatePendingInfo,
   AdminUpdateState,
   ChatNodeInfo,
@@ -185,6 +187,7 @@ interface MockState {
   settings: ManagerChatSettingsSummary;
   profiles: ProfileSummary[];
   config: ConfigSummary;
+  notificationPreferences: ActivityNotificationPreferences;
   gateway: GatewaySettingsSummary;
   skills: MockSkill[];
   skillBindings: Record<string, string[]>;
@@ -569,6 +572,7 @@ function createState(scenario: MockScenarioName, reset: number, previewOrigin?: 
     } satisfies ManagerChatSettingsSummary,
     profiles: structuredClone(MOCK_PROFILES),
     config: { current_manager: null },
+    notificationPreferences: { ...DEFAULT_ACTIVITY_NOTIFICATION_PREFERENCES },
     gateway: structuredClone(MOCK_GATEWAY),
     skills: structuredClone(MOCK_SKILLS),
     skillBindings: {},
@@ -1243,6 +1247,13 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   app.post('/api/push/subscriptions', (_req, res) => res.json({ id: '000000000000000000000001' }));
   app.delete('/api/push/subscriptions/:id', (_req, res) => res.json({ success: true }));
   app.get('/api/activity/notifications', (_req, res) => res.json({ events: [], unread: 0 }));
+  app.get('/api/activity/notification-preferences', (_req, res) => res.json(state.notificationPreferences));
+  app.post('/api/activity/notification-preferences', (req, res) => {
+    const keys = Object.keys(DEFAULT_ACTIVITY_NOTIFICATION_PREFERENCES);
+    if (keys.length !== Object.keys(req.body ?? {}).length || keys.some((key) => typeof req.body?.[key] !== 'boolean')) return res.status(400).json({ error: 'invalid_notification_preference' });
+    state.notificationPreferences = req.body;
+    return res.json(state.notificationPreferences);
+  });
   app.get('/api/auth-health', (_req, res) => res.json({ rows: [] }));
   const mockRepair = { id: 'mock-repair', node_id: 'mock-node', backend: 'hermes', provider: null, expires_at: new Date(Date.now() + 600_000).toISOString(), status: 'manual', instructions: 'Open a terminal on this machine and log in with the hermes CLI.' };
   app.post('/api/auth-health/repairs', (_req, res) => res.status(201).json({ key: '0'.repeat(64), repair: mockRepair }));
