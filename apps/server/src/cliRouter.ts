@@ -136,6 +136,10 @@ export interface UpstreamFetchOptions {
   fetchFn?: typeof globalThis.fetch;
 }
 
+// This is an owner-configured API client. Only the owner-only settings route
+// can select its origin; callers of read/refresh routes cannot choose a target.
+// Origin validation, disabled redirects, and server-built quota targets keep
+// the selected router separate from arbitrary requests on behalf of readers.
 export async function boundedUpstreamFetch(opts: UpstreamFetchOptions): Promise<{ status: number; body: unknown }> {
   const fetchFn = opts.fetchFn ?? globalThis.fetch;
   const controller = new AbortController();

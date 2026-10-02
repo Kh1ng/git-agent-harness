@@ -652,6 +652,7 @@ test('quota cache is keyed per origin and account identity', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'gah-cli-router-cache-'));
   const app = express();
   app.use(express.json());
+  app.use(rateLimit({ windowMs: 60_000, limit: 200, validate: false }));
   app.use('/api', authMiddleware);
   app.use('/api/cli-router', cliRouterRouter(mutationSafety('cache', directory), { fetchFn: rec.fn, readSettingsFn: () => stored, writeSettingsFn: () => {} }));
   const server = http.createServer(app);
@@ -776,6 +777,7 @@ test('corrupt stored settings: GET and mutations return 500 without network acce
   const writes: unknown[] = [];
   const app = express();
   app.use(express.json());
+  app.use(rateLimit({ windowMs: 60_000, limit: 200, validate: false }));
   app.use('/api', authMiddleware);
   app.use('/api/cli-router', cliRouterRouter(mutationSafety('corrupt', directory), {
     fetchFn: rec.fn, readSettingsFn: () => { throw new Error('boom /secret/path'); }, writeSettingsFn: s => { writes.push(s); },
