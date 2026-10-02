@@ -442,6 +442,12 @@ pub(super) fn add_request_schemas(manifest: &mut CapabilityManifest) {
                 false,
                 "Epic issue number to map; omit to list the issues that can be mapped.",
             ),
+            (
+                "file",
+                "string",
+                false,
+                "A .plan/maps/ map slug to read from the checkout instead of an epic.",
+            ),
         ]),
     );
     set(

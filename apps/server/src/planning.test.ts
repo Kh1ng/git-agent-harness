@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import express from 'express';
-import type { ChatSessionSummary, PlanningEpicList, PlanningMap } from '@git-agent-harness/contracts';
+import type { ChatSessionSummary, PlanningEpicList, PlanningMap, PlanningTarget } from '@git-agent-harness/contracts';
 import { grillPrompt, planningRouter, ticketPrompt, validAnswersPath, type PlanningDeps } from './planning.js';
 
 const map: PlanningMap = {
@@ -25,16 +25,32 @@ const map: PlanningMap = {
   missing: []
 };
 
+/** A chartr map file: node 0 is the destination, the rest are tickets. */
+const fileMap: PlanningMap = {
+  epic: 0,
+  file: 'handoff',
+  nodes: [
+    { number: 0, title: 'Node handoff', url: '', labels: [], state: 'parent', depth: 0, waiting_on: [], path: '.plan/maps/handoff/map.md' },
+    { number: 1, title: 'Transfer scope', url: '', labels: ['grilling'], state: 'done', depth: 1, waiting_on: [], path: '.plan/maps/handoff/tickets/01-transfer-scope.md' },
+    { number: 2, title: 'Implement transfer', url: '', labels: ['task'], state: 'ready', depth: 1, waiting_on: [], path: '.plan/maps/handoff/tickets/02-implement.md' },
+    { number: 3, title: 'Old idea', url: '', labels: ['task'], state: 'ruled_out', depth: 1, waiting_on: [], path: '.plan/maps/handoff/tickets/03-old.md' }
+  ],
+  edges: [{ from: 0, to: 1, kind: 'child' }, { from: 0, to: 2, kind: 'child' }, { from: 0, to: 3, kind: 'child' }, { from: 1, to: 2, kind: 'blocks' }],
+  frontier: [2],
+  missing: []
+};
+
 interface Started { profile: string; seed: { title: string; text: string; worktree: boolean }; backend?: string }
 
 async function withRouter(run: (base: string, calls: { maps: string[]; started: Started[] }) => Promise<void>): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), 'gah-planning-'));
   const calls = { maps: [] as string[], started: [] as Started[] };
   const deps = {
-    map: async (profile: string, epic?: number) => {
-      calls.maps.push(`${profile}#${epic ?? ''}`);
+    map: async (profile: string, chosen?: PlanningTarget) => {
+      calls.maps.push(`${profile}${chosen === undefined ? '' : 'epic' in chosen ? `#${chosen.epic}` : `:${chosen.file}`}`);
       if (profile === 'broken') throw new Error('gh failed at /home/secret');
-      return epic === undefined ? { epics: [] } satisfies PlanningEpicList : map;
+      if (chosen === undefined) return { epics: [], files: [] } satisfies PlanningEpicList;
+      return 'file' in chosen ? fileMap : map;
     },
     startChat: async (profile: string, seed: Started['seed'], backend?: string) => {
       calls.started.push({ profile, seed, backend });
@@ -65,11 +81,11 @@ test('maps are cached briefly, refreshable, and provider failures do not leak ou
     assert.deepEqual(calls.maps, ['demo#1']);
     await fetch(`${base}/map?profile=demo&epic=1&refresh=1`);
     assert.deepEqual(calls.maps, ['demo#1', 'demo#1']);
-    assert.deepEqual(await (await fetch(`${base}/epics?profile=demo`)).json(), { epics: [] });
+    assert.deepEqual(await (await fetch(`${base}/epics?profile=demo`)).json(), { epics: [], files: [] });
     const broken = await fetch(`${base}/map?profile=broken&epic=1`);
     assert.equal(broken.status, 502);
     assert.doesNotMatch(await broken.text(), /secret/);
-    for (const query of ['profile=demo', 'profile=demo&epic=0', 'profile=demo&epic=1x', 'epic=1']) {
+    for (const query of ['profile=demo', 'profile=demo&epic=0', 'profile=demo&epic=1x', 'epic=1', 'profile=demo&file=..%2Fetc', 'profile=demo&file=Bad', 'profile=demo&epic=1&file=handoff']) {
       assert.equal((await fetch(`${base}/map?${query}`)).status, 400, query);
     }
   });
@@ -180,4 +196,37 @@ test('planning prompts use no em dashes', () => {
   for (const text of [grillPrompt({ map, idea: 'x', settings }), grillPrompt({ map: null, idea: '', settings: { ...settings, answers: 'file' } }), ticketPrompt(map, 4)]) {
     assert.doesNotMatch(text, /—/);
   }
+});
+
+test('a .plan/maps/ map loads by slug, and its chats name ticket files, not issues', async () => {
+  await withRouter(async (base, calls) => {
+    const loaded = await fetch(`${base}/map?profile=demo&file=handoff`);
+    assert.equal(loaded.status, 200);
+    assert.equal(((await loaded.json()) as PlanningMap).file, 'handoff');
+    await fetch(`${base}/map?profile=demo&file=handoff`);
+    assert.deepEqual(calls.maps, ['demo:handoff'], 'loaded once, then cached');
+
+    assert.equal((await send(`${base}/chats`, 'POST', { profile: 'demo', kind: 'ticket', file: 'handoff', ticket: 2 })).status, 201);
+    const ticket = calls.started[0].seed;
+    assert.equal(ticket.title, 'Ticket 02');
+    assert.match(ticket.text, /^Ticket 02 Implement transfer \(\.plan\/maps\/handoff\/tickets\/02-implement\.md\)/);
+    assert.match(ticket.text, /Its blockers[^\n]*\n- ticket 01 Transfer scope \([^)]*\): done/);
+    assert.match(ticket.text, /Planning map `handoff`: Node handoff/);
+    assert.match(ticket.text, /- ticket 03 Old idea[^\n]*: ruled_out/);
+    assert.match(ticket.text, /Frontier \(can start now\): ticket 02/);
+    assert.doesNotMatch(ticket.text, /gh issue view/);
+
+    assert.equal((await send(`${base}/chats`, 'POST', { profile: 'demo', kind: 'grill', file: 'handoff' })).status, 201);
+    const grill = calls.started[1].seed;
+    assert.equal(grill.title, 'Plan: handoff');
+    assert.doesNotMatch(grill.text, /Parent: #0/, 'issues filed from a file map have no issue parent');
+
+    for (const body of [
+      { profile: 'demo', kind: 'ticket', file: '../x', ticket: 2 },
+      { profile: 'demo', kind: 'ticket', epic: 1, file: 'handoff', ticket: 2 },
+      { profile: 'demo', kind: 'ticket', file: 'handoff' }
+    ]) {
+      assert.equal((await send(`${base}/chats`, 'POST', body)).status, 400, JSON.stringify(body));
+    }
+  });
 });

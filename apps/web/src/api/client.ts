@@ -1,6 +1,6 @@
 import { coordinatorToken } from './coordinatorToken.js';
 import type { ActivityEvent, AuthHealthRow, LoginRepairView, PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harness/contracts';
-import type { PlanningChatRequest, PlanningEpicList, PlanningMap, PlanningSettings } from '@git-agent-harness/contracts';
+import type { PlanningChatRequest, PlanningEpicList, PlanningMap, PlanningSettings, PlanningTarget } from '@git-agent-harness/contracts';
 /**
  * Typed data-source client for GAH's pull-data REST endpoints.
  *
@@ -338,7 +338,7 @@ export interface GahDataSource {
   getChatPrs(profile: string): Promise<{ prs: ChatPrSummary[] }>;
   startChatFromPr(profile: string, prNumber: number, backend?: string, model?: string | null): Promise<ChatPrStartResult>;
   getPlanningEpics(profile: string, refresh?: boolean): Promise<PlanningEpicList>;
-  getPlanningMap(profile: string, epic: number, refresh?: boolean): Promise<PlanningMap>;
+  getPlanningMap(profile: string, target: PlanningTarget, refresh?: boolean): Promise<PlanningMap>;
   getPlanningSettings(profile: string): Promise<PlanningSettings>;
   setPlanningSettings(profile: string, settings: PlanningSettings): Promise<PlanningSettings>;
   startPlanningChat(request: PlanningChatRequest): Promise<ChatSessionSummary>;
@@ -750,8 +750,9 @@ export const gahApi: GahDataSource = {
   getPlanningEpics(profile, refresh) {
     return getJson<PlanningEpicList>('/api/planning/epics', { profile, refresh: refresh ? '1' : undefined });
   },
-  getPlanningMap(profile, epic, refresh) {
-    return getJson<PlanningMap>('/api/planning/map', { profile, epic: String(epic), refresh: refresh ? '1' : undefined });
+  getPlanningMap(profile, target, refresh) {
+    const which = 'epic' in target ? { epic: String(target.epic) } : { file: target.file };
+    return getJson<PlanningMap>('/api/planning/map', { profile, ...which, refresh: refresh ? '1' : undefined });
   },
   getPlanningSettings(profile) {
     return getJson<PlanningSettings>('/api/planning/settings', { profile });

@@ -1822,10 +1822,11 @@ export async function changePaidRouteApproval(action: 'grant' | 'revoke', scope:
 
 /** `gah map`: the epics a profile can map, or one epic's planning map. Read-only. */
 export async function runPlanningMap(profile: string): Promise<import('@git-agent-harness/contracts').PlanningEpicList>;
-export async function runPlanningMap(profile: string, epic: number): Promise<import('@git-agent-harness/contracts').PlanningMap>;
-export async function runPlanningMap(profile: string, epic?: number) {
+export async function runPlanningMap(profile: string, target: import('@git-agent-harness/contracts').PlanningTarget): Promise<import('@git-agent-harness/contracts').PlanningMap>;
+export async function runPlanningMap(profile: string, target?: import('@git-agent-harness/contracts').PlanningTarget) {
   const args = ['map', `--profile=${profile}`, '--json'];
-  if (epic !== undefined) args.push(`--epic=${epic}`);
+  if (target && 'epic' in target) args.push(`--epic=${target.epic}`);
+  if (target && 'file' in target) args.push(`--file=${target.file}`);
   const config = getConfigPath();
   if (config) args.push('--config', config);
   return runJsonCommand(args, config);

@@ -1347,7 +1347,7 @@ pub(super) fn add_planning_operations(manifest: &mut CapabilityManifest) {
         remote_disposition: RemoteDisposition::RemoteAvailable,
         local_only_reason: None,
         documentation: Some(
-            "Reads provider issues and their relations; never writes to the provider.".to_string(),
+            "Reads provider issues and their relations, or a chartr .plan/maps/ map from the checkout; never writes either.".to_string(),
         ),
         cli_command_path: "gah map".to_string(),
         is_stable: true,

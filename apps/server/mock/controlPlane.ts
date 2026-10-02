@@ -716,6 +716,34 @@ const MOCK_PLANNING_EPICS: PlanningEpicList['epics'] = [
   { number: 900, title: 'Offline mode', url: 'https://github.com/fixture/repo/issues/900', open: true, children: 5, open_children: 4 }
 ];
 
+
+const ticketNode = (number: number, title: string, state: PlanningMap['nodes'][number]['state'], depth: number, waiting_on: number[] = []) =>
+  ({ number, title, url: '', labels: ['task'], state, depth, waiting_on, path: `.plan/maps/node-handoff/tickets/0${number}-ticket.md` });
+
+/** A chartr map file with a resolved, a ready, a claimed, a ruled-out, and a blocked ticket. */
+const MOCK_PLANNING_FILE_MAP: PlanningMap = {
+  epic: 0,
+  file: 'node-handoff',
+  nodes: [
+    { number: 0, title: 'Node handoff', url: '', labels: [], state: 'parent', depth: 0, waiting_on: [], path: '.plan/maps/node-handoff/map.md' },
+    ticketNode(1, 'Transfer scope', 'done', 1),
+    ticketNode(2, 'Implement transfer', 'ready', 2),
+    ticketNode(3, 'Worker smoke test', 'claimed', 1),
+    ticketNode(4, 'Move uncommitted files', 'ruled_out', 1),
+    ticketNode(5, 'Verify on Windows', 'blocked', 3, [2, 4])
+  ],
+  edges: [
+    { from: 0, to: 1, kind: 'child' }, { from: 0, to: 3, kind: 'child' }, { from: 0, to: 4, kind: 'child' },
+    { from: 1, to: 2, kind: 'blocks' }, { from: 2, to: 5, kind: 'blocks' }, { from: 4, to: 5, kind: 'blocks' }
+  ],
+  frontier: [2],
+  missing: [],
+  diagnostics: ['.plan/maps/node-handoff/tickets/notes.md: the file name does not start with a ticket number']
+};
+
+const MOCK_PLANNING_FILES: PlanningEpicList['files'] = [
+  { slug: 'node-handoff', title: 'Node handoff', tickets: 5, open_tickets: 3 }
+];
 export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   const app = express();
   const server = createServer(app);
@@ -1734,8 +1762,12 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   });
   // Planning (#1241): a fixed epic, in-memory answer settings.
   const planningSettings = new Map<string, PlanningSettings>();
-  app.get('/api/planning/epics', (_req, res) => res.json({ epics: MOCK_PLANNING_EPICS } satisfies PlanningEpicList));
+  app.get('/api/planning/epics', (_req, res) => res.json({ epics: MOCK_PLANNING_EPICS, files: MOCK_PLANNING_FILES } satisfies PlanningEpicList));
   app.get('/api/planning/map', (req, res) => {
+    if (req.query.file !== undefined) {
+      if (req.query.file !== MOCK_PLANNING_FILE_MAP.file) return jsonError(res, 502, 'map_unavailable', 'Cannot read this map.');
+      return res.json(MOCK_PLANNING_FILE_MAP);
+    }
     if (Number(req.query.epic) !== MOCK_PLANNING_MAP.epic) {
       return jsonError(res, 502, 'map_unavailable', 'Cannot read issues for this project.');
     }
@@ -1758,7 +1790,8 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     if (kind !== 'grill' && !(kind === 'ticket' && Number.isInteger(ticket))) {
       return jsonError(res, 400, 'invalid_request', 'A planning chat is grill or ticket.');
     }
-    const title = kind === 'ticket' ? `Ticket #${ticket}` : req.body?.epic ? `Plan: #${req.body.epic}` : 'Plan';
+    const file = bodyString(req.body?.file);
+    const title = kind === 'ticket' ? (file ? `Ticket ${String(ticket).padStart(2, '0')}` : `Ticket #${ticket}`) : file ? `Plan: ${file}` : req.body?.epic ? `Plan: #${req.body.epic}` : 'Plan';
     res.status(201).json(createSession(bodyString(req.body?.profile) ?? 'fixture', bodyString(req.body?.backend), null, title));
   });
 

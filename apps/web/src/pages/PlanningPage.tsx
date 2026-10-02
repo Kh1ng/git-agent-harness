@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react';
-import { ExternalLink, MessageSquare, Orbit, Sparkles } from 'lucide-react';
-import type { PlanningEpic, PlanningMap, PlanningNode, PlanningSettings } from '@git-agent-harness/contracts';
+import { ExternalLink, FileText, MessageSquare, Orbit, Sparkles } from 'lucide-react';
+import type { PlanningEpicList, PlanningMap, PlanningNode, PlanningSettings } from '@git-agent-harness/contracts';
 import { DEFAULT_PLANNING_SETTINGS } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
 import { ExternalAnchor } from '../components/ExternalAnchor.js';
-import { STATE_LABEL, StarMap } from '../components/StarMap.js';
+import { STATE_CLASS, STATE_LABEL, StarMap } from '../components/StarMap.js';
 import { EmptyState, ErrorState, LoadingState } from '../components/ui/EmptyState.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { useChatProfiles } from '../hooks/useChatProfiles.js';
 import { readNavigation, updateNavigation, type Page } from '../lib/navigationState.js';
+import { choiceTarget, nodeName, type PlanningChoice } from '../lib/planningTarget.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 
@@ -16,7 +17,9 @@ const BADGE: Record<PlanningNode['state'], string> = {
   ready: 'badge badge-good',
   blocked: 'badge badge-warning',
   parent: 'badge badge-unknown',
-  done: 'badge badge-unknown'
+  done: 'badge badge-unknown',
+  ruled_out: 'badge badge-unknown',
+  claimed: 'badge badge-unknown'
 };
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -26,10 +29,25 @@ const validAnswersPath = (path: string) => path.length > 0 && path.length <= 200
   && !path.startsWith('/') && !path.includes('\\') && !/[\x00-\x1f\x7f]/.test(path)
   && path.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');
 
+/** The selection a deep link names, for this project only. */
+function linkedChoice(profile: string): PlanningChoice | null {
+  const nav = readNavigation();
+  if (nav.profile !== profile) return null;
+  if (nav.epic) return `epic:${Number(nav.epic)}`;
+  return nav.map ? `file:${nav.map}` : null;
+}
+
+/** The title shown for a map's centre. */
+function mapTitle(map: PlanningMap): string {
+  const centre = map.nodes.find((node) => node.number === map.epic);
+  return map.file ? centre?.title ?? map.file : `#${map.epic} ${centre?.title ?? ''}`.trim();
+}
+
 /**
- * Planning (#1241): an epic's issues as a star map, the work that can start
- * now, and grill-me chats that turn an idea into decisions and tickets.
- * Read-only: the map never files or edits issues.
+ * Planning (#1241): an epic's issues, or a chartr `.plan/maps/` map, as a
+ * star map, the work that can start now, and grill-me chats that turn an
+ * idea into decisions and tickets. Read-only: the map never files or edits
+ * an issue or a map file.
  */
 export function PlanningPage({ onNavigate }: { onNavigate: (page: Page) => void }) {
   const { isConnected, reconnectSeq, profile: wsProfile } = useWebSocket();
@@ -40,12 +58,9 @@ export function PlanningPage({ onNavigate }: { onNavigate: (page: Page) => void 
   const profile = profileOverride ?? wsProfile ?? 'gah';
   const projectIsLocal = local.some((candidate) => candidate.name === profile);
 
-  const [epics, setEpics] = useState<PlanningEpic[] | null>(null);
-  const [epicsError, setEpicsError] = useState<string | null>(null);
-  const [epic, setEpic] = useState<number | null>(() => {
-    const nav = readNavigation();
-    return nav.epic && nav.profile === profile ? Number(nav.epic) : null;
-  });
+  const [lists, setLists] = useState<PlanningEpicList | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
+  const [choice, setChoice] = useState<PlanningChoice | null>(() => linkedChoice(profile));
   const [map, setMap] = useState<PlanningMap | null>(null);
   const [mapError, setMapError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -56,21 +71,31 @@ export function PlanningPage({ onNavigate }: { onNavigate: (page: Page) => void 
   const [startError, setStartError] = useState<string | null>(null);
   const [grillOpen, setGrillOpen] = useState(false);
 
-  useEffect(() => { updateNavigation({ profile, epic: epic === null ? null : String(epic) }); }, [profile, epic]);
+  useEffect(() => {
+    const target = choice ? choiceTarget(choice) : null;
+    updateNavigation({
+      profile,
+      epic: target && 'epic' in target ? String(target.epic) : null,
+      map: target && 'file' in target ? target.file : null
+    });
+  }, [profile, choice]);
 
   useEffect(() => {
     let cancelled = false;
-    setEpics(null);
-    setEpicsError(null);
+    setLists(null);
+    setListError(null);
     if (!projectIsLocal) return;
     gahApi.getPlanningEpics(profile, epoch > 0)
-      .then(({ epics }) => {
+      .then((loaded) => {
         if (cancelled) return;
-        setEpics(epics);
+        setLists(loaded);
         setLastUpdated(Date.now());
-        setEpic((current) => current ?? epics.find((candidate) => candidate.open)?.number ?? null);
+        const firstEpic = loaded.epics.find((candidate) => candidate.open);
+        const firstFile = loaded.files[0];
+        setChoice((current) => current
+          ?? (firstEpic ? `epic:${firstEpic.number}` : firstFile ? `file:${firstFile.slug}` : null));
       })
-      .catch((error) => { if (!cancelled) setEpicsError(errorText(error)); });
+      .catch((error) => { if (!cancelled) setListError(errorText(error)); });
     return () => { cancelled = true; };
   }, [profile, projectIsLocal, epoch, reconnectSeq]);
 
@@ -79,14 +104,14 @@ export function PlanningPage({ onNavigate }: { onNavigate: (page: Page) => void 
     setMap(null);
     setMapError(null);
     setSelected(null);
-    if (epic === null || !projectIsLocal) return;
+    if (choice === null || !projectIsLocal) return;
     setLoading(true);
-    gahApi.getPlanningMap(profile, epic, epoch > 0)
+    gahApi.getPlanningMap(profile, choiceTarget(choice), epoch > 0)
       .then((loaded) => { if (!cancelled) { setMap(loaded); setLastUpdated(Date.now()); } })
       .catch((error) => { if (!cancelled) setMapError(errorText(error)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [profile, epic, projectIsLocal, epoch, reconnectSeq]);
+  }, [profile, choice, projectIsLocal, epoch, reconnectSeq]);
 
   const openChat = async (request: Parameters<typeof gahApi.startPlanningChat>[0]) => {
     setStarting(true);
@@ -94,7 +119,7 @@ export function PlanningPage({ onNavigate }: { onNavigate: (page: Page) => void 
     try {
       const session = await gahApi.startPlanningChat(request);
       setProfileOverride(profile);
-      updateNavigation({ profile, chat: session.id, epic: null });
+      updateNavigation({ profile, chat: session.id, epic: null, map: null });
       onNavigate('chat');
     } catch (error) {
       setStartError(errorText(error));
@@ -104,12 +129,13 @@ export function PlanningPage({ onNavigate }: { onNavigate: (page: Page) => void 
   };
 
   const node = map?.nodes.find((candidate) => candidate.number === selected) ?? null;
+  const empty = lists !== null && lists.epics.length === 0 && lists.files.length === 0;
 
   return (
     <div className="flex min-h-0 flex-col">
       <PageHeader
         title="Planning"
-        description="An epic's issues as a map: what is done, what waits on what, and what can start now. Read-only."
+        description="An epic's issues, or a .plan/maps/ map, as a map: what is done, what waits on what, and what can start now. Read-only."
         lastUpdated={lastUpdated}
         onRefresh={projectIsLocal ? () => setEpoch((value) => value + 1) : undefined}
         refreshing={loading}
@@ -125,59 +151,81 @@ export function PlanningPage({ onNavigate }: { onNavigate: (page: Page) => void 
         <label className="flex items-center gap-2 text-sm text-secondary">
           Project
           <select className="input max-w-[16rem]" value={projectIsLocal ? profile : ''}
-            onChange={(event) => { setEpic(null); setProfileOverride(event.target.value); }}>
+            onChange={(event) => { setChoice(null); setProfileOverride(event.target.value); }}>
             {!projectIsLocal && <option value="" disabled>Choose a project</option>}
             {local.map((candidate) => (
               <option key={candidate.name} value={candidate.name}>{candidate.display_name || candidate.name}</option>
             ))}
           </select>
         </label>
-        {epics && epics.length > 0 && (
+        {lists && !empty && (
           <label className="flex items-center gap-2 text-sm text-secondary">
-            Epic
-            <select className="input max-w-[22rem]" value={epic ?? ''}
-              onChange={(event) => setEpic(event.target.value ? Number(event.target.value) : null)}>
-              {epic === null && <option value="">Choose an epic</option>}
-              {epics.map((candidate) => (
-                <option key={candidate.number} value={candidate.number}>
-                  #{candidate.number} {candidate.title}{candidate.open ? '' : ' (closed)'}: {candidate.open_children} of {candidate.children} open
-                </option>
-              ))}
+            Map
+            <select className="input max-w-[22rem]" value={choice ?? ''}
+              onChange={(event) => setChoice(event.target.value ? event.target.value as PlanningChoice : null)}>
+              {choice === null && <option value="">Choose a map</option>}
+              {lists.epics.length > 0 && (
+                <optgroup label="Epics">
+                  {lists.epics.map((candidate) => (
+                    <option key={candidate.number} value={`epic:${candidate.number}`}>
+                      #{candidate.number} {candidate.title}{candidate.open ? '' : ' (closed)'}: {candidate.open_children} of {candidate.children} open
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {lists.files.length > 0 && (
+                <optgroup label="Map files (.plan/maps)">
+                  {lists.files.map((file) => (
+                    <option key={file.slug} value={`file:${file.slug}`}>
+                      {file.title}: {file.open_tickets} of {file.tickets} open
+                    </option>
+                  ))}
+                </optgroup>
+              )}
             </select>
           </label>
         )}
       </div>
 
       {grillOpen && projectIsLocal && (
-        <GrillPanel profile={profile} epic={map ? { number: map.epic, title: map.nodes.find((n) => n.number === map.epic)?.title ?? '' } : null}
-          starting={starting} onStart={(idea, useEpic) => void openChat({ profile, kind: 'grill', idea, ...(useEpic && epic !== null ? { epic } : {}) })} />
+        <GrillPanel profile={profile} scope={map ? mapTitle(map) : null}
+          starting={starting}
+          onStart={(idea, useMap) => void openChat({ profile, kind: 'grill', idea, ...(useMap && choice ? choiceTarget(choice) : {}) })} />
       )}
       {startError && <p role="alert" className="mb-3 text-sm text-critical">{startError}</p>}
+      {lists?.issues_error && (
+        <p role="status" className="mb-3 text-sm text-secondary">
+          Issues could not be read, so only map files are listed. {lists.issues_error}
+        </p>
+      )}
 
       {!projectIsLocal ? (
         <EmptyState icon={Orbit} title="Choose a project configured on this node"
-          description="Planning reads issues through this node's own project settings. Projects that live on a worker are not mapped here." />
-      ) : epicsError ? (
-        <ErrorState message={epicsError} onRetry={() => setEpoch((value) => value + 1)} />
-      ) : epics === null ? (
+          description="Planning reads issues and map files through this node's own project settings. Projects that live on a worker are not mapped here." />
+      ) : listError ? (
+        <ErrorState message={listError} onRetry={() => setEpoch((value) => value + 1)} />
+      ) : lists === null ? (
         <LoadingState label="Reading issues…" />
-      ) : epics.length === 0 ? (
+      ) : empty ? (
         <EmptyState icon={Orbit} title="No epics yet"
-          description="An epic is an issue with sub-issues, an issue other issues name with a `Parent: #N` line, or one labelled `epic`. Use Grill-me to plan one." />
+          description="An epic is an issue with sub-issues, an issue other issues name with a `Parent: #N` line, or one labelled `epic`. A chartr map in .plan/maps/ also appears here. Use Grill-me to plan one." />
       ) : mapError ? (
         <ErrorState message={mapError} onRetry={() => setEpoch((value) => value + 1)} />
       ) : !map ? (
-        epic === null ? null : <LoadingState label="Mapping the epic…" />
+        choice === null ? null : <LoadingState label="Mapping…" />
       ) : (
         <div className="grid min-w-0 items-start gap-4 md:grid-cols-[minmax(0,1fr)_20rem]">
           <section className="card hidden p-2 md:block" aria-label="Star map">
             <StarMap map={map} selected={selected} onSelect={(picked) => setSelected(picked.number)} />
-            <Legend />
+            <Legend fileMap={Boolean(map.file)} />
           </section>
           <aside className="min-w-0 space-y-4">
             {node && (
               <NodeDetail node={node} map={map} starting={starting} onSelect={setSelected}
-                onDiscuss={() => void openChat({ profile, kind: 'ticket', epic: map.epic, ticket: node.number })} />
+                onDiscuss={() => void openChat({
+                  profile, kind: 'ticket', ticket: node.number,
+                  ...(map.file ? { file: map.file } : { epic: map.epic })
+                })} />
             )}
             <FrontierList map={map} selected={selected} onSelect={setSelected} />
           </aside>
@@ -187,49 +235,60 @@ export function PlanningPage({ onNavigate }: { onNavigate: (page: Page) => void 
   );
 }
 
-function Legend() {
-  const items: [string, string][] = [['text-accent', 'Ready'], ['text-warning', 'Blocked'], ['text-secondary', 'In progress below'], ['text-muted', 'Done']];
+function Legend({ fileMap }: { fileMap: boolean }) {
+  const states: PlanningNode['state'][] = ['ready', 'blocked', 'parent', 'done', ...(fileMap ? ['claimed', 'ruled_out'] as const : [])];
   return (
     <ul className="flex flex-wrap gap-x-4 gap-y-1 px-3 pb-2 text-xs text-muted" aria-label="Legend">
-      {items.map(([color, label]) => (
-        <li key={label} className="flex items-center gap-1.5">
-          <span className={`inline-block h-2.5 w-2.5 rounded-full bg-current ${color}`} aria-hidden="true" />{label}
+      {states.map((state) => (
+        <li key={state} className="flex items-center gap-1.5">
+          <span className={`inline-block h-2.5 w-2.5 rounded-full ${state === 'ruled_out' ? 'border border-current' : 'bg-current'} ${STATE_CLASS[state]}`} aria-hidden="true" />
+          {STATE_LABEL[state]}
         </li>
       ))}
       <li className="flex items-center gap-1.5"><span className="text-warning" aria-hidden="true">→</span>blocks</li>
-      <li className="flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-full border border-dashed border-current" aria-hidden="true" />outside the epic</li>
+      {!fileMap && (
+        <li className="flex items-center gap-1.5"><span className="inline-block h-2.5 w-2.5 rounded-full border border-dashed border-current" aria-hidden="true" />outside the epic</li>
+      )}
     </ul>
   );
 }
 
-function IssueLink({ number, map, onSelect }: { number: number; map: PlanningMap; onSelect: (number: number) => void }) {
+function NodeLink({ number, map, onSelect }: { number: number; map: PlanningMap; onSelect: (number: number) => void }) {
   const known = map.nodes.some((candidate) => candidate.number === number);
   return known
-    ? <button type="button" className="text-accent hover:underline" onClick={() => onSelect(number)}>#{number}</button>
-    : <span className="text-muted">#{number}</span>;
+    ? <button type="button" className="text-accent hover:underline" onClick={() => onSelect(number)}>{nodeName(map, number)}</button>
+    : <span className="text-muted">{nodeName(map, number)}</span>;
 }
 
 /** The work that can start now; on a phone this is the whole page. */
 function FrontierList({ map, selected, onSelect }: { map: PlanningMap; selected: number | null; onSelect: (number: number) => void }) {
   const frontier = map.frontier.map((number) => map.nodes.find((node) => node.number === number)).filter((node): node is PlanningNode => !!node);
   const waiting = map.nodes.filter((node) => node.state === 'blocked' && node.depth !== null);
-  const done = map.nodes.filter((node) => node.state === 'done' && node.depth !== null).length;
-  const total = map.nodes.filter((node) => node.depth !== null && node.number !== map.epic).length;
+  const members = map.nodes.filter((node) => node.depth !== null && node.number !== map.epic);
+  const done = members.filter((node) => node.state === 'done').length;
+  const ruledOut = members.filter((node) => node.state === 'ruled_out').length;
+  const where = map.file ? mapTitle(map) : `#${map.epic}`;
   return (
     <section className="card-padded space-y-3" aria-label="Frontier">
       <div>
         <h3 className="text-sm font-semibold text-primary">Can start now</h3>
-        <p className="text-xs text-muted">{done} of {total} done under #{map.epic}.</p>
+        <p className="text-xs text-muted">
+          {done} of {members.length} done in {where}{ruledOut > 0 ? `, ${ruledOut} ruled out` : ''}.
+        </p>
       </div>
       {frontier.length === 0 ? (
-        <p className="text-sm text-secondary">Nothing is ready: every open issue is blocked or waits on its own sub-issues.</p>
+        <p className="text-sm text-secondary">
+          {map.file
+            ? 'Nothing is ready: every open ticket waits on one that is not resolved, or is claimed.'
+            : 'Nothing is ready: every open issue is blocked or waits on its own sub-issues.'}
+        </p>
       ) : (
         <ul className="space-y-1.5">
           {frontier.map((node) => (
             <li key={node.number}>
               <button type="button" onClick={() => onSelect(node.number)} aria-current={node.number === selected ? 'true' : undefined}
                 className={`w-full rounded-md px-2 py-1.5 text-left text-sm hover:bg-white/5 ${node.number === selected ? 'bg-white/5' : ''}`}>
-                <span className="font-medium text-accent">#{node.number}</span> <span className="text-primary">{node.title}</span>
+                <span className="font-medium text-accent">{nodeName(map, node.number)}</span> <span className="text-primary">{node.title}</span>
               </button>
             </li>
           ))}
@@ -242,16 +301,26 @@ function FrontierList({ map, selected, onSelect }: { map: PlanningMap; selected:
             {waiting.map((node) => (
               <li key={node.number}>
                 <button type="button" onClick={() => onSelect(node.number)} className="text-left hover:underline">
-                  <span className="text-warning">#{node.number}</span> <span className="text-primary">{node.title}</span>
+                  <span className="text-warning">{nodeName(map, node.number)}</span> <span className="text-primary">{node.title}</span>
                 </button>
-                <span className="block pl-1 text-xs text-muted">waits on {node.waiting_on.map((n) => `#${n}`).join(', ')}</span>
+                <span className="block pl-1 text-xs text-muted">waits on {node.waiting_on.map((n) => nodeName(map, n)).join(', ')}</span>
               </li>
             ))}
           </ul>
         </details>
       )}
       {map.missing.length > 0 && (
-        <p className="text-xs text-muted">Not found in this repository: {map.missing.map((n) => `#${n}`).join(', ')}.</p>
+        <p className="text-xs text-muted">
+          Not found in {map.file ? 'this map' : 'this repository'}: {map.missing.map((n) => nodeName(map, n)).join(', ')}.
+        </p>
+      )}
+      {map.diagnostics && map.diagnostics.length > 0 && (
+        <details>
+          <summary className="cursor-pointer text-xs font-medium uppercase tracking-wide text-muted">Skipped in the map files ({map.diagnostics.length})</summary>
+          <ul className="mt-2 space-y-1 text-xs text-muted">
+            {map.diagnostics.map((problem) => <li key={problem} className="break-words">{problem}</li>)}
+          </ul>
+        </details>
       )}
     </section>
   );
@@ -266,22 +335,31 @@ function NodeDetail({ node, map, starting, onSelect, onDiscuss }: {
 }) {
   const blocks = map.edges.filter((edge) => edge.kind === 'blocks' && edge.from === node.number).map((edge) => edge.to);
   const blockedBy = map.edges.filter((edge) => edge.kind === 'blocks' && edge.to === node.number).map((edge) => edge.from);
+  const centre = node.number === map.epic;
+  const name = map.file && centre ? 'Map' : nodeName(map, node.number);
   return (
-    <section className="card-padded space-y-3" aria-label={`Issue #${node.number}`}>
+    <section className="card-padded space-y-3" aria-label={map.file ? `Ticket ${name}` : `Issue ${name}`}>
       <div className="flex items-start justify-between gap-2">
-        <h3 className="min-w-0 text-sm font-semibold text-primary">#{node.number} {node.title}</h3>
+        <h3 className="min-w-0 text-sm font-semibold text-primary">{map.file && centre ? '' : `${name} `}{node.title}</h3>
         <span className={BADGE[node.state]}>{STATE_LABEL[node.state]}</span>
       </div>
       {node.depth === null && <p className="text-xs text-muted">Outside this epic; issues in it wait on this one.</p>}
+      {node.state === 'ruled_out' && <p className="text-xs text-muted">Ruled out: the tickets that wait on it stay blocked.</p>}
       {blockedBy.length > 0 && (
         <p className="text-xs text-secondary">Blocked by {blockedBy.map((number, index) => (
-          <span key={number}>{index > 0 && ', '}<IssueLink number={number} map={map} onSelect={onSelect} /></span>
+          <span key={number}>{index > 0 && ', '}<NodeLink number={number} map={map} onSelect={onSelect} /></span>
         ))}</p>
       )}
       {blocks.length > 0 && (
         <p className="text-xs text-secondary">Blocks {blocks.map((number, index) => (
-          <span key={number}>{index > 0 && ', '}<IssueLink number={number} map={map} onSelect={onSelect} /></span>
+          <span key={number}>{index > 0 && ', '}<NodeLink number={number} map={map} onSelect={onSelect} /></span>
         ))}</p>
+      )}
+      {node.path && (
+        <p className="flex items-start gap-1.5 text-xs text-muted">
+          <FileText size={13} className="mt-0.5 shrink-0" aria-hidden="true" />
+          <code className="break-all">{node.path}</code>
+        </p>
       )}
       <div className="flex flex-wrap gap-2">
         {node.url && (
@@ -289,7 +367,7 @@ function NodeDetail({ node, map, starting, onSelect, onDiscuss }: {
             <ExternalLink size={13} aria-hidden="true" /> Open issue
           </ExternalAnchor>
         )}
-        {node.number !== map.epic && node.depth !== null && (
+        {!centre && node.depth !== null && (
           <button type="button" className="btn-secondary text-xs" disabled={starting} onClick={onDiscuss}>
             <MessageSquare size={13} aria-hidden="true" /> Discuss in chat
           </button>
@@ -300,14 +378,15 @@ function NodeDetail({ node, map, starting, onSelect, onDiscuss }: {
 }
 
 /** Starts a grill-me chat and keeps where its answers go. */
-function GrillPanel({ profile, epic, starting, onStart }: {
+function GrillPanel({ profile, scope, starting, onStart }: {
   profile: string;
-  epic: { number: number; title: string } | null;
+  /** The open map's title, offered as the plan's scope. */
+  scope: string | null;
   starting: boolean;
-  onStart: (idea: string, useEpic: boolean) => void;
+  onStart: (idea: string, useMap: boolean) => void;
 }) {
   const [idea, setIdea] = useState('');
-  const [useEpic, setUseEpic] = useState(true);
+  const [useMap, setUseMap] = useState(true);
   const [saved, setSaved] = useState<PlanningSettings | null>(null);
   const [draft, setDraft] = useState<PlanningSettings>(DEFAULT_PLANNING_SETTINGS);
   const [error, setError] = useState<string | null>(null);
@@ -327,7 +406,7 @@ function GrillPanel({ profile, epic, starting, onStart }: {
     setError(null);
     try {
       if (changed) setSaved(await gahApi.setPlanningSettings(profile, draft));
-      onStart(idea, useEpic);
+      onStart(idea, useMap);
     } catch (caught) {
       setError(errorText(caught));
     }
@@ -344,10 +423,10 @@ function GrillPanel({ profile, epic, starting, onStart }: {
         <textarea className="input mt-1 block min-h-[5rem] w-full" maxLength={4000} value={idea}
           onChange={(event) => setIdea(event.target.value)} placeholder="Optional. Leave empty and the chat asks." />
       </label>
-      {epic && (
+      {scope && (
         <label className="flex items-center gap-2 text-sm text-secondary">
-          <input type="checkbox" checked={useEpic} onChange={(event) => setUseEpic(event.target.checked)} />
-          Plan within #{epic.number} {epic.title}
+          <input type="checkbox" checked={useMap} onChange={(event) => setUseMap(event.target.checked)} />
+          Plan within {scope}
         </label>
       )}
       <fieldset className="space-y-1.5 text-sm text-secondary">

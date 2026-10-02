@@ -1,20 +1,28 @@
 import type { PlanningMap, PlanningNode, PlanningNodeState } from '@git-agent-harness/contracts';
+import { nodeName } from '../lib/planningTarget.js';
 import { STAR_MAP_SIZE, layoutStarMap } from '../lib/starMapLayout.js';
 
 /** Fill colour per state; frontier stars also glow. */
-const STATE_CLASS: Record<PlanningNodeState, string> = {
+export const STATE_CLASS: Record<PlanningNodeState, string> = {
   ready: 'text-accent',
   blocked: 'text-warning',
   parent: 'text-secondary',
-  done: 'text-muted'
+  done: 'text-muted',
+  ruled_out: 'text-muted',
+  claimed: 'text-series-5'
 };
 
 export const STATE_LABEL: Record<PlanningNodeState, string> = {
   ready: 'Ready',
   blocked: 'Blocked',
   parent: 'In progress below',
-  done: 'Done'
+  done: 'Done',
+  ruled_out: 'Ruled out',
+  claimed: 'Claimed'
 };
+
+/** How solid a star is: done work fades; ruled-out work is only an outline. */
+const FILL_OPACITY: Partial<Record<PlanningNodeState, number>> = { done: 0.45, ruled_out: 0 };
 
 /**
  * An epic as a star map: the epic at the centre, its issues on rings by
@@ -38,7 +46,7 @@ export function StarMap({ map, selected, onSelect }: {
       viewBox={`0 0 ${STAR_MAP_SIZE} ${STAR_MAP_SIZE}`}
       className="h-auto w-full max-h-[70vh]"
       role="group"
-      aria-label={`Planning map for epic #${map.epic}`}
+      aria-label={map.file ? `Planning map ${map.file}` : `Planning map for epic #${map.epic}`}
     >
       <defs>
         <marker id="star-map-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -75,9 +83,12 @@ export function StarMap({ map, selected, onSelect }: {
         const epic = node.number === map.epic;
         const radius = epic ? 15 : 9;
         const isSelected = node.number === selected;
+        // A map file's centre is its destination, not a ticket.
+        const name = map.file && epic ? 'map' : nodeName(map, node.number);
+        const hollow = node.state === 'ruled_out';
         return (
           <g key={node.number} role="button" tabIndex={0}
-            aria-label={`#${node.number} ${node.title}: ${STATE_LABEL[node.state]}${node.depth === null ? ', outside the epic' : ''}`}
+            aria-label={`${map.file && epic ? 'Map' : name} ${node.title}: ${STATE_LABEL[node.state]}${node.depth === null ? ', outside the epic' : ''}`}
             aria-pressed={isSelected}
             className={`${STATE_CLASS[node.state]} cursor-pointer`}
             onClick={() => onSelect(node)}
@@ -89,13 +100,13 @@ export function StarMap({ map, selected, onSelect }: {
             <rect x={at.x - 20} y={at.y - radius - 6} width={40} height={radius * 2 + 26} fill="transparent" />
             {node.state === 'ready' && !epic && <circle cx={at.x} cy={at.y} r={radius + 7} fill="currentColor" opacity={0.18} />}
             <circle cx={at.x} cy={at.y} r={radius} fill="currentColor"
-              fillOpacity={node.state === 'done' ? 0.45 : 1}
-              stroke={isSelected ? 'rgb(var(--ink-primary))' : node.depth === null ? 'currentColor' : 'none'}
+              fillOpacity={FILL_OPACITY[node.state] ?? 1}
+              stroke={isSelected ? 'rgb(var(--ink-primary))' : node.depth === null || hollow ? 'currentColor' : 'none'}
               strokeWidth={isSelected ? 2.5 : 1.5}
               strokeDasharray={node.depth === null && !isSelected ? '3 3' : undefined} />
             <text x={at.x} y={at.y + radius + 14} textAnchor="middle" fontSize={epic ? 15 : 13}
               className="fill-secondary" style={{ fontWeight: epic || isSelected ? 600 : 400 }}>
-              #{node.number}
+              {name}
             </text>
           </g>
         );

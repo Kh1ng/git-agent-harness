@@ -47,25 +47,26 @@ paths:
   /api/planning/epics:
     get:
       operationId: planning.epics
-      summary: List the issues a central-node profile can map (parents, or labelled epic or wayfinder:map)
+      summary: List the issues a central-node profile can map (parents, or labelled epic or wayfinder:map) and its chartr .plan/maps/ map files
       description: Types in packages/contracts/src/planning.ts. Read-only; runs `gah map --json`. Cached for 60 seconds.
       parameters:
         - { name: profile, in: query, required: true, schema: { type: string } }
         - { name: refresh, in: query, schema: { type: string, enum: ["1"] } }
       responses:
-        "200": { description: PlanningEpicList }
-        "502": { description: The provider could not be read }
+        "200": { description: "PlanningEpicList. When issues cannot be read but map files exist, `issues_error` says why and the files are still listed." }
+        "502": { description: The provider or the map files could not be read }
   /api/planning/map:
     get:
       operationId: planning.map
-      summary: Read one epic as nodes, child and blocker edges, and the frontier
+      summary: Read one epic, or one .plan/maps/ map file, as nodes, child and blocker edges, and the frontier
       parameters:
         - { name: profile, in: query, required: true, schema: { type: string } }
-        - { name: epic, in: query, required: true, schema: { type: integer, minimum: 1 } }
+        - { name: epic, in: query, schema: { type: integer, minimum: 1 }, description: "Exactly one of epic and file." }
+        - { name: file, in: query, schema: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,99}$" }, description: "A .plan/maps/ slug, read from the checkout without provider requests." }
         - { name: refresh, in: query, schema: { type: string, enum: ["1"] } }
       responses:
         "200": { description: PlanningMap }
-        "502": { description: The provider could not be read }
+        "502": { description: The provider or the map files could not be read }
   /api/planning/settings:
     get:
       operationId: planning.settings.get
