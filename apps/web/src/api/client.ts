@@ -840,3 +840,63 @@ export const externalApprovalApi = {
   list: (profile: string) => getJson<import('@git-agent-harness/contracts').ExternalApprovalScope[]>('/api/external-approvals', { profile }),
   change: (action: 'grant' | 'deny' | 'revoke', scope: import('@git-agent-harness/contracts').ExternalApprovalDecisionScope) => postJson<import('@git-agent-harness/contracts').ExternalApprovalScope[], import('@git-agent-harness/contracts').ExternalApprovalDecisionScope & { confirm: true }>(`/api/external-approvals/${action}`, { ...scope, confirm: true })
 };
+
+// ---------------------------------------------------------------------------
+// CLI Router types — defined locally to match the concurrent backend contract.
+// Root will replace these imports with @git-agent-harness/contracts once the
+// shared types are available.
+// ---------------------------------------------------------------------------
+
+export interface CliRouterAccountQuota {
+  label: string;
+  remainingPercent: number | null;
+  resetAt: string | null;
+}
+
+export interface CliRouterAccount {
+  id: string;
+  name: string;
+  provider: string;
+  label: string;
+  disabled: boolean;
+  unavailable: boolean;
+  resetAt: string | null;
+  quotas: CliRouterAccountQuota[];
+  quotaError?: string;
+}
+
+export interface CliRouterModel {
+  id: string;
+  ownedBy: string;
+}
+
+export interface CliRouterSnapshot {
+  settings: {
+    url: string | null;
+    hasApiKey: boolean;
+    hasManagementKey: boolean;
+  };
+  status: 'unconfigured' | 'connected' | 'unavailable';
+  strategy: 'round-robin' | 'fill-first' | 'weighted-round-robin';
+  sessionAffinity: boolean;
+  accounts: CliRouterAccount[];
+  models: CliRouterModel[];
+}
+
+export interface CliRouterSettingsPayload {
+  url: string;
+  apiKey?: string;
+  managementKey?: string;
+}
+
+export const cliRouterApi = {
+  getSnapshot: () => getJson<CliRouterSnapshot>('/api/cli-router'),
+  saveSettings: (body: CliRouterSettingsPayload) =>
+    putJson<CliRouterSnapshot, CliRouterSettingsPayload>('/api/cli-router/settings', body),
+  setRouting: (body: { strategy: CliRouterSnapshot['strategy']; sessionAffinity: boolean }) =>
+    postJson<CliRouterSnapshot, typeof body>('/api/cli-router/routing', body),
+  setAccountStatus: (body: { id: string; disabled: boolean }) =>
+    postJson<CliRouterSnapshot, typeof body>('/api/cli-router/accounts/status', body),
+  refreshAccount: (body: { id: string }) =>
+    postJson<CliRouterSnapshot, typeof body>('/api/cli-router/accounts/refresh', body),
+};

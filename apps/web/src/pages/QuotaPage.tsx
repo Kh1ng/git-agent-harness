@@ -11,6 +11,8 @@ import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyStat
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { StatTile } from '../components/ui/StatTile.js';
 import { formatPercent, formatRemaining, formatAge, isStale, formatTokens, formatCount, formatCost, formatLocalTime } from '../lib/format.js';
+import { CliRouterPanel } from '../components/CliRouterPanel.js';
+
 
 const SNAPSHOT_REFRESH_MS = 5 * 60 * 1000;
 
@@ -172,6 +174,7 @@ export function QuotaPage() {
     return (
       <div className="space-y-6">
         {header}
+        <CliRouterPanel />
         <LoadingState label="Loading quota snapshot…" />
       </div>
     );
@@ -180,6 +183,7 @@ export function QuotaPage() {
     return (
       <div className="space-y-6">
         {header}
+        <CliRouterPanel />
         <ErrorState message={quota.error} endpoint="/api/quota" onRetry={refresh} />
       </div>
     );
@@ -193,6 +197,8 @@ export function QuotaPage() {
   return (
     <div className="space-y-6">
       {header}
+
+      <CliRouterPanel />
 
       <QuotaFreshnessPanel
         generatedAt={snapshot?.generated_at}
