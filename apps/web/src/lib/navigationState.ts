@@ -1,19 +1,22 @@
-const pages = ['overview', 'work', 'telemetry', 'quota', 'events', 'settings', 'chat', 'projects', 'git', 'nodes'] as const;
+const pages = ['overview', 'work', 'telemetry', 'quota', 'events', 'settings', 'chat', 'projects', 'git', 'nodes', 'planning'] as const;
 export type Page = typeof pages[number];
 export const DEFAULT_CONVERSATION_ID = 'default';
 
-type NavigationState = { page: Page; profile: string | null; chat: string | null };
+/** `epic` is the issue number the Planning page maps. */
+type NavigationState = { page: Page; profile: string | null; chat: string | null; epic: string | null };
 
 /** URLs restore a control surface and conversation, never credentials or commands. */
 export function readNavigation(search = window.location.search): NavigationState {
   const params = new URLSearchParams(search);
   const profile = params.get('profile');
   const chat = params.get('chat');
+  const epic = params.get('epic');
   const validProfile = profile && profile.trim() === profile && profile.length <= 512 && !/[\x00-\x1f\x7f]/.test(profile) ? profile : null;
   return {
     page: pages.find(page => page === params.get('page')) ?? 'overview',
     profile: validProfile,
-    chat: validProfile && chat && /^[a-zA-Z0-9_-]{1,128}$/.test(chat) ? chat : null
+    chat: validProfile && chat && /^[a-zA-Z0-9_-]{1,128}$/.test(chat) ? chat : null,
+    epic: validProfile && epic && /^[1-9][0-9]{0,9}$/.test(epic) ? epic : null
   };
 }
 
@@ -21,7 +24,7 @@ export function readNavigation(search = window.location.search): NavigationState
 export function updateNavigation(update: Partial<NavigationState>): void {
   const url = new URL(window.location.href);
   const next = { ...readNavigation(), ...update };
-  for (const key of ['page', 'profile', 'chat'] as const) {
+  for (const key of ['page', 'profile', 'chat', 'epic'] as const) {
     if (next[key]) url.searchParams.set(key, next[key]);
     else url.searchParams.delete(key);
   }

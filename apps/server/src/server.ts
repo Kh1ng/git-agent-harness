@@ -6,6 +6,7 @@ import { paidRouteApprovalsRouter } from './paidRouteApprovals.js';
 import { externalApprovalsRouter } from './externalApprovals.js';
 import { backendInstancesRouter } from './backendInstances.js';
 import { pmPlansRouter } from './pmPlans.js';
+import { planningRouter } from './planning.js';
 import { nodeSetupRouter } from './nodeSetup.js';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -50,6 +51,7 @@ import {
 
   runRoutingCandidateMutation,
   runPromptPolicyMutation,
+  runPlanningMap,
 } from './gahCli.js';
 import { COORDINATOR_VERSION, REPORT_GROUP_BY_VALUES } from '@git-agent-harness/contracts';
 import type {
@@ -95,6 +97,7 @@ import {
   startChatFromIssue as startManagerChatFromIssue,
   listChatPrsForProfile as listManagerChatPrs,
   startChatFromPr as startManagerChatFromPr,
+  startSeededChat,
   enqueueManagerWake as enqueueManagerChatWake
 } from './managerChat/ManagerChatManager.js';
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
@@ -470,6 +473,7 @@ export function createServer(
   app.use('/api/worker-chat', createWorkerChatRouter({ node, nodeId: getCoordinatorIdentity(undefined, coordinatorPort).node_id }));
   app.use('/api/worker-memory', workerMemoryRouter());
   app.use('/api/pm', pmPlansRouter());
+  if (node.role === 'central') app.use('/api/planning', planningRouter({ map: runPlanningMap, startChat: startSeededChat }));
   app.use('/api/route-approvals', paidRouteApprovalsRouter(mutation));
   app.use('/api/external-approvals', externalApprovalsRouter(mutation));
   app.use('/api/backend-instances', backendInstancesRouter(mutation));

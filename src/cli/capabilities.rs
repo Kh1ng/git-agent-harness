@@ -342,6 +342,7 @@ pub fn generate_manifest() -> CapabilityManifest {
     add_sync_operations(&mut manifest);
     add_dispatch_operations(&mut manifest);
     add_pm_operations(&mut manifest);
+    add_planning_operations(&mut manifest);
     add_tui_operations(&mut manifest);
     add_config_operations(&mut manifest);
     add_profile_operations(&mut manifest);

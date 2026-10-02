@@ -740,6 +740,26 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
       "cli_command_path": "gah notify-send",
       "is_stable": true
     },
+    "planning.map": {
+      "operation_id": "planning.map",
+      "display_name": "Read an epic's planning map (gah map)",
+      "class": "read",
+      "profile_scope": "profile_required",
+      "request_schema": null,
+      "response_schema": {
+        "rust_type": "PlanMap",
+        "ts_type": "PlanningMap",
+        "is_primitive": false
+      },
+      "streaming": "none",
+      "idempotency": "idempotent",
+      "secret_fields": [],
+      "remote_disposition": "remote_available",
+      "local_only_reason": null,
+      "documentation": "Reads provider issues and their relations; never writes to the provider.",
+      "cli_command_path": "gah map",
+      "is_stable": true
+    },
     "pm.plans.list": {
       "operation_id": "pm.plans.list",
       "display_name": "Read PM plans (gah pm plans)",
@@ -1267,6 +1287,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "gah ledger summary": "ledger.summary",
     "gah ledger work": "ledger.work",
     "gah loop": "loop.run",
+    "gah map": "planning.map",
     "gah node register": "node.register",
     "gah notify-send": "notify.send",
     "gah pm plans": "pm.plans.list",
@@ -1334,6 +1355,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     "pm.plans.list",
     "pm.plans.show",
     "pm.publish",
+    "planning.map",
     "config.show",
     "config.set",
     "profile.list",
@@ -2085,6 +2107,22 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
       },
       "required": [
         "work_id"
+      ],
+      "type": "object"
+    },
+    "planning.map": {
+      "properties": {
+        "epic": {
+          "description": "Epic issue number to map; omit to list the issues that can be mapped.",
+          "type": "number"
+        },
+        "profile": {
+          "description": "GAH profile name; defaults to the configured default profile.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile"
       ],
       "type": "object"
     },

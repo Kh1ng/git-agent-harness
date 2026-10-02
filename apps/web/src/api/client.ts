@@ -1,5 +1,6 @@
 import { coordinatorToken } from './coordinatorToken.js';
 import type { ActivityEvent, AuthHealthRow, LoginRepairView, PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harness/contracts';
+import type { PlanningChatRequest, PlanningEpicList, PlanningMap, PlanningSettings } from '@git-agent-harness/contracts';
 /**
  * Typed data-source client for GAH's pull-data REST endpoints.
  *
@@ -336,6 +337,11 @@ export interface GahDataSource {
   startChatFromIssue(profile: string, issueNumber: number, backend?: string, model?: string | null): Promise<ChatIssueStartResult>;
   getChatPrs(profile: string): Promise<{ prs: ChatPrSummary[] }>;
   startChatFromPr(profile: string, prNumber: number, backend?: string, model?: string | null): Promise<ChatPrStartResult>;
+  getPlanningEpics(profile: string, refresh?: boolean): Promise<PlanningEpicList>;
+  getPlanningMap(profile: string, epic: number, refresh?: boolean): Promise<PlanningMap>;
+  getPlanningSettings(profile: string): Promise<PlanningSettings>;
+  setPlanningSettings(profile: string, settings: PlanningSettings): Promise<PlanningSettings>;
+  startPlanningChat(request: PlanningChatRequest): Promise<ChatSessionSummary>;
   getAdminUpdatePending(): Promise<AdminUpdatePendingInfo>;
   getAdminUpdateStatus(): Promise<AdminUpdateState>;
   startAdminUpdate(): Promise<AdminUpdateState>;
@@ -740,6 +746,21 @@ export const gahApi: GahDataSource = {
   },
   startChatFromPr(profile, prNumber, backend, model) {
     return postJson<ChatPrStartResult, { profile: string; prNumber: number; backend?: string; model?: string | null }>('/api/manager-chat/prs/start', { profile, prNumber, backend, model });
+  },
+  getPlanningEpics(profile, refresh) {
+    return getJson<PlanningEpicList>('/api/planning/epics', { profile, refresh: refresh ? '1' : undefined });
+  },
+  getPlanningMap(profile, epic, refresh) {
+    return getJson<PlanningMap>('/api/planning/map', { profile, epic: String(epic), refresh: refresh ? '1' : undefined });
+  },
+  getPlanningSettings(profile) {
+    return getJson<PlanningSettings>('/api/planning/settings', { profile });
+  },
+  setPlanningSettings(profile, settings) {
+    return putJson<PlanningSettings, PlanningSettings & { profile: string }>('/api/planning/settings', { profile, ...settings });
+  },
+  startPlanningChat(request) {
+    return postJson<ChatSessionSummary, PlanningChatRequest>('/api/planning/chats', request);
   },
   getAdminUpdatePending() {
     return getJson<AdminUpdatePendingInfo>('/api/admin/update');

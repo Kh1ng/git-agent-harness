@@ -16,7 +16,7 @@
 import type { ChatIssueSummary, ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
 import { AsyncTtlCache } from '../asyncTtlCache.js';
 import { type ForgeProject, execProjectCli, execProviderCli } from './providerCli.js';
-import { appendEvents } from './sessionLog.js';
+import { seedOpeningMessage } from './sessionLog.js';
 import {
   chatSessionStoreOptions,
   createSession,
@@ -216,19 +216,13 @@ export async function startIssueChat(input: StartIssueChatInput): Promise<StartI
       storeOptions
     );
 
-  // Seed the log: the issue is the opening message of the conversation --
-  // rendered in the transcript and replayed into every backend's context.
-  const now = Date.now();
+  // The issue is the conversation's opening message.
   const issueText = [
     `#${issue.number} ${issue.title}`,
     issue.body?.trim() ?? '',
     issue.url ? `\n(${issue.url})` : ''
   ].filter((part) => part.length > 0).join('\n\n');
-  appendEvents(profile, [
-    { type: 'turn/start', seq: 1, turn: 1, timestamp: now },
-    { type: 'user/message', seq: 2, turn: 1, text: issueText, source: 'prompt', timestamp: now },
-    { type: 'turn/end', seq: 3, turn: 1, reason: { kind: 'complete' }, timestamp: now }
-  ], { stateDir: storeOptions.stateDir, sessionId: session.id });
+  seedOpeningMessage(profile, issueText, { stateDir: storeOptions.stateDir, sessionId: session.id });
 
   return { session, existing: false };
 }

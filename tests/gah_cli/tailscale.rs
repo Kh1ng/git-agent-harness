@@ -66,12 +66,12 @@ fn tailscale_ip_prefers_the_authoritative_cli_output() {
 #[test]
 fn tailscale_ip_fails_closed_off_tailnet() {
     let tmp = test_tempdir();
-    // No `tailscale` binary on PATH; `ip`/`ifconfig` are real but their
-    // addresses are outside 100.64.0.0/10, so the CIDR filter rejects them.
     // To keep the test hermetic even on a machine that IS on a tailnet,
-    // shadow both interface tools with outputs that stay off-tailnet.
+    // shadow the real `tailscale` CLI (it fails) and both interface tools
+    // (addresses outside 100.64.0.0/10, so the CIDR filter rejects them).
     let bin_dir = tmp.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
+    make_fake_bin_with_body(&bin_dir, "tailscale", "#!/bin/sh\nexit 1\n");
     for tool in ["ip", "ifconfig"] {
         make_fake_bin_with_body(
             &bin_dir,

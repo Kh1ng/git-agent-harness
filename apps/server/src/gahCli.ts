@@ -1819,3 +1819,14 @@ export async function changePaidRouteApproval(action: 'grant' | 'revoke', scope:
   args.push('--', scope.work_id);
   return runVoidCommand(args, config, 'gah route-approval');
 }
+
+/** `gah map`: the epics a profile can map, or one epic's planning map. Read-only. */
+export async function runPlanningMap(profile: string): Promise<import('@git-agent-harness/contracts').PlanningEpicList>;
+export async function runPlanningMap(profile: string, epic: number): Promise<import('@git-agent-harness/contracts').PlanningMap>;
+export async function runPlanningMap(profile: string, epic?: number) {
+  const args = ['map', `--profile=${profile}`, '--json'];
+  if (epic !== undefined) args.push(`--epic=${epic}`);
+  const config = getConfigPath();
+  if (config) args.push('--config', config);
+  return runJsonCommand(args, config);
+}

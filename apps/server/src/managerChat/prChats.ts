@@ -14,7 +14,7 @@
 import type { ChatPrSummary, ChatSessionSummary, ProfileSummary } from '@git-agent-harness/contracts';
 import { AsyncTtlCache } from '../asyncTtlCache.js';
 import { type ForgeProject, execProjectCli } from './providerCli.js';
-import { appendEvents } from './sessionLog.js';
+import { seedOpeningMessage } from './sessionLog.js';
 import {
   chatSessionStoreOptions,
   createSession,
@@ -164,20 +164,14 @@ export async function startPrChat(input: StartPrChatInput): Promise<StartPrChatR
       storeOptions
     );
 
-  // Seed the log: the PR is the opening message of the conversation --
-  // rendered in the transcript and replayed into every backend's context.
-  const now = Date.now();
+  // The PR is the conversation's opening message.
   const prText = [
     `#${pr.number} ${pr.title}`,
     pr.body?.trim() ?? '',
     pr.headRefName ? `Head branch: ${pr.headRefName}` : '',
     pr.url ? `\n(${pr.url})` : ''
   ].filter((part) => part.length > 0).join('\n\n');
-  appendEvents(profile, [
-    { type: 'turn/start', seq: 1, turn: 1, timestamp: now },
-    { type: 'user/message', seq: 2, turn: 1, text: prText, source: 'prompt', timestamp: now },
-    { type: 'turn/end', seq: 3, turn: 1, reason: { kind: 'complete' }, timestamp: now }
-  ], { stateDir: storeOptions.stateDir, sessionId: session.id });
+  seedOpeningMessage(profile, prText, { stateDir: storeOptions.stateDir, sessionId: session.id });
 
   return { session, existing: false };
 }

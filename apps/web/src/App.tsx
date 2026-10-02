@@ -22,6 +22,7 @@ const ManagerChatPage = lazy(() => import('./pages/ManagerChatPage.js').then((mo
 const GitPage = lazy(() => import('./pages/GitPage.js').then((module) => ({ default: module.GitPage })));
 const NodesPage = lazy(() => import('./pages/NodesPage.js').then((module) => ({ default: module.NodesPage })));
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage.js').then((module) => ({ default: module.ProjectsPage })));
+const PlanningPage = lazy(() => import('./pages/PlanningPage.js').then((module) => ({ default: module.PlanningPage })));
 
 export type { Page } from './lib/navigationState.js';
 
@@ -60,6 +61,8 @@ export function App() {
         return <ProjectsPage onNavigate={setCurrentPage} />;
       case 'git':
         return <GitPage />;
+      case 'planning':
+        return <PlanningPage onNavigate={setCurrentPage} />;
       case 'overview':
       default:
         return (

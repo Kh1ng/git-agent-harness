@@ -15,7 +15,7 @@ mod already_satisfied;
 mod attempts;
 mod claims;
 mod command;
-mod dependencies;
+pub(crate) mod dependencies;
 mod dry_run;
 mod environment;
 mod error;
