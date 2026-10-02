@@ -91,13 +91,15 @@ const NODE_POLL_CONCURRENCY = 4;
 // periodically before this -- it only ran on-demand (dashboard fetch,
 // dispatch routing), so a node with nothing currently dispatching to it
 // could go dark and never get flagged. "Bad" states below all mean the
-// node isn't answering health checks correctly; each is worth escalating
-// the same way, so they're treated as one bucket for alerting purposes.
+// node is not answering health checks correctly. Connectivity is one outage
+// bucket; auth and compatibility failures each add attention once until recovery.
 const LIVENESS_POLL_INTERVAL_MS = 60_000;
 const LIVENESS_ALERT_AFTER_CONSECUTIVE_BAD_CHECKS = 3;
 const LIVENESS_BAD_STATES: NodeObservationState[] = ['stale', 'unreachable', 'auth_failed', 'incompatible'];
 
-function nodeAlertState(state: NodeObservationState): 'offline' | 'auth_failed' | 'incompatible' {
+type NodeAlertState = 'offline' | 'auth_failed' | 'incompatible';
+
+function nodeAlertState(state: NodeObservationState): NodeAlertState {
   return state === 'auth_failed' || state === 'incompatible' ? state : 'offline';
 }
 
@@ -305,7 +307,7 @@ export class RegistryService {
   private nodes: Map<string, RegisteredNode> = new Map();
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
   private consecutiveBadChecks: Map<string, number> = new Map();
-  private alertedNodeStates = new Map<string, 'offline' | 'auth_failed' | 'incompatible'>();
+  private alertedNodeStates = new Map<string, Set<NodeAlertState>>();
   /** Normalized endpoint of the central node itself (issue #944): a worker
    * must never register a node whose advertised_url is the central node's
    * own endpoint -- the liveness scheduler would poll the central's own
@@ -329,12 +331,14 @@ export class RegistryService {
           for (const node of data.nodes) {
             this.nodes.set(node.node_id, node);
             // The first upgrade starts from the already observed outage, not a reminder.
-            if (!data.alertedNodeStates && LIVENESS_BAD_STATES.includes(node.last_observed_state)) this.alertedNodeStates.set(node.node_id, nodeAlertState(node.last_observed_state));
+            if (!data.alertedNodeStates && LIVENESS_BAD_STATES.includes(node.last_observed_state)) this.alertedNodeStates.set(node.node_id, new Set([nodeAlertState(node.last_observed_state)]));
           }
         }
         if (data.alertedNodeStates && typeof data.alertedNodeStates === 'object' && !Array.isArray(data.alertedNodeStates)) {
-          for (const [id, state] of Object.entries(data.alertedNodeStates)) {
-            if (this.nodes.has(id) && (state === 'offline' || state === 'auth_failed' || state === 'incompatible')) this.alertedNodeStates.set(id, state);
+          for (const [id, stored] of Object.entries(data.alertedNodeStates)) {
+            // Accept the previous single-bucket format while preserving every new bucket.
+            const states = (Array.isArray(stored) ? stored : [stored]).filter((state): state is NodeAlertState => state === 'offline' || state === 'auth_failed' || state === 'incompatible');
+            if (this.nodes.has(id) && states.length) this.alertedNodeStates.set(id, new Set(states));
           }
         }
       } catch (e) {
@@ -352,7 +356,7 @@ export class RegistryService {
       }
       const data = {
         nodes: Array.from(this.nodes.values()),
-        alertedNodeStates: Object.fromEntries([...this.alertedNodeStates].filter(([id]) => this.nodes.has(id)))
+        alertedNodeStates: Object.fromEntries([...this.alertedNodeStates].filter(([id]) => this.nodes.has(id)).map(([id, states]) => [id, [...states]]))
       };
       const temporary = `${this.configPath}.${process.pid}.tmp`;
       writeFileSync(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
@@ -912,8 +916,10 @@ export class RegistryService {
       const count = (this.consecutiveBadChecks.get(obs.node_id) ?? 0) + 1;
       this.consecutiveBadChecks.set(obs.node_id, count);
       const alertState = nodeAlertState(obs.state);
-      if (count >= LIVENESS_ALERT_AFTER_CONSECUTIVE_BAD_CHECKS && this.alertedNodeStates.get(obs.node_id) !== alertState) {
-        this.alertedNodeStates.set(obs.node_id, alertState);
+      const alerted = this.alertedNodeStates.get(obs.node_id) ?? new Set<NodeAlertState>();
+      if (count >= LIVENESS_ALERT_AFTER_CONSECUTIVE_BAD_CHECKS && !alerted.has(alertState)) {
+        alerted.add(alertState);
+        this.alertedNodeStates.set(obs.node_id, alerted);
         this.save();
         const message = `Node "${obs.display_name}" (${obs.node_id}) has been ${obs.state} for ${count} consecutive checks (last seen: ${obs.last_seen_at ?? 'never'}).`;
         this.livenessChanged({

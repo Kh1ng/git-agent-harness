@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -210,6 +210,9 @@ test('an offline transition survives restarts and only a recovered node can go o
   first.onLivenessTransition(({ state }) => transitions.push(state));
   try {
     for (let count = 0; count < 3; count++) await first.runLivenessCheck();
+    const older = JSON.parse(readFileSync(path, 'utf8'));
+    older.alertedNodeStates['restarting-node'] = 'offline';
+    writeFileSync(path, JSON.stringify(older));
     const restored = new RegistryService(path);
     restored.onLivenessTransition(({ state }) => transitions.push(state));
     for (let count = 0; count < 3; count++) await restored.runLivenessCheck();
@@ -248,9 +251,14 @@ test('a known outage does not hide a new authentication or compatibility failure
     await service.runLivenessCheck();
     await service.runLivenessCheck();
     assert.deepEqual(transitions, ['unreachable', 'auth_failed', 'incompatible']);
+    state = 'unreachable';
+    await service.runLivenessCheck();
+    assert.deepEqual(transitions, ['unreachable', 'auth_failed', 'incompatible'], 'returning to the same outage is not a new offline transition');
     const restored = new RegistryService(path);
     restored.onLivenessTransition(({ nodeState }) => transitions.push(nodeState ?? 'unknown'));
     for (let count = 0; count < 3; count++) await restored.runLivenessCheck();
-    assert.deepEqual(transitions, ['unreachable', 'auth_failed', 'incompatible']);
+    state = 'auth_failed';
+    await restored.runLivenessCheck();
+    assert.deepEqual(transitions, ['unreachable', 'auth_failed', 'incompatible'], 'each attention bucket remains acknowledged until healthy recovery');
   } finally { server.close(); }
 });
