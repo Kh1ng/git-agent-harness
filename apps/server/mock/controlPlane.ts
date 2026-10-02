@@ -31,6 +31,7 @@ import type {
   ChatTranscriptTurn,
   ClientMessage,
   ConfigSummary,
+  CliRouterSnapshot,
   GatewayBootstrapCommand,
   GatewaySettingsSummary,
   HelperUsageRecord,
@@ -163,7 +164,21 @@ interface ConversationState {
 
 type MockSkill = Skill & { bound: boolean };
 
+function mockCliRouter(): CliRouterSnapshot {
+  return {
+    settings: { url: 'http://127.0.0.1:8317', hasApiKey: true, hasManagementKey: true },
+    status: 'connected', strategy: 'round-robin', sessionAffinity: true,
+    accounts: [1, 2].map((index) => ({
+      id: `agy-${index}`, name: `antigravity-agy-${index}.json`, provider: 'antigravity',
+      label: `AGY ${index}`, disabled: false, unavailable: false, resetAt: null,
+      quotas: [{ label: 'Gemini Pro', remainingPercent: index === 1 ? 72 : 94, resetAt: null }]
+    })),
+    models: ['gemini-3.1-pro-high', 'gemini-3-flash'].map((id) => ({ id, ownedBy: 'antigravity' }))
+  };
+}
+
 interface MockState {
+  cliRouter: CliRouterSnapshot;
   scenario: MockScenarioName;
   reset: number;
   connectionCount: number;
@@ -542,6 +557,7 @@ function createState(scenario: MockScenarioName, reset: number, previewOrigin?: 
   }
 
   return {
+    cliRouter: mockCliRouter(),
     scenario,
     reset,
     connectionCount: 0,
@@ -1368,6 +1384,30 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
 
   app.get('/api/status', (_req, res) => res.json(STATUS_FIXTURE));
   app.get('/api/quota', (_req, res) => res.json(QUOTA_FIXTURE));
+  app.get('/api/cli-router', (_req, res) => res.json(state.cliRouter));
+  app.put('/api/cli-router/settings', (req, res) => {
+    state.cliRouter.settings.url = req.body.url;
+    res.json({ success: true });
+  });
+  app.post('/api/cli-router/routing', (req, res) => {
+    state.cliRouter.strategy = req.body.strategy;
+    state.cliRouter.sessionAffinity = req.body.sessionAffinity;
+    res.json({ success: true });
+  });
+  app.post('/api/cli-router/accounts/status', (req, res) => {
+    if (typeof req.body.id !== 'string') return res.status(400).json({ message: 'Account id is required.' });
+    const account = state.cliRouter.accounts.find((account) => account.id === req.body.id);
+    if (!account) return res.status(404).json({ message: 'Account not found.' });
+    account.disabled = req.body.disabled;
+    res.json({ success: true });
+  });
+  app.post('/api/cli-router/accounts/refresh', (req, res) => {
+    if (typeof req.body.id !== 'string') return res.status(400).json({ message: 'Account id is required.' });
+    if (!state.cliRouter.accounts.some((account) => account.id === req.body.id)) {
+      return res.status(404).json({ message: 'Account not found.' });
+    }
+    res.json(state.cliRouter);
+  });
   app.get('/api/usage/rollup', (req, res) => {
     res.json({ ...MOCK_USAGE_ROLLUP, profile: bodyString(req.query.profile) ?? 'fixture' } satisfies UsageRollupSummary);
   });

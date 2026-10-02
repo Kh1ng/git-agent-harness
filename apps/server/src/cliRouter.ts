@@ -29,9 +29,6 @@ const UPSTREAM_TIMEOUT_MS = 12_000;
 /** Maximum bytes we will read from an upstream JSON response. */
 const MAX_RESPONSE_BYTES = 512 * 1024; // 512 KiB
 
-/** Maximum JSON payload bytes from the client. */
-const MAX_REQUEST_BODY_BYTES = 8 * 1024;
-
 // ---------------------------------------------------------------------------
 // Settings persistence (atomic, mode 0600)
 // ---------------------------------------------------------------------------
@@ -77,18 +74,17 @@ export function writeSettings(settings: CliRouterStoredSettings): void {
   const tmp = path + `.tmp.${randomBytes(6).toString('hex')}`;
   // wx flags: open for writing, fails if file exists (no symlink attack on tmp)
   const fd = openSync(tmp, 'wx', 0o600);
-  let success = false;
   try {
-    writeFileSync(fd, JSON.stringify(settings, null, 2) + '\n');
-    fsyncSync(fd);
-    success = true;
-  } finally { 
-    closeSync(fd); 
-    if (!success) {
-      try { rmSync(tmp, { force: true }); } catch {}
+    try {
+      writeFileSync(fd, JSON.stringify(settings, null, 2) + '\n');
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
     }
+    renameSync(tmp, path);
+  } finally {
+    rmSync(tmp, { force: true });
   }
-  renameSync(tmp, path);
   quotaCache.clear();
 }
 
@@ -247,18 +243,18 @@ async function fetchRoutingStrategy(baseUrl: string, managementKey: string, fetc
   });
   if (stratResult.status !== 200) throw new Error('Upstream routing config request failed');
   if (!stratResult.body || typeof stratResult.body !== 'object') throw new Error('Invalid config format');
-  
+
   const config = stratResult.body as Record<string, unknown>;
   const routing = config.routing as Record<string, unknown> | undefined;
-  
+
   if (!routing) throw new Error('Missing routing config section');
-  
+
   if (typeof routing.strategy !== 'string' || !(CLI_ROUTER_STRATEGIES as readonly string[]).includes(routing.strategy)) {
     throw new Error('Unknown or missing routing strategy');
   }
-  
-  return { 
-    strategy: routing.strategy as CliRouterStrategy, 
+
+  return {
+    strategy: routing.strategy as CliRouterStrategy,
     sessionAffinity: routing['session-affinity'] === true
   };
 }
@@ -328,7 +324,7 @@ async function refreshAntigravityQuota(account: UpstreamAuthFile, deps: QuotaRef
       const name = boundedString(b.displayName, 80) ?? 'Unknown';
       const window = boundedString(b.window, 40);
       quotas.push({
-        label: window ? `${name} (${window})` : name,
+        label: [boundedString(g.displayName, 80), window ? `${name} (${window})` : name].filter(Boolean).join(' · '),
         remainingPercent: typeof b.remainingFraction === 'number' ? percent(b.remainingFraction * 100) : null,
         resetAt: isoOrNull(b.resetTime),
         observedAt,
@@ -591,7 +587,7 @@ export function cliRouterRouter(
     if (!isObj(body) || Object.keys(body).some(k => !allowed.includes(k))) {
       return res.status(400).json({ error: 'invalid_request', message: 'Only id and disabled are allowed.' });
     }
-    if (typeof body.id !== 'string' || !body.id) {
+    if (!boundedString(body.id)) {
       return res.status(400).json({ error: 'invalid_id', message: 'Account id is required.' });
     }
     if (typeof body.disabled !== 'boolean') {
@@ -641,7 +637,7 @@ export function cliRouterRouter(
     if (!isObj(body) || Object.keys(body).some(k => !allowed.includes(k))) {
       return res.status(400).json({ error: 'invalid_request', message: 'Only id is allowed.' });
     }
-    if (typeof body.id !== 'string' || !body.id) {
+    if (!boundedString(body.id)) {
       return res.status(400).json({ error: 'invalid_id', message: 'Account id is required.' });
     }
     const loaded = loadStored(res);

@@ -70,8 +70,8 @@ test('renders connected panel with accounts, models, strategy, and provider tabs
   await expect(strategySelect).toHaveValue('round-robin');
 
   // Provider filter tabs
-  await expect(component.getByRole('tab', { name: /All/ })).toBeVisible();
-  await expect(component.getByRole('tab', { name: /Claude/ })).toBeVisible();
+  await expect(component.getByRole('button', { name: /All/ })).toBeVisible();
+  await expect(component.getByRole('button', { name: /^Claude(?: \([0-9]+\))?$/ })).toBeVisible();
 });
 
 test('provider filter tabs filter the account list', async ({ mount, page }) => {
@@ -81,13 +81,13 @@ test('provider filter tabs filter the account list', async ({ mount, page }) => 
   await expect(component.getByTestId('account-acc-1')).toBeVisible();
 
   // Filter to Claude
-  await component.getByRole('tab', { name: /Claude/ }).click();
+  await component.getByRole('button', { name: /^Claude(?: \([0-9]+\))?$/ }).click();
   await expect(component.getByTestId('account-acc-1')).toHaveCount(0);
   await expect(component.getByTestId('account-acc-2')).toBeVisible();
   await expect(component.getByTestId('account-acc-3')).toHaveCount(0);
 
   // Filter back to All
-  await component.getByRole('tab', { name: /All/ }).click();
+  await component.getByRole('button', { name: /All/ }).click();
   await expect(component.getByTestId('account-acc-1')).toBeVisible();
   await expect(component.getByTestId('account-acc-3')).toBeVisible();
 });
@@ -100,8 +100,8 @@ test('show labels checkbox reveals and hides account labels', async ({ mount, pa
   await mockRouter(page, makeSnapshot());
 
   const component = await mount(<CliRouterPanel />);
-  // By default labels are hidden, show name
-  await expect(component.getByText('team@google.com')).toBeVisible();
+  // Email-bearing filenames stay hidden until the owner chooses to show them.
+  await expect(component.getByText('team@google.com')).toHaveCount(0);
   await expect(component.getByText('Team account')).toHaveCount(0);
 
   // Click show labels
@@ -294,7 +294,7 @@ test('quota bars render real remaining percentages, not hardcoded values', async
   const account = component.getByTestId('account-acc-1');
   await expect(account.getByText('72% remaining')).toBeVisible();
   const progress = account.locator('progress');
-  await expect(progress).toHaveAttribute('value', '28');
+  await expect(progress).toHaveAttribute('value', '72');
   await expect(progress).toHaveAttribute('max', '100');
 });
 

@@ -264,6 +264,14 @@
     border-radius: 9999px;
   }
 
+  .router-quota-progress::-webkit-progress-value {
+    background-color: currentColor;
+  }
+
+  .router-quota-progress::-moz-progress-bar {
+    background-color: currentColor;
+  }
+
   /* Chat markdown keeps each role's bubble color while giving generated
      prose predictable spacing and bounded code/link rendering. */
   .chat-markdown {

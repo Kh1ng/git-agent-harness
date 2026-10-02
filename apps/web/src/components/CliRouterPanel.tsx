@@ -22,7 +22,7 @@ function useFeedback(clearMs = 4000): [Feedback | null, (fb: Feedback) => void] 
   const set = useCallback((f: Feedback) => {
     clearTimeout(timer.current);
     setFb(f);
-    timer.current = setTimeout(() => setFb(null), clearMs);
+    if (f.kind === 'success') timer.current = setTimeout(() => setFb(null), clearMs);
   }, [clearMs]);
   useEffect(() => () => clearTimeout(timer.current), []);
   return [fb, set];
@@ -40,16 +40,20 @@ export function CliRouterPanel() {
   const [snapshot, setSnapshot] = useState<CliRouterSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const fetchSequence = useRef(0);
 
   const fetchSnapshot = useCallback(async () => {
+    const sequence = ++fetchSequence.current;
     try {
       const data = await cliRouterApi.getSnapshot();
+      if (sequence !== fetchSequence.current) return;
       setSnapshot(data);
       setError(null);
     } catch (err) {
+      if (sequence !== fetchSequence.current) return;
       setError(errorText(err));
     } finally {
-      setLoading(false);
+      if (sequence === fetchSequence.current) setLoading(false);
     }
   }, []);
 
@@ -76,7 +80,7 @@ export function CliRouterPanel() {
   }
 
   return (
-    <section className="space-y-4" data-testid="cli-router-panel">
+    <section className="space-y-4 [&_button]:min-h-11 sm:[&_button]:min-h-0" data-testid="cli-router-panel">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           {snapshot?.status === 'connected'
@@ -84,8 +88,8 @@ export function CliRouterPanel() {
             : <WifiOff size={16} className="text-muted" aria-hidden="true" />}
           <h3 className="text-sm font-semibold text-primary">CLI Router</h3>
           <StatusBadge
-            tone={snapshot?.status === 'connected' ? 'good' : snapshot?.status === 'unavailable' ? 'critical' : 'unknown'}
-            label={snapshot?.status ?? 'unknown'}
+            tone={error ? 'warning' : snapshot?.status === 'connected' ? 'good' : snapshot?.status === 'unavailable' ? 'critical' : 'unknown'}
+            label={error ? 'Stale' : snapshot?.status ?? 'unknown'}
           />
         </div>
         <button
@@ -98,6 +102,7 @@ export function CliRouterPanel() {
         </button>
       </div>
 
+      {error && <p role="alert" className="text-xs text-critical">Latest refresh failed. Showing the earlier snapshot. {error}</p>}
       <ConnectionSettings
         settings={snapshot?.settings ?? { url: null, hasApiKey: false, hasManagementKey: false }}
         status={snapshot?.status ?? 'unconfigured'}
@@ -349,7 +354,7 @@ function AccountList({
     <div className="card-padded">
       <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
         <h4 className="text-[11px] uppercase tracking-wide text-muted">Accounts ({accounts.length})</h4>
-        <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer">
+        <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer rounded focus-within:ring-2 focus-within:ring-accent">
           {showLabels ? <Eye size={12} aria-hidden="true" /> : <EyeOff size={12} aria-hidden="true" />}
           <input
             type="checkbox"
@@ -362,14 +367,13 @@ function AccountList({
       </div>
 
       {/* Provider filter tabs */}
-      <div className="flex flex-wrap gap-1 mb-3" role="tablist" aria-label="Filter by provider">
+      <div className="flex flex-wrap gap-1 mb-3" role="group" aria-label="Filter by provider">
         {PROVIDERS.map((p) => {
           const count = p === 'All' ? accounts.length : accounts.filter((a) => a.provider.toLowerCase() === p.toLowerCase()).length;
           return (
             <button
               key={p}
-              role="tab"
-              aria-selected={providerFilter === p}
+              aria-pressed={providerFilter === p}
               onClick={() => setProviderFilter(p)}
               className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
                 providerFilter === p
@@ -416,6 +420,9 @@ function AccountRow({
 }) {
   const [actionPending, setActionPending] = useState<'toggle' | 'refresh' | null>(null);
   const [feedback, setFeedback] = useFeedback();
+  const displayName = showLabel
+    ? (account.label || account.name)
+    : account.name.includes('@') ? `${account.provider} · ${account.id.slice(0, 8)}` : account.name;
 
   const handleToggle = async () => {
     if (actionPending) return;
@@ -435,8 +442,9 @@ function AccountRow({
     if (actionPending) return;
     setActionPending('refresh');
     try {
-      await cliRouterApi.refreshAccount({ id: account.id });
-      setFeedback({ kind: 'success', text: 'Quota refreshed' });
+      const updated = await cliRouterApi.refreshAccount({ id: account.id });
+      const quotaError = updated.accounts.find(row => row.id === account.id)?.quotaError;
+      setFeedback(quotaError ? { kind: 'error', text: quotaError } : { kind: 'success', text: 'Quota refreshed' });
       onChanged();
     } catch (err) {
       setFeedback({ kind: 'error', text: errorText(err) });
@@ -461,7 +469,7 @@ function AccountRow({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="text-xs font-medium text-primary truncate">
-              {showLabel ? (account.label || account.name) : account.name}
+              {displayName}
             </span>
             <span className="text-[11px] text-muted">{account.provider}</span>
             <StatusBadge tone={tone} label={statusLabel} />
@@ -476,7 +484,7 @@ function AccountRow({
             onClick={handleToggle}
             disabled={actionPending !== null}
             className="btn-secondary text-xs px-2 py-1"
-            aria-label={account.disabled ? `Enable ${account.name}` : `Pause ${account.name}`}
+            aria-label={account.disabled ? `Enable ${displayName}` : `Pause ${displayName}`}
           >
             {actionPending === 'toggle' ? '…' : account.disabled ? 'Enable' : 'Pause'}
           </button>
@@ -484,7 +492,7 @@ function AccountRow({
             onClick={handleRefresh}
             disabled={actionPending !== null}
             className="btn-secondary text-xs px-2 py-1"
-            aria-label={`Refresh quota for ${account.name}`}
+            aria-label={`Refresh quota for ${displayName}`}
           >
             <RefreshCw size={12} className={actionPending === 'refresh' ? 'animate-spin' : ''} aria-hidden="true" />
           </button>
@@ -508,12 +516,13 @@ function AccountRow({
                 </div>
                 {q.remainingPercent !== null && q.remainingPercent !== undefined && (
                   <progress
-                    className="usage-progress mt-1"
+                    className={`usage-progress router-quota-progress mt-1 ${q.remainingPercent < 20 ? 'text-warning' : 'text-good'}`}
                     max={100}
-                    value={100 - q.remainingPercent}
+                    value={q.remainingPercent}
                     aria-label={`${q.label}: ${Math.round(q.remainingPercent)}% remaining`}
                   />
                 )}
+                {q.observedAt && <p className="text-[11px] text-muted mt-0.5">Checked {formatLocalTime(q.observedAt)}</p>}
                 {remaining && <p className="text-[11px] text-muted mt-0.5">Resets in {remaining}</p>}
                 {q.resetAt && !remaining && (
                   <p className="text-[11px] text-muted mt-0.5">Resets {formatLocalTime(q.resetAt) ?? q.resetAt}</p>
@@ -527,6 +536,7 @@ function AccountRow({
       {account.quotaError && (
         <p className="text-xs text-critical mt-2">{account.quotaError}</p>
       )}
+      {account.quotas.length === 0 && !account.quotaError && <p className="text-xs text-muted mt-2">Quota not checked. Refresh this account to read its remaining allowance.</p>}
 
       {account.unavailable && account.resetAt && (
         <p className="text-xs text-muted mt-1">
@@ -579,7 +589,7 @@ function ModelList({ models }: { models: CliRouterSnapshot['models'] }) {
               </div>
               <button
                 onClick={() => copyId(m.id)}
-                className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1 rounded hover:bg-white/10 transition-opacity flex-shrink-0"
+                className="btn-secondary !min-h-11 !min-w-11 !px-2 sm:opacity-0 group-hover:opacity-100 focus:opacity-100 flex-shrink-0"
                 aria-label={`Copy ${gahId}`}
               >
                 {copied === gahId

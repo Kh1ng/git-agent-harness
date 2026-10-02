@@ -572,7 +572,7 @@ async function refreshOne(f: Record<string, unknown>, providerBody: unknown, pro
 
 test('api-call payload uses header/data, $TOKEN$ auth and server-chosen targets for every provider', async () => {
   const ag = await refreshOne(file({ provider: 'antigravity', project_id: 'proj-1' }),
-    JSON.stringify({ groups: [{ buckets: [{ displayName: 'Claude', window: '5h', remainingFraction: 0.25, resetTime: '2026-10-02T06:00:00Z' }] }] }));
+    JSON.stringify({ groups: [{ displayName: 'Claude models', buckets: [{ displayName: 'Claude', window: '5h', remainingFraction: 0.25, resetTime: '2026-10-02T06:00:00Z' }] }] }));
   assert.equal(ag.call.body.auth_index, 'idx1');
   assert.equal(ag.call.body.header.Authorization, 'Bearer $TOKEN$');
   assert.equal(ag.call.body.header['Content-Type'], 'application/json');
@@ -581,7 +581,7 @@ test('api-call payload uses header/data, $TOKEN$ auth and server-chosen targets 
   assert.deepEqual(JSON.parse(ag.call.body.data), { project: 'proj-1' });
   assert.equal(ag.call.body.headers, undefined);
   assert.equal(ag.call.body.body, undefined);
-  assert.deepEqual(ag.account.quotas.map(q => [q.label, q.remainingPercent, q.resetAt]), [['Claude (5h)', 25, '2026-10-02T06:00:00.000Z']]);
+  assert.deepEqual(ag.account.quotas.map(q => [q.label, q.remainingPercent, q.resetAt]), [['Claude models · Claude (5h)', 25, '2026-10-02T06:00:00.000Z']]);
 
   const cl = await refreshOne(file({}), { five_hour: { utilization: 30, resets_at: '2026-10-02T06:00:00Z' } });
   assert.equal(cl.call.body.header.Authorization, 'Bearer $TOKEN$');
