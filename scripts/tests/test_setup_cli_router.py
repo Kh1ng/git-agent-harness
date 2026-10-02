@@ -33,6 +33,8 @@ class RouterSetupTests(unittest.TestCase):
             gah.write_text(original)
             router.register_instance(gah, "gah", root, wrapper)
             stored = gah.read_text()
+            instance = router.tomllib.loads(stored)["profiles"]["gah"]["routing"]["backend_instances"]["cli-router"]
+            self.assertNotRegex(instance["account_label"], r"[\s/\\]")
             router.register_instance(gah, "gah", root, wrapper)
             self.assertEqual(gah.read_text(), stored)
             self.assertTrue(stored.startswith(original))
