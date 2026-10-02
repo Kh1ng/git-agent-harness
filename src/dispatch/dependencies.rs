@@ -100,15 +100,38 @@ pub(crate) fn fetch_github_sub_issues(
     }
 
     let endpoint = format!("repos/{}/issues/{parent_number}/sub_issues", profile.repo);
+    let issues = github_list_pages(&endpoint)?;
+
+    let mut sub_issue_numbers = Vec::new();
+    for issue in &issues {
+        if let Some(number) = issue["number"].as_u64() {
+            let number = number.to_string();
+            if number != parent_number {
+                sub_issue_numbers.push(number);
+            }
+        }
+    }
+
+    Ok(sub_issue_numbers)
+}
+
+/// Every item of a GitHub list endpoint, across all pages (`gh` defaults to
+/// 30 per page). A 404 means the endpoint is unavailable, so no relationships.
+/// A malformed or over-long response is an error, never a partial list.
+pub(crate) fn github_list_pages(
+    endpoint: &str,
+) -> Result<Vec<serde_json::Value>, DependencyRelationshipError> {
+    const MAX_PAGES: usize = 100;
     let output = provider_command("gh")
-        .args(["api", "--method", "GET", &endpoint])
+        .args(["api", "--method", "GET", endpoint])
+        .args(["--paginate", "--slurp", "-f", "per_page=100"])
         .output()
         .map_err(|e| DependencyRelationshipError::ProviderError {
-            message: format!("gh api list sub-issues failed: {e}"),
+            message: format!("gh api list {endpoint} failed: {e}"),
         })?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr = crate::redact::redact(String::from_utf8_lossy(&output.stderr).trim());
         let lower = stderr.to_ascii_lowercase();
 
         // Classify the error based on the response
@@ -138,30 +161,32 @@ pub(crate) fn fetch_github_sub_issues(
         });
     }
 
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
-        DependencyRelationshipError::MalformedResponse {
-            message: format!("Failed to parse GitHub sub-issues response: {e}"),
-        }
-    })?;
-
-    let issues =
-        value
-            .as_array()
-            .ok_or_else(|| DependencyRelationshipError::MalformedResponse {
-                message: format!("Expected array of sub-issues, got: {value}"),
-            })?;
-
-    let mut sub_issue_numbers = Vec::new();
-    for issue in issues {
-        if let Some(number) = issue["number"].as_u64() {
-            let number = number.to_string();
-            if number != parent_number {
-                sub_issue_numbers.push(number);
-            }
+    let malformed = |detail: &str| DependencyRelationshipError::MalformedResponse {
+        message: format!("GitHub list {endpoint}: {detail}"),
+    };
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| malformed(&format!("cannot parse response: {e}")))?;
+    // `--slurp` wraps each page in an outer array; a bare list of objects is
+    // accepted as one page.
+    let pages = value
+        .as_array()
+        .ok_or_else(|| malformed("expected an array"))?;
+    if pages.len() > MAX_PAGES {
+        return Err(DependencyRelationshipError::PaginationError {
+            message: format!(
+                "GitHub list {endpoint} reached {MAX_PAGES} pages; refusing a partial list"
+            ),
+        });
+    }
+    let mut items = Vec::new();
+    for page in pages {
+        match page {
+            serde_json::Value::Array(entries) => items.extend(entries.iter().cloned()),
+            serde_json::Value::Object(_) => items.push(page.clone()),
+            _ => return Err(malformed("page was not an array")),
         }
     }
-
-    Ok(sub_issue_numbers)
+    Ok(items)
 }
 
 /// Fetch native GitLab issue link relationships (blocks type) for a given issue.
@@ -197,6 +222,22 @@ pub(crate) fn fetch_gitlab_blocks_links(
             for link in links {
                 let link_type = link["link_type"].as_str().unwrap_or_default();
                 if link_type != "blocks" && link_type != "is_blocked_by" {
+                    continue;
+                }
+
+                // The list endpoint returns the *other* issue at the top level
+                // (`iid`, `project_id`) with `link_type` relative to this one.
+                if link.get("source_issue").is_none() && link.get("source_issue_iid").is_none() {
+                    let same_project = link["project_id"]
+                        .as_u64()
+                        .map(|id| id.to_string())
+                        .or_else(|| link["project_id"].as_str().map(ToString::to_string))
+                        .is_none_or(|id| !is_local_issue_reference(project_id) || id == project_id);
+                    if link_type == "is_blocked_by" && same_project {
+                        if let Some(iid) = link["iid"].as_u64() {
+                            blocked_numbers.push(iid.to_string());
+                        }
+                    }
                     continue;
                 }
 
@@ -293,12 +334,12 @@ pub(crate) fn fetch_native_dependencies(
 }
 
 #[derive(Debug, Clone)]
-struct DependencyFailure {
+pub(crate) struct DependencyFailure {
     code: &'static str,
     message: String,
 }
 
-fn parse_dependency_line(body: &str) -> Result<Option<Vec<String>>, DependencyFailure> {
+pub(crate) fn parse_dependency_line(body: &str) -> Result<Option<Vec<String>>, DependencyFailure> {
     let candidates: Vec<&str> = body
         .lines()
         .map(str::trim)
@@ -1312,6 +1353,59 @@ mod tests {
 
         let dependencies = fetch_gitlab_blocks_links(&profile, "1").unwrap();
         assert_eq!(dependencies, vec!["7".to_string()]);
+    }
+
+    /// The list endpoint returns the other issue at the top level, with
+    /// `link_type` relative to the asked issue.
+    #[test]
+    fn fetch_gitlab_blocks_links_reads_the_list_endpoint_shape() {
+        let profile = gitlab_test_profile();
+        let bin_dir = TempDir::new().unwrap();
+        let _path = PathGuard::set(bin_dir.path());
+        crate::provider::set_test_provider_path(bin_dir.path().to_str().unwrap());
+
+        write_fake_bin(
+            bin_dir.path(),
+            "glab",
+            "#!/bin/sh\nprintf '%s\\n' '[{\"iid\":10,\"project_id\":42,\"link_type\":\"is_blocked_by\"},{\"iid\":11,\"project_id\":42,\"link_type\":\"blocks\"},{\"iid\":12,\"project_id\":7,\"link_type\":\"is_blocked_by\"},{\"iid\":13,\"project_id\":42,\"link_type\":\"relates_to\"}]'\n",
+        );
+
+        assert_eq!(
+            fetch_gitlab_blocks_links(&profile, "1").unwrap(),
+            vec!["10".to_string()]
+        );
+    }
+
+    #[test]
+    fn github_relations_read_every_page_and_fail_closed_on_malformed_output() {
+        let profile = github_test_profile();
+        let bin_dir = TempDir::new().unwrap();
+        let _path = PathGuard::set(bin_dir.path());
+        crate::provider::set_test_provider_path(bin_dir.path().to_str().unwrap());
+        let page = |range: std::ops::Range<u32>| {
+            let items: Vec<_> = range.map(|n| format!("{{\"number\":{n}}}")).collect();
+            format!("[{}]", items.join(","))
+        };
+        let slurped = format!("[{},{}]", page(2..102), page(102..112));
+        let fake_gh = |output: &str| {
+            write_fake_bin(
+                bin_dir.path(),
+                "gh",
+                &format!(
+                    "#!/bin/sh\ncase \"$*\" in *--paginate*--slurp*) printf '%s' '{output}' ;; *) echo unpaginated >&2; exit 1 ;; esac\n"
+                ),
+            );
+        };
+        fake_gh(&slurped);
+        let found = fetch_github_sub_issues(&profile, "1").unwrap();
+        assert_eq!(found.len(), 110);
+        assert_eq!(found.last().map(String::as_str), Some("111"));
+
+        fake_gh("{\"message\":\"nope\"}");
+        assert!(matches!(
+            fetch_github_sub_issues(&profile, "1"),
+            Err(DependencyRelationshipError::MalformedResponse { .. })
+        ));
     }
 
     #[test]

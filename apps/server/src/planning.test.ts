@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import express from 'express';
@@ -97,6 +97,36 @@ test('settings default to issues, persist privately, and refuse paths outside th
     server.close();
     assert.equal(statSync(path).mode & 0o777, 0o600);
   } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable settings file is never overwritten, and a failed chat start leaks nothing', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'gah-planning-bad-'));
+  const path = join(directory, 'planning.json');
+  const app = express().use(express.json()).use(planningRouter({
+    map: async () => map,
+    startChat: async () => { throw new Error('spawn failed at /home/secret'); },
+    settingsPath: path
+  } as unknown as PlanningDeps));
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    for (const original of ['{"other": {"answers": "file"', '[1]', 'null']) {
+      writeFileSync(path, original);
+      const res = await send(`${base}/settings`, 'PUT', { profile: 'demo', answers: 'issues', path: 'docs/PLANNING.md' });
+      assert.equal(res.status, 500, original);
+      assert.equal((await res.json() as { error: string }).error, 'settings_unavailable');
+      assert.equal(readFileSync(path, 'utf8'), original);
+    }
+    const chat = await send(`${base}/chats`, 'POST', { profile: 'demo', kind: 'grill' });
+    assert.equal(chat.status, 422);
+    const text = await chat.text();
+    assert.match(text, /chat_unavailable/);
+    assert.doesNotMatch(text, /secret/);
+  } finally {
+    server.close();
     rmSync(directory, { recursive: true, force: true });
   }
 });

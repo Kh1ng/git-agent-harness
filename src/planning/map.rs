@@ -42,7 +42,7 @@ pub struct Node {
     /// Distance from the epic along child links; blockers outside the epic
     /// have none.
     pub depth: Option<usize>,
-    /// Open issues this one waits on.
+    /// Open or unknown issues this one waits on.
     pub waiting_on: Vec<u64>,
 }
 
@@ -123,10 +123,25 @@ fn body_parent(issue: &IssueFacts) -> Option<u64> {
     line_references(&issue.body, "Parent:").first().copied()
 }
 
-fn body_blockers(issue: &IssueFacts) -> Vec<u64> {
-    let mut blockers = line_references(&issue.body, "Blocked by:");
-    blockers.extend(line_references(&issue.body, "Depends on:"));
-    blockers
+/// Blockers from the body, and whether any reference could not be resolved to
+/// an issue here. Dispatch's parser decides what a `Blocked by:` line means,
+/// so a line it rejects (duplicates, bad syntax) or a reference to another
+/// project keeps the issue waiting instead of reading as ready.
+fn body_blockers(issue: &IssueFacts) -> (Vec<u64>, bool) {
+    let mut blockers = line_references(&issue.body, "Depends on:");
+    let mut unresolved = false;
+    match crate::dispatch::dependencies::parse_dependency_line(&issue.body) {
+        Ok(references) => {
+            for reference in references.into_iter().flatten() {
+                match reference.parse() {
+                    Ok(number) => blockers.push(number),
+                    Err(_) => unresolved = true,
+                }
+            }
+        }
+        Err(_) => unresolved = true,
+    }
+    (blockers, unresolved)
 }
 
 /// Parent to children, from native links and `Parent:` lines together.
@@ -223,15 +238,16 @@ pub fn build(epic: u64, issues: &BTreeMap<u64, IssueFacts>) -> PlanMap {
         }
     }
     let mut blockers: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
+    let mut unresolved_issues = BTreeSet::new();
     for number in depth.keys() {
         let Some(issue) = issues.get(number) else {
             continue;
         };
-        let found = issue
-            .native_blockers
-            .iter()
-            .copied()
-            .chain(body_blockers(issue));
+        let (from_body, unresolved) = body_blockers(issue);
+        if unresolved {
+            unresolved_issues.insert(*number);
+        }
+        let found = issue.native_blockers.iter().copied().chain(from_body);
         for blocker in found.filter(|blocker| blocker != number) {
             blockers.entry(*number).or_default().insert(blocker);
             edges.insert(Edge {
@@ -257,7 +273,8 @@ pub fn build(epic: u64, issues: &BTreeMap<u64, IssueFacts>) -> PlanMap {
             .into_iter()
             .flatten()
             .copied()
-            .filter(|blocker| open(blocker))
+            // A blocker the listing lacks is unknown, not closed.
+            .filter(|blocker| open(blocker) || !issues.contains_key(blocker))
             .collect();
         let has_open_children = depth.contains_key(number)
             && children
@@ -265,7 +282,7 @@ pub fn build(epic: u64, issues: &BTreeMap<u64, IssueFacts>) -> PlanMap {
                 .is_some_and(|kids| kids.iter().any(|kid| depth.contains_key(kid) && open(kid)));
         let state = if !issue.open {
             NodeState::Done
-        } else if !waiting_on.is_empty() {
+        } else if !waiting_on.is_empty() || unresolved_issues.contains(number) {
             NodeState::Blocked
         } else if has_open_children {
             NodeState::Parent
@@ -399,13 +416,32 @@ mod tests {
         assert_eq!(map.missing, vec![99]);
         assert_eq!(
             state(&map, 12),
-            NodeState::Ready,
-            "a blocker the listing lacks is not counted as open"
+            NodeState::Blocked,
+            "a blocker the listing lacks is unknown, not closed"
         );
+        assert!(!map.frontier.contains(&12));
         assert!(
             map.frontier.iter().all(|number| *number != 20),
             "blockers outside the epic are not its frontier"
         );
+    }
+
+    #[test]
+    fn bodies_dispatch_rejects_never_read_as_ready() {
+        let issues = index(vec![
+            issue(1, true, ""),
+            issue(2, true, "Parent: #1\nBlocked by: #9, #9"),
+            issue(3, true, "Parent: #1\nBlocked by: #9\nBlocked by: #8"),
+            issue(4, true, "Parent: #1\nBlocked by #9"),
+            issue(5, true, "Parent: #1\nBlocked by: github:o/r#7"),
+            issue(6, true, "Parent: #1\nBlocked by: #7"),
+            issue(7, false, "Parent: #1"),
+        ]);
+        let map = build(1, &issues);
+        for number in [2, 3, 4, 5] {
+            assert_eq!(state(&map, number), NodeState::Blocked, "#{number}");
+        }
+        assert_eq!(map.frontier, vec![6]);
     }
 
     #[test]

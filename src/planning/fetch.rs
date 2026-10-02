@@ -6,7 +6,7 @@
 use super::map::{self, IssueFacts};
 use crate::config::Profile;
 use crate::dispatch::dependencies::{fetch_github_sub_issues, fetch_gitlab_blocks_links};
-use crate::provider::{list_provider_issue_values, provider_command};
+use crate::provider::list_provider_issue_values;
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -170,21 +170,12 @@ fn github_blocked_by(profile: &Profile, number: u64) -> Result<Vec<u64>> {
         "repos/{}/issues/{number}/dependencies/blocked_by",
         profile.repo
     );
-    let output = provider_command("gh")
-        .args(["api", "--method", "GET", &endpoint])
-        .output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("404") || stderr.to_ascii_lowercase().contains("not found") {
-            return Ok(Vec::new());
-        }
-        bail!(
-            "gh api {endpoint} failed: {}",
-            crate::redact::redact(stderr.trim())
-        );
-    }
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    Ok(same_repository_numbers(&value, &profile.repo))
+    let issues = crate::dispatch::dependencies::github_list_pages(&endpoint)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(same_repository_numbers(
+        &serde_json::Value::Array(issues),
+        &profile.repo,
+    ))
 }
 
 fn same_repository_numbers(value: &serde_json::Value, repo: &str) -> Vec<u64> {
@@ -239,5 +230,34 @@ mod tests {
             {"number": 5}
         ]);
         assert_eq!(same_repository_numbers(&value, "owner/repo"), vec![3, 5]);
+    }
+
+    #[test]
+    fn blockers_beyond_the_first_page_are_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let pages: Vec<String> = [1..=100, 101..=140]
+            .into_iter()
+            .map(|range| {
+                let items: Vec<_> = range.map(|n| format!("{{\"number\":{n}}}")).collect();
+                format!("[{}]", items.join(","))
+            })
+            .collect();
+        let script = dir.path().join("gh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s' '[{}]'\n", pages.join(",")),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::provider::set_test_provider_path(dir.path().to_str().unwrap());
+        let found = crate::dispatch::dependencies::github_list_pages(
+            "repos/o/r/issues/1/dependencies/blocked_by",
+        )
+        .unwrap();
+        assert_eq!(
+            same_repository_numbers(&serde_json::Value::Array(found), "o/r").len(),
+            140
+        );
     }
 }

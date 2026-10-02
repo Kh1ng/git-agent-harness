@@ -63,7 +63,10 @@ export function readPlanningSettings(profile: string, path = defaultSettingsPath
 function writePlanningSettings(profile: string, settings: PlanningSettings, path: string): void {
   let stored: Record<string, PlanningSettings> = {};
   if (existsSync(path)) {
-    try { stored = JSON.parse(readFileSync(path, 'utf8')) as Record<string, PlanningSettings>; } catch { stored = {}; }
+    // Never overwrite a file we cannot read as an object: it may hold other profiles.
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('planning settings are not an object');
+    stored = parsed as Record<string, PlanningSettings>;
   }
   stored[profile] = settings;
   mkdirSync(dirname(path), { recursive: true });
@@ -185,7 +188,11 @@ export function planningRouter(deps: PlanningDeps): Router {
       res.status(400).json({ error: 'invalid_request', message: 'Answers go to `issues` or a repository-relative `.md` file.' }); return;
     }
     const settings: PlanningSettings = { answers: body.answers, path: body.path };
-    writePlanningSettings(body.profile, settings, settingsPath);
+    try {
+      writePlanningSettings(body.profile, settings, settingsPath);
+    } catch {
+      res.status(500).json({ error: 'settings_unavailable', message: 'Cannot save planning settings. Check the settings file on the central node.' }); return;
+    }
     res.json(settings);
   });
 
@@ -213,8 +220,8 @@ export function planningRouter(deps: PlanningDeps): Router {
       : { title: `Ticket #${ticket}`, text: ticketPrompt(map as PlanningMap, ticket as number), worktree: false };
     try {
       res.status(201).json(await deps.startChat(profile, seed, body.backend));
-    } catch (error) {
-      res.status(422).json({ error: 'chat_unavailable', message: error instanceof Error ? error.message : 'Cannot start the planning chat.' });
+    } catch {
+      res.status(422).json({ error: 'chat_unavailable', message: 'Cannot start the planning chat.' });
     }
   });
   return router;
