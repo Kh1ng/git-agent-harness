@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Bell, CheckCircle2, CircleDot, DatabaseZap, Gauge, KeyRound, MessageCircle, Radio, ShieldAlert, Wifi, WifiOff, XCircle } from 'lucide-react';
-import { activityPath, type ActivityEvent, type ActivityKind, type DeliveryReceipt } from '@git-agent-harness/contracts';
+import { activityPath, type ActivityEvent, type ActivityKind, type ActivityNotificationPreferences, type DeliveryReceipt } from '@git-agent-harness/contracts';
 import type { LucideIcon } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { activityApi } from '../api/client.js';
@@ -111,10 +111,27 @@ export function EventsPage({ openedEventId = null }: { openedEventId?: string | 
   const [view, setView] = useState<View>(() => openedEventId || activityUnreadCount > 0 ? 'notifications' : 'all');
   const [notifications, setNotifications] = useState<ActivityEvent[] | null>(null);
   const [notificationsError, setNotificationsError] = useState('');
+  const [preferences, setPreferences] = useState<ActivityNotificationPreferences | null>(null);
+  const [preferenceError, setPreferenceError] = useState('');
+  const [savingPreferences, setSavingPreferences] = useState(false);
   const scrolled = useRef(false);
   const pushStatus = backgroundPushStatus();
 
   useEffect(() => { void backgroundPushDeviceCount().then(setPushDevices); }, [systemEnabled]);
+  useEffect(() => {
+    let cancelled = false;
+    activityApi.notificationPreferences()
+      .then((value) => { if (!cancelled) { setPreferences(value); setPreferenceError(''); } })
+      .catch((error) => { if (!cancelled) setPreferenceError(error instanceof Error ? error.message : String(error)); });
+    return () => { cancelled = true; };
+  }, [reconnectSeq]);
+  const setPreference = async (key: keyof ActivityNotificationPreferences, enabled: boolean) => {
+    if (!preferences) return;
+    setSavingPreferences(true); setPreferenceError('');
+    try { setPreferences(await activityApi.setNotificationPreferences({ ...preferences, [key]: enabled })); }
+    catch (error) { setPreferenceError(error instanceof Error ? error.message : String(error)); }
+    finally { setSavingPreferences(false); }
+  };
   useEffect(() => {
     let cancelled = false;
     activityApi.notifications()
@@ -189,6 +206,25 @@ export function EventsPage({ openedEventId = null }: { openedEventId?: string | 
       {pushStatus === 'https_required' && (
         <p role="status" className="text-sm text-warning">Background push needs the HTTPS dashboard URL.</p>
       )}
+
+      <details className="rounded-lg border border-subtle p-3">
+        <summary className="cursor-pointer text-sm font-medium text-primary">Notification preferences</summary>
+        <div className="mt-3 space-y-2">
+          <p className="text-xs text-secondary">Task completion, failures, input requests, and other actions that need your attention stay enabled.</p>
+          {([
+            ['nodeOffline', 'Node goes offline'],
+            ['nodeBack', 'Node returns online'],
+            ['quotaNearLimit', 'Quota running low'],
+            ['authRestored', 'Login restored']
+          ] as const).map(([key, label]) => <label key={key} className="flex min-h-11 items-center gap-3 text-sm text-primary">
+            <input type="checkbox" checked={preferences?.[key] ?? false} disabled={!preferences || savingPreferences} onChange={(event) => void setPreference(key, event.target.checked)} />
+            {label}
+          </label>)}
+          {!preferences && !preferenceError && <p role="status" className="text-xs text-secondary">Loading preferences…</p>}
+          {savingPreferences && <p role="status" className="text-xs text-secondary">Saving preferences…</p>}
+          {preferenceError && <p role="alert" className="text-xs text-critical">Cannot update notification preferences: {preferenceError}</p>}
+        </div>
+      </details>
 
       <div className="flex flex-wrap items-center gap-2">
         <div role="tablist" aria-label="Activity view" className="flex gap-2">

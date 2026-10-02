@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { notifiableActivity, type ActivityEvent, type ControllerEvent, type DeliveryReceipt, type GatewayHealthSummary, type QuotaSnapshot } from '@git-agent-harness/contracts';
+import { DEFAULT_ACTIVITY_NOTIFICATION_PREFERENCES, notifiableActivity, type ActivityNotificationPreferences, type ActivityEvent, type ControllerEvent, type DeliveryReceipt, type GatewayHealthSummary, type QuotaSnapshot } from '@git-agent-harness/contracts';
 import { controllerDispatchSucceeded } from './controllerActivity.js';
 import { redactTextSecrets } from './managerChat/redactText.js';
 
@@ -132,6 +132,7 @@ export function activityFromNode(transition: {
   nodeId: string;
   displayName: string;
   state: 'offline' | 'back';
+  nodeState?: ActivityEvent['nodeState'];
   occurredAt: string;
   message: string;
 }): ActivityEvent {
@@ -145,7 +146,8 @@ export function activityFromNode(transition: {
       ? `${transition.displayName} is back online`
       : `${transition.displayName} is offline`,
     message: transition.message,
-    nodeId: transition.nodeId
+    nodeId: transition.nodeId,
+    ...(transition.nodeState ? { nodeState: transition.nodeState } : {})
   };
 }
 
@@ -185,29 +187,51 @@ export function activityFromGateway(health: GatewayHealthSummary): ActivityEvent
   };
 }
 
+/** Validate a complete preference snapshot before changing durable policy. */
+export function validateNotificationPreferences(value: unknown): ActivityNotificationPreferences {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Supply notification preferences.');
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(DEFAULT_ACTIVITY_NOTIFICATION_PREFERENCES);
+  if (Object.keys(record).length !== keys.length || keys.some((key) => typeof record[key] !== 'boolean')) throw new Error('Supply boolean values for every notification preference.');
+  return { nodeOffline: record.nodeOffline as boolean, nodeBack: record.nodeBack as boolean, quotaNearLimit: record.quotaNearLimit as boolean, authRestored: record.authRestored as boolean };
+}
+
 /** The durable operator feed. It owns retention, per-notification read state,
  * and delivery receipts; callers record events and listen for changes. */
 export class ActivityFeed {
   private events: ActivityEvent[] = [];
   private ids = new Set<string>();
   private listeners = new Set<(change: ActivityFeedChange) => void>();
+  private preferences = { ...DEFAULT_ACTIVITY_NOTIFICATION_PREFERENCES };
 
   constructor(
     private path: string | null = process.env.GAH_ACTIVITY_PATH ?? resolve(process.cwd(), 'config/activity.jsonl'),
     private deliver?: ActivityDeliverer,
     private now: () => number = Date.now
   ) {
+    const preferencesPath = path ? `${path}.preferences.json` : null;
+    if (preferencesPath && existsSync(preferencesPath)) {
+      try {
+        const preferences: unknown = JSON.parse(readFileSync(preferencesPath, 'utf8'));
+        this.preferences = validateNotificationPreferences(preferences);
+      } catch { console.error('Failed to load activity notification preferences; using defaults.'); }
+    }
     if (!path || !existsSync(path)) return;
     try {
+      let migrated = false;
       for (const line of readFileSync(path, 'utf8').split('\n')) {
         if (!line.trim()) continue;
         const event = JSON.parse(line) as ActivityEvent;
         if (event?.id && !this.ids.has(event.id)) {
+          if (this.optionalNotificationEnabled(event) === false && (!event.notificationMuted || event.readAt == null)) {
+            event.notificationMuted = true; event.readAt = event.readAt ?? new Date(this.now()).toISOString(); migrated = true;
+          }
           this.events.push(event);
           this.ids.add(event.id);
         }
       }
       this.trim();
+      if (migrated) this.persist();
     } catch (error) {
       console.error(`Failed to read activity feed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -222,6 +246,9 @@ export class ActivityFeed {
    * reached anyone, so it starts read. */
   record(event: ActivityEvent, deliver = true): boolean {
     if (this.ids.has(event.id)) return false;
+    const optionalEnabled = this.optionalNotificationEnabled(event);
+    if (optionalEnabled !== undefined) event.notificationMuted = !optionalEnabled;
+    if (event.notificationMuted) event.readAt = new Date(this.now()).toISOString();
     if (notifiableActivity(event)) event.readAt = deliver ? null : new Date(this.now()).toISOString();
     this.events.push(event);
     this.ids.add(event.id);
@@ -233,7 +260,7 @@ export class ActivityFeed {
     if (event.readAt === null) this.emit({ kind: 'unread', count: this.unreadCount() });
     if (deliver && this.deliver) {
       void Promise.resolve()
-        .then(() => this.deliver!(event))
+        .then(() => event.notificationMuted ? [] : this.deliver!(event))
         .then((receipts) => this.recordDeliveries(event.id, receipts ?? []))
         .catch((error) => {
           console.error(`[activity] delivery failed for ${event.id}: ${error instanceof Error ? error.message : String(error)}`);
@@ -255,7 +282,7 @@ export class ActivityFeed {
   }
 
   unreadCount(): number {
-    return this.events.filter((event) => event.readAt === null).length;
+    return this.events.filter((event) => notifiableActivity(event) && event.readAt === null).length;
   }
 
   /** Marks the named notifications read, or all of them. Returns how many changed. */
@@ -269,6 +296,42 @@ export class ActivityFeed {
     for (const event of changed) this.emit({ kind: 'updated', event });
     this.emit({ kind: 'unread', count: this.unreadCount() });
     return changed.length;
+  }
+
+  notificationPreferences(): ActivityNotificationPreferences {
+    return { ...this.preferences };
+  }
+
+  /** Save optional health alerts. Task completion, errors and requests for attention stay enabled. */
+  setNotificationPreferences(preferences: unknown): ActivityNotificationPreferences {
+    const next = validateNotificationPreferences(preferences);
+    if (this.path) {
+      mkdirSync(dirname(this.path), { recursive: true });
+      const path = `${this.path}.preferences.json`;
+      const temporary = `${path}.${process.pid}.tmp`;
+      writeFileSync(temporary, JSON.stringify(next) + '\n', { mode: 0o600 });
+      renameSync(temporary, path);
+    }
+    this.preferences = next;
+    const changed = this.events.filter((event) => !event.notificationMuted && this.optionalNotificationEnabled(event) === false);
+    for (const event of changed) { event.notificationMuted = true; event.readAt = event.readAt ?? new Date(this.now()).toISOString(); }
+    if (changed.length) this.persist();
+    for (const event of changed) this.emit({ kind: 'updated', event });
+    this.emit({ kind: 'unread', count: this.unreadCount() });
+    return this.notificationPreferences();
+  }
+
+  private optionalNotificationEnabled(event: ActivityEvent): boolean | undefined {
+    switch (event.kind) {
+      case 'node_back': return this.preferences.nodeBack;
+      case 'quota_near_limit': return this.preferences.quotaNearLimit;
+      case 'auth_restored': return this.preferences.authRestored;
+      case 'node_offline':
+        // Old events lack the observation state, so unknown/security failures remain enabled.
+        if (event.nodeState === 'unreachable' || event.nodeState === 'stale') return this.preferences.nodeOffline;
+        return true;
+      default: return undefined;
+    }
   }
 
   private recordDeliveries(id: string, receipts: DeliveryReceipt[]): void {

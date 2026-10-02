@@ -68,6 +68,10 @@ export interface ActivityEvent {
   sessionId?: string | null;
   workId?: string | null;
   nodeId?: string | null;
+  /** Offline mutes never hide authentication or compatibility failures. */
+  nodeState?: "healthy" | "stale" | "unreachable" | "auth_failed" | "incompatible";
+  /** The feed applies persisted preferences for optional health alerts. */
+  notificationMuted?: boolean;
   /** Where the event was recorded. Only controller-log replay sets this;
    * absent means the Node server originated the event. */
   origin?: "controller";
@@ -101,14 +105,26 @@ export const NOTIFIABLE_ACTIVITY_KINDS: ReadonlySet<ActivityKind> = new Set<Acti
   "chat_permission_requested",
   "action_required",
   "dispatch_failed",
+  "dispatch_completed",
   "review_ready",
+  "gateway_down",
   "node_offline",
-  "auth_expired",
-  "auth_restored"
+  "auth_expired"
 ]);
 
-export function notifiableActivity(event: Pick<ActivityEvent, "kind">): boolean {
-  return NOTIFIABLE_ACTIVITY_KINDS.has(event.kind);
+export interface ActivityNotificationPreferences {
+  nodeOffline: boolean;
+  nodeBack: boolean;
+  quotaNearLimit: boolean;
+  authRestored: boolean;
+}
+
+export const DEFAULT_ACTIVITY_NOTIFICATION_PREFERENCES: ActivityNotificationPreferences = {
+  nodeOffline: true, nodeBack: false, quotaNearLimit: false, authRestored: false
+};
+
+export function notifiableActivity(event: Pick<ActivityEvent, "kind" | "notificationMuted">): boolean {
+  return event.notificationMuted === undefined ? NOTIFIABLE_ACTIVITY_KINDS.has(event.kind) : !event.notificationMuted;
 }
 
 /** Where a notification opens. The event id rides along so the app can mark
