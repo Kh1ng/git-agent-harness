@@ -35,6 +35,24 @@ const STATUS_MARKER: &str = "__GAH_MEMORY_GATEWAY_STATUS__:";
 const DEFAULT_GATEWAY_URL: &str = "http://127.0.0.1:8420";
 const RECALL_TIMEOUT_SECONDS: u32 = 10;
 
+/// All GAH clients use the process key first, then the private gateway env file.
+pub fn gateway_api_key(home: &std::path::Path) -> Result<Option<String>> {
+    let key = std::env::var("TDAI_GATEWAY_API_KEY")
+        .ok()
+        .filter(|key| !key.is_empty())
+        .or_else(|| {
+            crate::installer::files::env_get(
+                &home.join(".config/gah/tdai-gateway.env"),
+                "TDAI_GATEWAY_API_KEY",
+            )
+        })
+        .filter(|key| !key.is_empty());
+    if let Some(key) = &key {
+        crate::installer::files::check_value("TDAI_GATEWAY_API_KEY", key)?;
+    }
+    Ok(key)
+}
+
 pub trait MemoryGatewayTransport {
     /// Returns `(http_status, response_body)` on any completed HTTP
     /// exchange; `Err` only for a transport-level failure (can't connect,
@@ -79,7 +97,7 @@ impl MemoryGatewayTransport for CurlMemoryGatewayTransport {
             let escaped_url = url.replace('\\', "\\\\").replace('"', "\\\"");
             let escaped_body = body.replace('\\', "\\\\").replace('"', "\\\"");
             let mut config = format!(
-                "silent\nurl = \"{escaped_url}\"\nheader = \"Content-Type: application/json\"\ndata = \"{escaped_body}\"\n"
+                "silent\nurl = \"{escaped_url}\"\nheader = \"Content-Type: application/json\"\nheader = \"X-GAH-Caller: cli\"\ndata = \"{escaped_body}\"\n"
             );
             if let Some(t) = token {
                 let escaped_token = t.replace('\\', "\\\\").replace('"', "\\\"");
@@ -150,7 +168,7 @@ fn gateway_connection(
     }
     Ok((
         std::env::var("TDAI_GATEWAY_URL").unwrap_or_else(|_| DEFAULT_GATEWAY_URL.to_string()),
-        std::env::var("TDAI_GATEWAY_API_KEY").ok(),
+        gateway_api_key(&crate::setup::host::home())?,
         node.role,
     ))
 }
@@ -446,20 +464,38 @@ mod tests {
         const TEST_NAME: &str =
             "memory_gateway::tests::real_curl_transport_is_hermetic_secret_safe_and_fail_open";
         if std::env::var_os("GAH_MEMORY_CURL_TEST_CHILD").is_none() {
-            let result = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST_NAME, "--nocapture"])
-                .env("GAH_MEMORY_CURL_TEST_CHILD", "1")
-                .env("GAH_NODE_ROLE", "central")
-                .env("TDAI_GATEWAY_URL", "https://memory.test")
-                .env("TDAI_GATEWAY_API_KEY", "super-secret-token")
-                .output()
+            for env_key in [true, false] {
+                let home = tempfile::tempdir().unwrap();
+                crate::installer::files::env_set(
+                    &home.path().join(".config/gah/tdai-gateway.env"),
+                    "TDAI_GATEWAY_API_KEY",
+                    if env_key {
+                        "ignored-file-key"
+                    } else {
+                        "super-secret-token"
+                    },
+                )
                 .unwrap();
-            assert!(
-                result.status.success(),
-                "{} {}",
-                String::from_utf8_lossy(&result.stdout),
-                String::from_utf8_lossy(&result.stderr)
-            );
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args(["--exact", TEST_NAME, "--nocapture"])
+                    .env("HOME", home.path())
+                    .env("GAH_MEMORY_CURL_TEST_CHILD", "1")
+                    .env("GAH_NODE_ROLE", "central")
+                    .env("TDAI_GATEWAY_URL", "https://memory.test");
+                if env_key {
+                    command.env("TDAI_GATEWAY_API_KEY", "super-secret-token");
+                } else {
+                    command.env_remove("TDAI_GATEWAY_API_KEY");
+                }
+                let result = command.output().unwrap();
+                assert!(
+                    result.status.success(),
+                    "{} {}",
+                    String::from_utf8_lossy(&result.stdout),
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            }
             return;
         }
 

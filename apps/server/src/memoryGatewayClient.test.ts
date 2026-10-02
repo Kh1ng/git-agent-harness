@@ -5,12 +5,21 @@
 // never throw, they degrade with a visible flag -- and a profile that has
 // opted out skips the gateway entirely.
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, rmSync, mkdtempSync } from 'node:fs';
+
+const savedHome = process.env.HOME;
+const testHome = mkdtempSync(join(tmpdir(), 'gah-memory-home-'));
+process.env.HOME = testHome;
+after(() => {
+  if (savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = savedHome;
+  rmSync(testHome, { recursive: true, force: true });
+});
 
 import {
   normalizeRemoteUrl,

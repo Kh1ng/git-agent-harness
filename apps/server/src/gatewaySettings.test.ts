@@ -2,15 +2,24 @@
 // including the credential-free summary and explicit bootstrap reveal.
 // Also covers PUT and gatewaySettingsStore unit behavior.
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { rmSync, existsSync } from 'node:fs';
+import { rmSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 
 import { createServer } from './server.js';
-import { readGatewaySettings, writeGatewaySettings, effectiveGatewayUrl, gatewayEnabledForProfile, effectiveContextPolicy, applyContextBudget } from './gatewaySettingsStore.js';
+import { readGatewaySettings, writeGatewaySettings, effectiveGatewayUrl, effectiveGatewayApiKey, gatewayKeyFile, gatewayEnabledForProfile, effectiveContextPolicy, applyContextBudget } from './gatewaySettingsStore.js';
+
+const savedHome = process.env.HOME;
+const testHome = mkdtempSync(join(tmpdir(), 'gah-gateway-home-'));
+process.env.HOME = testHome;
+after(() => {
+  if (savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = savedHome;
+  rmSync(testHome, { recursive: true, force: true });
+});
 
 async function withServer(
   testFn: (url: string) => Promise<void>,
@@ -117,12 +126,37 @@ test('gatewaySettingsStore: write then read round-trips', () => {
     writeGatewaySettings({ url: 'http://192.168.5.15:8420', apiKey: 'key1', enabled: false, disabledProfiles: ['qa'] });
     const s = readGatewaySettings();
     assert.equal(s.url, 'http://192.168.5.15:8420');
-    assert.equal(s.apiKey, 'key1');
+    assert.equal(s.apiKey, null);
+    assert.equal(effectiveGatewayApiKey(), 'key1');
+    assert.equal(readFileSync(path, 'utf8').includes('key1'), false);
     assert.equal(s.enabled, false);
     assert.deepEqual(s.disabledProfiles, ['qa']);
   } finally {
     delete process.env.GAH_GATEWAY_SETTINGS_PATH;
     if (existsSync(path)) rmSync(path);
+  }
+});
+
+test('gateway credentials use env then quoted private file, and migrate the legacy settings key', () => {
+  const savedKey = process.env.TDAI_GATEWAY_API_KEY;
+  const path = join(testHome, 'legacy-settings.json');
+  process.env.GAH_GATEWAY_SETTINGS_PATH = path;
+  try {
+    writeGatewaySettings({ apiKey: 'file-$`key\\quote"' });
+    delete process.env.TDAI_GATEWAY_API_KEY;
+    assert.equal(effectiveGatewayApiKey(), 'file-$`key\\quote"');
+    process.env.TDAI_GATEWAY_API_KEY = 'env-only-key';
+    assert.equal(effectiveGatewayApiKey(), 'env-only-key');
+    delete process.env.TDAI_GATEWAY_API_KEY;
+    rmSync(gatewayKeyFile());
+    writeFileSync(path, JSON.stringify({ apiKey: 'legacy-key', url: 'https://gateway.test' }));
+    assert.equal(effectiveGatewayApiKey(), 'legacy-key');
+    assert.equal(readFileSync(path, 'utf8').includes('legacy-key'), false);
+  } finally {
+    delete process.env.GAH_GATEWAY_SETTINGS_PATH;
+    rmSync(gatewayKeyFile(), { force: true });
+    if (savedKey === undefined) delete process.env.TDAI_GATEWAY_API_KEY;
+    else process.env.TDAI_GATEWAY_API_KEY = savedKey;
   }
 });
 

@@ -1572,6 +1572,8 @@ export interface MemoryContextPolicy {
 }
 
 export interface GatewayHealthSummary {
+  captureFailures?: number;
+  hookCaptureFailures?: number;
   degraded: boolean;
   lastError: string | null;
   lastFailedAt: number | null;

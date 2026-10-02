@@ -87,7 +87,7 @@ def configure(data, tool, script, python):
                 entries.append(group)
 
 
-def install(home, tools, hook_source, gateway_url=None):
+def install(home, tools, hook_source, gateway_url=None, gateway_api_key=None):
     if sys.version_info < (3, 10):
         raise ValueError('Memory hooks require Python 3.10 or newer')
     home = Path(home).expanduser().resolve()
@@ -135,6 +135,25 @@ def install(home, tools, hook_source, gateway_url=None):
         if not isinstance(gateway, dict):
             raise ValueError('Memory-hook settings must contain an object')
         if gateway_url is not None:
+            key = gateway_api_key or os.environ.get('TDAI_GATEWAY_API_KEY')
+            key_file = home / '.config/gah/tdai-gateway.env'
+            key_before = read_file(key_file)
+            if not key and key_before:
+                for line in reversed(key_before.decode().splitlines()):
+                    if line.startswith('TDAI_GATEWAY_API_KEY='):
+                        key = line.split('=', 1)[1].strip()
+                        if key.startswith('"') and key.endswith('"'):
+                            key = re.sub(r'\\(.)', r'\1', key[1:-1])
+                        elif key.startswith("'") and key.endswith("'"):
+                            key = key[1:-1]
+                        break
+            if not key or any(ord(c) < 32 or ord(c) == 127 for c in key):
+                raise ValueError(f'Set TDAI_GATEWAY_API_KEY in the environment or {key_file} before configuring a gateway')
+            # Keep other gateway settings, including its LLM key, in the canonical file.
+            lines = [line for line in (key_before or b'').decode().splitlines() if not line.startswith('TDAI_GATEWAY_API_KEY=')]
+            escaped = re.sub(r'([\\"$`])', r'\\\1', key)
+            lines.append(f'TDAI_GATEWAY_API_KEY="{escaped}"')
+            changes.append((key_file, key_before, ('\n'.join(lines) + '\n').encode(), 0o600))
             gateway['gateway_url'] = gateway_url
             changes.append((settings, before, (json.dumps(gateway, indent=2) + '\n').encode(), 0o600))
         changes.append((script, read_file(script), hook_source.encode(), 0o700))

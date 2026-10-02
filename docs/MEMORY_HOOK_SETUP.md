@@ -32,9 +32,9 @@ gah setup memory-hooks --tool claude,codex --gateway-url http://127.0.0.1:8420
 
 The URL is stored in `~/.config/gah/memory-hooks.json`. `TDAI_GATEWAY_URL` overrides it at runtime. Use a URL reachable from the worker's environment; WSL loopback refers to WSL. Use HTTPS when the connection requires transport encryption.
 
-Keep credentials out of the command line. Hooks read `TDAI_GATEWAY_API_KEY` from the agent's environment or a `TDAI_GATEWAY_API_KEY=...` line in `~/.config/gah/tdai-gateway.env`. Protect that file with mode `0600`. Existing installations with this file retain their default gateway URL, `http://127.0.0.1:8420`.
+Keep credentials out of the command line. Hooks, the Rust CLI, and the server read `TDAI_GATEWAY_API_KEY` from the process environment first, then from `~/.config/gah/tdai-gateway.env`. The file supports bare, single-quoted, and installer-escaped double-quoted values. Setup requires a key when you pass `--gateway-url` and writes it to this file with mode `0600`. It preserves other entries, including the gateway's LLM key. Existing installations with this file retain their default gateway URL, `http://127.0.0.1:8420`.
 
-Setup never calls the gateway or reads agent transcripts. At runtime, the bundled hook retains the reference implementation's recall, capture, and flush behavior. A gateway failure logs a diagnostic and skips memory for that event. Requests time out after eight seconds; errors do not fail the agent session.
+When you pass `--gateway-url`, `gah setup memory-hooks` makes one authenticated `POST /recall` check after installation. An HTTP 401 fails the check and names the key file to repair. Setup never reads agent transcripts. A runtime gateway failure logs a diagnostic and skips memory for that event. Failed captures increment a private local counter shown in GAH's gateway health. Requests time out after eight seconds; errors do not fail the agent session.
 
 ## Repeat, recover, and verify
 

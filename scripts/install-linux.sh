@@ -144,7 +144,7 @@ case "${GAH_GATEWAY_MODE:-}" in
     fi
     upsert_gateway_env_line TDAI_GATEWAY_URL "$GAH_GATEWAY_URL"
     if [ -n "${GAH_GATEWAY_API_KEY:-}" ]; then
-      upsert_gateway_env_line TDAI_GATEWAY_API_KEY "$GAH_GATEWAY_API_KEY"
+      upsert_env_line "$HOME/.config/gah/tdai-gateway.env" TDAI_GATEWAY_API_KEY "$GAH_GATEWAY_API_KEY" ""
     fi
     echo "Remote gateway confirmed reachable; wired into: ${gateway_env_files[*]}"
     ;;
@@ -206,7 +206,6 @@ case "${GAH_GATEWAY_MODE:-}" in
     fi
 
     upsert_gateway_env_line TDAI_GATEWAY_URL "http://127.0.0.1:8420"
-    upsert_gateway_env_line TDAI_GATEWAY_API_KEY "$gateway_api_key"
     echo "Co-located gateway is healthy; wired into: ${gateway_env_files[*]}"
     ;;
   "")

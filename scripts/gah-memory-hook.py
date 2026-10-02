@@ -19,11 +19,13 @@ exit that could be mistaken for a blocking hook response.
 """
 
 import argparse
+import fcntl
 import os
 import json
 import re
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -37,13 +39,38 @@ def log(msg: str) -> None:
     print(f"[gah-memory-hook] {msg}", file=sys.stderr)
 
 
+def capture_failed(path: str) -> None:
+    """Keep a private counter that the local GAH Settings health can read."""
+    if path != '/capture':
+        return
+    health = SETTINGS_FILE.with_name('memory-hook-health.json')
+    try:
+        health.parent.mkdir(parents=True, exist_ok=True)
+        with open(health.with_suffix('.lock'), 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            state = json.loads(health.read_text()) if health.exists() else {}
+            state['captureFailures'] = state.get('captureFailures', 0) + 1
+            with tempfile.NamedTemporaryFile(dir=health.parent, delete=False) as pending:
+                os.fchmod(pending.fileno(), 0o600)
+                pending.write(json.dumps(state).encode())
+                name = pending.name
+            os.replace(name, health)
+    except (OSError, ValueError, TypeError):
+        log('Could not update the capture failure count')
+
+
 def api_key() -> str | None:
     if os.environ.get("TDAI_GATEWAY_API_KEY"):
         return os.environ["TDAI_GATEWAY_API_KEY"]
     try:
-        for line in TDAI_API_KEY_FILE.read_text().splitlines():
+        for line in reversed(TDAI_API_KEY_FILE.read_text().splitlines()):
             if line.startswith("TDAI_GATEWAY_API_KEY="):
-                return line.split("=", 1)[1].strip()
+                raw = line.split("=", 1)[1].strip()
+                if raw.startswith('"') and raw.endswith('"'):
+                    raw = re.sub(r'\\(.)', r'\1', raw[1:-1])
+                elif raw.startswith("'") and raw.endswith("'"):
+                    raw = raw[1:-1]
+                return raw or None
     except OSError:
         pass
     return None
@@ -96,9 +123,14 @@ def gateway_post(path: str, body: dict) -> dict | None:
     url = urlsplit(base_url)
     if url.scheme not in ('http', 'https') or not url.hostname or url.username or url.password or url.query or url.fragment:
         log('Invalid gateway URL; memory skipped')
+        capture_failed(path)
         return None
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "X-GAH-Caller": "memory-hook"}
     key = api_key()
+    if not key or any(ord(c) < 32 or ord(c) == 127 for c in key):
+        log(f"{path} skipped: set TDAI_GATEWAY_API_KEY in {TDAI_API_KEY_FILE}")
+        capture_failed(path)
+        return None
     if key:
         headers["Authorization"] = f"Bearer {key}"
     req = urllib.request.Request(
@@ -109,20 +141,28 @@ def gateway_post(path: str, body: dict) -> dict | None:
     )
     try:
         with urllib.request.build_opener(NoGatewayRedirect()).open(req, timeout=8) as resp:
-            return json.loads(resp.read())
+            result = json.loads(resp.read())
+            if result.get('code', 0) != 0:
+                log(f'{path} failed: gateway code {result.get("code")}')
+                capture_failed(path)
+                return None
+            return result
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
         log(f"{path} failed (continuing without it): {e}")
+        capture_failed(path)
         return None
 
 
-def last_turn_from_transcript(transcript_path: str) -> tuple[str, str] | None:
+def last_turn_from_transcript(transcript_path: str, last_assistant_message: str | None = None) -> tuple[str, str] | None:
     """Extract the last user message + assistant reply from a Claude
     Code / Codex JSONL transcript (both use the same message-role shape).
     Returns None if nothing usable is found -- never raises."""
     if not transcript_path or not Path(transcript_path).exists():
         return None
     user_text = None
-    assistant_text = None
+    # Stop can precede the final transcript write. Claude supplies the completed
+    # response directly: https://code.claude.com/docs/en/hooks#stop
+    assistant_text = last_assistant_message or None
     try:
         lines = Path(transcript_path).read_text().splitlines()
     except OSError:
@@ -175,11 +215,12 @@ def do_recall(cwd: str, tool: str) -> str:
     return result.get("context", "") or ""
 
 
-def do_capture(cwd: str, transcript_path: str) -> None:
+def do_capture(cwd: str, transcript_path: str, last_assistant_message: str | None = None) -> None:
     key = session_key(cwd)
-    turn = last_turn_from_transcript(transcript_path)
+    turn = last_turn_from_transcript(transcript_path, last_assistant_message)
     if turn is None:
         log("no usable turn found in transcript, skipping capture")
+        capture_failed('/capture')
         return
     user_text, assistant_text = turn
     gateway_post(
@@ -237,7 +278,7 @@ def main() -> None:
             context = do_recall(cwd, tool)
             emit_recall_output(tool, context)
         elif phase == "capture":
-            do_capture(cwd, payload.get("transcript_path", ""))
+            do_capture(cwd, payload.get("transcript_path", ""), payload.get("last_assistant_message"))
         elif phase == "flush":
             do_flush(cwd)
     except Exception as e:  # noqa: BLE001 -- a hook must never crash the caller
