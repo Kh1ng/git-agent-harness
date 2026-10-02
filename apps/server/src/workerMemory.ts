@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
+import { requireOwner } from './authMiddleware.js';
+import { runProfileList } from './gahCli.js';
 import { sessionKeyForProfile } from './managerChat/memoryGatewayClient.js';
 import { effectiveGatewayApiKey, effectiveGatewayUrl, gatewayEnabledForProfile } from './gatewaySettingsStore.js';
 
@@ -16,7 +18,7 @@ export function workerMemoryRouter(): Router {
     'memories/migrate-english': ['session_key'],
     'profiles/read': ['session_key', 'filename'],
   })) {
-    router.post(`/${operation}`, async (req, res) => {
+    router.post(`/${operation}`, ...(['memories/delete', 'memories/migrate-english'].includes(operation) ? [requireOwner] : []), async (req, res) => {
       if (!required.every((key) => typeof req.body?.[key] === 'string') || !req.body.session_key.startsWith('gah:')) {
         res.status(400).json({ error: 'A GAH session_key and the gateway operation fields are required.' });
         return;
@@ -26,12 +28,22 @@ export function workerMemoryRouter(): Router {
         return;
       }
       if (operation.startsWith('memories/') || operation === 'profiles/read') {
-        if (req.body.session_key !== await sessionKeyForProfile(req.body.profile)) {
-          res.status(400).json({error:'Memory management must use the configured profile project.'});
+        if (req.body.profile.length > 2048 || /[\x00-\x1f\x7f]/.test(req.body.profile)
+          || required.some(key => req.body[key].length > 2048 || /[\x00-\x1f\x7f]/.test(req.body[key]))) {
+          res.status(400).json({error:'Invalid memory operation field.'});
           return;
         }
-        if (required.some(key => req.body[key].length > 2048 || /[\x00-\x1f\x7f]/.test(req.body[key]))) {
-          res.status(400).json({error:'Invalid memory operation field.'});
+        const profiles = await runProfileList().catch(() => null);
+        if (profiles === null) {
+          res.status(503).json({error:'Configured memory profiles are unavailable.'});
+          return;
+        }
+        if (!profiles.some(profile => profile.name === req.body.profile)) {
+          res.status(400).json({error:'Memory management requires a configured profile.'});
+          return;
+        }
+        if (req.body.session_key !== await sessionKeyForProfile(req.body.profile)) {
+          res.status(400).json({error:'Memory management must use the configured profile project.'});
           return;
         }
       }
