@@ -92,6 +92,7 @@ function ActivityRow({ event, highlighted, onRead }: { event: ActivityEvent; hig
           </div>
           <p className="text-xs text-secondary mt-1 break-words max-w-[75ch]">{event.message}</p>
           <DeliveryChips deliveries={event.deliveries} />
+          {event.pairingRequestId && <a href={activityPath(event)} className="mt-1.5 inline-flex min-h-11 items-center text-xs text-accent underline">Review access request</a>}
           {chat && <a href={activityPath(event)} className="mt-1.5 inline-flex min-h-11 items-center text-xs text-accent underline sm:min-h-0">Open chat</a>}
           {event.kind === 'auth_expired' && event.nodeId && event.login && <div className="mt-2">
             <LoginRepairPanel login={{ node_id: event.nodeId, backend: event.login.backend, provider: event.login.provider }} />

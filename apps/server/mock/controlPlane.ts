@@ -59,6 +59,7 @@ import type {
   PlanningMap,
   PlanningSettings
 } from '@git-agent-harness/contracts';
+import type { PairedDevice, PairingAccessRequest } from '@git-agent-harness/contracts';
 import { DEFAULT_PLANNING_SETTINGS } from '@git-agent-harness/contracts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -180,6 +181,8 @@ function mockCliRouter(): CliRouterSnapshot {
 }
 
 interface MockState {
+  pairingRequests: PairingAccessRequest[];
+  pairedDevices: PairedDevice[];
   cliRouter: CliRouterSnapshot;
   scenario: MockScenarioName;
   reset: number;
@@ -560,6 +563,10 @@ function createState(scenario: MockScenarioName, reset: number, previewOrigin?: 
   }
 
   return {
+    pairingRequests: [{ schema_version: 1, id: 'mock-pairing-request-1', name: 'Mock Linux', matching_code: 'ABCD1234',
+      expires_at: new Date(Date.now() + 5 * 60_000).toISOString(), server: { id: 'mock-central', name: 'Mock central', origin: 'http://localhost:5173' },
+      access: 'Dashboard control: read projects and chats, run agent work, and choose chat models.', status: 'pending' }],
+    pairedDevices: [{ id: 'mock-device-1', name: 'Mock Phone', created_at: '2026-01-01T00:00:00Z', expires_at: '2030-10-01T00:00:00Z', revoked_at: null, can_approve_pairing: false }],
     cliRouter: mockCliRouter(),
     scenario,
     reset,
@@ -1216,11 +1223,45 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   // fixtures only -- the real single-use/expiry/origin semantics are
   // covered by apps/server/src/pairing.test.ts and deliberately not
   // re-tested here.
-  app.get('/api/pairing/session', (_req, res) => res.json({ schema_version: 1, principal: { kind: 'owner', id: 'mock-owner' } }));
+  app.get('/api/pairing/session', (_req, res) => res.json({ schema_version: 1, principal: { kind: 'owner', id: 'mock-owner' }, can_approve_pairing: true }));
   app.get('/api/pairing/devices', (_req, res) => res.json({
     schema_version: 1,
-    devices: [{ id: 'mock-device-1', name: 'Mock Phone', created_at: '2026-01-01T00:00:00Z', expires_at: '2026-10-01T00:00:00Z', revoked_at: null }]
+    devices: state.pairedDevices
   }));
+  app.patch('/api/pairing/devices/:id', (req, res) => {
+    const device = state.pairedDevices.find(device => device.id === req.params.id);
+    if (!device || typeof req.body?.can_approve_pairing !== 'boolean') return res.status(400).json({ message: 'Select a mock device and boolean pairing approval setting.' });
+    device.can_approve_pairing = req.body.can_approve_pairing;
+    res.json({ schema_version: 1, device });
+  });
+  app.post('/api/pairing/access/request', (req, res) => {
+    if (typeof req.body?.name !== 'string' || !req.body.name.trim()) return res.status(400).json({ message: 'Enter a mock device name.' });
+    const seed = state.pairingRequests[0];
+    const request: PairingAccessRequest = { ...seed, id: `mock-pairing-request-${state.pairingRequests.length + 1}`, name: req.body.name.trim(),
+      matching_code: 'ABCD1234', expires_at: new Date(Date.now() + 5 * 60_000).toISOString(), status: 'pending' };
+    state.pairingRequests.push(request);
+    res.status(202).json(request);
+  });
+  app.get('/api/pairing/access/status', (_req, res) => res.json(state.pairingRequests.at(-1)));
+  app.get('/api/pairing/access/requests', (_req, res) => res.json({ schema_version: 1,
+    requests: state.pairingRequests.filter(request => request.status === 'pending' || request.status === 'approved') }));
+  app.post('/api/pairing/access/requests/:id/:decision', (req, res) => {
+    const request = state.pairingRequests.find(request => request.id === req.params.id);
+    if (!request || !['approve', 'deny'].includes(req.params.decision)) return res.status(400).json({ message: 'Choose a mock request and decision.' });
+    if (request.status !== 'pending') return res.status(409).json({ message: 'This mock request is no longer pending.' });
+    if (req.params.decision === 'approve' && (req.body?.confirm !== true || req.body?.matching_code !== request.matching_code)) return res.status(400).json({ message: 'Confirm the mock matching code.' });
+    request.status = req.params.decision === 'approve' ? 'approved' : 'denied';
+    res.json(request);
+  });
+  app.post('/api/pairing/access/claim', (req, res) => {
+    const request = state.pairingRequests.at(-1)!;
+    if (req.body?.confirm !== true || request.status !== 'approved') return res.status(400).json({ message: 'Approve and confirm the mock request first.' });
+    request.status = 'claimed';
+    const device: PairedDevice = { id: `mock-device-${state.pairedDevices.length + 1}`, name: request.name,
+      created_at: new Date(Date.now()).toISOString(), expires_at: '2030-10-01T00:00:00Z', revoked_at: null, can_approve_pairing: false };
+    state.pairedDevices.push(device);
+    res.json({ schema_version: 1, device });
+  });
   app.post('/api/pairing/offers', (_req, res) => res.json({
     schema_version: 1,
     code: 'MOCK-CODE-1',

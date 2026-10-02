@@ -373,9 +373,16 @@ export function createServer(
       }
     });
   }
-  // Pairing only exempts one-time code inspection/redemption; its management
-  // routes enforce owner authentication inside the router. Workers cannot pair.
-  if (node.role === 'central') app.use('/api/pairing', pairingRouter(app.locals.deviceAccess, getCoordinatorIdentity(undefined, coordinatorPort)));
+  // Pairing's public offer/request flows retain origin and transport checks;
+  // device management and delegated approval enforce authority inside the router.
+  if (node.role === 'central') app.use('/api/pairing', pairingRouter(app.locals.deviceAccess, getCoordinatorIdentity(undefined, coordinatorPort), request => {
+    const event: ActivityEvent = {
+      id: `pairing:${request.id}`, occurredAt: new Date().toISOString(), profile: null,
+      kind: 'action_required', severity: 'warning', title: 'Device sign-in approval requested',
+      message: `${request.name} wants dashboard control. Compare its matching code in Settings.`, pairingRequestId: request.id,
+    };
+    if (configDeps.activityFeed?.record(event)) sessionStore.broadcast({ type: 'activity.event', event });
+  }));
   // All API reads and mutations share one boundary, including future routes.
   // Direct same-origin loopback access remains local; /health stays public.
   app.use('/api', authMiddleware);
@@ -393,6 +400,8 @@ export function createServer(
     res.status(400).json({ error: code, message: error instanceof Error ? error.message : String(error) });
   };
   if (node.role === 'central' && configDeps.activityFeed) {
+    const canApprovePairing = (res: express.Response): boolean => res.locals.authPrincipal?.kind === 'owner'
+      || app.locals.deviceAccess.canApprovePairing(res.locals.authPrincipal?.id ?? '');
     // Workers post every Rust-side activity event here; the route writes an
     // audit receipt, so it is rate-limited like the other writing mounts.
     app.use('/api/activity', rateLimit({
@@ -411,7 +420,8 @@ export function createServer(
     app.get('/api/activity/notifications', (_req, res) => {
       res.setHeader('Cache-Control', 'no-store');
       const feed = configDeps.activityFeed!;
-      res.json({ events: feed.notifications(), unread: feed.unreadCount() });
+      const canApprove = canApprovePairing(res);
+      res.json({ events: feed.notifications(canApprove), unread: feed.unreadCount(canApprove) });
     });
     app.get('/api/activity/notification-preferences', (_req, res) => {
       res.setHeader('Cache-Control', 'no-store');
@@ -434,8 +444,9 @@ export function createServer(
         return res.status(400).json({ error: 'invalid_activity_read', message: 'Supply up to 200 notification ids, or all: true.' });
       }
       const feed = configDeps.activityFeed!;
-      const changed = feed.markRead(all ? 'all' : ids as string[]);
-      return res.json({ changed, unread: feed.unreadCount() });
+      const canApprove = canApprovePairing(res);
+      const changed = feed.markRead(all ? 'all' : ids as string[], canApprove);
+      return res.json({ changed, unread: feed.unreadCount(canApprove) });
     });
   }
   if (node.role === 'central' && configDeps.webPushNotifications) {

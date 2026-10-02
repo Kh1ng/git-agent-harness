@@ -65,6 +65,8 @@ export interface ActivityEvent {
   severity: "info" | "success" | "warning" | "error";
   title: string;
   message: string;
+  /** Review-only deep link; never includes a claim secret or matching code. */
+  pairingRequestId?: string;
   sessionId?: string | null;
   workId?: string | null;
   nodeId?: string | null;
@@ -129,7 +131,10 @@ export function notifiableActivity(event: Pick<ActivityEvent, "kind" | "notifica
 
 /** Where a notification opens. The event id rides along so the app can mark
  * that one notification read and, on the Activity page, highlight it. */
-export function activityPath(event: Pick<ActivityEvent, "id" | "profile" | "sessionId">): string {
+export function activityPath(event: Pick<ActivityEvent, "id" | "profile" | "sessionId" | "pairingRequestId">): string {
+  if (event.pairingRequestId) {
+    return `/?${new URLSearchParams({ page: "settings", pairingRequest: event.pairingRequestId, event: event.id })}`;
+  }
   if (event.profile && event.sessionId) {
     return `/?${new URLSearchParams({ page: "chat", profile: event.profile, chat: event.sessionId, event: event.id })}`;
   }
