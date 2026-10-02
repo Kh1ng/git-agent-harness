@@ -29,6 +29,7 @@ export interface CliRouterQuota {
   /** null means the quota value is unknown (not zero). */
   remainingPercent: number | null;
   resetAt: string | null;
+  observedAt?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +147,8 @@ export interface CliRouterStoredSettings {
 export interface UpstreamAuthFile {
   id: string;
   name: string;
-  auth_index: number;
+  /** Opaque upstream handle (hex string in v8, number historically). */
+  auth_index: string | number;
   provider: string;
   type: string;
   label: string;
@@ -156,6 +158,8 @@ export interface UpstreamAuthFile {
   project_id: string | null;
   quota: unknown;
   model_quotas: unknown;
+  /** Safe claims only; present for Codex accounts. */
+  id_token?: { chatgpt_account_id?: string } | null;
 }
 
 /** GET /v1/models response entry */
