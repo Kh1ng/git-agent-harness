@@ -13,7 +13,6 @@ on:
       - 'scripts/install-windows.ps1'
       - 'scripts/install-wsl-worker.sh'
       - 'scripts/test-windows-installer.ps1'
-      - 'scripts/test-wsl-worker-config.py'
       - 'scripts/stage-node-test-artifacts.mjs'
       - 'scripts/test-node-test-artifacts.mjs'
       - 'scripts/install.sh'
@@ -22,10 +21,9 @@ on:
       - 'scripts/install-macos-desktop.sh'
       - 'scripts/macos-launchd.sh'
       - 'scripts/configure-node-role.sh'
-      - 'scripts/test-worker-installers.py'
       - 'scripts/test-macos-install.sh'
-      - 'scripts/test-macos-desktop-install.py'
-      - 'scripts/test-macos-launchd.py'
+      - 'src/installer/**'
+      - 'tests/installer_scripts.rs'
       - 'src/update.rs'
       - 'packages/**'
       - 'package.json'
@@ -122,7 +120,9 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/desktop
+          workspaces: |
+            .
+            apps/desktop
 
       - name: Install dependencies
         run: npm ci
@@ -136,16 +136,11 @@ jobs:
       - name: Check desktop types
         run: npm run --workspace=apps/desktop typecheck
 
-      - name: Check WSL worker configuration
+      # The installers run on macOS's own bash 3.2 here, against the built gah.
+      - name: Check installer scripts
         run: |
           bash -n scripts/install-wsl-worker.sh
-          python3 scripts/test-wsl-worker-config.py
-
-      - name: Check worker installer scripts
-        run: |
-          python3 scripts/test-worker-installers.py
-          python3 scripts/test-macos-desktop-install.py
-          python3 scripts/test-macos-launchd.py
+          cargo test --test installer_scripts
 
       - name: Build local connection screen
         working-directory: apps/desktop

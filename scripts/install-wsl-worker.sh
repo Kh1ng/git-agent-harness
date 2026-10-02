@@ -10,7 +10,7 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
 fi
 # An already provisioned distro must not need a sudo password to install the worker.
 missing_packages=()
-for package in ca-certificates curl git python3 xz-utils build-essential; do
+for package in ca-certificates curl git xz-utils build-essential; do
   if [ "$(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null || true)" != 'installed' ]; then
     missing_packages+=("$package")
   fi
@@ -29,8 +29,9 @@ mkdir -p "$release_dir/bin"
 install -m 755 "$stage/gah" "$release_dir/bin/gah"
 # role-cli-check:start -- also exercised without installing a service.
 if ! "$release_dir/bin/gah" config set --help | grep -q -- '--node-role' ||
-   ! "$release_dir/bin/gah" status --help | grep -q -- '--role'; then
-  echo 'The downloaded GAH CLI is too old for this worker installer. Publish/install a matching CLI release with config --node-role and status --role support. The existing worker service and settings have not changed.' >&2
+   ! "$release_dir/bin/gah" status --help | grep -q -- '--role' ||
+   ! "$release_dir/bin/gah" installer --help >/dev/null 2>&1; then
+  echo 'The downloaded GAH CLI is too old for this worker installer. Publish/install a matching CLI release with config --node-role, status --role, and installer support. The existing worker service and settings have not changed.' >&2
   exit 1
 fi
 # role-cli-check:end
@@ -55,52 +56,9 @@ npm run build:shared
 npm run --workspace=apps/server build
 
 # Store secrets in the WSL user's private directory, never in a task's command line.
-python3 - "$stage/settings.json" "$install_dir" "$release_dir" "$node" <<'PY'
-import json, os, pathlib, shlex, sys, uuid
-settings = json.loads(pathlib.Path(sys.argv[1]).read_text())
-root, release, node = map(pathlib.Path, sys.argv[2:])
-config = pathlib.Path.home() / '.config/gah/config.toml'
-config.parent.mkdir(parents=True, exist_ok=True)
-if not config.exists():
-    config.write_text('[defaults]\n\n[profiles]\n')
-identity_path = root / 'identity.json'
-identity = json.loads(identity_path.read_text()) if identity_path.exists() else {'node_id': str(uuid.uuid4())}
-identity.update(display_name=settings['display_name'], advertised_url=settings['advertised_url'])
-identity_path.write_text(json.dumps(identity))
-env = {
-    'COORDINATOR_TOKEN': settings['token'], 'GAH_ALLOW_INSECURE_HTTP': '1',
-    'GAH_COORDINATOR_IDENTITY_PATH': str(identity_path),
-    'GAH_CONFIG_PATH': str(config), 'GAH_CONFIG': str(config),
-    'GAH_BINARY': str(release / 'bin/gah'), 'HOST': '0.0.0.0', 'PORT': '3774',
-}
-env_path = root / 'worker.env'
-agent_bins = [path for path in [pathlib.Path.home() / '.local/bin', pathlib.Path.home() / '.opencode/bin'] if path.is_dir()]
-worker_path = ':'.join(map(str, [release / 'bin', node.parent, *agent_bins]))
-env_path.write_text(''.join(f'export {k}={shlex.quote(v)}\n' for k, v in env.items()) + 'export PATH=' + shlex.quote(worker_path + ':') + '"$PATH"\n')
-env_path.chmod(0o600)
-start = root / 'start.sh'
-start.write_text('#!/usr/bin/env bash\nset -euo pipefail\nsource ' + shlex.quote(str(env_path)) + '\ncd ' + shlex.quote(str(release)) + '\nexec ' + shlex.quote(str(node)) + ' apps/server/dist/bin.js\n')
-start.chmod(0o700)
-register = root / 'register.sh'
-register.write_text('#!/usr/bin/env bash\nset -euo pipefail\nsource ' + shlex.quote(str(env_path)) + '\ncd ' + shlex.quote(str(release)) + '''
-for attempt in {1..30}; do
-  if curl -fsS http://127.0.0.1:3774/health >/dev/null; then break; fi
-  sleep 1
-done
-profiles="${1:-}"
-if [ -z "$profiles" ]; then
-  profiles="$("$GAH_BINARY" profile list --json | python3 -c 'import json,sys; print(",".join(profile["name"] for profile in json.load(sys.stdin)))')"
-fi
-exec ''' + shlex.quote(str(node)) + ' apps/server/dist/registerNodeCli.js --central-url ' + shlex.quote(settings['central_url']) + ' --self-url http://127.0.0.1:3774 --transport-mode trusted_lan --secret-ref env:COORDINATOR_TOKEN --labels windows,wsl --profiles "$profiles"\n')
-register.chmod(0o700)
-# systemd quoting uses double quotes and expands percent specifiers, unlike shell quoting.
-unit_path = pathlib.Path.home() / '.config/systemd/user/gah-worker.service'
-unit_path.parent.mkdir(parents=True, exist_ok=True)
-quoted_start = str(start).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%')
-unit_path.write_text('[Unit]\nDescription=GAH headless WSL worker\nAfter=network-online.target\n\n[Service]\nExecStart=/bin/bash --login "' + quoted_start + '"\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n')
-PY
+"$release_dir/bin/gah" installer wsl-worker --settings "$stage/settings.json" --root "$install_dir" --release "$release_dir" --node "$node"
 # Persist role beside profiles. Do not pin it in worker.env: re-flagging config survives restart.
-central_url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["central_url"])' "$stage/settings.json")"
+central_url="$("$release_dir/bin/gah" installer json --file "$stage/settings.json" --pointer /central_url)"
 "$release_dir/bin/gah" config set --node-role worker --registry-central-url "$central_url" --config "$HOME/.config/gah/config.toml"
 systemctl --user daemon-reload
 systemctl --user enable gah-worker.service

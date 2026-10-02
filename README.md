@@ -32,15 +32,8 @@ Provider CLIs use separate authentication inside WSL. See the [Windows tester gu
 ### Linux — desktop worker (AppImage)
 
 ```bash
-export GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
-ASSET_ID=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
-  -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/Kh1ng/git-agent-harness/releases/latest" \
-  | python3 -c "import sys,json; a=[x for x in json.load(sys.stdin)['assets'] if x['name'].endswith('.AppImage')]; print(a[0]['id'])")
-curl -L -H "Authorization: Bearer $GITHUB_TOKEN" \
-  -H "Accept: application/octet-stream" \
-  "https://api.github.com/repos/Kh1ng/git-agent-harness/releases/assets/$ASSET_ID" \
-  -o GAH-Worker.AppImage
+# Uses the GitHub CLI's login (gh auth login), so private releases work too.
+gh release download --repo Kh1ng/git-agent-harness --pattern '*.AppImage' --output GAH-Worker.AppImage
 chmod +x GAH-Worker.AppImage && ./GAH-Worker.AppImage
 ```
 
@@ -53,17 +46,9 @@ The native Android app is a control-only WebView for a central GAH node. Build i
 ### CLI binary (`gah`) — Linux or macOS
 
 ```bash
-export GITHUB_TOKEN="ghp_xxxxxxxxxxxx"
 # Linux: gah-linux-x86_64 | macOS: gah-macos-universal
-ASSET_NAME="gah-linux-x86_64"
-ASSET_ID=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
-  -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/Kh1ng/git-agent-harness/releases/latest" \
-  | python3 -c "import sys,json; a=[x for x in json.load(sys.stdin)['assets'] if x['name']=='$ASSET_NAME']; print(a[0]['id'])")
-curl -L -H "Authorization: Bearer $GITHUB_TOKEN" \
-  -H "Accept: application/octet-stream" \
-  "https://api.github.com/repos/Kh1ng/git-agent-harness/releases/assets/$ASSET_ID" \
-  -o /usr/local/bin/gah && chmod +x /usr/local/bin/gah
+gh release download --repo Kh1ng/git-agent-harness --pattern gah-linux-x86_64 --output gah
+sudo install -m 755 gah /usr/local/bin/gah
 ```
 
 Smoke test:

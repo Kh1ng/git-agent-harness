@@ -13,6 +13,7 @@ use tauri::{
 };
 
 mod open_project;
+mod setup_check;
 
 const OWNER_CREDENTIAL_SERVICE: &str = "com.kh1ng.gah.owner";
 const OWNER_TOKEN_STORAGE_KEY: &str = "gah.coordinatorToken";
@@ -898,7 +899,9 @@ fn main() {
             set_worker_running,
             open_external_url,
             open_project::desktop_open_context,
-            open_project::open_local_checkout
+            open_project::open_local_checkout,
+            setup_check::setup_check,
+            setup_check::open_setup_terminal
         ])
         .setup(|app| {
             let settings = read_settings();

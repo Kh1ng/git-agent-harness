@@ -24,6 +24,7 @@ pub mod fleet_preflight;
 pub mod generated_artifacts;
 mod github_ci;
 pub mod init;
+pub mod installer;
 pub mod job_kind;
 pub mod ledger;
 pub mod manager;

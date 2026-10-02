@@ -20,6 +20,7 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Map(args) => crate::planning::run(args)?,
+        Commands::Installer(command) => crate::installer::run(command)?,
         Commands::Setup {
             command: Some(command),
             ..

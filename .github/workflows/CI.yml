@@ -87,9 +87,6 @@ jobs:
       - name: Check CI test selection
         run: bash scripts/test-ci-test-scope.sh
 
-      - name: Check worker installer scripts
-        run: python3 scripts/test-worker-installers.py
-
       - name: Check memory hook setup
         run: |
           python3 -m venv "$RUNNER_TEMP/gah-memory-hooks-python"

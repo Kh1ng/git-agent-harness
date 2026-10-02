@@ -441,32 +441,6 @@ pub fn requirements(selection: &Selection, host: &dyn Host) -> Vec<Requirement> 
             Feature::Worker
         };
         list.push(Requirement {
-            id: "python3",
-            label: "Python 3".into(),
-            why: "The service installer uses it to write its settings files.",
-            feature,
-            optional: false,
-            status: command_status(host, "python3", &["--version"], Some((3, 8))),
-            action: if os == Os::Macos {
-                Some(Action {
-                    kind: ActionKind::Install,
-                    command: "xcode-select --install".into(),
-                    sudo: false,
-                })
-            } else {
-                package(
-                    host,
-                    &[
-                        (PackageManager::Apt, "python3"),
-                        (PackageManager::Dnf, "python3"),
-                        (PackageManager::Pacman, "python"),
-                        (PackageManager::Brew, "python"),
-                    ],
-                )
-            },
-            help: Some("https://www.python.org/downloads/"),
-        });
-        list.push(Requirement {
             id: "curl",
             label: "curl".into(),
             why: "The installer uses it to check that services came up.",
@@ -733,7 +707,7 @@ pub(crate) mod tests {
             &selection(Role::Central),
             &FakeHost::new(Os::Linux, Some(PackageManager::Apt)),
         );
-        assert!(ids(&list).ends_with(&["python3", "curl", "service_manager", "tailscale"]));
+        assert!(ids(&list).ends_with(&["curl", "service_manager", "tailscale"]));
         let tailscale = list.iter().find(|r| r.id == "tailscale").unwrap();
         assert!(tailscale.optional && !tailscale.blocking());
         let systemd = list.iter().find(|r| r.id == "service_manager").unwrap();

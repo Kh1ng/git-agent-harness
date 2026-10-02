@@ -24,6 +24,11 @@ case "$role" in central|worker) ;; *) echo "ERROR: unknown GAH_NODE_ROLE='$role'
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# --bin gah is required: Cargo.toml declares a second [[bin]]
+# (generate-cli-capabilities) with no default-run set, so a bare `cargo run`
+# is ambiguous and errors instead of picking one. The first call builds gah.
+gah_cli=(cargo run -q --bin gah --)
+
 if [ "$role" = central ]; then
   case "${GAH_GATEWAY_MODE:-}" in
     colocated)
@@ -36,28 +41,10 @@ if [ "$role" = central ]; then
       fi
       gateway_api_key="${GAH_GATEWAY_API_KEY:-$(openssl rand -hex 24)}"
       export GAH_MACOS_GATEWAY_URL=http://127.0.0.1:8420 GAH_MACOS_GATEWAY_KEY="$gateway_api_key"
-      python3 - <<'PY'
-import os
-import tempfile
-from pathlib import Path
-for value in [os.environ['GAH_MACOS_GATEWAY_KEY'], os.environ['GAH_GATEWAY_LLM_API_KEY']]:
-    if not value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise SystemExit('ERROR: gateway credentials must not contain control characters')
-path = Path.home() / '.config/gah/tdai-gateway.env'
-path.parent.mkdir(parents=True, exist_ok=True)
-def quoted(value):
-    for character in ['\\', '"', '$', '`']:
-        value = value.replace(character, '\\' + character)
-    return '"' + value + '"'
-fd, temporary = tempfile.mkstemp(dir=path.parent)
-try:
-    with os.fdopen(fd, 'w') as output:
-        output.write('TDAI_GATEWAY_API_KEY=' + quoted(os.environ['GAH_MACOS_GATEWAY_KEY']) + '\n')
-        output.write('TDAI_LLM_API_KEY=' + quoted(os.environ['GAH_GATEWAY_LLM_API_KEY']) + '\n')
-    os.replace(temporary, path)
-finally:
-    if os.path.exists(temporary): os.unlink(temporary)
-PY
+      # Values travel on stdin; the file is written with mode 0600.
+      gateway_env="$HOME/.config/gah/tdai-gateway.env"
+      printf '%s' "$GAH_MACOS_GATEWAY_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_GATEWAY_API_KEY
+      printf '%s' "$GAH_GATEWAY_LLM_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_LLM_API_KEY
       ;;
     remote)
       : "${GAH_GATEWAY_URL:?GAH_GATEWAY_MODE=remote requires GAH_GATEWAY_URL on macOS}"
@@ -70,37 +57,17 @@ PY
     *) echo "ERROR: unknown GAH_GATEWAY_MODE='$GAH_GATEWAY_MODE'" >&2; exit 1 ;;
   esac
   if [ -n "${GAH_MACOS_GATEWAY_URL:-}" ]; then
-    python3 - <<'PY'
-import os
-import tempfile
-from pathlib import Path
-path = Path.home() / '.config/gah/server.env'
-path.parent.mkdir(parents=True, exist_ok=True)
-lines = path.read_text().splitlines() if path.exists() else []
-values = {'TDAI_GATEWAY_URL': os.environ['GAH_MACOS_GATEWAY_URL']}
-if os.environ.get('GAH_MACOS_GATEWAY_KEY'): values['TDAI_GATEWAY_API_KEY'] = os.environ['GAH_MACOS_GATEWAY_KEY']
-for key, value in values.items():
-    if any(ord(char) < 32 or ord(char) == 127 for char in value): raise SystemExit('ERROR: gateway settings must not contain control characters')
-    for character in ['\\', '"', '$', '`']: value = value.replace(character, '\\' + character)
-    lines = [line for line in lines if not line.startswith(key + '=')]
-    lines.append(key + '="' + value + '"')
-fd, temporary = tempfile.mkstemp(dir=path.parent)
-try:
-    with os.fdopen(fd, 'w') as output: output.write('\n'.join(lines) + '\n')
-    os.replace(temporary, path)
-finally:
-    if os.path.exists(temporary): os.unlink(temporary)
-PY
+    printf '%s' "$GAH_MACOS_GATEWAY_URL" | "${gah_cli[@]}" installer env-set --file "$HOME/.config/gah/server.env" TDAI_GATEWAY_URL
+    if [ -n "${GAH_MACOS_GATEWAY_KEY:-}" ]; then
+      printf '%s' "$GAH_MACOS_GATEWAY_KEY" | "${gah_cli[@]}" installer env-set --file "$HOME/.config/gah/server.env" TDAI_GATEWAY_API_KEY
+    fi
   fi
 elif [ -n "${GAH_GATEWAY_MODE:-}" ]; then
   echo 'ERROR: configure the TDAI gateway on a central node, not a worker.' >&2
   exit 1
 fi
 
-# --bin gah is required: Cargo.toml declares a second [[bin]]
-# (generate-cli-capabilities) with no default-run set, so a bare `cargo run`
-# is ambiguous and errors instead of picking one.
-bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --bin gah --
+bash "$repo_root/scripts/configure-node-role.sh" "$role" "${gah_cli[@]}"
 cargo run --bin gah -- update --repo "$repo_root" --role "$role"
 
 if [ "$role" = central ] && [ "${GAH_GATEWAY_MODE:-}" = colocated ]; then
