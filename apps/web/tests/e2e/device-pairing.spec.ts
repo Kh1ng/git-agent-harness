@@ -22,8 +22,15 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
   const app = express();
   app.set('trust proxy', 'loopback');
   app.locals.deviceAccess = access;
-  // Exercise the remote boundary while the hermetic listener runs on loopback.
-  app.use((req, _res, next) => { req.headers['x-forwarded-for'] = req.headers['x-test-client'] === 'owner' ? '198.51.100.8' : '198.51.100.9'; next(); });
+  // New approval credentials require TLS remotely. Keep their HTTP fixture on
+  // trusted loopback; simulate remote authentication for all other APIs and WS.
+  const loopbackApprovalPaths = new Set(['/api/pairing/access/request', '/api/pairing/access/status', '/api/pairing/access/claim']);
+  app.use((req, _res, next) => {
+    if (loopbackApprovalPaths.has(req.path)) {
+      for (const header of ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto']) delete req.headers[header];
+    } else req.headers['x-forwarded-for'] = req.headers['x-test-client'] === 'owner' ? '198.51.100.8' : '198.51.100.9';
+    next();
+  });
   app.use(express.json());
   app.use('/api/pairing', pairingRouter(access, { node_id: '11111111-1111-1111-1111-111111111111', display_name: 'Pairing test central', advertised_url: '', version: 'test', schema_digest: 'test' }));
   app.use('/api', authMiddleware);
