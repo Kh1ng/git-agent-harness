@@ -190,6 +190,9 @@ test('a gateway that accepts but never responds cannot block a turn indefinitely
     const startedAt = Date.now();
     assert.equal((await recall('does-not-exist', 'current project')).degraded, true);
     assert.ok(Date.now() - startedAt < 6_000, 'gateway request should time out within five seconds');
+    const flushStartedAt = Date.now();
+    assert.equal(await flushSession('does-not-exist', 25), false);
+    assert.ok(Date.now() - flushStartedAt < 1_000, 'best-effort quota flush must respect its short timeout');
   } finally {
     if (saved === undefined) delete process.env.TDAI_GATEWAY_URL;
     else process.env.TDAI_GATEWAY_URL = saved;

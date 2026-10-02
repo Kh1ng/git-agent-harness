@@ -856,7 +856,8 @@ export async function runTurn(
         return result;
       } catch (error) {
         if (isUsageLimitError(error)) {
-          await flushSession(profile).catch(() => undefined);
+          // Quota handoff stays responsive even if settlement extraction stalls.
+          await flushSession(profile, 5_000).catch(() => undefined);
         } else if (!active.cancelled) {
           reportChatTurn(nodeId, backendId, errorMessage(error));
         }

@@ -175,7 +175,7 @@ export async function sessionKeyForTicket(profile: string, ticketId: string): Pr
 /** Best-effort POST that NEVER throws (#878 fail-open): records gateway
  * degradation on any failure (transport, non-2xx, malformed JSON) and
  * returns null; returns the parsed JSON and records success otherwise. */
-async function postJsonBestEffort<T>(path: string, body: unknown): Promise<T | null> {
+async function postJsonBestEffort<T>(path: string, body: unknown, timeoutMs = 5_000): Promise<T | null> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-GAH-Caller': 'server' };
   try {
     const apiKey = gatewayApiKey();
@@ -184,7 +184,7 @@ async function postJsonBestEffort<T>(path: string, body: unknown): Promise<T | n
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(path === '/session/end' ? 300_000 : 5_000)
+      signal: AbortSignal.timeout(timeoutMs)
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -310,7 +310,7 @@ export async function captureForTicket(
  *
  * #878 fail-open: never throws. A failed flush reports `false` (and marks
  * the gateway degraded) rather than aborting the turn. */
-export async function flushSession(profile: string): Promise<boolean> {
+export async function flushSession(profile: string, timeoutMs = 300_000): Promise<boolean> {
   clearTimeout(idleFlushes.get(profile));
   idleFlushes.delete(profile);
   if (!gatewayEnabledForProfile(profile)) {
@@ -318,6 +318,6 @@ export async function flushSession(profile: string): Promise<boolean> {
   }
   const result = await postJsonBestEffort<{ flushed: boolean }>('/session/end', {
     session_key: await sessionKeyForProfile(profile)
-  });
+  }, timeoutMs);
   return result?.flushed === true;
 }
