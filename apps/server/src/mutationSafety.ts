@@ -33,7 +33,11 @@ type Operation =
   | 'apns_device.add'
   | 'apns_device.remove'
   | 'activity.record'
-  | 'auth.repair.start';
+  | 'auth.repair.start'
+  | 'cli_router.configure'
+  | 'cli_router.routing'
+  | 'cli_router.account'
+  | 'cli_router.refresh';
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 
 // JSON object order is not part of the request's meaning; array order is.
@@ -89,7 +93,8 @@ export function mutationSafety(nodeId: string, directory = process.env.GAH_MUTAT
       operation.startsWith('backend_instance.') ||
       operation.startsWith('config.routing_candidate.') ||
       operation.startsWith('config.prompt_policy.') ||
-      operation.startsWith('messaging_bridge.')
+      operation.startsWith('messaging_bridge.') ||
+      operation.startsWith('cli_router.')
     ) && principal.kind !== 'owner') return reject(403, 'owner_required', 'This operation requires owner access.');
     if (!key || !/^[A-Za-z0-9_-]{16,128}$/.test(key)) return reject(400, 'idempotency_key_required', 'Supply an Idempotency-Key of 16–128 letters, digits, underscores, or hyphens.');
 

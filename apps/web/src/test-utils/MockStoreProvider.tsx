@@ -11,9 +11,10 @@ interface LoopStatus {
 export interface MockStoreProviderProps {
   children: React.ReactNode;
   statusData: StatusSnapshot | null;
+  quotaData?: QuotaSnapshot;
 }
 
-export function MockStoreProvider({ children, statusData }: MockStoreProviderProps) {
+export function MockStoreProvider({ children, statusData, quotaData }: MockStoreProviderProps) {
   // Initialize the store with our test data
   React.useEffect(() => {
     // Mock fetch functions to prevent actual API calls
@@ -73,7 +74,7 @@ export function MockStoreProvider({ children, statusData }: MockStoreProviderPro
         key: 'test'
       },
       quota: {
-        data: mockQuotaData,
+        data: quotaData ?? mockQuotaData,
         loading: false,
         error: null,
         fetchedAt: Date.now(),
@@ -88,7 +89,7 @@ export function MockStoreProvider({ children, statusData }: MockStoreProviderPro
       },
       loopAction: { pending: false, error: null }
     });
-  }, [statusData]);
+  }, [statusData, quotaData]);
 
   return <>{children}</>;
 }

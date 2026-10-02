@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { claudeSpawnSpec, codexSpawnSpec, compactionSummary, isCompactionCommand, isUsageLimitError } from './managerChat/acpAdapter.js';
+import { claudeSpawnSpec, codexSpawnSpec, opencodeSpawnSpec, compactionSummary, isCompactionCommand, isUsageLimitError } from './managerChat/acpAdapter.js';
 import { normalizeRemoteUrl } from './managerChat/memoryGatewayClient.js';
 import {
   modelOverrideForProfile,
@@ -22,6 +22,32 @@ test('named account ACP children receive only their executable and isolated prov
   assert.deepEqual(claudeSpawnSpec({ executable: '/bin/claude-personal', state_root: '/state/personal' }).env, {
     CLAUDE_CODE_EXECUTABLE: '/bin/claude-personal', HOME: '/state/personal', CLAUDE_CONFIG_DIR: join('/state/personal', '.claude')
   });
+});
+
+test('opencode ACP child gets the configured executable and isolated HOME/XDG state', () => {
+  const saved = process.env.OPENCODE_CONFIG_CONTENT;
+  process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ model: 'gah-router/claude-sonnet' });
+  try {
+    const spec = opencodeSpawnSpec({ executable: '/home/u/.local/bin/gah-cli-router-opencode', state_root: '/state/router' });
+    assert.equal(spec.command, '/home/u/.local/bin/gah-cli-router-opencode');
+    assert.deepEqual(spec.args, ['acp']);
+    const { OPENCODE_CONFIG_CONTENT, ...rest } = spec.env as Record<string, string>;
+    assert.deepEqual(rest, {
+      HOME: '/state/router',
+      XDG_CONFIG_HOME: join('/state/router', '.config'),
+      XDG_DATA_HOME: join('/state/router', '.local', 'share'),
+      XDG_STATE_HOME: join('/state/router', '.local', 'state'),
+      XDG_CACHE_HOME: join('/state/router', '.cache')
+    });
+    // Inherited config (current model) is preserved; the GAH agent is layered on top.
+    assert.deepEqual(JSON.parse(OPENCODE_CONFIG_CONTENT), { model: 'gah-router/claude-sonnet', default_agent: 'gah-implementer' });
+    // No runtime: plain `opencode`, no state isolation.
+    const plain = opencodeSpawnSpec();
+    assert.equal(plain.command, 'opencode');
+    assert.deepEqual(Object.keys(plain.env as object), ['OPENCODE_CONFIG_CONTENT']);
+  } finally {
+    if (saved === undefined) delete process.env.OPENCODE_CONFIG_CONTENT; else process.env.OPENCODE_CONFIG_CONTENT = saved;
+  }
 });
 
 test('bound skills are injected with the exact resolved version before the request', () => {

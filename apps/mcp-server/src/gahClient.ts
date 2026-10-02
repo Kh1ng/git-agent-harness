@@ -117,5 +117,6 @@ export const gah = {
     request('GET', `/api/controller-activity${query({ profile, since })}`),
   loopStatus: (profile: string) => request('GET', `/api/loop/status${query({ profile })}`),
   dispatch: (options: Record<string, unknown>) =>
-    request('POST', '/api/dispatch', options, options.waitForCompletion === true)
+    request('POST', '/api/dispatch', options, options.waitForCompletion === true),
+  cliRouter: () => request('GET', '/api/cli-router')
 };

@@ -473,6 +473,7 @@ export interface QuotaUsageSummary {
 }
 
 export interface QuotaCandidateStatus {
+  backend_instance?: string | null;
   modes: string[];
   backend: string;
   model: string | null;

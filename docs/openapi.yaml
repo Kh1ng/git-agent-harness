@@ -979,6 +979,138 @@ paths:
         "200": { description: Fleet observations }
         "500": { description: Internal error }
 
+  /api/cli-router:
+    get:
+      tags: [status]
+      summary: Read the central node's subscription router snapshot
+      description: >-
+        Read-only MCP tool gah_cli_router uses this route. Returns safe account
+        metadata, quota observations, model IDs, and connection key presence.
+        Key values and provider tokens are never returned. Quota requires an
+        explicit per-account refresh. See packages/contracts/src/cli-router.ts.
+      responses:
+        "200":
+          description: CliRouterSnapshot (unconfigured, connected, or unavailable)
+          content:
+            application/json:
+              schema: { type: object }
+        "500": { description: Private router configuration is unreadable or corrupted }
+        "429": { description: Router request rate limit reached }
+  /api/cli-router/settings:
+    put:
+      tags: [config]
+      summary: Configure and test an owner-selected router connection
+      description: >-
+        Central nodes only. Owner access required. URL must be an HTTPS origin
+        or literal loopback HTTP origin. Both keys are required initially and
+        when changing origin. Blank or omitted keys preserve the current
+        origin's saved values. Connection tests complete before an atomic save.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [url]
+              properties:
+                url: { type: string, maxLength: 2000 }
+                apiKey: { type: string, maxLength: 512, writeOnly: true }
+                managementKey: { type: string, maxLength: 512, writeOnly: true }
+      responses:
+        "200": { description: "{ success: true }" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Owner access required }
+        "409": { $ref: "#/components/responses/MutationConflict" }
+        "500": { description: Private configuration read or write failed }
+        "502": { description: Router connection test failed }
+        "503": { $ref: "#/components/responses/MutationStorageUnavailable" }
+  /api/cli-router/routing:
+    post:
+      tags: [config]
+      summary: Set upstream strategy and session affinity
+      description: >-
+        Owner access required. The two upstream writes are not atomic. An
+        error can mean that strategy changed but affinity did not. Refresh
+        the snapshot before another change. No automatic replay occurs.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [strategy, sessionAffinity]
+              properties:
+                strategy: { type: string, enum: [round-robin, fill-first, weighted-round-robin] }
+                sessionAffinity: { type: boolean }
+      responses:
+        "200": { description: "{ success: true }" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Owner access required }
+        "409": { $ref: "#/components/responses/MutationConflict" }
+        "502": { description: Upstream write failed or had a partial outcome }
+  /api/cli-router/accounts/status:
+    post:
+      tags: [config]
+      summary: Pause or enable one upstream subscription account
+      description: Owner access required. Account IDs resolve through a fresh upstream account list.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [id, disabled]
+              properties:
+                id: { type: string, maxLength: 200 }
+                disabled: { type: boolean }
+      responses:
+        "200": { description: "{ success: true }" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Owner access required }
+        "404": { description: Account not found }
+        "409": { $ref: "#/components/responses/MutationConflict" }
+        "502": { description: Upstream account read or status write failed }
+  /api/cli-router/accounts/refresh:
+    post:
+      tags: [status]
+      summary: Refresh one account's quota and return the router snapshot
+      description: >-
+        Owner access required. Provider requests use fixed server-side targets
+        and the router's token substitution. Failed quota observations return
+        a safe per-account quotaError, not a fabricated zero balance.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [id]
+              properties:
+                id: { type: string, maxLength: 200 }
+      responses:
+        "200":
+          description: CliRouterSnapshot with updated account quota or quotaError
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { description: Owner access required }
+        "404": { description: Account not found }
+        "409": { $ref: "#/components/responses/MutationConflict" }
+        "502": { description: Cannot read upstream accounts }
+
 components:
   parameters:
     IdempotencyKey:
