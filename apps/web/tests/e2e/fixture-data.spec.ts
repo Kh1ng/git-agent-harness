@@ -27,12 +27,13 @@ test('Overview renders fixture profile + status data from the hermetic server', 
 test('Quota page renders the fixture quota snapshot observations', async ({ page }) => {
   await page.goto('/');
   await navigateTo(page, 'Quota');
-  // responses/quota.json carries codex/claude candidate cards with usage.
+  // responses/quota.json carries codex/claude candidate ledger rows with quota windows.
   await expect(page.getByText('codex', { exact: false }).first()).toBeVisible();
   await expect(page.getByText('claude', { exact: false }).first()).toBeVisible();
-  await expect(page.getByText('Quota windows', { exact: true }).first()).toBeVisible();
+  await expect(page.getByTestId('quota-candidate-codex-0').getByRole('progressbar', { name: 'weekly · codex-mini: 34.2% used, 65.8% remaining', exact: true })).toBeVisible();
   await expect(page.getByText('weekly', { exact: false })).toBeVisible();
   await expect(page.getByText('65.8% remaining', { exact: true })).toBeVisible();
+  await page.getByText('Usage and data freshness', { exact: true }).click();
   await expect(page.getByText('Account quota check', { exact: true })).toBeVisible();
   await expect(page.getByText('Quota data', { exact: true })).toBeVisible();
   await expect(page.getByTestId('quota-check-codex').getByText('No quota data recorded')).toBeVisible();

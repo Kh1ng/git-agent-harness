@@ -105,7 +105,7 @@ test.describe('last-updated indicator', () => {
 
   for (const route of [
     { label: 'Overview', heading: 'Overview' },
-    { label: 'Quota', heading: 'Quota' },
+    { label: 'Quota', heading: 'Quota management' },
     { label: 'Telemetry', heading: 'Telemetry' },
     { label: 'Factory', heading: 'Factory' },
     { label: 'Activity', heading: 'Activity' },
