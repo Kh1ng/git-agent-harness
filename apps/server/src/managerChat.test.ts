@@ -288,18 +288,22 @@ test('handoffAttempt reruns a usage-limited turn on the next eligible backend, o
   assert.deepEqual(result.handoff, { from: 'hermes', to: 'codex', reason: "You've hit your usage limit.", resetAt: null });
 });
 
-test('handoffAttempt skips a fallback that fails for a non-limit reason and tries the next', async () => {
-  const result = await handoffAttempt({
-    startBackend: 'hermes',
-    fallbackBackends: ['codex', 'claude'],
-    attempt: async (backendId) => {
-      if (backendId === 'hermes') throw new Error('usage limit hit');
-      if (backendId === 'codex') throw new Error('codex not installed');
-      return { reply: 'claude answer', model: 'opus', usage: null };
-    }
-  });
-  assert.equal(result.backend, 'claude');
-  assert.deepEqual(result.handoff, { from: 'hermes', to: 'claude', reason: 'usage limit hit', resetAt: null });
+test('handoffAttempt stops on auth, crash, and cancellation failures in a fallback', async () => {
+  for (const message of ['401 Unauthorized: invalid API key', 'backend crashed: segfault', 'Turn cancelled']) {
+    const calls: string[] = [];
+    const fallbackError = new Error(message);
+    await assert.rejects(handoffAttempt({
+      startBackend: 'claude',
+      fallbackBackends: ['agy', 'codex'],
+      attempt: async backend => {
+        calls.push(backend);
+        if (backend === 'claude') throw new Error("You've hit your session limit.");
+        if (backend === 'agy') throw fallbackError;
+        return { reply: 'codex answer', model: null, usage: null };
+      }
+    }), error => error === fallbackError);
+    assert.deepEqual(calls, ['claude', 'agy'], `${message} must not advance to Codex`);
+  }
 });
 
 test('handoffAttempt does not hand off on non-limit errors', async () => {

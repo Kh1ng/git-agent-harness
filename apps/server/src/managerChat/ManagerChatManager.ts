@@ -668,6 +668,7 @@ export async function handoffAttempt(
       try { return { ...await run(fallback), backend: fallback, handoff: { from: startBackend, to: fallback, reason: errorMessage(error), resetAt: failure.resetAt } }; }
       catch (second) {
         const failed = second as { error: unknown; failure: QuotaFailure };
+        if (failed.failure?.kind !== 'hard') throw failed.error ?? second;
         errors.push(`fallback ${fallback}: ${errorMessage(failed.error ?? second)}`);
       }
     }
