@@ -49,3 +49,18 @@ test('approved access requires an explicit claim and retained matching device se
   expect(paired).toBe(false);
   expect(claims).toBe(1);
 });
+
+test('claim clears a stale owner token before checking the new controller session', async ({ page, mount }) => {
+  let paired = false;
+  await page.evaluate(() => sessionStorage.setItem('gah.coordinatorToken', 'stale-owner-token'));
+  await page.route('**/api/pairing/access/status', route => route.fulfill({ json: request('approved') }));
+  await page.route('**/api/pairing/access/claim', route => route.fulfill({ json: { device: { id: 'device-1', name: 'Linux laptop' } } }));
+  await page.route('**/api/pairing/session', route => route.request().headers().authorization
+    ? route.fulfill({ status: 401, json: { message: 'Invalid owner token' } })
+    : route.fulfill({ json: { principal: { kind: 'device', id: 'device-1' } } }));
+  const component = await mount(<DeviceAccessRequest onPaired={async () => { paired = true; }} />);
+  await component.getByRole('button', { name: 'Continue to dashboard' }).click();
+  await expect.poll(() => paired).toBe(true);
+  expect(await page.evaluate(() => sessionStorage.getItem('gah.coordinatorToken'))).toBeNull();
+  await expect(component.getByRole('alert')).toHaveCount(0);
+});

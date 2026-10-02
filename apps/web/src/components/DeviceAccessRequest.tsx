@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { PairedDevice, PairingAccessRequest } from '@git-agent-harness/contracts';
 import { pairingApi } from '../api/client.js';
+import { saveCoordinatorToken } from '../api/coordinatorToken.js';
 
 /** The request credential stays in an HttpOnly cookie. Poll only while awaiting
  * a decision, with no overlapping requests or retries after a connection error. */
@@ -61,6 +62,7 @@ export function DeviceAccessRequest({ onPaired }: { onPaired: (device: PairedDev
         <p role="status" className={request.status === 'approved' ? 'text-good' : 'text-secondary'}>{request.status === 'pending' ? 'Waiting for approval. Open the access request notification on your trusted device, or go to Connection & pairing. Compare this code before approving.' : request.status === 'approved' ? 'Access approved. Continue to sign in on this device.' : request.status === 'denied' ? 'Access denied. Ask the owner before sending another request.' : request.status === 'expired' ? 'This request expired. Send a new request when your approver is ready.' : 'This request was already used. Check your connection settings.'}</p>
         {request.status === 'approved' && <button className="btn-primary min-h-11" disabled={busy} onClick={() => void run(async () => {
           const { device } = await pairingApi.claimAccess();
+          saveCoordinatorToken('');
           const session = await pairingApi.session();
           if (session.principal.kind !== 'device' || session.principal.id !== device.id) throw new Error('This browser did not retain its device session. Allow cookies and send a new access request.');
           await onPaired(device);

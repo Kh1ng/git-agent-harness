@@ -148,6 +148,10 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     await expect(approver).not.toBeChecked();
     expect(await phone.evaluate(async () => (await fetch('/api/pairing/access/requests')).status)).toBe(403);
     await linux.goto(`${origin}/?page=settings`);
+    await linux.getByLabel('Access token', { exact: true }).fill('stale-owner-token');
+    await linux.getByRole('button', { name: 'Save and reconnect' }).click();
+    await expect(linux.getByRole('status').filter({ hasText: 'Access required' })).toBeVisible();
+    expect(await linux.evaluate(() => sessionStorage.getItem('gah.coordinatorToken'))).toBe('stale-owner-token');
     await linux.getByRole('button', { name: 'Request access', exact: true }).click();
     await linux.getByLabel('Device name', { exact: true }).fill('Linux laptop');
     await linux.getByRole('button', { name: 'Send access request' }).click();
