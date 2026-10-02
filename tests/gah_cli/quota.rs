@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn native_claude_refresh_cannot_attribute_default_login_to_another_account() {
+    let tmp = test_tempdir();
+    let path = tmp.path().join("quota.jsonl");
+    for arguments in [
+        ["--backend-instance", "claude-second"],
+        ["--model", "other-model"],
+        ["--command", "other-login"],
+    ] {
+        bin()
+            .args(["quota", "refresh", "--backend", "claude", "--store-path"])
+            .arg(&path)
+            .args(arguments)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("current native OAuth login"));
+        assert!(!path.exists());
+    }
+}
+
+#[test]
 fn quota_record_persists_validated_account_observation_from_stdin() {
     let tmp = test_tempdir();
     let path = tmp.path().join("quota.jsonl");

@@ -520,6 +520,16 @@ pub fn refresh_codex_and_store_for_identity(
     Ok(Some(record))
 }
 
+/// Persist both native Claude allowance windows under the default account's
+/// explicit instance. Named Claude accounts cannot inherit these readings.
+pub fn refresh_claude_and_store(state_path: &Path) -> Result<Option<QuotaObservationRecord>> {
+    let records = crate::usage::claude::refresh()?;
+    for record in &records {
+        append(state_path, record)?;
+    }
+    Ok(records.into_iter().next())
+}
+
 /// Issue #761: nothing refreshed this store periodically -- only a human
 /// running `gah quota refresh` by hand did, so account-level quota data
 /// went stale for days even while dispatch itself was active. Called once
@@ -545,6 +555,14 @@ pub fn refresh_stale_quota_observations(
         .clone()
         .unwrap_or_else(|| "codex".to_string());
     let mut handles = Vec::new();
+    if let Some(handle) =
+        maybe_refresh_backend_instance(store_path, "claude", Some("claude"), now, {
+            let path = store_path.to_path_buf();
+            move || refresh_claude_and_store(&path)
+        })
+    {
+        handles.push(handle);
+    }
     if std::env::var("NOUS_API_KEY").is_ok_and(|key| !key.is_empty()) {
         if let Some(handle) = maybe_refresh_backend_instance(
             store_path,

@@ -43,6 +43,14 @@ pub fn run(command: QuotaCommands) -> Result<()> {
                 );
             }
             let is_vibe_admin = crate::config::canonical_backend_name(&backend) == "vibe";
+            if backend == "claude"
+                && (backend_instance.is_some()
+                    || model.is_some()
+                    || quota_pool.is_some()
+                    || codex_cmd != "claude")
+            {
+                bail!("Claude quota refresh uses the current native OAuth login; command/instance/model/pool overrides are unsupported");
+            }
             if backend == "nous"
                 && (backend_instance.is_some() || model.is_some() || quota_pool.is_some())
             {
@@ -54,7 +62,9 @@ pub fn run(command: QuotaCommands) -> Result<()> {
                 );
             }
 
-            let refreshed = if backend == "nous" {
+            let refreshed = if backend == "claude" {
+                quota_store::refresh_claude_and_store(&path)
+            } else if backend == "nous" {
                 let record = crate::usage::nous::refresh()?;
                 quota_store::append(&path, &record)?;
                 Ok(Some(record))

@@ -1368,8 +1368,8 @@ pub enum QuotaCommands {
     Refresh {
         /// Backend whose account quota to refresh (e.g. "codex"). "vibe"
         /// refreshes from the Mistral Admin API (`MISTRAL_ADMIN_API_KEY`);
-        /// "nous" reads the Nous account API (`NOUS_API_KEY`).
-        /// instead of running a CLI subprocess.
+        /// "nous" reads the Nous account API (`NOUS_API_KEY`);
+        /// "claude" reads the current native Claude OAuth login.
         #[arg(long, default_value = "codex")]
         backend: String,
         /// Stable, secret-safe execution instance for this account reading.
@@ -1389,7 +1389,8 @@ pub enum QuotaCommands {
         /// PATH, e.g. "codex"). Only `codex` has a structured status parser
         /// today; other backends fall back to "no data" rather than
         /// guessing. Ignored for `--backend vibe`, which always uses the
-        /// Mistral Admin API rather than a subprocess.
+        /// Mistral Admin API rather than a subprocess. Claude uses the current
+        /// native OAuth login and rejects command overrides.
         #[arg(long)]
         command: Option<String>,
         /// Override the durable store path (default: $XDG_STATE_HOME/gah/...).
@@ -1398,7 +1399,7 @@ pub enum QuotaCommands {
         store_path: Option<String>,
     },
     /// Refresh account-level quota for every configured profile's
-    /// quota-tracked backends (codex, vibe), throttled to one live check per
+    /// quota-tracked backends (codex, claude, vibe, nous), throttled to one live check per
     /// backend per interval (30 min) and bounded so a hung backend can never
     /// wedge the caller. Runs each due refresh to completion before exiting
     /// (it JOINS the refresh threads, unlike the fire-and-forget loop-tick
