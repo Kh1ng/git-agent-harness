@@ -30,6 +30,11 @@ pub enum NodeState {
     Blocked,
     /// Open, unblocked, and its open children carry the work.
     Parent,
+    /// A map-file ticket answered as out of scope. Unlike `Done`, it does
+    /// not unblock the tickets that wait on it.
+    RuledOut,
+    /// A map-file ticket someone has claimed: open, but not free to take.
+    Claimed,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,6 +49,9 @@ pub struct Node {
     pub depth: Option<usize>,
     /// Open or unknown issues this one waits on.
     pub waiting_on: Vec<u64>,
+    /// For a map-file ticket, its path in the repository; `url` is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -72,6 +80,12 @@ pub struct PlanMap {
     /// Referenced issues the listing did not include (deleted, or in another
     /// project).
     pub missing: Vec<u64>,
+    /// The `.plan/maps/` slug when the map came from files, not issues.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Problems reading a map file that did not stop the map.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -297,6 +311,7 @@ pub fn build(epic: u64, issues: &BTreeMap<u64, IssueFacts>) -> PlanMap {
             state,
             depth: depth.get(number).copied(),
             waiting_on,
+            path: None,
         });
     }
     let frontier = nodes
@@ -312,6 +327,8 @@ pub fn build(epic: u64, issues: &BTreeMap<u64, IssueFacts>) -> PlanMap {
         edges: edges.into_iter().collect(),
         frontier,
         missing,
+        file: None,
+        diagnostics: Vec::new(),
     }
 }
 

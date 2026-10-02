@@ -21,7 +21,7 @@ test('the star map shows the epic, its blockers, and the work that can start now
   const frontier = page.getByRole('region', { name: 'Frontier' });
   await expect(frontier.getByRole('button', { name: /#902 Local event store/ })).toBeVisible();
   await expect(frontier.getByRole('button', { name: /#905 Stale data banner/ })).toBeVisible();
-  await expect(frontier.getByText('1 of 7 done under #900.')).toBeVisible();
+  await expect(frontier.getByText('1 of 7 done in #900.')).toBeVisible();
 
   await map.getByRole('button', { name: /#903 Conflict resolution: Blocked/ }).click();
   const detail = page.getByRole('region', { name: 'Issue #903' });
@@ -78,4 +78,38 @@ test('on a phone the frontier list replaces the map', async ({ page, request }, 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await page.screenshot({ path: testInfo.outputPath('planning-phone.png'), fullPage: true });
+});
+
+test('a .plan/maps/ map shows its tickets, keeps ruled-out work blocking, and opens a ticket chat', async ({ page, request }, testInfo) => {
+  await reset(request);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto('/?page=planning&profile=fixture&map=node-handoff');
+  const map = page.getByRole('group', { name: 'Planning map node-handoff' });
+  await expect(map).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'Map' })).toHaveValue('file:node-handoff');
+  await expect(page.locator('optgroup[label="Map files (.plan/maps)"] option')).toHaveText(['Node handoff: 3 of 5 open']);
+  await expect(page.locator('optgroup[label="Epics"] option')).toHaveCount(1);
+
+  const frontier = page.getByRole('region', { name: 'Frontier' });
+  await expect(frontier.getByRole('button', { name: /^02 Implement transfer/ })).toBeVisible();
+  await expect(frontier.getByText('1 of 5 done in Node handoff, 1 ruled out.')).toBeVisible();
+  await frontier.getByText(/Skipped in the map files \(1\)/).click();
+  await expect(frontier.getByText(/notes\.md: the file name does not start with a ticket number/)).toBeVisible();
+
+  await map.getByRole('button', { name: /^05 Verify on Windows: Blocked/ }).click();
+  const blocked = page.getByRole('region', { name: 'Ticket 05' });
+  await expect(blocked.getByText(/Blocked by/)).toContainText('02');
+  await expect(blocked.getByText(/Blocked by/)).toContainText('04');
+  await map.getByRole('button', { name: /^04 Move uncommitted files: Ruled out/ }).click();
+  await expect(page.getByRole('region', { name: 'Ticket 04' }).getByText('Ruled out: the tickets that wait on it stay blocked.')).toBeVisible();
+  await expect(map.getByRole('button', { name: /^03 Worker smoke test: Claimed/ })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('planning-map-file.png'), fullPage: true });
+
+  await map.getByRole('button', { name: /^02 Implement transfer/ }).click();
+  const detail = page.getByRole('region', { name: 'Ticket 02' });
+  await expect(detail.getByText('.plan/maps/node-handoff/tickets/02-ticket.md')).toBeVisible();
+  await expect(detail.getByRole('link', { name: 'Open issue' })).toHaveCount(0);
+  await detail.getByRole('button', { name: 'Discuss in chat' }).click();
+  await expect(page).toHaveURL(/page=chat/);
+  await expect(page).not.toHaveURL(/map=/);
 });

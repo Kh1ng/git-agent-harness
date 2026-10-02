@@ -772,7 +772,7 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
       "secret_fields": [],
       "remote_disposition": "remote_available",
       "local_only_reason": null,
-      "documentation": "Reads provider issues and their relations; never writes to the provider.",
+      "documentation": "Reads provider issues and their relations, or a chartr .plan/maps/ map from the checkout; never writes either.",
       "cli_command_path": "gah map",
       "is_stable": true
     },
@@ -2133,6 +2133,10 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
         "epic": {
           "description": "Epic issue number to map; omit to list the issues that can be mapped.",
           "type": "number"
+        },
+        "file": {
+          "description": "A .plan/maps/ map slug to read from the checkout instead of an epic.",
+          "type": "string"
         },
         "profile": {
           "description": "GAH profile name; defaults to the configured default profile.",

@@ -1,7 +1,10 @@
 /** `gah map --json` output and the Planning page API (#1241). The map is
- * read-only: it reflects provider issues and never writes to them. */
+ * read-only: it reflects provider issues, or a chartr `.plan/maps/` map in
+ * the checkout, and never writes to either. */
 
-export type PlanningNodeState = 'done' | 'ready' | 'blocked' | 'parent';
+/** `ruled_out` and `claimed` occur only in map files: a ruled-out ticket
+ * does not unblock its dependents, and a claimed one is open but taken. */
+export type PlanningNodeState = 'done' | 'ready' | 'blocked' | 'parent' | 'ruled_out' | 'claimed';
 
 export interface PlanningNode {
   number: number;
@@ -13,6 +16,8 @@ export interface PlanningNode {
   depth: number | null;
   /** Open issues this one waits on. */
   waiting_on: number[];
+  /** A map-file ticket's path in the repository (`url` is then empty). */
+  path?: string;
 }
 
 export interface PlanningEdge {
@@ -30,6 +35,11 @@ export interface PlanningMap {
   frontier: number[];
   /** Referenced issues the provider listing did not include. */
   missing: number[];
+  /** The `.plan/maps/` slug when the map came from files. Node 0 is then the
+   * map's destination and the numbers are ticket numbers, not issues. */
+  file?: string;
+  /** Map-file problems that did not stop the map (a skipped ticket, say). */
+  diagnostics?: string[];
 }
 
 export interface PlanningEpic {
@@ -41,9 +51,24 @@ export interface PlanningEpic {
   open_children: number;
 }
 
+/** A chartr map in the checkout's `.plan/maps/<slug>/`. */
+export interface PlanningMapFile {
+  slug: string;
+  title: string;
+  tickets: number;
+  /** Tickets neither resolved nor ruled out. */
+  open_tickets: number;
+}
+
 export interface PlanningEpicList {
   epics: PlanningEpic[];
+  files: PlanningMapFile[];
+  /** Why issues could not be listed; the map files still were. */
+  issues_error?: string;
 }
+
+/** What to map: an epic issue, or a `.plan/maps/` slug. */
+export type PlanningTarget = { epic: number } | { file: string };
 
 /** Where a grill-me chat records answers: provider issues, or one Markdown
  * file in the repository at `path`. */
@@ -64,6 +89,8 @@ export interface PlanningChatRequest {
   profile: string;
   kind: 'grill' | 'ticket';
   epic?: number;
+  /** A `.plan/maps/` slug, instead of `epic`. */
+  file?: string;
   ticket?: number;
   /** The rough idea to grill, for `grill`. */
   idea?: string;
