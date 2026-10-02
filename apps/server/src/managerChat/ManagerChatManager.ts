@@ -663,14 +663,15 @@ export async function handoffAttempt(
     const { error, failure } = caught as { error: unknown; failure: QuotaFailure };
     if (!failure || failure.kind !== 'hard') throw error ?? caught;
     const fallbacks = typeof fallbackBackends === 'function' ? await fallbackBackends() : fallbackBackends;
+    const errors = [errorMessage(error)];
     for (const fallback of fallbacks) {
       try { return { ...await run(fallback), backend: fallback, handoff: { from: startBackend, to: fallback, reason: errorMessage(error), resetAt: failure.resetAt } }; }
       catch (second) {
         const failed = second as { error: unknown; failure: QuotaFailure };
-        if (failed.failure?.kind === 'hard') throw new Error(`${errorMessage(error)}; fallback ${fallback}: ${errorMessage(failed.error)}`);
+        errors.push(`fallback ${fallback}: ${errorMessage(failed.error ?? second)}`);
       }
     }
-    throw error;
+    throw new Error(errors.join('; '));
   }
 }
 

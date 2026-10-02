@@ -329,16 +329,38 @@ test('handoffAttempt fails the turn when no fallback is configured', async () =>
   );
 });
 
-test('handoffAttempt allows at most one handoff: a second limit error fails the turn', async () => {
+test('handoffAttempt tries the next account after an exhausted fallback and records both limits', async () => {
+  const calls: string[] = [];
+  const classified: string[] = [];
+  const result = await handoffAttempt({
+    startBackend: 'agy#second',
+    fallbackBackends: ['agy#first', 'claude'],
+    classify: async backend => {
+      classified.push(backend);
+      return { kind: 'hard', resetAt: 1234, retryAfterMs: null };
+    },
+    attempt: async backend => {
+      calls.push(backend);
+      if (backend !== 'claude') throw new Error(`${backend} Individual quota reached`);
+      return { reply: 'claude answer', model: null, usage: null };
+    }
+  });
+  assert.deepEqual(calls, ['agy#second', 'agy#first', 'claude']);
+  assert.deepEqual(classified, ['agy#second', 'agy#first']);
+  assert.equal(result.backend, 'claude');
+  assert.equal(result.handoff?.resetAt, 1234);
+});
+
+test('handoffAttempt reports every exhausted account when no fallback succeeds', async () => {
   await assert.rejects(
     handoffAttempt({
       startBackend: 'hermes',
-      fallbackBackends: ['codex'],
+      fallbackBackends: ['codex', 'claude'],
       attempt: async (backendId) => {
         throw new Error(`${backendId} usage limit`);
       }
     }),
-    /hermes usage limit/
+    /hermes usage limit; fallback codex: codex usage limit; fallback claude: claude usage limit/
   );
 });
 
