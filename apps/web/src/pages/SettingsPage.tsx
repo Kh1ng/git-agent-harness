@@ -1646,12 +1646,14 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
 const MEMORY_TIERS = ['L0', 'L1', 'L2'];
 
 interface PolicyDraft {
+  settleIdleSeconds: string;
   budgetChars: string;
   tiers: string[];
 }
 
 function policyDraft(policy: MemoryContextPolicy | undefined): PolicyDraft {
   return {
+    settleIdleSeconds: policy?.settleIdleSeconds ? String(policy.settleIdleSeconds) : '',
     budgetChars: policy?.budgetChars ? String(policy.budgetChars) : '',
     tiers: policy?.tiers ?? []
   };
@@ -1659,6 +1661,7 @@ function policyDraft(policy: MemoryContextPolicy | undefined): PolicyDraft {
 
 function policyFromDraft(draft: PolicyDraft): MemoryContextPolicy {
   return {
+    ...(draft.settleIdleSeconds ? { settleIdleSeconds: Number(draft.settleIdleSeconds) } : {}),
     ...(draft.budgetChars ? { budgetChars: Number(draft.budgetChars) } : {}),
     ...(draft.tiers.length > 0 ? { tiers: draft.tiers } : {})
   };
@@ -1720,6 +1723,10 @@ function GatewaySettingsSection({ configuredProfiles }: { configuredProfiles: Pr
     const drafts = [globalPolicyDraft, ...Object.values(profilePolicyDrafts)];
     if (drafts.some((draft) => draft.budgetChars && (!Number.isInteger(Number(draft.budgetChars)) || Number(draft.budgetChars) < 1))) {
       setError('Memory budgets must be whole numbers greater than zero, or blank for unlimited.');
+      return;
+    }
+    if (drafts.some((draft) => draft.settleIdleSeconds && (!Number.isInteger(Number(draft.settleIdleSeconds)) || Number(draft.settleIdleSeconds) < 1 || Number(draft.settleIdleSeconds) > 86400))) {
+      setError('Idle timeouts must be 1–86400 seconds, or blank to use the default.');
       return;
     }
     setSaving(true);
@@ -1870,6 +1877,14 @@ function GatewaySettingsSection({ configuredProfiles }: { configuredProfiles: Pr
             className="mt-1 w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary"
           />
         </label>
+        <label className="block max-w-xs text-xs text-secondary">
+          Save memory after idle (seconds)
+          <input type="number" min="1" max="86400" step="1"
+            value={globalPolicyDraft.settleIdleSeconds}
+            onChange={(event) => setGlobalPolicyDraft((current) => ({ ...current, settleIdleSeconds: event.target.value }))}
+            placeholder="900 (15 minutes)"
+            className="mt-1 w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary" />
+        </label>
         <div>
           <span className="block text-xs text-secondary">Eligible tiers</span>
           <TierPicker value={globalPolicyDraft.tiers} onChange={(tiers) => setGlobalPolicyDraft((current) => ({ ...current, tiers }))} />
@@ -1890,7 +1905,7 @@ function GatewaySettingsSection({ configuredProfiles }: { configuredProfiles: Pr
                 [profile.name]: { ...draft, ...patch }
               }));
               return (
-                <div key={profile.name} className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_12rem_minmax(0,1fr)] sm:items-end">
+                <div key={profile.name} className="grid gap-3 p-3 sm:grid-cols-2 lg:grid-cols-4 sm:items-end">
                   <div className="min-w-0">
                     <p className="text-xs font-medium text-primary truncate">{profile.display_name}</p>
                     <p className="text-xs text-muted truncate">{profile.name}</p>
@@ -1906,6 +1921,14 @@ function GatewaySettingsSection({ configuredProfiles }: { configuredProfiles: Pr
                       placeholder="Inherit"
                       className="mt-1 w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary"
                     />
+                  </label>
+                  <label className="block text-xs text-secondary">
+                    Save after idle (seconds)
+                    <input type="number" min="1" max="86400" step="1"
+                      value={draft.settleIdleSeconds}
+                      onChange={(event) => updateDraft({ settleIdleSeconds: event.target.value })}
+                      placeholder="Inherit"
+                      className="mt-1 w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-xs text-primary" />
                   </label>
                   <div>
                     <span className="block text-xs text-secondary">Tier override</span>

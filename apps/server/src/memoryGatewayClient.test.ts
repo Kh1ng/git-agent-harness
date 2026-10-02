@@ -36,7 +36,7 @@ import {
  * capture-then-recall round-trips through the same store a real gateway
  * would use, and namespace isolation between keys is genuinely exercised
  * rather than assumed. */
-async function withFakeGateway(testFn: (baseUrl: string) => Promise<void>): Promise<void> {
+async function withFakeGateway(testFn: (baseUrl: string) => Promise<void>, onFlush?: (key: string) => void): Promise<void> {
   const store = new Map<string, string[]>();
   const server = http.createServer((req, res) => {
     let body = '';
@@ -50,6 +50,12 @@ async function withFakeGateway(testFn: (baseUrl: string) => Promise<void>): Prom
         store.set(sessionKey, entries);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ l0_recorded: 1, scheduler_notified: false }));
+        return;
+      }
+      if (req.url === '/session/end') {
+        onFlush?.(sessionKey);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({flushed:true}));
         return;
       }
       if (req.url === '/recall') {
@@ -258,4 +264,27 @@ test('a working gateway clears the degraded health snapshot', async () => {
     assert.equal(gatewayHealth().degraded, false);
     assert.equal(gatewayHealth().lastError, null);
   });
+});
+
+
+test('idle captures flush once after the last turn; explicit settle cancels the timer', async () => {
+  const { writeGatewaySettings } = await import('./gatewaySettingsStore.js');
+  process.env.GAH_GATEWAY_SETTINGS_PATH = join(testHome, 'idle-settings.json');
+  const flushed: string[] = [];
+  try {
+    writeGatewaySettings({ contextPolicy: {settleIdleSeconds:0.08} });
+    await withFakeGateway(async () => {
+      await capture('idle-project', 'first fact', 'acknowledged');
+      await new Promise(resolve => setTimeout(resolve, 40));
+      await capture('idle-project', 'corrected fact', 'acknowledged');
+      await new Promise(resolve => setTimeout(resolve, 50));
+      assert.deepEqual(flushed, []);
+      await new Promise(resolve => setTimeout(resolve, 60));
+      assert.deepEqual(flushed, ['gah:manager:idle-project']);
+      await capture('idle-project', 'last fact', 'acknowledged');
+      assert.equal(await flushSession('idle-project'), true);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      assert.equal(flushed.length, 2, 'explicit settle must not flush again on the old timer');
+    }, key => flushed.push(key));
+  } finally { delete process.env.GAH_GATEWAY_SETTINGS_PATH; }
 });

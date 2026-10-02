@@ -19,6 +19,7 @@ pub mod commands;
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Memory(args) => commands::memory::run(args)?,
         Commands::Route(args) => commands::route::run(
             &args.profile,
             args.model.as_deref(),

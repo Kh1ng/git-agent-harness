@@ -93,6 +93,8 @@ pub enum PmCommands {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Project memory retrieval, flush, deletion and migration.
+    Memory(crate::cli::commands::memory::MemoryArgs),
     /// Shared subscription routes, or classify and record a failed turn read from stdin.
     Route(crate::cli::commands::route::Args),
     /// The install scripts' file work (environment files, LaunchAgents, WSL).

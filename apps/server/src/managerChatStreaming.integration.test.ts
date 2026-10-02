@@ -538,11 +538,12 @@ test('a configured context budget truncates injected recall and records its prov
         | undefined;
       assert.ok(inject, 'an inject event was logged');
       const recalledPortion = inject.text.match(/R{10,}/)?.[0] ?? '';
-      assert.equal(recalledPortion.length, 1000, 'context never exceeds the budget');
+      assert.ok(recalledPortion.length > 0);
+      assert.ok(inject.text.length - 'Hello there'.length <= 1000, 'the complete memory envelope stays within budget');
       assert.equal(inject.truncated, true);
       assert.deepEqual(inject.policy, { budgetChars: 1000, tiers: ['L0', 'L1'] });
       // Truncation is never silent: the agent is told more exists.
-      assert.ok(inject.text.includes('truncated to the context budget'), 'truncation is surfaced, not silent');
+      assert.ok(inject.text.includes('truncated to the memory budget'), 'truncation is surfaced, not silent');
     } finally {
       await closeSocket(ws);
     }

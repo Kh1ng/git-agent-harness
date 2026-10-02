@@ -28,7 +28,8 @@ import { AsyncTtlCache } from '../asyncTtlCache.js';
 import {
   effectiveGatewayUrl,
   effectiveGatewayApiKey,
-  gatewayEnabledForProfile
+  gatewayEnabledForProfile,
+  effectiveContextPolicy
 } from '../gatewaySettingsStore.js';
 
 // Read fresh per call: lets tests substitute, and lets runtime config changes
@@ -241,6 +242,8 @@ export async function recall(profile: string, query: string): Promise<RecallResu
   return recallForKey(await sessionKeyForProfile(profile), query);
 }
 
+const idleFlushes = new Map<string, ReturnType<typeof setTimeout>>();
+
 export async function capture(
   profile: string,
   userContent: string,
@@ -255,7 +258,14 @@ export async function capture(
   // instead of skipping the whole capture. Every non-empty reply is preserved
   // verbatim; ticket-scoped captures keep their existing caller-owned contract.
   const capturedAssistantContent = assistantContent === '' ? '[No assistant reply]' : assistantContent;
-  return captureForKey(await sessionKeyForProfile(profile), userContent, capturedAssistantContent);
+  const captured = await captureForKey(await sessionKeyForProfile(profile), userContent, capturedAssistantContent);
+  if (!captured.degraded && captured.l0Recorded > 0) {
+    clearTimeout(idleFlushes.get(profile));
+    const timer = setTimeout(() => { idleFlushes.delete(profile); void flushSession(profile); }, effectiveContextPolicy(profile).settleIdleSeconds! * 1000);
+    timer.unref();
+    idleFlushes.set(profile, timer);
+  }
+  return captured;
 }
 
 /** Ticket-scoped recall for repair/review agents -- callers never see key
@@ -301,6 +311,8 @@ export async function captureForTicket(
  * #878 fail-open: never throws. A failed flush reports `false` (and marks
  * the gateway degraded) rather than aborting the turn. */
 export async function flushSession(profile: string): Promise<boolean> {
+  clearTimeout(idleFlushes.get(profile));
+  idleFlushes.delete(profile);
   if (!gatewayEnabledForProfile(profile)) {
     return false;
   }

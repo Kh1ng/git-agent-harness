@@ -139,6 +139,7 @@ struct RecallResponse {
 #[derive(Debug, Deserialize)]
 struct CaptureResponse {
     l0_recorded: u64,
+    #[serde(default)]
     code: i64,
     #[serde(default)]
     message: String,
@@ -150,8 +151,9 @@ fn gateway_connection(
 ) -> Result<(String, Option<String>, NodeRole)> {
     let node = crate::node_role::NodeRoleStatus::resolve(defaults)?;
     if node.role == NodeRole::Worker {
-        let token = std::env::var("COORDINATOR_TOKEN")
-            .context("worker memory requires COORDINATOR_TOKEN")?;
+        let token = std::env::var("COORDINATOR_TOKEN").ok().filter(|token| !token.is_empty())
+            .or_else(|| crate::installer::files::env_get(&crate::setup::host::home().join(".config/gah/gah-loop.env"), "COORDINATOR_TOKEN"))
+            .context("worker memory requires COORDINATOR_TOKEN in the environment or ~/.config/gah/gah-loop.env")?;
         if token.trim().is_empty() || token.chars().any(char::is_control) {
             anyhow::bail!(
                 "worker memory requires a nonempty COORDINATOR_TOKEN without control characters"
@@ -167,10 +169,93 @@ fn gateway_connection(
         ));
     }
     Ok((
-        std::env::var("TDAI_GATEWAY_URL").unwrap_or_else(|_| DEFAULT_GATEWAY_URL.to_string()),
+        configured_gateway_url(),
         gateway_api_key(&crate::setup::host::home())?,
         node.role,
     ))
+}
+
+/// The setup hook settings already hold the Mac's remote gateway URL.
+fn configured_gateway_url() -> String {
+    std::env::var("TDAI_GATEWAY_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+        .or_else(|| {
+            let home = crate::setup::host::home();
+            [
+                home.join(".config/gah/gateway-settings.json"),
+                home.join(".config/gah/memory-hooks.json"),
+            ]
+            .iter()
+            .find_map(|file| {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
+                value
+                    .get("url")
+                    .or_else(|| value.get("gateway_url"))?
+                    .as_str()
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_owned)
+            })
+        })
+        .unwrap_or_else(|| DEFAULT_GATEWAY_URL.into())
+}
+
+/// User-requested operations report failures; only automatic memory calls fail open.
+pub fn project_request(
+    defaults: &crate::config::Defaults,
+    profile_name: &str,
+    local_path: &str,
+    operation: &str,
+    mut payload: serde_json::Value,
+) -> Result<serde_json::Value> {
+    anyhow::ensure!(
+        matches!(
+            operation,
+            "recall"
+                | "session/end"
+                | "memories/list"
+                | "memories/delete"
+                | "memories/migrate-english"
+                | "profiles/read"
+        ),
+        "Unsupported memory operation"
+    );
+    let project = resolve_project_key(profile_name, local_path);
+    anyhow::ensure!(
+        !project.is_empty() && project.len() <= 2000 && !project.chars().any(char::is_control),
+        "Invalid project key"
+    );
+    let (url, key, role) = gateway_connection(defaults)?;
+    payload["session_key"] = serde_json::json!(format!("gah:manager:{project}"));
+    if role == NodeRole::Worker {
+        payload["profile"] = serde_json::json!(profile_name);
+    }
+    let (status, response) = CurlMemoryGatewayTransport.post(
+        &format!("{}/{operation}", url.trim_end_matches('/')),
+        &serde_json::to_string(&payload)?,
+        key.as_deref(),
+        300,
+    )?;
+    anyhow::ensure!(
+        status != 401,
+        "Memory gateway authentication failed; repair ~/.config/gah/tdai-gateway.env"
+    );
+    anyhow::ensure!(
+        (200..300).contains(&status),
+        "Memory gateway returned HTTP {status}"
+    );
+    let result: serde_json::Value =
+        serde_json::from_slice(&response).context("Invalid memory gateway response")?;
+    anyhow::ensure!(
+        result.get("code").and_then(|v| v.as_i64()).unwrap_or(0) == 0,
+        "Memory operation failed: {}",
+        result
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error")
+    );
+    Ok(result)
 }
 
 /// Same normalization as `memoryGatewayClient.ts`'s `normalizeRemoteUrl`:
