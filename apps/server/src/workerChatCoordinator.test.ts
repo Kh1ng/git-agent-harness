@@ -15,7 +15,7 @@ import { RegistryService } from './registryService.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { addRemoteProject } from './projectCatalog.js';
 import { configureChatRouting, chatNodes } from './chatRouting.js';
-import { createChatSession, sendManagerChatMessage, archiveChatSession, getSessionView } from './managerChat/ManagerChatManager.js';
+import { createChatSession, startChatFromIssue, startChatFromPr, sendManagerChatMessage, archiveChatSession, getSessionView } from './managerChat/ManagerChatManager.js';
 import { getSession } from './managerChat/chatSessions.js';
 import type { ManagerAdapter } from './managerChat/registry.js';
 import { reclaimChatSessions } from './managerChat/chatMaintenance.js';
@@ -42,6 +42,9 @@ test('central keeps history and skills while authenticated turns move between wo
     GAH_GATEWAY_SETTINGS_PATH: join(root, 'gateway.json'),
     GAH_MANAGER_CHAT_SETTINGS_PATH: join(root, 'manager.json'),
     GAH_SKILL_BANK_PATH: join(root, 'skills.json'),
+    GAH_FAKE_GH_FIXTURE: new URL('../tests/fixtures/gh/data', import.meta.url).pathname,
+    GAH_FAKE_GH_STATE: join(root, 'gh-state'),
+    PATH: `${new URL('../tests/fixtures/gh', import.meta.url).pathname}:${process.env.PATH}`,
     COORDINATOR_TOKEN: 'isolated-worker-test',
     GAH_ALLOW_INSECURE_HTTP: '1'
   });
@@ -162,5 +165,14 @@ test('central keeps history and skills while authenticated turns move between wo
   for (const nodeId of ['one', 'two']) {
     assert.ok(getSession('worker-only', session.id, { stateDir: join(root, `${nodeId}-state`) })?.archivedAt);
     assert.equal(existsSync(saved.workspaces![nodeId].worktreePath!), false);
+  }
+  // Source chats use the same worker RPC and preserve an explicitly chosen
+  // account, including PR's worktree-less creation contract.
+  for (const [start, number, worktree] of [[startChatFromIssue, 42, true], [startChatFromPr, 12, false]] as const) {
+    const created = (await start(project.chat_profile, number, 'claude', null, 'two', 'claude-2')).session;
+    assert.equal(created.nodeId, 'two');
+    assert.equal(created.backendInstance, 'claude-2');
+    assert.equal(created.worktreePath !== null, worktree);
+    assert.equal(getSession('worker-only', created.id, { stateDir: join(root, 'two-state') })?.backendInstance, 'claude-2');
   }
 });
