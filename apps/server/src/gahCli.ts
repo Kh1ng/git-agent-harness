@@ -1839,10 +1839,10 @@ export interface SubscriptionRoute {
 }
 export interface QuotaFailure { kind: 'hard' | 'transient' | 'other'; resetAt: number | null; retryAfterMs: number | null }
 export function runSubscriptionRoutes(profile: string, model?: string | null): Promise<SubscriptionRoute[]> {
-  const config = getConfigPath();
+  const config = getConfigPath(process.env.GAH_CONFIG_PATH ?? process.env.GAH_CONFIG);
   return runJsonCommand(['route', '--profile', profile, ...(model ? ['--model', model] : []), ...(config ? ['--config-path', config] : [])], config);
 }
 export function runQuotaFailure(profile: string, backend: string, instance: string | null | undefined, model: string | null | undefined, message: string): Promise<QuotaFailure> {
-  const config = getConfigPath();
+  const config = getConfigPath(process.env.GAH_CONFIG_PATH ?? process.env.GAH_CONFIG);
   return runJsonCommand(['route', '--profile', profile, ...(config ? ['--config-path', config] : []), '--failure-backend', backend, ...(instance ? ['--backend-instance', instance] : []), ...(model ? ['--model', model] : [])], config, false, message.slice(0, 64 * 1024));
 }
