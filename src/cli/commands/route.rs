@@ -3,6 +3,20 @@ use anyhow::Result;
 use std::io::Read;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+#[derive(clap::Args)]
+pub struct Args {
+    #[arg(long)]
+    pub profile: String,
+    #[arg(long)]
+    pub model: Option<String>,
+    #[arg(long)]
+    pub failure_backend: Option<String>,
+    #[arg(long, requires = "failure_backend")]
+    pub backend_instance: Option<String>,
+    #[arg(long = "config", visible_alias = "config-path")]
+    pub config_path: Option<String>,
+}
+
 pub fn run(
     profile_name: &str,
     model: Option<&str>,
