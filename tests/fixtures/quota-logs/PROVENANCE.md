@@ -30,3 +30,5 @@ corresponding captured fixture on this host — no real AGY quota exhaustion has
 here yet. The quota-branch tests in `quota_parser.rs` exercise the literal strings already
 present in the shipped regex rather than an external fixture; treat that regex as unverified
 against a real capture until one exists.
+
+`agy_individual_quota_reached.txt`: central node `~/.local/state/gah/chat` handoff records (Aug 29–30), inspected Oct 2, 2026 while investigating GAH #1294. The subscription error and cooldown are provider output, not a synthetic HTTP 429.

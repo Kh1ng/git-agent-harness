@@ -124,7 +124,7 @@ export async function resolveInstanceAdapter(profile: string, backendId: string,
   const runtimeKey = JSON.stringify(runtime);
   const cached = INSTANCE_ADAPTERS.get(key);
   if (cached?.runtime === runtimeKey) return cached.adapter;
-  if (runtime.logical_backend !== backendId) throw new Error(`Backend instance "${instance}" does not serve ${backendId}.`);
+  if (runtime.logical_backend !== backendId && runtime.runner_kind !== backendId) throw new Error(`Backend instance "${instance}" does not serve ${backendId}.`);
   const label = runtime.account_label ? `${backendId} · ${runtime.account_label}` : `${backendId} · ${instance}`;
   const adapter = runtime.runner_kind === 'codex'
     ? acpManagerAdapter(backendId, label, () => codexSpawnSpec(runtime), { consecutiveFailureReconnectThreshold: 2 })
@@ -132,6 +132,8 @@ export async function resolveInstanceAdapter(profile: string, backendId: string,
       ? acpManagerAdapter(backendId, label, () => claudeSpawnSpec(runtime))
       : runtime.runner_kind === 'opencode'
         ? acpManagerAdapter(backendId, label, () => opencodeSpawnSpec(runtime))
+        : runtime.runner_kind === 'agy'
+          ? createHeadlessBackend(agyBackendSpec(runtime)) as ManagerAdapter
         : (() => { throw new Error(`Backend instance "${instance}" is not supported by Manager Chat.`); })();
   INSTANCE_ADAPTERS.set(key, { runtime: runtimeKey, adapter });
   return adapter;

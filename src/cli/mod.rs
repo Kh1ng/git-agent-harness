@@ -19,6 +19,19 @@ pub mod commands;
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Route {
+            profile,
+            model,
+            failure_backend,
+            backend_instance,
+            config_path,
+        } => commands::route::run(
+            &profile,
+            model.as_deref(),
+            failure_backend.as_deref(),
+            backend_instance.as_deref(),
+            config_path.as_deref(),
+        )?,
         Commands::Map(args) => crate::planning::run(args)?,
         Commands::Installer(command) => crate::installer::run(command)?,
         Commands::Setup {

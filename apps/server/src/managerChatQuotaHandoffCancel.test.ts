@@ -122,3 +122,38 @@ test('cancelling a quota-handoff turn stuck on a never-settling fallback settles
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+test('the exact Claude session limit switches to AGY and keeps that route on the following message', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-chat-quota-pin-'));
+  const savedEnv = { ...process.env };
+  const claude = resolveAdapter('claude'); const agy = resolveAdapter('agy');
+  const savedClaude = claude.runTurn; const savedAgy = agy.runTurn;
+  const profile = `quota-pin-${Date.now()}`;
+  process.env.GAH_BINARY = join(fixtures, 'gah', 'gah');
+  process.env.GAH_MANAGER_CHAT_SETTINGS_PATH = join(dir, 'settings.json');
+  process.env.GAH_GATEWAY_SETTINGS_PATH = join(dir, 'gateway.json');
+  process.env.GAH_FIXTURE_QUOTA_ROUTES = '["agy"]';
+  process.env.TDAI_GATEWAY_URL = 'http://127.0.0.1:1';
+  setSessionLogOptions({ stateDir: join(dir, 'chat') });
+  const calls: string[] = [];
+  claude.runTurn = async () => { calls.push('claude'); throw new Error("You've hit your session limit · resets 2:30am (America/Chicago)"); };
+  agy.runTurn = async () => { calls.push('agy'); return { reply: 'continued', model: null, usage: null }; };
+  try {
+    const { setBackendForProfile, readSettings, writeSettings, quotaRouteForProfile } = await import('./managerChat/settingsStore.js');
+    setBackendForProfile(profile, 'claude');
+    const first = await sendManagerChatMessage(profile, 'first message');
+    assert.equal(first.turn.backend, 'agy');
+    const second = await sendManagerChatMessage(profile, 'following message');
+    assert.equal(second.turn.backend, 'agy');
+    assert.deepEqual(calls, ['claude', 'agy', 'agy']);
+    assert.equal(quotaRouteForProfile(profile)?.original.backend, 'claude');
+    const settings = readSettings(); settings.quotaRoutes![profile].original.resetAt = Date.now() - 1; writeSettings(settings);
+    assert.equal(quotaRouteForProfile(profile), undefined, 'known reset releases the persisted route');
+    setBackendForProfile(profile, 'hermes');
+    assert.equal(quotaRouteForProfile(profile), undefined, 'manual selection clears the route');
+    assert.ok(loadLog(profile, { stateDir: join(dir, 'chat') }).some(event => event.type === 'handoff' && event.from === 'claude' && event.to === 'agy' && event.resetAt != null));
+  } finally {
+    claude.runTurn = savedClaude; agy.runTurn = savedAgy;
+    setSessionLogOptions({ stateDir: undefined }); process.env = savedEnv; rmSync(dir, { recursive: true, force: true });
+  }
+});

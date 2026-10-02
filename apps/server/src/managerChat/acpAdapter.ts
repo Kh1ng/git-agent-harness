@@ -363,11 +363,17 @@ function summarizeToolOutput(tool: acp.ToolCallUpdate): string | null {
  * "You've hit your usage limit..."), so matching on the message is the
  * trigger signal. Anything else -- auth, backend crash, network -- is never
  * a handoff trigger. */
-export function isUsageLimitError(error: unknown): boolean {
+export function classifyUsageLimitError(error: unknown): 'hard' | 'transient' | null {
   const message = error instanceof Error ? error.message : String(error);
-  // Quota/usage-limit triggers only. Deliberately not matching "token limit"
-  // (a max_tokens stop, not a quota) or generic "limit reached" phrasing.
-  return /usage limit|rate limit|quota|exhausted|insufficient (credits|quota)|hit (your|the) (daily |monthly )?limit|quota.*exceed/i.test(message);
+  if (/401|unauthorized|invalid api key|not logged in|cancelled|canceled/i.test(message)) return null;
+  if (/not your usage limit/i.test(message)) return 'transient';
+  if (/usage limit|(?:session|weekly|monthly|daily) limit|individual quota reached|quota exhausted|insufficient (credits|quota)/i.test(message)) return 'hard';
+  if (/rate limit|\b429\b|resource_exhausted|overloaded|server busy/i.test(message)) return 'transient';
+  return null;
+}
+
+export function isUsageLimitError(error: unknown): boolean {
+  return classifyUsageLimitError(error) === 'hard';
 }
 
 export function codexSpawnSpec(runtime?: { executable: string; state_root: string | null }): SpawnSpec {

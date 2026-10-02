@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import type { ChatSessionSummary, ChatTranscriptTurn, HelperRoutePreference, HelperTaskKind, NodeRoleStatus, ProfileSummary } from '@git-agent-harness/contracts';
-import { runProfileList } from './gahCli.js';
+import { runProfileList, runSubscriptionRoutes, runQuotaFailure } from './gahCli.js';
 import { resolveInstanceAdapter, type ManagerAdapter } from './managerChat/registry.js';
 import { archiveSession, chatKey, createSession, getSession, publishWorkspace, refreshWorkspace, resolveSessionCwd, restoreSession, touchSession, updateSession, type ChatSessionStoreOptions } from './managerChat/chatSessions.js';
 import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewChangesForHelper, getSelectedChangesForHelper } from './gitCache.js';
@@ -42,7 +42,7 @@ export function createWorkerChatRouter(deps: {
     if (!body || typeof body.profile !== 'string' || !body.profile || typeof body.action !== 'string') {
       return void res.status(400).json({ error: 'A profile and worker chat action are required.' });
     }
-    const actions = ['create', 'prepare', 'handoff', 'archive', 'restore', 'models', 'commands', 'run', 'cancel', 'steer', 'permission', 'git-status', 'git-review', 'git-commit', 'git-publish', 'git-update', 'helper-task'];
+    const actions = ['quota-routes', 'quota-failure', 'create', 'prepare', 'handoff', 'archive', 'restore', 'models', 'commands', 'run', 'cancel', 'steer', 'permission', 'git-status', 'git-review', 'git-commit', 'git-publish', 'git-update', 'helper-task'];
     if (!actions.includes(body.action)) return void res.status(400).json({ error: 'Unknown worker chat action.' });
     const sessionId = body.sessionId;
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(sessionId))) {
@@ -53,6 +53,14 @@ export function createWorkerChatRouter(deps: {
       const profile = (await profiles()).find(candidate => candidate.name === body.profile);
       if (!profile) return void res.status(404).json({ error: 'This worker does not have that profile.' });
       if (!profile.web_url || body.repo !== profile.repo || body.provider !== profile.provider || body.origin !== new URL(profile.web_url).origin) return void res.status(409).json({ error: 'The worker profile refers to a different repository or provider host.' });
+      if (body.action === 'quota-routes' || body.action === 'quota-failure') {
+        if (!(body.model == null || (typeof body.model === 'string' && body.model.length <= 256))) return void res.status(400).json({ error: 'Invalid quota model.' });
+        if (body.action === 'quota-routes') return void res.json(await runSubscriptionRoutes(body.profile, body.model));
+        if (typeof body.backend !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(body.backend)
+          || !(body.backendInstance == null || (typeof body.backendInstance === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(body.backendInstance)))
+          || typeof body.message !== 'string' || body.message.length > 64 * 1024) return void res.status(400).json({ error: 'Invalid quota failure.' });
+        return void res.json(await runQuotaFailure(body.profile, body.backend, body.backendInstance, body.model, body.message));
+      }
       const key = chatKey(body.profile, sessionId);
       if (['create', 'prepare', 'handoff', 'archive', 'restore', 'run', 'git-commit', 'git-publish', 'git-update'].includes(body.action)) {
         if (workspaceOperations.has(key) || [...active.values()].some(turn => turn.key === key)) {

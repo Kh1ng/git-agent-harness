@@ -308,13 +308,14 @@ export function getSession(profile: string, sessionId: string, opts?: ChatSessio
 export function updateSession(
   profile: string,
   sessionId: string,
-  patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string; titleSuggestion?: ChatSessionSummary['titleSuggestion'] },
+  patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string; titleSuggestion?: ChatSessionSummary['titleSuggestion']; quotaHandoff?: ChatSessionSummary['quotaHandoff'] },
   opts?: ChatSessionStoreOptions
 ): ChatSessionSummary {
   const sessions = readIndex(profile, opts);
   const session = sessions.find((s) => s.id === sessionId);
   if (!session) throw new Error(`No chat session '${sessionId}' for profile '${profile}'`);
   if (session.archivedAt !== null) throw new Error(`Chat session '${sessionId}' is archived`);
+  if (patch.quotaHandoff !== undefined) session.quotaHandoff = patch.quotaHandoff;
   if (patch.backend !== undefined) session.backend = patch.backend;
   if (patch.backendInstance !== undefined) session.backendInstance = patch.backendInstance;
   if (patch.model !== undefined) session.model = patch.model;

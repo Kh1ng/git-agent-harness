@@ -259,7 +259,11 @@ test('reasoning effort override persists per profile+backend', () => {
 
 test('isUsageLimitError classifies quota-limit messages but not auth/crash/network errors', () => {
   assert.equal(isUsageLimitError(new Error("You've hit your usage limit. Please wait or upgrade.")), true);
-  assert.equal(isUsageLimitError(new Error('Rate limit exceeded, retry in 30s.')), true);
+  assert.equal(isUsageLimitError(new Error('Rate limit exceeded, retry in 30s.')), false);
+  // Session and AGY: central-node chat logs read Oct 2 (#1294). Weekly: parser fixture.
+  assert.equal(isUsageLimitError(new Error("Internal error: You've hit your session limit · resets 2:30am (America/Chicago)")), true);
+  assert.equal(isUsageLimitError(new Error("You've hit your weekly limit · resets Oct 5")), true);
+  assert.equal(isUsageLimitError(new Error('Agy turn failed: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 162h54m28s.')), true);
   assert.equal(isUsageLimitError(new Error('Quota exhausted: insufficient credits.')), true);
   assert.equal(isUsageLimitError(new Error('Token limit reached.')), false); // not a quota-limit trigger by itself
   assert.equal(isUsageLimitError(new Error('401 Unauthorized: invalid API key')), false);
@@ -281,7 +285,7 @@ test('handoffAttempt reruns a usage-limited turn on the next eligible backend, o
   assert.deepEqual(calls, ['hermes', 'codex']);
   assert.equal(result.backend, 'codex');
   assert.equal(result.reply, 'answered by codex');
-  assert.deepEqual(result.handoff, { from: 'hermes', to: 'codex', reason: "You've hit your usage limit." });
+  assert.deepEqual(result.handoff, { from: 'hermes', to: 'codex', reason: "You've hit your usage limit.", resetAt: null });
 });
 
 test('handoffAttempt skips a fallback that fails for a non-limit reason and tries the next', async () => {
@@ -295,7 +299,7 @@ test('handoffAttempt skips a fallback that fails for a non-limit reason and trie
     }
   });
   assert.equal(result.backend, 'claude');
-  assert.deepEqual(result.handoff, { from: 'hermes', to: 'claude', reason: 'usage limit hit' });
+  assert.deepEqual(result.handoff, { from: 'hermes', to: 'claude', reason: 'usage limit hit', resetAt: null });
 });
 
 test('handoffAttempt does not hand off on non-limit errors', async () => {
@@ -336,4 +340,16 @@ test('handoffAttempt allows at most one handoff: a second limit error fails the 
     }),
     /hermes usage limit/
   );
+});
+
+test('transient throttling retries the same route and never hands off', async () => {
+  const calls: string[] = [];
+  let tries = 0;
+  const result = await handoffAttempt({ startBackend: 'claude', fallbackBackends: ['agy'], retryDelay: async () => {}, attempt: async backend => {
+    calls.push(backend);
+    if (++tries < 3) throw new Error('Rate limit exceeded, retry in 30s');
+    return { reply: 'ok', model: null, usage: null };
+  }});
+  assert.deepEqual(calls, ['claude', 'claude', 'claude']);
+  assert.equal(result.handoff, null);
 });

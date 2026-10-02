@@ -576,8 +576,8 @@ interface AgyStreamResult {
   error?: string;
 }
 
-function runAgyModels() {
-  const result = execFile('agy', ['models'], { encoding: 'utf8', timeout: 10_000 });
+function runAgyModels(runtime?: { executable: string; state_root: string | null }) {
+  const result = execFile(runtime?.executable ?? 'agy', ['models'], { encoding: 'utf8', timeout: 10_000, env: { ...process.env, ...(runtime?.state_root ? { HOME: runtime.state_root } : {}) } });
   result.child.stdin?.end();
   return result;
 }
@@ -604,12 +604,13 @@ function runAgyModels() {
  * installed CLI takes both natively as `--model`/`--effort`; append them
  * only when the session actually pinned one, so an unpinned session's argv
  * is unchanged. */
-export function agyBackendSpec(): HeadlessBackendSpec {
+export function agyBackendSpec(runtime?: { executable: string; state_root: string | null }): HeadlessBackendSpec {
   return {
     id: 'agy',
     displayName: 'Agy',
+    ...(runtime?.state_root ? { spawnEnv: async () => ({ HOME: runtime.state_root! }) } : {}),
     modelOptions: async () => ({
-      models: String((await runAgyModels()).stdout)
+      models: String((await runAgyModels(runtime)).stdout)
         .split('\n')
         .flatMap((line) => {
           const [id, name] = line.trim().split('\t');
@@ -622,7 +623,7 @@ export function agyBackendSpec(): HeadlessBackendSpec {
     }),
     turnArgs: (opts = {}) => {
       const args = [
-        'agy',
+        runtime?.executable ?? 'agy',
         '--input-format',
         'stream-json',
         '--output-format',

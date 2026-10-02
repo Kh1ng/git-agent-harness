@@ -20,9 +20,11 @@ import {
   type ManagerModelInfo,
   type ManagerReasoningEffortInfo
 } from './registry.js';
-import { compactionSummary, isCompactionCommand, isUsageLimitError } from './acpAdapter.js';
+import { compactionSummary, isCompactionCommand, isUsageLimitError, classifyUsageLimitError } from './acpAdapter.js';
 import {
   backendForProfile,
+  quotaRouteForProfile,
+  setQuotaRouteForProfile,
   modelOverrideForProfile,
   reasoningEffortOverrideForProfile,
   helperRouteFor,
@@ -48,7 +50,7 @@ import {
   type ChatSessionStoreOptions
 } from './chatSessions.js';
 import { previewProxy, detectDevPort } from './previewProxy.js';
-import { runProfileList } from '../gahCli.js';
+import { runProfileList, runSubscriptionRoutes, runQuotaFailure, type SubscriptionRoute, type QuotaFailure } from '../gahCli.js';
 import { randomUUID } from 'node:crypto';
 import type { ChatSessionEvent, ChatTranscriptTurn, ChatUsage, Skill } from '@git-agent-harness/contracts';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
@@ -333,7 +335,7 @@ export function updateChatSession(
   sessionId: string,
   patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string }
 ) {
-  return updateSession(profile, sessionId, patch, chatSessionStoreOptions);
+  return updateSession(profile, sessionId, { ...patch, ...(patch.backend !== undefined || patch.backendInstance !== undefined || patch.model !== undefined ? { quotaHandoff: null } : {}) }, chatSessionStoreOptions);
 }
 
 /** Archives a chat session: dirty worktree patched first, branch survives (WP2). */
@@ -610,6 +612,7 @@ interface HandoffInfo {
   from: string;
   to: string;
   reason: string;
+  resetAt?: number | null;
 }
 
 function errorMessage(error: unknown): string {
@@ -634,7 +637,9 @@ export function applyBoundSkills(prompt: string, skills: Skill[]): string {
  * it with mock attempt functions instead of real backend processes. */
 export interface HandoffAttemptInput {
   startBackend: string;
-  fallbackBackends: string[];
+  fallbackBackends: string[] | (() => Promise<string[]>);
+  classify?: (backend: string, error: unknown) => Promise<QuotaFailure>;
+  retryDelay?: (milliseconds: number) => Promise<void>;
   attempt: (backendId: string) => Promise<{ reply: string; model: string | null; usage: ChatUsage | null }>;
 }
 
@@ -642,31 +647,29 @@ export async function handoffAttempt(
   input: HandoffAttemptInput
 ): Promise<{ reply: string; backend: string; model: string | null; usage: ChatUsage | null; handoff: HandoffInfo | null }> {
   const { startBackend, fallbackBackends, attempt } = input;
-  let backend = startBackend;
-  let handoff: HandoffInfo | null = null;
-  try {
-    const result = await attempt(startBackend);
-    return { ...result, backend, handoff };
-  } catch (error) {
-    // Only a usage/quota limit triggers an automatic handoff. Any other
-    // failure (auth, backend crash, network) surfaces as today's error.
-    if (!isUsageLimitError(error)) throw error;
-
-    for (const fallback of fallbackBackends) {
-      try {
-        const result = await attempt(fallback);
-        backend = fallback;
-        handoff = { from: startBackend, to: fallback, reason: errorMessage(error) };
-        return { ...result, backend, handoff };
-      } catch (fallbackError) {
-        // At most one automatic handoff per turn: a second limit error fails
-        // the turn normally (AC4), surfacing the exhausted-model error.
-        if (isUsageLimitError(fallbackError)) throw error;
-        // Non-limit fallback failure (e.g. not installed) -> try the next.
-        continue;
+  const classify = input.classify ?? (async (_backend: string, error: unknown): Promise<QuotaFailure> => ({ kind: classifyUsageLimitError(error) ?? 'other', resetAt: null, retryAfterMs: null }));
+  const run = async (backend: string) => {
+    for (let retry = 0; ; retry++) {
+      try { return await attempt(backend); }
+      catch (error) {
+        const failure = await classify(backend, error);
+        if (failure.kind !== 'transient' || retry >= 2) throw { error, failure };
+        await (input.retryDelay ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))))(Math.min(failure.retryAfterMs ?? 1000 * 2 ** retry, 30_000));
       }
     }
-    // No eligible fallback: today's behavior -- fail with the limit error.
+  };
+  try { return { ...await run(startBackend), backend: startBackend, handoff: null }; }
+  catch (caught) {
+    const { error, failure } = caught as { error: unknown; failure: QuotaFailure };
+    if (!failure || failure.kind !== 'hard') throw error ?? caught;
+    const fallbacks = typeof fallbackBackends === 'function' ? await fallbackBackends() : fallbackBackends;
+    for (const fallback of fallbacks) {
+      try { return { ...await run(fallback), backend: fallback, handoff: { from: startBackend, to: fallback, reason: errorMessage(error), resetAt: failure.resetAt } }; }
+      catch (second) {
+        const failed = second as { error: unknown; failure: QuotaFailure };
+        if (failed.failure?.kind === 'hard') throw new Error(`${errorMessage(error)}; fallback ${fallback}: ${errorMessage(failed.error)}`);
+      }
+    }
     throw error;
   }
 }
@@ -675,6 +678,7 @@ export async function handoffAttempt(
 export type TurnRunResult = {
   reply: string;
   backend: string;
+  backendInstance?: string | null;
   model: string | null;
   usage: ChatUsage | null;
   handoff: HandoffInfo | null;
@@ -723,12 +727,34 @@ export async function runTurn(
   // backend's recall sees the pre-handoff exchange. Best-effort: a flush
   // failure must not block the handoff itself. The flush is per-PROFILE --
   // project memory is shared across a profile's sessions by design.
+  let modelNote = '';
+  const start = `${context.backend}#${context.backendInstance ?? ''}`;
+  const routes = new Map([[start, { backend: context.backend, instance: context.backendInstance ?? null }]]);
   const result = await handoffAttempt({
-    startBackend: context.backend,
-    fallbackBackends: listManagerBackends().filter((b) => b.implemented && b.id !== context.backend).map((b) => b.id),
-    attempt: async (backendId) => {
+    startBackend: start,
+    fallbackBackends: async () => {
+      const candidates = context.route?.remote
+        ? await context.route.remote.request<SubscriptionRoute[]>({ action: 'quota-routes', model: context.model })
+        : await runSubscriptionRoutes(context.route?.profileName ?? profile, context.model);
+      for (const { identity } of candidates) {
+        const instance = identity.explicit_instance ? identity.backend_instance : null;
+        const key = `${identity.runner_kind}#${instance ?? ''}`;
+        if (key !== start && listManagerBackends().some(backend => backend.id === identity.runner_kind && backend.implemented)) routes.set(key, { backend: identity.runner_kind, instance });
+      }
+      return [...routes.keys()].filter(key => key !== start);
+    },
+    classify: async (key, error) => {
+      if (active.cancelled) return { kind: 'other', resetAt: null, retryAfterMs: null };
+      const route = routes.get(key)!;
+      return context.route?.remote
+        ? context.route.remote.request<QuotaFailure>({ action: 'quota-failure', backend: route.backend, backendInstance: route.instance, model: key === start ? context.model : null, message: errorMessage(error) })
+        : runQuotaFailure(context.route?.profileName ?? profile, route.backend, route.instance, key === start ? context.model : null, errorMessage(error));
+    },
+    retryDelay: milliseconds => Promise.race([new Promise<void>(resolve => setTimeout(resolve, milliseconds)), active.cancelSettled.then(() => { throw new Error('Turn cancelled'); })]),
+    attempt: async (key) => {
+      if (active.cancelled) throw new Error('Turn cancelled');
+      const { backend: backendId, instance: ownInstance } = routes.get(key)!;
       if (context.route?.remote) await chatRoute(profile, context.route.nodeId, backendId);
-      const ownInstance = backendId === context.backend ? context.backendInstance : null;
       const adapter = context.route?.remote?.adapter(backendId, context.sessionId === 'default' ? undefined : context.sessionId, ownInstance)
         ?? await resolveInstanceAdapter(profile, backendId, ownInstance);
       active.backend = backendId;
@@ -738,8 +764,14 @@ export async function runTurn(
         // handoff fallback backend uses its own default (the override is
         // for a different backend's model id space). Reasoning effort
         // follows the same rule.
-        const ownBackend = backendId === context.backend;
-        const model = ownBackend ? context.model : undefined;
+        const ownBackend = key === start;
+        let model = ownBackend ? context.model : undefined;
+        if (!ownBackend && context.model) {
+          const options = await adapter.listModels(profile).catch(() => null);
+          const family = (value: string) => value.toLowerCase().match(/opus|sonnet|haiku|gemini|gpt|mistral/)?.[0];
+          model = options?.models.find(item => item.id === context.model || (family(context.model!) && family(item.name) === family(context.model!)))?.id ?? null;
+          modelNote = model ? `Continuing the selected model family on ${model}.` : `The target does not offer the selected model family (${context.model}); using its default model.`;
+        }
         const reasoningEffort = ownBackend ? context.reasoningEffort : undefined;
         const binding = isSlashCommand
           ? { source: 'canonical' as const, skills: [] }
@@ -853,7 +885,9 @@ export async function runTurn(
       await flushSession(profile);
     }
   }
-  return result;
+  const chosen = routes.get(result.backend)!;
+  const source = routes.get(result.handoff?.from ?? start)!;
+  return { ...result, backend: chosen.backend, backendInstance: chosen.instance, handoff: result.handoff ? { ...result.handoff, reason: `${result.handoff.reason}${modelNote ? ` ${modelNote}` : ''}`, from: `${source.backend}${source.instance ? ` [${source.instance}]` : ''}`, to: `${chosen.backend}${chosen.instance ? ` [${chosen.instance}]` : ''}` } : null };
 }
 
 export interface ManagerChatTurnResult {
@@ -1021,11 +1055,16 @@ export function sendManagerChatMessage(
   // sessions fail loudly rather than silently landing in the default log.
   const prepareSession = async (): Promise<{ cwd?: string; backend: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; route: ChatRoute }> => {
     if (!sessionId || sessionId === 'default') {
-      const backend = backendOverride ?? backendForProfile(profile);
-      return { backend, backendInstance: null, model: modelOverrideForProfile(profile, backend), reasoningEffort: reasoningEffortOverrideForProfile(profile, backend), route: await chatRoute(profile, nodeId, backend) };
+      const pinned = backendOverride ? undefined : quotaRouteForProfile(profile);
+      const backend = backendOverride ?? pinned?.backend ?? backendForProfile(profile);
+      return { backend, backendInstance: pinned?.backendInstance ?? null, model: pinned ? pinned.model : modelOverrideForProfile(profile, backend), reasoningEffort: pinned ? null : reasoningEffortOverrideForProfile(profile, backend), route: await chatRoute(profile, nodeId, backend) };
     }
     let session = getSession(profile, sessionId, chatSessionStoreOptions);
     if (!session || session.archivedAt !== null) throw new Error('Chat session is unavailable or archived.');
+    if (session.quotaHandoff?.resetAt != null && session.quotaHandoff.resetAt <= Date.now()) {
+      const original = session.quotaHandoff;
+      session = updateSession(profile, sessionId, { backend: original.backend, backendInstance: original.backendInstance, model: original.model, reasoningEffort: original.reasoningEffort, quotaHandoff: null }, chatSessionStoreOptions);
+    }
     const route = await chatRoute(profile, nodeId ?? session.nodeId, session.backend);
     if (!session.title && !message.trim().startsWith('/')) {
       const fallbackTitle = chatTitleFromText(message);
@@ -1320,7 +1359,15 @@ export function sendManagerChatMessage(
       );
       const result = await Promise.race([run, settleDeadline]);
       const { reply, backend, model, usage, handoff } = result;
-      const backendInstance = backend === sessionContext.backend ? sessionContext.backendInstance ?? null : null;
+      const backendInstance = result.backendInstance ?? null;
+      if (handoff && !active.cancelled) {
+        if (sessionId && sessionId !== 'default') {
+          const existing = getSession(profile, sessionId, chatSessionStoreOptions)?.quotaHandoff;
+          updateSession(profile, sessionId, { backend, backendInstance, model, reasoningEffort: null, quotaHandoff: existing ?? { backend: sessionContext.backend, backendInstance: sessionContext.backendInstance ?? null, model: sessionContext.model ?? null, reasoningEffort: sessionContext.reasoningEffort ?? null, reason: handoff.reason, resetAt: handoff.resetAt ?? null } }, chatSessionStoreOptions);
+        } else {
+          setQuotaRouteForProfile(profile, { backend, backendInstance, model, original: quotaRouteForProfile(profile)?.original ?? { backend: sessionContext.backend, backendInstance: sessionContext.backendInstance ?? null, model: sessionContext.model ?? null, reasoningEffort: sessionContext.reasoningEffort ?? null, reason: handoff.reason, resetAt: handoff.resetAt ?? null } });
+        }
+      }
       await active.chunkWriter.close();
       const assistant: ChatTranscriptTurn = {
         role: 'assistant',
@@ -1352,9 +1399,11 @@ export function sendManagerChatMessage(
               seq: ++active.seq,
               turn: turnNo,
               from: handoff.from,
-              fromModel: model ?? null,
+              fromModel: sessionContext.model ?? null,
               to: handoff.to,
-              toModel: null,
+              toModel: model,
+              resetAt: handoff.resetAt ?? null,
+              modelChanged: sessionContext.model != null && sessionContext.model !== model,
               reason: handoff.reason,
               timestamp: Date.now()
             }] : []),
