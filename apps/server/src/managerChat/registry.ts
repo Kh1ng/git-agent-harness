@@ -130,7 +130,9 @@ export async function resolveInstanceAdapter(profile: string, backendId: string,
     ? acpManagerAdapter(backendId, label, () => codexSpawnSpec(runtime), { consecutiveFailureReconnectThreshold: 2 })
     : runtime.runner_kind === 'claude'
       ? acpManagerAdapter(backendId, label, () => claudeSpawnSpec(runtime))
-      : (() => { throw new Error(`Backend instance "${instance}" is not supported by Manager Chat.`); })();
+      : runtime.runner_kind === 'opencode'
+        ? acpManagerAdapter(backendId, label, () => opencodeSpawnSpec(runtime))
+        : (() => { throw new Error(`Backend instance "${instance}" is not supported by Manager Chat.`); })();
   INSTANCE_ADAPTERS.set(key, { runtime: runtimeKey, adapter });
   return adapter;
 }

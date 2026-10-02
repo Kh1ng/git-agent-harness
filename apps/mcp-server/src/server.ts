@@ -30,7 +30,7 @@ const REQUEST_SCHEMAS = loadRequestSchemas();
 // single source of truth. Tools backed by HTTP-only server surfaces (no CLI
 // operation) keep hand-written schemas and are listed here so the split is
 // explicit.
-const HTTP_ONLY_TOOLS = new Set(['gah_info', 'gah_usage_rollup', 'gah_hold', 'gah_controller_activity', 'gah_loop_status']);
+const HTTP_ONLY_TOOLS = new Set(['gah_info', 'gah_usage_rollup', 'gah_hold', 'gah_controller_activity', 'gah_loop_status', 'gah_cli_router']);
 
 const TOOL_TO_OPERATION: Record<string, string> = {
   gah_status: 'status.get',
@@ -121,6 +121,12 @@ export function createGahMcpServer(): McpServer {
     'gah_info',
     { title: 'GAH server info', description: 'Identify the connected GAH control-plane node and API version.' },
     () => tool(() => gah.info())
+  );
+
+  server.registerTool(
+    'gah_cli_router',
+    { title: 'GAH CLI router status', description: 'Read-only snapshot of the CLI Proxy API connection status, settings, quotas, and allowed models.' },
+    () => tool(() => gah.cliRouter())
   );
 
   server.registerTool(

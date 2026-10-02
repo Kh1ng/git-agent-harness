@@ -29,7 +29,7 @@ test('lists usage and orchestration tools and forwards their HTTP calls', async 
   try {
     const tools = await client.listTools();
     const names = new Set(tools.tools.map((tool) => tool.name));
-    for (const name of ['gah_info', 'gah_usage_rollup', 'gah_events', 'gah_controller_activity', 'gah_loop_status']) {
+    for (const name of ['gah_info', 'gah_usage_rollup', 'gah_events', 'gah_controller_activity', 'gah_loop_status', 'gah_cli_router']) {
       assert(names.has(name), `missing ${name}`);
     }
     // Issue #525: paid-route approval tools are exposed.

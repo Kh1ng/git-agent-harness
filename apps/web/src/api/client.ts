@@ -840,3 +840,20 @@ export const externalApprovalApi = {
   list: (profile: string) => getJson<import('@git-agent-harness/contracts').ExternalApprovalScope[]>('/api/external-approvals', { profile }),
   change: (action: 'grant' | 'deny' | 'revoke', scope: import('@git-agent-harness/contracts').ExternalApprovalDecisionScope) => postJson<import('@git-agent-harness/contracts').ExternalApprovalScope[], import('@git-agent-harness/contracts').ExternalApprovalDecisionScope & { confirm: true }>(`/api/external-approvals/${action}`, { ...scope, confirm: true })
 };
+
+// ---------------------------------------------------------------------------
+// CLI Router types — defined locally to match the concurrent backend contract.
+export type { CliRouterSnapshot, CliRouterAccount, CliRouterModel, CliRouterQuota as CliRouterAccountQuota, CliRouterSettingsInput as CliRouterSettingsPayload } from '@git-agent-harness/contracts';
+import type { CliRouterSnapshot, CliRouterSettingsInput as CliRouterSettingsPayload } from '@git-agent-harness/contracts';
+
+export const cliRouterApi = {
+  getSnapshot: () => getJson<CliRouterSnapshot>('/api/cli-router'),
+  saveSettings: (body: CliRouterSettingsPayload) =>
+    putJson<{ success: true }, CliRouterSettingsPayload>('/api/cli-router/settings', body),
+  setRouting: (body: { strategy: CliRouterSnapshot['strategy']; sessionAffinity: boolean }) =>
+    postJson<{ success: true }, typeof body>('/api/cli-router/routing', body),
+  setAccountStatus: (body: { id: string; disabled: boolean }) =>
+    postJson<{ success: true }, typeof body>('/api/cli-router/accounts/status', body),
+  refreshAccount: (body: { id: string }) =>
+    postJson<CliRouterSnapshot, typeof body>('/api/cli-router/accounts/refresh', body),
+};

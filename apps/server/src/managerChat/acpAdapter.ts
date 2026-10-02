@@ -394,7 +394,7 @@ export function claudeSpawnSpec(runtime?: { executable: string; state_root: stri
 
 /** opencode ships a native ACP server (`opencode acp`) — Tier A like
  * Hermes, no bridge needed. */
-export function opencodeSpawnSpec(): SpawnSpec {
+export function opencodeSpawnSpec(runtime?: { executable: string; state_root: string | null }): SpawnSpec {
   const inherited = process.env.OPENCODE_CONFIG_CONTENT;
   let config: Record<string, unknown> = {};
   if (inherited !== undefined) {
@@ -407,10 +407,18 @@ export function opencodeSpawnSpec(): SpawnSpec {
       throw new Error(`Cannot start OpenCode Manager Chat: OPENCODE_CONFIG_CONTENT must be a JSON object (${detail}).`);
     }
   }
+  const env: Record<string, string> = { OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...config, default_agent: 'gah-implementer' }) };
+  if (runtime?.state_root) {
+    env.HOME = runtime.state_root;
+    env.XDG_CONFIG_HOME = path.join(runtime.state_root, '.config');
+    env.XDG_DATA_HOME = path.join(runtime.state_root, '.local', 'share');
+    env.XDG_STATE_HOME = path.join(runtime.state_root, '.local', 'state');
+    env.XDG_CACHE_HOME = path.join(runtime.state_root, '.cache');
+  }
   return {
-    command: 'opencode',
+    command: runtime?.executable ?? 'opencode',
     args: ['acp'],
-    env: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...config, default_agent: 'gah-implementer' }) }
+    env
   };
 }
 

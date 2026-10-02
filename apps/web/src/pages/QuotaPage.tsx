@@ -11,6 +11,8 @@ import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyStat
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { StatTile } from '../components/ui/StatTile.js';
 import { formatPercent, formatRemaining, formatAge, isStale, formatTokens, formatCount, formatCost, formatLocalTime } from '../lib/format.js';
+import { CliRouterPanel } from '../components/CliRouterPanel.js';
+
 
 const SNAPSHOT_REFRESH_MS = 5 * 60 * 1000;
 
@@ -18,11 +20,15 @@ const SNAPSHOT_REFRESH_MS = 5 * 60 * 1000;
  * (model) + pool must never be collapsed, per the spec: "agy" and
  * "agy-second" are different instances, "5-hour" and "weekly" are
  * different windows. This is used as the React key and the card title. */
-function scopeIdentity(backend: string, model: string | null, pool?: string | null): string {
-  const parts = [backend];
+function scopeIdentity(backend: string, model: string | null, pool?: string | null, instance?: string | null): string {
+  // OpenCode is a runner. Its model namespace identifies the configured API provider.
+  const provider = backend === 'opencode' && model?.includes('/') ? model.split('/')[0] : null;
+  const name = provider === 'gah-router' ? 'CLI subscription router' : provider ?? backend;
+  const parts = [name];
+  if (instance && instance !== backend) parts.push(instance);
   if (pool) parts.push(pool);
   if (model) parts.push(model);
-  return parts.join(' / ');
+  return [...new Set(parts)].join(' / ');
 }
 
 function formatQuotaMetadata(q: {
@@ -172,6 +178,7 @@ export function QuotaPage() {
     return (
       <div className="space-y-6">
         {header}
+        <CliRouterPanel />
         <LoadingState label="Loading quota snapshot…" />
       </div>
     );
@@ -180,6 +187,7 @@ export function QuotaPage() {
     return (
       <div className="space-y-6">
         {header}
+        <CliRouterPanel />
         <ErrorState message={quota.error} endpoint="/api/quota" onRetry={refresh} />
       </div>
     );
@@ -193,6 +201,8 @@ export function QuotaPage() {
   return (
     <div className="space-y-6">
       {header}
+
+      <CliRouterPanel />
 
       <QuotaFreshnessPanel
         generatedAt={snapshot?.generated_at}
@@ -247,10 +257,11 @@ export function QuotaPage() {
                   <div className="flex items-start justify-between gap-2 mb-2">
                     <div>
                       <span className="text-sm font-medium text-primary">
-                        {scopeIdentity(candidate.backend, candidate.model, candidate.quota_pool)}
+                        {scopeIdentity(candidate.backend, candidate.model, candidate.quota_pool, candidate.backend_instance)}
                       </span>
                       <p className="text-[11px] text-muted mt-1">
                         {candidate.modes.length > 0 ? candidate.modes.join(', ') : 'candidate'}
+                        {candidate.backend === 'opencode' && ' · OpenCode runner'}
                         {!candidate.configured && ' · no profile runner override'}
                       </p>
                     </div>

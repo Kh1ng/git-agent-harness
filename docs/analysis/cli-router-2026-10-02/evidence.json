@@ -1,0 +1,36 @@
+{
+  "video_url": "https://www.youtube.com/watch?v=D8PikZ1KhUo",
+  "video_title": "If you have a Claude sub, watch this",
+  "channel": "Theo - t3\u2024gg",
+  "duration_seconds": 3996,
+  "upload_date": "20261002",
+  "downloaded_transcript": "/tmp/gah-router-video/D8PikZ1KhUo.en-orig.vtt",
+  "full_resolution_frame_download": "HTTP 403 from googlevideo.com",
+  "frames": [
+    {
+      "requested_seconds": 1078,
+      "actual_seconds": 1076.23,
+      "file": "storyboard-17-56.png",
+      "source": "YouTube native storyboard sb0, 320x180"
+    },
+    {
+      "requested_seconds": 1232,
+      "actual_seconds": 1225.71,
+      "file": "storyboard-20-25.png",
+      "source": "YouTube native storyboard sb0, 320x180"
+    },
+    {
+      "requested_seconds": 1260,
+      "actual_seconds": 1255.6,
+      "file": "storyboard-20-55.png",
+      "source": "YouTube native storyboard sb0, 320x180"
+    },
+    {
+      "requested_seconds": 1327,
+      "actual_seconds": 1325.36,
+      "file": "storyboard-22-05.png",
+      "source": "YouTube native storyboard sb0, 320x180"
+    }
+  ],
+  "description": "Your ability to work and put out even bigger things is only limited by your token usage, so lets fix that - it's time to learn how to token-max. \n\nThanks to Parallel for Sponsoring! Check them out here: \nhttps://soydev.link/parallel\n\nWant to sponsor a video? Learn more here: https://soydev.link/sponsor-me\n\nCheck out my Twitch, Twitter, Discord more at https://t3.gg\n\nS/O @Ph4seon3 for the awesome edit \ud83d\ude4f\n\n#ai #coding #programming"
+}
