@@ -194,3 +194,63 @@ test('status observations answer from cache while one background poll refreshes 
     server.close();
   }
 });
+
+test('an offline transition survives restarts and only a recovered node can go offline again', async () => {
+  let up = false;
+  const server = http.createServer((req, res) => {
+    if (!up) { req.socket.destroy(); return; }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ version: '0.1.0', schema_digest: COORDINATOR_SCHEMA_DIGEST, generated_at: new Date().toISOString() }));
+  });
+  const url = await listen(server);
+  const path = tempRegistryPath();
+  const first = new RegistryService(path);
+  first.registerNode({ node_id: 'restarting-node', display_name: 'Restarting node', advertised_url: url, version: '0.1.0', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback', secret_ref: 'env:UNUSED' });
+  const transitions: string[] = [];
+  first.onLivenessTransition(({ state }) => transitions.push(state));
+  try {
+    for (let count = 0; count < 3; count++) await first.runLivenessCheck();
+    const restored = new RegistryService(path);
+    restored.onLivenessTransition(({ state }) => transitions.push(state));
+    for (let count = 0; count < 3; count++) await restored.runLivenessCheck();
+    assert.deepEqual(transitions, ['offline'], 'restarting central must not repeat a known outage');
+    up = true;
+    await restored.runLivenessCheck();
+    assert.deepEqual(transitions, ['offline', 'back']);
+    up = false;
+    const recovered = new RegistryService(path);
+    recovered.onLivenessTransition(({ state }) => transitions.push(state));
+    for (let count = 0; count < 3; count++) await recovered.runLivenessCheck();
+    assert.deepEqual(transitions, ['offline', 'back', 'offline']);
+  } finally { server.close(); }
+});
+
+test('a known outage does not hide a new authentication or compatibility failure', async () => {
+  let state: 'unreachable' | 'auth_failed' | 'incompatible' = 'unreachable';
+  const server = http.createServer((req, res) => {
+    if (state === 'unreachable') { req.socket.destroy(); return; }
+    if (state === 'auth_failed') { res.writeHead(401); res.end(); return; }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ version: '0.1.0', schema_digest: 'unexpected-schema', generated_at: new Date().toISOString() }));
+  });
+  const url = await listen(server);
+  const path = tempRegistryPath();
+  const service = new RegistryService(path);
+  service.registerNode({ node_id: 'attention-node', display_name: 'Attention node', advertised_url: url, version: '0.1.0', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback', secret_ref: 'env:UNUSED' });
+  const transitions: string[] = [];
+  service.onLivenessTransition(({ nodeState }) => transitions.push(nodeState ?? 'unknown'));
+  try {
+    for (let count = 0; count < 3; count++) await service.runLivenessCheck();
+    state = 'auth_failed';
+    await service.runLivenessCheck();
+    await service.runLivenessCheck();
+    state = 'incompatible';
+    await service.runLivenessCheck();
+    await service.runLivenessCheck();
+    assert.deepEqual(transitions, ['unreachable', 'auth_failed', 'incompatible']);
+    const restored = new RegistryService(path);
+    restored.onLivenessTransition(({ nodeState }) => transitions.push(nodeState ?? 'unknown'));
+    for (let count = 0; count < 3; count++) await restored.runLivenessCheck();
+    assert.deepEqual(transitions, ['unreachable', 'auth_failed', 'incompatible']);
+  } finally { server.close(); }
+});

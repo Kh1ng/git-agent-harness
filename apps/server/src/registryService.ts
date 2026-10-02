@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { parseNodeAuthHealth } from './authHealth.js';
 import { resolve, dirname, sep } from 'node:path';
 import crypto from 'node:crypto';
@@ -97,10 +97,15 @@ const LIVENESS_POLL_INTERVAL_MS = 60_000;
 const LIVENESS_ALERT_AFTER_CONSECUTIVE_BAD_CHECKS = 3;
 const LIVENESS_BAD_STATES: NodeObservationState[] = ['stale', 'unreachable', 'auth_failed', 'incompatible'];
 
+function nodeAlertState(state: NodeObservationState): 'offline' | 'auth_failed' | 'incompatible' {
+  return state === 'auth_failed' || state === 'incompatible' ? state : 'offline';
+}
+
 export interface NodeLivenessTransition {
   nodeId: string;
   displayName: string;
   state: 'offline' | 'back';
+  nodeState?: NodeObservationState;
   occurredAt: string;
   message: string;
 }
@@ -300,7 +305,7 @@ export class RegistryService {
   private nodes: Map<string, RegisteredNode> = new Map();
   private livenessTimer: ReturnType<typeof setInterval> | null = null;
   private consecutiveBadChecks: Map<string, number> = new Map();
-  private alreadyAlerted: Set<string> = new Set();
+  private alertedNodeStates = new Map<string, 'offline' | 'auth_failed' | 'incompatible'>();
   /** Normalized endpoint of the central node itself (issue #944): a worker
    * must never register a node whose advertised_url is the central node's
    * own endpoint -- the liveness scheduler would poll the central's own
@@ -323,6 +328,13 @@ export class RegistryService {
         if (Array.isArray(data.nodes)) {
           for (const node of data.nodes) {
             this.nodes.set(node.node_id, node);
+            // The first upgrade starts from the already observed outage, not a reminder.
+            if (!data.alertedNodeStates && LIVENESS_BAD_STATES.includes(node.last_observed_state)) this.alertedNodeStates.set(node.node_id, nodeAlertState(node.last_observed_state));
+          }
+        }
+        if (data.alertedNodeStates && typeof data.alertedNodeStates === 'object' && !Array.isArray(data.alertedNodeStates)) {
+          for (const [id, state] of Object.entries(data.alertedNodeStates)) {
+            if (this.nodes.has(id) && (state === 'offline' || state === 'auth_failed' || state === 'incompatible')) this.alertedNodeStates.set(id, state);
           }
         }
       } catch (e) {
@@ -339,9 +351,12 @@ export class RegistryService {
         mkdirSync(dir, { recursive: true });
       }
       const data = {
-        nodes: Array.from(this.nodes.values())
+        nodes: Array.from(this.nodes.values()),
+        alertedNodeStates: Object.fromEntries([...this.alertedNodeStates].filter(([id]) => this.nodes.has(id)))
       };
-      writeFileSync(this.configPath, JSON.stringify(data, null, 2));
+      const temporary = `${this.configPath}.${process.pid}.tmp`;
+      writeFileSync(temporary, JSON.stringify(data, null, 2), { mode: 0o600 });
+      renameSync(temporary, this.configPath);
     } catch (e) {
       console.error('Failed to save registry config:', e);
       throw e;
@@ -791,6 +806,8 @@ export class RegistryService {
     if (deleted) {
       this.observations.delete(nodeId);
       this.observationRequests.delete(nodeId);
+      this.alertedNodeStates.delete(nodeId);
+      this.consecutiveBadChecks.delete(nodeId);
       this.save();
       this.changed();
     }
@@ -878,9 +895,10 @@ export class RegistryService {
     for (const obs of observations) {
       const isBad = LIVENESS_BAD_STATES.includes(obs.state);
       if (!isBad) {
-        const recovered = this.alreadyAlerted.delete(obs.node_id);
+        const recovered = this.alertedNodeStates.delete(obs.node_id);
         this.consecutiveBadChecks.delete(obs.node_id);
         if (recovered) {
+          this.save();
           this.livenessChanged({
             nodeId: obs.node_id,
             displayName: obs.display_name,
@@ -893,13 +911,16 @@ export class RegistryService {
       }
       const count = (this.consecutiveBadChecks.get(obs.node_id) ?? 0) + 1;
       this.consecutiveBadChecks.set(obs.node_id, count);
-      if (count >= LIVENESS_ALERT_AFTER_CONSECUTIVE_BAD_CHECKS && !this.alreadyAlerted.has(obs.node_id)) {
-        this.alreadyAlerted.add(obs.node_id);
+      const alertState = nodeAlertState(obs.state);
+      if (count >= LIVENESS_ALERT_AFTER_CONSECUTIVE_BAD_CHECKS && this.alertedNodeStates.get(obs.node_id) !== alertState) {
+        this.alertedNodeStates.set(obs.node_id, alertState);
+        this.save();
         const message = `Node "${obs.display_name}" (${obs.node_id}) has been ${obs.state} for ${count} consecutive checks (last seen: ${obs.last_seen_at ?? 'never'}).`;
         this.livenessChanged({
           nodeId: obs.node_id,
           displayName: obs.display_name,
           state: 'offline',
+          nodeState: obs.state,
           occurredAt: obs.observed_at,
           message
         });

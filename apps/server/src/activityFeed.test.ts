@@ -142,7 +142,7 @@ test('a notification survives a flood of routine events for 30 days (#1273)', ()
   const feed = new ActivityFeed(null, undefined, () => NOW);
   feed.record(feedEvent('ping-20d', 'review_ready', NOW - 20 * DAY), false);
   feed.record(feedEvent('ping-31d', 'review_ready', NOW - 31 * DAY), false);
-  for (let index = 0; index < 5_000; index++) feed.record(feedEvent(`routine-${index}`, 'dispatch_completed', NOW), false);
+  for (let index = 0; index < 5_000; index++) feed.record(feedEvent(`routine-${index}`, 'node_back', NOW), false);
   assert.deepEqual(feed.notifications().map((event) => event.id), ['ping-20d']);
   assert.equal(feed.replay('gah').length, 200);
 });
@@ -153,7 +153,7 @@ test('opening one notification marks only it read; mark all is explicit (#1273)'
   feed.onChange((change) => changes.push(change.kind === 'unread' ? `unread:${change.count}` : `updated:${change.event.id}`));
   feed.record(feedEvent('a', 'review_ready', NOW - 2));
   feed.record(feedEvent('b', 'dispatch_failed', NOW - 1));
-  feed.record(feedEvent('routine', 'dispatch_completed', NOW));
+  feed.record(feedEvent('routine', 'node_back', NOW));
   feed.record(feedEvent('backfilled', 'dispatch_failed', NOW - 3), false);
   assert.equal(feed.unreadCount(), 2, 'a silently backfilled event never reached anyone');
   assert.equal(feed.markRead(['a', 'routine']), 1, 'routine events carry no read state');
