@@ -1243,10 +1243,7 @@ fn cost_aware_ordering_prefers_underpace_included_quota() {
         diagnostics.selected_quota_pool.as_deref(),
         Some("codex-main")
     );
-    assert_eq!(
-        diagnostics.selected_pace_band.as_deref(),
-        Some("aggressive_burn")
-    );
+    assert_eq!(diagnostics.selected_pace_band.as_deref(), Some("mild_burn"));
     assert_eq!(
         diagnostics.selected_cost_class.as_deref(),
         Some("included_quota")
