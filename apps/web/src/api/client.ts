@@ -1,5 +1,5 @@
 import { coordinatorToken } from './coordinatorToken.js';
-import type { ActivityEvent, AuthHealthRow, LoginRepairView, PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harness/contracts';
+import type { ActivityEvent, ActivityNotificationPreferences, AuthHealthRow, LoginRepairView, PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harness/contracts';
 import type { PlanningChatRequest, PlanningEpicList, PlanningMap, PlanningSettings, PlanningTarget } from '@git-agent-harness/contracts';
 /**
  * Typed data-source client for GAH's pull-data REST endpoints.
@@ -131,6 +131,8 @@ export const loginRepairApi = {
 };
 
 export const activityApi = {
+  notificationPreferences: () => getJson<ActivityNotificationPreferences>('/api/activity/notification-preferences'),
+  setNotificationPreferences: (preferences: ActivityNotificationPreferences) => postJson<ActivityNotificationPreferences, ActivityNotificationPreferences>('/api/activity/notification-preferences', preferences),
   notifications: () => getJson<{ events: ActivityEvent[]; unread: number }>('/api/activity/notifications'),
   markRead: (ids: string[] | 'all') => postJson<{ changed: number; unread: number }, { ids: string[] } | { all: true }>(
     '/api/activity/read', ids === 'all' ? { all: true } : { ids }

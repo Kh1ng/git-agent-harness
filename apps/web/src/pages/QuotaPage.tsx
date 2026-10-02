@@ -1,6 +1,6 @@
-import { useEffect } from 'react';
-import type { QuotaCheck, QuotaSnapshot } from '@git-agent-harness/contracts';
-import { Gauge, Clock, ListChecks, CheckCircle2, Coins, Timer } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import type { QuotaCheck, QuotaSnapshot, QuotaCandidateStatus } from '@git-agent-harness/contracts';
+import { Gauge, ListChecks, CheckCircle2, Coins, Timer } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -52,8 +52,8 @@ function quotaPercentages(q: {
   quota_used_percent?: number | null;
   quota_remaining_percent?: number | null;
 }): { used: number; remaining: number } | null {
-  const used = q.quota_used_percent;
-  const remaining = q.quota_remaining_percent;
+  const used = Number.isFinite(q.quota_used_percent) ? q.quota_used_percent : null;
+  const remaining = Number.isFinite(q.quota_remaining_percent) ? q.quota_remaining_percent : null;
   if (used === null || used === undefined) {
     if (remaining === null || remaining === undefined) return null;
     const boundedRemaining = Math.min(100, Math.max(0, remaining));
@@ -162,8 +162,8 @@ export function QuotaPage() {
 
   const header = (
     <PageHeader
-      title="Quota"
-      description="Canonical candidate usage, availability, and quota observations"
+      title="Quota management"
+      description="Account allowances and configured routing candidates"
       onRefresh={refresh}
       refreshing={quota.loading}
       lastUpdated={quota.fetchedAt}
@@ -176,7 +176,7 @@ export function QuotaPage() {
   // to retry.
   if (quota.loading && !quota.data) {
     return (
-      <div className="space-y-6">
+      <div className="quota-page space-y-6">
         {header}
         <CliRouterPanel />
         <LoadingState label="Loading quota snapshot…" />
@@ -185,7 +185,7 @@ export function QuotaPage() {
   }
   if (quota.error && !quota.data) {
     return (
-      <div className="space-y-6">
+      <div className="quota-page space-y-6">
         {header}
         <CliRouterPanel />
         <ErrorState message={quota.error} endpoint="/api/quota" onRetry={refresh} />
@@ -199,152 +199,139 @@ export function QuotaPage() {
   const freshness = snapshot?.freshness;
 
   return (
-    <div className="space-y-6">
+    <div className="quota-page space-y-6">
       {header}
 
       <CliRouterPanel />
 
-      <QuotaFreshnessPanel
-        generatedAt={snapshot?.generated_at}
-        freshness={freshness}
-        quotaChecks={snapshot?.quota_checks ?? []}
-      />
+      <QuotaCandidateLedger candidates={candidates} />
 
-      <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatTile
-          label="Entries (7d)"
-          value={formatCount(usage?.entries)}
-          icon={ListChecks}
-          hint={usage?.validation_pass !== null && usage?.validation_pass !== undefined ? `${usage.validation_pass} validated` : undefined}
-        />
-        <StatTile
-          label="Success rate"
-          value={formatPercent(usage?.success_rate)}
-          icon={CheckCircle2}
-          hint={usage?.entries !== null && usage?.entries !== undefined ? `${usage.validation_pass}/${usage.entries} validated` : undefined}
-        />
-        <StatTile
-          label="Usage (7d)"
-          value={formatTokens(usage?.total_tokens)}
-          icon={Coins}
-          hint={usage?.requests_count !== null && usage?.requests_count !== undefined ? `${formatCount(usage.requests_count)} requests` : undefined}
-        />
-        <StatTile
-          label="Candidates"
-          value={String(candidates.length)}
-          icon={Timer}
-          hint={candidates.length > 0 ? `${candidates.filter((c) => c.eligible_now).length} eligible now` : undefined}
-        />
-      </section>
+      <details className="quota-settings">
+        <summary className="text-sm text-secondary cursor-pointer py-3">Usage and data freshness</summary>
+        <div className="space-y-4 pt-2">
+          <QuotaFreshnessPanel generatedAt={snapshot?.generated_at} freshness={freshness} quotaChecks={snapshot?.quota_checks ?? []} />
+          <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <StatTile
+              label="Entries (7d)"
+              value={formatCount(usage?.entries)}
+              icon={ListChecks}
+              hint={usage?.validation_pass !== null && usage?.validation_pass !== undefined ? `${usage.validation_pass} validated` : undefined}
+            />
+            <StatTile
+              label="Success rate"
+              value={formatPercent(usage?.success_rate)}
+              icon={CheckCircle2}
+              hint={usage?.entries !== null && usage?.entries !== undefined ? `${usage.validation_pass}/${usage.entries} validated` : undefined}
+            />
+            <StatTile
+              label="Usage (7d)"
+              value={formatTokens(usage?.total_tokens)}
+              icon={Coins}
+              hint={usage?.requests_count !== null && usage?.requests_count !== undefined ? `${formatCount(usage.requests_count)} requests` : undefined}
+            />
+            <StatTile
+              label="Candidates"
+              value={String(candidates.length)}
+              icon={Timer}
+              hint={candidates.length > 0 ? `${candidates.filter((c) => c.eligible_now).length} eligible now` : undefined}
+            />
+          </section>
 
-      <section>
-        <h3 className="text-sm font-semibold text-primary mb-3">Configured candidates</h3>
-        {candidates.length === 0 ? (
-          <EmptyState
-            icon={Gauge}
-            title="No canonical candidates recorded"
-            description="Add routing candidates to the profile to see availability and quota state here."
-          />
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {candidates.map((candidate, i) => {
-              const remaining = formatRemaining(candidate.unavailable_until);
-              const age = formatAge(candidate.observed_at);
-              const stale = isStale(candidate.observed_at);
-              const observations = candidate.quota_observations ?? [];
+        </div>
+      </details>
+    </div>
+  );
+}
+
+/** A provider groups routing scopes, without treating distinct models as accounts. */
+function candidateProvider(candidate: QuotaCandidateStatus): string {
+  return candidate.backend === 'opencode' && candidate.model?.includes('/')
+    ? candidate.model.split('/')[0]
+    : candidate.backend;
+}
+
+function QuotaCandidateLedger({ candidates }: { candidates: QuotaCandidateStatus[] }) {
+  const [providerFilter, setProviderFilter] = useState('All');
+  const providers = [...new Set(candidates.map(candidateProvider))];
+  const activeFilter = providers.includes(providerFilter) ? providerFilter : 'All';
+  const filteredProviders = activeFilter === 'All' ? providers : [activeFilter];
+  return (
+    <section className="quota-candidates">
+      <h3 className="text-base font-semibold text-primary mb-3">Configured candidates</h3>
+      {candidates.length === 0 ? (
+        <EmptyState icon={Gauge} title="No canonical candidates recorded" description="Add routing candidates to the profile to see availability and quota state here." />
+      ) : (
+        <>
+          <div className="quota-provider-tabs" role="group" aria-label="Filter candidates by provider">
+            {['All', ...providers].map(provider => (
+              <button key={provider} className="quota-provider-tab" aria-pressed={activeFilter === provider} onClick={() => setProviderFilter(provider)}>
+                <Gauge size={15} aria-hidden="true" />{provider}
+                <span className="quota-provider-count">({provider === 'All' ? candidates.length : candidates.filter(candidate => candidateProvider(candidate) === provider).length})</span>
+              </button>
+            ))}
+          </div>
+          <div className="quota-summary-band" aria-label="Configured provider summaries">
+            {filteredProviders.map(provider => {
+              const scopes = candidates.filter(candidate => candidateProvider(candidate) === provider);
+              const observations = scopes.flatMap(candidate => candidate.quota_observations ?? []);
               return (
-                <div key={i} className="card-padded">
-                  <div className="flex items-start justify-between gap-2 mb-2">
-                    <div>
-                      <span className="text-sm font-medium text-primary">
-                        {scopeIdentity(candidate.backend, candidate.model, candidate.quota_pool, candidate.backend_instance)}
-                      </span>
-                      <p className="text-[11px] text-muted mt-1">
-                        {candidate.modes.length > 0 ? candidate.modes.join(', ') : 'candidate'}
-                        {candidate.backend === 'opencode' && ' · OpenCode runner'}
-                        {!candidate.configured && ' · no profile runner override'}
-                      </p>
-                    </div>
-                    <StatusBadge tone={candidate.eligible_now ? 'good' : 'critical'} label={candidate.eligible_now ? 'Eligible' : 'Unavailable'} />
-                  </div>
-
-                  <div className="space-y-1 text-xs text-secondary mb-3">
-                    <p>Usage: {formatCount(candidate.usage.entries)} entries, {formatPercent(candidate.usage.success_rate)} success</p>
-                    <p className="text-muted">
-                      Tokens: {formatTokens(candidate.usage.total_tokens)} · Requests: {formatCount(candidate.usage.requests_count)}
-                    </p>
-                    {candidate.usage.actual_cost_usd !== null || candidate.usage.estimated_cost_usd !== null ? (
-                      <p className="text-muted">Cost: {formatCost(candidate.usage.actual_cost_usd ?? candidate.usage.estimated_cost_usd)}</p>
-                    ) : null}
-                  </div>
-
-                  {!candidate.eligible_now && (
-                    <div className="space-y-1 text-xs text-secondary mb-3">
-                      <p>Reason: {candidate.reason ?? 'Unknown'}</p>
-                      <p className="inline-flex items-center gap-1">
-                        <Clock size={11} aria-hidden="true" />
-                        {remaining ? `Resets in ${remaining}` : 'No known reset time'}
-                      </p>
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-between text-xs text-muted pt-2 border-t border-subtle">
-                    <span>{age ? `Observed ${age}` : 'No observation'}</span>
-                    {stale && <StatusBadge tone="serious" label="Stale" />}
-                  </div>
-                  {candidate.source && <p className="text-xs text-muted mt-1">Source: {candidate.source}</p>}
-
-                  <div className="mt-3 pt-3 border-t border-subtle">
-                    <p className="text-[11px] uppercase tracking-wide text-muted mb-2">Quota windows</p>
-                    {observations.length === 0 ? (
-                      <p className="text-xs text-muted">No quota windows reported for this candidate.</p>
-                    ) : (
-                      <div className="space-y-3">
-                        {observations.map((q, j) => {
-                          const percentages = quotaPercentages(q);
-                          const observationAge = formatAge(q.observed_at);
-                          const observationStale = isStale(q.observed_at);
-                          const label = `${q.quota_window ?? 'Unknown window'}${q.model ? ` · ${q.model}` : ''}`;
-                          return (
-                            <div key={j} className="text-xs text-secondary">
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <span className="font-medium text-primary">{label}</span>
-                                {observationStale && <StatusBadge tone="serious" label="Stale" />}
-                              </div>
-                              {percentages ? (
-                                <>
-                                  <div className="mt-1.5 flex items-center justify-between gap-3 tabular-nums">
-                                    <span>{formatQuotaPercent(percentages.used)} used</span>
-                                    <span className="text-muted">{formatQuotaPercent(percentages.remaining)} remaining</span>
-                                  </div>
-                                  <progress
-                                    className="usage-progress mt-1.5"
-                                    max={100}
-                                    value={percentages.used}
-                                    aria-label={`${label}: ${formatQuotaPercent(percentages.used)} used, ${formatQuotaPercent(percentages.remaining)} remaining`}
-                                  />
-                                </>
-                              ) : (
-                                <div className="mt-1.5 rounded-md border border-subtle bg-raised px-2.5 py-2 text-muted">
-                                  No usage percentage available
-                                </div>
-                              )}
-                              <p className="mt-1.5 text-muted">
-                                {formatQuotaMetadata(q)}
-                                {` · ${observationAge ? `observed ${observationAge}` : 'no observation time'}`}
-                              </p>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                </div>
+                <section key={provider} className="quota-provider-summary">
+                  <div className="flex items-center justify-between gap-3 mb-3"><h4 className="text-sm font-semibold text-primary">{provider}</h4><span className="text-xs text-muted">{scopes.length} {scopes.length === 1 ? 'candidate' : 'candidates'}</span></div>
+                  <p className="text-2xl font-semibold text-primary tabular-nums">{scopes.filter(candidate => candidate.eligible_now).length}<span className="text-sm font-normal text-muted"> / {scopes.length} eligible</span></p>
+                  <p className="text-xs text-muted mt-2">{observations.length} quota {observations.length === 1 ? 'observation' : 'observations'} · {observations.filter(observation => quotaPercentages(observation) !== null).length} with percentages</p>
+                </section>
               );
             })}
           </div>
-        )}
-      </section>
-    </div>
+          <div className="quota-provider-ledgers">
+            {filteredProviders.map(provider => (
+              <section key={provider}>
+                <h4 className="text-sm font-semibold text-primary mb-2">{provider}</h4>
+                {candidates.filter(candidate => candidateProvider(candidate) === provider).map((candidate, index) => (
+                  <div key={index} className="quota-candidate-row" data-testid={`quota-candidate-${candidate.backend}-${index}`}>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-primary break-words">{scopeIdentity(candidate.backend, candidate.model, candidate.quota_pool, candidate.backend_instance)}</p>
+                      <p className="text-xs text-muted mt-1">{candidate.modes.length > 0 ? candidate.modes.join(', ') : 'candidate'}{candidate.backend === 'opencode' && ' · OpenCode runner'}{!candidate.configured && ' · no profile runner override'}</p>
+                      <div className="mt-2 flex flex-wrap gap-2"><StatusBadge tone={candidate.eligible_now ? 'good' : 'critical'} label={candidate.eligible_now ? 'Eligible' : 'Unavailable'} />{isStale(candidate.observed_at) && <StatusBadge tone="serious" label="Stale" />}</div>
+                      {!candidate.eligible_now && <p className="text-xs text-secondary mt-2">{candidate.reason ?? 'Unknown reason'} · {formatRemaining(candidate.unavailable_until) ? `Resets in ${formatRemaining(candidate.unavailable_until)}` : 'No known reset time'}</p>}
+                      <p className="text-xs text-muted mt-2">{formatAge(candidate.observed_at) ? `Observed ${formatAge(candidate.observed_at)}` : 'No observation'}</p>
+                    </div>
+                    <div className="quota-account-windows">
+                      {(candidate.quota_observations ?? []).length === 0 && <p className="text-xs text-muted">No quota windows reported for this candidate.</p>}
+                      {(candidate.quota_observations ?? []).map((observation, observationIndex) => {
+                        const percentages = quotaPercentages(observation);
+                        const label = `${observation.quota_window ?? 'Unknown window'}${observation.model ? ` · ${observation.model}` : ''}`;
+                        return (
+                          <div key={observationIndex} className="min-w-0 text-xs text-secondary">
+                            <div className="flex flex-wrap items-start justify-between gap-2 mb-2"><span>{label}</span>{isStale(observation.observed_at) && <StatusBadge tone="serious" label="Stale" />}</div>
+                            {percentages ? (
+                              <>
+                                <div className="flex items-baseline justify-between gap-2 tabular-nums mb-2"><span>{formatQuotaPercent(percentages.used)} used</span><span className="font-semibold text-primary">{formatQuotaPercent(percentages.remaining)} remaining</span></div>
+                                <progress className={`usage-progress router-quota-progress ${percentages.remaining < 20 ? 'text-critical' : percentages.remaining < 60 ? 'text-warning' : 'text-good'}`} max={100} value={percentages.remaining} aria-label={`${label}: ${formatQuotaPercent(percentages.used)} used, ${formatQuotaPercent(percentages.remaining)} remaining`} />
+                              </>
+                            ) : <p className="text-muted">No usage percentage available</p>}
+                            <p className="mt-2 text-muted">{formatQuotaMetadata(observation)}</p>
+                            <p className="mt-1 text-muted">{formatAge(observation.observed_at) ? `Observed ${formatAge(observation.observed_at)}` : 'No observation time'}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <details className="quota-row-feedback text-xs text-muted">
+                      <summary className="cursor-pointer">Usage details</summary>
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2">
+                        <span>{formatCount(candidate.usage.entries)} entries · {formatPercent(candidate.usage.success_rate)} success</span>
+                        <span>{formatTokens(candidate.usage.total_tokens)} tokens · {formatCount(candidate.usage.requests_count)} requests</span>
+                        {(candidate.usage.actual_cost_usd !== null || candidate.usage.estimated_cost_usd !== null) && <span>Cost: {formatCost(candidate.usage.actual_cost_usd ?? candidate.usage.estimated_cost_usd)}</span>}
+                        {candidate.source && <span>Source: {candidate.source}</span>}
+                      </div>
+                    </details>
+                  </div>
+                ))}
+              </section>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
   );
 }

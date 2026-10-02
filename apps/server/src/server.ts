@@ -65,7 +65,7 @@ import type {
   ChatSessionEvent
 } from '@git-agent-harness/contracts';
 import { getFleetDispatch, sessionStore } from './wsServer.js';
-import { ActivityFeed } from './activityFeed.js';
+import { ActivityFeed, validateNotificationPreferences } from './activityFeed.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
 import { deriveControllerActivity } from './controllerActivity.js';
 import { authMiddleware, coordinatorTokenMatches, isLocalAddress, requireOwner } from './authMiddleware.js';
@@ -200,11 +200,13 @@ function postedActivity(value: unknown): ActivityEvent | null {
   const validOptional = (key: string) => event[key] === undefined || event[key] === null
     || (typeof event[key] === 'string' && (event[key] as string).length > 0 && (event[key] as string).length <= 160);
   if (!validOptional('sessionId') || !validOptional('workId') || !validOptional('nodeId')) return null;
+  const nodeState = event.nodeState as ActivityEvent['nodeState'];
+  if (nodeState !== undefined && !['healthy', 'stale', 'unreachable', 'auth_failed', 'incompatible'].includes(nodeState)) return null;
   const sessionId = event.sessionId as string | null | undefined;
   const workId = event.workId as string | null | undefined;
   const nodeId = event.nodeId as string | null | undefined;
   return { id, occurredAt, profile, kind: kind as ActivityKind,
-    severity: severity as ActivityEvent['severity'], title, message, sessionId, workId, nodeId };
+    severity: severity as ActivityEvent['severity'], title, message, sessionId, workId, nodeId, nodeState };
 }
 
 const DEFAULT_CONFIG_EFFECTIVE_DEPS: ConfigEffectiveDeps = {
@@ -410,6 +412,19 @@ export function createServer(
       res.setHeader('Cache-Control', 'no-store');
       const feed = configDeps.activityFeed!;
       res.json({ events: feed.notifications(), unread: feed.unreadCount() });
+    });
+    app.get('/api/activity/notification-preferences', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(configDeps.activityFeed!.notificationPreferences());
+    });
+    // Like marking activity read, this shared notification choice is idempotent
+    // and available to authenticated paired devices. The mount rate-limits writes.
+    app.post('/api/activity/notification-preferences', (req, res) => {
+      let preferences;
+      try { preferences = validateNotificationPreferences(req.body); }
+      catch (error) { return rejectInvalidRequest(res, 'invalid_notification_preference', error); }
+      try { return res.json(configDeps.activityFeed!.setNotificationPreferences(preferences)); }
+      catch { return res.status(500).json({ error: 'notification_preference_save_failed' }); }
     });
     // Idempotent by nature, so no replay receipt; the mount above rate-limits it.
     app.post('/api/activity/read', (req, res) => {

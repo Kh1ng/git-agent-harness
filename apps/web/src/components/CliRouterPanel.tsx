@@ -1,14 +1,30 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Wifi, WifiOff, Settings, RefreshCw, ChevronDown, ChevronRight, Copy, Check, Eye, EyeOff } from 'lucide-react';
+import { Wifi, WifiOff, Settings, RefreshCw, ChevronDown, ChevronRight, Copy, Check, Eye, EyeOff, Gauge } from 'lucide-react';
 import { StatusBadge } from './ui/StatusBadge.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
-import { formatRemaining, formatLocalTime } from '../lib/format.js';
+import { formatRemaining, formatLocalTime, isStale } from '../lib/format.js';
 import { cliRouterApi } from '../api/client.js';
 import type { CliRouterSnapshot, CliRouterSettingsPayload } from '../api/client.js';
 
 const ROUTER_REFRESH_MS = 60_000;
-const PROVIDERS = ['All', 'Antigravity', 'Claude', 'Codex'] as const;
-type ProviderFilter = (typeof PROVIDERS)[number];
+/** Group account identities, never models or quota windows, into provider filters. */
+function accountProviders(accounts: CliRouterSnapshot['accounts']): string[] {
+  return [...new Set(accounts.map(account => account.provider))];
+}
+
+/** Keep the same masked identity in account rows and summary accessibility labels. */
+function accountDisplayName(account: CliRouterSnapshot['accounts'][number], showLabel: boolean): string {
+  return showLabel ? (account.label || account.name)
+    : account.name.includes('@') ? `${account.provider} · ${account.id.slice(0, 8)}` : account.name;
+}
+
+function remainingPercent(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : null;
+}
+
+function quotaTone(remaining: number | null): string {
+  return remaining === null ? 'text-muted' : remaining < 20 ? 'text-critical' : remaining < 60 ? 'text-warning' : 'text-good';
+}
 
 /** Feedback message auto-cleared after display. */
 interface Feedback {
@@ -103,26 +119,26 @@ export function CliRouterPanel() {
       </div>
 
       {error && <p role="alert" className="text-xs text-critical">Latest refresh failed. Showing the earlier snapshot. {error}</p>}
-      <ConnectionSettings
-        settings={snapshot?.settings ?? { url: null, hasApiKey: false, hasManagementKey: false }}
-        status={snapshot?.status ?? 'unconfigured'}
-        onSaved={fetchSnapshot}
-      />
-
       {snapshot?.status === 'connected' && (
-        <>
-          <RoutingControls
-            strategy={snapshot.strategy}
-            sessionAffinity={snapshot.sessionAffinity}
-            onChanged={fetchSnapshot}
-          />
-          <AccountList
-            accounts={snapshot.accounts}
-            onChanged={fetchSnapshot}
-          />
-          <ModelList models={snapshot.models} />
-        </>
+        <AccountList accounts={snapshot.accounts} onChanged={fetchSnapshot} />
       )}
+
+      <details className="quota-settings" open={snapshot?.status === 'unconfigured'}>
+        <summary className="text-sm text-secondary cursor-pointer py-3">Router settings and models</summary>
+        <div className="space-y-3 pb-3">
+          <ConnectionSettings
+            settings={snapshot?.settings ?? { url: null, hasApiKey: false, hasManagementKey: false }}
+            status={snapshot?.status ?? 'unconfigured'}
+            onSaved={fetchSnapshot}
+          />
+          {snapshot?.status === 'connected' && (
+            <>
+              <RoutingControls strategy={snapshot.strategy} sessionAffinity={snapshot.sessionAffinity} onChanged={fetchSnapshot} />
+              <ModelList models={snapshot.models} />
+            </>
+          )}
+        </div>
+      </details>
 
       {snapshot?.status === 'unconfigured' && (
         <div className="card-padded text-xs text-muted space-y-2">
@@ -343,63 +359,98 @@ function AccountList({
   accounts: CliRouterSnapshot['accounts'];
   onChanged: () => void;
 }) {
-  const [providerFilter, setProviderFilter] = useState<ProviderFilter>('All');
+  const [providerFilter, setProviderFilter] = useState('All');
   const [showLabels, setShowLabels] = useState(false);
-
-  const filtered = providerFilter === 'All'
-    ? accounts
-    : accounts.filter((a) => a.provider.toLowerCase() === providerFilter.toLowerCase());
+  const providers = accountProviders(accounts);
+  const activeFilter = providers.includes(providerFilter) ? providerFilter : 'All';
+  const filteredProviders = activeFilter === 'All' ? providers : [activeFilter];
 
   return (
-    <div className="card-padded">
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-        <h4 className="text-[11px] uppercase tracking-wide text-muted">Accounts ({accounts.length})</h4>
-        <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer rounded focus-within:ring-2 focus-within:ring-accent">
-          {showLabels ? <Eye size={12} aria-hidden="true" /> : <EyeOff size={12} aria-hidden="true" />}
-          <input
-            type="checkbox"
-            checked={showLabels}
-            onChange={(e) => setShowLabels(e.target.checked)}
-            className="sr-only"
-          />
+    <div className="quota-accounts">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <p className="text-sm text-muted tabular-nums">
+          <span className="text-primary">{accounts.length} {accounts.length === 1 ? 'account' : 'accounts'}</span>
+          <span className="mx-2">·</span>
+          <span className="text-good">{accounts.filter(account => !account.disabled && !account.unavailable).length} active</span>
+        </p>
+        <label className="btn-secondary cursor-pointer focus-within:ring-2 focus-within:ring-accent">
+          {showLabels ? <Eye size={14} aria-hidden="true" /> : <EyeOff size={14} aria-hidden="true" />}
+          <input type="checkbox" checked={showLabels} onChange={e => setShowLabels(e.target.checked)} className="sr-only" />
           <span>{showLabels ? 'Labels visible' : 'Show labels'}</span>
         </label>
       </div>
 
-      {/* Provider filter tabs */}
-      <div className="flex flex-wrap gap-1 mb-3" role="group" aria-label="Filter by provider">
-        {PROVIDERS.map((p) => {
-          const count = p === 'All' ? accounts.length : accounts.filter((a) => a.provider.toLowerCase() === p.toLowerCase()).length;
-          return (
-            <button
-              key={p}
-              aria-pressed={providerFilter === p}
-              onClick={() => setProviderFilter(p)}
-              className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
-                providerFilter === p
-                  ? 'bg-accent/20 text-primary'
-                  : 'text-muted hover:text-secondary hover:bg-white/5'
-              }`}
-            >
-              {p} {count > 0 && <span className="text-muted">({count})</span>}
-            </button>
-          );
-        })}
+      <div className="quota-provider-tabs" role="group" aria-label="Filter accounts by provider">
+        {['All', ...providers].map(provider => (
+          <button key={provider} aria-pressed={activeFilter === provider} onClick={() => setProviderFilter(provider)} className="quota-provider-tab">
+            <Gauge size={15} aria-hidden="true" />
+            {provider}
+            <span className="quota-provider-count">({provider === 'All' ? accounts.length : accounts.filter(account => account.provider === provider).length})</span>
+          </button>
+        ))}
       </div>
 
-      {filtered.length === 0 ? (
-        <p className="text-xs text-muted py-4 text-center">No accounts{providerFilter !== 'All' ? ` for ${providerFilter}` : ''}</p>
-      ) : (
-        <div className="space-y-2">
-          {filtered.map((account) => (
-            <AccountRow
-              key={account.id}
-              account={account}
-              showLabel={showLabels}
-              onChanged={onChanged}
-            />
-          ))}
-        </div>
+      {accounts.length === 0 ? <p className="text-sm text-muted py-6">No router accounts configured.</p> : (
+        <>
+          <div className="quota-summary-band" aria-label="Provider quota summaries">
+            {filteredProviders.map(provider => {
+              const providerAccounts = accounts.filter(account => account.provider === provider);
+              // Each label remains its own allowance. Percentages from different windows
+              // cannot be added, and unknown readings never count as a zero balance.
+              const labels = [...new Set(providerAccounts.flatMap(account => account.quotas.map(quota => quota.label)))];
+              return (
+                <section key={provider} className="quota-provider-summary" data-testid={`quota-summary-${provider}`}>
+                  <div className="flex items-center justify-between gap-3 mb-4">
+                    <h4 className="text-sm font-semibold text-primary">{provider}</h4>
+                    <span className="text-xs text-muted">{providerAccounts.length} {providerAccounts.length === 1 ? 'account' : 'accounts'}</span>
+                  </div>
+                  {labels.length === 0 ? <p className="text-sm text-muted">Quota not checked</p> : labels.map((label, labelIndex) => {
+                    const readings = providerAccounts.map(account => account.quotas.find(quota => quota.label === label));
+                    const known = readings.map(quota => remainingPercent(quota?.remainingPercent)).filter((value): value is number => value !== null);
+                    const total = known.reduce((sum, value) => sum + value, 0);
+                    if (labelIndex > 0) {
+                      return <p key={label} className="quota-summary-secondary text-xs text-muted"><span>{label}</span><span className="text-secondary tabular-nums">{known.length ? `${Math.round(total * 10) / 10}% of ${known.length * 100}%` : 'Unknown'} · {known.length}/{providerAccounts.length} reported{readings.some(quota => isStale(quota?.observedAt)) ? ' · Stale' : ''}</span></p>;
+                    }
+                    const resetTimes = readings.map(quota => quota?.resetAt).filter((value): value is string => !!value && Number.isFinite(Date.parse(value)) && Date.parse(value) > Date.now()).sort((left, right) => Date.parse(left) - Date.parse(right));
+                    const nextReset = resetTimes[0];
+                    return (
+                      <div key={label} className="quota-summary-window">
+                        <p className="text-xs text-muted mb-1">{label} · remaining</p>
+                        <div className="flex items-baseline gap-2 tabular-nums">
+                          <span className="text-2xl font-semibold text-primary">{known.length ? `${Math.round(total * 10) / 10}%` : 'Unknown'}</span>
+                          {known.length > 0 && <span className="text-xs text-muted">of {known.length * 100}%</span>}
+                        </div>
+                        <div className="flex gap-1 my-2" aria-label={`${label}: individual account allowances`}>
+                          {readings.map((quota, index) => {
+                            const remaining = remainingPercent(quota?.remainingPercent);
+                            return remaining === null ? <span key={providerAccounts[index].id} className="quota-unknown-segment flex-1" title={`${accountDisplayName(providerAccounts[index], showLabels)}: unknown`} /> : (
+                              <progress key={providerAccounts[index].id} className={`usage-progress router-quota-progress flex-1 ${quotaTone(remaining)}`} max={100} value={remaining} aria-label={`${accountDisplayName(providerAccounts[index], showLabels)}, ${label}: ${remaining}% remaining`} />
+                            );
+                          })}
+                        </div>
+                        <p className="text-xs text-muted">{known.length}/{providerAccounts.length} {providerAccounts.length === 1 ? 'account' : 'accounts'} reported{readings.some(quota => isStale(quota?.observedAt)) ? ' · Stale readings' : ''}</p>
+                        <p className="text-xs text-muted mt-1">{nextReset ? `Next reset ${formatRemaining(nextReset) ? `in ${formatRemaining(nextReset)}` : formatLocalTime(nextReset)}` : 'No reset time reported'}</p>
+                      </div>
+                    );
+                  })}
+                </section>
+              );
+            })}
+          </div>
+          {accounts.some(account => account.quotas.some(quota => remainingPercent(quota.remainingPercent) !== null)) && (
+            <p className="text-xs text-muted mt-2">Totals add reported account percentages within each window; they do not compare token capacities.</p>
+          )}
+          <div className="quota-provider-ledgers">
+            {filteredProviders.map(provider => (
+              <section key={provider}>
+                <h4 className="text-sm font-semibold text-primary mb-2">{provider} <span className="text-muted font-normal ml-2">{accounts.filter(account => account.provider === provider).length}</span></h4>
+                {accounts.filter(account => account.provider === provider).map(account => (
+                  <AccountRow key={account.id} account={account} showLabel={showLabels} onChanged={onChanged} />
+                ))}
+              </section>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
@@ -420,9 +471,7 @@ function AccountRow({
 }) {
   const [actionPending, setActionPending] = useState<'toggle' | 'refresh' | null>(null);
   const [feedback, setFeedback] = useFeedback();
-  const displayName = showLabel
-    ? (account.label || account.name)
-    : account.name.includes('@') ? `${account.provider} · ${account.id.slice(0, 8)}` : account.name;
+  const displayName = accountDisplayName(account, showLabel);
 
   const handleToggle = async () => {
     if (actionPending) return;
@@ -461,94 +510,42 @@ function AccountRow({
     : 'Active';
 
   return (
-    <div
-      className="rounded-md border border-subtle bg-raised/50 p-3"
-      data-testid={`account-${account.id}`}
-    >
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-medium text-primary truncate">
-              {displayName}
-            </span>
-            <span className="text-[11px] text-muted">{account.provider}</span>
-            <StatusBadge tone={tone} label={statusLabel} />
-          </div>
-          {showLabel && account.label && account.label !== account.name && (
-            <p className="text-[11px] text-muted mt-0.5 truncate">{account.name}</p>
-          )}
-        </div>
-
-        <div className="flex items-center gap-1.5 flex-shrink-0">
-          <button
-            onClick={handleToggle}
-            disabled={actionPending !== null}
-            className="btn-secondary text-xs px-2 py-1"
-            aria-label={account.disabled ? `Enable ${displayName}` : `Pause ${displayName}`}
-          >
-            {actionPending === 'toggle' ? '…' : account.disabled ? 'Enable' : 'Pause'}
-          </button>
-          <button
-            onClick={handleRefresh}
-            disabled={actionPending !== null}
-            className="btn-secondary text-xs px-2 py-1"
-            aria-label={`Refresh quota for ${displayName}`}
-          >
-            <RefreshCw size={12} className={actionPending === 'refresh' ? 'animate-spin' : ''} aria-hidden="true" />
-          </button>
-        </div>
+    <div className="quota-account-row" data-testid={`account-${account.id}`}>
+      <div className="min-w-0 quota-account-identity">
+        <p className="text-sm font-medium text-primary break-all">{displayName}</p>
+        {showLabel && account.label && account.label !== account.name && <p className="text-xs text-muted mt-1 break-all">{account.name}</p>}
+        <div className="mt-2"><StatusBadge tone={tone} label={statusLabel} /></div>
+        {account.unavailable && account.resetAt && <p className="text-xs text-muted mt-2">Available again {formatRemaining(account.resetAt) ? `in ${formatRemaining(account.resetAt)}` : (formatLocalTime(account.resetAt) ?? account.resetAt)}</p>}
       </div>
-
-      {/* Quota windows */}
-      {account.quotas.length > 0 && (
-        <div className="mt-2 space-y-1.5">
-          {account.quotas.map((q, i) => {
-            const remaining = formatRemaining(q.resetAt);
-            return (
-              <div key={i} className="text-xs text-secondary">
-                <div className="flex items-center justify-between gap-2">
-                  <span>{q.label}</span>
-                  <span className="text-muted tabular-nums">
-                    {q.remainingPercent !== null && q.remainingPercent !== undefined
-                      ? `${Math.round(q.remainingPercent)}% remaining`
-                      : 'Unknown'}
-                  </span>
-                </div>
-                {q.remainingPercent !== null && q.remainingPercent !== undefined && (
-                  <progress
-                    className={`usage-progress router-quota-progress mt-1 ${q.remainingPercent < 20 ? 'text-warning' : 'text-good'}`}
-                    max={100}
-                    value={q.remainingPercent}
-                    aria-label={`${q.label}: ${Math.round(q.remainingPercent)}% remaining`}
-                  />
-                )}
-                {q.observedAt && <p className="text-[11px] text-muted mt-0.5">Checked {formatLocalTime(q.observedAt)}</p>}
-                {remaining && <p className="text-[11px] text-muted mt-0.5">Resets in {remaining}</p>}
-                {q.resetAt && !remaining && (
-                  <p className="text-[11px] text-muted mt-0.5">Resets {formatLocalTime(q.resetAt) ?? q.resetAt}</p>
-                )}
+      <div className="quota-account-windows">
+        {account.quotas.map((quota, index) => {
+          const remaining = remainingPercent(quota.remainingPercent);
+          const reset = formatRemaining(quota.resetAt);
+          return (
+            <div key={index} className="min-w-0 text-xs text-secondary">
+              <div className="flex items-start justify-between gap-2 mb-2">
+                <span>{quota.label}</span>
+                <span className="font-semibold text-primary tabular-nums whitespace-nowrap">{remaining === null ? 'Unknown' : `${remaining}% remaining`}</span>
               </div>
-            );
-          })}
-        </div>
-      )}
-
-      {account.quotaError && (
-        <p className="text-xs text-critical mt-2">{account.quotaError}</p>
-      )}
-      {account.quotas.length === 0 && !account.quotaError && <p className="text-xs text-muted mt-2">Quota not checked. Refresh this account to read its remaining allowance.</p>}
-
-      {account.unavailable && account.resetAt && (
-        <p className="text-xs text-muted mt-1">
-          Available again {formatRemaining(account.resetAt) ? `in ${formatRemaining(account.resetAt)}` : (formatLocalTime(account.resetAt) ?? account.resetAt)}
-        </p>
-      )}
-
-      {feedback && (
-        <p role={feedback.kind === 'error' ? 'alert' : 'status'} className={`text-xs mt-1.5 ${feedback.kind === 'error' ? 'text-critical' : 'text-good'}`}>
-          {feedback.text}
-        </p>
-      )}
+              {remaining !== null && <progress className={`usage-progress router-quota-progress ${quotaTone(remaining)}`} max={100} value={remaining} aria-label={`${quota.label}: ${remaining}% remaining`} />}
+              <p className="text-xs text-muted mt-2">{reset ? `Resets in ${reset}` : quota.resetAt ? `Resets ${formatLocalTime(quota.resetAt) ?? quota.resetAt}` : 'No reset time reported'}</p>
+              <p className="text-xs text-muted mt-1">{quota.observedAt ? `Checked ${formatLocalTime(quota.observedAt)}` : 'No observation time'}{isStale(quota.observedAt) && <span className="text-serious"> · Stale</span>}</p>
+            </div>
+          );
+        })}
+        {account.quotas.length === 0 && <p className="text-xs text-muted">Quota not checked. Refresh this account to read its remaining allowance.</p>}
+      </div>
+      <div className="quota-account-actions">
+        <button onClick={handleToggle} disabled={actionPending !== null} className="btn-secondary text-xs" aria-label={account.disabled ? `Enable ${displayName}` : `Pause ${displayName}`}>
+          {actionPending === 'toggle' ? '…' : account.disabled ? 'Enable' : 'Pause'}
+        </button>
+        <button onClick={handleRefresh} disabled={actionPending !== null} className="btn-secondary text-xs" aria-label={`Refresh quota for ${displayName}`}>
+          <RefreshCw size={13} className={actionPending === 'refresh' ? 'animate-spin' : ''} aria-hidden="true" />
+          Refresh quota
+        </button>
+      </div>
+      {account.quotaError && <p className="quota-row-feedback text-xs text-critical">{account.quotaError}</p>}
+      {feedback && <p className={`quota-row-feedback text-xs ${feedback.kind === 'error' ? 'text-critical' : 'text-good'}`} role={feedback.kind === 'error' ? 'alert' : 'status'}>{feedback.text}</p>}
     </div>
   );
 }
