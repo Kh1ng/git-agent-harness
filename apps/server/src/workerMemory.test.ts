@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import { authMiddleware } from './authMiddleware.js';
 import { DeviceAccess, DEVICE_COOKIE } from './deviceAccess.js';
 import { workerMemoryRouter } from './workerMemory.js';
@@ -31,7 +32,7 @@ test('memory management enforces owner access and configured project membership'
   const access = new DeviceAccess(join(directory, 'devices.json'));
   const app = express();
   app.locals.deviceAccess = access;
-  app.use(express.json(), authMiddleware);
+  app.use(rateLimit({ windowMs: 60_000, limit: 60 }), express.json(), authMiddleware);
   app.use('/api/worker-memory', workerMemoryRouter());
   const server = createServer(app);
   t.after(async () => {
