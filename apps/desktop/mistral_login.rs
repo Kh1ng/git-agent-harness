@@ -17,6 +17,8 @@ const URL: &str = "https://admin.mistral.ai/organization/usage";
 const API_PATH: &str = "/api/local-trpc/";
 const EVENT: &str = "gah:mistral-login";
 static CHECKING: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
+mod collector_args;
 
 #[derive(Clone, Serialize)]
 pub struct LoginStatus {
@@ -150,7 +152,7 @@ fn finish(login: &tauri::WebviewWindow) -> LoginStatus {
         return status(
             "pending",
             true,
-            "Finish signing in to Mistral, then check the connection.",
+            "Open the Mistral usage page after signing in, then check the connection.",
         );
     }
     // Wry's macOS cookies_for_url uses exact domain equality. Filter the
@@ -171,7 +173,7 @@ fn finish(login: &tauri::WebviewWindow) -> LoginStatus {
             return status(
                 "pending",
                 true,
-                "Finish signing in to Mistral, then check the connection.",
+                "No usable Mistral session cookies were found. Sign in again, then check the connection.",
             )
         }
     };
@@ -230,15 +232,23 @@ fn cookie_header(cookies: &[Cookie<'_>], now: i64) -> Result<String, ()> {
         }
         let name = cookie.name();
         let value = cookie.value();
+        // RFC 6265 permits a cookie value enclosed in double quotes. Preserve
+        // that browser representation, validating the enclosed cookie octets.
+        let octets = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(value);
         if name.is_empty()
             || !name
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
-            || !value
+            || !octets
                 .bytes()
                 .all(|byte| (0x21..=0x7e).contains(&byte) && !b"\";,\\".contains(&byte))
         {
-            return Err(());
+            // Optional analytics cookies must not discard a usable session.
+            // The remaining header still requires provider verification.
+            continue;
         }
         selected.push((
             cookie.path().unwrap_or("/").len(),
@@ -312,13 +322,7 @@ fn verify_and_save(gah: &Path, root: &Path, cookie: &str) -> LoginStatus {
     let store = check.dir.join("quota.jsonl");
     let mut command = super::command(gah.to_string_lossy().as_ref());
     command
-        .args([
-            "quota",
-            "refresh",
-            "--backend",
-            "mistral-dashboard",
-            "--store",
-        ])
+        .args(collector_args::REFRESH_ARGS)
         .arg(&store)
         .env("MISTRAL_DASHBOARD_COOKIE_FILE", check.dir.join("cookie"));
     let succeeded = run_gah(command, Duration::from_secs(95));

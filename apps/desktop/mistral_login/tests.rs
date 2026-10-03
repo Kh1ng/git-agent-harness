@@ -32,6 +32,48 @@ fn cookie_capture_preserves_http_only_and_parent_domains_but_rejects_other_scope
 }
 
 #[test]
+fn unsafe_analytics_cookie_cannot_discard_valid_http_only_authentication() {
+    let cookies = [
+        cookie("session", "admin.mistral.ai", "/", "synthetic-session"),
+        cookie("analytics", ".mistral.ai", "/", "\"synthetic,id\""),
+        cookie("bad;name", "admin.mistral.ai", "/", "synthetic-value"),
+        cookie(
+            "injected",
+            "admin.mistral.ai",
+            "/",
+            "value\r\nInjected: value",
+        ),
+    ];
+    let header = cookie_header(&cookies, unix_seconds()).unwrap();
+    assert_eq!(header, "session=synthetic-session");
+    assert!(cookies[0].http_only().unwrap());
+    assert!(!header.contains(['\"', ',', '\r', '\n']));
+}
+
+#[test]
+fn quoted_http_only_session_value_is_preserved_without_accepting_unsafe_octets() {
+    let cookies = [
+        cookie(
+            "session",
+            ".mistral.ai",
+            "/",
+            "\"synthetic-opaque-session\"",
+        ),
+        cookie("unsafe", ".mistral.ai", "/", "\"unsafe,value\""),
+        cookie(
+            "injection",
+            ".mistral.ai",
+            "/",
+            "\"value\nInjected: header\"",
+        ),
+    ];
+    assert_eq!(
+        cookie_header(&cookies, unix_seconds()).unwrap(),
+        "session=\"synthetic-opaque-session\""
+    );
+}
+
+#[test]
 fn cookie_header_rejects_injection_ambiguous_values_and_oversized_secrets() {
     for (name, value) in [
         ("session", "valid\nInjected: value"),
@@ -200,7 +242,7 @@ fn only_verified_session_is_atomically_saved_and_supported_record_is_used() {
         &root.0,
         r#"
 if [ "$2" = refresh ]; then
-  [ "$3" = --backend ] && [ "$4" = mistral-dashboard ] && [ "$5" = --store ] || exit 2
+  [ "$3" = --backend ] && [ "$4" = mistral-dashboard ] && [ "$5" = --store-path ] || exit 2
   [ -n "$MISTRAL_DASHBOARD_COOKIE_FILE" ] || exit 3
   printf '%s' '{"backend":"mistral-dashboard","account_usage":{"account_id":"synthetic"},"check_error":null}' > "$6"
 elif [ "$2" = record ]; then
