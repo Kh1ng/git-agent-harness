@@ -305,7 +305,7 @@ type QuotaLedgerRow = Omit<QuotaCandidateStatus, 'usage'> & {
 function QuotaCandidateLedger({ candidates: configuredCandidates, quotaChecks }: { candidates: QuotaCandidateStatus[]; quotaChecks: QuotaCheck[] }) {
   // An account observation is not permission to schedule work on that account.
   const observedAccounts: QuotaLedgerRow[] = quotaChecks.filter(check =>
-    check.backend_instance && (check.quota_observations?.length ?? 0) > 0 && !configuredCandidates.some(candidate =>
+    check.backend_instance && ((check.quota_observations?.length ?? 0) > 0 || check.status === 'failed') && !configuredCandidates.some(candidate =>
       candidate.backend === check.backend && candidate.backend_instance === check.backend_instance &&
       (!check.model || candidate.model === check.model) && (!check.quota_pool || candidate.quota_pool === check.quota_pool)
     )

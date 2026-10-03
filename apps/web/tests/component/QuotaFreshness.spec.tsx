@@ -159,4 +159,28 @@ test('observation-only Nous accounts show balances without becoming generic Open
   await expect(nous.getByText('Eligible', { exact: true })).toHaveCount(0);
   await expect(nous.getByText('Usage details', { exact: true })).toHaveCount(0);
   await expect(component.getByTestId('quota-candidate-opencode-0').filter({ hasNotText: 'Observed account' }).getByRole('progressbar')).toHaveCount(0);
+
+  const failedQuota: QuotaSnapshot = {
+    ...quota,
+    quota_checks: [
+      { ...quota.quota_checks[0], status: 'failed', quota_observations: [], error: 'Nous account check failed' },
+      { backend: 'vibe', provider: 'mistral', backend_instance: 'vibe-second', quota_pool: 'vibe-second-monthly', checked_at: new Date().toISOString(), status: 'failed', error: 'Vibe account check failed' },
+      { backend: 'claude', provider: 'anthropic', backend_instance: 'claude-unverified', checked_at: new Date().toISOString(), status: 'no_data' }
+    ]
+  };
+  await component.update(<MockStoreProvider statusData={null} quotaData={failedQuota}><WebSocketProvider><QuotaPage /></WebSocketProvider></MockStoreProvider>);
+  await expect(nous.getByText('Quota unknown', { exact: true })).toBeVisible();
+  await expect(nous.getByText('Availability unverified', { exact: true })).toBeVisible();
+  await expect(nous.getByText('Usage details', { exact: true })).toHaveCount(0);
+  const vibe = component.getByTestId('quota-candidate-vibe-0');
+  await expect(vibe.getByText(/vibe-second/).first()).toBeVisible();
+  await expect(vibe.getByText('Quota unknown', { exact: true })).toBeVisible();
+  await expect(vibe.getByText('Availability unverified', { exact: true })).toBeVisible();
+  await expect(vibe.getByText('Usage details', { exact: true })).toHaveCount(0);
+  await expect(component.getByRole('progressbar')).toHaveCount(0);
+  const filters = component.getByRole('group', { name: 'Filter candidates by provider' });
+  await expect(filters.getByRole('button', { name: 'Nous (1)', exact: true })).toBeVisible();
+  await expect(filters.getByRole('button', { name: 'Mistral (1)', exact: true })).toBeVisible();
+  await expect(filters.getByRole('button', { name: 'Anthropic (1)', exact: true })).toHaveCount(0);
+  await expect(component.getByTestId('quota-candidate-claude-0')).toHaveCount(0);
 });
