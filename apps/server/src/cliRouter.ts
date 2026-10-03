@@ -99,7 +99,7 @@ export function writeSettings(settings: CliRouterStoredSettings): void {
 }
 
 // ---------------------------------------------------------------------------
-// In-memory quota cache (never persisted to disk)
+// Dashboard cache; sanitized observations are also appended through gah quota record
 // ---------------------------------------------------------------------------
 
 interface QuotaCache {
@@ -445,28 +445,27 @@ export interface CliRouterDeps {
   recordQuotaFn?: (record: Record<string, unknown>) => Promise<void>;
 }
 
-export function cliRouterRouter(
-  mutation: ReturnType<typeof mutationSafety>,
-  deps: CliRouterDeps = {}
-): Router {
-  const router = Router();
+/** Owns bounded quota collection for both dashboard reads and the server lifecycle. */
+export function createCliRouterQuotaObserver(deps: CliRouterDeps = {}) {
   const doFetch = deps.fetchFn;
   const doRead = deps.readSettingsFn ?? readSettings;
-  const doWrite = deps.writeSettingsFn ?? writeSettings;
   const now = deps.now ?? Date.now;
   const doRecord = deps.recordQuotaFn ?? recordQuota;
   const refreshInterval = 15 * 60_000;
+  // Timer scheduling and the wall clock can differ slightly at the interval boundary.
+  const refreshThrottle = refreshInterval - 60_000;
   let batch: Promise<void> | undefined;
+  let stopped = false;
 
   async function observeAccount(account: UpstreamAuthFile, stored: CliRouterStoredSettings, force = false): Promise<QuotaCache | undefined> {
     const origin = stored.url.replace(/\/$/, '');
     const key = cacheKey(origin, account);
     const previous = quotaCache.get(key);
-    if (!force && previous?.checkedAt !== undefined && now() - previous.checkedAt < refreshInterval) return previous;
+    if (!force && previous?.checkedAt !== undefined && now() - previous.checkedAt < refreshThrottle) return previous;
     const result = await refreshAccountQuota(account, { baseUrl: origin, managementKey: stored.managementKey, fetchFn: doFetch });
     // A replaced connection must not receive an old in-flight reading.
     const current = doRead();
-    if (current?.url !== stored.url || current.managementKey !== stored.managementKey
+    if (stopped || current?.url !== stored.url || current.managementKey !== stored.managementKey
       || JSON.stringify(current.accountBackends) !== JSON.stringify(stored.accountBackends)) return;
     result.checkedAt = now();
     quotaCache.set(key, result);
@@ -506,16 +505,62 @@ export function cliRouterRouter(
   }
 
   /** One bounded background batch serves every controller; refreshes never block page reads. */
-  function observeAccounts(accounts: UpstreamAuthFile[], stored: CliRouterStoredSettings): void {
-    if (deps.autoRefresh === false || batch) return;
+  function observeAccounts(accounts: UpstreamAuthFile[], stored: CliRouterStoredSettings): Promise<void> {
+    if (stopped || deps.autoRefresh === false) return Promise.resolve();
+    if (batch) return batch;
     // ponytail: serial refresh, up to 64 configured accounts per batch; add a
     // bounded worker pool only if account refresh latency requires it.
     batch = (async () => {
       for (const account of accounts.slice(0, 64)) {
+        if (stopped) break;
         if (!account.disabled) await observeAccount(account, stored);
       }
     })().catch(() => undefined).finally(() => { batch = undefined; });
+    return batch;
   }
+
+  // Inventory polling is single-flight too; failures cannot trigger a request storm.
+  let refresh: Promise<void> | undefined;
+  let lastRefresh: number | undefined;
+  async function refreshConfigured(): Promise<void> {
+    if (stopped) return;
+    if (refresh) return refresh;
+    if (lastRefresh !== undefined && now() - lastRefresh < refreshThrottle) return;
+    lastRefresh = now();
+    refresh = (async () => {
+      const stored = doRead();
+      if (!stored?.url || !stored.managementKey) return;
+      const accounts = await fetchAuthFiles(stored.url.replace(/\/$/, ''), stored.managementKey, doFetch);
+      await observeAccounts(accounts, stored);
+    })().catch(() => undefined).finally(() => { refresh = undefined; });
+    return refresh;
+  }
+
+  return {
+    observeAccount,
+    observeAccounts,
+    refresh: refreshConfigured,
+    /** Refresh without a dashboard; shutdown prevents further observations and writes. */
+    start() {
+      stopped = false;
+      const timer = setInterval(() => { void refreshConfigured(); }, refreshInterval);
+      timer.unref?.();
+      void refreshConfigured();
+      return () => { stopped = true; clearInterval(timer); };
+    }
+  };
+}
+
+export function cliRouterRouter(
+  mutation: ReturnType<typeof mutationSafety>,
+  deps: CliRouterDeps = {},
+  observer = createCliRouterQuotaObserver(deps)
+): Router {
+  const router = Router();
+  const doFetch = deps.fetchFn;
+  const doRead = deps.readSettingsFn ?? readSettings;
+  const doWrite = deps.writeSettingsFn ?? writeSettings;
+  const { observeAccount, observeAccounts } = observer;
 
   router.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
 

@@ -29,6 +29,8 @@ pub fn latest_windows_for_identity<'a>(
 
 /// An explicit credential binding cannot inherit ambient or sibling source
 /// readings. A shared verified billing pool remains visible at account scope.
+/// Without a credential binding, explicit instances exclude unscoped readings
+/// before freshness selection so ambient checks cannot replace their windows.
 pub fn latest_windows_for_identity_and_credential<'a>(
     records: &'a [QuotaObservationRecord],
     identity: &crate::execution_identity::ExecutionIdentity,
@@ -38,7 +40,12 @@ pub fn latest_windows_for_identity_and_credential<'a>(
         .into_iter()
         .filter(|record| match credential_id {
             Some(id) => record.credential_id.as_deref() == Some(id),
-            None => observation_matches_identity(record, identity),
+            None => {
+                observation_matches_identity(record, identity)
+                    && (!identity.explicit_instance
+                        || record.backend_instance.is_some()
+                        || record.quota_pool.is_some())
+            }
         })
         .collect();
     let timestamp = |record: &QuotaObservationRecord| {

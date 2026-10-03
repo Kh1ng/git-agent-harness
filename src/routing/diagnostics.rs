@@ -134,6 +134,7 @@ pub(super) fn build_routing_diagnostics<C: DiagnosticCandidate>(
         selected_model: selected.model().map(str::to_string),
         selected_quota_pool: selected.quota_pool().map(str::to_string),
         selected_pace_band: candidate_pace_band(selected, pacing),
+        selected_subscription_capacity: None,
         selected_cost_class: Some(candidate_cost_class(selected)),
         selected_over: selected_over.unwrap_or_default().to_vec(),
         configured_order,

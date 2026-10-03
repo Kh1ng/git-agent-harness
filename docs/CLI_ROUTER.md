@@ -2,7 +2,7 @@
 
 GAH uses [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) as a local subscription gateway. OpenCode runs coding jobs and ACP chat through it. The existing AGY, Claude, Codex, and Vibe runners remain available.
 
-The Quota page shows router accounts, available models, remaining quota, and reset times. It also controls account pause, routing strategy, and session affinity. Account quota requires an explicit refresh. Each observation includes its check time. A failed refresh shows an error instead of a zero balance.
+The Quota page shows router accounts, available models, remaining quota, and reset times. It also controls account pause, routing strategy, and session affinity. The central server refreshes router quota at startup and every 15 minutes, even with no dashboard open. The refresh button also offers an immediate check. Each observation includes its check time. A failed refresh shows an error instead of a zero balance.
 
 ## Install on a central node
 
@@ -107,4 +107,6 @@ GAH chooses the job, runner, and model. The proxy chooses an eligible account fo
 
 GAH's weekly pacing compares remaining quota with the target remaining balance. Unused quota becomes more urgent as reset approaches. Explicit candidate priorities still take precedence. This weekly calculation does not model monthly or five-hour windows.
 
-Router account readings currently stay in the dashboard cache. They do not feed GAH's durable quota observations or select the account with the earliest reset. Completing that connection requires fresh model/pool-scoped observations, distinct short-term limits and subscription budgets, and reset-aware selection for new sessions. Unknown or failed readings must remain unknown; one exhausted model pool must not disable an account's other pools. Cache savings must use provider-reported cache tokens rather than inferred savings.
+Router observations are sanitized and appended through `gah quota record` to the durable quota store. Bind router account IDs to native backends with `accountBackends` in the private router settings to apply those readings to the matching native account. Unbound accounts retain opaque identities and cannot imply capacity for a native account. AGY observations distinguish Google-native and external-model pools.
+
+Scheduling uses fresh weekly or monthly subscription balances for reset pressure. Five-hour throttles affect eligibility without creating urgency to spend. Failed account-wide checks invalidate earlier window readings. Named credential removal or rotation also retires its earlier capacity. Each launched dispatch attempt records its selected subscription capacity and reset pressure alongside the actual route. Provider-reported cache reads and writes stay in the existing usage record.

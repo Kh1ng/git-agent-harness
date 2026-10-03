@@ -1,3 +1,5 @@
+mod routing_record;
+pub(super) use routing_record::record_route_attempt;
 mod execution_env;
 use super::command::which;
 pub(super) use execution_env::apply_execution_identity_env;
@@ -906,24 +908,6 @@ pub(super) fn apply_route_to_ledger(ledger: &mut LedgerEntry, route: &RouteDecis
     ledger.human_required_reason_code = None;
     ledger.human_required = route.human_required;
     ledger.routing_diagnostics = route.routing_diagnostics.clone();
-}
-
-pub(super) fn record_route_attempt(ledger: &mut LedgerEntry, route: &RouteDecision) -> Result<()> {
-    route.identity.validate_for_persistence()?;
-    ledger
-        .routing_runtime
-        .dispatch_attempted
-        .insert(CandidateIdentity::from_execution_identity(&route.identity));
-    ledger
-        .attempt_routing
-        .push(crate::ledger::AttemptRoutingRecord {
-            attempt_number: ledger.attempt_routing.len() as u32 + 1,
-            backend_instance: route.identity.backend_instance.clone(),
-            effective_model: route.effective_model.clone(),
-            identity: Some(route.identity.clone()),
-            routing_diagnostics: route.routing_diagnostics.clone(),
-        });
-    Ok(())
 }
 
 /// Live-observed bug: `worktree::create`/`create_existing` failures (e.g. a
