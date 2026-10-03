@@ -21,7 +21,7 @@ $script:kernel = '6.6.0-microsoft-standard-WSL2'
 $script:setupExit = 0
 $script:answer = 'y'
 $script:reachable = $true
-$script:source = [Net.IPAddress]::Parse('192.168.1.11')
+$script:source = [pscustomobject]@{ IPAddress = '192.168.1.11'; AddressFamily = 2 }
 function wsl.exe {
     $script:calls += ,@($args)
     $global:LASTEXITCODE = 0
@@ -85,7 +85,7 @@ try {
     $script:reachable = $false
     Assert-Rejected { Assert-GahWslReady 'Ubuntu' 'https://central.test' } 'unreachable'
     $script:reachable = $true
-    $script:source = [Net.IPAddress]::Parse('::1')
+    $script:source = [pscustomobject]@{ IPAddress = '::1'; AddressFamily = 23 }
     Assert-Rejected { Assert-GahWslReady 'Ubuntu' 'https://central.test' } 'IPv4'
     Assert-Rejected { Assert-GahWslReady 'Ubuntu' 'https://central.test/path' } 'origin'
     Assert-Rejected { Invoke-GahWindowsSetup '-bad' $command '' $false } 'Invalid'

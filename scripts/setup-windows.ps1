@@ -39,7 +39,7 @@ function Assert-GahWslReady([string]$Name, [string]$Address) {
         if ($uri.Scheme -notin @('http', 'https') -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $uri.AbsolutePath -ne '/') { throw 'Central address must be an HTTP(S) origin.' }
         $connection = Test-NetConnection -ComputerName $uri.DnsSafeHost -Port $uri.Port -InformationLevel Detailed -WarningAction SilentlyContinue
         if (-not $connection.TcpTestSucceeded) { throw 'The central node is unreachable from Windows.' }
-        if ($connection.SourceAddress.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { throw 'The WSL worker requires an IPv4 route to central.' }
+        if (([Net.IPAddress]::Parse($connection.SourceAddress.IPAddress)).AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { throw 'The WSL worker requires an IPv4 route to central.' }
     }
 }
 
