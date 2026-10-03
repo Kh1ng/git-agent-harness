@@ -48,6 +48,8 @@ pub struct QuotaObservationRecord {
     pub usage_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mistral_admin: Option<MistralAdminObservationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_usage: Option<crate::usage::account_usage::AccountUsageObservation>,
 }
 
 /// Persisted Mistral Admin API payloads associated with a single refresh.
@@ -138,11 +140,16 @@ pub fn parse_external_observation(input: &str) -> Result<QuotaObservationRecord>
         "checked_at",
         "check_error",
         "usage_source",
+        "account_usage",
     ];
     if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
         anyhow::bail!("unsupported quota observation field");
     }
-    let mut record: QuotaObservationRecord = serde_json::from_value(value)?;
+    let mut record: QuotaObservationRecord = serde_json::from_value(value)
+        .map_err(|_| anyhow::anyhow!("invalid quota observation schema"))?;
+    if let Some(usage) = &record.account_usage {
+        usage.validate()?;
+    }
     for (name, value) in [
         ("backend", Some(record.backend.as_str())),
         ("backend instance", record.backend_instance.as_deref()),
@@ -382,6 +389,7 @@ fn has_quota_data(record: &QuotaObservationRecord) -> bool {
         || record.quota_remaining_percent.is_some()
         || record.quota_window.is_some()
         || record.quota_reset_at.is_some()
+        || record.account_usage.is_some()
 }
 
 /// #166: read Codex app-server account-level quota and append
@@ -410,6 +418,7 @@ pub fn refresh_codex_and_store(
                 check_error: None,
                 usage_source: obs.usage_source.clone(),
                 mistral_admin: None,
+                account_usage: None,
             };
             append(state_path, &rec)?;
             Ok(Some(rec))
@@ -461,6 +470,7 @@ pub fn refresh_vibe_admin_and_store(
                 check_error: refresh.spend_limit_error,
                 usage_source: Some("mistral_admin_refresh".to_string()),
                 mistral_admin: Some(admin_refresh),
+                account_usage: None,
             };
             append(state_path, &rec)?;
             return Ok(Some(rec));
@@ -484,6 +494,7 @@ pub fn refresh_vibe_admin_and_store(
         check_error: None,
         usage_source: obs.usage_source,
         mistral_admin: admin_refresh,
+        account_usage: None,
     };
     append(state_path, &rec)?;
     Ok(Some(rec))
@@ -515,6 +526,7 @@ pub fn refresh_codex_and_store_for_identity(
         check_error: None,
         usage_source: observation.usage_source,
         mistral_admin: None,
+        account_usage: None,
     };
     append(state_path, &record)?;
     Ok(Some(record))
@@ -596,6 +608,26 @@ pub fn refresh_stale_quota_observations(
         move || refresh_codex_and_store(&codex_cmd, None, &path)
     }) {
         handles.push(handle);
+    }
+    if crate::usage::mistral_dashboard::configured() {
+        let instance = load(store_path)
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .find(|record| record.backend == "mistral-dashboard")
+            .and_then(|record| record.backend_instance);
+        if let Some(handle) = maybe_refresh_backend_instance(
+            store_path,
+            "mistral-dashboard",
+            instance.as_deref(),
+            now,
+            {
+                let path = store_path.to_path_buf();
+                move || crate::usage::mistral_dashboard::refresh_scheduled(&path)
+            },
+        ) {
+            handles.push(handle);
+        }
     }
     if let Some(handle) = maybe_refresh_backend(store_path, "vibe", now, {
         let path = store_path.to_path_buf();
@@ -715,6 +747,7 @@ fn maybe_refresh_backend_instance(
                     .map(|error| crate::redact::redact(&error.to_string())),
                 usage_source: None,
                 mistral_admin: None,
+                account_usage: None,
             };
             let _ = append(&path, &marker);
         }
@@ -1108,6 +1141,7 @@ mod tests {
                 check_error: None,
                 usage_source: Some("codex_status_json".into()),
                 mistral_admin: None,
+                account_usage: None,
             },
         )
         .unwrap();
@@ -1142,6 +1176,7 @@ mod tests {
                     check_error: None,
                     usage_source: Some("codex_status_json".into()),
                     mistral_admin: None,
+                    account_usage: None,
                 },
             )
             .unwrap();
@@ -1163,6 +1198,7 @@ mod tests {
                 check_error: None,
                 usage_source: Some("agy_cli_log_delta".into()),
                 mistral_admin: None,
+                account_usage: None,
             },
         )
         .unwrap();
@@ -1192,11 +1228,13 @@ mod tests {
             check_error: None,
             usage_source: Some("codex_status_json".into()),
             mistral_admin: None,
+            account_usage: None,
         };
         let good2 = QuotaObservationRecord {
             quota_used_percent: Some(20.0),
             observed_at: Some("2026-04-29T10:00:00Z".into()),
             mistral_admin: None,
+            account_usage: None,
             ..good1.clone()
         };
         let mut contents = serde_json::to_string(&good1).unwrap();
@@ -1235,6 +1273,7 @@ mod tests {
                 check_error: None,
                 usage_source: Some("codex_status_json".into()),
                 mistral_admin: None,
+                account_usage: None,
             },
         )
         .unwrap();
@@ -1260,6 +1299,7 @@ mod tests {
             check_error: None,
             usage_source: Some("test".into()),
             mistral_admin: None,
+            account_usage: None,
         }
     }
 
@@ -1312,6 +1352,14 @@ mod tests {
                 Some(70.0)
             );
         }
+    }
+
+    #[test]
+    fn account_usage_import_is_scoped_and_does_not_require_a_quota_cap() {
+        let value = serde_json::json!({"backend":"mistral-dashboard", "backend_instance":"mistral-dashboard:account", "quota_pool":"mistral-dashboard:account", "checked_at":"2026-10-03T00:00:00Z", "observed_at":"2026-10-03T00:00:00Z", "usage_source":"mistral_dashboard", "account_usage":{"account_id":"customer-1", "workspace_id":null, "period_start":"2026-10-01T00:00:00Z", "period_end":"2026-10-03T00:00:00Z", "currency":"USD", "requests":4, "cost":0.03079, "cost_source":"dashboard_prices", "models":[]}});
+        let record = parse_external_observation(&value.to_string()).unwrap();
+        assert!(record.quota_remaining_percent.is_none());
+        assert!(record.quota_reset_at.is_none());
     }
 
     #[test]

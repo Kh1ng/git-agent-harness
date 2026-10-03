@@ -1,0 +1,132 @@
+{
+  "result": {
+    "data": {
+      "json": {
+        "groups": [
+          {
+            "apiKeyId": null,
+            "apiKeyPrimitiveAccessScope": null,
+            "apiKeyScope": null,
+            "callSource": null,
+            "callType": null,
+            "correlationId": null,
+            "customerId": null,
+            "customerTier": null,
+            "organizationId": null,
+            "plan": null,
+            "planType": null,
+            "serviceAccountId": null,
+            "subscriptionId": null,
+            "timeBucket": null,
+            "timestamp": null,
+            "untracked": null,
+            "userId": null,
+            "workspaceId": null,
+            "apiZone": null,
+            "billingDisplayName": "zai-glm-5-3",
+            "billingGroup": null,
+            "billingMetric": "zai-glm-5-3",
+            "count": 6,
+            "nbApiCalls": 2,
+            "serviceTier": null,
+            "usageType": "vibe",
+            "value": 1250
+          },
+          {
+            "apiKeyId": null,
+            "apiKeyPrimitiveAccessScope": null,
+            "apiKeyScope": null,
+            "callSource": null,
+            "callType": null,
+            "correlationId": null,
+            "customerId": null,
+            "customerTier": null,
+            "organizationId": null,
+            "plan": null,
+            "planType": null,
+            "serviceAccountId": null,
+            "subscriptionId": null,
+            "timeBucket": null,
+            "timestamp": null,
+            "untracked": null,
+            "userId": null,
+            "workspaceId": null,
+            "apiZone": null,
+            "billingDisplayName": "mistral-medium-3-5",
+            "billingGroup": null,
+            "billingMetric": "mistral-medium-3-5",
+            "count": 1,
+            "nbApiCalls": 1,
+            "serviceTier": null,
+            "usageType": "vibe",
+            "value": 100
+          },
+          {
+            "apiKeyId": null,
+            "apiKeyPrimitiveAccessScope": null,
+            "apiKeyScope": null,
+            "callSource": null,
+            "callType": null,
+            "correlationId": null,
+            "customerId": null,
+            "customerTier": null,
+            "organizationId": null,
+            "plan": null,
+            "planType": null,
+            "serviceAccountId": null,
+            "subscriptionId": null,
+            "timeBucket": null,
+            "timestamp": null,
+            "untracked": null,
+            "userId": null,
+            "workspaceId": null,
+            "apiZone": null,
+            "billingDisplayName": "web_search",
+            "billingGroup": null,
+            "billingMetric": "web_search",
+            "count": 1,
+            "nbApiCalls": 1,
+            "serviceTier": null,
+            "usageType": "vibe_connectors",
+            "value": 1
+          }
+        ],
+        "metadata": {
+          "hasMore": false,
+          "queryParams": {
+            "customerId": "11111111-1111-4111-8111-111111111111",
+            "start": "2026-10-01T00:00:00.000Z",
+            "end": "2026-10-03T00:00:00.000Z",
+            "workspaceIds": null,
+            "groupBy": [
+              "billing_display_name",
+              "usage_type"
+            ],
+            "includeNbApiCalls": true,
+            "limit": 50000,
+            "offset": 0,
+            "apiKeyId": null,
+            "apiZone": null,
+            "billingDisplayName": null,
+            "billingGroup": null,
+            "billingMetric": null,
+            "callSource": null,
+            "callType": null,
+            "filters": null,
+            "organizationId": null,
+            "serviceAccountId": null,
+            "serviceTier": null,
+            "timeBucket": null,
+            "usageType": null,
+            "userId": null,
+            "preferPeriodAggregate": false,
+            "untracked": false
+          }
+        }
+      },
+      "meta": {
+        "v": 1
+      }
+    }
+  }
+}

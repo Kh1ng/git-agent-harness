@@ -1369,7 +1369,8 @@ pub enum QuotaCommands {
         /// Backend whose account quota to refresh (e.g. "codex"). "vibe"
         /// refreshes from the Mistral Admin API (`MISTRAL_ADMIN_API_KEY`);
         /// "nous" reads the Nous account API (`NOUS_API_KEY`);
-        /// "claude" reads the current native Claude OAuth login.
+        /// "claude" reads the current native Claude OAuth login;
+        /// "mistral-dashboard" reads the owner-only dashboard Cookie file.
         #[arg(long, default_value = "codex")]
         backend: String,
         /// Stable, secret-safe execution instance for this account reading.
@@ -1399,7 +1400,7 @@ pub enum QuotaCommands {
         store_path: Option<String>,
     },
     /// Refresh account-level quota for every configured profile's
-    /// quota-tracked backends (codex, claude, vibe, nous), throttled to one live check per
+    /// quota-tracked backends (codex, claude, vibe, nous, mistral-dashboard), throttled to one live check per
     /// backend per interval (30 min) and bounded so a hung backend can never
     /// wedge the caller. Runs each due refresh to completion before exiting
     /// (it JOINS the refresh threads, unlike the fire-and-forget loop-tick

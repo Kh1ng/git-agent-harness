@@ -962,6 +962,20 @@ explicit. Each item shows one chip per delivery target, for example
 reading server logs. Every pushed URL carries `event=<id>`: a push for an
 event with no chat scrolls to that event and highlights it.
 
+### Mistral dashboard usage
+
+On macOS or Linux, save the **Cookie header value** from a signed-in Mistral
+dashboard request in `~/.config/gah/mistral-dashboard.cookie`. This is a browser
+session credential, not an API key. Keep it on the account-owning node and run
+`chmod 600 ~/.config/gah/mistral-dashboard.cookie`.
+`MISTRAL_DASHBOARD_COOKIE_FILE` can select another private file.
+
+Run `gah quota refresh --backend mistral-dashboard` to collect read-only usage
+and the current login's Vibe monthly allowance. Automatic checks run at most
+every 30 minutes and skip an empty default file. Expired sessions require a new
+Cookie value. These account readings stay separate from Vibe execution instances
+and task usage; missing allowance or price data remains unknown.
+
 ### Provider login health
 
 Every node runs `gah auth-health` at server start and every 30 minutes. It
