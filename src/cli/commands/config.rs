@@ -294,7 +294,7 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             work_id,
             acp_bridge,
             adapter_program,
-            args,
+            mut args,
         } => {
             let cfg = config::load(config_path.as_deref())?;
             let selected_profile = config::get_profile(&cfg, &profile)?;
@@ -401,7 +401,15 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                 {
                     anyhow::bail!("Vibe bridge interpreter is unavailable");
                 }
-                std::process::Command::new(path)
+                if identity.credential_id.is_some() {
+                    crate::runner::backends::vibe::credential_guard::bridge(
+                        executable, &path, &mut args,
+                    )?
+                } else {
+                    std::process::Command::new(path)
+                }
+            } else if identity.runner_kind == "vibe" {
+                crate::runner::backends::vibe::credential_guard::command(executable, &env)?
             } else {
                 std::process::Command::new(executable)
             };

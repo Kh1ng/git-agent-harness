@@ -105,7 +105,8 @@ impl ExecutionIdentity {
             env.push((key.clone(), value.clone()));
         }
         if self.runner_kind == "vibe" && !selected.is_empty() {
-            env.retain(|(name, _)| name != "VIBE_CLI");
+            env.retain(|(name, _)| name != "VIBE_CLI" && name != "GAH_VIBE_CREDENTIAL_BOUND");
+            env.push(("GAH_VIBE_CREDENTIAL_BOUND".into(), "1".into()));
             if let Some(model) = &self.effective_model {
                 env.retain(|(name, _)| name != "VIBE_ACTIVE_MODEL");
                 env.push(("VIBE_ACTIVE_MODEL".into(), model.clone()));
@@ -334,6 +335,9 @@ impl ExecutionIdentity {
     pub fn validate_launch_config(&self, cwd: &std::path::Path) -> anyhow::Result<()> {
         if self.credential_id.is_none() {
             return Ok(());
+        }
+        if self.runner_kind == "vibe" {
+            return self.validate_vibe_config(cwd);
         }
         if self.runner_kind == "hermes" {
             return self.validate_hermes_config();

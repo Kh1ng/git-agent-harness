@@ -224,7 +224,27 @@ pub fn run_review_backend_for_identity(
             "backend does not support review invocation"
         )),
     };
-    let mut cmd = Command::new(&executable);
+    let mut cmd = if identity.runner_kind == "vibe" {
+        match crate::runner::backends::vibe::credential_guard::command(&executable, env_vars) {
+            Ok(command) => command,
+            Err(error) => {
+                return ReviewRunResult {
+                    outcome: ReviewProcessOutcome::SpawnFailure,
+                    duration_secs: start.elapsed().as_secs_f64(),
+                    stdout: String::new(),
+                    stderr: error.to_string(),
+                    idle_timeout_seconds: profile.review_timeout_seconds(),
+                    hard_timeout_seconds,
+                    last_progress_secs: None,
+                    usage_artifact_path: None,
+                    agy_cli_log_delta: None,
+                    resources: crate::ledger::AttemptResourceUsage::never_launched(),
+                }
+            }
+        }
+    } else {
+        Command::new(&executable)
+    };
     let invocation = match invocation {
         Ok(invocation) => invocation,
         Err(_) => {

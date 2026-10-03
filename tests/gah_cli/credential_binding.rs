@@ -12,7 +12,38 @@ impl BindingFixture {
         let (root, config) = super::config::config_with_profile();
         let bins = root.path().join("bin");
         fs::create_dir_all(&bins).unwrap();
-        write_executable(&bins.join(runner), script);
+        if runner == "vibe" {
+            let modules = root.path().join("python-fixture");
+            for directory in [
+                "vibe",
+                "vibe/core",
+                "vibe/core/config",
+                "vibe/utils",
+                "vibe/cli",
+            ] {
+                fs::create_dir_all(modules.join(directory)).unwrap();
+                fs::write(modules.join(directory).join("__init__.py"), "").unwrap();
+            }
+            fs::write(modules.join("vibe/core/config/vibe_schema.py"), "from types import SimpleNamespace\nclass VibeConfigSchema:\n    vibe_base_url='https://chat.mistral.ai'\n    def get_provider_for_model(self, model):\n        return SimpleNamespace(name='mistral',api_base='https://api.mistral.ai/v1',api_key_env_var='MISTRAL_API_KEY')\n    def get_mistral_provider(self):\n        return self.get_provider_for_model(None)\n").unwrap();
+            fs::write(modules.join("vibe/utils/api_keys.py"), "from collections import namedtuple\nclass ApiKeySource:\n    ENVIRONMENT='environment'\nApiKeyOrigin=namedtuple('ApiKeyOrigin','source env_var')\ndef resolve_api_key_with_origin(name):\n    raise RuntimeError('unexpected keyring fallback')\n").unwrap();
+            fs::write(modules.join("vibe/cli/entrypoint.py"), format!("import subprocess\nfrom vibe.core.config.vibe_schema import VibeConfigSchema\nfrom vibe.utils import api_keys\ndef main():\n    VibeConfigSchema().get_provider_for_model(None)\n    api_keys.resolve_api_key_with_origin('MISTRAL_API_KEY')\n    subprocess.run(['/bin/sh','-c',{}], check=True)\n", serde_json::to_string(script).unwrap())).unwrap();
+            write_executable(
+                &bins.join("python3"),
+                &format!(
+                    "#!/bin/sh\nexport PYTHONPATH='{}'\nexec /usr/bin/python3 \"$@\"\n",
+                    modules.display()
+                ),
+            );
+            write_executable(
+                &bins.join(runner),
+                &format!(
+                    "#!{}\nfrom vibe.cli.entrypoint import main\nmain()\n",
+                    bins.join("python3").display()
+                ),
+            );
+        } else {
+            write_executable(&bins.join(runner), script);
+        }
         let path = format!("{}:{}", bins.display(), std::env::var("PATH").unwrap());
         Self { root, config, path }
     }
@@ -345,4 +376,71 @@ fn acp_wrapper_preserves_stdio_and_only_selected_child_auth() {
         message["path"],
         f.root.path().join("bin/codex").to_str().unwrap()
     );
+}
+
+#[test]
+fn vibe_competing_project_provider_fails_before_launch() {
+    let f = BindingFixture::new("vibe", "#!/bin/sh\nprintf launched\n");
+    f.save("source", "mistral", "MISTRAL_API_KEY", "synthetic-mistral");
+    f.add("vibe-one", "vibe", "source");
+    fs::create_dir_all(f.root.path().join(".vibe")).unwrap();
+    fs::write(f.root.path().join(".vibe/config.toml"), "[[providers]]\nname = \"mistral\"\napi_base = \"https://other.invalid/v1\"\napi_key_env_var = \"OTHER_API_KEY\"\n").unwrap();
+    f.exec("vibe-one")
+        .current_dir(f.root.path())
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("Vibe configuration overrides"));
+}
+
+#[test]
+fn vibe_managed_provider_override_fails_inside_guarded_bridge() {
+    let f = BindingFixture::new("vibe", "#!/bin/sh\nprintf launched\n");
+    f.save("source", "mistral", "MISTRAL_API_KEY", "synthetic-mistral");
+    f.add("vibe-one", "vibe", "source");
+    let schema = f
+        .root
+        .path()
+        .join("python-fixture/vibe/core/config/vibe_schema.py");
+    let installed = fs::read_to_string(&schema)
+        .unwrap()
+        .replace("https://api.mistral.ai/v1", "https://other.invalid/v1");
+    fs::write(schema, installed).unwrap();
+    f.exec("vibe-one")
+        .args([
+            "--adapter-program",
+            f.root.path().join("bin/python3").to_str().unwrap(),
+            "--",
+            "-c",
+            "from vibe.cli.entrypoint import main; main()",
+        ])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "Vibe configuration overrides the selected credential provider",
+        ));
+}
+
+#[test]
+fn vibe_bridge_cannot_use_another_instances_interpreter() {
+    let f = BindingFixture::new("vibe", "#!/bin/sh\nprintf launched\n");
+    f.save("source", "mistral", "MISTRAL_API_KEY", "synthetic-mistral");
+    f.add("vibe-one", "vibe", "source");
+    let other = f.root.path().join("bin/python-other");
+    write_executable(&other, "#!/bin/sh\nprintf launched\n");
+    f.exec("vibe-one")
+        .args([
+            "--adapter-program",
+            other.to_str().unwrap(),
+            "--",
+            "-c",
+            "from vibe.cli.entrypoint import main; main()",
+        ])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "does not match the selected Python launcher",
+        ));
 }

@@ -1,4 +1,5 @@
 mod credentials;
+mod vibe;
 pub use credentials::selected_codex_config_args;
 use std::path::PathBuf;
 
