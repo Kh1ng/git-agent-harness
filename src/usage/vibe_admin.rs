@@ -47,6 +47,12 @@ pub fn admin_api_key() -> Option<String> {
 /// host. Transport, auth, and non-2xx failures carry a stable failure class
 /// so the quota snapshot does not collapse them into bare `no_data`.
 pub fn fetch_admin_endpoint(path: &str, api_key: &str) -> std::io::Result<Option<String>> {
+    if api_key.chars().any(char::is_control) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Mistral Admin API key contains invalid characters",
+        ));
+    }
     // Issue #761: this is now reachable from an unattended background probe
     // (quota_store::refresh_stale_quota_observations), not just the manual
     // `gah quota refresh` CLI command a human can Ctrl-C. `--max-time`
@@ -54,17 +60,26 @@ pub fn fetch_admin_endpoint(path: &str, api_key: &str) -> std::io::Result<Option
     // can't hang indefinitely; arm_child_pdeathsig is defense-in-depth so
     // the kernel kills it directly if this process dies before it returns.
     let mut cmd = Command::new("curl");
-    cmd.args(["-sS", "--max-time", "15", "-K", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.args([
+        "--disable",
+        "-sS",
+        "--max-time",
+        "15",
+        "--max-filesize",
+        "524288",
+        "-K",
+        "-",
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
     crate::runner::process::arm_child_pdeathsig(&mut cmd);
     let mut child = cmd.spawn()?;
 
     if let Some(mut stdin) = child.stdin.take() {
         let escaped_key = api_key.replace('\\', "\\\\").replace('"', "\\\"");
         let config = format!(
-            "silent\nfail\nurl = \"{MISTRAL_ADMIN_API_BASE}{path}\"\nheader = \"Authorization: Bearer {escaped_key}\"\nheader = \"Accept: application/json\"\n"
+            "silent\nfail\nurl = \"{MISTRAL_ADMIN_API_BASE}{path}\"\nheader = \"x-api-key: {escaped_key}\"\nheader = \"Accept: application/json\"\n"
         );
         stdin.write_all(config.as_bytes())?;
     }
@@ -115,7 +130,7 @@ pub fn refresh_admin_data(
 
     let workspace_usage = fetch_admin_endpoint(
         &format!(
-            "/api/admin/analytics/vibe/usage/by_workspace?start_time={start_time}&end_time={end_time}"
+            "/v1/admin/analytics/vibe/code/usage/by_workspace?start_time={start_time}&end_time={end_time}"
         ),
         api_key,
     )
@@ -124,20 +139,20 @@ pub fn refresh_admin_data(
     .map(|body| parse_vibe_workspace_analytics(&body))
     .unwrap_or_default();
 
-    let billing = fetch_admin_endpoint("/api/admin/usage", api_key)
+    let billing = fetch_admin_endpoint("/v1/admin/usage", api_key)
         .ok()
         .flatten()
         .map(|body| parse_admin_usage(&body))
         .unwrap_or_default();
 
-    let rate_limits = fetch_admin_endpoint("/api/admin/rate-limit", api_key)
+    let rate_limits = fetch_admin_endpoint("/v1/admin/rate-limit", api_key)
         .ok()
         .flatten()
         .map(|body| parse_admin_rate_limit(&body))
         .unwrap_or_default();
 
     let (spend_limit, spend_limit_error) =
-        match fetch_admin_endpoint("/api/admin/spend-limit", api_key) {
+        match fetch_admin_endpoint("/v1/admin/spend-limit", api_key) {
             Ok(Some(body)) => match admin_spend_limit_to_quota_observation(&body, backend, model) {
                 Some(observation) => (Some(observation), None),
                 None => (
@@ -176,7 +191,7 @@ fn sum_u64_field(entries: &[Value], field: &str) -> Option<u64> {
     saw_any.then_some(total)
 }
 
-/// Parse `GET /api/admin/analytics/vibe/usage/by_workspace`
+/// Parse `GET /v1/admin/analytics/vibe/code/usage/by_workspace`
 /// (`VibeWorkspaceStatsOUT`) into an aggregate `LedgerUsage`: token and
 /// request counts summed across the queried window. Never fabricates a
 /// count when the response carries none.
@@ -225,7 +240,7 @@ pub fn parse_vibe_workspace_analytics(json: &str) -> LedgerUsage {
     }
 }
 
-/// Parse `GET /api/admin/usage` (`UsageOUTJSON`) into a billing `LedgerUsage`.
+/// Parse `GET /v1/admin/usage` (`UsageOUTJSON`) into a billing `LedgerUsage`.
 /// `actual_cost_usd` is only ever set when the response's own `currency` is
 /// USD -- converting a EUR/other-currency `vibe_usage` figure into a USD
 /// number would fabricate an exchange rate this parser has no basis for, so
@@ -248,7 +263,16 @@ pub fn parse_admin_usage(json: &str) -> LedgerUsage {
         return LedgerUsage::default();
     }
 
+    // The current Admin API documents vibe_usage as a legacy field that is
+    // always zero, not a current Vibe billing balance.
     let (actual_cost_usd, cost_unknown_reason) = match currency {
+        _ if vibe_usage == Some(0.0) => (
+            None,
+            Some(
+                "mistral_admin_usage legacy vibe_usage field does not report current Vibe cost"
+                    .to_string(),
+            ),
+        ),
         Some("USD") => (vibe_usage, None),
         Some(other) => (
             None,
@@ -313,7 +337,7 @@ fn parse_admin_rate_limit_model_limits(value: Option<&Value>) -> Vec<AdminModelR
     }
 }
 
-/// Parse `GET /api/admin/rate-limit` (`RateLimitsOUT`). Per-model token
+/// Parse `GET /v1/admin/rate-limit` (`RateLimitsOUT`). Per-model token
 /// limits don't collapse into a single `quota_used_percent`-shaped value
 /// (there's no "used" figure here, only configured ceilings), so this
 /// returns its own struct rather than overloading `LedgerUsage`.
@@ -331,7 +355,7 @@ pub fn parse_admin_rate_limit(json: &str) -> AdminRateLimits {
     }
 }
 
-/// Parse `GET /api/admin/spend-limit` (`LimitsOUT`) into a `LedgerUsage`
+/// Parse `GET /v1/admin/spend-limit` (`LimitsOUT`) into a `LedgerUsage`
 /// carrying `quota_used_percent`/`quota_remaining_percent`.
 ///
 /// `total_usage`/`usage_limit` give an exact ratio when both are present.
@@ -535,6 +559,16 @@ mod tests {
     }
 
     #[test]
+    fn admin_usage_legacy_zero_is_not_a_current_zero_cost() {
+        let usage = parse_admin_usage(r#"{"vibe_usage":0,"currency":"USD"}"#);
+        assert_eq!(usage.actual_cost_usd, None);
+        assert_eq!(
+            usage.cost_unknown_reason.as_deref(),
+            Some("mistral_admin_usage legacy vibe_usage field does not report current Vibe cost")
+        );
+    }
+
+    #[test]
     fn parses_admin_rate_limit_per_model_ceilings() {
         let limits = parse_admin_rate_limit(RATE_LIMIT);
         assert_eq!(limits.requests_per_second, Some(87));
@@ -616,10 +650,37 @@ mod tests {
         );
         let _path_guard = crate::test_support::PathGuard::set(dir.path());
 
-        let body = fetch_admin_endpoint("/api/admin/spend-limit", "sk-test")
+        let body = fetch_admin_endpoint("/v1/admin/spend-limit", "sk-test")
             .unwrap()
             .expect("successful fetch returns a body");
         assert_eq!(body, r#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn fetch_admin_endpoint_rejects_key_config_injection_before_spawning_curl() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let called = dir.path().join("called");
+        write_fake_curl(
+            dir.path(),
+            &format!("#!/bin/sh\ntouch '{}'\n", called.display()),
+        );
+        let _path_guard = crate::test_support::PathGuard::set(dir.path());
+        for key in [
+            "sk-test\nurl = https://example.com",
+            "sk-test\r",
+            "sk-test\t",
+            "sk-test\0",
+            "sk-test\u{7f}",
+        ] {
+            let error = fetch_admin_endpoint("/v1/admin/usage", key).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(
+                error.to_string(),
+                "Mistral Admin API key contains invalid characters"
+            );
+        }
+        assert!(!called.exists());
     }
 
     #[test]
@@ -630,7 +691,7 @@ mod tests {
         let _path_guard = crate::test_support::PathGuard::set(dir.path());
 
         assert_eq!(
-            fetch_admin_endpoint("/api/admin/spend-limit", "sk-test")
+            fetch_admin_endpoint("/v1/admin/spend-limit", "sk-test")
                 .unwrap_err()
                 .to_string(),
             "cli_error: Mistral Admin API curl exited with status 22"
@@ -648,7 +709,7 @@ mod tests {
         let _path_guard = crate::test_support::PathGuard::set(dir.path());
 
         assert_eq!(
-            fetch_admin_endpoint("/api/admin/spend-limit", "sk-test")
+            fetch_admin_endpoint("/v1/admin/spend-limit", "sk-test")
                 .unwrap_err()
                 .to_string(),
             "auth_required: Mistral Admin API rejected the configured credentials"
@@ -659,7 +720,7 @@ mod tests {
     // while curl runs -- it is passed through curl's stdin config (`-K -`),
     // never as a command-line argument.
     #[test]
-    fn fetch_admin_endpoint_never_puts_api_key_in_argv() {
+    fn fetch_admin_endpoint_uses_current_auth_and_bounded_curl_without_key_in_argv() {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let dir = tempfile::tempdir().unwrap();
         let argv_path = dir.path().join("argv.txt");
@@ -674,12 +735,17 @@ mod tests {
         );
         let _path_guard = crate::test_support::PathGuard::set(dir.path());
 
-        fetch_admin_endpoint("/api/admin/usage", "sk-super-secret").unwrap();
+        fetch_admin_endpoint("/v1/admin/usage", "sk-super-secret").unwrap();
 
         let argv = std::fs::read_to_string(&argv_path).unwrap();
         assert!(!argv.contains("sk-super-secret"), "got argv: {argv}");
+        assert!(argv.starts_with("--disable\n"));
+        assert!(argv.contains("--max-time\n15\n"));
+        assert!(argv.contains("--max-filesize\n524288\n"));
         let stdin = std::fs::read_to_string(&stdin_path).unwrap();
-        assert!(stdin.contains("sk-super-secret"), "got stdin: {stdin}");
+        assert!(stdin.contains("url = \"https://api.mistral.ai/v1/admin/usage\""));
+        assert!(stdin.contains("header = \"x-api-key: sk-super-secret\""));
+        assert!(!stdin.contains("Authorization:"));
     }
 
     #[test]
@@ -694,7 +760,7 @@ mod tests {
         write_fake_curl(
             dir.path(),
             &format!(
-                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{rate_limit}' ;;\n  *api/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/code/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *v1/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *v1/admin/rate-limit*) cat '{rate_limit}' ;;\n  *v1/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
                 fixtures = fixtures,
                 rate_limit = rate_limit_path.display(),
                 spend_limit = spend_limit_path.display(),
@@ -725,7 +791,7 @@ mod tests {
         write_fake_curl(
             dir.path(),
             &format!(
-                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *api/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *v1/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
                 spend_limit = spend_limit_path.display(),
             ),
         );
