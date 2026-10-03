@@ -1,5 +1,5 @@
 use crate::cli::args::CredentialCommands;
-use crate::credentials::{self, CredentialInfo};
+use crate::credentials::{self, CredentialInfo, CredentialKind};
 use anyhow::{bail, Result};
 use std::io::Read;
 
@@ -11,10 +11,11 @@ pub fn run(command: CredentialCommands) -> Result<()> {
                 println!("{}", serde_json::to_string(&records)?);
             } else {
                 for record in records {
-                    println!(
-                        "{}\t{}\t{}",
-                        record.id, record.provider, record.account_label
-                    );
+                    let kind = match record.kind {
+                        CredentialKind::ApiKey => "api_key",
+                        CredentialKind::MistralDashboard => "mistral_dashboard",
+                    };
+                    println!("{}\t{}\t{}", record.id, record.provider, kind);
                 }
             }
         }
