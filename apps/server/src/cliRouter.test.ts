@@ -909,7 +909,7 @@ test('changing router origin requires both new keys before any connection attemp
 });
 
 
-test('server lifecycle collects quota without HTTP readers, throttles inventory and stops on shutdown', async t => {
+test('server lifecycle tolerates timer jitter, throttles inventory and stops on shutdown', async t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   let now = Date.now();
   const records: Record<string, unknown>[] = [];
@@ -928,7 +928,7 @@ test('server lifecycle collects quota without HTTP readers, throttles inventory 
     assert.equal(records[0].quota_window, 'seven_day');
     await Promise.all([observer.refresh(), observer.refresh()]);
     assert.equal(rec.calls.length, 2, 'inventory and usage are both throttled');
-    now += 15 * 60_000;
+    now += 15 * 60_000 - 5; // Timer and wall clocks can differ by a few milliseconds.
     t.mock.timers.tick(15 * 60_000);
     await observer.refresh();
     assert.equal(records.length, 2);

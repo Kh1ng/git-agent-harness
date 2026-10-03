@@ -452,6 +452,8 @@ export function createCliRouterQuotaObserver(deps: CliRouterDeps = {}) {
   const now = deps.now ?? Date.now;
   const doRecord = deps.recordQuotaFn ?? recordQuota;
   const refreshInterval = 15 * 60_000;
+  // Timer scheduling and the wall clock can differ slightly at the interval boundary.
+  const refreshThrottle = refreshInterval - 60_000;
   let batch: Promise<void> | undefined;
   let stopped = false;
 
@@ -459,7 +461,7 @@ export function createCliRouterQuotaObserver(deps: CliRouterDeps = {}) {
     const origin = stored.url.replace(/\/$/, '');
     const key = cacheKey(origin, account);
     const previous = quotaCache.get(key);
-    if (!force && previous?.checkedAt !== undefined && now() - previous.checkedAt < refreshInterval) return previous;
+    if (!force && previous?.checkedAt !== undefined && now() - previous.checkedAt < refreshThrottle) return previous;
     const result = await refreshAccountQuota(account, { baseUrl: origin, managementKey: stored.managementKey, fetchFn: doFetch });
     // A replaced connection must not receive an old in-flight reading.
     const current = doRead();
@@ -523,7 +525,7 @@ export function createCliRouterQuotaObserver(deps: CliRouterDeps = {}) {
   async function refreshConfigured(): Promise<void> {
     if (stopped) return;
     if (refresh) return refresh;
-    if (lastRefresh !== undefined && now() - lastRefresh < refreshInterval) return;
+    if (lastRefresh !== undefined && now() - lastRefresh < refreshThrottle) return;
     lastRefresh = now();
     refresh = (async () => {
       const stored = doRead();

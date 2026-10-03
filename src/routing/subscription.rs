@@ -25,13 +25,6 @@ pub fn capacity(
     let latest = crate::quota_store::latest_windows_for_identity(records, identity);
     let mut result = SubscriptionCapacity::default();
     for record in latest {
-        if identity.explicit_instance
-            && identity.credential_id.is_none()
-            && record.backend_instance.is_none()
-            && record.quota_pool.is_none()
-        {
-            continue;
-        }
         let Some(observed) = record
             .observed_at
             .as_deref()
@@ -273,6 +266,34 @@ mod tests {
             assert!(result.known_capacity);
             assert_eq!(result.reset_pressure, expected, "{window}");
         }
+    }
+
+    #[test]
+    fn ambient_readings_cannot_replace_or_invalidate_explicit_instance_capacity() {
+        let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
+        let mut identity =
+            ExecutionIdentity::legacy_candidate("agy", None::<String>, None::<String>);
+        identity.explicit_instance = true;
+        identity.backend_instance = "agy-second".into();
+        let scoped: QuotaObservationRecord = serde_json::from_value(serde_json::json!({
+            "backend":"agy", "backend_instance":"agy-second", "quota_window":"weekly",
+            "quota_remaining_percent":80, "observed_at":"2026-10-03T17:50:00Z",
+            "quota_reset_at":"2026-10-09T18:00:00Z"
+        }))
+        .unwrap();
+        let expected = capacity(&identity, std::slice::from_ref(&scoped), now);
+        assert!(expected.known_capacity);
+        let mut ambient = scoped.clone();
+        ambient.backend_instance = None;
+        ambient.observed_at = Some("2026-10-03T17:55:00Z".into());
+        ambient.quota_remaining_percent = Some(10.0);
+        assert_eq!(
+            capacity(&identity, &[scoped.clone(), ambient.clone()], now),
+            expected
+        );
+        ambient.check_error = Some("unavailable".into());
+        ambient.quota_window = None;
+        assert_eq!(capacity(&identity, &[scoped, ambient], now), expected);
     }
 
     #[test]
