@@ -6,6 +6,8 @@ on:
     branches: [main]
     paths:
       - 'apps/ios/**'
+      - 'scripts/test-ios-central.sh'
+      - 'docs/IOS_TESTING.md'
       - '.github/workflows/ios.yml'
 
 permissions:
@@ -17,6 +19,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Check physical test helper syntax
+        run: bash -n scripts/test-ios-central.sh
       - name: Select an available iPhone simulator
         id: simulator
         run: |

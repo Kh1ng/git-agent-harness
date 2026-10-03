@@ -7,7 +7,7 @@ Open `GAH.xcodeproj` in Xcode. Select the GAH target, choose your development te
 ## Connect
 
 1. Turn on Tailscale on the iPhone.
-2. For first launch, tap **Set up connection** and enter `http://100.118.97.79` or your central address.
+2. For first launch, tap **Set up connection** and enter your central HTTPS address. This deployment uses `https://hermesagent.tail82695.ts.net:8443`.
 3. In an owner dashboard, open **Settings > Connection & pairing** and generate a pairing QR code.
 4. In the iPhone dashboard, open **Settings > Connection & pairing > Scan pairing QR code**.
 5. Scan the code. If the server address changes, review it before selecting **Open server**.
