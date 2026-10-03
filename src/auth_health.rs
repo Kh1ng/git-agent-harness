@@ -197,8 +197,8 @@ fn opencode_credential_providers(auth_list: &str) -> Vec<String> {
     providers
 }
 
-/// A credential that lists no models is dead: opencode keeps showing an
-/// expired Copilot token in `auth list` while `models` returns none of its models.
+/// A saved credential without a model catalog has unknown login validity:
+/// model discovery alone cannot establish that the credential expired.
 pub fn classify_opencode(auth_list: &str, models: &str) -> Vec<(String, AuthHealth)> {
     opencode_credential_providers(auth_list)
         .into_iter()
@@ -211,8 +211,8 @@ pub fn classify_opencode(auth_list: &str, models: &str) -> Vec<(String, AuthHeal
                 AuthHealth::new(AuthState::Ok, None)
             } else {
                 AuthHealth::new(
-                    AuthState::Expired,
-                    Some("A credential is saved but the provider lists no models."),
+                    AuthState::Unknown,
+                    Some("No models were listed for this provider. Login validity is unknown."),
                 )
             };
             (provider, health)
@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_credential_without_models_is_expired() {
+    fn opencode_credential_without_models_has_unknown_login_validity() {
         let auth_list = "┌  Credentials ~/.local/share/opencode/auth.json\n│\n●  GitHub Copilot oauth\n│\n●  Anthropic api\n│\n└  2 credentials\n";
         let models = "anthropic/claude-sonnet-4\nanthropic/claude-opus-4\nopencode/big-pickle\n";
         let results = classify_opencode(auth_list, models);
@@ -524,9 +524,13 @@ mod tests {
                 .map(|(provider, health)| (provider.as_str(), health.state))
                 .collect::<Vec<_>>(),
             vec![
-                ("github-copilot", AuthState::Expired),
+                ("github-copilot", AuthState::Unknown),
                 ("anthropic", AuthState::Ok)
             ]
+        );
+        assert_eq!(
+            results[0].1.detail.as_deref(),
+            Some("No models were listed for this provider. Login validity is unknown.")
         );
     }
 
