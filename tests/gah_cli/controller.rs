@@ -31,7 +31,7 @@ fn loop_reports_nonzero_review_backend_as_failure_not_success() {
     make_fake_bin_with_body(
         &fake_bin,
         "claude",
-        "#!/bin/sh\nprintf 'subscription quota exhausted\\n' >&2\nexit 23\n",
+        "#!/bin/sh\nprintf 'review backend crashed\\n' >&2\nexit 23\n",
     );
     // `updated_at` is relative to "now" (not hardcoded) so the fake PR
     // stays classified as active instead of aging into STALE over time.

@@ -62,7 +62,7 @@ export function parseWorkerChatEvent(value: unknown): WorkerChatEvent {
   throw new Error('Worker returned an invalid chat event.');
 }
 
-type WorkerChatReply = import('@git-agent-harness/contracts').ChatSessionSummary
+type WorkerChatReply = import('./gahCli.js').SubscriptionRoute[] | import('./gahCli.js').QuotaFailure | import('@git-agent-harness/contracts').ChatSessionSummary
   | { session: import('@git-agent-harness/contracts').ChatSessionSummary }
   | Awaited<ReturnType<ManagerAdapter['listModels']>>
   | Awaited<ReturnType<ManagerAdapter['listCommands']>>
@@ -76,6 +76,19 @@ const optionalString = (value: unknown): value is string | undefined => value ==
  * Project only the action's response fields before central stores or renders them. */
 export function parseWorkerChatReply(value: unknown, request: Record<string, unknown>): WorkerChatReply {
   const invalid = () => new Error('Worker returned an invalid chat response.');
+  if (request.action === 'quota-failure') {
+    if (!object(value) || !['hard', 'transient', 'other'].includes(String(value.kind)) || !measurement(value.resetAt, true) || !measurement(value.retryAfterMs, true)) throw invalid();
+    return { kind: value.kind as 'hard' | 'transient' | 'other', resetAt: value.resetAt as number | null, retryAfterMs: value.retryAfterMs as number | null };
+  }
+  if (request.action === 'quota-routes') {
+    if (!Array.isArray(value) || value.length > 128) throw invalid();
+    return value.map(route => {
+      if (!object(route) || !object(route.identity)) throw invalid();
+      const id = route.identity;
+      if (![id.runner_kind, id.logical_backend, id.backend_instance].every(label => typeof label === 'string' && /^[a-zA-Z0-9_.:-]{1,128}$/.test(label)) || !nullableString(id.effective_model) || !nullableString(id.quota_pool) || !(id.explicit_instance === undefined || typeof id.explicit_instance === 'boolean')) throw invalid();
+      return { identity: { runner_kind: id.runner_kind as string, logical_backend: id.logical_backend as string, backend_instance: id.backend_instance as string, effective_model: id.effective_model, quota_pool: id.quota_pool, explicit_instance: id.explicit_instance as boolean | undefined } };
+    });
+  }
   if (request.action === 'handoff') {
     if (!object(value) || typeof value.branch !== 'string' || !value.branch
       || typeof value.commit !== 'string' || !/^[0-9a-f]{40,64}$/i.test(value.commit)) throw invalid();

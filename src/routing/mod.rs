@@ -5,6 +5,7 @@ mod diagnostics;
 mod policy;
 mod reservation;
 mod reviewer_history;
+pub mod subscription;
 #[cfg(test)]
 mod test_support;
 mod types;

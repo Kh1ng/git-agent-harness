@@ -66,6 +66,18 @@ if (command === 'pm') {
   } else if (!['plans', 'show'].includes(sub)) process.exit(2);
   process.stdout.write(JSON.stringify(result));
   process.exit(0);
+} else if (command === 'route') {
+  if (args.includes('--failure-backend')) {
+    let input = ''; for await (const chunk of process.stdin) input += chunk;
+    const kind = /not your usage limit/i.test(input) ? 'transient'
+      : /usage limit|session limit|weekly limit|monthly limit|Individual quota reached|quota exhausted/i.test(input) ? 'hard'
+      : /rate limit|429|overloaded/i.test(input) ? 'transient' : 'other';
+    process.stdout.write(JSON.stringify({ kind, resetAt: kind === 'hard' ? Date.now() + 3600000 : null, retryAfterMs: 1 }));
+  } else {
+    const backends = JSON.parse(process.env.GAH_FIXTURE_QUOTA_ROUTES ?? '["codex"]');
+    process.stdout.write(JSON.stringify(backends.map(backend => ({ identity: { runner_kind: backend, logical_backend: backend, backend_instance: `legacy:${backend}`, effective_model: null, quota_pool: null } }))));
+  }
+  process.exit(0);
 } else if (command === 'status') {
   if (args.includes('--role')) {
     process.stdout.write(JSON.stringify({ role: 'central', central_url: null }));

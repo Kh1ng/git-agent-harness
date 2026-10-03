@@ -95,7 +95,7 @@ fn transient_not_usage_limit_re() -> &'static Regex {
 
 fn usage_or_weekly_limit_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)(usage limit|weekly limit)").unwrap())
+    RE.get_or_init(|| Regex::new(r"(?i)(usage limit|weekly limit|monthly limit|daily limit|quota exhausted|insufficient (credits|quota))").unwrap())
 }
 
 fn insufficient_balance_re() -> &'static Regex {
@@ -110,7 +110,9 @@ fn insufficient_balance_re() -> &'static Regex {
 
 fn generic_rate_limit_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)rate limit").unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)(rate limit|(?:code|status|http|error)\s*:?\s*429|RESOURCE_EXHAUSTED|overloaded|server busy)").unwrap()
+    })
 }
 
 fn codex_selected_model_capacity_re() -> &'static Regex {
@@ -181,12 +183,7 @@ fn month_day_time_with_tz_re() -> &'static Regex {
 
 fn agy_quota_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(
-            r"(?i)(RESOURCE_EXHAUSTED|Individual quota reached|code 429|AGY quota exhausted)",
-        )
-        .unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"(?i)(Individual quota reached|AGY quota exhausted)").unwrap())
 }
 
 fn agy_auth_re() -> &'static Regex {
@@ -908,27 +905,32 @@ mod tests {
     // rather than an external fixture -- see PROVENANCE.md for the caveat.
 
     #[test]
-    fn agy_resource_exhausted_classifies_as_quota_exhaustion() {
+    fn agy_resource_exhausted_without_subscription_evidence_is_transient() {
         let now = utc(2026, Month::January, 1, 0, 0);
         let parsed = parse("agy-main", "Error: RESOURCE_EXHAUSTED", now).unwrap();
-        assert_eq!(parsed.kind, FailureKind::QuotaExhausted);
-        assert!(!parsed.retryable);
-        assert_eq!(parsed.confidence, Confidence::High);
+        assert_eq!(parsed.kind, FailureKind::RateLimited);
+        assert!(parsed.retryable);
+        assert_eq!(parsed.confidence, Confidence::Low);
     }
 
     #[test]
-    fn agy_contextual_code_429_classifies_as_quota_exhaustion() {
+    fn agy_contextual_code_429_is_transient() {
         let now = utc(2026, Month::January, 1, 0, 0);
         let parsed = parse("agy-second", "request failed with code 429", now).unwrap();
-        assert_eq!(parsed.kind, FailureKind::QuotaExhausted);
+        assert_eq!(parsed.kind, FailureKind::RateLimited);
     }
 
     #[test]
     fn agy_individual_quota_reached_classifies_as_quota_exhaustion() {
         let now = utc(2026, Month::January, 1, 0, 0);
-        let parsed = parse("agy", "Individual quota reached. Resets in 2h 15m.", now).unwrap();
+        let parsed = parse(
+            "agy",
+            include_str!("../tests/fixtures/quota-logs/agy_individual_quota_reached.txt"),
+            now,
+        )
+        .unwrap();
         assert_eq!(parsed.kind, FailureKind::QuotaExhausted);
-        assert_eq!(parsed.reset_at.as_deref(), Some("2026-01-01T02:15:00Z"));
+        assert_eq!(parsed.reset_at.as_deref(), Some("2026-01-07T18:54:28Z"));
     }
 
     #[test]

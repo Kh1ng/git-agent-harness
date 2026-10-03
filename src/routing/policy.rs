@@ -190,13 +190,40 @@ pub(super) fn order_candidates(
 ) -> (Vec<RouteCandidate>, Option<ReorderDecision>) {
     let mut candidates = with_original_order(candidates);
     let has_review_history = is_review_mode(mode) && !runtime.reviewer_outcomes.is_empty();
-    if !escalate && !has_review_history && !candidates.iter().any(RouteCandidate::has_cost_policy) {
+    if !escalate
+        && !is_load_balanced_mode(mode)
+        && !has_review_history
+        && !candidates.iter().any(RouteCandidate::has_cost_policy)
+    {
         return (candidates, None);
     }
 
     let original = candidates.clone();
+    let now = time::OffsetDateTime::now_utc();
+    let records = if is_load_balanced_mode(mode) {
+        crate::quota_store::load_account_observations()
+    } else {
+        vec![]
+    };
+    let capacities = candidates
+        .iter()
+        .map(|candidate| {
+            (
+                CandidateIdentity::from_execution_identity(&candidate.identity),
+                super::subscription::capacity(&candidate.identity, &records, now),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     candidates.sort_by(|left, right| {
-        compare_candidates(left, right, &profile.pacing, escalate, runtime, mode)
+        compare_candidates(
+            left,
+            right,
+            &profile.pacing,
+            escalate,
+            runtime,
+            mode,
+            &capacities,
+        )
     });
     let before_history = candidates
         .iter()
@@ -373,10 +400,26 @@ fn compare_candidates(
     escalate: bool,
     runtime: &RoutingRuntimeState,
     mode: &str,
+    capacities: &std::collections::HashMap<
+        CandidateIdentity,
+        super::subscription::SubscriptionCapacity,
+    >,
 ) -> Ordering {
     right
         .priority
         .cmp(&left.priority)
+        .then_with(|| {
+            if is_load_balanced_mode(mode) {
+                super::subscription::compare(
+                    &left.identity,
+                    &capacities[&CandidateIdentity::from_execution_identity(&left.identity)],
+                    &right.identity,
+                    &capacities[&CandidateIdentity::from_execution_identity(&right.identity)],
+                )
+            } else {
+                Ordering::Equal
+            }
+        })
         .then_with(|| {
             if is_load_balanced_mode(mode) {
                 candidate_run_count(left, runtime).cmp(&candidate_run_count(right, runtime))

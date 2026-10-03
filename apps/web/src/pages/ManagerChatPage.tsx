@@ -1630,6 +1630,11 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
         </div>
       </div>
 
+      {activeSession?.quotaHandoff && <p className="truncate text-xs text-muted" title={activeSession.quotaHandoff.reason}>
+        On {activeSession.backend}{activeSession.backendInstance ? ` [${backendInstanceLabels[activeSession.backendInstance] ?? activeSession.backendInstance}]` : ''}: {activeSession.quotaHandoff.backend} quota limit
+        {activeSession.quotaHandoff.resetAt ? ` · resets ${new Date(activeSession.quotaHandoff.resetAt).toLocaleString()}` : ' · reset unknown'}
+      </p>}
+
       {storageOpen && (() => {
         const profileStorage = storage?.profiles[0];
         const storageBySession = new Map(profileStorage?.sessions.map((item) => [item.sessionId, item]) ?? []);
@@ -2027,6 +2032,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
           />
           <div className="flex items-end gap-1.5 px-2 pb-2">
             <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 min-[360px]:flex-nowrap">
+
             {composerPicker && <ProviderPicker {...composerPicker} />}
             <ChatNodePicker compact {...nodeSnapshot} value={chosenNode} disabled={turnBusy || !isConnected || backendChanging || modelChanging || reasoningEffortChanging || sessionSelectionChanging}
               onChange={nodeId => setNodeChoice({ profile, sessionId, nodeId })} />

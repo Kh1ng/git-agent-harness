@@ -108,3 +108,91 @@ fn availability_clear_can_target_one_backend_instance() {
     assert_eq!(first["eligible"], true);
     assert_eq!(second["eligible"], false);
 }
+
+#[test]
+fn chat_routes_record_exact_account_exhaustion_and_keep_the_sibling_available() {
+    let temp = test_tempdir();
+    let config = temp.path().join("config.toml");
+    fs::write(&config, "[defaults]\ncurrent_manager = \"claude\"\n").unwrap();
+    bin()
+        .args([
+            "profile",
+            "add",
+            "test",
+            "--display-name",
+            "Test",
+            "--repo-id",
+            "owner/repo",
+            "--provider",
+            "github",
+            "--repo",
+            "owner/repo",
+            "--local-path",
+        ])
+        .arg(temp.path())
+        .arg("--artifact-root")
+        .arg(temp.path().join("artifacts"))
+        .arg("--config-path")
+        .arg(&config)
+        .assert()
+        .success();
+    let mut content = fs::read_to_string(&config).unwrap();
+    for name in ["agy-one", "agy-two"] {
+        content.push_str(&format!("\n[profiles.test.routing.backend_instances.{name}]\nrunner_kind = \"agy\"\nlogical_backend = \"agy\"\nexecutable = \"{}\"\naccount_label = \"{name}\"\nquota_pool = \"{name}\"\n", std::env::current_exe().unwrap().display()));
+    }
+    fs::write(&config, content).unwrap();
+    let availability = temp.path().join("availability.json");
+    let quota = temp.path().join("quota.jsonl");
+    let output = bin()
+        .args([
+            "route",
+            "--profile",
+            "test",
+            "--failure-backend",
+            "agy",
+            "--backend-instance",
+            "agy-one",
+            "--config-path",
+        ])
+        .arg(&config)
+        .env("GAH_AVAILABILITY_PATH", &availability)
+        .env("GAH_QUOTA_STORE_PATH", &quota)
+        .write_stdin("Individual quota reached. Resets in 162h54m28s.")
+        .assert()
+        .success();
+    let failure: Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(failure["kind"], "hard");
+    assert!(
+        failure["resetAt"].as_i64().unwrap()
+            > time::OffsetDateTime::now_utc().unix_timestamp() * 1000 + 6 * 86400000
+    );
+    let output = bin()
+        .args(["route", "--profile", "test", "--config-path"])
+        .arg(&config)
+        .env("GAH_AVAILABILITY_PATH", &availability)
+        .env("GAH_QUOTA_STORE_PATH", &quota)
+        .assert()
+        .success();
+    let candidates: Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(candidates.as_array().unwrap().len(), 1);
+    assert_eq!(candidates[0]["identity"]["backend_instance"], "agy-two");
+    let before = fs::read(&availability).unwrap();
+    bin()
+        .args([
+            "route",
+            "--profile",
+            "test",
+            "--failure-backend",
+            "agy",
+            "--backend-instance",
+            "agy-two",
+            "--config-path",
+        ])
+        .arg(&config)
+        .env("GAH_AVAILABILITY_PATH", &availability)
+        .write_stdin("request failed with code 429")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("transient"));
+    assert_eq!(before, fs::read(&availability).unwrap());
+}

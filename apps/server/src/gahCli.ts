@@ -184,10 +184,12 @@ export async function runQuota(
 function runJsonCommand<T>(
   args: string[],
   config?: string,
-  acceptStructuredFailure = false
+  acceptStructuredFailure = false,
+  input?: string
 ): Promise<T> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(findGahBinary(), args, getSpawnOptions(config));
+    const child = spawn(findGahBinary(), args, { ...getSpawnOptions(config), ...(input !== undefined ? { stdio: ['pipe', 'pipe', 'pipe'] as const } : {}) });
+    if (input !== undefined) { child.stdin?.on('error', () => undefined); child.stdin?.end(input); }
 
     let stdout = '';
     let stderr = '';
@@ -1836,4 +1838,17 @@ export async function runPlanningMap(profile: string, target?: import('@git-agen
   const config = getConfigPath();
   if (config) args.push('--config', config);
   return runJsonCommand(args, config);
+}
+
+export interface SubscriptionRoute {
+  identity: { runner_kind: string; logical_backend: string; backend_instance: string; explicit_instance?: boolean; effective_model: string | null; quota_pool: string | null };
+}
+export interface QuotaFailure { kind: 'hard' | 'transient' | 'other'; resetAt: number | null; retryAfterMs: number | null }
+export function runSubscriptionRoutes(profile: string, model?: string | null): Promise<SubscriptionRoute[]> {
+  const config = getConfigPath(process.env.GAH_CONFIG_PATH ?? process.env.GAH_CONFIG);
+  return runJsonCommand(['route', '--profile', profile, ...(model ? ['--model', model] : []), ...(config ? ['--config-path', config] : [])], config);
+}
+export function runQuotaFailure(profile: string, backend: string, instance: string | null | undefined, model: string | null | undefined, message: string): Promise<QuotaFailure> {
+  const config = getConfigPath(process.env.GAH_CONFIG_PATH ?? process.env.GAH_CONFIG);
+  return runJsonCommand(['route', '--profile', profile, ...(config ? ['--config-path', config] : []), '--failure-backend', backend, ...(instance ? ['--backend-instance', instance] : []), ...(model ? ['--model', model] : [])], config, false, message.slice(0, 64 * 1024));
 }

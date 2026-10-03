@@ -259,7 +259,11 @@ test('reasoning effort override persists per profile+backend', () => {
 
 test('isUsageLimitError classifies quota-limit messages but not auth/crash/network errors', () => {
   assert.equal(isUsageLimitError(new Error("You've hit your usage limit. Please wait or upgrade.")), true);
-  assert.equal(isUsageLimitError(new Error('Rate limit exceeded, retry in 30s.')), true);
+  assert.equal(isUsageLimitError(new Error('Rate limit exceeded, retry in 30s.')), false);
+  // Session and AGY: central-node chat logs read Oct 2 (#1294). Weekly: parser fixture.
+  assert.equal(isUsageLimitError(new Error("Internal error: You've hit your session limit · resets 2:30am (America/Chicago)")), true);
+  assert.equal(isUsageLimitError(new Error("You've hit your weekly limit · resets Oct 5")), true);
+  assert.equal(isUsageLimitError(new Error('Agy turn failed: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 162h54m28s.')), true);
   assert.equal(isUsageLimitError(new Error('Quota exhausted: insufficient credits.')), true);
   assert.equal(isUsageLimitError(new Error('Token limit reached.')), false); // not a quota-limit trigger by itself
   assert.equal(isUsageLimitError(new Error('401 Unauthorized: invalid API key')), false);
@@ -281,21 +285,25 @@ test('handoffAttempt reruns a usage-limited turn on the next eligible backend, o
   assert.deepEqual(calls, ['hermes', 'codex']);
   assert.equal(result.backend, 'codex');
   assert.equal(result.reply, 'answered by codex');
-  assert.deepEqual(result.handoff, { from: 'hermes', to: 'codex', reason: "You've hit your usage limit." });
+  assert.deepEqual(result.handoff, { from: 'hermes', to: 'codex', reason: "You've hit your usage limit.", resetAt: null });
 });
 
-test('handoffAttempt skips a fallback that fails for a non-limit reason and tries the next', async () => {
-  const result = await handoffAttempt({
-    startBackend: 'hermes',
-    fallbackBackends: ['codex', 'claude'],
-    attempt: async (backendId) => {
-      if (backendId === 'hermes') throw new Error('usage limit hit');
-      if (backendId === 'codex') throw new Error('codex not installed');
-      return { reply: 'claude answer', model: 'opus', usage: null };
-    }
-  });
-  assert.equal(result.backend, 'claude');
-  assert.deepEqual(result.handoff, { from: 'hermes', to: 'claude', reason: 'usage limit hit' });
+test('handoffAttempt stops on auth, crash, and cancellation failures in a fallback', async () => {
+  for (const message of ['401 Unauthorized: invalid API key', 'backend crashed: segfault', 'Turn cancelled']) {
+    const calls: string[] = [];
+    const fallbackError = new Error(message);
+    await assert.rejects(handoffAttempt({
+      startBackend: 'claude',
+      fallbackBackends: ['agy', 'codex'],
+      attempt: async backend => {
+        calls.push(backend);
+        if (backend === 'claude') throw new Error("You've hit your session limit.");
+        if (backend === 'agy') throw fallbackError;
+        return { reply: 'codex answer', model: null, usage: null };
+      }
+    }), error => error === fallbackError);
+    assert.deepEqual(calls, ['claude', 'agy'], `${message} must not advance to Codex`);
+  }
 });
 
 test('handoffAttempt does not hand off on non-limit errors', async () => {
@@ -325,15 +333,68 @@ test('handoffAttempt fails the turn when no fallback is configured', async () =>
   );
 });
 
-test('handoffAttempt allows at most one handoff: a second limit error fails the turn', async () => {
+test('handoffAttempt classifies locally when the quota classifier is unavailable', async () => {
+  const result = await handoffAttempt({
+    startBackend: 'claude',
+    fallbackBackends: ['agy'],
+    classify: async () => { throw new Error('Unknown worker chat action.'); },
+    attempt: async backend => {
+      if (backend === 'claude') throw new Error("You've hit your session limit");
+      return { reply: 'agy answer', model: null, usage: null };
+    }
+  });
+  assert.equal(result.backend, 'agy');
+  await assert.rejects(handoffAttempt({
+    startBackend: 'claude',
+    fallbackBackends: ['agy'],
+    classify: async () => { throw new Error('Unknown worker chat action.'); },
+    attempt: async () => { throw new Error('backend crashed'); }
+  }), /backend crashed/);
+});
+
+test('handoffAttempt tries the next account after an exhausted fallback and records both limits', async () => {
+  const calls: string[] = [];
+  const classified: string[] = [];
+  const result = await handoffAttempt({
+    startBackend: 'agy#second',
+    fallbackBackends: ['agy#first', 'claude'],
+    classify: async backend => {
+      classified.push(backend);
+      return { kind: 'hard', resetAt: 1234, retryAfterMs: null };
+    },
+    attempt: async backend => {
+      calls.push(backend);
+      if (backend !== 'claude') throw new Error(`${backend} Individual quota reached`);
+      return { reply: 'claude answer', model: null, usage: null };
+    }
+  });
+  assert.deepEqual(calls, ['agy#second', 'agy#first', 'claude']);
+  assert.deepEqual(classified, ['agy#second', 'agy#first']);
+  assert.equal(result.backend, 'claude');
+  assert.equal(result.handoff?.resetAt, 1234);
+});
+
+test('handoffAttempt reports every exhausted account when no fallback succeeds', async () => {
   await assert.rejects(
     handoffAttempt({
       startBackend: 'hermes',
-      fallbackBackends: ['codex'],
+      fallbackBackends: ['codex', 'claude'],
       attempt: async (backendId) => {
         throw new Error(`${backendId} usage limit`);
       }
     }),
-    /hermes usage limit/
+    /hermes usage limit; fallback codex: codex usage limit; fallback claude: claude usage limit/
   );
+});
+
+test('transient throttling retries the same route and never hands off', async () => {
+  const calls: string[] = [];
+  let tries = 0;
+  const result = await handoffAttempt({ startBackend: 'claude', fallbackBackends: ['agy'], retryDelay: async () => {}, attempt: async backend => {
+    calls.push(backend);
+    if (++tries < 3) throw new Error('Rate limit exceeded, retry in 30s');
+    return { reply: 'ok', model: null, usage: null };
+  }});
+  assert.deepEqual(calls, ['claude', 'claude', 'claude']);
+  assert.equal(result.handoff, null);
 });

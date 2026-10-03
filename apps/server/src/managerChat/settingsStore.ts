@@ -9,7 +9,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { DEFAULT_BACKEND_ID } from './registry.js';
-import type { HelperRoutePreference } from '@git-agent-harness/contracts';
+import type { HelperRoutePreference, ChatSessionSummary } from '@git-agent-harness/contracts';
 
 export interface ManagerChatSettings {
   defaultBackend: string;
@@ -23,6 +23,7 @@ export interface ManagerChatSettings {
   /** Last ACP-advertised thought level picked per profile/backend. */
   reasoningEffortOverrides: Record<string, string>;
   helperRoutes: HelperRoutePreference[];
+  quotaRoutes?: Record<string, { backend: string; backendInstance: string | null; model: string | null; original: NonNullable<ChatSessionSummary['quotaHandoff']> }>;
 }
 
 function settingsPath(): string {
@@ -42,6 +43,7 @@ export function readSettings(): ManagerChatSettings {
           typeof data.reasoningEffortOverrides === 'object' && data.reasoningEffortOverrides
             ? data.reasoningEffortOverrides
             : {},
+        quotaRoutes: data.quotaRoutes ?? {},
         helperRoutes: Array.isArray(data.helperRoutes) ? data.helperRoutes.filter(validHelperRoute) : []
       };
     } catch {
@@ -91,13 +93,14 @@ export function writeSettings(settings: ManagerChatSettings): void {
 
 export function backendForProfile(profile: string): string {
   const settings = readSettings();
-  return settings.profileOverrides[profile] ?? settings.defaultBackend;
+  return quotaRouteForProfile(profile)?.backend ?? settings.profileOverrides[profile] ?? settings.defaultBackend;
 }
 
 /** Select the backend for one project's interactive default conversation. */
 export function setBackendForProfile(profile: string, backendId: string): void {
   const settings = readSettings();
   settings.profileOverrides[profile] = backendId;
+  delete settings.quotaRoutes?.[profile];
   writeSettings(settings);
 }
 
@@ -112,6 +115,7 @@ export function modelOverrideForProfile(profile: string, backendId: string): str
 export function setModelOverrideForProfile(profile: string, backendId: string, modelId: string): void {
   const settings = readSettings();
   settings.modelOverrides[modelOverrideKey(profile, backendId)] = modelId;
+  delete settings.quotaRoutes?.[profile];
   writeSettings(settings);
 }
 
@@ -122,5 +126,23 @@ export function reasoningEffortOverrideForProfile(profile: string, backendId: st
 export function setReasoningEffortOverrideForProfile(profile: string, backendId: string, effortId: string): void {
   const settings = readSettings();
   settings.reasoningEffortOverrides[modelOverrideKey(profile, backendId)] = effortId;
+  delete settings.quotaRoutes?.[profile];
+  writeSettings(settings);
+}
+
+/** A default conversation keeps its chosen account without changing operator preferences. */
+export function quotaRouteForProfile(profile: string) {
+  const settings = readSettings();
+  const route = settings.quotaRoutes?.[profile];
+  if (route?.original.resetAt != null && route.original.resetAt <= Date.now()) {
+    delete settings.quotaRoutes?.[profile];
+    writeSettings(settings);
+    return undefined;
+  }
+  return route;
+}
+export function setQuotaRouteForProfile(profile: string, route: NonNullable<ManagerChatSettings['quotaRoutes']>[string]) {
+  const settings = readSettings();
+  settings.quotaRoutes = { ...settings.quotaRoutes, [profile]: route };
   writeSettings(settings);
 }

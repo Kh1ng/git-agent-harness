@@ -210,6 +210,8 @@ export interface ChatHandoff {
   toModel: string | null;
   reason: string;
   timestamp: number;
+  resetAt?: number | null;
+  modelChanged?: boolean;
 }
 
 /** The exact central-bank skill versions applied to one backend attempt.
@@ -325,6 +327,7 @@ export interface ChatSessionView {
  * what makes a worktree interchangeable between models.
  */
 export interface ChatSessionSummary {
+  quotaHandoff?: { backend: string; backendInstance: string | null; model: string | null; reasoningEffort: string | null; reason: string; resetAt: number | null } | null;
   id: string;
   /** Node selected for the next turn; workspaces stay on their owning nodes. */
   nodeId?: string;
