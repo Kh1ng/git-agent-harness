@@ -65,6 +65,9 @@ class MemoryHooks(unittest.TestCase):
             setup.install(root, ['claude', 'codex', 'hermes'], SOURCE, 'http://127.0.0.1:9', 'fixture-key')
             result = json.loads(claude.read_text())
             self.assertEqual(result['permissions'], {'allow':['Read']})
+            ending = result['hooks']['SessionEnd'][0]['hooks'][0]
+            self.assertEqual(shlex.split(ending['command'])[-2:], ['--phase', 'flush'])
+            self.assertEqual(ending['timeout'], 60)
             self.assertEqual(result['hooks']['SessionStart'][0]['hooks'], [old_hook])
             command = result['hooks']['SessionStart'][1]['hooks'][0]['command']
             self.assertEqual(shlex.split(command)[1:], [str(root.resolve() / '.local/bin/gah-memory-hook'), '--tool', 'claude', '--phase', 'recall'])
@@ -79,6 +82,18 @@ class MemoryHooks(unittest.TestCase):
             self.assertEqual(before, {str(p):p.read_bytes() for p in root.rglob('*') if p.is_file()})
             self.assertEqual(files[3].stat().st_mode & 0o777, 0o700)
             self.assertTrue(all(p.stat().st_mode & 0o777 == 0o600 for p in root.rglob('*.gah-backup-*')))
+
+    def test_existing_owned_flush_timeout_is_upgraded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / 'gah-memory-hook'
+            owned = {'command': shlex.join([str(script), '--tool', 'hermes', '--phase', 'flush']), 'timeout': 15}
+            unrelated = {'command': 'petdex keep-me', 'timeout': 7}
+            data = {'hooks': {'on_session_end': [unrelated, owned]}}
+            setup.configure(data, 'hermes', script, 'python3')
+            ending = data['hooks']['on_session_end']
+            self.assertEqual(ending[0], unrelated)
+            self.assertEqual(ending[1]['timeout'], 60)
+            self.assertEqual(len(ending), 2)
 
     def test_unrelated_command_yaml_alias_and_symlinked_parent_are_preserved(self):
         with tempfile.TemporaryDirectory() as directory:

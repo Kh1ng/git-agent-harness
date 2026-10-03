@@ -53,6 +53,8 @@ def configure(data, tool, script, python):
     # Detach YAML aliases before changing the selected hook subtree.
     hooks = data['hooks'] = copy.deepcopy(hooks)
     phases = [('on_session_start', 'recall'), ('on_session_end', 'flush')] if tool == 'hermes' else [('SessionStart', 'recall'), ('Stop', 'capture')]
+    if tool == 'claude':
+        phases.append(('SessionEnd', 'flush'))
     for event, phase in phases:
         entries = hooks.setdefault(event, [])
         if not isinstance(entries, list):
@@ -74,9 +76,11 @@ def configure(data, tool, script, python):
                     continue
                 if (len(parts) == 5 or (len(parts) == 6 and (parts[0] == python or re.fullmatch(r'python(?:3(?:\.\d+)?)?', Path(parts[0]).name)))) and parts[-4:] == suffix[-4:] and Path(parts[-5]).expanduser().resolve() == script.resolve():
                     handler['command'] = command
+                    if phase == 'flush':
+                        handler['timeout'] = 60
                     found = True
         if not found:
-            handler = {'command': command, 'timeout': 15}
+            handler = {'command': command, 'timeout': 60 if phase == 'flush' else 15}
             if tool == 'hermes':
                 entries.append(handler)
             else:

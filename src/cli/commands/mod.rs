@@ -34,3 +34,5 @@ pub mod update;
 pub mod watchdog;
 
 pub mod route;
+
+pub mod memory;

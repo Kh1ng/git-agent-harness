@@ -28,7 +28,8 @@ import { AsyncTtlCache } from '../asyncTtlCache.js';
 import {
   effectiveGatewayUrl,
   effectiveGatewayApiKey,
-  gatewayEnabledForProfile
+  gatewayEnabledForProfile,
+  effectiveContextPolicy
 } from '../gatewaySettingsStore.js';
 
 // Read fresh per call: lets tests substitute, and lets runtime config changes
@@ -174,7 +175,7 @@ export async function sessionKeyForTicket(profile: string, ticketId: string): Pr
 /** Best-effort POST that NEVER throws (#878 fail-open): records gateway
  * degradation on any failure (transport, non-2xx, malformed JSON) and
  * returns null; returns the parsed JSON and records success otherwise. */
-async function postJsonBestEffort<T>(path: string, body: unknown): Promise<T | null> {
+async function postJsonBestEffort<T>(path: string, body: unknown, timeoutMs = 5_000): Promise<T | null> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-GAH-Caller': 'server' };
   try {
     const apiKey = gatewayApiKey();
@@ -183,7 +184,7 @@ async function postJsonBestEffort<T>(path: string, body: unknown): Promise<T | n
       method: 'POST',
       headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(5_000)
+      signal: AbortSignal.timeout(timeoutMs)
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -241,6 +242,8 @@ export async function recall(profile: string, query: string): Promise<RecallResu
   return recallForKey(await sessionKeyForProfile(profile), query);
 }
 
+const idleFlushes = new Map<string, ReturnType<typeof setTimeout>>();
+
 export async function capture(
   profile: string,
   userContent: string,
@@ -255,7 +258,14 @@ export async function capture(
   // instead of skipping the whole capture. Every non-empty reply is preserved
   // verbatim; ticket-scoped captures keep their existing caller-owned contract.
   const capturedAssistantContent = assistantContent === '' ? '[No assistant reply]' : assistantContent;
-  return captureForKey(await sessionKeyForProfile(profile), userContent, capturedAssistantContent);
+  const captured = await captureForKey(await sessionKeyForProfile(profile), userContent, capturedAssistantContent);
+  if (!captured.degraded && captured.l0Recorded > 0) {
+    clearTimeout(idleFlushes.get(profile));
+    const timer = setTimeout(() => { idleFlushes.delete(profile); void flushSession(profile); }, effectiveContextPolicy(profile).settleIdleSeconds! * 1000);
+    timer.unref();
+    idleFlushes.set(profile, timer);
+  }
+  return captured;
 }
 
 /** Ticket-scoped recall for repair/review agents -- callers never see key
@@ -300,12 +310,14 @@ export async function captureForTicket(
  *
  * #878 fail-open: never throws. A failed flush reports `false` (and marks
  * the gateway degraded) rather than aborting the turn. */
-export async function flushSession(profile: string): Promise<boolean> {
+export async function flushSession(profile: string, timeoutMs = 300_000): Promise<boolean> {
+  clearTimeout(idleFlushes.get(profile));
+  idleFlushes.delete(profile);
   if (!gatewayEnabledForProfile(profile)) {
     return false;
   }
   const result = await postJsonBestEffort<{ flushed: boolean }>('/session/end', {
     session_key: await sessionKeyForProfile(profile)
-  });
+  }, timeoutMs);
   return result?.flushed === true;
 }

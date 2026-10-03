@@ -140,7 +140,7 @@ def gateway_post(path: str, body: dict) -> dict | None:
         method="POST",
     )
     try:
-        with urllib.request.build_opener(NoGatewayRedirect()).open(req, timeout=8) as resp:
+        with urllib.request.build_opener(NoGatewayRedirect()).open(req, timeout=55 if path == '/session/end' else 8) as resp:
             result = json.loads(resp.read())
             if result.get('code', 0) != 0:
                 log(f'{path} failed: gateway code {result.get("code")}')

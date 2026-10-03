@@ -1607,7 +1607,9 @@ export interface GatewaySettingsSummary {
 }
 
 export interface MemoryContextPolicy {
-  /** Maximum recalled characters injected per turn. Unset = unlimited. */
+  /** Flush completed project chats after this idle period; defaults to 900 seconds. */
+  settleIdleSeconds?: number;
+  /** Maximum characters in the complete injected memory envelope per turn. Unset = unlimited. */
   budgetChars?: number;
   /** Eligible memory tiers. Unset/empty = all tiers. */
   tiers?: string[];
