@@ -733,7 +733,7 @@ test('quota cache is keyed per origin and account identity', async () => {
   app.use(express.json());
   app.use(rateLimit({ windowMs: 60_000, limit: 200, validate: false }));
   app.use('/api', authMiddleware);
-  app.use('/api/cli-router', cliRouterRouter(mutationSafety('cache', directory), { fetchFn: rec.fn, readSettingsFn: () => stored, writeSettingsFn: () => {} }));
+  app.use('/api/cli-router', cliRouterRouter(mutationSafety('cache', directory), { fetchFn: rec.fn, readSettingsFn: () => stored, writeSettingsFn: () => {}, autoRefresh: false, recordQuotaFn: async () => {} }));
   const server = http.createServer(app);
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
