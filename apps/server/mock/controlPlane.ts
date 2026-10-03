@@ -1464,6 +1464,10 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
 
   app.get('/api/status', (_req, res) => res.json(STATUS_FIXTURE));
   app.get('/api/quota', (_req, res) => res.json(QUOTA_FIXTURE));
+  app.get('/api/registry/quota', (req, res) => res.json({
+    profile: bodyString(req.query.profile) ?? QUOTA_FIXTURE.profile.profile,
+    since: bodyString(req.query.since) ?? '7d', nodes: []
+  }));
   app.get('/api/cli-router', (_req, res) => res.json(state.cliRouter));
   app.put('/api/cli-router/settings', (req, res) => {
     state.cliRouter.settings.url = req.body.url;
