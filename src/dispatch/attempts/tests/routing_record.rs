@@ -105,7 +105,19 @@ fn record_route_attempt_preserves_each_route_and_its_diagnostics() {
     );
 
     let serialized = serde_json::to_string(&entry).unwrap();
-    let parsed: LedgerEntry = serde_json::from_str(&serialized).unwrap();
+    let mut parsed: LedgerEntry = serde_json::from_str(&serialized).unwrap();
+    let decoded = parsed.attempt_routing[0]
+        .routing_diagnostics
+        .as_mut()
+        .unwrap()
+        .selected_subscription_capacity
+        .as_mut()
+        .unwrap();
+    let expected = capacity.reset_pressure.unwrap();
+    assert!((decoded.reset_pressure.unwrap() - expected).abs() < 1e-10);
+    // JSON decimal parsing can change the final bit of this computed float.
+    // Compare every other persisted field exactly after checking its tolerance.
+    decoded.reset_pressure = Some(expected);
     assert_eq!(parsed.attempt_routing, entry.attempt_routing);
     assert!(parsed.routing_runtime.dispatch_attempted.is_empty());
 
