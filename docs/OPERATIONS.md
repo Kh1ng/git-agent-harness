@@ -964,23 +964,28 @@ event with no chat scrolls to that event and highlights it.
 
 ### Mistral dashboard usage
 
-On macOS or Linux, save the **Cookie header value** from a signed-in Mistral
-dashboard request in `~/.config/gah/mistral-dashboard.cookie`. This is a browser
-session credential, not an API key. Keep it on the account-owning node and run
-`chmod 600 ~/.config/gah/mistral-dashboard.cookie`.
-`MISTRAL_DASHBOARD_COOKIE_FILE` can select another private file.
+In the desktop app, open **Quota → Connect Mistral**, then choose
+**Connect Mistral** in local Settings. Sign in in the Mistral window. GAH verifies
+usage access and saves the session privately on this device. The device needs
+an installed GAH collector to refresh usage.
+
+For manual setup on macOS or Linux, save the **Cookie header value** from a
+signed-in Mistral dashboard request in `~/.config/gah/mistral-dashboard.cookie`.
+This is a session credential, not an API key. Keep it on the account-owning node
+with mode `600`. `MISTRAL_DASHBOARD_COOKIE_FILE` can select another private file;
+the desktop connection flow uses the default path.
 
 Run `gah quota refresh --backend mistral-dashboard` to collect read-only usage
 and the current login's Vibe monthly allowance. Automatic checks run at most
-every 30 minutes and skip an empty default file. Expired sessions require a new
-Cookie value. These account readings stay separate from Vibe execution instances
+every 30 minutes and skip an empty default file. Reconnect in Settings when the
+session expires. Account readings stay separate from Vibe execution instances
 and task usage; missing allowance or price data remains unknown.
 
 ### Provider login health
 
 Every node runs `gah auth-health` at server start and every 30 minutes. It
 checks claude, codex, hermes, each opencode provider (a saved credential that
-lists no models counts as expired), `gh`, `glab`, and `MISTRAL_API_KEY` /
+lists no models has unknown login validity), `gh`, `glab`, and `MISTRAL_API_KEY` /
 `NOUS_API_KEY` when set. It also reports backends that a dispatch attempt
 marked unavailable for an authentication failure. The command prints fixed,
 secret-free details, never provider output. A worker reports the result in
