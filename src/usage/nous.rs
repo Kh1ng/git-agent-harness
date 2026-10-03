@@ -18,6 +18,7 @@ pub fn refresh() -> Result<QuotaObservationRecord> {
     let mut command = Command::new("curl");
     command
         .args([
+            "--disable",
             "--silent",
             "--fail",
             "--max-time",

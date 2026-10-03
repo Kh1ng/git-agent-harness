@@ -26,6 +26,9 @@ pub struct QuotaCheck {
     pub quota_pool: Option<String>,
     pub checked_at: String,
     pub status: QuotaCheckStatus,
+    /// Account readings remain visible even when no routing candidate uses them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quota_observations: Vec<super::QuotaObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -88,6 +91,28 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
         .into_iter()
         .map(
             |((backend, backend_instance, model, quota_pool), (record, checked_at, _))| {
+                let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+                    &backend,
+                    model.as_deref(),
+                    quota_pool.as_deref(),
+                );
+                if let Some(instance) = &backend_instance {
+                    identity.backend_instance = instance.clone();
+                }
+                // Exact scope prevents a broad legacy reading from being
+                // presented as a verified balance for a named account.
+                let scoped: Vec<_> = records
+                    .iter()
+                    .filter(|reading| {
+                        reading.backend == backend
+                            && reading.backend_instance == backend_instance
+                            && reading.model == model
+                            && reading.quota_pool == quota_pool
+                    })
+                    .cloned()
+                    .collect();
+                let quota_observations =
+                    super::aggregate_observations(None, None, &scoped, &identity);
                 let has_data = record.quota_window.is_some()
                     || record.quota_used_percent.is_some()
                     || record.quota_remaining_percent.is_some()
@@ -112,6 +137,7 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
                     quota_pool,
                     checked_at,
                     status,
+                    quota_observations,
                     error: record.check_error.as_deref().map(crate::redact::redact),
                 }
             },
@@ -267,5 +293,51 @@ mod tests {
         assert_eq!(checks[0].status, QuotaCheckStatus::Data);
         assert_eq!(checks[1].status, QuotaCheckStatus::Failed);
         assert_eq!(checks[0].provider.as_deref(), Some("mistral"));
+    }
+
+    #[test]
+    fn check_only_account_windows_are_exactly_scoped_and_invalidated() {
+        let mut first = record(
+            "opencode",
+            Some("2026-10-02T23:00:00Z"),
+            Some("2026-10-02T23:00:00Z"),
+            QuotaCheckStatus::Data,
+        );
+        first.backend_instance = Some("opencode:nous-portal-api".into());
+        first.quota_pool = Some("nous-portal-api".into());
+        first.quota_window = Some("subscription-monthly".into());
+        first.quota_remaining_percent = Some(0.0);
+        first.usage_source = Some("nous_portal_account".into());
+        let broad = record(
+            "opencode",
+            Some("2026-10-02T23:01:00Z"),
+            Some("2026-10-02T23:01:00Z"),
+            QuotaCheckStatus::Data,
+        );
+        let mut records = vec![first.clone(), broad];
+        let checks = build_quota_checks(&records);
+        let nous = checks
+            .iter()
+            .find(|check| check.provider.as_deref() == Some("nous"))
+            .unwrap();
+        assert_eq!(nous.quota_observations.len(), 1);
+        assert_eq!(
+            nous.quota_observations[0].quota_remaining_percent,
+            Some(0.0)
+        );
+        let mut failure = first;
+        failure.checked_at = Some("2026-10-02T23:02:00Z".into());
+        failure.observed_at = None;
+        failure.quota_window = None;
+        failure.quota_remaining_percent = None;
+        failure.check_error = Some("credential expired".into());
+        records.push(failure);
+        let checks = build_quota_checks(&records);
+        let nous = checks
+            .iter()
+            .find(|check| check.provider.as_deref() == Some("nous"))
+            .unwrap();
+        assert_eq!(nous.status, QuotaCheckStatus::Failed);
+        assert!(nous.quota_observations.is_empty());
     }
 }

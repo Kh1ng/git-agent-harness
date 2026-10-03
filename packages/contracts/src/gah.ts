@@ -499,6 +499,7 @@ export interface QuotaCheck {
   quota_pool?: string | null;
   checked_at: string;
   status: 'data' | 'no_data' | 'failed';
+  quota_observations?: QuotaObservation[];
   error?: string | null;
 }
 
