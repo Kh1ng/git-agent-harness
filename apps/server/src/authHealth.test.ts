@@ -63,6 +63,23 @@ test('a chat turn that fails with 401 is expired at once; the next good turn res
   assert.deepEqual(f.events, ['auth_expired mac · claude: login expired', 'auth_restored mac · claude: login restored']);
 });
 
+test('a worker model catalog becoming unknown neither expires its login nor changes healthy Codex', () => {
+  const f = fixture();
+  const codex: AuthProbe = { backend: 'codex', provider: null, state: 'ok', source: 'probe' };
+  const observation = (state: AuthProbe['state']) => ({
+    node_id: 'mac', display_name: 'Mac',
+    auth_health: { checked_at: 'now', probes: [{ ...copilot(state), detail: 'No models were listed for this provider. Login validity is unknown.' }, codex] }
+  }) as unknown as NodeObservationSnapshot;
+  f.workers.push(observation('ok'));
+  f.monitor.observationsChanged();
+  f.workers[0] = observation('unknown');
+  f.monitor.observationsChanged();
+  assert.deepEqual(f.monitor.rows().map(row => [row.backend, row.provider, row.state]), [
+    ['opencode', 'github-copilot', 'unknown'], ['codex', null, 'ok']
+  ]);
+  assert.deepEqual(f.events, [], 'model discovery is not an expired-login attention event');
+});
+
 test('a failure that is not about authentication changes nothing', async () => {
   const f = fixture([], async () => false);
   await f.monitor.turnFinished('central', 'codex', 'the model is overloaded');

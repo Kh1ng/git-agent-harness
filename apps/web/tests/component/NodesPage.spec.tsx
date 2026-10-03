@@ -60,6 +60,21 @@ test('lists the coordinator, controller devices, and workers', async ({ mount, p
   await expect(component.getByRole('button', { name: 'Worker one', exact: true })).toBeVisible();
 });
 
+test('unknown and failed login checks cannot be presented as working logins', async ({ mount, page }) => {
+  await connectSocket(page);
+  await page.route('**/api/registry/fleet/snapshot', route => route.fulfill({ json: { nodes: [], observations: [], leases: [] } }));
+  await page.route('**/api/auth-health', route => route.fulfill({ json: { rows: [
+    { node_id: 'mac', node_name: 'Mac', backend: 'codex', provider: null, state: 'ok', source: 'probe' },
+    { node_id: 'mac', node_name: 'Mac', backend: 'opencode', provider: 'github-copilot', state: 'unknown', source: 'probe' },
+    { node_id: 'mac', node_name: 'Mac', backend: 'glab', provider: 'gitlab', state: 'error', source: 'probe' }
+  ] } }));
+  const component = await mount(<WebSocketProvider><NodesPage /></WebSocketProvider>);
+  const logins = component.getByRole('region', { name: 'Logins' });
+  await expect(logins.getByText('2 of 3 login checks could not verify login validity.')).toBeVisible();
+  await expect(logins.getByText(/checked logins work/)).toHaveCount(0);
+  await expect(logins.getByRole('button', { name: 'Fix login' })).toHaveCount(0);
+});
+
 test('fleet lists unknown, stale and classified health; click checks health and WS invalidates cached data', async ({ mount, page }, testInfo) => {
   await connectSocket(page);
   let offline = false;
