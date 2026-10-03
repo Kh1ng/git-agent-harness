@@ -18,8 +18,13 @@ fn private_rotation_and_listing_never_return_secret_material() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("credentials");
     save_at(&root, info("primary"), "synthetic-first").unwrap();
+    let previous_revision = read_at(&root, "primary").unwrap().revision;
     save_at(&root, info("second"), "synthetic-second").unwrap();
     save_at(&root, info("primary"), "synthetic-renewed").unwrap();
+    assert_ne!(
+        read_at(&root, "primary").unwrap().revision,
+        previous_revision
+    );
     assert_eq!(
         read_at(&root, "primary").unwrap().secret,
         "synthetic-renewed"

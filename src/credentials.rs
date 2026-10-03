@@ -31,6 +31,8 @@ pub struct CredentialInfo {
 struct StoredCredential {
     info: CredentialInfo,
     secret: String,
+    #[serde(default)]
+    revision: String,
 }
 
 /// Canonical provider vocabulary shared with execution's harness bindings.
@@ -274,6 +276,7 @@ fn save_at(root: &Path, mut info: CredentialInfo, secret: &str) -> Result<Creden
         &StoredCredential {
             info: info.clone(),
             secret: secret.to_owned(),
+            revision: uuid::Uuid::new_v4().to_string(),
         },
     )
     .map_err(|_| anyhow::anyhow!("cannot encode private credential"))?;
@@ -291,6 +294,12 @@ pub fn list() -> Result<Vec<CredentialInfo>> {
 }
 pub fn get(id: &str) -> Result<CredentialInfo> {
     Ok(read_at(&root()?, id)?.info)
+}
+
+/// A save-generation nonce invalidates cached children after rotation. This is
+/// independent of key material and never identifies a billing pool.
+pub fn revision(id: &str) -> Result<String> {
+    Ok(read_at(&root()?, id)?.revision)
 }
 pub fn save(info: CredentialInfo, secret: &str) -> Result<CredentialInfo> {
     save_at(&root()?, info, secret)
