@@ -26,6 +26,13 @@ fn native_provider_connection_commands_match_installed_cli() {
         native_args::refresh("mistral-second"),
         native_args::instances(),
         native_args::bind("gah", "vibe-personal", "mistral-personal"),
+        native_args::add_instance(
+            "gah",
+            "vibe-personal",
+            "vibe",
+            "mistral-personal",
+            "Personal",
+        ),
     ] {
         let parsed = Cli::try_parse_from(std::iter::once("gah".to_owned()).chain(args));
         assert!(

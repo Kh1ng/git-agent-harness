@@ -63,3 +63,28 @@ pub fn bind(profile: &str, instance: &str, credential_id: &str) -> Vec<String> {
     .map(str::to_owned)
     .into()
 }
+
+pub fn add_instance(
+    profile: &str,
+    instance: &str,
+    runner: &str,
+    credential_id: &str,
+    label: &str,
+) -> Vec<String> {
+    [
+        "config",
+        "add-backend-instance",
+        "--profile",
+        profile,
+        "--instance",
+        instance,
+        "--runner-kind",
+        runner,
+        "--credential-id",
+        credential_id,
+        "--account-label",
+        label,
+    ]
+    .map(str::to_owned)
+    .into()
+}

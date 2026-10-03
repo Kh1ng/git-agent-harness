@@ -173,6 +173,40 @@ pub async fn credential_bind(
     .map_err(|_| FAILURE.to_owned())?
 }
 
+#[tauri::command]
+pub async fn credential_add_instance(
+    window: tauri::WebviewWindow,
+    profile: String,
+    instance: String,
+    runner_kind: String,
+    credential_id: String,
+) -> Result<(), String> {
+    super::local_only(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let output = invoke(cli_args::list(), None, Duration::from_secs(10))?;
+        let connections: Vec<CredentialInfo> =
+            serde_json::from_slice(&output).map_err(|_| FAILURE.to_owned())?;
+        let connection = connections
+            .into_iter()
+            .find(|info| info.id == credential_id && info.kind == "api_key")
+            .ok_or_else(|| FAILURE.to_owned())?;
+        invoke(
+            cli_args::add_instance(
+                &profile,
+                &instance,
+                &runner_kind,
+                &credential_id,
+                &connection.account_label,
+            ),
+            None,
+            Duration::from_secs(10),
+        )
+        .map(|_| ())
+    })
+    .await
+    .map_err(|_| FAILURE.to_owned())?
+}
+
 fn invoke(args: Vec<String>, input: Option<&[u8]>, timeout: Duration) -> Result<Vec<u8>, String> {
     let gah = super::installed_gah()?;
     invoke_with_gah(&gah, args, input, timeout)
