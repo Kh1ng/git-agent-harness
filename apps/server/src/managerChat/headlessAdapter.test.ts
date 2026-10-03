@@ -667,3 +667,15 @@ test('bound OpenHands profile supplies model metadata without requiring or retur
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test('a named Vibe instance derives its Python bridge from the selected launcher', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-vibe-selected-launcher-'));
+  const selected = join(dir, 'selected-vibe');
+  try {
+    writeFileSync(selected, '#!/selected/install/bin/python3\n');
+    assert.equal(vibeBackendSpec({ executable: selected }).turnArgs()[0], '/selected/install/bin/python3');
+    writeFileSync(selected, '#!/usr/bin/env python3\n');
+    assert.throws(() => vibeBackendSpec({ executable: selected }).turnArgs(), /absolute Python interpreter/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

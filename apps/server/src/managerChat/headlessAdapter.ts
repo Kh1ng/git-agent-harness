@@ -143,7 +143,7 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
     implemented: true,
 
     dispose(): void {
-      for (const state of states.values()) state.child?.kill('SIGTERM');
+      // Retire the adapter without interrupting a turn already using its key.
       states.clear();
     },
 
@@ -347,8 +347,8 @@ const VIBE_STDIN_BRIDGE = [
  * from its own shebang, rather than hard-coding a host-specific path. Not
  * cached: it's one cheap `command -v` + file read per turn, and caching
  * would make the resolved interpreter outlive a test's fake PATH. */
-function resolveVibeInterpreter(): string {
-  const launcherPath = execFileSync('/bin/sh', ['-c', 'command -v vibe'], { encoding: 'utf8' }).trim();
+function resolveVibeInterpreter(executable?: string): string {
+  const launcherPath = executable ?? execFileSync('/bin/sh', ['-c', 'command -v vibe'], { encoding: 'utf8' }).trim();
   if (!launcherPath) {
     throw new Error('vibe executable not found on PATH.');
   }
@@ -358,6 +358,9 @@ function resolveVibeInterpreter(): string {
   if (!match) {
     throw new Error(`Could not determine vibe's Python interpreter from ${realLauncher}.`);
   }
+  if (!path.isAbsolute(match[1]) || !/^python/.test(path.basename(match[1]))) {
+    throw new Error('Vibe requires an absolute Python interpreter in its launcher shebang.');
+  }
   return match[1];
 }
 
@@ -366,8 +369,8 @@ function resolveVibeInterpreter(): string {
  * `resolveInterpreter` is overridable so tests can prove the argv/stdin
  * split against a fake interpreter instead of requiring a real vibe
  * install. */
-export function vibeBackendSpec(overrides: { resolveInterpreter?: () => string } = {}): HeadlessBackendSpec {
-  const resolveInterpreter = overrides.resolveInterpreter ?? resolveVibeInterpreter;
+export function vibeBackendSpec(overrides: { resolveInterpreter?: () => string; executable?: string } = {}): HeadlessBackendSpec {
+  const resolveInterpreter = overrides.resolveInterpreter ?? (() => resolveVibeInterpreter(overrides.executable));
   return {
     id: 'vibe',
     displayName: 'Vibe',

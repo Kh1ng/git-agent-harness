@@ -773,7 +773,13 @@ export function createAcpBackend(
   }
 
   function dispose(): void {
-    for (const state of connections.values()) state.process.kill();
+    for (const state of connections.values()) {
+      if (state.activePrompt) {
+        void state.activePrompt.then(() => state.process.kill(), () => state.process.kill());
+      } else {
+        state.process.kill();
+      }
+    }
     connections.clear();
   }
 

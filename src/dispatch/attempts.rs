@@ -1,4 +1,6 @@
+mod execution_env;
 use super::command::which;
+pub(super) use execution_env::apply_execution_identity_env;
 
 pub(crate) mod external_approval_gap;
 use super::DispatchArgs;
@@ -253,19 +255,6 @@ pub(super) fn record_external_approval_consumption_for_last_attempt(
     );
 }
 
-pub(super) fn apply_execution_identity_env(
-    profile: &Profile,
-    identity: &crate::execution_identity::ExecutionIdentity,
-    env_vars: &mut Vec<(String, String)>,
-) -> Result<()> {
-    if identity.state_root.is_some() {
-        identity.apply_instance_state_env(env_vars);
-    } else {
-        apply_backend_instance_env(profile, &identity.logical_backend, env_vars);
-    }
-    identity.apply_credential_env(env_vars)
-}
-
 pub(super) fn external_env_vars_for_work_item(
     cfg: &GahConfig,
     profile_name: &str,
@@ -459,27 +448,7 @@ pub(super) fn run_backend_with_reserved_route(
         work_id,
         &identity.credential_env()?,
     )?;
-    let mut selected_llm = runner::LlmConfig {
-        base_url: llm.base_url.clone(),
-        api_key: llm.api_key.clone(),
-        model: llm.model.clone(),
-    };
-    if identity.credential_id.is_some() && runner_kind == "openhands" {
-        selected_llm.base_url = env_vars
-            .iter()
-            .rev()
-            .find(|(name, _)| name == "LLM_BASE_URL")
-            .ok_or_else(|| anyhow::anyhow!("selected credential has no OpenHands endpoint"))?
-            .1
-            .clone();
-        selected_llm.api_key = env_vars
-            .iter()
-            .rev()
-            .find(|(name, _)| name == "LLM_API_KEY")
-            .ok_or_else(|| anyhow::anyhow!("selected credential has no OpenHands execution key"))?
-            .1
-            .clone();
-    }
+    let selected_llm = execution_env::selected_llm(identity, llm, &env_vars)?;
     let llm = &selected_llm;
     env_vars.retain(|(key, _)| key != crate::runner::process::HARD_TIMEOUT_ENV);
     if let Some(seconds) = hard_timeout_seconds.filter(|seconds| *seconds > 0) {
