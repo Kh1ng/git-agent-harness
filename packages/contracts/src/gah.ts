@@ -473,6 +473,8 @@ export interface QuotaUsageSummary {
 }
 
 export interface QuotaCandidateStatus {
+  /** Billing/subscription service, distinct from the runner or model vendor. */
+  provider?: string | null;
   backend_instance?: string | null;
   modes: string[];
   backend: string;
@@ -491,8 +493,13 @@ export interface QuotaCandidateStatus {
 
 export interface QuotaCheck {
   backend: string;
+  provider?: string | null;
+  backend_instance?: string | null;
+  model?: string | null;
+  quota_pool?: string | null;
   checked_at: string;
   status: 'data' | 'no_data' | 'failed';
+  quota_observations?: QuotaObservation[];
   error?: string | null;
 }
 

@@ -3,6 +3,8 @@ use crate::ledger::{AttemptBehaviorMetrics, LedgerUsage};
 use regex::Regex;
 use serde_json::Value;
 
+pub mod claude;
+pub mod nous;
 mod vibe;
 pub use vibe::parse_vibe_session_metadata;
 

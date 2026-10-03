@@ -622,15 +622,51 @@ fn route_candidates(
 /// deriving it from `quota_remaining_percent` when only that was recorded
 /// (vibe's Mistral Admin spend-limit reading uses remaining, not used).
 /// `quota_days_remaining` is quota_pace()'s "days until the quota window
-/// resets", derived from `quota_reset_at` relative to `now`; negative (an
-/// already-past reset that just hasn't been re-observed yet) clamps to 0
-/// rather than feeding quota_pace() a value it would reject as invalid.
+/// resets", derived from `quota_reset_at` relative to `now`. Only fresh,
+/// current weekly budgets belong in the weekly pacing formula.
 fn live_quota_pacing_inputs(
     observations: &[crate::quota_store::QuotaObservationRecord],
     identity: &ExecutionIdentity,
     now: time::OffsetDateTime,
 ) -> (Option<f64>, Option<f64>) {
-    let Some(record) = crate::quota_store::latest_for_identity(observations, identity) else {
+    let Some(record) = crate::quota_store::latest_windows_for_identity(observations, identity)
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record.quota_window.as_deref(),
+                Some("weekly" | "seven_day" | "seven-day" | "7d" | "10080m")
+            )
+        })
+        .filter(|record| {
+            record
+                .observed_at
+                .as_deref()
+                .and_then(|observed| {
+                    time::OffsetDateTime::parse(
+                        observed,
+                        &time::format_description::well_known::Rfc3339,
+                    )
+                    .ok()
+                })
+                .is_some_and(|observed| {
+                    observed <= now && now - observed <= time::Duration::minutes(30)
+                })
+        })
+        .filter(|record| {
+            record
+                .quota_reset_at
+                .as_deref()
+                .and_then(|reset| {
+                    time::OffsetDateTime::parse(
+                        reset,
+                        &time::format_description::well_known::Rfc3339,
+                    )
+                    .ok()
+                })
+                .is_some_and(|reset| reset > now)
+        })
+        .max_by(|left, right| left.observed_at.cmp(&right.observed_at))
+    else {
         return (None, None);
     };
     let usage_percent = record.quota_used_percent.or_else(|| {

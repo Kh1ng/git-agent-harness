@@ -9,6 +9,22 @@ use serde_json;
 
 pub fn run(command: QuotaCommands) -> Result<()> {
     match command {
+        QuotaCommands::Record { store_path } => {
+            use std::io::Read;
+            let mut input = String::new();
+            std::io::stdin()
+                .take(16 * 1024 + 1)
+                .read_to_string(&mut input)?;
+            if input.len() > 16 * 1024 {
+                bail!("quota observation exceeds 16 KiB");
+            }
+            let record = quota_store::parse_external_observation(&input)?;
+            let path = store_path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(quota_store::store_path);
+            quota_store::append(&path, &record)?;
+            println!("Recorded account-level quota observation.");
+        }
         QuotaCommands::Refresh {
             backend,
             backend_instance,
@@ -27,13 +43,32 @@ pub fn run(command: QuotaCommands) -> Result<()> {
                 );
             }
             let is_vibe_admin = crate::config::canonical_backend_name(&backend) == "vibe";
+            if backend == "claude"
+                && (backend_instance.is_some()
+                    || model.is_some()
+                    || quota_pool.is_some()
+                    || codex_cmd != "claude")
+            {
+                bail!("Claude quota refresh uses the current native OAuth login; command/instance/model/pool overrides are unsupported");
+            }
+            if backend == "nous"
+                && (backend_instance.is_some() || model.is_some() || quota_pool.is_some())
+            {
+                bail!("Nous account refresh uses the configured nous-portal-api account; instance/model/pool overrides are unsupported");
+            }
             if is_vibe_admin && backend_instance.is_some() {
                 bail!(
                     "--backend-instance is not supported for --backend vibe: the Mistral Admin API key is a single org-wide credential, not a per-instance one"
                 );
             }
 
-            let refreshed = if is_vibe_admin {
+            let refreshed = if backend == "claude" {
+                quota_store::refresh_claude_and_store(&path)
+            } else if backend == "nous" {
+                let record = crate::usage::nous::refresh()?;
+                quota_store::append(&path, &record)?;
+                Ok(Some(record))
+            } else if is_vibe_admin {
                 quota_store::refresh_vibe_admin_and_store(model.as_deref(), &path)
             } else if let Some(instance) = backend_instance {
                 let mut identity = execution_identity::ExecutionIdentity::legacy_candidate(

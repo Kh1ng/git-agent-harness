@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { QuotaCheck, QuotaSnapshot, QuotaCandidateStatus } from '@git-agent-harness/contracts';
+import type { QuotaCheck, QuotaSnapshot, QuotaCandidateStatus, FleetQuotaSnapshot } from '@git-agent-harness/contracts';
 import { Gauge, ListChecks, CheckCircle2, Coins, Timer } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
@@ -12,6 +12,7 @@ import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { StatTile } from '../components/ui/StatTile.js';
 import { formatPercent, formatRemaining, formatAge, isStale, formatTokens, formatCount, formatCost, formatLocalTime } from '../lib/format.js';
 import { CliRouterPanel } from '../components/CliRouterPanel.js';
+import { gahApi } from '../api/client.js';
 
 
 const SNAPSHOT_REFRESH_MS = 5 * 60 * 1000;
@@ -20,14 +21,11 @@ const SNAPSHOT_REFRESH_MS = 5 * 60 * 1000;
  * (model) + pool must never be collapsed, per the spec: "agy" and
  * "agy-second" are different instances, "5-hour" and "weekly" are
  * different windows. This is used as the React key and the card title. */
-function scopeIdentity(backend: string, model: string | null, pool?: string | null, instance?: string | null): string {
-  // OpenCode is a runner. Its model namespace identifies the configured API provider.
-  const provider = backend === 'opencode' && model?.includes('/') ? model.split('/')[0] : null;
-  const name = provider === 'gah-router' ? 'CLI subscription router' : provider ?? backend;
-  const parts = [name];
-  if (instance && instance !== backend) parts.push(instance);
-  if (pool) parts.push(pool);
-  if (model) parts.push(model);
+function scopeIdentity(candidate: Pick<QuotaCandidateStatus, 'backend' | 'provider' | 'backend_instance' | 'quota_pool'> & { model?: string | null }): string {
+  const parts = [providerLabel(candidateProvider(candidate))];
+  if (candidate.backend_instance) parts.push(candidate.backend_instance);
+  if (candidate.quota_pool) parts.push(candidate.quota_pool);
+  if (candidate.model) parts.push(candidate.model);
   return [...new Set(parts)].join(' / ');
 }
 
@@ -123,9 +121,9 @@ export function QuotaFreshnessPanel({
                   ? 'unknown'
                   : 'good';
               return (
-                <div key={check.backend} data-testid={`quota-check-${check.backend}`} className="text-xs text-secondary">
+                <div key={scopeIdentity(check)} data-testid={`quota-check-${check.backend}`} className="text-xs text-secondary">
                   <div className="flex items-center justify-between gap-2">
-                    <span>{check.backend}</span>
+                    <span>{scopeIdentity(check)}</span>
                     <span className="inline-flex items-center gap-2">
                       {isStale(check.checked_at) && <StatusBadge tone="serious" label="Stale" />}
                       <StatusBadge tone={tone} label={label} />
@@ -149,6 +147,7 @@ export function QuotaPage() {
   const profile = profileOverride ?? wsProfile;
   const quota = useGahStore((s) => s.quota);
   const fetchQuota = useGahStore((s) => s.fetchQuota);
+  const [fleetRefresh, setFleetRefresh] = useState(0);
 
   useEffect(() => {
     fetchQuota({ profile: profile ?? undefined, since: '7d' });
@@ -156,6 +155,7 @@ export function QuotaPage() {
 
   const refresh = () => {
     fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
+    setFleetRefresh(value => value + 1);
   };
   useAutoRefresh(refresh, SNAPSHOT_REFRESH_MS);
   useWsReconnectRefresh(refresh);
@@ -180,6 +180,7 @@ export function QuotaPage() {
         {header}
         <CliRouterPanel />
         <LoadingState label="Loading quota snapshot…" />
+        <FleetQuotaPanel profile={profile} refreshKey={fleetRefresh} />
       </div>
     );
   }
@@ -189,6 +190,7 @@ export function QuotaPage() {
         {header}
         <CliRouterPanel />
         <ErrorState message={quota.error} endpoint="/api/quota" onRetry={refresh} />
+        <FleetQuotaPanel profile={profile} refreshKey={fleetRefresh} />
       </div>
     );
   }
@@ -204,7 +206,9 @@ export function QuotaPage() {
 
       <CliRouterPanel />
 
-      <QuotaCandidateLedger candidates={candidates} />
+      <QuotaCandidateLedger candidates={candidates} quotaChecks={snapshot?.quota_checks ?? []} />
+
+      <FleetQuotaPanel profile={profile} refreshKey={fleetRefresh} />
 
       <details className="quota-settings">
         <summary className="text-sm text-secondary cursor-pointer py-3">Usage and data freshness</summary>
@@ -233,7 +237,7 @@ export function QuotaPage() {
               label="Candidates"
               value={String(candidates.length)}
               icon={Timer}
-              hint={candidates.length > 0 ? `${candidates.filter((c) => c.eligible_now).length} eligible now` : undefined}
+              hint={candidates.length > 0 ? `${candidates.filter((c) => c.eligible_now).length} not blocked` : undefined}
             />
           </section>
 
@@ -243,21 +247,86 @@ export function QuotaPage() {
   );
 }
 
-/** A provider groups routing scopes, without treating distinct models as accounts. */
-function candidateProvider(candidate: QuotaCandidateStatus): string {
-  return candidate.backend === 'opencode' && candidate.model?.includes('/')
-    ? candidate.model.split('/')[0]
-    : candidate.backend;
+function FleetQuotaPanel({ profile, refreshKey }: { profile: string | null; refreshKey: number }) {
+  const [snapshot, setSnapshot] = useState<{ profile: string | null; data: FleetQuotaSnapshot | null; error: string | null } | null>(null);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    gahApi.getFleetQuota({ profile: profile ?? undefined, since: '7d' })
+      .then(data => { if (!cancelled) setSnapshot({ profile, data, error: null }); })
+      .catch(error => { if (!cancelled) setSnapshot(previous => ({ profile, data: previous?.profile === profile ? previous.data : null, error: error instanceof Error ? error.message : 'Could not load worker quota.' })); });
+    return () => { cancelled = true; };
+  }, [profile, refreshKey, retry]);
+  const current = snapshot?.profile === profile ? snapshot : null;
+  return <>
+    {!current && <LoadingState label="Loading worker quota…" />}
+    {current?.error && <ErrorState message={current.error} endpoint="/api/registry/quota" onRetry={() => setRetry(value => value + 1)} />}
+    {current?.data && <FleetQuotaLedger snapshot={current.data} />}
+  </>;
 }
 
-function QuotaCandidateLedger({ candidates }: { candidates: QuotaCandidateStatus[] }) {
+export function FleetQuotaLedger({ snapshot }: { snapshot: FleetQuotaSnapshot }) {
+  if (snapshot.nodes.length === 0) return null;
+  return <section className="space-y-6" aria-label="Worker quota observations">
+    <div>
+      <h3 className="text-base font-semibold text-primary">Worker quota</h3>
+      <p className="text-xs text-muted mt-1">Allowances reported on each node. Worker usage ledgers are shown separately and are not added to central totals.</p>
+    </div>
+    {snapshot.nodes.map(node => <section key={node.nodeId} data-testid={`node-quota-${node.nodeId}`} className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div><h4 className="text-sm font-semibold text-primary">{node.displayName}</h4><p className="text-xs text-muted break-all">Node {node.nodeId}{node.quota ? ` · Snapshot ${formatAge(node.quota.generated_at) ?? node.quota.generated_at}` : ''}</p></div>
+        <StatusBadge tone={node.state === 'available' ? 'good' : node.state === 'unavailable' ? 'critical' : 'unknown'} label={node.state === 'available' ? 'Reported' : node.state === 'unavailable' ? 'Unavailable' : 'Project not configured'} />
+      </div>
+      {node.error && <p className="text-xs text-critical">{node.error}</p>}
+      {node.quota && <QuotaCandidateLedger candidates={node.quota.candidates} quotaChecks={node.quota.quota_checks} />}
+    </section>)}
+  </section>;
+}
+
+/** A provider groups routing scopes, without treating distinct models as accounts. */
+function candidateProvider(candidate: Pick<QuotaCandidateStatus, 'backend' | 'provider'> & { model?: string | null }): string {
+  if (candidate.provider) return candidate.provider;
+  // The legacy second AGY runner is another account of the same provider.
+  if (candidate.backend === 'agy-second') return 'agy';
+  return candidate.backend === 'opencode' && candidate.model?.includes('/')
+    ? candidate.model.split('/')[0]
+    : candidate.backend === 'opencode' ? 'Unknown provider' : candidate.backend;
+}
+
+function providerLabel(provider: string): string {
+  return ({ nous: 'Nous', 'nous-portal': 'Nous', mistral: 'Mistral', antigravity: 'Antigravity', anthropic: 'Anthropic', openai: 'OpenAI', 'gah-router': 'CLI subscription router' } as Record<string, string>)[provider] ?? provider;
+}
+
+type QuotaLedgerRow = Omit<QuotaCandidateStatus, 'usage'> & {
+  usage: QuotaCandidateStatus['usage'] | null;
+  observationOnly?: boolean;
+};
+
+function QuotaCandidateLedger({ candidates: configuredCandidates, quotaChecks }: { candidates: QuotaCandidateStatus[]; quotaChecks: QuotaCheck[] }) {
+  // An account observation is not permission to schedule work on that account.
+  const observedAccounts: QuotaLedgerRow[] = quotaChecks.filter(check =>
+    check.backend_instance && ((check.quota_observations?.length ?? 0) > 0 || check.status === 'failed') && !configuredCandidates.some(candidate =>
+      candidate.backend === check.backend && candidate.backend_instance === check.backend_instance &&
+      (!check.model || candidate.model === check.model) && (!check.quota_pool || candidate.quota_pool === check.quota_pool)
+    )
+  ).map(check => ({
+    backend: check.backend, provider: check.provider, backend_instance: check.backend_instance,
+    model: check.model ?? null, quota_pool: check.quota_pool, quota_observations: check.quota_observations,
+    modes: [], configured: false, eligible_now: false, observed_at: null, usage: null, observationOnly: true
+  }));
+  const candidates: QuotaLedgerRow[] = [...configuredCandidates, ...observedAccounts];
   const [providerFilter, setProviderFilter] = useState('All');
   const providers = [...new Set(candidates.map(candidateProvider))];
   const activeFilter = providers.includes(providerFilter) ? providerFilter : 'All';
   const filteredProviders = activeFilter === 'All' ? providers : [activeFilter];
   return (
     <section className="quota-candidates">
-      <h3 className="text-base font-semibold text-primary mb-3">Configured candidates</h3>
+      <h3 className="text-base font-semibold text-primary mb-3">Accounts and routing candidates</h3>
+      {quotaChecks.filter(check => check.status === 'failed').map((check, index) => (
+        <p key={index} role="alert" className="text-xs text-critical mb-3">
+          {scopeIdentity(check)} · Quota check failed{check.error ? `: ${check.error}` : '. Refresh the account quota check.'}
+        </p>
+      ))}
       {candidates.length === 0 ? (
         <EmptyState icon={Gauge} title="No canonical candidates recorded" description="Add routing candidates to the profile to see availability and quota state here." />
       ) : (
@@ -265,7 +334,7 @@ function QuotaCandidateLedger({ candidates }: { candidates: QuotaCandidateStatus
           <div className="quota-provider-tabs" role="group" aria-label="Filter candidates by provider">
             {['All', ...providers].map(provider => (
               <button key={provider} className="quota-provider-tab" aria-pressed={activeFilter === provider} onClick={() => setProviderFilter(provider)}>
-                <Gauge size={15} aria-hidden="true" />{provider}
+                <Gauge size={15} aria-hidden="true" />{providerLabel(provider)}
                 <span className="quota-provider-count">({provider === 'All' ? candidates.length : candidates.filter(candidate => candidateProvider(candidate) === provider).length})</span>
               </button>
             ))}
@@ -273,11 +342,12 @@ function QuotaCandidateLedger({ candidates }: { candidates: QuotaCandidateStatus
           <div className="quota-summary-band" aria-label="Configured provider summaries">
             {filteredProviders.map(provider => {
               const scopes = candidates.filter(candidate => candidateProvider(candidate) === provider);
+              const routingScopes = scopes.filter(candidate => !candidate.observationOnly);
               const observations = scopes.flatMap(candidate => candidate.quota_observations ?? []);
               return (
                 <section key={provider} className="quota-provider-summary">
-                  <div className="flex items-center justify-between gap-3 mb-3"><h4 className="text-sm font-semibold text-primary">{provider}</h4><span className="text-xs text-muted">{scopes.length} {scopes.length === 1 ? 'candidate' : 'candidates'}</span></div>
-                  <p className="text-2xl font-semibold text-primary tabular-nums">{scopes.filter(candidate => candidate.eligible_now).length}<span className="text-sm font-normal text-muted"> / {scopes.length} eligible</span></p>
+                  <div className="flex items-center justify-between gap-3 mb-3"><h4 className="text-sm font-semibold text-primary">{providerLabel(provider)}</h4><span className="text-xs text-muted">{routingScopes.length} {routingScopes.length === 1 ? 'candidate' : 'candidates'}{scopes.length > routingScopes.length ? ` · ${scopes.length - routingScopes.length} observed accounts` : ''}</span></div>
+                  {routingScopes.length > 0 ? <p className="text-2xl font-semibold text-primary tabular-nums">{routingScopes.filter(candidate => candidate.eligible_now).length}<span className="text-sm font-normal text-muted"> / {routingScopes.length} not blocked</span></p> : <p className="text-sm text-muted">No routing candidate</p>}
                   <p className="text-xs text-muted mt-2">{observations.length} quota {observations.length === 1 ? 'observation' : 'observations'} · {observations.filter(observation => quotaPercentages(observation) !== null).length} with percentages</p>
                 </section>
               );
@@ -286,14 +356,18 @@ function QuotaCandidateLedger({ candidates }: { candidates: QuotaCandidateStatus
           <div className="quota-provider-ledgers">
             {filteredProviders.map(provider => (
               <section key={provider}>
-                <h4 className="text-sm font-semibold text-primary mb-2">{provider}</h4>
+                <h4 className="text-sm font-semibold text-primary mb-2">{providerLabel(provider)}</h4>
                 {candidates.filter(candidate => candidateProvider(candidate) === provider).map((candidate, index) => (
                   <div key={index} className="quota-candidate-row" data-testid={`quota-candidate-${candidate.backend}-${index}`}>
                     <div className="min-w-0">
-                      <p className="text-sm font-medium text-primary break-words">{scopeIdentity(candidate.backend, candidate.model, candidate.quota_pool, candidate.backend_instance)}</p>
-                      <p className="text-xs text-muted mt-1">{candidate.modes.length > 0 ? candidate.modes.join(', ') : 'candidate'}{candidate.backend === 'opencode' && ' · OpenCode runner'}{!candidate.configured && ' · no profile runner override'}</p>
-                      <div className="mt-2 flex flex-wrap gap-2"><StatusBadge tone={candidate.eligible_now ? 'good' : 'critical'} label={candidate.eligible_now ? 'Eligible' : 'Unavailable'} />{isStale(candidate.observed_at) && <StatusBadge tone="serious" label="Stale" />}</div>
-                      {!candidate.eligible_now && <p className="text-xs text-secondary mt-2">{candidate.reason ?? 'Unknown reason'} · {formatRemaining(candidate.unavailable_until) ? `Resets in ${formatRemaining(candidate.unavailable_until)}` : 'No known reset time'}</p>}
+                      <p className="text-sm font-medium text-primary break-words">{scopeIdentity(candidate)}</p>
+                      <p className="text-xs text-muted mt-1">{candidate.observationOnly ? 'Observed account · not a routing candidate' : candidate.modes.length > 0 ? candidate.modes.join(', ') : 'candidate'}{candidate.backend === 'opencode' && ' · OpenCode runner'}{!candidate.observationOnly && !candidate.configured && ' · no profile runner override'}</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <StatusBadge tone={candidate.observationOnly ? 'unknown' : !candidate.eligible_now ? 'critical' : candidate.observed_at ? 'good' : 'unknown'} label={candidate.observationOnly ? 'Availability unverified' : !candidate.eligible_now ? 'Unavailable' : candidate.observed_at ? 'Eligible' : 'Availability unverified'} />
+                        {!(candidate.quota_observations ?? []).some(observation => quotaPercentages(observation) !== null) && <StatusBadge tone="unknown" label="Quota unknown" />}
+                        {isStale(candidate.observed_at) && <StatusBadge tone="serious" label="Stale" />}
+                      </div>
+                      {!candidate.observationOnly && !candidate.eligible_now && <p className="text-xs text-secondary mt-2">{candidate.reason ?? 'Unknown reason'} · {formatRemaining(candidate.unavailable_until) ? `Resets in ${formatRemaining(candidate.unavailable_until)}` : 'No known reset time'}</p>}
                       <p className="text-xs text-muted mt-2">{formatAge(candidate.observed_at) ? `Observed ${formatAge(candidate.observed_at)}` : 'No observation'}</p>
                     </div>
                     <div className="quota-account-windows">
@@ -316,7 +390,7 @@ function QuotaCandidateLedger({ candidates }: { candidates: QuotaCandidateStatus
                         );
                       })}
                     </div>
-                    <details className="quota-row-feedback text-xs text-muted">
+                    {candidate.usage && <details className="quota-row-feedback text-xs text-muted">
                       <summary className="cursor-pointer">Usage details</summary>
                       <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2">
                         <span>{formatCount(candidate.usage.entries)} entries · {formatPercent(candidate.usage.success_rate)} success</span>
@@ -324,7 +398,7 @@ function QuotaCandidateLedger({ candidates }: { candidates: QuotaCandidateStatus
                         {(candidate.usage.actual_cost_usd !== null || candidate.usage.estimated_cost_usd !== null) && <span>Cost: {formatCost(candidate.usage.actual_cost_usd ?? candidate.usage.estimated_cost_usd)}</span>}
                         {candidate.source && <span>Source: {candidate.source}</span>}
                       </div>
-                    </details>
+                    </details>}
                   </div>
                 ))}
               </section>

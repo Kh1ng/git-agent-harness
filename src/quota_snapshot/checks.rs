@@ -16,8 +16,19 @@ pub enum QuotaCheckStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct QuotaCheck {
     pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_instance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_pool: Option<String>,
     pub checked_at: String,
     pub status: QuotaCheckStatus,
+    /// Account readings remain visible even when no routing candidate uses them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quota_observations: Vec<super::QuotaObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -55,7 +66,7 @@ fn check_timestamp(record: &QuotaObservationRecord) -> Option<String> {
 }
 
 pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<QuotaCheck> {
-    let mut latest = BTreeMap::<String, (&QuotaObservationRecord, String, OffsetDateTime)>::new();
+    let mut latest = BTreeMap::new();
     for record in records {
         let Some(checked_at) = check_timestamp(record) else {
             continue;
@@ -63,35 +74,74 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
         let Ok(parsed) = OffsetDateTime::parse(&checked_at, &Rfc3339) else {
             continue;
         };
+        let key = (
+            record.backend.clone(),
+            record.backend_instance.clone(),
+            record.model.clone(),
+            record.quota_pool.clone(),
+        );
         if latest
-            .get(&record.backend)
+            .get(&key)
             .is_none_or(|(_, _, current)| parsed >= *current)
         {
-            latest.insert(record.backend.clone(), (record, checked_at, parsed));
+            latest.insert(key, (record, checked_at, parsed));
         }
     }
     latest
         .into_iter()
-        .map(|(backend, (record, checked_at, _))| {
-            let has_data = record.quota_window.is_some()
-                || record.quota_used_percent.is_some()
-                || record.quota_remaining_percent.is_some()
-                || record.quota_reset_at.is_some()
-                || record.mistral_admin.is_some();
-            let status = if record.check_error.is_some() {
-                QuotaCheckStatus::Failed
-            } else if has_data {
-                QuotaCheckStatus::Data
-            } else {
-                QuotaCheckStatus::NoData
-            };
-            QuotaCheck {
-                backend,
-                checked_at,
-                status,
-                error: record.check_error.as_deref().map(crate::redact::redact),
-            }
-        })
+        .map(
+            |((backend, backend_instance, model, quota_pool), (record, checked_at, _))| {
+                let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+                    &backend,
+                    model.as_deref(),
+                    quota_pool.as_deref(),
+                );
+                if let Some(instance) = &backend_instance {
+                    identity.backend_instance = instance.clone();
+                }
+                // Exact scope prevents a broad legacy reading from being
+                // presented as a verified balance for a named account.
+                let scoped: Vec<_> = records
+                    .iter()
+                    .filter(|reading| {
+                        reading.backend == backend
+                            && reading.backend_instance == backend_instance
+                            && reading.model == model
+                            && reading.quota_pool == quota_pool
+                    })
+                    .cloned()
+                    .collect();
+                let quota_observations =
+                    super::aggregate_observations(None, None, &scoped, &identity);
+                let has_data = record.quota_window.is_some()
+                    || record.quota_used_percent.is_some()
+                    || record.quota_remaining_percent.is_some()
+                    || record.quota_reset_at.is_some()
+                    || record.mistral_admin.is_some();
+                let status = if record.check_error.is_some() {
+                    QuotaCheckStatus::Failed
+                } else if has_data {
+                    QuotaCheckStatus::Data
+                } else {
+                    QuotaCheckStatus::NoData
+                };
+                QuotaCheck {
+                    provider: if record.usage_source.as_deref() == Some("nous_portal_account") {
+                        Some("nous".into())
+                    } else {
+                        super::quota_provider(&backend, model.as_deref())
+                    },
+                    backend,
+                    backend_instance,
+                    model,
+                    quota_pool,
+                    checked_at,
+                    status,
+                    quota_observations,
+                    error: record.check_error.as_deref().map(crate::redact::redact),
+                }
+            },
+        )
         .collect()
 }
 
@@ -133,6 +183,7 @@ mod tests {
             QuotaCheckStatus::NoData,
         )];
         let candidates = vec![QuotaCandidateStatus {
+            provider: Some("openai".to_string()),
             modes: vec!["default".to_string()],
             backend: "codex".to_string(),
             backend_instance: None,
@@ -216,5 +267,77 @@ mod tests {
         assert_eq!(status("agy"), Some(QuotaCheckStatus::Data));
         assert_eq!(status("codex"), Some(QuotaCheckStatus::Failed));
         assert_eq!(status("vibe"), Some(QuotaCheckStatus::NoData));
+    }
+
+    #[test]
+    fn sibling_accounts_keep_independent_check_health() {
+        let mut first = record(
+            "vibe",
+            Some("2026-10-02T23:00:00Z"),
+            Some("2026-10-02T23:00:00Z"),
+            QuotaCheckStatus::Data,
+        );
+        first.backend_instance = Some("vibe-1".into());
+        first.quota_pool = Some("vibe-1-monthly".into());
+        let mut second = record(
+            "vibe",
+            None,
+            Some("2026-10-02T23:01:00Z"),
+            QuotaCheckStatus::Failed,
+        );
+        second.backend_instance = Some("vibe-2".into());
+        second.quota_pool = Some("vibe-2-monthly".into());
+        let checks = build_quota_checks(&[first, second]);
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].backend_instance.as_deref(), Some("vibe-1"));
+        assert_eq!(checks[0].status, QuotaCheckStatus::Data);
+        assert_eq!(checks[1].status, QuotaCheckStatus::Failed);
+        assert_eq!(checks[0].provider.as_deref(), Some("mistral"));
+    }
+
+    #[test]
+    fn check_only_account_windows_are_exactly_scoped_and_invalidated() {
+        let mut first = record(
+            "opencode",
+            Some("2026-10-02T23:00:00Z"),
+            Some("2026-10-02T23:00:00Z"),
+            QuotaCheckStatus::Data,
+        );
+        first.backend_instance = Some("opencode:nous-portal-api".into());
+        first.quota_pool = Some("nous-portal-api".into());
+        first.quota_window = Some("subscription-monthly".into());
+        first.quota_remaining_percent = Some(0.0);
+        first.usage_source = Some("nous_portal_account".into());
+        let broad = record(
+            "opencode",
+            Some("2026-10-02T23:01:00Z"),
+            Some("2026-10-02T23:01:00Z"),
+            QuotaCheckStatus::Data,
+        );
+        let mut records = vec![first.clone(), broad];
+        let checks = build_quota_checks(&records);
+        let nous = checks
+            .iter()
+            .find(|check| check.provider.as_deref() == Some("nous"))
+            .unwrap();
+        assert_eq!(nous.quota_observations.len(), 1);
+        assert_eq!(
+            nous.quota_observations[0].quota_remaining_percent,
+            Some(0.0)
+        );
+        let mut failure = first;
+        failure.checked_at = Some("2026-10-02T23:02:00Z".into());
+        failure.observed_at = None;
+        failure.quota_window = None;
+        failure.quota_remaining_percent = None;
+        failure.check_error = Some("credential expired".into());
+        records.push(failure);
+        let checks = build_quota_checks(&records);
+        let nous = checks
+            .iter()
+            .find(|check| check.provider.as_deref() == Some("nous"))
+            .unwrap();
+        assert_eq!(nous.status, QuotaCheckStatus::Failed);
+        assert!(nous.quota_observations.is_empty());
     }
 }

@@ -59,6 +59,18 @@ The MCP tool `gah_cli_router` returns the same read-only snapshot. Mutations req
 
 ## Operation and privacy
 
+Nous balances come from `https://portal.nousresearch.com/api/oauth/account`
+with `NOUS_API_KEY`. Run `gah quota refresh --backend nous` for a live check.
+Automatic quota refresh checks this account when the key is configured. GAH
+records subscription credit percentages in the `nous-portal-api` pool. Purchased
+credits and rollover funds are not a monthly quota denominator. If the API does
+not supply a valid monthly cap, the percentage remains unknown.
+
+Local collectors can pass one account observation as JSON on stdin to
+`gah quota record`. This command requires an explicit backend instance, a check
+time, and a source label. It validates percentages and timestamps before it
+appends to the shared store. It does not accept credentials or provider payloads.
+
 Linux service commands:
 
 ```sh

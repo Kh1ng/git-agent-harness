@@ -1,6 +1,42 @@
 use super::*;
 
 #[test]
+fn native_claude_refresh_cannot_attribute_default_login_to_another_account() {
+    let tmp = test_tempdir();
+    let path = tmp.path().join("quota.jsonl");
+    for arguments in [
+        ["--backend-instance", "claude-second"],
+        ["--model", "other-model"],
+        ["--command", "other-login"],
+    ] {
+        bin()
+            .args(["quota", "refresh", "--backend", "claude", "--store-path"])
+            .arg(&path)
+            .args(arguments)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("current native OAuth login"));
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn quota_record_persists_validated_account_observation_from_stdin() {
+    let tmp = test_tempdir();
+    let path = tmp.path().join("quota.jsonl");
+    bin().args(["quota", "record", "--store-path"]).arg(&path)
+        .write_stdin(r#"{"backend":"agy","backend_instance":"agy-1","quota_remaining_percent":42,"observed_at":"2026-10-02T23:00:00Z","checked_at":"2026-10-02T23:00:00Z","usage_source":"cli_router"}"#)
+        .assert().success();
+    let recorded: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(recorded["backend_instance"], "agy-1");
+    assert_eq!(recorded["quota_remaining_percent"], 42.0);
+    bin().args(["quota", "record", "--store-path"]).arg(&path)
+        .write_stdin(r#"{"backend":"agy","backend_instance":"agy-1","quota_remaining_percent":142,"checked_at":"2026-10-02T23:00:00Z","usage_source":"cli_router"}"#)
+        .assert().failure();
+    assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
+}
+
+#[test]
 fn quota_list_json_reads_existing_store_records() {
     let tmp = test_tempdir();
     let store_path = tmp.path().join("quota-observations.jsonl");
