@@ -232,11 +232,17 @@ fn cookie_header(cookies: &[Cookie<'_>], now: i64) -> Result<String, ()> {
         }
         let name = cookie.name();
         let value = cookie.value();
+        // RFC 6265 permits a cookie value enclosed in double quotes. Preserve
+        // that browser representation, validating the enclosed cookie octets.
+        let octets = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(value);
         if name.is_empty()
             || !name
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
-            || !value
+            || !octets
                 .bytes()
                 .all(|byte| (0x21..=0x7e).contains(&byte) && !b"\";,\\".contains(&byte))
         {

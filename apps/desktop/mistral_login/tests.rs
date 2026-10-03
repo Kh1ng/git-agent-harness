@@ -51,6 +51,29 @@ fn unsafe_analytics_cookie_cannot_discard_valid_http_only_authentication() {
 }
 
 #[test]
+fn quoted_http_only_session_value_is_preserved_without_accepting_unsafe_octets() {
+    let cookies = [
+        cookie(
+            "session",
+            ".mistral.ai",
+            "/",
+            "\"synthetic-opaque-session\"",
+        ),
+        cookie("unsafe", ".mistral.ai", "/", "\"unsafe,value\""),
+        cookie(
+            "injection",
+            ".mistral.ai",
+            "/",
+            "\"value\nInjected: header\"",
+        ),
+    ];
+    assert_eq!(
+        cookie_header(&cookies, unix_seconds()).unwrap(),
+        "session=\"synthetic-opaque-session\""
+    );
+}
+
+#[test]
 fn cookie_header_rejects_injection_ambiguous_values_and_oversized_secrets() {
     for (name, value) in [
         ("session", "valid\nInjected: value"),
