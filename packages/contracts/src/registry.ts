@@ -1,9 +1,24 @@
-import type { ActiveClaim, AvailabilityScope, BackendInstanceSummary, RecentLedgerSummary } from './gah.js';
+import type { ActiveClaim, AvailabilityScope, BackendInstanceSummary, RecentLedgerSummary, QuotaSnapshot } from './gah.js';
 import type { ClaimLease } from './claims.js';
 import coordinatorProtocol from './coordinator-protocol.json' with { type: 'json' };
 
 export const COORDINATOR_VERSION = coordinatorProtocol.version;
 export const COORDINATOR_SCHEMA_SEED = coordinatorProtocol.schema_seed;
+
+/** Worker observations stay scoped to their source node; mirrored ledgers are not additive. */
+export interface NodeQuotaRelay {
+  nodeId: string;
+  displayName: string;
+  state: 'available' | 'unavailable' | 'unsupported_profile';
+  quota: QuotaSnapshot | null;
+  error?: string;
+}
+
+export interface FleetQuotaSnapshot {
+  profile: string;
+  since: string;
+  nodes: NodeQuotaRelay[];
+}
 
 export interface RegisteredNode {
   node_id: string;

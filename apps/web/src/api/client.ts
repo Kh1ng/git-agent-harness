@@ -21,6 +21,7 @@ import type { PlanningChatRequest, PlanningEpicList, PlanningMap, PlanningSettin
  */
 import type {
   FleetSnapshot,
+  FleetQuotaSnapshot,
   NodeHealthCheckResult,
   StatusSnapshot,
   QuotaSnapshot,
@@ -270,6 +271,7 @@ export interface StopLoopResult {
 export interface GahDataSource {
   getCoordinatorInfo(): Promise<CoordinatorInfo>;
   getFleetSnapshot(): Promise<FleetSnapshot>;
+  getFleetQuota(params?: { profile?: string; since?: string }): Promise<FleetQuotaSnapshot>;
   checkNodeHealth(nodeId: string): Promise<NodeHealthCheckResult>;
   getNodeDoctor(nodeId: string, profile: string): Promise<DoctorSnapshot>;
   getStatus(profile?: string): Promise<StatusSnapshot>;
@@ -460,6 +462,9 @@ export const gahApi: GahDataSource = {
   },
   getFleetSnapshot() {
     return getJson<FleetSnapshot>('/api/registry/fleet/snapshot');
+  },
+  getFleetQuota(params = {}) {
+    return getJson<FleetQuotaSnapshot>('/api/registry/quota', params);
   },
   checkNodeHealth(nodeId) {
     return getJson<NodeHealthCheckResult>(`/api/registry/nodes/${encodeURIComponent(nodeId)}/health`);
