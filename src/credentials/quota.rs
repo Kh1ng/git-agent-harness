@@ -36,21 +36,45 @@ fn unknown(info: &CredentialInfo, now: OffsetDateTime) -> QuotaObservationRecord
 }
 
 pub(crate) fn refresh(id: &str, path: &Path) -> Result<QuotaObservationRecord> {
-    let (info, secret) = super::selected(id)?;
-    refresh_with(&info, path, OffsetDateTime::now_utc(), || {
+    refresh_selected_at(&super::root()?, id, path, |info, secret| {
         match (info.kind, info.provider.as_str(), info.env_var.as_deref()) {
             (CredentialKind::MistralDashboard, _, _) => {
-                crate::usage::mistral_dashboard::refresh_cookie(&secret).map(Some)
+                crate::usage::mistral_dashboard::refresh_cookie(secret).map(Some)
             }
             (CredentialKind::ApiKey, "nous", _) => {
-                crate::usage::nous::refresh_key(&secret).map(Some)
+                crate::usage::nous::refresh_key(secret).map(Some)
             }
             (CredentialKind::ApiKey, "mistral", Some("MISTRAL_ADMIN_API_KEY")) => {
-                quota_store::refresh_vibe_admin_record(&secret, None)
+                quota_store::refresh_vibe_admin_record(secret, None)
             }
-            _ => Ok(None), // This credential has no supported account-usage API.
+            _ => Ok(None),
         }
     })
+}
+
+fn refresh_selected_at(
+    root: &Path,
+    id: &str,
+    path: &Path,
+    collect: impl FnOnce(&CredentialInfo, &str) -> Result<Option<QuotaObservationRecord>>,
+) -> Result<QuotaObservationRecord> {
+    // Secret and generation come from one atomic record. Network calls hold no
+    // source lock; rotation/deletion and publication share only a short lock.
+    let selected = super::read_at(root, id)?;
+    let result = collect(&selected.info, &selected.secret);
+    let _guard = super::source_lock(root, id)?;
+    let current = super::read_at(root, id)
+        .map_err(|_| anyhow::anyhow!("credential changed during quota check"))?;
+    if current.revision != selected.revision {
+        anyhow::bail!("credential changed during quota check");
+    }
+    refresh_with(&selected.info, path, OffsetDateTime::now_utc(), || result)
+}
+
+// Replacing a key can change its billing account. Clear that source before the
+// replacement is acknowledged; other sources and ambient accounts stay active.
+pub(crate) fn updated(info: &CredentialInfo, path: &Path) -> Result<()> {
+    quota_store::append(path, &unknown(info, OffsetDateTime::now_utc()))
 }
 
 pub(crate) fn removed(info: &CredentialInfo, path: &Path) -> Result<()> {
@@ -132,6 +156,90 @@ mod tests {
         record.quota_remaining_percent = Some(40.0);
         record.observed_at = record.checked_at.clone();
         record
+    }
+    #[test]
+    #[cfg(unix)]
+    fn replacing_saved_source_invalidates_cached_quota_without_a_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("credentials");
+        let path = dir.path().join("quota.jsonl");
+        let source = info("primary");
+        let now = OffsetDateTime::now_utc() - time::Duration::minutes(1);
+        super::super::save_with_quota_at(&credentials, source.clone(), "session=old", Some(&path))
+            .unwrap();
+        refresh_with(&source, &path, now, || Ok(Some(reading(&source, now)))).unwrap();
+        let sibling = info("second");
+        refresh_with(&sibling, &path, now, || Ok(Some(reading(&sibling, now)))).unwrap();
+        super::super::save_with_quota_at(&credentials, source.clone(), "session=new", Some(&path))
+            .unwrap();
+        let records = quota_store::load(&path).unwrap();
+        let current = quota_store::current_source_records(&records);
+        let selected: Vec<_> = current
+            .iter()
+            .filter(|r| r.credential_id.as_deref() == Some("primary"))
+            .collect();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].quota_pool, None);
+        assert_eq!(selected[0].quota_remaining_percent, None);
+        assert!(selected[0].account_usage.is_none());
+        assert!(current
+            .iter()
+            .any(|r| r.credential_id.as_deref() == Some("second")
+                && r.quota_remaining_percent == Some(40.0)));
+        let identity = ExecutionIdentity::legacy_candidate(
+            "mistral-dashboard",
+            None::<String>,
+            None::<String>,
+        );
+        assert!(quota_store::latest_windows_for_identity_and_credential(
+            &records,
+            &identity,
+            Some("primary")
+        )
+        .is_empty());
+    }
+    #[test]
+    #[cfg(unix)]
+    fn in_flight_old_account_cannot_publish_after_rotation_or_removal() {
+        for remove in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let credentials = dir.path().join("credentials");
+            let path = dir.path().join("quota.jsonl");
+            let source = info("primary");
+            super::super::save_with_quota_at(
+                &credentials,
+                source.clone(),
+                "session=old",
+                Some(&path),
+            )
+            .unwrap();
+            let result =
+                refresh_selected_at(&credentials, &source.id, &path, |selected, secret| {
+                    assert_eq!(secret, "session=old");
+                    if remove {
+                        super::super::remove_at(&credentials, &source.id, &path).unwrap();
+                    } else {
+                        super::super::save_with_quota_at(
+                            &credentials,
+                            source.clone(),
+                            "session=new",
+                            Some(&path),
+                        )
+                        .unwrap();
+                    }
+                    Ok(Some(reading(selected, OffsetDateTime::now_utc())))
+                });
+            assert!(result.is_err());
+            let records = quota_store::load(&path).unwrap();
+            assert!(quota_store::current_source_records(&records)
+                .iter()
+                .all(|r| r.quota_remaining_percent.is_none() && r.account_usage.is_none()));
+            assert_eq!(
+                records.len(),
+                1,
+                "the old collector must not append after source mutation"
+            );
+        }
     }
     #[test]
     fn rotating_a_source_cannot_leave_its_previous_account_active() {

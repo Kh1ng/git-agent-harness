@@ -189,6 +189,39 @@ fn read_at(_root: &Path, _id: &str) -> Result<StoredCredential> {
     bail!("private named credential storage is unavailable on this platform")
 }
 
+#[cfg(unix)]
+fn source_lock(root: &Path, id: &str) -> Result<std::fs::File> {
+    use fs2::FileExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    validate_id(id)?;
+    private_directory(root, true)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(root.join(format!(".{id}.lock")))
+        .context("credential publication lock unavailable")?;
+    let metadata = file
+        .metadata()
+        .context("credential publication lock unavailable")?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        bail!("credential publication lock must be owner-only");
+    }
+    file.lock_exclusive()
+        .context("credential publication lock unavailable")?;
+    Ok(file)
+}
+#[cfg(not(unix))]
+fn source_lock(_root: &Path, _id: &str) -> Result<std::fs::File> {
+    bail!("private named credential storage is unavailable on this platform")
+}
+
 fn validate_id(id: &str) -> Result<()> {
     if id.is_empty()
         || id.len() > 80
@@ -252,7 +285,17 @@ fn list_at(root: &Path) -> Result<Vec<CredentialInfo>> {
     Ok(records)
 }
 
-fn save_at(root: &Path, mut info: CredentialInfo, secret: &str) -> Result<CredentialInfo> {
+#[cfg(test)]
+fn save_at(root: &Path, info: CredentialInfo, secret: &str) -> Result<CredentialInfo> {
+    save_with_quota_at(root, info, secret, None)
+}
+
+fn save_with_quota_at(
+    root: &Path,
+    mut info: CredentialInfo,
+    secret: &str,
+    quota_path: Option<&Path>,
+) -> Result<CredentialInfo> {
     use std::io::Write;
     info.provider = canonical_provider(&info.provider).into();
     if info.kind == CredentialKind::ApiKey && info.env_var.is_none() {
@@ -284,7 +327,14 @@ fn save_at(root: &Path, mut info: CredentialInfo, secret: &str) -> Result<Creden
     file.as_file()
         .sync_all()
         .context("cannot save private credential")?;
-    file.persist(root.join(format!("{}.json", info.id)))
+    let _guard = source_lock(root, &info.id)?;
+    let destination = root.join(format!("{}.json", info.id));
+    if std::fs::symlink_metadata(&destination).is_ok() {
+        if let Some(path) = quota_path {
+            quota::updated(&info, path)?;
+        }
+    }
+    file.persist(destination)
         .map_err(|_| anyhow::anyhow!("cannot save private credential"))?;
     Ok(info)
 }
@@ -302,14 +352,20 @@ pub fn revision(id: &str) -> Result<String> {
     Ok(read_at(&root()?, id)?.revision)
 }
 pub fn save(info: CredentialInfo, secret: &str) -> Result<CredentialInfo> {
-    save_at(&root()?, info, secret)
+    save_with_quota_at(
+        &root()?,
+        info,
+        secret,
+        Some(&crate::quota_store::store_path()),
+    )
 }
 pub fn remove(id: &str) -> Result<()> {
-    validate_id(id)?;
-    let root = root()?;
-    private_directory(&root, false)?;
-    let info = read_at(&root, id)?.info;
-    quota::removed(&info, &crate::quota_store::store_path())?;
+    remove_at(&root()?, id, &crate::quota_store::store_path())
+}
+fn remove_at(root: &Path, id: &str, quota_path: &Path) -> Result<()> {
+    let _guard = source_lock(root, id)?;
+    let info = read_at(root, id)?.info;
+    quota::removed(&info, quota_path)?;
     std::fs::remove_file(root.join(format!("{id}.json"))).context("named credential unavailable")
 }
 
