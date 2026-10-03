@@ -31,7 +31,7 @@ impl LoginTarget {
             (None, None) => Ok(Self::default()),
             (Some(id), Some(label))
                 if !id.is_empty()
-                    && id.len() <= 64
+                    && id.len() <= 80
                     && id
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
@@ -77,6 +77,8 @@ mod tests {
             assert!(LoginTarget::new(Some(id.into()), Some("Work".into())).is_err());
         }
         assert!(LoginTarget::new(Some("work".into()), None).is_err());
+        assert!(LoginTarget::new(Some("x-".repeat(40)), Some("Work".into())).is_ok());
+        assert!(LoginTarget::new(Some("x-".repeat(40) + "x"), Some("Work".into())).is_err());
     }
 
     #[test]
