@@ -56,6 +56,12 @@ if xcodebuild test-without-building -xctestrun "${runfiles[0]}" \
 else
   status=$?
 fi
-xcrun xcresulttool export attachments --path "$output/central.xcresult" --output-path "$output/screenshots"
+if [ -d "$output/central.xcresult" ]; then
+  if ! xcrun xcresulttool export attachments --path "$output/central.xcresult" --output-path "$output/screenshots"; then
+    echo "Screenshot export failed; see $output/central.xcresult and $output/test.log." >&2
+  fi
+else
+  echo "No result bundle was produced; see $output/test.log." >&2
+fi
 echo "Physical central navigation exit status: $status. Screenshots: $output/screenshots"
 exit "$status"
