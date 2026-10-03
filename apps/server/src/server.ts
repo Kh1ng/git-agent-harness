@@ -1103,6 +1103,19 @@ export function createServer(
     }
   });
 
+  app.get('/api/registry/quota', async (req, res) => {
+    if (node.role !== 'central') return res.status(403).json({ error: 'central_only' });
+    const profile = req.query.profile ?? DEFAULT_PROFILE;
+    const since = req.query.since ?? '7d';
+    if (typeof profile !== 'string' || !/^[a-zA-Z0-9_.-]{1,128}$/.test(profile)
+      || typeof since !== 'string' || !/^[1-9][0-9]{0,3}[mhdw]$/.test(since)) {
+      return res.status(400).json({ error: 'invalid_quota_query' });
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    try { res.json(await registryService.getNodeQuotas(profile, since)); }
+    catch { res.status(502).json({ error: 'node_quota_unavailable' }); }
+  });
+
   // Issue #519: HTTP adapters for the four JSON-ready read operations from
   // the read-API audit. Fixed argv; the CLI owns parsing and validation.
   const QUERY_TEXT_LIMITS: Record<string, number> = {

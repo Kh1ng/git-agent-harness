@@ -9,7 +9,10 @@ import type {
   NodeSummary,
   NodeHealthCheckResult,
   NodeObservationSnapshot,
-  NodeObservationState
+  NodeObservationState,
+  QuotaSnapshot,
+  NodeQuotaRelay,
+  FleetQuotaSnapshot
 } from '@git-agent-harness/contracts';
 import { COORDINATOR_VERSION } from '@git-agent-harness/contracts';
 import { COORDINATOR_SCHEMA_DIGEST } from './coordinatorIdentity.js';
@@ -240,6 +243,53 @@ function isDoctorSnapshot(value: unknown, profile: string): value is DoctorSnaps
       && ['ok', 'warn', 'fail'].includes(check.status) && (check.profile == null || check.profile === profile));
 }
 
+function isQuotaSnapshot(value: unknown, profile: string, since: string): value is QuotaSnapshot {
+  if (!value || typeof value !== 'object') return false;
+  const snapshot = value as Partial<QuotaSnapshot>;
+  const optionalText = (value: unknown) => value == null || typeof value === 'string';
+  return snapshot.schema_version === 2 && typeof snapshot.generated_at === 'string'
+    && Number.isFinite(Date.parse(snapshot.generated_at)) && snapshot.profile?.profile === profile
+    && snapshot.since === since && !!snapshot.freshness && typeof snapshot.freshness === 'object'
+    && !!snapshot.usage && typeof snapshot.usage === 'object' && Array.isArray(snapshot.quota_checks)
+    && snapshot.quota_checks.every(check => check && typeof check.backend === 'string'
+      && typeof check.checked_at === 'string' && Number.isFinite(Date.parse(check.checked_at))
+      && ['data', 'no_data', 'failed'].includes(check.status)
+      && [check.backend_instance, check.model, check.quota_pool, check.provider, check.error].every(optionalText))
+    && Array.isArray(snapshot.candidates) && snapshot.candidates.every(candidate => candidate
+      && typeof candidate.backend === 'string' && (candidate.model === null || typeof candidate.model === 'string')
+      && typeof candidate.configured === 'boolean' && typeof candidate.eligible_now === 'boolean'
+      && [candidate.backend_instance, candidate.quota_pool, candidate.provider, candidate.reason,
+        candidate.unavailable_until, candidate.source, candidate.last_error_summary, candidate.observed_at].every(optionalText)
+      && Array.isArray(candidate.modes) && candidate.modes.every(mode => typeof mode === 'string')
+      && !!candidate.usage && typeof candidate.usage === 'object'
+      && (candidate.quota_observations === undefined || (Array.isArray(candidate.quota_observations)
+        && candidate.quota_observations.every(observation => observation && typeof observation.backend === 'string'
+          && [Reflect.get(observation, 'backend_instance'), observation.model, Reflect.get(observation, 'quota_pool'), observation.quota_window,
+            observation.quota_reset_at, observation.observed_at, observation.usage_source].every(optionalText)
+          && [observation.quota_used_percent, observation.quota_remaining_percent].every(percent => percent == null
+            || (typeof percent === 'number' && Number.isFinite(percent) && percent >= 0 && percent <= 100))))));
+}
+
+async function readQuotaResponse(response: Response): Promise<unknown> {
+  const limit = 1024 * 1024;
+  if (!response.headers.get('content-type')?.includes('application/json') || Number(response.headers.get('content-length')) > limit) {
+    throw new Error('PROTOCOL: Worker quota response is not bounded JSON.');
+  }
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if (response.body) {
+    const reader = response.body.getReader();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) { await reader.cancel(); throw new Error('PROTOCOL: Worker quota response exceeds 1 MiB.'); }
+      chunks.push(value);
+    }
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
 async function mapWithConcurrency<T, U>(
   items: T[],
   concurrency: number,
@@ -298,6 +348,7 @@ export function resolveSecret(secretRef: string): string {
 }
 
 export class RegistryService {
+  private quotaReads = new Map<string, { node: RegisteredNode; expiresAt: number; result: Promise<NodeQuotaRelay> }>();
   private observationRequests = new Map<string, number>();
   private observations = new Map<string, NodeObservationSnapshot>();
   private revalidation: Promise<unknown> | null = null;
@@ -437,6 +488,46 @@ export class RegistryService {
     });
     if (!profile) this.changed();
     return observations;
+  }
+
+  /** Read each declared worker's quota separately; relay never changes routing or central accounting. */
+  async getNodeQuotas(profile: string, since: string): Promise<FleetQuotaSnapshot> {
+    const nodes = this.getNodes().filter(node => !(this.selfUrl && this.listenerPort !== null
+      && isCentralEndpoint(node.advertised_url, this.selfUrl, this.listenerPort)));
+    const readings = await mapWithConcurrency(nodes, NODE_POLL_CONCURRENCY, async node => {
+      const base = { nodeId: node.node_id, displayName: node.display_name, quota: null };
+      if (!node.profiles?.includes(profile)) return { ...base, state: 'unsupported_profile' as const, error: 'Profile is not declared by this worker.' };
+      const key = `${node.node_id}\0${profile}\0${since}`;
+      const cached = this.quotaReads.get(key);
+      if (cached?.node === node && cached.expiresAt > Date.now()) return cached.result;
+      const result = this.readNodeQuota(node, profile, since);
+      if (this.quotaReads.size >= 128) this.quotaReads.delete(this.quotaReads.keys().next().value!);
+      this.quotaReads.set(key, { node, expiresAt: Date.now() + 30_000, result });
+      return result;
+    });
+    return { profile, since, nodes: readings };
+  }
+
+  private async readNodeQuota(node: RegisteredNode, profile: string, since: string): Promise<NodeQuotaRelay> {
+    const base = { nodeId: node.node_id, displayName: node.display_name };
+    try {
+      const url = new URL('/api/quota', node.advertised_url);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
+        || (url.protocol === 'http:' && !isLoopback(url.toString()) && node.transport_mode !== 'trusted_lan')) {
+        throw new Error('Worker quota transport is not permitted.');
+      }
+      const headers = nodeHeaders(node);
+      url.searchParams.set('profile', profile);
+      url.searchParams.set('since', since);
+      const response = await fetchWithTimeout(url.toString(), headers, NODE_OBSERVATION_TIMEOUT_MS);
+      if (!response.ok) return { ...base, state: 'unavailable', quota: null, error: `Worker quota returned HTTP ${response.status}.` };
+      const quota = await readQuotaResponse(response);
+      if (!isQuotaSnapshot(quota, profile, since)) return { ...base, state: 'unavailable', quota: null, error: 'Worker quota schema or profile did not match.' };
+      if (this.nodes.get(node.node_id) !== node) return { ...base, state: 'unavailable', quota: null, error: 'Worker registration changed during the quota check.' };
+      return { ...base, state: 'available', quota };
+    } catch {
+      return { ...base, state: 'unavailable', quota: null, error: 'Cannot read quota from the registered worker. Check its connection, credential, and response.' };
+    }
   }
 
   private persistObservation(
