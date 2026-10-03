@@ -150,7 +150,7 @@ fn finish(login: &tauri::WebviewWindow) -> LoginStatus {
         return status(
             "pending",
             true,
-            "Finish signing in to Mistral, then check the connection.",
+            "Open the Mistral usage page after signing in, then check the connection.",
         );
     }
     // Wry's macOS cookies_for_url uses exact domain equality. Filter the
@@ -171,7 +171,7 @@ fn finish(login: &tauri::WebviewWindow) -> LoginStatus {
             return status(
                 "pending",
                 true,
-                "Finish signing in to Mistral, then check the connection.",
+                "No usable Mistral session cookies were found. Sign in again, then check the connection.",
             )
         }
     };
@@ -238,7 +238,9 @@ fn cookie_header(cookies: &[Cookie<'_>], now: i64) -> Result<String, ()> {
                 .bytes()
                 .all(|byte| (0x21..=0x7e).contains(&byte) && !b"\";,\\".contains(&byte))
         {
-            return Err(());
+            // Optional analytics cookies must not discard a usable session.
+            // The remaining header still requires provider verification.
+            continue;
         }
         selected.push((
             cookie.path().unwrap_or("/").len(),
