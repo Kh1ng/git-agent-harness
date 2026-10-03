@@ -25,6 +25,7 @@ import { apnsFromEnvironment } from './apns.js';
 import { channelDelivery, commandDelivery, deliverToAll } from './notifyDelivery.js';
 import { AuthHealthMonitor, AuthHealthProber, configureChatAuthHealth } from './authHealth.js';
 import { LoginRepairBroker, LoginRepairs, loadProviderKeys } from './loginRepair.js';
+import { startQuotaRefreshScheduler } from './quotaRefreshScheduler.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
 const HOST = resolveBindHost();
@@ -167,6 +168,7 @@ async function main() {
   // still matters.
   if (node.role === 'central') startChatMaintenanceScheduler();
 
+  let stopQuotaRefresh: (() => Promise<void>) | undefined;
   // Start HTTP server
   server.listen(PORT, HOST, () => {
     logLifecycle(`Git Agent Harness server listening on ${HOST}:${PORT}`);
@@ -177,17 +179,24 @@ async function main() {
       console.warn(warning);
     }
     // After listening: login checks spawn provider CLIs and must never delay health.
-    if (cliAvailable) authHealthProber.start();
+    if (cliAvailable) {
+      authHealthProber.start();
+      stopQuotaRefresh = startQuotaRefreshScheduler();
+    }
   });
   
-  // Exit at once: waiting on open keep-alive or WebSocket connections would
-  // hold the port and delay the replacement process.
-  const shutdown = () => {
+  // Close listeners immediately and terminate the quota process tree before
+  // exit; keep-alive or WebSocket connections do not hold up shutdown.
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logLifecycle('Shutting down...');
     registryService.stopLivenessScheduler();
     stopChatMaintenanceScheduler();
     authHealthProber.stop();
     server.close();
+    await stopQuotaRefresh?.();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);

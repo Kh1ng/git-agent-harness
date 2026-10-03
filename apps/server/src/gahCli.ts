@@ -113,7 +113,7 @@ function getConfigPath(config?: string): string | undefined {
 /**
  * Spawn options for running GAH CLI commands
  */
-function getSpawnOptions(config?: string, detached?: boolean): SpawnOptions {
+export function getSpawnOptions(config?: string, detached?: boolean): SpawnOptions {
   const env = { ...process.env };
   
   // Set config path if provided
@@ -621,7 +621,7 @@ const TERMINATE_KILL_TIMEOUT_MS = 5000;
  * direct child. Windows has no process-group signalling equivalent, so
  * `taskkill /T` is used to walk and kill the descendant tree instead.
  */
-async function terminateProcessTree(pid: number, child: ChildProcess): Promise<boolean> {
+export async function terminateProcessTree(pid: number, child: ChildProcess): Promise<boolean> {
   if (process.platform === 'win32') {
     spawnSync('taskkill', ['/PID', String(pid), '/T', '/F']);
     return waitForClose(child, TERMINATE_KILL_TIMEOUT_MS);
