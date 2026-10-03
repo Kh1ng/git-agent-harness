@@ -619,10 +619,14 @@ fn aggregate_observations(
         });
     }
 
-    // Backend and model summaries are intentionally broad aggregates. Filter
-    // after combining them so a same-named model on another backend, another
-    // model on this backend, or a sibling account cannot leak into this card.
+    // A bound source may report a provider account distinct from its runner
+    // instance/pool. Its exact credential ID owns the reading; broad ledger
+    // aggregates have no source identity and cannot describe this account.
+    // Unbound candidates retain backend, instance, pool and model scoping.
     out.retain(|observation| {
+        if let Some(id) = identity.credential_id.as_deref() {
+            return observation.credential_id.as_deref() == Some(id);
+        }
         config::canonical_backend_name(&observation.backend) == identity.logical_backend
             && observation
                 .backend_instance
@@ -1067,6 +1071,106 @@ mod tests {
         let obs = aggregate_observations(None, None, &account, &identity);
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].quota_remaining_percent, Some(42.0));
+    }
+
+    #[test]
+    fn bound_observations_follow_selected_source_instead_of_route_or_ambient_identity() {
+        for (runner, collector) in [("opencode", "opencode"), ("vibe", "mistral-dashboard")] {
+            let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+                runner,
+                Some("route-model"),
+                Some("route-pool"),
+            );
+            identity.backend_instance = "runner-work".into();
+            identity.credential_id = Some("work-source".into());
+            let mut selected = account_record(
+                collector,
+                None,
+                "monthly",
+                Some(42.0),
+                "2026-07-03T00:00:00Z",
+            );
+            selected.backend_instance = Some("provider-verified-account".into());
+            selected.quota_pool = Some("provider-verified-pool".into());
+            selected.credential_id = Some("work-source".into());
+            let mut sibling = selected.clone();
+            sibling.credential_id = Some("other-source".into());
+            sibling.quota_remaining_percent = Some(17.0);
+            let ambient =
+                account_record(runner, None, "monthly", Some(90.0), "2026-07-03T00:00:00Z");
+            let broad = ledger::summary::GroupSummary {
+                quota_observations: vec![group_obs(
+                    runner,
+                    None,
+                    "monthly",
+                    Some(80.0),
+                    "2026-07-03T00:00:00Z",
+                )],
+                ..empty_group()
+            };
+            let observations = aggregate_observations(
+                Some(&broad),
+                Some(&broad),
+                &[selected, sibling, ambient],
+                &identity,
+            );
+            assert_eq!(observations.len(), 1, "only selected source for {runner}");
+            assert_eq!(
+                observations[0].credential_id.as_deref(),
+                Some("work-source")
+            );
+            assert_eq!(observations[0].quota_remaining_percent, Some(42.0));
+            assert_eq!(
+                observations[0].quota_pool.as_deref(),
+                Some("provider-verified-pool")
+            );
+        }
+    }
+
+    #[test]
+    fn unbound_observations_keep_backend_instance_and_pool_scoping() {
+        let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            "codex",
+            None::<String>,
+            Some("route-pool"),
+        );
+        identity.backend_instance = "runner-work".into();
+        let mut selected =
+            account_record("codex", None, "weekly", Some(42.0), "2026-07-03T00:00:00Z");
+        selected.backend_instance = Some("runner-work".into());
+        selected.quota_pool = Some("route-pool".into());
+        let mut other_instance = selected.clone();
+        other_instance.backend_instance = Some("runner-other".into());
+        let mut other_pool = selected.clone();
+        other_pool.quota_pool = Some("other-pool".into());
+        let mut other_backend = selected.clone();
+        other_backend.backend = "opencode".into();
+        let broad = ledger::summary::GroupSummary {
+            quota_observations: vec![group_obs(
+                "codex",
+                None,
+                "5h",
+                Some(80.0),
+                "2026-07-03T00:00:00Z",
+            )],
+            ..empty_group()
+        };
+        let observations = aggregate_observations(
+            Some(&broad),
+            None,
+            &[selected, other_instance, other_pool, other_backend],
+            &identity,
+        );
+        assert_eq!(observations.len(), 2);
+        assert!(observations
+            .iter()
+            .all(|observation| observation.credential_id.is_none()));
+        assert!(observations
+            .iter()
+            .any(|observation| observation.quota_remaining_percent == Some(42.0)));
+        assert!(observations
+            .iter()
+            .any(|observation| observation.quota_remaining_percent == Some(80.0)));
     }
 
     #[test]
