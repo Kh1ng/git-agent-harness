@@ -27,7 +27,7 @@ fn live_weekly_pacing_rejects_other_windows_stale_and_failed_checks() {
         mistral_admin: None,
     };
     assert_eq!(
-        live_quota_pacing_inputs(&[fresh.clone()], &identity, now).0,
+        live_quota_pacing_inputs(std::slice::from_ref(&fresh), &identity, now).0,
         Some(20.0)
     );
     for window in ["subscription-monthly", "5h", "daily"] {
