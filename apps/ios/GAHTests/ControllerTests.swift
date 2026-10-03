@@ -29,6 +29,50 @@ private func fixtureControl(_ path: String) throws {
 }
 
 final class ControllerTests: XCTestCase {
+    // Opt-in physical smoke test. It reads central through the app's existing
+    // paired session and leaves chats, workers, and server settings untouched.
+    func testPhysicalCentralNavigationAndBackgroundRecovery() throws {
+        guard let raw = ProcessInfo.processInfo.environment["GAH_IOS_LIVE_CENTRAL_URL"] else {
+            throw XCTSkip("Run scripts/test-ios-central.sh for physical central validation.")
+        }
+        let address = try ServerAddress(raw)
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-centralURL", address.origin.absoluteString]
+        app.launch()
+        let menu = app.webViews.buttons["Open navigation menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 30))
+        for page in ["Nodes", "Chat", "Git", "Telemetry", "Settings"] {
+            menu.tap()
+            app.webViews.buttons[page].firstMatch.tap()
+            XCTAssertFalse(app.webViews.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Authentication token required")).firstMatch.waitForExistence(timeout: 2))
+            XCTAssertFalse(app.buttons["Retry connection"].exists)
+            if page == "Nodes", let node = ProcessInfo.processInfo.environment["GAH_IOS_EXPECTED_NODE"] {
+                XCTAssertTrue(app.webViews.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", node)).firstMatch.waitForExistence(timeout: 30))
+            }
+            let evidence = XCTAttachment(screenshot: app.screenshot())
+            #if targetEnvironment(simulator)
+            evidence.name = "Simulator central \(page)"
+            #else
+            evidence.name = "Physical central \(page)"
+            #endif
+            evidence.lifetime = .keepAlways
+            add(evidence)
+            // First-time chat opens its project chooser; dismissing it is local
+            // navigation and does not create a conversation or call a provider.
+            if page == "Chat", app.webViews.staticTexts["Start a chat"].exists {
+                app.webViews.buttons["Close"].tap()
+            }
+        }
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(app.webViews.staticTexts["Connection & pairing"].waitForExistence(timeout: 20))
+        app.terminate()
+        app.launchArguments = [] // Let persisted navigation drive the cold launch.
+        app.launch()
+        XCTAssertTrue(app.webViews.staticTexts["Connection & pairing"].waitForExistence(timeout: 30))
+    }
+
     func testActivityNotificationPayloadIsBounded() {
         let valid: [String: Any] = ["type": "activity", "id": "event-1", "title": "Work finished", "body": "#941 passed"]
         XCTAssertEqual(activityNotificationRequest(from: valid), ActivityNotificationRequest(id: "event-1", title: "Work finished", body: "#941 passed", url: nil))

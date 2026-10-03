@@ -14,7 +14,24 @@ The owner requested an installable iPhone app. The SwiftUI shell adds a persiste
 2. Sign into Xcode under Settings > Accounts. Select your development team for the GAH target.
 3. Enable Developer Mode under iPhone Settings > Privacy & Security if needed.
 4. Build and run `apps/ios/GAH.xcodeproj` on the iPhone. A dashboard refresh cannot update the native scanner integration.
-5. Turn on Tailscale. Use central `http://100.118.97.79`.
+5. Turn on Tailscale. Use central `https://hermesagent.tail82695.ts.net:8443`. The default HTTPS port currently serves a different application.
+
+## Repeatable physical navigation check
+
+After pairing the app, run this read-only smoke test from the Mac:
+
+```sh
+GAH_IOS_DEVICE=YOUR_IPHONE_UDID \
+GAH_IOS_TEAM=YOUR_DEVELOPMENT_TEAM \
+GAH_IOS_CENTRAL_URL=https://hermesagent.tail82695.ts.net:8443 \
+GAH_IOS_EXPECTED_NODE=12VHFAILURE \
+bash scripts/test-ios-central.sh
+```
+
+It builds and installs the current app, then opens Nodes, Chat, Git, Telemetry, and Settings through the existing paired session.
+It also checks Settings after backgrounding and a process restart. It exports screenshots and the XCTest result bundle to a temporary evidence directory.
+It sends no coding turn, worker command, or device revocation. Missing authentication fails the test.
+The simulator suite skips this check unless explicitly configured. Camera, keyboard, cellular handoff, and Live Activity acceptance still require the steps below.
 
 ## Acceptance run
 
