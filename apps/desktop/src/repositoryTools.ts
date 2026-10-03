@@ -10,6 +10,11 @@ export function bindRepositoryTools(section: HTMLElement, invoke: Invoke) {
   const status = section.querySelector<HTMLElement>('#repository-tool-status')!;
   const guide = section.querySelector<HTMLAnchorElement>('#repository-tool-guide')!;
   const check = section.querySelector<HTMLButtonElement>('#repository-tool-check')!;
+  if (/Windows/i.test(navigator.userAgent)) {
+    const environment = document.createElement('p');
+    environment.textContent = 'On Windows, GAH runs in WSL. Install the CLI inside your selected WSL distribution using the Linux instructions in the official guide.';
+    status.before(environment);
+  }
   let revision = 0;
   async function refresh() {
     const request = ++revision;

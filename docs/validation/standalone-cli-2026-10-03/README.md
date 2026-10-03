@@ -19,6 +19,9 @@ Automated checks:
 - Desktop Settings regression: missing package, official guide link, installed re-check, and GitLab selection passed.
 - Both login-panel component checks passed.
 - All 13 login-repair tests passed, including missing packages before OAuth and preserving token transport on stdin after a successful package check.
+- Full serial all-feature Rust suite: 2,331 passed across 36 test binaries; formatting and Clippy passed.
+- Full server/mock suites: 617 passed, 1 skipped, 0 failures.
+- Root and desktop type checks passed.
 - Native desktop tests: 35 passed. The macOS desktop application bundle built successfully.
 
 This run does not prove a fresh Linux AppImage installation. Linux validation covers the real login-repair process and the GUI with a mocked native bridge.
