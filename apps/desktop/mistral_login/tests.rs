@@ -130,7 +130,9 @@ fn provider_window_has_no_native_command_or_event_capability() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|window| window == WINDOW));
+            .any(|window| window
+                .as_str()
+                .is_some_and(|window| window == "*" || window.starts_with(WINDOW))));
         if capability["permissions"]
             .as_array()
             .unwrap()
@@ -138,6 +140,9 @@ fn provider_window_has_no_native_command_or_event_capability() {
             .any(|permission| {
                 permission == "allow-mistral-login-start"
                     || permission == "allow-mistral-login-finish"
+                    || permission
+                        .as_str()
+                        .is_some_and(|permission| permission.starts_with("allow-credential-"))
             })
         {
             assert_eq!(capability["windows"], serde_json::json!(["dashboard"]));
@@ -261,6 +266,52 @@ fi
         0o600
     );
     assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn two_named_verified_sessions_save_only_selected_credentials_and_preserve_default() {
+    let root = TestRoot::new();
+    let default = root.0.join("mistral-dashboard.cookie");
+    std::fs::write(&default, "existing-default-session").unwrap();
+    let body = r#"
+if [ "$1" = quota ] && [ "$2" = refresh ]; then
+  if [ "$3" = --backend ]; then
+    [ "$4" = mistral-dashboard ] && [ "$5" = --store-path ] || exit 2
+    printf '%s' '{"backend":"mistral-dashboard","account_usage":{"account_id":"synthetic"},"check_error":null}' > "$6"
+  else
+    [ "$3" = --credential ] || exit 3
+    [ -f '__ROOT__/'"$4"'.saved' ] || exit 4
+  fi
+elif [ "$1" = credentials ] && [ "$2" = save ]; then
+  [ "$3" = --id ] && [ "$5" = --provider ] && [ "$6" = mistral ] || exit 5
+  [ "$7" = --kind ] && [ "$8" = mistral_dashboard ] && [ "$9" = --account-label ] || exit 6
+  case "$4" in account-work|account-personal) ;; *) exit 7 ;; esac
+  cat > '__ROOT__/'"$4"'.saved'
+  printf '{"id":"%s","provider":"mistral","kind":"mistral_dashboard","account_label":"%s","env_var":null}' "$4" "${10}"
+else exit 8
+fi
+"#.replace("__ROOT__", &root.0.to_string_lossy());
+    let gah = fake_gah(&root.0, &body);
+    for (id, label, cookie) in [
+        ("account-work", "Work", "session=synthetic-work"),
+        ("account-personal", "Personal", "session=synthetic-personal"),
+    ] {
+        let target = LoginTarget::new(Some(id.into()), Some(label.into())).unwrap();
+        assert_eq!(
+            verify_and_save_for(&gah, &root.0, cookie, &target).state,
+            "connected"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.0.join(format!("{id}.saved"))).unwrap(),
+            cookie
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(default).unwrap(),
+        "existing-default-session"
+    );
+    assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 4);
 }
 
 #[cfg(unix)]

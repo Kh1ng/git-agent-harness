@@ -19,6 +19,13 @@ fn main() {
             "open_setup_terminal",
             "mistral_login_start",
             "mistral_login_finish",
+            "credential_list",
+            "credential_save",
+            "credential_remove",
+            "credential_refresh",
+            "credential_instances",
+            "credential_bind",
+            "credential_add_instance",
         ]),
     ))
     .expect("failed to build desktop permissions");

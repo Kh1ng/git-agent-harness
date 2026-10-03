@@ -30,7 +30,14 @@
             "allow-setup-check",
             "allow-open-setup-terminal",
             "allow-mistral-login-start",
-            "allow-mistral-login-finish"
+            "allow-mistral-login-finish",
+            "allow-credential-list",
+            "allow-credential-save",
+            "allow-credential-remove",
+            "allow-credential-refresh",
+            "allow-credential-instances",
+            "allow-credential-bind",
+            "allow-credential-add-instance"
           ],
           "local": true
         },

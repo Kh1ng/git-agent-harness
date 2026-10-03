@@ -15,7 +15,7 @@ import { ProfileEditor } from '../components/ProfileEditor.js';
 import { SkillBankSettingsSection } from '../components/SkillBankSettingsSection.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
-import { gahApi, backendInstancesApi, promptPoliciesApi, routingCandidatesApi, GahApiError } from '../api/client.js';
+import { gahApi, backendInstancesApi, promptPoliciesApi, routingCandidatesApi, GahApiError, type BackendRunnerKind } from '../api/client.js';
 import type { ConfigSetData, NotificationSettingsSummary } from '@git-agent-harness/contracts';
 import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary, ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, AdminUpdatePendingInfo, AdminUpdateState, BackendInstanceSummary, HelperRoutePreference, ManagerModelInfo } from '@git-agent-harness/contracts';
 
@@ -877,7 +877,7 @@ function PromptPoliciesCard({ profileName, effective, onRefresh }: {
  * reason. Toggles shell out to the fixed CLI command through the server's
  * owner-gated mutation API; the merged-entry write and validation live in
  * Rust. */
-function BackendInstancesCard({ profileName, effective }: { profileName: string; effective: SettingsConfigProfileSummary }) {
+export function BackendInstancesCard({ profileName, effective }: { profileName: string; effective: Pick<SettingsConfigProfileSummary, 'backend_instances'> }) {
   const declared = effective.backend_instances;
   const [instances, setInstances] = useState(declared ?? []);
   const [pendingInstance, setPendingInstance] = useState<string | null>(null);
@@ -886,7 +886,7 @@ function BackendInstancesCard({ profileName, effective }: { profileName: string;
   const [adding, setAdding] = useState(false);
   const [newInstance, setNewInstance] = useState('');
   const [newLabel, setNewLabel] = useState('');
-  const [newRunner, setNewRunner] = useState<'codex' | 'claude'>('codex');
+  const [newRunner, setNewRunner] = useState<BackendRunnerKind>('codex');
   const [editing, setEditing] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState('');
   const [loginCommand, setLoginCommand] = useState<string | null>(null);
@@ -976,7 +976,7 @@ function BackendInstancesCard({ profileName, effective }: { profileName: string;
           {adding ? 'Cancel' : 'Add account'}
         </button>
       </div>
-      <p className="mb-3 max-w-2xl text-xs text-muted">Each named Codex or Claude account gets separate provider state. GAH stores the label and state location, never the provider token.</p>
+      <p className="mb-3 max-w-2xl text-xs text-muted">Manage named runner instances on the connected node. Save and select API keys in the owning computer’s desktop Settings. Codex, Claude and Antigravity use their existing OAuth controls.</p>
       {error && <p className="text-xs text-critical mb-2">{error}</p>}
       {loginCommand && (
         <div className="mb-3 rounded-md border border-subtle bg-raised p-2 text-xs text-secondary">
@@ -986,9 +986,9 @@ function BackendInstancesCard({ profileName, effective }: { profileName: string;
       )}
       {adding && (
         <div className="mb-3 grid gap-2 rounded-md border border-subtle bg-raised p-3 sm:grid-cols-2">
-          <label className="space-y-1 text-xs text-secondary">Provider
-            <select value={newRunner} onChange={(event) => setNewRunner(event.target.value as 'codex' | 'claude')} className="w-full rounded-md border border-subtle bg-card px-2 py-1.5 text-primary">
-              <option value="codex">Codex</option><option value="claude">Claude</option>
+          <label className="space-y-1 text-xs text-secondary">Runner
+            <select value={newRunner} onChange={(event) => setNewRunner(event.target.value as BackendRunnerKind)} className="w-full rounded-md border border-subtle bg-card px-2 py-1.5 text-primary">
+              <option value="codex">Codex</option><option value="claude">Claude</option><option value="opencode">OpenCode</option><option value="vibe">Vibe</option><option value="openhands">OpenHands</option><option value="hermes">Hermes</option><option value="agy">Antigravity</option>
             </select>
           </label>
           <label className="space-y-1 text-xs text-secondary">Account label
@@ -1024,6 +1024,7 @@ function BackendInstancesCard({ profileName, effective }: { profileName: string;
               {instance.config_source && (
                 <p className="text-xs text-muted">Source: {instance.config_source.replace('_', ' ')}</p>
               )}
+              {instance.credential_id && <p className="text-xs text-muted break-all">Credential on this node: {instance.credential_id}{instance.credential_provider ? ` · ${instance.credential_provider}` : ''}</p>}
               {editing === instance.backend_instance && (
                 <div className="mt-2 flex gap-2">
                   <input aria-label={`Account label for ${instance.backend_instance}`} value={editLabel} onChange={(event) => setEditLabel(event.target.value)} className="min-w-0 rounded-md border border-subtle bg-raised px-2 py-1 text-xs text-primary" />

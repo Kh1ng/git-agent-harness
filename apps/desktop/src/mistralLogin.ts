@@ -2,6 +2,7 @@ export type MistralLoginResult = {
   state: 'pending' | 'connected' | 'cancelled' | 'unavailable';
   installed: boolean;
   message: string;
+  credential_id?: string | null;
 };
 
 /** Connects this device through the native sign-in window; credentials never enter this page. */
@@ -14,6 +15,7 @@ export function bindMistralLogin(section: HTMLElement, invoke: (command: string)
   let revision = 0;
 
   function show(result: MistralLoginResult) {
+    if (result.credential_id) return;
     revision++;
     status.textContent = result.message;
     installation.hidden = result.installed;

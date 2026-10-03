@@ -1002,6 +1002,9 @@ export interface RoutingCandidateSummary {
 export interface BackendInstanceSummary {
   backend_instance: string;
   runner_kind: string;
+  /** Named credential on this instance's own node; never a key value. */
+  credential_id?: string | null;
+  credential_provider?: string | null;
   /** Present in the effective canonical/profile environment. */
   declared?: boolean;
   /** Issue #822: disabled instances stay declared but routing skips them. */
