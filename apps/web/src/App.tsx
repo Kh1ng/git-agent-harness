@@ -27,7 +27,7 @@ const PlanningPage = lazy(() => import('./pages/PlanningPage.js').then((module) 
 export type { Page } from './lib/navigationState.js';
 
 export function App() {
-  const [currentPage, setCurrentPage] = useState<Page>(() => new URLSearchParams(window.location.hash.slice(1)).has('pair') ? 'settings' : readNavigation().page);
+  const [currentPage, setCurrentPage] = useState<Page>(() => (new URLSearchParams(window.location.hash.slice(1)).has('pair') || new URLSearchParams(window.location.search).has('pairingRequest')) ? 'settings' : readNavigation().page);
   const [chatLauncherRequest, setChatLauncherRequest] = useState(0);
   useEffect(() => updateNavigation({ page: currentPage }), [currentPage]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);

@@ -20,10 +20,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+mod identity;
+mod instances;
+pub(crate) use identity::current_source_records;
+pub use identity::{latest_windows_for_identity, latest_windows_for_identity_and_credential};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaObservationRecord {
     pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,6 +54,8 @@ pub struct QuotaObservationRecord {
     pub usage_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mistral_admin: Option<MistralAdminObservationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_usage: Option<crate::usage::account_usage::AccountUsageObservation>,
 }
 
 /// Persisted Mistral Admin API payloads associated with a single refresh.
@@ -115,6 +123,94 @@ pub fn load(state_path: &Path) -> Result<Vec<QuotaObservationRecord>> {
 /// Load from the canonical global path, swallowing any error to an empty list.
 pub fn load_account_observations() -> Vec<QuotaObservationRecord> {
     load(&store_path()).unwrap_or_default()
+}
+
+/// Validate secret-free provider observations supplied by a local collector.
+/// Explicit instance identity is required so another account cannot inherit them.
+pub fn parse_external_observation(input: &str) -> Result<QuotaObservationRecord> {
+    let value: serde_json::Value =
+        serde_json::from_str(input).context("parse quota observation JSON")?;
+    let fields = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("quota observation must be an object"))?;
+    let allowed = [
+        "backend",
+        "backend_instance",
+        "credential_id",
+        "model",
+        "quota_pool",
+        "quota_window",
+        "quota_used_percent",
+        "quota_remaining_percent",
+        "quota_reset_at",
+        "observed_at",
+        "checked_at",
+        "check_error",
+        "usage_source",
+        "account_usage",
+    ];
+    if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
+        anyhow::bail!("unsupported quota observation field");
+    }
+    let mut record: QuotaObservationRecord = serde_json::from_value(value)
+        .map_err(|_| anyhow::anyhow!("invalid quota observation schema"))?;
+    if let Some(usage) = &record.account_usage {
+        usage.validate()?;
+    }
+    for (name, value) in [
+        ("backend", Some(record.backend.as_str())),
+        ("backend instance", record.backend_instance.as_deref()),
+        ("credential ID", record.credential_id.as_deref()),
+        ("quota pool", record.quota_pool.as_deref()),
+        ("usage source", record.usage_source.as_deref()),
+    ] {
+        if let Some(value) = value {
+            if crate::execution_identity::validate_operator_label(name, value)? != value {
+                anyhow::bail!("{name} must not contain surrounding whitespace");
+            }
+        }
+    }
+    if record.backend_instance.is_none()
+        || record.checked_at.is_none()
+        || record.usage_source.is_none()
+    {
+        anyhow::bail!("backend_instance, checked_at and usage_source are required");
+    }
+    for value in [record.quota_used_percent, record.quota_remaining_percent]
+        .into_iter()
+        .flatten()
+    {
+        if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+            anyhow::bail!("quota percentages must be between 0 and 100");
+        }
+    }
+    for value in [
+        record.checked_at.as_deref(),
+        record.observed_at.as_deref(),
+        record.quota_reset_at.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        OffsetDateTime::parse(value, &Rfc3339).context("quota timestamp must be RFC 3339")?;
+    }
+    for (name, value, limit) in [
+        ("model", record.model.as_deref(), 512),
+        ("quota window", record.quota_window.as_deref(), 128),
+        ("check error", record.check_error.as_deref(), 1024),
+    ] {
+        if let Some(value) = value {
+            if value.is_empty() || value.len() > limit || value.chars().any(char::is_control) {
+                anyhow::bail!("invalid {name}");
+            }
+        }
+    }
+    if has_quota_data(&record) && record.observed_at.is_none() {
+        anyhow::bail!("quota data requires observed_at");
+    }
+    record.backend = crate::config::canonical_backend_name(&record.backend).to_string();
+    record.check_error = record.check_error.as_deref().map(crate::redact::redact);
+    Ok(record)
 }
 
 fn has_ledger_usage_data(usage: &crate::ledger::LedgerUsage) -> bool {
@@ -201,9 +297,15 @@ pub fn latest_for<'a>(
                 && r.model.as_deref() == model
                 && r.backend_instance.is_none()
                 && r.quota_pool.is_none()
-                && has_quota_data(r)
         })
-        .max_by(|a, b| a.observed_at.cmp(&b.observed_at))
+        .max_by_key(|record| {
+            record
+                .checked_at
+                .as_deref()
+                .or(record.observed_at.as_deref())
+                .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
+        })
+        .filter(|record| record.check_error.is_none() && has_quota_data(record))
 }
 
 /// Most-recent observation for an exact execution identity, with a
@@ -213,21 +315,8 @@ pub fn latest_for_identity<'a>(
     records: &'a [QuotaObservationRecord],
     identity: &crate::execution_identity::ExecutionIdentity,
 ) -> Option<&'a QuotaObservationRecord> {
-    records
-        .iter()
-        .filter(|record| {
-            record.backend == identity.logical_backend
-                && (record.model.is_none() || record.model == identity.effective_model)
-                && record
-                    .backend_instance
-                    .as_deref()
-                    .is_none_or(|instance| instance == identity.backend_instance)
-                && record
-                    .quota_pool
-                    .as_deref()
-                    .is_none_or(|pool| Some(pool) == identity.quota_pool.as_deref())
-                && has_quota_data(record)
-        })
+    latest_windows_for_identity(records, identity)
+        .into_iter()
         .max_by(|left, right| left.observed_at.cmp(&right.observed_at))
 }
 
@@ -236,6 +325,7 @@ fn has_quota_data(record: &QuotaObservationRecord) -> bool {
         || record.quota_remaining_percent.is_some()
         || record.quota_window.is_some()
         || record.quota_reset_at.is_some()
+        || record.account_usage.is_some()
 }
 
 /// #166: read Codex app-server account-level quota and append
@@ -264,6 +354,8 @@ pub fn refresh_codex_and_store(
                 check_error: None,
                 usage_source: obs.usage_source.clone(),
                 mistral_admin: None,
+                account_usage: None,
+                credential_id: None,
             };
             append(state_path, &rec)?;
             Ok(Some(rec))
@@ -288,10 +380,21 @@ pub fn refresh_vibe_admin_and_store(
 ) -> Result<Option<QuotaObservationRecord>> {
     let api_key = crate::usage::admin_api_key()
         .ok_or_else(|| anyhow::anyhow!("auth_required: MISTRAL_ADMIN_API_KEY is not configured"))?;
+    let record = refresh_vibe_admin_record(&api_key, model)?;
+    if let Some(record) = &record {
+        append(state_path, record)?;
+    }
+    Ok(record)
+}
+
+pub(crate) fn refresh_vibe_admin_record(
+    api_key: &str,
+    model: Option<&str>,
+) -> Result<Option<QuotaObservationRecord>> {
     let end_time = time::OffsetDateTime::now_utc().unix_timestamp();
     let thirty_days_secs = 30 * 24 * 60 * 60;
     let refresh = crate::usage::refresh_admin_data(
-        &api_key,
+        api_key,
         (end_time - thirty_days_secs, end_time),
         "vibe",
         model,
@@ -315,8 +418,9 @@ pub fn refresh_vibe_admin_and_store(
                 check_error: refresh.spend_limit_error,
                 usage_source: Some("mistral_admin_refresh".to_string()),
                 mistral_admin: Some(admin_refresh),
+                account_usage: None,
+                credential_id: None,
             };
-            append(state_path, &rec)?;
             return Ok(Some(rec));
         }
         if let Some(error) = refresh.spend_limit_error {
@@ -338,8 +442,9 @@ pub fn refresh_vibe_admin_and_store(
         check_error: None,
         usage_source: obs.usage_source,
         mistral_admin: admin_refresh,
+        account_usage: None,
+        credential_id: None,
     };
-    append(state_path, &rec)?;
     Ok(Some(rec))
 }
 
@@ -355,7 +460,16 @@ pub fn refresh_codex_and_store_for_identity(
     let Some(observation) = observation else {
         return Ok(None);
     };
-    let record = QuotaObservationRecord {
+    let record = record_from_codex_observation(observation, identity);
+    append(state_path, &record)?;
+    Ok(Some(record))
+}
+
+fn record_from_codex_observation(
+    observation: crate::ledger::summary::GroupQuotaObservation,
+    identity: &crate::execution_identity::ExecutionIdentity,
+) -> QuotaObservationRecord {
+    QuotaObservationRecord {
         backend: identity.logical_backend.clone(),
         backend_instance: Some(identity.backend_instance.clone()),
         model: identity.effective_model.clone(),
@@ -369,9 +483,19 @@ pub fn refresh_codex_and_store_for_identity(
         check_error: None,
         usage_source: observation.usage_source,
         mistral_admin: None,
-    };
-    append(state_path, &record)?;
-    Ok(Some(record))
+        account_usage: None,
+        credential_id: None,
+    }
+}
+
+/// Persist both native Claude allowance windows under the default account's
+/// explicit instance. Named Claude accounts cannot inherit these readings.
+pub fn refresh_claude_and_store(state_path: &Path) -> Result<Option<QuotaObservationRecord>> {
+    let records = crate::usage::claude::refresh()?;
+    for record in &records {
+        append(state_path, record)?;
+    }
+    Ok(records.into_iter().next())
 }
 
 /// Issue #761: nothing refreshed this store periodically -- only a human
@@ -399,6 +523,42 @@ pub fn refresh_stale_quota_observations(
         .clone()
         .unwrap_or_else(|| "codex".to_string());
     let mut handles = Vec::new();
+    handles.extend(instances::refresh(profile, now, store_path));
+    if let Some(handle) =
+        maybe_refresh_backend_instance(store_path, "claude", Some("claude"), now, {
+            let path = store_path.to_path_buf();
+            move || refresh_claude_and_store(&path)
+        })
+    {
+        handles.push(handle);
+    }
+    if crate::usage::nous::configured() {
+        if let Some(handle) = maybe_refresh_backend_instance(
+            store_path,
+            "opencode",
+            Some("opencode:nous-portal-api"),
+            now,
+            {
+                let path = store_path.to_path_buf();
+                move || {
+                    let record = match crate::usage::nous::refresh() {
+                        Ok(record) => record,
+                        Err(error) => {
+                            let mut record =
+                                crate::usage::nous::parse(b"{}", OffsetDateTime::now_utc())?;
+                            record.check_error = Some(crate::redact::redact(&error.to_string()));
+                            record.observed_at = None;
+                            record
+                        }
+                    };
+                    append(&path, &record)?;
+                    Ok(Some(record))
+                }
+            },
+        ) {
+            handles.push(handle);
+        }
+    }
     if let Some(handle) = maybe_refresh_backend(store_path, "codex", now, {
         let codex_cmd = codex_cmd.clone();
         let path = store_path.to_path_buf();
@@ -406,11 +566,47 @@ pub fn refresh_stale_quota_observations(
     }) {
         handles.push(handle);
     }
-    if let Some(handle) = maybe_refresh_backend(store_path, "vibe", now, {
+    if crate::usage::mistral_dashboard::configured() {
+        let instance = load(store_path)
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .find(|record| record.backend == "mistral-dashboard" && record.credential_id.is_none())
+            .and_then(|record| record.backend_instance);
+        if let Some(handle) = maybe_refresh_backend_instance(
+            store_path,
+            "mistral-dashboard",
+            instance.as_deref(),
+            now,
+            {
+                let path = store_path.to_path_buf();
+                move || crate::usage::mistral_dashboard::refresh_scheduled(&path)
+            },
+        ) {
+            handles.push(handle);
+        }
+    }
+    if crate::usage::admin_api_key().is_some() {
+        if let Some(handle) = maybe_refresh_backend(store_path, "vibe", now, {
+            let path = store_path.to_path_buf();
+            move || refresh_vibe_admin_and_store(None, &path)
+        }) {
+            handles.push(handle);
+        }
+    }
+    for info in crate::credentials::list().unwrap_or_default() {
+        let id = info.id.clone();
         let path = store_path.to_path_buf();
-        move || refresh_vibe_admin_and_store(None, &path)
-    }) {
-        handles.push(handle);
+        if let Some(handle) = maybe_refresh_source(
+            store_path,
+            crate::credentials::quota::backend(&info),
+            None,
+            Some(&info.id),
+            now,
+            move || crate::credentials::quota::refresh(&id, &path).map(Some),
+        ) {
+            handles.push(handle);
+        }
     }
     handles
 }
@@ -454,10 +650,35 @@ fn maybe_refresh_backend(
     now: OffsetDateTime,
     refresh: impl FnOnce() -> Result<Option<QuotaObservationRecord>> + Send + 'static,
 ) -> Option<std::thread::JoinHandle<()>> {
+    maybe_refresh_backend_instance(path, backend, None, now, refresh)
+}
+
+fn maybe_refresh_backend_instance(
+    path: &Path,
+    backend: &str,
+    instance: Option<&str>,
+    now: OffsetDateTime,
+    refresh: impl FnOnce() -> Result<Option<QuotaObservationRecord>> + Send + 'static,
+) -> Option<std::thread::JoinHandle<()>> {
+    maybe_refresh_source(path, backend, instance, None, now, refresh)
+}
+
+fn maybe_refresh_source(
+    path: &Path,
+    backend: &str,
+    instance: Option<&str>,
+    credential_id: Option<&str>,
+    now: OffsetDateTime,
+    refresh: impl FnOnce() -> Result<Option<QuotaObservationRecord>> + Send + 'static,
+) -> Option<std::thread::JoinHandle<()>> {
     let records = load(path).unwrap_or_default();
     let last_checked = records
         .iter()
-        .filter(|record| record.backend == backend)
+        .filter(|record| {
+            record.backend == backend
+                && record.credential_id.as_deref() == credential_id
+                && (credential_id.is_some() || record.backend_instance.as_deref() == instance)
+        })
         .filter_map(|record| {
             record
                 .checked_at
@@ -473,12 +694,17 @@ fn maybe_refresh_backend(
     if !due {
         return None;
     }
+    let in_flight_key = format!(
+        "{backend}\0{}\0{}",
+        instance.unwrap_or_default(),
+        credential_id.unwrap_or_default()
+    );
     {
         let mut in_flight = IN_FLIGHT
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let set = in_flight.get_or_insert_with(std::collections::HashSet::new);
-        if !set.insert(backend.to_string()) {
+        if !set.insert(in_flight_key.clone()) {
             // A previous tick's refresh for this exact backend hasn't
             // returned yet -- don't pile on a second attempt on top of it.
             return None;
@@ -486,6 +712,8 @@ fn maybe_refresh_backend(
     }
     let path = path.to_path_buf();
     let backend = backend.to_string();
+    let instance = instance.map(str::to_string);
+    let credential_id = credential_id.map(str::to_string);
     Some(std::thread::spawn(move || {
         // `refresh_*_and_store` already appends a real record when it
         // finds data (Ok(Some(_))); on Ok(None)/Err, append a data-free
@@ -493,10 +721,12 @@ fn maybe_refresh_backend(
         // attempt and stops retrying every tick against a backend that
         // isn't configured here at all.
         let refresh = refresh();
-        if !matches!(&refresh, Ok(Some(_))) {
+        // Named refresh owns its scoped failure marker and rejects obsolete
+        // generations. A generic fallback must never revive a removed source.
+        if credential_id.is_none() && !matches!(&refresh, Ok(Some(_))) {
             let marker = QuotaObservationRecord {
                 backend: backend.clone(),
-                backend_instance: None,
+                backend_instance: instance,
                 model: None,
                 quota_pool: None,
                 quota_window: None,
@@ -510,12 +740,14 @@ fn maybe_refresh_backend(
                     .map(|error| crate::redact::redact(&error.to_string())),
                 usage_source: None,
                 mistral_admin: None,
+                account_usage: None,
+                credential_id,
             };
             let _ = append(&path, &marker);
         }
         if let Ok(mut in_flight) = IN_FLIGHT.lock() {
             if let Some(set) = in_flight.as_mut() {
-                set.remove(&backend);
+                set.remove(&in_flight_key);
             }
         }
     }))
@@ -772,7 +1004,7 @@ mod tests {
         std::fs::write(
             &script_path,
             format!(
-                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{rate_limit}' ;;\n  *api/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/code/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *v1/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *v1/admin/rate-limit*) cat '{rate_limit}' ;;\n  *v1/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
                 rate_limit = rate_limit_path.display(),
                 spend_limit = spend_limit_path.display(),
             ),
@@ -849,7 +1081,7 @@ mod tests {
         std::fs::write(
             &script_path,
             format!(
-                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{rate_limit}' ;;\n  *api/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/code/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *v1/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *v1/admin/rate-limit*) cat '{rate_limit}' ;;\n  *v1/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
                 rate_limit = rate_limit_path.display(),
                 spend_limit = spend_limit_path.display(),
             ),
@@ -903,6 +1135,8 @@ mod tests {
                 check_error: None,
                 usage_source: Some("codex_status_json".into()),
                 mistral_admin: None,
+                account_usage: None,
+                credential_id: None,
             },
         )
         .unwrap();
@@ -937,6 +1171,8 @@ mod tests {
                     check_error: None,
                     usage_source: Some("codex_status_json".into()),
                     mistral_admin: None,
+                    account_usage: None,
+                    credential_id: None,
                 },
             )
             .unwrap();
@@ -958,6 +1194,8 @@ mod tests {
                 check_error: None,
                 usage_source: Some("agy_cli_log_delta".into()),
                 mistral_admin: None,
+                account_usage: None,
+                credential_id: None,
             },
         )
         .unwrap();
@@ -987,11 +1225,15 @@ mod tests {
             check_error: None,
             usage_source: Some("codex_status_json".into()),
             mistral_admin: None,
+            account_usage: None,
+            credential_id: None,
         };
         let good2 = QuotaObservationRecord {
             quota_used_percent: Some(20.0),
             observed_at: Some("2026-04-29T10:00:00Z".into()),
             mistral_admin: None,
+            account_usage: None,
+            credential_id: None,
             ..good1.clone()
         };
         let mut contents = serde_json::to_string(&good1).unwrap();
@@ -1030,6 +1272,8 @@ mod tests {
                 check_error: None,
                 usage_source: Some("codex_status_json".into()),
                 mistral_admin: None,
+                account_usage: None,
+                credential_id: None,
             },
         )
         .unwrap();
@@ -1055,6 +1299,8 @@ mod tests {
             check_error: None,
             usage_source: Some("test".into()),
             mistral_admin: None,
+            account_usage: None,
+            credential_id: None,
         }
     }
 
@@ -1066,6 +1312,79 @@ mod tests {
         );
         identity.backend_instance = instance.into();
         identity
+    }
+
+    #[test]
+    fn latest_windows_keep_short_and_weekly_limits_on_the_right_account() {
+        let mut weekly = scoped_record(Some("account-a"), 20.0, "2026-07-20T10:00:00Z");
+        weekly.quota_window = Some("weekly".into());
+        let mut short = scoped_record(Some("account-a"), 90.0, "2026-07-20T11:00:00Z");
+        short.quota_window = Some("5h".into());
+        let mut old = weekly.clone();
+        old.observed_at = Some("2026-07-19T10:00:00Z".into());
+        let mut sibling = weekly.clone();
+        sibling.backend_instance = Some("account-b".into());
+        sibling.quota_used_percent = Some(99.0);
+        let records = [weekly, short, old, sibling];
+        let windows = latest_windows_for_identity(&records, &identity("account-a"));
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].quota_used_percent, Some(90.0));
+        assert_eq!(windows[1].quota_used_percent, Some(20.0));
+    }
+
+    #[test]
+    fn newer_failed_or_empty_check_invalidates_only_its_account() {
+        let success = scoped_record(Some("account-a"), 20.0, "2026-07-20T10:00:00Z");
+        let sibling = scoped_record(Some("account-b"), 70.0, "2026-07-20T10:00:00Z");
+        let mut failure = success.clone();
+        failure.quota_window = None;
+        failure.quota_used_percent = None;
+        failure.quota_remaining_percent = None;
+        failure.observed_at = None;
+        failure.checked_at = Some("2026-07-20T11:00:00Z".into());
+        for error in [None, Some("failed".into())] {
+            failure.check_error = error;
+            let records = [success.clone(), sibling.clone(), failure.clone()];
+            assert!(latest_for_identity(&records, &identity("account-a")).is_none());
+            assert_eq!(
+                latest_for_identity(&records, &identity("account-b"))
+                    .unwrap()
+                    .quota_used_percent,
+                Some(70.0)
+            );
+        }
+    }
+
+    #[test]
+    fn account_usage_import_is_scoped_and_does_not_require_a_quota_cap() {
+        let value = serde_json::json!({"backend":"mistral-dashboard", "backend_instance":"mistral-dashboard:account", "quota_pool":"mistral-dashboard:account", "checked_at":"2026-10-03T00:00:00Z", "observed_at":"2026-10-03T00:00:00Z", "usage_source":"mistral_dashboard", "account_usage":{"account_id":"customer-1", "workspace_id":null, "period_start":"2026-10-01T00:00:00Z", "period_end":"2026-10-03T00:00:00Z", "currency":"USD", "requests":4, "cost":0.03079, "cost_source":"dashboard_prices", "models":[]}});
+        let record = parse_external_observation(&value.to_string()).unwrap();
+        assert!(record.quota_remaining_percent.is_none());
+        assert!(record.quota_reset_at.is_none());
+    }
+
+    #[test]
+    fn external_observation_rejects_invalid_or_unscoped_provider_data() {
+        let valid = serde_json::json!({"backend":"agy", "backend_instance":"agy-primary", "quota_pool":"agy:external", "quota_window":"weekly", "quota_remaining_percent":42.0, "checked_at":"2026-10-02T23:00:00Z", "observed_at":"2026-10-02T23:00:00Z", "usage_source":"cli_router"});
+        assert_eq!(
+            parse_external_observation(&valid.to_string())
+                .unwrap()
+                .quota_remaining_percent,
+            Some(42.0)
+        );
+        for (field, value) in [
+            ("backend_instance", serde_json::Value::Null),
+            ("checked_at", serde_json::json!("bad time")),
+            ("quota_remaining_percent", serde_json::json!(101)),
+            ("access_token", serde_json::json!("private")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(
+                parse_external_observation(&invalid.to_string()).is_err(),
+                "accepted invalid {field}"
+            );
+        }
     }
 
     #[test]

@@ -73,6 +73,7 @@ import { DeviceAccess } from './deviceAccess.js';
 import { mutationSafety } from './mutationSafety.js';
 import { pairingRouter } from './pairing.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
+import { resolveChatProject } from './projectCatalog.js';
 import { RegistryService, NodeDoctorError } from './registryService.js';
 import { ClaimsService, ClaimConflictError } from './claimsService.js';
 import { backendForProfile, helperRouteFor, readSettings as readManagerChatSettings, setBackendForProfile, validHelperRoute, writeSettings as writeManagerChatSettings } from './managerChat/settingsStore.js';
@@ -373,9 +374,16 @@ export function createServer(
       }
     });
   }
-  // Pairing only exempts one-time code inspection/redemption; its management
-  // routes enforce owner authentication inside the router. Workers cannot pair.
-  if (node.role === 'central') app.use('/api/pairing', pairingRouter(app.locals.deviceAccess, getCoordinatorIdentity(undefined, coordinatorPort)));
+  // Pairing's public offer/request flows retain origin and transport checks;
+  // device management and delegated approval enforce authority inside the router.
+  if (node.role === 'central') app.use('/api/pairing', pairingRouter(app.locals.deviceAccess, getCoordinatorIdentity(undefined, coordinatorPort), request => {
+    const event: ActivityEvent = {
+      id: `pairing:${request.id}`, occurredAt: new Date().toISOString(), profile: null,
+      kind: 'action_required', severity: 'warning', title: 'Device sign-in approval requested',
+      message: `${request.name} wants dashboard control. Compare its matching code in Settings.`, pairingRequestId: request.id,
+    };
+    if (configDeps.activityFeed?.record(event)) sessionStore.broadcast({ type: 'activity.event', event });
+  }));
   // All API reads and mutations share one boundary, including future routes.
   // Direct same-origin loopback access remains local; /health stays public.
   app.use('/api', authMiddleware);
@@ -393,6 +401,8 @@ export function createServer(
     res.status(400).json({ error: code, message: error instanceof Error ? error.message : String(error) });
   };
   if (node.role === 'central' && configDeps.activityFeed) {
+    const canApprovePairing = (res: express.Response): boolean => res.locals.authPrincipal?.kind === 'owner'
+      || app.locals.deviceAccess.canApprovePairing(res.locals.authPrincipal?.id ?? '');
     // Workers post every Rust-side activity event here; the route writes an
     // audit receipt, so it is rate-limited like the other writing mounts.
     app.use('/api/activity', rateLimit({
@@ -411,7 +421,8 @@ export function createServer(
     app.get('/api/activity/notifications', (_req, res) => {
       res.setHeader('Cache-Control', 'no-store');
       const feed = configDeps.activityFeed!;
-      res.json({ events: feed.notifications(), unread: feed.unreadCount() });
+      const canApprove = canApprovePairing(res);
+      res.json({ events: feed.notifications(canApprove), unread: feed.unreadCount(canApprove) });
     });
     app.get('/api/activity/notification-preferences', (_req, res) => {
       res.setHeader('Cache-Control', 'no-store');
@@ -434,8 +445,9 @@ export function createServer(
         return res.status(400).json({ error: 'invalid_activity_read', message: 'Supply up to 200 notification ids, or all: true.' });
       }
       const feed = configDeps.activityFeed!;
-      const changed = feed.markRead(all ? 'all' : ids as string[]);
-      return res.json({ changed, unread: feed.unreadCount() });
+      const canApprove = canApprovePairing(res);
+      const changed = feed.markRead(all ? 'all' : ids as string[], canApprove);
+      return res.json({ changed, unread: feed.unreadCount(canApprove) });
     });
   }
   if (node.role === 'central' && configDeps.webPushNotifications) {
@@ -1078,10 +1090,21 @@ export function createServer(
     }
   });
 
+  // Conversation identities select a catalog checkout; quota APIs need its
+  // configured profile name. Never infer a profile from an unregistered alias.
+  async function resolveQuotaProfile(profile: string): Promise<string | undefined> {
+    if (!profile.startsWith('gah-node:')) return profile;
+    try {
+      return (await resolveChatProject(profile, { localNodeId: getCoordinatorIdentity().node_id, listProfiles }))?.name;
+    } catch { return undefined; }
+  }
+
   app.get('/api/quota', async (req, res) => {
-    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const selectedProfile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const since = typeof req.query.since === 'string' ? req.query.since : '7d';
     try {
+      const profile = await resolveQuotaProfile(selectedProfile);
+      if (profile === undefined) return res.status(404).json({ error: 'quota_project_not_found' });
       const quota = await runQuota({ profile, since });
       res.json(quota);
     } catch (error) {
@@ -1090,6 +1113,24 @@ export function createServer(
         message: error instanceof Error ? error.message : String(error)
       });
     }
+  });
+
+  app.get('/api/registry/quota', async (req, res) => {
+    if (node.role !== 'central') return res.status(403).json({ error: 'central_only' });
+    const selectedProfile = req.query.profile ?? DEFAULT_PROFILE;
+    const since = req.query.since ?? '7d';
+    if (typeof selectedProfile !== 'string' || (!selectedProfile.startsWith('gah-node:') && !/^[a-zA-Z0-9_.-]{1,128}$/.test(selectedProfile))
+      || typeof since !== 'string' || !/^[1-9][0-9]{0,3}[mhdw]$/.test(since)) {
+      return res.status(400).json({ error: 'invalid_quota_query' });
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const profile = await resolveQuotaProfile(selectedProfile);
+      if (profile === undefined) return res.status(404).json({ error: 'quota_project_not_found' });
+      if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(profile)) return res.status(400).json({ error: 'invalid_quota_query' });
+      res.json(await registryService.getNodeQuotas(profile, since));
+    }
+    catch { res.status(502).json({ error: 'node_quota_unavailable' }); }
   });
 
   // Issue #519: HTTP adapters for the four JSON-ready read operations from
@@ -2149,7 +2190,9 @@ export function createServer(
       return;
     }
     try {
-      res.status(201).json(await startManagerChatFromIssue(profile, issueNumber, backend, model));
+      res.status(201).json(await startManagerChatFromIssue(profile, issueNumber, backend, model,
+        typeof req.body?.nodeId === 'string' ? req.body.nodeId : undefined,
+        typeof req.body?.backendInstance === 'string' ? req.body.backendInstance : null));
     } catch (error) {
       res.status(502).json({
         error: 'Failed to start chat from issue',
@@ -2183,7 +2226,9 @@ export function createServer(
       return;
     }
     try {
-      res.status(201).json(await startManagerChatFromPr(profile, prNumber, backend, model));
+      res.status(201).json(await startManagerChatFromPr(profile, prNumber, backend, model,
+        typeof req.body?.nodeId === 'string' ? req.body.nodeId : undefined,
+        typeof req.body?.backendInstance === 'string' ? req.body.backendInstance : null));
     } catch (error) {
       res.status(502).json({
         error: 'Failed to start chat from pull request',

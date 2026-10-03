@@ -333,6 +333,25 @@ test('handoffAttempt fails the turn when no fallback is configured', async () =>
   );
 });
 
+test('handoffAttempt classifies locally when the quota classifier is unavailable', async () => {
+  const result = await handoffAttempt({
+    startBackend: 'claude',
+    fallbackBackends: ['agy'],
+    classify: async () => { throw new Error('Unknown worker chat action.'); },
+    attempt: async backend => {
+      if (backend === 'claude') throw new Error("You've hit your session limit");
+      return { reply: 'agy answer', model: null, usage: null };
+    }
+  });
+  assert.equal(result.backend, 'agy');
+  await assert.rejects(handoffAttempt({
+    startBackend: 'claude',
+    fallbackBackends: ['agy'],
+    classify: async () => { throw new Error('Unknown worker chat action.'); },
+    attempt: async () => { throw new Error('backend crashed'); }
+  }), /backend crashed/);
+});
+
 test('handoffAttempt tries the next account after an exhausted fallback and records both limits', async () => {
   const calls: string[] = [];
   const classified: string[] = [];

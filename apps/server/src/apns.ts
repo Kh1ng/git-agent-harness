@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import type { ActivityEvent, DeliveryReceipt } from '@git-agent-harness/contracts';
 import { deliveryReceipt } from './notifyDelivery.js';
 import { chatToolName, type ChatLifecycleEvent } from './activityFeed.js';
-import { activityPushPayload } from './webPush.js';
+import { activityPushPayload, activityPushTargetAllowed } from './webPush.js';
 import { pushRegistrationId, removePushEntries, validPushDeviceLabel, validPushRegistrationId, writePrivatePushStore } from './pushStore.js';
 
 type ApnsConfig = {
@@ -144,15 +144,15 @@ export class ApnsNotifications {
     removePushEntries(this.devicesPath, this.devices(), (device) => device.deviceId === deviceId);
   }
 
-  /** Sends the alert to every registered device; one receipt per device. */
-  async deliverActivity(event: ActivityEvent): Promise<DeliveryReceipt[]> {
+  /** Sends alerts to applicable devices; one receipt per target. */
+  async deliverActivity(event: ActivityEvent, canApprovePairing?: (id: string) => boolean): Promise<DeliveryReceipt[]> {
     const payload = activityPushPayload(event);
     if (!payload) return [];
-    return this.sendToDevices((device) => ({
+    return this.sendToDevices((device) => activityPushTargetAllowed(event, device.deviceId, canApprovePairing) ? ({
       token: device.token,
       headers: this.headers('alert', this.config.bundleId, event.id),
       payload: { aps: { alert: { title: payload.title, body: payload.body }, sound: 'default' }, ...payload }
-    }), 'device');
+    }) : null, 'device');
   }
 
   async deliverChatLifecycle(event: ChatLifecycleEvent): Promise<void> {

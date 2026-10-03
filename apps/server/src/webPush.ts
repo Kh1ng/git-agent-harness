@@ -32,6 +32,11 @@ type WebPushTransport = Pick<typeof webPush, 'generateVAPIDKeys' | 'setVapidDeta
 
 export type ActivityPushPayload = { id: string; title: string; body: string; url: string };
 
+/** Sign-in requests wake owner registrations and explicitly delegated approvers only. */
+export function activityPushTargetAllowed(event: ActivityEvent, deviceId?: string, canApprovePairing?: (id: string) => boolean): boolean {
+  return !event.pairingRequestId || deviceId === undefined || canApprovePairing?.(deviceId) === true;
+}
+
 /** The shared wake filter and bounded public payload for every push transport. */
 export function activityPushPayload(event: ActivityEvent): ActivityPushPayload | null {
   if (!notifiableActivity(event)) return null;
@@ -122,15 +127,15 @@ export class WebPushNotifications {
     removePushEntries(this.subscriptionsPath, this.subscriptions(), (entry) => entry.deviceId === deviceId);
   }
 
-  /** Sends to every subscription; one receipt per subscription. */
-  async deliverActivity(event: ActivityEvent): Promise<DeliveryReceipt[]> {
+  /** Sends to applicable subscriptions; one receipt per target. */
+  async deliverActivity(event: ActivityEvent, canApprovePairing?: (id: string) => boolean): Promise<DeliveryReceipt[]> {
     const publicPayload = activityPushPayload(event);
     if (!publicPayload) {
       if (notifiableActivity(event)) console.error(`[webPush] skipped oversized activity payload ${event.id}`);
       return [];
     }
     const payload = JSON.stringify(publicPayload);
-    const subscriptions = this.subscriptions();
+    const subscriptions = this.subscriptions().filter(entry => activityPushTargetAllowed(event, entry.deviceId, canApprovePairing));
     const expired = new Set<string>();
     const receipts = await Promise.all(subscriptions.map(async (entry) => {
       const target = entry.label ?? 'Browser';

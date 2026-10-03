@@ -35,6 +35,13 @@ lines.on('line', (line) => {
     respond({ jsonrpc: '2.0', id: request.id, result: { sessionId: 'fake-session' } });
     return;
   }
+  if (request.method === 'session/prompt' && mode === 'retire-prompt') {
+    fs.writeFileSync(spawnCountPath + '.pid', String(process.pid));
+    respond({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fake-session',
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'active-turn' } } } });
+    setTimeout(() => respond({ jsonrpc: '2.0', id: request.id, result: { stopReason: 'end_turn' } }), 100);
+    return;
+  }
   if (request.method === 'session/prompt' && mode === 'detail-less-error') {
     process.stderr.write('SECRET-START\n' + 'x'.repeat(5000) + '\nDIAGNOSTIC-END\n', () => {
       respond({ jsonrpc: '2.0', id: request.id, error: { code: -32603, message: 'Internal error' } });
@@ -230,6 +237,32 @@ test('cancel evicts a child only when its prompt ignores cancellation', { timeou
     assert.equal(Number(readFileSync(spawnCountPath, 'utf8')), 2);
   } finally {
     await new Promise((resolve) => setTimeout(resolve, 50));
+    rmSync(fake.dir, { recursive: true, force: true });
+  }
+});
+
+
+test('credential rotation retires an ACP child after its current prompt settles', { timeout: 3000 }, async () => {
+  const fake = fakeAcpScript();
+  const count = join(fake.dir, 'count');
+  const backend = createAcpBackend('Codex', () => ({ command: process.execPath, args: [fake.path, 'retire-prompt', count] }));
+  try {
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const turn = backend.runTurn('profile', { ...emptyTurnInput, onChunk: () => started() });
+    await ready;
+    const pid = Number(readFileSync(count + '.pid', 'utf8'));
+    backend.dispose();
+    process.kill(pid, 0);
+    assert.equal((await turn).reply, 'active-turn');
+    let stopped = false;
+    for (let attempt = 0; attempt < 30 && !stopped; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      try { process.kill(pid, 0); } catch { stopped = true; }
+    }
+    assert.equal(stopped, true, 'retired child exits after the turn finishes');
+  } finally {
+    backend.dispose();
     rmSync(fake.dir, { recursive: true, force: true });
   }
 });

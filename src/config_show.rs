@@ -31,6 +31,7 @@ pub struct BackendInstanceSummary {
     pub logical_backend: String,
     pub account_label: Option<String>,
     pub auth_source_label: Option<String>,
+    pub credential_id: Option<String>,
     pub quota_pool: Option<String>,
     pub supported_models: Vec<String>,
     pub executable_configured: bool,
@@ -107,6 +108,7 @@ pub(crate) fn backend_instance_summaries(
                     .unwrap_or_else(|| instance.runner_kind.clone()),
                 account_label: instance.account_label.clone(),
                 auth_source_label: instance.auth_source_label.clone(),
+                credential_id: instance.credential_id.clone(),
                 quota_pool: instance.quota_pool.clone(),
                 supported_models: instance.supported_models.clone(),
                 executable_configured: instance.executable.is_some()

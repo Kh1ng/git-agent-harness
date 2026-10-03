@@ -46,9 +46,15 @@ export async function chatRoute(profile: string, nodeId?: string, backend?: stri
   if (!registry || !local) throw new Error('Worker chat routing is not configured.');
   const project = await resolveChatProject(profile);
   if (!project) throw new Error('The project is no longer in the catalog.');
-  const targetId = nodeId ?? project.node_id;
+  const available = requireReady ? await chatNodes(profile, backend) : [];
+  // An unpinned new chat can use another checkout when the catalog owner
+  // is offline. Explicit choices and existing-session routes stay pinned.
+  const targetId = nodeId ?? (requireReady
+    ? available.find(node => node.nodeId === project.node_id && node.eligible)?.nodeId
+      ?? available.find(node => node.eligible)?.nodeId ?? project.node_id
+    : project.node_id);
   if (requireReady) {
-    const target = (await chatNodes(profile, backend)).find(node => node.nodeId === targetId);
+    const target = available.find(node => node.nodeId === targetId);
     if (!target?.eligible) throw new Error(target?.reason ?? 'This worker is no longer registered.');
   }
   if (targetId === local.node_id) {

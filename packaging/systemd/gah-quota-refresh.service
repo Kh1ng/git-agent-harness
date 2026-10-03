@@ -30,6 +30,8 @@ WorkingDirectory=%h
 Environment=HOME=%h
 Environment=GAH_CONFIG=%h/.config/gah/config.toml
 Environment=XDG_STATE_HOME=%h/.local/state
+EnvironmentFile=-%h/.config/gah/gah-loop.env
+EnvironmentFile=-%h/.config/gah/provider-keys.env
 Environment=PATH=%h/.nvm/versions/node/v22.23.1/bin:%h/.opencode/bin:%h/.local/bin:%h/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=%h/.cargo/bin/gah quota auto-refresh
 TimeoutStartSec=300

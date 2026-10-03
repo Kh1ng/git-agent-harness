@@ -112,8 +112,8 @@ export interface StartPrChatInput {
   model?: string | null;
   /** Store override (tests). */
   storeOptions?: ChatSessionStoreOptions;
-  /** Creates the worktree-less session on a worker for a project with no
-   * checkout on central (#1276). Absent means a local session. */
+  /** Creates the worktree-less session on the selected node. Absent means
+   * a local session. */
   create?: (settings: { title: string; branch: string }) => Promise<ChatSessionSummary>;
 }
 

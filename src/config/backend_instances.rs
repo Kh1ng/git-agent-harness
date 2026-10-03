@@ -30,6 +30,9 @@ pub struct BackendInstanceConfig {
     pub account_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_source_label: Option<String>,
+    /// Stable local credential identifier; never a key, path, or display label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_pool: Option<String>,
     /// Empty preserves unrestricted legacy model behavior.
@@ -51,6 +54,24 @@ impl BackendInstanceConfig {
 /// Command output is discarded; only the provider's structured/safe login
 /// result reaches config, Doctor, or the dashboard.
 pub fn backend_instance_auth_ready(instance: &BackendInstanceConfig) -> Option<bool> {
+    if instance.credential_id.is_some() {
+        let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            &instance.runner_kind,
+            None::<String>,
+            None::<String>,
+        );
+        identity.credential_id = instance.credential_id.clone();
+        identity.state_root = instance.state_root.as_deref().map(PathBuf::from);
+        return Some(
+            matches!(
+                crate::runner::resolve_backend_instance_executable(instance),
+                crate::runner::ExecutableResolution::Found(_)
+            ) && identity.credential_env().is_ok()
+                && identity
+                    .validate_launch_config(&std::env::current_dir().ok()?)
+                    .is_ok(),
+        );
+    }
     let crate::runner::ExecutableResolution::Found(executable) =
         crate::runner::resolve_backend_instance_executable(instance)
     else {
@@ -81,6 +102,7 @@ pub(crate) fn merge_instance_maps(
             project.state_root = project.state_root.or(canonical.state_root);
             project.account_label = project.account_label.or(canonical.account_label);
             project.auth_source_label = project.auth_source_label.or(canonical.auth_source_label);
+            project.credential_id = project.credential_id.or(canonical.credential_id);
             project.quota_pool = project.quota_pool.or(canonical.quota_pool);
             if project.supported_models.is_empty() {
                 project.supported_models = canonical.supported_models;
@@ -176,6 +198,7 @@ impl RoutingPolicy {
             identity.state_root = instance.state_root.as_deref().map(PathBuf::from);
             identity.account_label = instance.account_label.clone();
             identity.auth_source_label = instance.auth_source_label.clone();
+            identity.credential_id = instance.credential_id.clone();
             identity.quota_pool = candidate
                 .quota_pool
                 .clone()
@@ -235,6 +258,7 @@ fn validate_instance(
         ("runner kind", Some(instance.runner_kind.as_str())),
         ("account label", instance.account_label.as_deref()),
         ("auth source label", instance.auth_source_label.as_deref()),
+        ("credential identifier", instance.credential_id.as_deref()),
         ("quota pool", instance.quota_pool.as_deref()),
     ] {
         if let Some(value) = value {
@@ -253,6 +277,18 @@ fn validate_instance(
             "instance '{name}': unsupported runner kind '{}'",
             instance.runner_kind
         ));
+    }
+    if instance.credential_id.is_some() {
+        let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            &instance.runner_kind,
+            None::<String>,
+            None::<String>,
+        );
+        identity.credential_id = instance.credential_id.clone();
+        identity.state_root = instance.state_root.as_deref().map(PathBuf::from);
+        if let Err(error) = identity.credential_env() {
+            errors.push(format!("instance '{name}': {error}"));
+        }
     }
     if let Some(root) = instance
         .state_root
@@ -358,6 +394,17 @@ fn validate_candidate(
             candidate.model.as_deref().unwrap_or("<default>"),
             instance_name
         ));
+    }
+    if instance.credential_id.is_some() {
+        if let Err(error) = routing
+            .execution_identity_for_candidate(candidate)
+            .credential_env()
+        {
+            errors.push(format!(
+                "instance '{}' credential binding: {}",
+                instance_name, error
+            ));
+        }
     }
     validate_cost(candidate, instance_name, instance, errors);
 }
@@ -469,6 +516,7 @@ mod tests {
                 state_root: Some("/var/lib/gah/opencode-api".into()),
                 account_label: Some("team-api".into()),
                 auth_source_label: Some("env-openai-key".into()),
+                credential_id: Some("openai-source".into()),
                 quota_pool: Some("openai-api".into()),
                 supported_models: vec!["openai/gpt-5".into()],
                 enabled: Some(true),
@@ -483,6 +531,7 @@ mod tests {
         });
 
         assert_eq!(identity.backend_instance, "opencode-api");
+        assert_eq!(identity.credential_id.as_deref(), Some("openai-source"));
         assert_eq!(identity.account_label.as_deref(), Some("team-api"));
         assert_eq!(
             identity.auth_source_label.as_deref(),
@@ -586,6 +635,7 @@ impl Default for BackendInstanceConfig {
             state_root: None,
             account_label: None,
             auth_source_label: None,
+            credential_id: None,
             quota_pool: None,
             supported_models: Vec::new(),
         }

@@ -113,7 +113,7 @@ function getConfigPath(config?: string): string | undefined {
 /**
  * Spawn options for running GAH CLI commands
  */
-function getSpawnOptions(config?: string, detached?: boolean): SpawnOptions {
+export function getSpawnOptions(config?: string, detached?: boolean): SpawnOptions {
   const env = { ...process.env };
   
   // Set config path if provided
@@ -623,7 +623,7 @@ const TERMINATE_KILL_TIMEOUT_MS = 5000;
  * direct child. Windows has no process-group signalling equivalent, so
  * `taskkill /T` is used to walk and kill the descendant tree instead.
  */
-async function terminateProcessTree(pid: number, child: ChildProcess): Promise<boolean> {
+export async function terminateProcessTree(pid: number, child: ChildProcess): Promise<boolean> {
   if (process.platform === 'win32') {
     spawnSync('taskkill', ['/PID', String(pid), '/T', '/F']);
     return waitForClose(child, TERMINATE_KILL_TIMEOUT_MS);
@@ -1484,12 +1484,14 @@ export async function runBackendInstanceToggle(
 export async function runBackendInstanceAdd(
   profile: string,
   instance: string,
-  runnerKind: 'codex' | 'claude',
+  runnerKind: 'codex' | 'claude' | 'opencode' | 'hermes' | 'vibe' | 'agy' | 'openhands',
   accountLabel: string,
-  config?: string
+  config?: string,
+  credentialId?: string
 ): Promise<void> {
   const args = ['config', 'add-backend-instance', '--profile', profile, '--instance', instance,
     '--runner-kind', runnerKind, '--account-label', accountLabel];
+  if (credentialId) args.push('--credential-id', credentialId);
   if (config) args.push('--config-path', config);
   return runVoidCommand(args, config, 'gah config add-backend-instance');
 }
@@ -1513,6 +1515,10 @@ export interface BackendInstanceRuntime {
   executable: string;
   state_root: string | null;
   account_label: string | null;
+  /** Local reference and save generation; never includes a secret. */
+  credential_id?: string | null;
+  credential_provider?: string | null;
+  credential_revision?: string | null;
 }
 
 export function runBackendInstanceRuntime(profile: string, instance: string, config?: string): Promise<BackendInstanceRuntime> {

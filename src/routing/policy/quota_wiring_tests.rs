@@ -5,6 +5,70 @@
 //! rather than pushing `tests.rs` further over).
 
 use super::*;
+use crate::routing::policy::{live_quota_pacing_inputs, ExecutionIdentity};
+
+#[test]
+fn live_weekly_pacing_rejects_other_windows_stale_and_failed_checks() {
+    let now = OffsetDateTime::now_utc();
+    let identity = ExecutionIdentity::legacy_candidate("codex", Some("gpt-5.4"), None::<String>);
+    let fresh = crate::quota_store::QuotaObservationRecord {
+        backend: "codex".into(),
+        backend_instance: None,
+        model: Some("gpt-5.4".into()),
+        quota_pool: None,
+        quota_window: Some("weekly".into()),
+        quota_used_percent: Some(20.0),
+        quota_remaining_percent: Some(80.0),
+        quota_reset_at: (now + time::Duration::days(5)).format(&Rfc3339).ok(),
+        observed_at: now.format(&Rfc3339).ok(),
+        checked_at: None,
+        check_error: None,
+        usage_source: Some("test".into()),
+        mistral_admin: None,
+        account_usage: None,
+        credential_id: None,
+    };
+    assert_eq!(
+        live_quota_pacing_inputs(std::slice::from_ref(&fresh), &identity, now).0,
+        Some(20.0)
+    );
+    for window in ["subscription-monthly", "5h", "daily"] {
+        let mut other = fresh.clone();
+        other.quota_window = Some(window.into());
+        assert_eq!(
+            live_quota_pacing_inputs(&[other.clone()], &identity, now),
+            (None, None)
+        );
+        assert_eq!(
+            live_quota_pacing_inputs(&[fresh.clone(), other], &identity, now).0,
+            Some(20.0)
+        );
+    }
+    for observed in [
+        now - time::Duration::minutes(31),
+        now + time::Duration::seconds(1),
+    ] {
+        let mut invalid = fresh.clone();
+        invalid.observed_at = observed.format(&Rfc3339).ok();
+        assert_eq!(
+            live_quota_pacing_inputs(&[invalid], &identity, now),
+            (None, None)
+        );
+    }
+    let mut expired = fresh.clone();
+    expired.quota_reset_at = now.format(&Rfc3339).ok();
+    assert_eq!(
+        live_quota_pacing_inputs(&[expired], &identity, now),
+        (None, None)
+    );
+    let mut failed = fresh.clone();
+    failed.check_error = Some("failed".into());
+    failed.checked_at = (now + time::Duration::seconds(1)).format(&Rfc3339).ok();
+    assert_eq!(
+        live_quota_pacing_inputs(&[fresh, failed], &identity, now),
+        (None, None)
+    );
+}
 
 // Same scenario as cost_aware_ordering_prefers_underpace_included_quota in
 // tests.rs, but the operator opted "codex" into quota-aware pacing
@@ -37,6 +101,8 @@ fn cost_aware_ordering_uses_live_quota_store_data_when_config_does_not_hardcode_
             check_error: None,
             usage_source: Some("codex_status_json".to_string()),
             mistral_admin: None,
+            account_usage: None,
+            credential_id: None,
         },
     )
     .unwrap();

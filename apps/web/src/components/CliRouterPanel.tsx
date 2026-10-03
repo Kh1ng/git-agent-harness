@@ -63,7 +63,11 @@ export function CliRouterPanel() {
     try {
       const data = await cliRouterApi.getSnapshot();
       if (sequence !== fetchSequence.current) return;
-      setSnapshot(data);
+      // A failed connection does not remove accounts. Keep the last inventory
+      // until a successful read confirms it, including a confirmed empty list.
+      setSnapshot(previous => data.status === 'unavailable' && data.accounts.length === 0 && previous
+        ? { ...data, accounts: previous.accounts }
+        : data);
       setError(null);
     } catch (err) {
       if (sequence !== fetchSequence.current) return;
@@ -119,8 +123,16 @@ export function CliRouterPanel() {
       </div>
 
       {error && <p role="alert" className="text-xs text-critical">Latest refresh failed. Showing the earlier snapshot. {error}</p>}
-      {snapshot?.status === 'connected' && (
-        <AccountList accounts={snapshot.accounts} onChanged={fetchSnapshot} />
+      {snapshot?.status === 'unavailable' && <p role="alert" className="text-xs text-critical">Router unavailable. Account inventory and quota readings may be incomplete or from an earlier check. Refresh to check the connection.</p>}
+      {snapshot && (snapshot.status === 'connected' || snapshot.accounts.length > 0) && (
+        <AccountList accounts={snapshot.accounts} onChanged={updated => {
+          if (!updated) { void fetchSnapshot(); return; }
+          // Account refresh can return fresh quotas while models/routing are
+          // unavailable. Use that response rather than discard it in a reread.
+          fetchSequence.current += 1;
+          setSnapshot(updated);
+          setError(null);
+        }} />
       )}
 
       <details className="quota-settings" open={snapshot?.status === 'unconfigured'}>
@@ -357,7 +369,7 @@ function AccountList({
   onChanged,
 }: {
   accounts: CliRouterSnapshot['accounts'];
-  onChanged: () => void;
+  onChanged: (snapshot?: CliRouterSnapshot) => void;
 }) {
   const [providerFilter, setProviderFilter] = useState('All');
   const [showLabels, setShowLabels] = useState(false);
@@ -467,7 +479,7 @@ function AccountRow({
 }: {
   account: CliRouterSnapshot['accounts'][number];
   showLabel: boolean;
-  onChanged: () => void;
+  onChanged: (snapshot?: CliRouterSnapshot) => void;
 }) {
   const [actionPending, setActionPending] = useState<'toggle' | 'refresh' | null>(null);
   const [feedback, setFeedback] = useFeedback();
@@ -494,7 +506,7 @@ function AccountRow({
       const updated = await cliRouterApi.refreshAccount({ id: account.id });
       const quotaError = updated.accounts.find(row => row.id === account.id)?.quotaError;
       setFeedback(quotaError ? { kind: 'error', text: quotaError } : { kind: 'success', text: 'Quota refreshed' });
-      onChanged();
+      onChanged(updated);
     } catch (err) {
       setFeedback({ kind: 'error', text: errorText(err) });
     } finally {

@@ -8,6 +8,13 @@ const compatibilityClients = new WeakSet<WebSocket>();
 const compatibilityWarnings = new WeakSet<WebSocket>();
 const deviceClients = new WeakMap<WebSocket, { access: DeviceAccess; id: string }>();
 
+/** Approval alerts follow the same live delegation as HTTP review actions. */
+export function webSocketCanApprovePairing(ws: WebSocket): boolean {
+  if (compatibilityClients.has(ws)) return false;
+  const device = deviceClients.get(ws);
+  return device ? device.access.canApprovePairing(device.id) : true;
+}
+
 /** Check before dispatching each message, including messages already buffered
  * when revocation terminated the transport. Revocation never stops accepted work. */
 export function webSocketAccessValid(ws: WebSocket): boolean {

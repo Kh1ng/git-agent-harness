@@ -1,4 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { bindMistralLogin, type MistralLoginResult } from './mistralLogin.js';
+import { bindProviderConnections } from './providerConnections.js';
 
 type Presence = { dock: boolean; launch_window: boolean; tray: boolean };
 type Settings = { central_url: string; wsl_distribution: string; presence: Presence };
@@ -14,6 +17,13 @@ const tray = document.querySelector<HTMLInputElement>('#show-tray')!;
 const ownerToken = document.querySelector<HTMLInputElement>('#owner-token')!;
 const ownerState = document.querySelector<HTMLElement>('#owner-state')!;
 const isMac = navigator.userAgent.includes('Mac');
+const showMistralLogin = bindMistralLogin(document.querySelector<HTMLElement>('#mistral-section')!, command => invoke<MistralLoginResult>(command));
+const showProviderConnection = bindProviderConnections(document.querySelector<HTMLElement>('#provider-connections')!, invoke);
+// Explicit Check connection remains available if automatic status events cannot be delivered.
+void listen<MistralLoginResult>('gah:mistral-login', event => {
+  showMistralLogin(event.payload);
+  showProviderConnection(event.payload);
+}).catch(() => {});
 
 function showPresence(presence: Presence) {
   dock.checked = presence.dock;
@@ -48,6 +58,7 @@ type SetupCheck = {
   terminal: boolean;
 };
 let nodeRole: 'central' | 'worker' = 'central';
+let standaloneStarted = false;
 
 function statusText(status: SetupStatus): string {
   switch (status.state) {
@@ -59,8 +70,8 @@ function statusText(status: SetupStatus): string {
   }
 }
 
-/** `gah setup --check` as a checklist; the work itself happens in Terminal. */
-async function refreshSetup() {
+/** `gah setup --check` as a checklist; the work itself happens in Terminal. Resolves to readiness. */
+async function refreshSetup(): Promise<boolean> {
   const result = await invoke<SetupCheck>('setup_check', { role: nodeRole });
   const state = document.querySelector<HTMLElement>('#setup-state')!;
   const list = document.querySelector<HTMLElement>('#setup-list')!;
@@ -69,7 +80,7 @@ async function refreshSetup() {
   list.replaceChildren();
   const pending = !result.installed || !result.report?.ready;
   if (!result.installed) {
-    state.textContent = 'GAH is not installed on this computer yet. Setup builds it, asks what this computer is for, and offers each missing tool before installing it.';
+    state.textContent = 'GAH is not installed on this computer yet. Setup builds it, asks whether this computer is the central node, a worker, or command line only, and offers each missing tool before installing it.';
     button.textContent = 'Install GAH in Terminal';
   } else if (result.error || !result.report) {
     state.textContent = result.error ?? 'Setup could not check this computer.';
@@ -103,15 +114,19 @@ async function refreshSetup() {
   }
   list.hidden = list.childElementCount === 0;
   button.hidden = !pending || !result.terminal;
+  document.querySelector<HTMLElement>('#setup-standalone')!.hidden = button.hidden;
+  document.querySelector<HTMLElement>('#standalone-note')!.hidden = button.hidden;
   commandLine.hidden = !pending || result.terminal;
   commandLine.querySelector('code')!.textContent = result.command;
+  return !pending;
 }
 
 async function perform(action: () => Promise<void>) {
   error.textContent = '';
-  document.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+  const buttons = [...document.querySelectorAll('button')].filter(button => !button.closest('#provider-connections, #mistral-section'));
+  buttons.forEach((button) => { button.disabled = true; });
   try { await action(); } catch (err) { error.textContent = String(err); }
-  finally { document.querySelectorAll('button').forEach((button) => { button.disabled = false; }); }
+  finally { buttons.forEach((button) => { button.disabled = false; }); }
 }
 
 async function refresh() {
@@ -186,7 +201,22 @@ document.querySelector('#presence')!.addEventListener('submit', (event) => {
 dock.addEventListener('change', constrainPresence);
 tray.addEventListener('change', constrainPresence);
 document.querySelector('#refresh')!.addEventListener('click', () => { void perform(refresh); });
-document.querySelector('#setup-refresh')!.addEventListener('click', () => { void perform(refreshSetup); });
+document.querySelector('#setup-refresh')!.addEventListener('click', () => {
+  void perform(async () => {
+    if (await refreshSetup() && standaloneStarted) {
+      standaloneStarted = false;
+      await connect();
+    }
+  });
+});
+document.querySelector('#setup-standalone')!.addEventListener('click', () => {
+  void perform(async () => {
+    central.value = await invoke<string>('open_setup_terminal', { standalone: true });
+    nodeRole = 'central';
+    standaloneStarted = true;
+    document.querySelector('#setup-state')!.textContent = 'Standalone setup is running in Terminal. Select Check again when it finishes to open the dashboard.';
+  });
+});
 document.querySelector('#setup-terminal')!.addEventListener('click', () => {
   void perform(async () => {
     await invoke('open_setup_terminal');
@@ -219,8 +249,6 @@ void perform(async () => {
   const role = await invoke<RoleStatus>('node_role_status');
   showRole(role);
   nodeRole = role.role;
-  // Windows workers install through the Windows installer and WSL.
-  const setup = document.querySelector<HTMLElement>('#setup-section')!;
-  setup.hidden = navigator.userAgent.includes('Windows');
-  if (!setup.hidden) await refreshSetup();
+  // On Windows, setup and gah live in the selected WSL distribution.
+  await refreshSetup();
 });

@@ -863,6 +863,8 @@ fn account_quota_merges_into_backend_group_only() {
         check_error: None,
         usage_source: Some("codex_app_server".to_string()),
         mistral_admin: None,
+        account_usage: None,
+        credential_id: None,
     };
     let observations = vec![account];
 

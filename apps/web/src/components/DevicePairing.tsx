@@ -4,6 +4,8 @@ import type { PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harn
 import { GahApiError, pairingApi } from '../api/client.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { saveCoordinatorToken } from '../api/coordinatorToken.js';
+import { DeviceAccessRequest } from './DeviceAccessRequest.js';
+import { DeviceAccessReview } from './DeviceAccessReview.js';
 import { ConnectionStatus } from './ConnectionStatus.js';
 import { setSystemNotificationsEnabled } from '../lib/activityNotifications.js';
 
@@ -31,13 +33,16 @@ async function unregisterNativePush(): Promise<void> {
  * neither this component nor the QR renderer receives a device credential. */
 export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () => void }) {
   const nativeController = (window as Window & { webkit?: { messageHandlers?: { gahController?: { postMessage?: (message: string) => void } } } }).webkit?.messageHandlers?.gahController;
-  const { isConnected, isConnecting, error: connectionError, serverVersion } = useWebSocket();
+  const { isConnected, isConnecting, error: connectionError, serverVersion, activityRevision } = useWebSocket();
   const [pending, setPending] = useState(() => {
     try { return pairingLink(window.location.href); } catch { return null; }
   });
   const [preview, setPreview] = useState<PairingPreview | null>(null);
+  const [sessionUnauthenticated, setSessionUnauthenticated] = useState(false);
+  const [sessionChecked, setSessionChecked] = useState(false);
   const [principal, setPrincipal] = useState<'owner' | 'device' | null>(null);
-  const [open, setOpen] = useState(Boolean(pending));
+  const [open, setOpen] = useState(Boolean(pending) || new URLSearchParams(window.location.search).has('pairingRequest'));
+  const [canApprove, setCanApprove] = useState(false);
   const [origin, setOrigin] = useState(window.location.origin);
   const [manualLink, setManualLink] = useState('');
   const [deviceName, setDeviceName] = useState('');
@@ -46,13 +51,14 @@ export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () =
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const loadSession = () => { pairingApi.session().then(({ principal }) => setPrincipal(principal.kind)).catch(error => {
+  const loadSession = () => { pairingApi.session().then(session => { setSessionUnauthenticated(false); setPrincipal(session.principal.kind); setCanApprove(session.principal.kind === 'owner' || session.can_approve_pairing === true); }).catch(error => {
       if (error instanceof GahApiError && [401, 403].includes(error.status)) {
+        setSessionUnauthenticated(true);
         if (principal === 'device') { setNotice(''); setError(error.message); }
-        setPrincipal(null);
+        setPrincipal(null); setCanApprove(false);
       }
-    }); };
-  useEffect(loadSession, [isConnected]);
+    }).finally(() => setSessionChecked(true)); };
+  useEffect(loadSession, [isConnected, activityRevision]);
   useEffect(() => {
     if (!pending) return;
     // Fragments never reach the HTTP server; remove them from browser history too.
@@ -79,14 +85,18 @@ export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () =
   };
   const url = offer ? `${offer.server.origin}/#pair=${offer.code}&server=${offer.server.id}` : '';
   return <section className="mt-3 text-sm max-sm:[&_button]:min-h-11 max-sm:[&_input]:min-h-11" aria-label="Device pairing">
-    {!pending && <div className="mb-3"><ConnectionStatus isConnected={isConnected} isConnecting={isConnecting} error={connectionError} serverVersion={serverVersion} /></div>}
+    {!pending && !(principal === null && sessionUnauthenticated) && <div className="mb-3"><ConnectionStatus isConnected={isConnected} isConnecting={isConnecting} error={connectionError} serverVersion={serverVersion} /></div>}
     {principal === 'owner' && <p role="status" className="mb-2 text-good">Owner · Administrative access enabled</p>}
     {principal === 'device' && <p role="status" className="mb-2 text-good">Paired controller · Dashboard access enabled</p>}
-    {principal === null && !pending && <p role="status" className={`mb-2 ${isConnected ? 'text-warning' : 'text-muted'}`}>Disconnected · No owner or controller access</p>}
+    {principal === null && !pending && <p role="status" className={`mb-2 ${isConnected ? 'text-warning' : 'text-muted'}`}>{sessionUnauthenticated ? 'Access required · Request approval or use a pairing link' : 'Disconnected · No owner or controller access'}</p>}
     <div className="flex flex-wrap gap-2">
     {!pending && typeof nativeController?.postMessage === 'function' && <button type="button" className="btn-primary" onClick={() => nativeController.postMessage?.('scanPairingCode')}>Scan pairing QR code</button>}
-    <button type="button" className="btn-secondary" aria-expanded={open} onClick={() => setOpen(!open)}>{principal === 'owner' ? 'Pair a device' : principal === 'device' ? 'Manage pairing' : 'Pair this device'}</button>
+    <button type="button" className="btn-secondary" aria-expanded={open} onClick={() => { setOpen(!open); if (!open) loadSession(); }}>{principal === 'owner' ? 'Pair a device' : principal === 'device' ? 'Manage pairing' : 'Pair this device'}</button>
     {principal === 'device' && !pending && <button type="button" className="btn-secondary" onClick={requestOwnerAccess}>Pair another device</button>}</div>
+    {sessionChecked && principal === null && !pending && <DeviceAccessRequest onPaired={async device => {
+      saveCoordinatorToken(''); setPrincipal('device'); setCanApprove(false); setOpen(true); setError('');
+      setNotice(`Paired as ${device.name}. Access expires ${new Date(device.expires_at).toLocaleDateString()}.`);
+    }} />}
     {open && <div className="mt-3 max-w-2xl space-y-4 rounded-md border border-subtle bg-raised p-4">
       {error && <p role="alert" className="text-critical">{error}</p>}
       {notice && <p role="status" className="text-secondary">{notice}</p>}
@@ -108,6 +118,7 @@ export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () =
           <button type="button" className="btn-secondary" onClick={() => { setPending(null); setPreview(null); }}>Cancel pairing</button>
         </div>
       </form> : pending && !error ? <p role="status">Checking pairing code…</p> : null}
+      {canApprove && !pending && <DeviceAccessReview />}
       {principal === 'owner' && !pending && <>
         <form className="space-y-3" onSubmit={event => { event.preventDefault(); void run(async () => setOffer(await pairingApi.create(origin))); }}>
           <p className="text-secondary">Give a trusted device dashboard control. Codes expire after five minutes and work once.</p>
@@ -130,11 +141,12 @@ export function DevicePairing({ requestOwnerAccess }: { requestOwnerAccess: () =
           {devices?.length === 0 && <p className="text-secondary">No paired devices.</p>}
           <ul className="space-y-2">{devices?.map(device => <li key={device.id} className="flex flex-wrap items-center justify-between gap-2 border-t border-subtle pt-2">
             <span className="min-w-0 break-words">{device.name} <span className="text-secondary">· {device.revoked_at ? 'Revoked' : Date.parse(device.expires_at) <= Date.now() ? 'Expired' : `Expires ${new Date(device.expires_at).toLocaleDateString()}`}</span></span>
+            {!device.revoked_at && Date.parse(device.expires_at) > Date.now() && <label className="flex min-h-11 items-center gap-2 text-secondary"><input type="checkbox" disabled={busy} checked={device.can_approve_pairing === true} onChange={event => { const enabled = event.target.checked; setDevices(current => current?.map(item => item.id === device.id ? { ...item, can_approve_pairing: enabled } : item) ?? null); void run(async () => { try { await pairingApi.setApprover(device.id, enabled); loadDevices(); setNotice(`${device.name} ${enabled ? 'can now approve' : 'can no longer approve'} device access requests.`); } catch (failure) { setDevices(current => current?.map(item => item.id === device.id ? device : item) ?? null); throw failure; } }); }} />Allow {device.name} to approve access requests</label>}
             {!device.revoked_at && <button type="button" className="btn-secondary" disabled={busy} onClick={() => void run(async () => { await pairingApi.revoke(device.id); loadDevices(); setNotice(`Revoked ${device.name}. Existing device connections are closed.`); })}>Revoke {device.name}</button>}
           </li>)}</ul>
         </div>
       </>}
-      {principal === 'device' && !pending && <div className="space-y-2"><p className="text-secondary">Pairing stays signed in across app or browser restarts until it expires or the owner revokes access.</p><p className="text-secondary">To generate a pairing QR code for another device, sign in with the central owner token.</p><button type="button" className="btn-secondary" disabled={busy} onClick={() => void run(async () => { await unregisterNativePush(); await setSystemNotificationsEnabled(false); await pairingApi.logout(); saveCoordinatorToken(''); setPrincipal(null); setNotice('Device session cleared from this browser.'); })}>Disconnect this browser</button></div>}
+      {principal === 'device' && !pending && <div className="space-y-2"><p className="text-secondary">Pairing stays signed in across app or browser restarts until it expires or the owner revokes access.</p><p className="text-secondary">{canApprove ? 'This device can approve access requests. Only the owner can enable approval on other devices.' : 'To approve access requests here, ask the owner to enable this device in Paired devices.'}</p><p className="text-secondary">To generate a pairing QR code for another device, sign in with the central owner token.</p><button type="button" className="btn-secondary" disabled={busy} onClick={() => void run(async () => { await unregisterNativePush(); await setSystemNotificationsEnabled(false); await pairingApi.logout(); saveCoordinatorToken(''); setPrincipal(null); setCanApprove(false); setNotice('Device session cleared from this browser.'); })}>Disconnect this browser</button></div>}
       {principal === null && !pending && <p className="text-secondary">Ask the owner for a pairing link or QR code to stay signed in on this device. An owner access token grants temporary access for this tab only.</p>}
       {!pending && <form className="space-y-2 border-t border-subtle pt-3" onSubmit={event => { event.preventDefault(); try {
         const parsed = pairingLink(manualLink);
