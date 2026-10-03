@@ -20,10 +20,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+mod identity;
+mod instances;
+pub(crate) use identity::current_source_records;
+pub use identity::{latest_windows_for_identity, latest_windows_for_identity_and_credential};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaObservationRecord {
     pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +136,7 @@ pub fn parse_external_observation(input: &str) -> Result<QuotaObservationRecord>
     let allowed = [
         "backend",
         "backend_instance",
+        "credential_id",
         "model",
         "quota_pool",
         "quota_window",
@@ -153,6 +160,7 @@ pub fn parse_external_observation(input: &str) -> Result<QuotaObservationRecord>
     for (name, value) in [
         ("backend", Some(record.backend.as_str())),
         ("backend instance", record.backend_instance.as_deref()),
+        ("credential ID", record.credential_id.as_deref()),
         ("quota pool", record.quota_pool.as_deref()),
         ("usage source", record.usage_source.as_deref()),
     ] {
@@ -312,78 +320,6 @@ pub fn latest_for_identity<'a>(
         .max_by(|left, right| left.observed_at.cmp(&right.observed_at))
 }
 
-fn observation_matches_identity(
-    record: &QuotaObservationRecord,
-    identity: &crate::execution_identity::ExecutionIdentity,
-) -> bool {
-    record.backend == identity.logical_backend
-        && (record.model.is_none() || record.model == identity.effective_model)
-        && record
-            .backend_instance
-            .as_deref()
-            .is_none_or(|instance| instance == identity.backend_instance)
-        && record
-            .quota_pool
-            .as_deref()
-            .is_none_or(|pool| Some(pool) == identity.quota_pool.as_deref())
-}
-
-/// Latest reading for each limit window belonging to this execution identity.
-/// A five-hour refresh must not replace an independent weekly balance.
-pub fn latest_windows_for_identity<'a>(
-    records: &'a [QuotaObservationRecord],
-    identity: &crate::execution_identity::ExecutionIdentity,
-) -> Vec<&'a QuotaObservationRecord> {
-    let matching: Vec<_> = records
-        .iter()
-        .filter(|record| observation_matches_identity(record, identity))
-        .collect();
-    let timestamp = |record: &QuotaObservationRecord| {
-        record
-            .checked_at
-            .as_deref()
-            .or(record.observed_at.as_deref())
-            .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
-    };
-    let mut windows = std::collections::BTreeMap::<_, &QuotaObservationRecord>::new();
-    let mut invalidated = std::collections::BTreeMap::<_, OffsetDateTime>::new();
-    for check in matching
-        .iter()
-        .filter(|check| check.check_error.is_some() || !has_quota_data(check))
-    {
-        if let Some(checked) = timestamp(check) {
-            let current = invalidated.entry(&check.quota_window).or_insert(checked);
-            *current = (*current).max(checked);
-        }
-    }
-    for record in matching
-        .iter()
-        .copied()
-        .filter(|record| has_quota_data(record) && record.check_error.is_none())
-    {
-        // A failed or empty check invalidates earlier data for that window.
-        // An account-wide check with no window invalidates all its windows.
-        if [
-            invalidated.get(&None),
-            invalidated.get(&record.quota_window),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|checked| timestamp(record).is_none_or(|observed| *checked >= observed))
-        {
-            continue;
-        }
-        let key = (&record.model, &record.quota_window);
-        if windows
-            .get(&key)
-            .is_none_or(|current| timestamp(record) >= timestamp(current))
-        {
-            windows.insert(key, record);
-        }
-    }
-    windows.into_values().collect()
-}
-
 fn has_quota_data(record: &QuotaObservationRecord) -> bool {
     record.quota_used_percent.is_some()
         || record.quota_remaining_percent.is_some()
@@ -419,6 +355,7 @@ pub fn refresh_codex_and_store(
                 usage_source: obs.usage_source.clone(),
                 mistral_admin: None,
                 account_usage: None,
+                credential_id: None,
             };
             append(state_path, &rec)?;
             Ok(Some(rec))
@@ -443,10 +380,21 @@ pub fn refresh_vibe_admin_and_store(
 ) -> Result<Option<QuotaObservationRecord>> {
     let api_key = crate::usage::admin_api_key()
         .ok_or_else(|| anyhow::anyhow!("auth_required: MISTRAL_ADMIN_API_KEY is not configured"))?;
+    let record = refresh_vibe_admin_record(&api_key, model)?;
+    if let Some(record) = &record {
+        append(state_path, record)?;
+    }
+    Ok(record)
+}
+
+pub(crate) fn refresh_vibe_admin_record(
+    api_key: &str,
+    model: Option<&str>,
+) -> Result<Option<QuotaObservationRecord>> {
     let end_time = time::OffsetDateTime::now_utc().unix_timestamp();
     let thirty_days_secs = 30 * 24 * 60 * 60;
     let refresh = crate::usage::refresh_admin_data(
-        &api_key,
+        api_key,
         (end_time - thirty_days_secs, end_time),
         "vibe",
         model,
@@ -471,8 +419,8 @@ pub fn refresh_vibe_admin_and_store(
                 usage_source: Some("mistral_admin_refresh".to_string()),
                 mistral_admin: Some(admin_refresh),
                 account_usage: None,
+                credential_id: None,
             };
-            append(state_path, &rec)?;
             return Ok(Some(rec));
         }
         if let Some(error) = refresh.spend_limit_error {
@@ -495,8 +443,8 @@ pub fn refresh_vibe_admin_and_store(
         usage_source: obs.usage_source,
         mistral_admin: admin_refresh,
         account_usage: None,
+        credential_id: None,
     };
-    append(state_path, &rec)?;
     Ok(Some(rec))
 }
 
@@ -512,7 +460,16 @@ pub fn refresh_codex_and_store_for_identity(
     let Some(observation) = observation else {
         return Ok(None);
     };
-    let record = QuotaObservationRecord {
+    let record = record_from_codex_observation(observation, identity);
+    append(state_path, &record)?;
+    Ok(Some(record))
+}
+
+fn record_from_codex_observation(
+    observation: crate::ledger::summary::GroupQuotaObservation,
+    identity: &crate::execution_identity::ExecutionIdentity,
+) -> QuotaObservationRecord {
+    QuotaObservationRecord {
         backend: identity.logical_backend.clone(),
         backend_instance: Some(identity.backend_instance.clone()),
         model: identity.effective_model.clone(),
@@ -527,9 +484,8 @@ pub fn refresh_codex_and_store_for_identity(
         usage_source: observation.usage_source,
         mistral_admin: None,
         account_usage: None,
-    };
-    append(state_path, &record)?;
-    Ok(Some(record))
+        credential_id: None,
+    }
 }
 
 /// Persist both native Claude allowance windows under the default account's
@@ -567,6 +523,7 @@ pub fn refresh_stale_quota_observations(
         .clone()
         .unwrap_or_else(|| "codex".to_string());
     let mut handles = Vec::new();
+    handles.extend(instances::refresh(profile, now, store_path));
     if let Some(handle) =
         maybe_refresh_backend_instance(store_path, "claude", Some("claude"), now, {
             let path = store_path.to_path_buf();
@@ -614,7 +571,7 @@ pub fn refresh_stale_quota_observations(
             .unwrap_or_default()
             .into_iter()
             .rev()
-            .find(|record| record.backend == "mistral-dashboard")
+            .find(|record| record.backend == "mistral-dashboard" && record.credential_id.is_none())
             .and_then(|record| record.backend_instance);
         if let Some(handle) = maybe_refresh_backend_instance(
             store_path,
@@ -629,11 +586,27 @@ pub fn refresh_stale_quota_observations(
             handles.push(handle);
         }
     }
-    if let Some(handle) = maybe_refresh_backend(store_path, "vibe", now, {
+    if crate::usage::admin_api_key().is_some() {
+        if let Some(handle) = maybe_refresh_backend(store_path, "vibe", now, {
+            let path = store_path.to_path_buf();
+            move || refresh_vibe_admin_and_store(None, &path)
+        }) {
+            handles.push(handle);
+        }
+    }
+    for info in crate::credentials::list().unwrap_or_default() {
+        let id = info.id.clone();
         let path = store_path.to_path_buf();
-        move || refresh_vibe_admin_and_store(None, &path)
-    }) {
-        handles.push(handle);
+        if let Some(handle) = maybe_refresh_source(
+            store_path,
+            crate::credentials::quota::backend(&info),
+            None,
+            Some(&info.id),
+            now,
+            move || crate::credentials::quota::refresh(&id, &path).map(Some),
+        ) {
+            handles.push(handle);
+        }
     }
     handles
 }
@@ -687,11 +660,24 @@ fn maybe_refresh_backend_instance(
     now: OffsetDateTime,
     refresh: impl FnOnce() -> Result<Option<QuotaObservationRecord>> + Send + 'static,
 ) -> Option<std::thread::JoinHandle<()>> {
+    maybe_refresh_source(path, backend, instance, None, now, refresh)
+}
+
+fn maybe_refresh_source(
+    path: &Path,
+    backend: &str,
+    instance: Option<&str>,
+    credential_id: Option<&str>,
+    now: OffsetDateTime,
+    refresh: impl FnOnce() -> Result<Option<QuotaObservationRecord>> + Send + 'static,
+) -> Option<std::thread::JoinHandle<()>> {
     let records = load(path).unwrap_or_default();
     let last_checked = records
         .iter()
         .filter(|record| {
-            record.backend == backend && record.backend_instance.as_deref() == instance
+            record.backend == backend
+                && record.credential_id.as_deref() == credential_id
+                && (credential_id.is_some() || record.backend_instance.as_deref() == instance)
         })
         .filter_map(|record| {
             record
@@ -708,7 +694,11 @@ fn maybe_refresh_backend_instance(
     if !due {
         return None;
     }
-    let in_flight_key = format!("{backend}\0{}", instance.unwrap_or_default());
+    let in_flight_key = format!(
+        "{backend}\0{}\0{}",
+        instance.unwrap_or_default(),
+        credential_id.unwrap_or_default()
+    );
     {
         let mut in_flight = IN_FLIGHT
             .lock()
@@ -723,6 +713,7 @@ fn maybe_refresh_backend_instance(
     let path = path.to_path_buf();
     let backend = backend.to_string();
     let instance = instance.map(str::to_string);
+    let credential_id = credential_id.map(str::to_string);
     Some(std::thread::spawn(move || {
         // `refresh_*_and_store` already appends a real record when it
         // finds data (Ok(Some(_))); on Ok(None)/Err, append a data-free
@@ -730,7 +721,9 @@ fn maybe_refresh_backend_instance(
         // attempt and stops retrying every tick against a backend that
         // isn't configured here at all.
         let refresh = refresh();
-        if !matches!(&refresh, Ok(Some(_))) {
+        // Named refresh owns its scoped failure marker and rejects obsolete
+        // generations. A generic fallback must never revive a removed source.
+        if credential_id.is_none() && !matches!(&refresh, Ok(Some(_))) {
             let marker = QuotaObservationRecord {
                 backend: backend.clone(),
                 backend_instance: instance,
@@ -748,6 +741,7 @@ fn maybe_refresh_backend_instance(
                 usage_source: None,
                 mistral_admin: None,
                 account_usage: None,
+                credential_id,
             };
             let _ = append(&path, &marker);
         }
@@ -1142,6 +1136,7 @@ mod tests {
                 usage_source: Some("codex_status_json".into()),
                 mistral_admin: None,
                 account_usage: None,
+                credential_id: None,
             },
         )
         .unwrap();
@@ -1177,6 +1172,7 @@ mod tests {
                     usage_source: Some("codex_status_json".into()),
                     mistral_admin: None,
                     account_usage: None,
+                    credential_id: None,
                 },
             )
             .unwrap();
@@ -1199,6 +1195,7 @@ mod tests {
                 usage_source: Some("agy_cli_log_delta".into()),
                 mistral_admin: None,
                 account_usage: None,
+                credential_id: None,
             },
         )
         .unwrap();
@@ -1229,12 +1226,14 @@ mod tests {
             usage_source: Some("codex_status_json".into()),
             mistral_admin: None,
             account_usage: None,
+            credential_id: None,
         };
         let good2 = QuotaObservationRecord {
             quota_used_percent: Some(20.0),
             observed_at: Some("2026-04-29T10:00:00Z".into()),
             mistral_admin: None,
             account_usage: None,
+            credential_id: None,
             ..good1.clone()
         };
         let mut contents = serde_json::to_string(&good1).unwrap();
@@ -1274,6 +1273,7 @@ mod tests {
                 usage_source: Some("codex_status_json".into()),
                 mistral_admin: None,
                 account_usage: None,
+                credential_id: None,
             },
         )
         .unwrap();
@@ -1300,6 +1300,7 @@ mod tests {
             usage_source: Some("test".into()),
             mistral_admin: None,
             account_usage: None,
+            credential_id: None,
         }
     }
 

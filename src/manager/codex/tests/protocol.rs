@@ -16,6 +16,46 @@ fn account_rate_limits_read_round_trips_over_app_server() {
 }
 
 #[test]
+fn isolated_account_quota_uses_only_its_child_home_and_removes_api_keys() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let f = fixture();
+    make_json_rpc_codex(&f.bin_dir, &f.record_dir);
+    let executable = f.bin_dir.join("codex");
+    let script = fs::read_to_string(&executable).unwrap().replace(
+        "record_dir = os.path.dirname(record)",
+        "record_dir = os.path.dirname(record)\nwith open(os.path.join(record_dir, 'quota-env.json'), 'w') as fh:\n    json.dump({'home': os.environ.get('HOME'), 'codex_home': os.environ.get('CODEX_HOME'), 'api_key': 'OPENAI_API_KEY' in os.environ or 'CODEX_API_KEY' in os.environ}, fh)",
+    );
+    fs::write(&executable, script).unwrap();
+    let home_before = std::env::var_os("HOME");
+    let selected_home = f.record_dir.join("isolated");
+    let environment = vec![
+        ("HOME".into(), selected_home.to_string_lossy().into_owned()),
+        (
+            "CODEX_HOME".into(),
+            selected_home.join(".codex").to_string_lossy().into_owned(),
+        ),
+        ("OPENAI_API_KEY".into(), "synthetic-api-key".into()),
+        ("CODEX_API_KEY".into(), "synthetic-api-key".into()),
+    ];
+    let response =
+        read_account_rate_limits_with_env(&executable, Duration::from_secs(1), &environment)
+            .unwrap();
+    assert_eq!(
+        response.pointer("/rateLimitsByLimitId/codex/primary/usedPercent"),
+        Some(&json!(7))
+    );
+    let recorded: Value =
+        serde_json::from_slice(&fs::read(f.record_dir.join("quota-env.json")).unwrap()).unwrap();
+    assert_eq!(recorded["home"], json!(selected_home.to_string_lossy()));
+    assert_eq!(
+        recorded["codex_home"],
+        json!(selected_home.join(".codex").to_string_lossy())
+    );
+    assert_eq!(recorded["api_key"], false);
+    assert_eq!(std::env::var_os("HOME"), home_before);
+}
+
+#[test]
 fn constructor_rejection_terminates_its_transport() {
     let _exec_guard = crate::test_support::ExecGuard::new();
     let f = fixture();

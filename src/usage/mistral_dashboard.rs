@@ -119,6 +119,11 @@ pub fn refresh() -> Result<QuotaObservationRecord> {
     refresh_with(&cookie, OffsetDateTime::now_utc(), request)
 }
 
+/// Named dashboard sources are passed explicitly, without changing process env.
+pub(crate) fn refresh_cookie(cookie: &str) -> Result<QuotaObservationRecord> {
+    refresh_with(cookie, OffsetDateTime::now_utc(), request)
+}
+
 fn refresh_with(
     cookie: &str,
     now: OffsetDateTime,
@@ -178,7 +183,9 @@ fn refresh_and_store_with(
             let mut previous = quota_store::load(path)?
                 .into_iter()
                 .rev()
-                .find(|record| record.backend == "mistral-dashboard")
+                .find(|record| {
+                    record.backend == "mistral-dashboard" && record.credential_id.is_none()
+                })
                 .unwrap_or(QuotaObservationRecord {
                     backend: "mistral-dashboard".into(),
                     backend_instance: Some("mistral-dashboard".into()),
@@ -194,6 +201,7 @@ fn refresh_and_store_with(
                     usage_source: Some("mistral_dashboard".into()),
                     mistral_admin: None,
                     account_usage: None,
+                    credential_id: None,
                 });
             previous.quota_window = None;
             previous.quota_used_percent = None;

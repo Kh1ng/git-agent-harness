@@ -1482,12 +1482,14 @@ export async function runBackendInstanceToggle(
 export async function runBackendInstanceAdd(
   profile: string,
   instance: string,
-  runnerKind: 'codex' | 'claude',
+  runnerKind: 'codex' | 'claude' | 'opencode' | 'hermes' | 'vibe' | 'agy' | 'openhands',
   accountLabel: string,
-  config?: string
+  config?: string,
+  credentialId?: string
 ): Promise<void> {
   const args = ['config', 'add-backend-instance', '--profile', profile, '--instance', instance,
     '--runner-kind', runnerKind, '--account-label', accountLabel];
+  if (credentialId) args.push('--credential-id', credentialId);
   if (config) args.push('--config-path', config);
   return runVoidCommand(args, config, 'gah config add-backend-instance');
 }
@@ -1511,6 +1513,10 @@ export interface BackendInstanceRuntime {
   executable: string;
   state_root: string | null;
   account_label: string | null;
+  /** Local reference and save generation; never includes a secret. */
+  credential_id?: string | null;
+  credential_provider?: string | null;
+  credential_revision?: string | null;
 }
 
 export function runBackendInstanceRuntime(profile: string, instance: string, config?: string): Promise<BackendInstanceRuntime> {

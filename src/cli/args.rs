@@ -7,6 +7,8 @@
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+mod quota;
+pub use quota::{CredentialCommands, QuotaCommands};
 
 #[derive(Parser)]
 #[command(name = "gah", about = "git agent harness")]
@@ -476,6 +478,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: QuotaCommands,
     },
+    /// Manage node-local named provider credentials. Secret values use stdin only.
+    Credentials {
+        #[command(subcommand)]
+        command: CredentialCommands,
+    },
     /// Query and reconcile per-backend-instance skill inventory (issue
     /// #966, #863 gap 2): what GAH intends bound vs. what a backend
     /// self-reports having.
@@ -609,7 +616,7 @@ pub enum ConfigCommands {
         #[arg(long, action = clap::ArgAction::Set)]
         enabled: bool,
     },
-    /// Add an isolated named Codex or Claude account to one profile.
+    /// Add an isolated named runner account to one profile.
     AddBackendInstance {
         #[arg(long = "config", visible_alias = "config-path")]
         config_path: Option<String>,
@@ -621,6 +628,39 @@ pub enum ConfigCommands {
         runner_kind: String,
         #[arg(long)]
         account_label: String,
+        #[arg(long)]
+        credential_id: Option<String>,
+    },
+    /// Bind a named local credential source to a declared execution instance.
+    SetBackendInstanceCredential {
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        instance: String,
+        #[arg(long)]
+        credential_id: String,
+    },
+    /// Launch a declared instance without exporting its key to a caller.
+    ExecBackendInstance {
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        instance: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        work_id: Option<String>,
+        #[arg(long, conflicts_with = "adapter_program")]
+        acp_bridge: Option<String>,
+        /// Worker-selected Python interpreter for the fixed Vibe stdin bridge.
+        #[arg(long)]
+        adapter_program: Option<String>,
+        #[arg(last = true)]
+        args: Vec<String>,
     },
     /// Change the safe display label without changing durable instance identity.
     SetBackendInstanceLabel {
@@ -1351,86 +1391,6 @@ pub enum TelemetryCommands {
         /// Filter by account label
         #[arg(long)]
         account: Option<String>,
-    },
-}
-
-/// Quota/usage observation management (issue #151 / #166).
-#[derive(Subcommand)]
-pub enum QuotaCommands {
-    /// Record one validated, account-scoped quota observation from JSON on stdin.
-    Record {
-        #[arg(long, name = "store")]
-        store_path: Option<String>,
-    },
-    /// Refresh account-level quota (e.g. Codex app-server, or the
-    /// Mistral Admin API for `--backend vibe`) and persist the observation
-    /// so the Quota/Telemetry pages show real data.
-    Refresh {
-        /// Backend whose account quota to refresh (e.g. "codex"). "vibe"
-        /// refreshes from the Mistral Admin API (`MISTRAL_ADMIN_API_KEY`);
-        /// "nous" reads the Nous account API (`NOUS_API_KEY`);
-        /// "claude" reads the current native Claude OAuth login;
-        /// "mistral-dashboard" reads the owner-only dashboard Cookie file.
-        #[arg(long, default_value = "codex")]
-        backend: String,
-        /// Stable, secret-safe execution instance for this account reading.
-        /// Omit to write a legacy instance-unknown observation. Not
-        /// supported for `--backend vibe`: the Admin API key is a single
-        /// org-wide credential, not a per-instance one.
-        #[arg(long, visible_alias = "instance")]
-        backend_instance: Option<String>,
-        /// Model qualifier for the observation (usually unset for
-        /// account-level readings).
-        #[arg(long)]
-        model: Option<String>,
-        /// Shared capacity/billing pool for this observation.
-        #[arg(long)]
-        quota_pool: Option<String>,
-        /// Path/command for the backend CLI (defaults to the backend name on
-        /// PATH, e.g. "codex"). Only `codex` has a structured status parser
-        /// today; other backends fall back to "no data" rather than
-        /// guessing. Ignored for `--backend vibe`, which always uses the
-        /// Mistral Admin API rather than a subprocess. Claude uses the current
-        /// native OAuth login and rejects command overrides.
-        #[arg(long)]
-        command: Option<String>,
-        /// Override the durable store path (default: $XDG_STATE_HOME/gah/...).
-        /// Mainly for testing/automation.
-        #[arg(long, name = "store")]
-        store_path: Option<String>,
-    },
-    /// Refresh account-level quota for every configured profile's
-    /// quota-tracked backends (codex, claude, vibe, nous, mistral-dashboard), throttled to one live check per
-    /// backend per interval (30 min) and bounded so a hung backend can never
-    /// wedge the caller. Runs each due refresh to completion before exiting
-    /// (it JOINS the refresh threads, unlike the fire-and-forget loop-tick
-    /// probe), so a systemd oneshot timer can run it safely. Intended for
-    /// unattended invocation -- a systemd timer -- not the manual per-backend
-    /// `refresh` command.
-    AutoRefresh {
-        /// Override the durable store path (default: $XDG_STATE_HOME/gah/...).
-        /// Mainly for testing/automation.
-        #[arg(long, name = "store")]
-        store_path: Option<String>,
-    },
-    /// List persisted account-level quota observations.
-    List {
-        #[arg(long, default_value_t = false)]
-        json: bool,
-        #[arg(long, name = "store")]
-        store_path: Option<String>,
-    },
-    /// Build the canonical profile-scoped quota snapshot used by the web
-    /// dashboard and CLI inspection paths.
-    Snapshot {
-        #[arg(long)]
-        profile: String,
-        #[arg(long, default_value = "7d")]
-        since: String,
-        #[arg(long, default_value_t = false)]
-        json: bool,
-        #[arg(long, name = "config")]
-        config_path: Option<String>,
     },
 }
 

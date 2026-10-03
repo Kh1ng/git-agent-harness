@@ -918,10 +918,26 @@ pub fn refresh_codex_quota(
     codex_cmd: &str,
     model: Option<&str>,
 ) -> std::io::Result<Option<GroupQuotaObservation>> {
-    let response = crate::manager::codex::read_account_rate_limits(
-        std::path::Path::new(codex_cmd),
-        CODEX_QUOTA_TIMEOUT,
-    )
+    refresh_codex_quota_with_env(codex_cmd, model, &[])
+}
+
+pub(crate) fn refresh_codex_quota_with_env(
+    codex_cmd: &str,
+    model: Option<&str>,
+    environment: &[(String, String)],
+) -> std::io::Result<Option<GroupQuotaObservation>> {
+    let response = if environment.is_empty() {
+        crate::manager::codex::read_account_rate_limits(
+            std::path::Path::new(codex_cmd),
+            CODEX_QUOTA_TIMEOUT,
+        )
+    } else {
+        crate::manager::codex::read_account_rate_limits_with_env(
+            std::path::Path::new(codex_cmd),
+            CODEX_QUOTA_TIMEOUT,
+            environment,
+        )
+    }
     .map_err(std::io::Error::other)?;
     let output = serde_json::to_string(&response).map_err(std::io::Error::other)?;
     codex_rate_limits_to_quota_observation(&output, "codex", model)

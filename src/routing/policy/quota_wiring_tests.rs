@@ -26,6 +26,7 @@ fn live_weekly_pacing_rejects_other_windows_stale_and_failed_checks() {
         usage_source: Some("test".into()),
         mistral_admin: None,
         account_usage: None,
+        credential_id: None,
     };
     assert_eq!(
         live_quota_pacing_inputs(std::slice::from_ref(&fresh), &identity, now).0,
@@ -101,6 +102,7 @@ fn cost_aware_ordering_uses_live_quota_store_data_when_config_does_not_hardcode_
             usage_source: Some("codex_status_json".to_string()),
             mistral_admin: None,
             account_usage: None,
+            credential_id: None,
         },
     )
     .unwrap();

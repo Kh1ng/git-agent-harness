@@ -18,6 +18,38 @@ pub fn refresh() -> Result<QuotaObservationRecord> {
     )
 }
 
+/// Explicit named keys never fall back to native Hermes or another account.
+pub(crate) fn refresh_key(key: &str) -> Result<QuotaObservationRecord> {
+    if key.is_empty() || key.len() > 8192 || key.chars().any(char::is_control) {
+        bail!("invalid Nous credential");
+    }
+    parse_named(&fetch_account(key)?, OffsetDateTime::now_utc())
+}
+
+fn parse_named(input: &[u8], now: OffsetDateTime) -> Result<QuotaObservationRecord> {
+    use sha2::{Digest, Sha256};
+    let mut record = parse(input, now)?;
+    record.backend_instance = None;
+    record.quota_pool = None;
+    let body: serde_json::Value =
+        serde_json::from_slice(input).context("invalid Nous account response")?;
+    if let Some(id) = body["organisation"]["id"]
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
+    {
+        if body["paid_service_access"]["organisation_id"]
+            .as_str()
+            .is_some_and(|other| other != id)
+        {
+            bail!("Nous account billing identity mismatch");
+        }
+        let pool = format!("nous:{:x}", Sha256::digest(id.as_bytes()));
+        record.backend_instance = Some(format!("opencode:{pool}"));
+        record.quota_pool = Some(pool);
+    }
+    Ok(record)
+}
+
 fn refresh_with_sources(
     explicit_key: Option<String>,
     native_key: impl FnOnce() -> Result<String>,
@@ -202,12 +234,35 @@ pub(crate) fn parse(input: &[u8], now: OffsetDateTime) -> Result<QuotaObservatio
         usage_source: Some("nous_portal_account".into()),
         mistral_admin: None,
         account_usage: None,
+        credential_id: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn named_keys_share_only_the_verified_organisation_billing_pool() {
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let source = br#"{"organisation":{"id":"synthetic-org"},"user":{"email":"first@example.invalid"},"paid_service_access":{"organisation_id":"synthetic-org"},"subscription":{"monthly_credits":20,"credits_remaining":10}}"#;
+        let first = parse_named(source, now).unwrap();
+        let other_key = br#"{"organisation":{"id":"synthetic-org"},"user":{"email":"second@example.invalid"},"subscription":{"monthly_credits":20,"credits_remaining":10}}"#;
+        let second = parse_named(other_key, now).unwrap();
+        assert_eq!(first.quota_pool, second.quota_pool);
+        assert!(first.quota_pool.as_deref().unwrap().starts_with("nous:"));
+        assert!(!first
+            .quota_pool
+            .as_deref()
+            .unwrap()
+            .contains("synthetic-org"));
+        let unknown = parse_named(
+            br#"{"subscription":{"monthly_credits":20,"credits_remaining":10}}"#,
+            now,
+        )
+        .unwrap();
+        assert_eq!(unknown.quota_pool, None);
+        assert!(parse_named(br#"{"organisation":{"id":"first"},"paid_service_access":{"organisation_id":"second"}}"#, now).is_err());
+    }
     #[test]
     fn expired_native_hourly_token_is_not_reused_after_resolution_failure() {
         let now = OffsetDateTime::from_unix_timestamp(3600).unwrap();

@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { bindMistralLogin, type MistralLoginResult } from './mistralLogin.js';
+import { bindProviderConnections } from './providerConnections.js';
 
 type Presence = { dock: boolean; launch_window: boolean; tray: boolean };
 type Settings = { central_url: string; wsl_distribution: string; presence: Presence };
@@ -17,8 +18,12 @@ const ownerToken = document.querySelector<HTMLInputElement>('#owner-token')!;
 const ownerState = document.querySelector<HTMLElement>('#owner-state')!;
 const isMac = navigator.userAgent.includes('Mac');
 const showMistralLogin = bindMistralLogin(document.querySelector<HTMLElement>('#mistral-section')!, command => invoke<MistralLoginResult>(command));
+const showProviderConnection = bindProviderConnections(document.querySelector<HTMLElement>('#provider-connections')!, invoke);
 // Explicit Check connection remains available if automatic status events cannot be delivered.
-void listen<MistralLoginResult>('gah:mistral-login', event => showMistralLogin(event.payload)).catch(() => {});
+void listen<MistralLoginResult>('gah:mistral-login', event => {
+  showMistralLogin(event.payload);
+  showProviderConnection(event.payload);
+}).catch(() => {});
 
 function showPresence(presence: Presence) {
   dock.checked = presence.dock;
@@ -118,9 +123,10 @@ async function refreshSetup(): Promise<boolean> {
 
 async function perform(action: () => Promise<void>) {
   error.textContent = '';
-  document.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+  const buttons = [...document.querySelectorAll('button')].filter(button => !button.closest('#provider-connections, #mistral-section'));
+  buttons.forEach((button) => { button.disabled = true; });
   try { await action(); } catch (err) { error.textContent = String(err); }
-  finally { document.querySelectorAll('button').forEach((button) => { button.disabled = false; }); }
+  finally { buttons.forEach((button) => { button.disabled = false; }); }
 }
 
 async function refresh() {

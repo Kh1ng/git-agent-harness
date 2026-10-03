@@ -312,5 +312,6 @@ pub(super) fn parse(
         usage_source: Some("mistral_dashboard".into()),
         mistral_admin: None,
         account_usage: Some(usage),
+        credential_id: None,
     })
 }

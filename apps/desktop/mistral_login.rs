@@ -6,25 +6,34 @@ use std::path::Path;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{webview::Cookie, Emitter, Manager};
+#[cfg(test)]
+use tauri::webview::Cookie;
+use tauri::{Emitter, Manager};
 
 const WINDOW: &str = "mistral-login";
 const URL: &str = "https://admin.mistral.ai/organization/usage";
-const API_PATH: &str = "/api/local-trpc/";
 const EVENT: &str = "gah:mistral-login";
-static CHECKING: AtomicBool = AtomicBool::new(false);
 #[cfg(unix)]
 mod collector_args;
+mod cookies;
+mod target;
+use cookies::cookie_header;
+#[cfg(test)]
+use cookies::matches_api_path;
+use target::LoginTarget;
 
 #[derive(Clone, Serialize)]
 pub struct LoginStatus {
     state: &'static str,
     installed: bool,
     message: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_id: Option<String>,
 }
 
 fn status(state: &'static str, installed: bool, message: &'static str) -> LoginStatus {
@@ -32,6 +41,7 @@ fn status(state: &'static str, installed: bool, message: &'static str) -> LoginS
         state,
         installed,
         message,
+        credential_id: None,
     }
 }
 
@@ -39,8 +49,17 @@ fn status(state: &'static str, installed: bool, message: &'static str) -> LoginS
 pub async fn mistral_login_start(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
+    credential_id: Option<String>,
+    account_label: Option<String>,
 ) -> Result<LoginStatus, String> {
     super::local_only(&window)?;
+    let target = LoginTarget::new(credential_id, account_label)?;
+    let mut reply = start(&app, &target)?;
+    reply.credential_id = target.credential_id;
+    Ok(reply)
+}
+
+fn start(app: &tauri::AppHandle, target: &LoginTarget) -> Result<LoginStatus, String> {
     if !cfg!(unix) {
         return Ok(status(
             "unavailable",
@@ -55,34 +74,39 @@ pub async fn mistral_login_start(
             "Install GAH on this computer before connecting Mistral.",
         ));
     }
-    if !default_cookie_source(
-        &super::config_dir(),
-        std::env::var_os("MISTRAL_DASHBOARD_COOKIE_FILE").as_deref(),
-    ) {
+    if !target.isolated()
+        && !default_cookie_source(
+            &super::config_dir(),
+            std::env::var_os("MISTRAL_DASHBOARD_COOKIE_FILE").as_deref(),
+        )
+    {
         return Ok(custom_cookie_status());
     }
-    if let Some(login) = app.get_webview_window(WINDOW) {
+    let label = target.window_label();
+    if let Some(login) = app.get_webview_window(&label) {
         login.show().map_err(|_| "Cannot open Mistral sign-in.")?;
         login
             .set_focus()
             .map_err(|_| "Cannot focus Mistral sign-in.")?;
     } else {
+        let callback_target = target.clone();
         let builder = tauri::WebviewWindowBuilder::new(
-            &app,
-            WINDOW,
+            app,
+            &label,
             tauri::WebviewUrl::External(URL.parse().expect("fixed URL")),
         )
         .title("Connect Mistral to GAH")
         .inner_size(1000.0, 760.0)
-        .on_page_load(|login, payload| {
+        .on_page_load(move |login, payload| {
             if payload.event() != tauri::webview::PageLoadEvent::Finished
                 || !authenticated_page(payload.url())
             {
                 return;
             }
             // Native callback only: the remote provider has no IPC grant.
+            let target = callback_target.clone();
             tauri::async_runtime::spawn_blocking(move || {
-                let reply = finish(&login);
+                let reply = finish_for(&login, &target);
                 if let Some(settings) = login.app_handle().get_webview_window("dashboard") {
                     if super::local_only(&settings).is_ok() {
                         let _ = settings.emit(EVENT, reply);
@@ -90,10 +114,20 @@ pub async fn mistral_login_start(
                 }
             });
         });
-        #[cfg(target_os = "macos")]
-        let builder = builder.data_store_identifier(*b"gah-mistral-auth");
-        #[cfg(not(target_os = "macos"))]
-        let builder = builder.data_directory(super::config_dir().join("mistral-webview"));
+        // A nonpersistent store belongs only to this WebView. Named accounts
+        // cannot inherit the default connection or another slot's cookies.
+        let builder = if target.isolated() {
+            builder.incognito(true)
+        } else {
+            #[cfg(target_os = "macos")]
+            {
+                builder.data_store_identifier(*b"gah-mistral-auth")
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                builder.data_directory(super::config_dir().join("mistral-webview"))
+            }
+        };
         builder
             .build()
             .map_err(|_| "Cannot create the Mistral sign-in window.")?;
@@ -105,16 +139,21 @@ pub async fn mistral_login_start(
 pub async fn mistral_login_finish(
     window: tauri::WebviewWindow,
     app: tauri::AppHandle,
+    credential_id: Option<String>,
+    account_label: Option<String>,
 ) -> Result<LoginStatus, String> {
     super::local_only(&window)?;
-    let Some(login) = app.get_webview_window(WINDOW) else {
-        return Ok(status(
+    let target = LoginTarget::new(credential_id, account_label)?;
+    let Some(login) = app.get_webview_window(&target.window_label()) else {
+        let mut reply = status(
             "cancelled",
             super::installed_gah().is_ok(),
             "The sign-in window is closed. Connect Mistral to try again.",
-        ));
+        );
+        reply.credential_id = target.credential_id;
+        return Ok(reply);
     };
-    tauri::async_runtime::spawn_blocking(move || finish(&login))
+    tauri::async_runtime::spawn_blocking(move || finish_for(&login, &target))
         .await
         .map_err(|_| "Mistral connection check failed.".into())
 }
@@ -126,21 +165,16 @@ fn authenticated_page(url: &tauri::Url) -> bool {
         && matches!(url.path(), "/organization/usage" | "/organization/usage/")
 }
 
-struct Checking;
-impl Drop for Checking {
-    fn drop(&mut self) {
-        CHECKING.store(false, Ordering::Release);
-    }
+fn finish_for(login: &tauri::WebviewWindow, target: &LoginTarget) -> LoginStatus {
+    let mut reply = finish(login, target);
+    reply.credential_id = target.credential_id.clone();
+    reply
 }
 
-fn finish(login: &tauri::WebviewWindow) -> LoginStatus {
-    if CHECKING
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
+fn finish(login: &tauri::WebviewWindow, target: &LoginTarget) -> LoginStatus {
+    let Some(_checking) = target.start_check() else {
         return status("pending", true, "Checking the Mistral connection.");
-    }
-    let _checking = Checking;
+    };
     let Ok(gah) = super::installed_gah() else {
         return status(
             "unavailable",
@@ -178,10 +212,10 @@ fn finish(login: &tauri::WebviewWindow) -> LoginStatus {
         }
     };
     #[cfg(unix)]
-    let reply = verify_and_save(&gah, &super::config_dir(), &cookie);
+    let reply = verify_and_save_for(&gah, &super::config_dir(), &cookie, target);
     #[cfg(not(unix))]
     let reply = {
-        let _ = (gah, cookie);
+        let _ = (gah, cookie, target);
         status(
             "unavailable",
             true,
@@ -207,64 +241,6 @@ fn default_cookie_source(root: &Path, configured: Option<&std::ffi::OsStr>) -> b
 
 fn custom_cookie_status() -> LoginStatus {
     status("unavailable",true,"A custom Mistral Cookie file is configured. Clear MISTRAL_DASHBOARD_COOKIE_FILE before connecting with this app.")
-}
-
-fn matches_api_path(path: &str) -> bool {
-    path == API_PATH
-        || API_PATH.starts_with(path)
-            && (path.ends_with('/') || API_PATH.as_bytes().get(path.len()) == Some(&b'/'))
-}
-
-fn cookie_header(cookies: &[Cookie<'_>], now: i64) -> Result<String, ()> {
-    let mut selected = Vec::new();
-    if cookies.len() > 512 {
-        return Err(());
-    }
-    for cookie in cookies {
-        let domain = cookie.domain().unwrap_or_default().trim_start_matches('.');
-        if !matches!(domain, "admin.mistral.ai" | "mistral.ai")
-            || !matches_api_path(cookie.path().unwrap_or("/"))
-            || cookie
-                .expires_datetime()
-                .is_some_and(|expiry| expiry.unix_timestamp() <= now)
-        {
-            continue;
-        }
-        let name = cookie.name();
-        let value = cookie.value();
-        // RFC 6265 permits a cookie value enclosed in double quotes. Preserve
-        // that browser representation, validating the enclosed cookie octets.
-        let octets = value
-            .strip_prefix('"')
-            .and_then(|v| v.strip_suffix('"'))
-            .unwrap_or(value);
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
-            || !octets
-                .bytes()
-                .all(|byte| (0x21..=0x7e).contains(&byte) && !b"\";,\\".contains(&byte))
-        {
-            // Optional analytics cookies must not discard a usable session.
-            // The remaining header still requires provider verification.
-            continue;
-        }
-        selected.push((
-            cookie.path().unwrap_or("/").len(),
-            format!("{name}={value}"),
-        ));
-    }
-    selected.sort_by_key(|cookie| std::cmp::Reverse(cookie.0));
-    let header = selected
-        .into_iter()
-        .map(|(_, cookie)| cookie)
-        .collect::<Vec<_>>()
-        .join("; ");
-    if header.is_empty() || header.len() > 32768 {
-        return Err(());
-    }
-    Ok(header)
 }
 
 #[cfg(unix)]
@@ -304,12 +280,19 @@ impl Drop for PrivateCheck {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn verify_and_save(gah: &Path, root: &Path, cookie: &str) -> LoginStatus {
-    if !default_cookie_source(
-        root,
-        std::env::var_os("MISTRAL_DASHBOARD_COOKIE_FILE").as_deref(),
-    ) {
+    verify_and_save_for(gah, root, cookie, &LoginTarget::default())
+}
+
+#[cfg(unix)]
+fn verify_and_save_for(gah: &Path, root: &Path, cookie: &str, target: &LoginTarget) -> LoginStatus {
+    if !target.isolated()
+        && !default_cookie_source(
+            root,
+            std::env::var_os("MISTRAL_DASHBOARD_COOKIE_FILE").as_deref(),
+        )
+    {
         return custom_cookie_status();
     }
     let Ok(check) = PrivateCheck::new(root, cookie) else {
@@ -353,7 +336,36 @@ fn verify_and_save(gah: &Path, root: &Path, cookie: &str) -> LoginStatus {
             "Update GAH on this computer to finish connecting Mistral.",
         );
     }
-    if std::fs::rename(
+    if let Some(id) = &target.credential_id {
+        // The selected slot is saved only after a real staged provider check.
+        // Its account scope comes from the collector, never the display label.
+        let input = super::credentials::CredentialInput {
+            id: id.clone(),
+            provider: "mistral".into(),
+            kind: "mistral_dashboard".into(),
+            account_label: target.account_label.clone().expect("validated target"),
+            env_var: None,
+            secret: cookie.to_owned(),
+        };
+        if super::credentials::save_with_gah(gah, input).is_err() {
+            return status(
+                "unavailable",
+                true,
+                "The verified Mistral session could not be saved. Update GAH and try again.",
+            );
+        }
+        let mut command = super::command(gah.to_string_lossy().as_ref());
+        command.args(["quota", "refresh", "--credential", id]);
+        return if run_gah(command, Duration::from_secs(95)) {
+            status("connected", true, "Mistral is connected on this computer. Usage and allowance are refreshed automatically.")
+        } else {
+            status(
+                "unavailable",
+                true,
+                "Mistral is saved, but its usage check failed. Check this connection again.",
+            )
+        };
+    } else if std::fs::rename(
         check.dir.join("cookie"),
         root.join("mistral-dashboard.cookie"),
     )

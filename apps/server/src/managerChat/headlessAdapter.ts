@@ -142,6 +142,11 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
     displayName: spec.displayName,
     implemented: true,
 
+    dispose(): void {
+      // Retire the adapter without interrupting a turn already using its key.
+      states.clear();
+    },
+
     async runTurn(gahProfile, input) {
       const state = stateFor(gahProfile);
       const cwd = input.cwd ?? process.cwd();
@@ -342,8 +347,8 @@ const VIBE_STDIN_BRIDGE = [
  * from its own shebang, rather than hard-coding a host-specific path. Not
  * cached: it's one cheap `command -v` + file read per turn, and caching
  * would make the resolved interpreter outlive a test's fake PATH. */
-function resolveVibeInterpreter(): string {
-  const launcherPath = execFileSync('/bin/sh', ['-c', 'command -v vibe'], { encoding: 'utf8' }).trim();
+function resolveVibeInterpreter(executable?: string): string {
+  const launcherPath = executable ?? execFileSync('/bin/sh', ['-c', 'command -v vibe'], { encoding: 'utf8' }).trim();
   if (!launcherPath) {
     throw new Error('vibe executable not found on PATH.');
   }
@@ -353,6 +358,9 @@ function resolveVibeInterpreter(): string {
   if (!match) {
     throw new Error(`Could not determine vibe's Python interpreter from ${realLauncher}.`);
   }
+  if (!path.isAbsolute(match[1]) || !/^python/.test(path.basename(match[1]))) {
+    throw new Error('Vibe requires an absolute Python interpreter in its launcher shebang.');
+  }
   return match[1];
 }
 
@@ -361,8 +369,8 @@ function resolveVibeInterpreter(): string {
  * `resolveInterpreter` is overridable so tests can prove the argv/stdin
  * split against a fake interpreter instead of requiring a real vibe
  * install. */
-export function vibeBackendSpec(overrides: { resolveInterpreter?: () => string } = {}): HeadlessBackendSpec {
-  const resolveInterpreter = overrides.resolveInterpreter ?? resolveVibeInterpreter;
+export function vibeBackendSpec(overrides: { resolveInterpreter?: () => string; executable?: string } = {}): HeadlessBackendSpec {
+  const resolveInterpreter = overrides.resolveInterpreter ?? (() => resolveVibeInterpreter(overrides.executable));
   return {
     id: 'vibe',
     displayName: 'Vibe',
@@ -374,7 +382,7 @@ export function vibeBackendSpec(overrides: { resolveInterpreter?: () => string }
   };
 }
 
-async function resolveOpenhandsEnv(gahProfile: string): Promise<Record<string, string>> {
+async function resolveOpenhandsEnv(gahProfile: string, includeApiKey = true): Promise<Record<string, string>> {
   const { oh_profile: profile } = await runConfigShowProfile(gahProfile);
   if (!profile) return {};
   if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(profile)) {
@@ -401,7 +409,7 @@ async function resolveOpenhandsEnv(gahProfile: string): Promise<Record<string, s
   };
   return {
     LLM_BASE_URL: process.env.LLM_BASE_URL ?? required('base_url'),
-    LLM_API_KEY: process.env.LLM_API_KEY ?? required('api_key'),
+    ...(includeApiKey ? { LLM_API_KEY: process.env.LLM_API_KEY ?? required('api_key') } : {}),
     LLM_MODEL: process.env.LLM_MODEL ?? required('model'),
     OPENHANDS_SUPPRESS_BANNER: '1'
   };
@@ -410,7 +418,7 @@ async function resolveOpenhandsEnv(gahProfile: string): Promise<Record<string, s
 /** OpenHands accepts a task file but not a raw stdin task. `/dev/stdin`
  * keeps the replayed transcript off argv while satisfying its headless CLI. */
 export function openhandsBackendSpec(
-  overrides: { resolveEnv?: (gahProfile: string) => Promise<Record<string, string>> } = {}
+  overrides: { resolveEnv?: (gahProfile: string) => Promise<Record<string, string>>; instanceCredential?: boolean } = {}
 ): HeadlessBackendSpec {
   return {
     id: 'openhands',
@@ -426,7 +434,7 @@ export function openhandsBackendSpec(
       '--override-with-envs'
     ],
     encodeStdin: (prompt) => prompt,
-    spawnEnv: overrides.resolveEnv ?? resolveOpenhandsEnv,
+    spawnEnv: overrides.resolveEnv ?? (profile => resolveOpenhandsEnv(profile, !overrides.instanceCredential)),
     parseReply: parseOpenhandsReply
   };
 }

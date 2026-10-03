@@ -33,6 +33,9 @@ pub(crate) fn run_with_executable(
         .arg(task)
         .args(filtered_codex_args(extra_args))
         .args(codex_model_args(model))
+        .args(crate::execution_identity::selected_codex_config_args(
+            env_vars,
+        ))
         .current_dir(worktree);
     crate::runner::apply_child_env(&mut cmd, env_vars);
 

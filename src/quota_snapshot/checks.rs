@@ -17,6 +17,8 @@ pub enum QuotaCheckStatus {
 pub struct QuotaCheck {
     pub backend: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
@@ -67,7 +69,20 @@ fn check_timestamp(record: &QuotaObservationRecord) -> Option<String> {
 
 pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<QuotaCheck> {
     let mut latest = BTreeMap::new();
-    for record in records {
+    for record in crate::quota_store::current_source_records(records) {
+        if record.backend == "vibe"
+            && record.credential_id.is_none()
+            && record.account_usage.is_none()
+            && record.mistral_admin.is_none()
+            && record.quota_window.is_none()
+            && record.quota_remaining_percent.is_none()
+            && record.quota_used_percent.is_none()
+            && record.quota_reset_at.is_none()
+            && record.check_error.as_deref()
+                == Some("auth_required: MISTRAL_ADMIN_API_KEY is not configured")
+        {
+            continue;
+        }
         let Some(checked_at) = check_timestamp(record) else {
             continue;
         };
@@ -75,6 +90,7 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
             continue;
         };
         let key = (
+            record.credential_id.clone(),
             record.backend.clone(),
             record.backend_instance.clone(),
             record.model.clone(),
@@ -90,7 +106,10 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
     latest
         .into_iter()
         .map(
-            |((backend, backend_instance, model, quota_pool), (record, checked_at, _))| {
+            |(
+                (credential_id, backend, backend_instance, model, quota_pool),
+                (record, checked_at, _),
+            )| {
                 let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
                     &backend,
                     model.as_deref(),
@@ -105,6 +124,7 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
                     .iter()
                     .filter(|reading| {
                         reading.backend == backend
+                            && reading.credential_id == credential_id
                             && reading.backend_instance == backend_instance
                             && reading.model == model
                             && reading.quota_pool == quota_pool
@@ -127,7 +147,14 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
                     QuotaCheckStatus::NoData
                 };
                 QuotaCheck {
-                    provider: if record.usage_source.as_deref() == Some("nous_portal_account") {
+                    credential_id,
+                    provider: if let Some(provider) = record
+                        .usage_source
+                        .as_deref()
+                        .and_then(|source| source.strip_prefix("credential_api:"))
+                    {
+                        Some(provider.into())
+                    } else if record.usage_source.as_deref() == Some("nous_portal_account") {
                         Some("nous".into())
                     } else {
                         super::quota_provider(&backend, model.as_deref())
@@ -150,6 +177,20 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
 mod tests {
     use super::*;
     use crate::quota_snapshot::{QuotaCandidateStatus, QuotaObservation, UsageSummary};
+    #[test]
+    fn an_unconfigured_admin_auth_method_does_not_poison_the_connected_dashboard() {
+        let now = Some("2026-10-03T04:00:00Z");
+        let mut dashboard = record("mistral-dashboard", now, now, QuotaCheckStatus::Data);
+        dashboard.backend_instance = Some("mistral-dashboard:verified".into());
+        dashboard.usage_source = Some("mistral_dashboard".into());
+        let mut admin = record("vibe", None, now, QuotaCheckStatus::Failed);
+        admin.check_error = Some("auth_required: MISTRAL_ADMIN_API_KEY is not configured".into());
+        let checks = build_quota_checks(&[dashboard.clone(), admin.clone()]);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].backend, "mistral-dashboard");
+        admin.credential_id = Some("named-admin".into());
+        assert_eq!(build_quota_checks(&[dashboard, admin]).len(), 2);
+    }
 
     fn record(
         backend: &str,
@@ -173,6 +214,7 @@ mod tests {
             usage_source: None,
             mistral_admin: None,
             account_usage: None,
+            credential_id: None,
         }
     }
 
@@ -211,6 +253,7 @@ mod tests {
                 observed_at: Some("2026-08-22T19:47:14Z".to_string()),
                 usage_source: None,
                 account_usage: None,
+                credential_id: None,
             }],
         }];
 

@@ -314,6 +314,7 @@ pub fn run() -> Result<()> {
         }
         Commands::Telemetry { command } => commands::telemetry::run(command)?,
         Commands::Quota { command } => commands::quota::run(command)?,
+        Commands::Credentials { command } => commands::credentials::run(command)?,
         Commands::Skills { command } => commands::skills::run(command)?,
         Commands::Claims { command } => commands::claims::run(command)?,
         Commands::Node { command } => commands::node::run(command)?,

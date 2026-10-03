@@ -92,7 +92,7 @@ fn review_attempt_environment_isolates_only_agy_second() {
         None::<String>,
         None::<String>,
     );
-    let primary = review_attempt_environment(&profile, &primary_identity, &base);
+    let primary = review_attempt_environment(&profile, &primary_identity, &base).unwrap();
     assert_eq!(primary, base);
 
     let secondary_identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
@@ -100,7 +100,7 @@ fn review_attempt_environment_isolates_only_agy_second() {
         None::<String>,
         None::<String>,
     );
-    let secondary = review_attempt_environment(&profile, &secondary_identity, &base);
+    let secondary = review_attempt_environment(&profile, &secondary_identity, &base).unwrap();
     assert_eq!(
         secondary,
         vec![("HOME".to_string(), "/tmp/agy-account-2".to_string())]
@@ -122,13 +122,29 @@ fn review_attempt_environment_uses_declared_instance_state_root() {
     identity.backend_instance = "opencode-api".into();
     identity.set_state_root(Some("/var/lib/gah/opencode-api".into()));
 
-    let environment = review_attempt_environment(&profile, &identity, &base);
+    let environment = review_attempt_environment(&profile, &identity, &base).unwrap();
 
     assert_eq!(
         environment,
         vec![
             ("PATH".to_string(), "/bin".to_string()),
             ("HOME".to_string(), "/var/lib/gah/opencode-api".to_string()),
+            (
+                "XDG_CONFIG_HOME".to_string(),
+                "/var/lib/gah/opencode-api/.config".to_string()
+            ),
+            (
+                "XDG_DATA_HOME".to_string(),
+                "/var/lib/gah/opencode-api/.local/share".to_string()
+            ),
+            (
+                "XDG_STATE_HOME".to_string(),
+                "/var/lib/gah/opencode-api/.local/state".to_string()
+            ),
+            (
+                "XDG_CACHE_HOME".to_string(),
+                "/var/lib/gah/opencode-api/.cache".to_string()
+            ),
         ]
     );
 }

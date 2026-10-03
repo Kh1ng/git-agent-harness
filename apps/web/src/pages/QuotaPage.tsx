@@ -306,7 +306,26 @@ function providerLabel(provider: string): string {
 type QuotaLedgerRow = Omit<QuotaCandidateStatus, 'usage'> & {
   usage: QuotaCandidateStatus['usage'] | null;
   observationOnly?: boolean;
+  sourceNoData?: boolean;
 };
+
+function accountObservations(scopes: QuotaLedgerRow[]) {
+  const observations = new Map<string, NonNullable<QuotaCandidateStatus['quota_observations']>[number]>();
+  scopes.forEach((scope, scopeIndex) => (scope.quota_observations ?? []).forEach((observation, index) => {
+    const account = observation.account_usage;
+    // Only provider-confirmed account identities can prove a shared allowance.
+    // Unidentified sources remain separate rather than being merged by label.
+    const pool = observation.quota_pool ?? scope.quota_pool;
+    const verified = account ? ['mistral', account.account_id, account.workspace_id]
+      : observation.usage_source === 'nous_portal_account' && pool?.startsWith('nous:') ? ['nous', pool] : null;
+    const key = verified ? JSON.stringify([...verified, observation.quota_window ?? null]) : `${scopeIndex}:${index}`;
+    const previous = observations.get(key);
+    if (!previous || Date.parse(observation.observed_at ?? '') > Date.parse(previous.observed_at ?? '') || !previous.observed_at) {
+      observations.set(key, observation);
+    }
+  }));
+  return [...observations.values()];
+}
 
 function AccountUsageMetrics({ usage }: { usage: AccountUsageObservation | AccountUsageModel }) {
   const connector = 'usage_type' in usage && usage.usage_type === 'vibe_connectors';
@@ -342,14 +361,15 @@ function AccountUsageDetails({ usage }: { usage: AccountUsageObservation }) {
 function QuotaCandidateLedger({ candidates: configuredCandidates, quotaChecks }: { candidates: QuotaCandidateStatus[]; quotaChecks: QuotaCheck[] }) {
   // An account observation is not permission to schedule work on that account.
   const observedAccounts: QuotaLedgerRow[] = quotaChecks.filter(check =>
-    check.backend_instance && ((check.quota_observations?.length ?? 0) > 0 || check.status === 'failed') && !configuredCandidates.some(candidate =>
+    check.backend_instance && (check.credential_id || (check.quota_observations?.length ?? 0) > 0 || check.status === 'failed') && !configuredCandidates.some(candidate =>
       candidate.backend === check.backend && candidate.backend_instance === check.backend_instance &&
       (!check.model || candidate.model === check.model) && (!check.quota_pool || candidate.quota_pool === check.quota_pool)
     )
   ).map(check => ({
-    backend: check.backend, provider: check.provider, backend_instance: check.backend_instance,
+    backend: check.backend, provider: check.provider, backend_instance: check.backend_instance, credential_id: check.credential_id,
     model: check.model ?? null, quota_pool: check.quota_pool, quota_observations: check.quota_observations,
-    modes: [], configured: false, eligible_now: false, observed_at: null, usage: null, observationOnly: true
+    modes: [], configured: false, eligible_now: false, observed_at: null, usage: null, observationOnly: true,
+    sourceNoData: !!check.credential_id && check.status === 'no_data'
   }));
   const candidates: QuotaLedgerRow[] = [...configuredCandidates, ...observedAccounts];
   const [providerFilter, setProviderFilter] = useState('All');
@@ -380,7 +400,7 @@ function QuotaCandidateLedger({ candidates: configuredCandidates, quotaChecks }:
             {filteredProviders.map(provider => {
               const scopes = candidates.filter(candidate => candidateProvider(candidate) === provider);
               const routingScopes = scopes.filter(candidate => !candidate.observationOnly);
-              const observations = scopes.flatMap(candidate => candidate.quota_observations ?? []);
+              const observations = accountObservations(scopes);
               return (
                 <section key={provider} className="quota-provider-summary">
                   <div className="flex items-center justify-between gap-3 mb-3"><h4 className="text-sm font-semibold text-primary">{providerLabel(provider)}</h4><span className="text-xs text-muted">{routingScopes.length} {routingScopes.length === 1 ? 'candidate' : 'candidates'}{scopes.length > routingScopes.length ? ` · ${scopes.length - routingScopes.length} observed accounts` : ''}</span></div>
@@ -408,7 +428,7 @@ function QuotaCandidateLedger({ candidates: configuredCandidates, quotaChecks }:
                       {!candidate.observationOnly && <p className="text-xs text-muted mt-2">{formatAge(candidate.observed_at) ? `Observed ${formatAge(candidate.observed_at)}` : 'No observation'}</p>}
                     </div>
                     <div className="quota-account-windows">
-                      {(candidate.quota_observations ?? []).length === 0 && <p className="text-xs text-muted">No quota windows reported for this candidate.</p>}
+                      {(candidate.quota_observations ?? []).length === 0 && <p className="text-xs text-muted">{candidate.sourceNoData ? 'This connection has no provider usage reading. Its allowance is unknown.' : 'No quota windows reported for this candidate.'}</p>}
                       {(candidate.quota_observations ?? []).map((observation, observationIndex) => {
                         const percentages = quotaPercentages(observation);
                         const window = observation.quota_window === 'vibe-code-included-monthly' ? 'Vibe Code included monthly allowance' : observation.quota_window ?? 'Unknown window';

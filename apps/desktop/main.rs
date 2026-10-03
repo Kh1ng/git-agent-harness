@@ -12,6 +12,7 @@ use tauri::{
     Manager,
 };
 
+mod credentials;
 mod mistral_login;
 mod open_project;
 mod setup_check;
@@ -904,7 +905,14 @@ fn main() {
             setup_check::setup_check,
             setup_check::open_setup_terminal,
             mistral_login::mistral_login_start,
-            mistral_login::mistral_login_finish
+            mistral_login::mistral_login_finish,
+            credentials::credential_list,
+            credentials::credential_save,
+            credentials::credential_remove,
+            credentials::credential_refresh,
+            credentials::credential_instances,
+            credentials::credential_bind,
+            credentials::credential_add_instance
         ])
         .setup(|app| {
             let settings = read_settings();

@@ -22,7 +22,7 @@ export function backendInstancesRouter(
   const respondWithInstances = async (res: express.Response, profile: string) => {
     const summary = await read(profile);
     const backend_instances = await Promise.all(summary.backend_instances.map(async (instance) => {
-      if (!['codex', 'claude'].includes(instance.runner_kind)) return instance;
+      if (!instance.credential_id && !['codex', 'claude'].includes(instance.runner_kind)) return instance;
       const auth = await testAuth(profile, instance.backend_instance);
       return { ...instance, auth_ready: auth.auth_ready, healthy: auth.auth_ready };
     }));
@@ -58,14 +58,15 @@ export function backendInstancesRouter(
   }
   router.post('/add', mutation('backend_instance.configure'), async (req, res) => {
     const body = req.body;
-    const allowed = ['profile', 'instance', 'runnerKind', 'accountLabel'];
+    const allowed = ['profile', 'instance', 'runnerKind', 'accountLabel', 'credentialId'];
     if (!body || Object.keys(body).some(key => !allowed.includes(key)) || !text(body.profile, 128)
       || !text(body.instance, 128) || !text(body.accountLabel, 128)
-      || !['codex', 'claude'].includes(body.runnerKind)) {
-      return res.status(400).json({ error: 'invalid_instance', message: 'Name the profile, account, instance, and Codex or Claude provider.' });
+      || !['codex', 'claude', 'opencode', 'hermes', 'vibe', 'agy', 'openhands'].includes(body.runnerKind)
+      || (body.credentialId !== undefined && (typeof body.credentialId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(body.credentialId)))) {
+      return res.status(400).json({ error: 'invalid_instance', message: 'Name the profile, account, instance, and runner.' });
     }
     try {
-      await add(body.profile, body.instance, body.runnerKind, body.accountLabel);
+      await add(body.profile, body.instance, body.runnerKind, body.accountLabel, undefined, body.credentialId);
       return await respondWithInstances(res, body.profile);
     } catch {
       return res.status(502).json({ error: 'backend_instance_outcome_unknown', message: 'The account may not have been added. Refresh before retrying.' });
