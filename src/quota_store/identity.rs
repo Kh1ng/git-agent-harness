@@ -95,8 +95,15 @@ pub(crate) fn current_source_records(
     records: &[QuotaObservationRecord],
 ) -> Vec<&QuotaObservationRecord> {
     let mut latest = std::collections::BTreeMap::<&String, &QuotaObservationRecord>::new();
-    for record in records {
+    let mut lifecycle = std::collections::BTreeMap::<&String, usize>::new();
+    for (index, record) in records.iter().enumerate() {
         if let Some(id) = &record.credential_id {
+            if matches!(
+                record.usage_source.as_deref(),
+                Some("credential_updated" | "credential_removed")
+            ) {
+                lifecycle.insert(id, index);
+            }
             // Source publication and lifecycle mutations share a per-source
             // lock. Append order therefore identifies its current binding even
             // if a previously captured check is future-dated or the clock rolls
@@ -106,14 +113,17 @@ pub(crate) fn current_source_records(
     }
     records
         .iter()
-        .filter(|record| {
+        .enumerate()
+        .filter(|(index, record)| {
             record.credential_id.as_ref().is_none_or(|id| {
                 let current = latest[id];
                 current.usage_source.as_deref() != Some("credential_removed")
+                    && lifecycle.get(id).is_none_or(|cutoff| index >= cutoff)
                     && record.backend == current.backend
                     && record.backend_instance == current.backend_instance
                     && record.quota_pool == current.quota_pool
             })
         })
+        .map(|(_, record)| record)
         .collect()
 }

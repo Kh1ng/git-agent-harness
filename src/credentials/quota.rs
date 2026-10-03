@@ -74,7 +74,9 @@ fn refresh_selected_at(
 // Replacing a key can change its billing account. Clear that source before the
 // replacement is acknowledged; other sources and ambient accounts stay active.
 pub(crate) fn updated(info: &CredentialInfo, path: &Path) -> Result<()> {
-    quota_store::append(path, &unknown(info, OffsetDateTime::now_utc()))
+    let mut record = unknown(info, OffsetDateTime::now_utc());
+    record.usage_source = Some("credential_updated".into());
+    quota_store::append(path, &record)
 }
 
 pub(crate) fn removed(info: &CredentialInfo, path: &Path) -> Result<()> {
@@ -261,6 +263,59 @@ mod tests {
                 "retired data stays in append-only history"
             );
         }
+    }
+    #[test]
+    #[cfg(unix)]
+    fn replacement_same_verified_pool_cannot_reactivate_previous_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("credentials");
+        let path = dir.path().join("quota.jsonl");
+        let source = info("primary");
+        super::super::save_with_quota_at(&credentials, source.clone(), "session=old", Some(&path))
+            .unwrap();
+        let now = OffsetDateTime::now_utc();
+        let future = now + time::Duration::days(7);
+        refresh_with(&source, &path, future, || {
+            Ok(Some(reading(&source, future)))
+        })
+        .unwrap();
+        let sibling = info("second");
+        refresh_with(&sibling, &path, future, || {
+            Ok(Some(reading(&sibling, future)))
+        })
+        .unwrap();
+        super::super::save_with_quota_at(&credentials, source.clone(), "session=new", Some(&path))
+            .unwrap();
+        let mut fresh = reading(&source, now);
+        fresh.quota_remaining_percent = Some(70.0);
+        refresh_with(&source, &path, now, || Ok(Some(fresh))).unwrap();
+        let mut independent_window = reading(&source, now);
+        independent_window.quota_window = Some("daily".into());
+        independent_window.quota_remaining_percent = Some(90.0);
+        refresh_with(&source, &path, now, || Ok(Some(independent_window))).unwrap();
+        let records = quota_store::load(&path).unwrap();
+        let identity = ExecutionIdentity::legacy_candidate(
+            "mistral-dashboard",
+            None::<String>,
+            None::<String>,
+        );
+        let readings = quota_store::latest_windows_for_identity_and_credential(
+            &records,
+            &identity,
+            Some("primary"),
+        );
+        assert_eq!(readings.len(), 2);
+        assert!(readings.iter().any(|r| r.quota_window.as_deref()
+            == Some("vibe-code-included-monthly")
+            && r.quota_remaining_percent == Some(70.0)));
+        assert!(readings
+            .iter()
+            .any(|r| r.quota_window.as_deref() == Some("daily")
+                && r.quota_remaining_percent == Some(90.0)));
+        assert!(quota_store::current_source_records(&records)
+            .iter()
+            .any(|r| r.credential_id.as_deref() == Some("second")
+                && r.quota_remaining_percent == Some(40.0)));
     }
     #[test]
     #[cfg(unix)]
