@@ -88,7 +88,7 @@ test('a vibe session decodes a leaked tool request, reads the worktree file afte
   // which leaks the observed wire shape on the first invocation and emits
   // the review once the continuation prompt carries the file content.
   const vibeBinDir = join(stateDir, 'vibe-bin');
-  const fakeInterpreter = join(vibeBinDir, 'fake-python3');
+  const fakeInterpreter = join(vibeBinDir, 'python3');
   const worktreeRecord = join(vibeBinDir, 'cwd.txt');
   execFileSync('mkdir', ['-p', vibeBinDir]);
   writeFileSync(fakeInterpreter, `#!/bin/sh
@@ -179,7 +179,12 @@ esac
     const replyPromise = request(client, 'manager.chat.reply', 'turn', {
       type: 'manager.chat.send', requestId: 'turn', profile, message: 'Review memoryGatewayClient.ts.', sessionId
     } satisfies ClientMessage);
-    const permission = await permissionPush;
+    // A failed backend must release this waiter, rather than leave the socket
+    // open forever while the test waits for a permission that cannot arrive.
+    const permission = await Promise.race([
+      permissionPush,
+      replyPromise.then(() => { throw new Error('Vibe replied before requesting file permission'); })
+    ]);
     assert.equal(permission.title, `Read ${targetPath}`);
     assert.deepEqual(permission.options, [
       { optionId: 'allow-once', name: 'Allow', kind: 'allow_once' },
@@ -244,8 +249,8 @@ esac
     client.close();
     await once(client, 'close');
   } finally {
-    try { ws?.close(); } catch { /* already closed */ }
-    await new Promise((r) => setTimeout(r, 300));
+    ws?.terminate();
+    for (const client of wss.clients) client.terminate();
     wss.close();
     await new Promise<void>((done) => server.close(() => done()));
     await new Promise<void>((done) => gateway.close(() => done()));

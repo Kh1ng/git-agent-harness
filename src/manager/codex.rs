@@ -248,7 +248,19 @@ struct CodexTransport {
 
 impl CodexTransport {
     fn spawn(executable: &Path, stderr: Stdio) -> Result<Self> {
+        Self::spawn_with_env(executable, stderr, &[])
+    }
+
+    fn spawn_with_env(
+        executable: &Path,
+        stderr: Stdio,
+        environment: &[(String, String)],
+    ) -> Result<Self> {
         let mut cmd = Command::new(executable);
+        cmd.envs(environment.iter().map(|(key, value)| (key, value)));
+        if !environment.is_empty() {
+            cmd.env_remove("OPENAI_API_KEY").env_remove("CODEX_API_KEY");
+        }
         cmd.arg("app-server");
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -505,7 +517,15 @@ fn rpc_request(transport: &mut CodexTransport, method: &str, params: Value) -> R
 }
 
 pub(crate) fn read_account_rate_limits(executable: &Path, timeout: Duration) -> Result<Value> {
-    let mut transport = CodexTransport::spawn(executable, Stdio::null())?;
+    read_account_rate_limits_with_env(executable, timeout, &[])
+}
+
+pub(crate) fn read_account_rate_limits_with_env(
+    executable: &Path,
+    timeout: Duration,
+    environment: &[(String, String)],
+) -> Result<Value> {
+    let mut transport = CodexTransport::spawn_with_env(executable, Stdio::null(), environment)?;
     transport.response_timeout = timeout;
     let pid = transport.child.id();
     crate::runner::process::register_supervised_child(pid);

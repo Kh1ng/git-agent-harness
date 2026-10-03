@@ -80,7 +80,7 @@ for (const mode of ['issue', 'pr'] as const) {
         return;
       }
       let body: unknown = {};
-      if (pathname.endsWith('/nodes')) body = { nodes: [] };
+      if (pathname.endsWith('/nodes')) body = { nodes: [{ nodeId: 'central', displayName: 'Central', role: 'central', eligible: true, chatCapable: true }] };
       if (pathname.endsWith('/settings')) body = { profileOverrides: {}, defaultBackend: 'claude' };
       if (pathname.endsWith('/models')) body = { models: [], currentModelId: null };
       if (pathname.endsWith('/issues')) body = { issues: candidates };

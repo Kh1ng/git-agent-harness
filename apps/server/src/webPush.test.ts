@@ -10,6 +10,22 @@ const subscription = {
   keys: { p256dh: 'public-material', auth: 'auth-material' }
 };
 
+test('pairing requests wake only owner and explicitly enabled approver registrations', async () => {
+  const f = fixture();
+  try {
+    f.service.register(subscription, 'Owner');
+    f.service.register({ ...subscription, endpoint: 'https://fcm.googleapis.com/approver' }, 'Approver', 'enabled-device');
+    f.service.register({ ...subscription, endpoint: 'https://fcm.googleapis.com/controller' }, 'Controller', 'ordinary-device');
+    const event = { id: 'pairing:test', occurredAt: new Date().toISOString(), profile: null, kind: 'action_required' as const,
+      severity: 'warning' as const, title: 'Device approval requested', message: 'Review in Settings.', pairingRequestId: 'request-id' };
+    const receipts = await f.service.deliverActivity(event, id => id === 'enabled-device');
+    assert.deepEqual(receipts.map(receipt => receipt.target), ['Owner', 'Approver']);
+    assert.equal(JSON.parse(f.sent[0][1] as string).url, '/?page=settings&pairingRequest=request-id&event=pairing%3Atest');
+    assert.deepEqual((await f.service.deliverActivity(event)).map(receipt => receipt.target), ['Owner'], 'Missing approver policy fails closed');
+    assert.equal((await f.service.deliverActivity({ ...event, pairingRequestId: undefined })).length, 3, 'Task attention still reaches every registration');
+  } finally { rmSync(f.directory, { recursive: true, force: true }); }
+});
+
 function fixture(sendNotification: (...args: unknown[]) => Promise<unknown> = async () => ({})) {
   const directory = mkdtempSync(join(tmpdir(), 'gah-web-push-'));
   const keys = join(directory, 'vapid.json');

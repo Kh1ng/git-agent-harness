@@ -16,6 +16,34 @@ const nodes = [
 ];
 const backends = [{ id: 'claude', displayName: 'Claude', implemented: true }];
 
+for (const source of ['issue', 'pr'] as const) {
+  test(`${source} creation replaces an offline owner and preserves the chosen node and account`, async ({ mount, page }) => {
+    let started: unknown;
+    await page.route('**/api/**', async route => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith('/nodes')) return route.fulfill({ json: { nodes } });
+      if (path.endsWith('/settings')) return route.fulfill({ json: { profileOverrides: {}, defaultBackend: 'claude' } });
+      if (path.endsWith('/backend-instances')) return route.fulfill({ json: { backend_instances: [{ backend_instance: 'claude-2', logical_backend: 'claude', enabled: true, executable_resolved: true, auth_ready: true, account_label: 'Second login' }] } });
+      if (path.endsWith(`/${source}s`)) return route.fulfill({ json: { [`${source}s`]: [{ number: 7, title: 'Source task', labels: [], url: null, author: null, headRefName: null, isDraft: false, reviewState: null, updatedAt: null }] } });
+      if (path.endsWith('/start')) {
+        started = route.request().postDataJSON();
+        return route.fulfill({ json: { session: { id: 'created' } } });
+      }
+      return route.fulfill({ json: { models: [], currentModelId: null } });
+    });
+    const project: ChatProfile = { ...remote, name: 'gah-node:stale:remote', node_id: 'stale' };
+    const modal = await mount(<NewChatModal open currentProfile={project.name} profiles={[project]} backends={backends}
+      onClose={() => {}} onCreated={() => {}} />);
+    await modal.getByRole('tab', { name: source === 'issue' ? 'From issue' : 'From PR' }).click();
+    const picker = modal.getByRole('combobox', { name: 'Run on node' });
+    await expect(picker).toHaveValue('central');
+    await picker.selectOption('worker');
+    await modal.getByRole('combobox', { name: 'Account' }).selectOption('claude-2');
+    await modal.getByRole('button', { name: '#7 Source task' }).click();
+    await expect.poll(() => started).toMatchObject({ profile: project.name, [`${source}Number`]: 7, nodeId: 'worker', backendInstance: 'claude-2' });
+  });
+}
+
 test('node readiness retries, unavailable workers stay disabled, and remote creation uses its owner', async ({ mount, page }, testInfo) => {
   let failNodes = true;
   let created: unknown;
@@ -122,7 +150,7 @@ test('a worker-only project starts a chat from an issue (#1276)', async ({ mount
   const modal = await mount(<NewChatModal open currentProfile={remote.name} profiles={[remote]} backends={backends}
     onClose={() => {}} onCreated={() => {}} />);
   await modal.getByRole('tab', { name: 'From issue' }).click();
-  await expect(modal.getByText('This chat runs on the node that owns the project.')).toBeVisible();
+  await expect(modal.getByRole('combobox', { name: 'Run on node' })).toHaveValue('worker');
   // Picking an issue starts the chat immediately.
   await modal.getByText('Worker bug').click();
   await expect.poll(() => started).toMatchObject({ profile: remote.name, issueNumber: 7, backend: 'claude' });
@@ -145,7 +173,7 @@ test('a worker-only project starts a chat from a pull request (#1276)', async ({
   const modal = await mount(<NewChatModal open currentProfile={remote.name} profiles={[remote]} backends={backends}
     onClose={() => {}} onCreated={() => {}} />);
   await modal.getByRole('tab', { name: 'From PR' }).click();
-  await expect(modal.getByText('This chat runs on the node that owns the project.')).toBeVisible();
+  await expect(modal.getByRole('combobox', { name: 'Run on node' })).toHaveValue('worker');
   await modal.getByText('Worker fix').click();
   await expect.poll(() => started).toMatchObject({ profile: remote.name, prNumber: 9, backend: 'claude' });
 });

@@ -47,3 +47,55 @@ test('pairing codes are single-use, origin/server-bound, expired and invalid aft
     assert.throws(() => new DeviceAccess(path).authenticate(second.token), /storage is invalid/);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+test('push-approved access is secret-bound, short-lived, single-use and never delegates approval automatically', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'gah-access-request-'));
+  const path = join(directory, 'devices.json');
+  let now = Date.now();
+  const server = { id: 'central-id', name: 'Central', origin: 'https://gah.test' };
+  const access = new DeviceAccess(path, () => now);
+  try {
+    const offer = access.create(server);
+    const phone = access.redeem(offer.code, server.id, server.origin, 'Phone');
+    assert.equal(access.canApprovePairing(phone.device.id), false);
+    const pending = access.createAccessRequest(server, 'Linux');
+    const other = access.createAccessRequest(server, 'Other browser');
+    assert.throws(() => access.decideAccessRequest(pending.request.id, true, pending.request.matching_code, phone.device.id), /not enabled/);
+    access.setCanApprovePairing(phone.device.id, true);
+    assert.equal(new DeviceAccess(path, () => now).canApprovePairing(phone.device.id), true, 'Owner delegation persists across restart');
+    assert.throws(() => access.accessRequestStatus(`${pending.request.id}.${other.cookie.split('.')[1]}`, server.origin), /bound/);
+    assert.throws(() => access.accessRequestStatus(pending.cookie, 'https://other.test'), /bound/);
+    assert.throws(() => access.claimAccessRequest(pending.cookie, server.origin), /not approved/);
+    assert.throws(() => access.decideAccessRequest(pending.request.id, true, 'WRONG', phone.device.id), /matching code/);
+    access.decideAccessRequest(pending.request.id, true, pending.request.matching_code, phone.device.id);
+    access.setCanApprovePairing(phone.device.id, false);
+    assert.throws(() => access.claimAccessRequest(pending.cookie, server.origin), /no longer/);
+    access.setCanApprovePairing(phone.device.id, true);
+    const linux = access.claimAccessRequest(pending.cookie, server.origin);
+    assert.equal(access.authenticate(linux.token)?.id, linux.device.id);
+    assert.equal(access.canApprovePairing(linux.device.id), false);
+    assert.equal(access.accessRequestStatus(pending.cookie, server.origin).status, 'claimed');
+    assert.throws(() => access.claimAccessRequest(pending.cookie, server.origin), /already been claimed/);
+    assert.throws(() => access.decideAccessRequest(pending.request.id, true, pending.request.matching_code, 'owner'), /no longer pending/);
+    const rejected = access.createAccessRequest(server, 'Denied');
+    access.decideAccessRequest(rejected.request.id, false, undefined, 'owner');
+    assert.equal(access.accessRequestStatus(rejected.cookie, server.origin).status, 'denied');
+    assert.throws(() => access.claimAccessRequest(rejected.cookie, server.origin), /not approved/);
+    const approved = access.createAccessRequest(server, 'Revoked approver');
+    access.decideAccessRequest(approved.request.id, true, approved.request.matching_code, phone.device.id);
+    access.revoke(phone.device.id);
+    assert.throws(() => access.claimAccessRequest(approved.cookie, server.origin), /no longer/);
+    assert.throws(() => access.decideAccessRequest(other.request.id, true, other.request.matching_code, phone.device.id), /not enabled/);
+    now += 5 * 60_000;
+    assert.equal(access.accessRequestStatus(other.cookie, server.origin).status, 'expired');
+    assert.throws(() => access.decideAccessRequest(other.request.id, true, other.request.matching_code, 'owner'), /no longer pending/);
+    assert.throws(() => new DeviceAccess(path).accessRequestStatus(other.cookie, server.origin), /bound/);
+    const disk = readFileSync(path, 'utf8');
+    for (const value of [pending.cookie, pending.request.matching_code, other.cookie, linux.token.split('.')[1]]) assert.ok(!disk.includes(value));
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    const rows = JSON.parse(disk);
+    rows.devices[0].can_approve_pairing = 'true';
+    writeFileSync(path, JSON.stringify(rows));
+    assert.throws(() => new DeviceAccess(path).canApprovePairing(phone.device.id), /storage is invalid/);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});

@@ -22,8 +22,15 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
   const app = express();
   app.set('trust proxy', 'loopback');
   app.locals.deviceAccess = access;
-  // Exercise the remote boundary while the hermetic listener runs on loopback.
-  app.use((req, _res, next) => { req.headers['x-forwarded-for'] = req.headers['x-test-client'] === 'owner' ? '198.51.100.8' : '198.51.100.9'; next(); });
+  // New approval credentials require TLS remotely. Keep their HTTP fixture on
+  // trusted loopback; simulate remote authentication for all other APIs and WS.
+  const loopbackApprovalPaths = new Set(['/api/pairing/access/request', '/api/pairing/access/status', '/api/pairing/access/claim']);
+  app.use((req, _res, next) => {
+    if (loopbackApprovalPaths.has(req.path)) {
+      for (const header of ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto']) delete req.headers[header];
+    } else req.headers['x-forwarded-for'] = req.headers['x-test-client'] === 'owner' ? '198.51.100.8' : '198.51.100.9';
+    next();
+  });
   app.use(express.json());
   app.use('/api/pairing', pairingRouter(access, { node_id: '11111111-1111-1111-1111-111111111111', display_name: 'Pairing test central', advertised_url: '', version: 'test', schema_digest: 'test' }));
   app.use('/api', authMiddleware);
@@ -52,6 +59,8 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
       webkit: { messageHandlers: { gahController: { postMessage: (message: string) => sessionStorage.setItem('nativeMessage', message) } } }
     });
   });
+  const linuxContext = await browser.newContext();
+  const linux = await linuxContext.newPage();
   const owner = await ownerContext.newPage();
   const phone = await deviceContext.newPage();
   let closedDeviceSockets = 0;
@@ -140,7 +149,51 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     await expect(owner.getByRole('button', { name: 'Revoke Test phone', exact: true })).toBeVisible();
     await owner.getByRole('heading', { name: 'Paired devices' }).scrollIntoViewIfNeeded();
     await owner.screenshot({ path: testInfo.outputPath('paired-devices-desktop.png') });
+    // Linux requests access without copying the owner's token. Controller
+    // approval is disabled until the owner explicitly enables this phone.
+    const approver = owner.getByLabel('Allow Test phone to approve access requests', { exact: true });
+    await expect(approver).not.toBeChecked();
+    expect(await phone.evaluate(async () => (await fetch('/api/pairing/access/requests')).status)).toBe(403);
+    await linux.goto(`${origin}/?page=settings`);
+    await linux.getByLabel('Access token', { exact: true }).fill('stale-owner-token');
+    await linux.getByRole('button', { name: 'Save and reconnect' }).click();
+    await expect(linux.getByRole('status').filter({ hasText: 'Access required' })).toBeVisible();
+    expect(await linux.evaluate(() => sessionStorage.getItem('gah.coordinatorToken'))).toBe('stale-owner-token');
+    await linux.getByRole('button', { name: 'Request access', exact: true }).click();
+    await linux.getByLabel('Device name', { exact: true }).fill('Linux laptop');
+    await linux.getByRole('button', { name: 'Send access request' }).click();
+    await expect(linux.getByRole('status').filter({ hasText: 'Waiting for approval' })).toBeVisible();
+    await expect(linux.getByText('Connection error: WebSocket connection error')).toHaveCount(0);
+    await owner.getByRole('button', { name: 'Refresh requests' }).click();
+    await owner.getByRole('button', { name: 'Deny Linux laptop', exact: true }).click();
+    await expect(linux.getByRole('status').filter({ hasText: 'Access denied' })).toBeVisible({ timeout: 10_000 });
+    await linux.getByRole('button', { name: 'Start a new request' }).click();
+    await linux.getByRole('button', { name: 'Send access request' }).click();
+    await expect(linux.getByRole('status').filter({ hasText: 'Waiting for approval' })).toBeVisible();
+    const request = await linux.evaluate(async () => (await (await fetch('/api/pairing/access/status')).json()) as { id: string; matching_code: string });
+    await approver.check();
+    await expect(owner.getByRole('status').filter({ hasText: 'Test phone can now approve device access requests.' })).toBeVisible();
+    // This is the same request-id URL opened by an approval notification.
+    await phone.goto(`${origin}/?page=settings&pairingRequest=${encodeURIComponent(request.id)}`);
+    const reviews = phone.getByRole('region', { name: 'Access requests', exact: true });
+    await expect(reviews.getByText(request.matching_code, { exact: true })).toBeVisible();
+    await expect(reviews.locator('li').filter({ hasText: 'Linux laptop' })).toHaveClass(/ring-2/);
+    await expect(phone.getByRole('button', { name: 'Generate pairing QR code' })).toHaveCount(0);
+    await reviews.getByRole('button', { name: 'Approve Linux laptop', exact: true }).click();
+    await expect(linux.getByRole('status').filter({ hasText: 'Access approved' })).toBeVisible({ timeout: 10_000 });
+    expect((await linuxContext.cookies()).some(cookie => cookie.name === 'gah_device')).toBe(false);
+    await linux.getByRole('button', { name: 'Continue to dashboard' }).click();
+    await expect(linux.getByRole('status').filter({ hasText: 'Paired as Linux laptop' })).toBeVisible();
+    await expect(linux.getByRole('status').filter({ hasText: /^Live/ })).toBeVisible();
+    expect((await linuxContext.cookies()).find(cookie => cookie.name === 'gah_device')).toMatchObject({ httpOnly: true, sameSite: 'Strict' });
+    expect(await linux.evaluate(() => sessionStorage.getItem('gah.coordinatorToken'))).toBeNull();
+    await linux.reload();
+    await expect(linux.getByRole('status').filter({ hasText: 'Paired controller' })).toBeVisible();
+    expect(await linux.evaluate(async () => (await fetch('/api/profiles')).status)).toBe(200);
+    expect(await linux.evaluate(async () => (await (await fetch('/api/pairing/session')).json()).can_approve_pairing)).toBe(false);
+    expect(await linux.evaluate(() => document.cookie)).not.toContain('gah_device');
     // Owner access is explicit and temporary; clearing it returns to the paired device.
+    await phone.getByText('Central access token', { exact: true }).click();
     await phone.getByLabel('Access token', { exact: true }).fill('browser-owner-secret');
     await phone.getByRole('button', { name: 'Save and reconnect' }).click();
     await expect(phone.getByRole('button', { name: 'Generate pairing QR code' })).toBeVisible();
@@ -164,7 +217,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     await expect(phone.getByRole('alert').filter({ hasText: 'already used' })).toBeVisible();
     await expect(phone.getByRole('button', { name: 'Confirm server and pair' })).toHaveCount(0);
   } finally {
-    await ownerContext.close(); await deviceContext.close();
+    await ownerContext.close(); await deviceContext.close(); await linuxContext.close();
     for (const socket of wss.clients) socket.terminate();
     await new Promise<void>(resolve => wss.close(() => resolve()));
     await new Promise<void>(resolve => server.close(() => resolve()));

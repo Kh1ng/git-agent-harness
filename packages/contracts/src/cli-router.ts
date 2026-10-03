@@ -30,6 +30,9 @@ export interface CliRouterQuota {
   remainingPercent: number | null;
   resetAt: string | null;
   observedAt?: string;
+  /** Provider-reported window and pool identifiers, never inferred from display text. */
+  window?: string;
+  quotaPool?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +94,8 @@ export interface CliRouterSettingsInput {
   apiKey?: string;
   /** Blank/omitted preserves saved value; required on initial connect. */
   managementKey?: string;
+  /** Explicit binding of upstream account ids to existing native logical backends. */
+  accountBackends?: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +142,7 @@ export interface CliRouterStoredSettings {
   url: string;
   apiKey: string;
   managementKey: string;
+  accountBackends?: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,62 @@
+{
+  "result": {
+    "data": {
+      "json": {
+        "currency": "USD",
+        "prices": [
+          {
+            "apiZone": "global",
+            "billingGroup": "cached",
+            "billingMetric": "zai-glm-5-3",
+            "eventType": "api_tokens",
+            "price": 1.4e-07,
+            "serviceTier": "standard"
+          },
+          {
+            "apiZone": "global",
+            "billingGroup": "input",
+            "billingMetric": "zai-glm-5-3",
+            "eventType": "api_tokens",
+            "price": 1.4e-06,
+            "serviceTier": "standard"
+          },
+          {
+            "apiZone": "global",
+            "billingGroup": "output",
+            "billingMetric": "zai-glm-5-3",
+            "eventType": "api_tokens",
+            "price": 4.4e-06,
+            "serviceTier": "standard"
+          },
+          {
+            "apiZone": "global",
+            "billingGroup": "input",
+            "billingMetric": "mistral-medium-3-5",
+            "eventType": "api_tokens",
+            "price": 1.5e-06,
+            "serviceTier": "standard"
+          },
+          {
+            "apiZone": "global",
+            "billingGroup": "input",
+            "billingMetric": "mistral-medium-3-5",
+            "eventType": "api_audio_seconds",
+            "price": 0.00016666666666666666,
+            "serviceTier": "standard"
+          },
+          {
+            "apiZone": "global",
+            "billingGroup": "calls",
+            "billingMetric": "web_search",
+            "eventType": "api_connectors",
+            "price": 0.03,
+            "serviceTier": "standard"
+          }
+        ]
+      },
+      "meta": {
+        "v": 1
+      }
+    }
+  }
+}

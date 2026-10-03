@@ -293,6 +293,9 @@ fn operator_shutdown_suppresses_refill_without_becoming_a_worker_failure() {
 
 #[test]
 fn route_state_fingerprint_changes_with_effective_configuration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _guard =
+        crate::test_support::AvailabilityEnvGuard::set(tmp.path().join("availability.json"));
     let mut cfg = controller_config();
     let now = time::OffsetDateTime::now_utc();
     let before = route_state_fingerprint(&cfg, "real", now).unwrap();

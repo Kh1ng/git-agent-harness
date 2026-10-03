@@ -1,9 +1,9 @@
+pub(crate) mod credential_guard;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::runner::output;
 use crate::runner::process::{spawn_with_idle_watch, write_redacted_task};
@@ -34,7 +34,7 @@ pub(crate) fn run_with_executable(
     // never misreported as this attempt's token consumption.
     let sessions_before = snapshot_vibe_session_metadata_paths(env_vars);
 
-    let mut cmd = Command::new(executable);
+    let mut cmd = credential_guard::command(executable, env_vars)?;
     // --trust: automation-only, not persisted to trusted_folders.toml --
     // skips the interactive trust prompt without touching global config.
     // --auto-approve: same automation need as agy's --dangerously-skip-permissions.

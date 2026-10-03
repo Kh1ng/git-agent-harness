@@ -11,8 +11,8 @@
       main { max-width: 42rem; margin: auto; padding: 2rem; }
       h1 { font-size: 1.75rem; margin: 0; } h2 { font-size: 1.25rem; }
       p { color: #b4bdcc; } label { display: block; margin-top: 1rem; }
-      input, button { font: inherit; border-radius: .35rem; border: 1px solid #536078; padding: .55rem .75rem; }
-      input { display: block; box-sizing: border-box; width: 100%; background: #11151f; color: inherit; caret-color: #8ab4ff; }
+      input, select, button { font: inherit; border-radius: .35rem; border: 1px solid #536078; padding: .55rem .75rem; }
+      input, select { display: block; box-sizing: border-box; width: 100%; background: #11151f; color: inherit; caret-color: #8ab4ff; }
       button { background: #283c5b; color: white; cursor: pointer; margin-top: 1rem; transition: background-color 140ms cubic-bezier(.16, 1, .3, 1); }
       input[type="checkbox"] { display: inline-block; width: 1.1rem; height: 1.1rem; margin: 0 .6rem 0 0; vertical-align: middle; accent-color: #8ab4ff; }
       .preference { min-height: 2.75rem; display: flex; align-items: center; margin: 0; cursor: pointer; }
@@ -25,6 +25,7 @@
       .actions { display: flex; gap: .75rem; flex-wrap: wrap; }
       .checklist { list-style: none; padding: 0; margin: .5rem 0 0; } .checklist li { padding: .35rem 0; border-bottom: 1px solid #232936; }
       .checklist .mark { display: inline-block; width: 1.5rem; } .checklist .ok { color: #9be09b; } .checklist .missing { color: #ffb4b4; } .checklist .optional { color: #b4bdcc; }
+      .checklist p { overflow-wrap: anywhere; }
       .checklist small { display: block; color: #b4bdcc; margin-left: 1.5rem; } code { font-size: .875rem; background: #11151f; padding: .1rem .3rem; border-radius: .25rem; overflow-wrap: anywhere; }
       @media (prefers-reduced-motion: reduce) { button { transition: none; } }
     </style>
@@ -34,12 +35,51 @@
       <button id="back" type="button">← Back to Settings</button>
       <h1>Settings · This computer</h1>
       <p>Change this computer’s connection, app presence, and worker. Pair devices and manage central from the dashboard’s Settings page.</p>
+      <section id="mistral-section" aria-labelledby="mistral-heading">
+        <h2 id="mistral-heading">Mistral account usage</h2>
+        <p>Sign in to Mistral in the app window, then check the connection. GAH saves the connection on this computer. A registered worker shares usage readings with central.</p>
+        <p id="mistral-status" role="status">Connect your account to collect its usage and included Vibe allowance.</p>
+        <p id="mistral-installation" hidden>GAH CLI is unavailable on this computer. Complete setup below before collecting account usage.</p>
+        <div class="actions">
+          <button id="mistral-connect" type="button">Connect Mistral</button>
+          <button id="mistral-finish" type="button" hidden>Check connection</button>
+        </div>
+      </section>
+      <section id="provider-connections" aria-labelledby="provider-connections-heading">
+        <h2 id="provider-connections-heading">Provider connections</h2>
+        <p>Save named keys and separate accounts on this computer. Keys for the same billing account share its allowance. Saving a key does not verify account usage.</p>
+        <p>Codex, Claude and Antigravity OAuth accounts use their existing backend account or CLI Router controls.</p>
+        <p id="credential-status" role="status">Checking saved connections…</p>
+        <ul id="credential-list" class="checklist"></ul>
+        <div class="actions">
+          <button id="credential-add" type="button">Add API key</button>
+          <button id="credential-reload" type="button">Check saved connections</button>
+        </div>
+        <form id="credential-form" hidden>
+          <label for="credential-label">Connection name</label>
+          <input id="credential-label" required maxlength="128" placeholder="Personal or work" autocomplete="off" />
+          <label for="credential-provider">Provider</label>
+          <input id="credential-provider" required maxlength="64" list="credential-providers" placeholder="mistral" autocomplete="off" autocapitalize="none" spellcheck="false" />
+          <datalist id="credential-providers"><option value="mistral"><option value="nous"><option value="openai"><option value="anthropic"><option value="google"><option value="xai"><option value="kimi"></datalist>
+          <label for="credential-secret">API key</label>
+          <input id="credential-secret" type="password" required maxlength="32768" autocomplete="off" autocapitalize="none" spellcheck="false" />
+          <label for="credential-env">Environment variable (optional)</label>
+          <input id="credential-env" maxlength="128" placeholder="Provider default" autocomplete="off" autocapitalize="none" spellcheck="false" />
+          <div class="actions"><button type="submit">Save key</button><button id="credential-cancel" type="button">Cancel</button></div>
+        </form>
+        <label for="mistral-account-label">Another Mistral account name</label>
+        <input id="mistral-account-label" required maxlength="128" placeholder="Work Mistral" autocomplete="off" />
+        <button id="mistral-add-account" type="button">Connect another Mistral account</button>
+        <p>This opens a separate sign-in window and preserves your current Mistral connection.</p>
+      </section>
       <section id="setup-section" aria-labelledby="setup-heading">
         <h2 id="setup-heading">Set up this computer</h2>
         <p id="setup-state" role="status">Checking what this computer has…</p>
         <ul id="setup-list" class="checklist" hidden></ul>
+        <p id="standalone-note" hidden>Standalone runs the dashboard and agents on this computer only. It accepts every setup default and connects this app when setup finishes.</p>
         <p id="setup-command" hidden>Run in a terminal: <code></code></p>
         <div class="actions">
+          <button id="setup-standalone" type="button" hidden aria-describedby="standalone-note">Set up standalone</button>
           <button id="setup-terminal" type="button" hidden>Finish setup in Terminal</button>
           <button id="setup-refresh" type="button">Check again</button>
         </div>

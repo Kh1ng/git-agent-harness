@@ -170,8 +170,7 @@ export interface StartIssueChatInput {
   inProgressLabel?: string;
   /** Store override (tests). */
   storeOptions?: ChatSessionStoreOptions;
-  /** Creates the session on a worker for a project with no checkout on
-   * central (#1276). Absent means a local session. */
+  /** Creates the session on the selected node. Absent means a local session. */
   create?: (settings: { title: string; branch: string }) => Promise<ChatSessionSummary>;
 }
 
@@ -204,7 +203,7 @@ export async function startIssueChat(input: StartIssueChatInput): Promise<StartI
   // by design); a fresh grab for the same issue gets a suffixed branch.
   // Central can't list a worker's branches, so a remote grab checks central's
   // own session records for an earlier use of the branch instead.
-  const branchTaken = input.create
+  const branchTaken = !profileInfo.local_path
     ? listSessions(profile, storeOptions).some((session) => session.branch === canonicalBranch)
     : !!(await execProviderCli('git', ['branch', '--list', canonicalBranch], profileInfo.local_path)).stdout.trim();
   const title = `#${issueNumber} ${issue.title}`;

@@ -473,6 +473,9 @@ export interface QuotaUsageSummary {
 }
 
 export interface QuotaCandidateStatus {
+  credential_id?: string | null;
+  /** Billing/subscription service, distinct from the runner or model vendor. */
+  provider?: string | null;
   backend_instance?: string | null;
   modes: string[];
   backend: string;
@@ -490,9 +493,15 @@ export interface QuotaCandidateStatus {
 }
 
 export interface QuotaCheck {
+  credential_id?: string | null;
   backend: string;
+  provider?: string | null;
+  backend_instance?: string | null;
+  model?: string | null;
+  quota_pool?: string | null;
   checked_at: string;
   status: 'data' | 'no_data' | 'failed';
+  quota_observations?: QuotaObservation[];
   error?: string | null;
 }
 
@@ -536,7 +545,36 @@ export interface DoctorSnapshot {
 // gah report --json (src/report.rs)
 // ---------------------------------------------------------------------------
 
+/** Provider dashboard consumption, separate from GAH task accounting and quota caps. */
+export interface AccountUsageModel {
+  model: string;
+  usage_type: 'vibe' | 'vibe_connectors';
+  requests?: number | null;
+  input_tokens?: number | null;
+  cached_input_tokens?: number | null;
+  output_tokens?: number | null;
+  cost?: number | null;
+}
+
+export interface AccountUsageObservation {
+  account_id: string;
+  workspace_id: string | null;
+  period_start: string;
+  period_end: string;
+  currency: 'USD';
+  requests?: number | null;
+  input_tokens?: number | null;
+  cached_input_tokens?: number | null;
+  output_tokens?: number | null;
+  cost?: number | null;
+  cost_source?: 'dashboard_prices' | null;
+  models: AccountUsageModel[];
+}
+
 export interface QuotaObservation {
+  credential_id?: string | null;
+  backend_instance?: string | null;
+  quota_pool?: string | null;
   backend: string;
   model?: string | null;
   quota_window?: string | null;
@@ -545,6 +583,7 @@ export interface QuotaObservation {
   quota_reset_at?: string | null;
   observed_at?: string | null;
   usage_source?: string | null;
+  account_usage?: AccountUsageObservation | null;
 }
 
 export interface BackendModelComparison {
@@ -963,6 +1002,9 @@ export interface RoutingCandidateSummary {
 export interface BackendInstanceSummary {
   backend_instance: string;
   runner_kind: string;
+  /** Named credential on this instance's own node; never a key value. */
+  credential_id?: string | null;
+  credential_provider?: string | null;
   /** Present in the effective canonical/profile environment. */
   declared?: boolean;
   /** Issue #822: disabled instances stay declared but routing skips them. */

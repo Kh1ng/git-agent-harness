@@ -1,5 +1,5 @@
 import { coordinatorToken } from './coordinatorToken.js';
-import type { ActivityEvent, ActivityNotificationPreferences, AuthHealthRow, LoginRepairView, PairedDevice, PairingOffer, PairingPreview } from '@git-agent-harness/contracts';
+import type { ActivityEvent, ActivityNotificationPreferences, AuthHealthRow, LoginRepairView, PairedDevice, PairingOffer, PairingPreview, PairingAccessRequest } from '@git-agent-harness/contracts';
 import type { PlanningChatRequest, PlanningEpicList, PlanningMap, PlanningSettings, PlanningTarget } from '@git-agent-harness/contracts';
 /**
  * Typed data-source client for GAH's pull-data REST endpoints.
@@ -21,6 +21,7 @@ import type { PlanningChatRequest, PlanningEpicList, PlanningMap, PlanningSettin
  */
 import type {
   FleetSnapshot,
+  FleetQuotaSnapshot,
   NodeHealthCheckResult,
   StatusSnapshot,
   QuotaSnapshot,
@@ -89,13 +90,19 @@ export class GahApiError extends Error {
 }
 
 export const pairingApi = {
-  session: () => getJson<{ principal: { kind: 'owner' | 'device'; id?: string } }>('/api/pairing/session'),
+  session: () => getJson<{ principal: { kind: 'owner' | 'device'; id?: string }; can_approve_pairing: boolean }>('/api/pairing/session'),
   devices: () => getJson<{ devices: PairedDevice[] }>('/api/pairing/devices'),
   create: (origin: string) => postJson<PairingOffer, { origin: string }>('/api/pairing/offers', { origin }),
   inspect: (code: string, server_id: string) => postJson<PairingPreview, { code: string; server_id: string }>('/api/pairing/inspect', { code, server_id }),
   redeem: (code: string, server_id: string, name: string) => postJson<{ device: PairedDevice }, { code: string; server_id: string; name: string; confirm: true }>('/api/pairing/redeem', { code, server_id, name, confirm: true }),
   revoke: (id: string) => deleteJson(`/api/pairing/devices/${encodeURIComponent(id)}`),
-  logout: () => postJson('/api/pairing/logout', {})
+  logout: () => postJson('/api/pairing/logout', {}),
+  requestAccess: (name: string) => postJson<PairingAccessRequest, { name: string }>('/api/pairing/access/request', { name }),
+  accessStatus: () => getJson<PairingAccessRequest>('/api/pairing/access/status'),
+  claimAccess: () => postJson<{ device: PairedDevice }, { confirm: true }>('/api/pairing/access/claim', { confirm: true }),
+  accessRequests: () => getJson<{ requests: PairingAccessRequest[] }>('/api/pairing/access/requests'),
+  reviewAccess: (id: string, action: 'approve' | 'deny', matching_code: string) => postJson<PairingAccessRequest, { matching_code?: string; confirm?: true }>(`/api/pairing/access/requests/${encodeURIComponent(id)}/${action}`, action === 'approve' ? { matching_code, confirm: true } : {}),
+  setApprover: (id: string, can_approve_pairing: boolean) => patchJson<{ device: PairedDevice }, { can_approve_pairing: boolean }>(`/api/pairing/devices/${encodeURIComponent(id)}`, { can_approve_pairing })
 };
 
 export const pushApi = {
@@ -264,6 +271,7 @@ export interface StopLoopResult {
 export interface GahDataSource {
   getCoordinatorInfo(): Promise<CoordinatorInfo>;
   getFleetSnapshot(): Promise<FleetSnapshot>;
+  getFleetQuota(params?: { profile?: string; since?: string }): Promise<FleetQuotaSnapshot>;
   checkNodeHealth(nodeId: string): Promise<NodeHealthCheckResult>;
   getNodeDoctor(nodeId: string, profile: string): Promise<DoctorSnapshot>;
   getStatus(profile?: string): Promise<StatusSnapshot>;
@@ -336,9 +344,9 @@ export interface GahDataSource {
   getChatPreview(profile: string, sessionId: string): Promise<{ preview: ChatPreviewInfo | null }>;
   setChatPreview(profile: string, sessionId: string, port: number | null): Promise<{ preview: ChatPreviewInfo | null }>;
   getChatIssues(profile: string): Promise<{ issues: ChatIssueSummary[] }>;
-  startChatFromIssue(profile: string, issueNumber: number, backend?: string, model?: string | null): Promise<ChatIssueStartResult>;
+  startChatFromIssue(profile: string, issueNumber: number, backend?: string, model?: string | null, nodeId?: string, backendInstance?: string | null): Promise<ChatIssueStartResult>;
   getChatPrs(profile: string): Promise<{ prs: ChatPrSummary[] }>;
-  startChatFromPr(profile: string, prNumber: number, backend?: string, model?: string | null): Promise<ChatPrStartResult>;
+  startChatFromPr(profile: string, prNumber: number, backend?: string, model?: string | null, nodeId?: string, backendInstance?: string | null): Promise<ChatPrStartResult>;
   getPlanningEpics(profile: string, refresh?: boolean): Promise<PlanningEpicList>;
   getPlanningMap(profile: string, target: PlanningTarget, refresh?: boolean): Promise<PlanningMap>;
   getPlanningSettings(profile: string): Promise<PlanningSettings>;
@@ -454,6 +462,9 @@ export const gahApi: GahDataSource = {
   },
   getFleetSnapshot() {
     return getJson<FleetSnapshot>('/api/registry/fleet/snapshot');
+  },
+  getFleetQuota(params = {}) {
+    return getJson<FleetQuotaSnapshot>('/api/registry/quota', params);
   },
   checkNodeHealth(nodeId) {
     return getJson<NodeHealthCheckResult>(`/api/registry/nodes/${encodeURIComponent(nodeId)}/health`);
@@ -740,14 +751,14 @@ export const gahApi: GahDataSource = {
   getChatIssues(profile) {
     return getJson<{ issues: ChatIssueSummary[] }>('/api/manager-chat/issues', { profile });
   },
-  startChatFromIssue(profile, issueNumber, backend, model) {
-    return postJson<ChatIssueStartResult, { profile: string; issueNumber: number; backend?: string; model?: string | null }>('/api/manager-chat/issues/start', { profile, issueNumber, backend, model });
+  startChatFromIssue(profile, issueNumber, backend, model, nodeId, backendInstance) {
+    return postJson<ChatIssueStartResult, { profile: string; issueNumber: number; backend?: string; model?: string | null; nodeId?: string; backendInstance?: string | null }>('/api/manager-chat/issues/start', { profile, issueNumber, backend, model, nodeId, backendInstance });
   },
   getChatPrs(profile) {
     return getJson<{ prs: ChatPrSummary[] }>('/api/manager-chat/prs', { profile });
   },
-  startChatFromPr(profile, prNumber, backend, model) {
-    return postJson<ChatPrStartResult, { profile: string; prNumber: number; backend?: string; model?: string | null }>('/api/manager-chat/prs/start', { profile, prNumber, backend, model });
+  startChatFromPr(profile, prNumber, backend, model, nodeId, backendInstance) {
+    return postJson<ChatPrStartResult, { profile: string; prNumber: number; backend?: string; model?: string | null; nodeId?: string; backendInstance?: string | null }>('/api/manager-chat/prs/start', { profile, prNumber, backend, model, nodeId, backendInstance });
   },
   getPlanningEpics(profile, refresh) {
     return getJson<PlanningEpicList>('/api/planning/epics', { profile, refresh: refresh ? '1' : undefined });
@@ -827,10 +838,11 @@ export const promptPoliciesApi = {
     ),
 };
 
+export type BackendRunnerKind = 'codex' | 'claude' | 'opencode' | 'openhands' | 'vibe' | 'agy' | 'hermes';
 export const backendInstancesApi = {
   list: (profile: string) => getJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }>('/api/backend-instances', { profile }),
   setEnabled: (profile: string, instance: string, enabled: boolean) => postJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }, { profile: string; instance: string }>(`/api/backend-instances/${enabled ? 'enable' : 'disable'}`, { profile, instance }),
-  add: (profile: string, instance: string, runnerKind: 'codex' | 'claude', accountLabel: string) => postJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }, { profile: string; instance: string; runnerKind: 'codex' | 'claude'; accountLabel: string }>('/api/backend-instances/add', { profile, instance, runnerKind, accountLabel }),
+  add: (profile: string, instance: string, runnerKind: BackendRunnerKind, accountLabel: string) => postJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }, { profile: string; instance: string; runnerKind: BackendRunnerKind; accountLabel: string }>('/api/backend-instances/add', { profile, instance, runnerKind, accountLabel }),
   setLabel: (profile: string, instance: string, accountLabel: string) => postJson<{ profile: string; backend_instances: import('@git-agent-harness/contracts').BackendInstanceSummary[] }, { profile: string; instance: string; accountLabel: string }>('/api/backend-instances/label', { profile, instance, accountLabel })
 };
 

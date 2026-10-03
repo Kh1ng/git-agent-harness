@@ -962,11 +962,64 @@ explicit. Each item shows one chip per delivery target, for example
 reading server logs. Every pushed URL carries `event=<id>`: a push for an
 event with no chat scrolls to that event and highlights it.
 
+### Named provider connections
+
+In the desktop app, open **Settings → Provider connections** on the computer
+that will run the account. Add an API key with a provider and an account label.
+Use separate names for personal, work, and client accounts. **Replace key**
+updates one connection. **Remove** removes only the selected connection.
+
+Each connection keeps its secret on that computer. The connection list contains
+metadata only. Central receives usage readings from workers without receiving
+their keys. Replacing a key clears its previous account reading until a new
+check succeeds.
+
+Choose **Check usage** to request a reading for the selected connection.
+A saved key does not prove usage access. Providers without a supported usage
+endpoint show an unknown allowance. Two keys share an allowance only when the
+provider confirms the same billing account.
+
+To run an account, bind its connection to a compatible local instance.
+Alternatively, choose **Create local instance** in the connection list.
+Instances keep separate runner state. Mistral dashboard sessions provide usage
+access and cannot serve as inference keys. AGY accounts use separate CLI logins.
+Existing approval requirements for paid credentials still apply.
+
+The CLI supports the same storage through `gah credentials list --json`,
+`gah credentials save`, and `gah credentials remove --id NAME`.
+The save command reads the secret from stdin. Its `--id`, `--provider`,
+`--kind`, and `--account-label` arguments contain metadata only.
+`gah quota refresh --credential NAME` checks only that connection.
+
+### Mistral dashboard usage
+
+In the desktop app, open **Quota → Connect Mistral**, then choose
+**Connect Mistral** in local Settings. Sign in in the Mistral window. GAH verifies
+usage access and saves the session privately on this device. The device needs
+an installed GAH collector to refresh usage.
+
+For another Mistral account, choose **Connect another Mistral account** in Provider
+connections. Give the account a separate name and sign in in its isolated
+window. This preserves the existing default session. **Reconnect** updates only
+the selected account.
+
+For manual setup on macOS or Linux, save the **Cookie header value** from a
+signed-in Mistral dashboard request in `~/.config/gah/mistral-dashboard.cookie`.
+This is a session credential, not an API key. Keep it on the account-owning node
+with mode `600`. `MISTRAL_DASHBOARD_COOKIE_FILE` can select another private file;
+the desktop connection flow uses the default path.
+
+Run `gah quota refresh --backend mistral-dashboard` to collect read-only usage
+and the current login's Vibe monthly allowance. Automatic checks run at most
+every 30 minutes and skip an empty default file. Reconnect in Settings when the
+session expires. Account readings stay separate from Vibe execution instances
+and task usage; missing allowance or price data remains unknown.
+
 ### Provider login health
 
 Every node runs `gah auth-health` at server start and every 30 minutes. It
 checks claude, codex, hermes, each opencode provider (a saved credential that
-lists no models counts as expired), `gh`, `glab`, and `MISTRAL_API_KEY` /
+lists no models has unknown login validity), `gh`, `glab`, and `MISTRAL_API_KEY` /
 `NOUS_API_KEY` when set. It also reports backends that a dispatch attempt
 marked unavailable for an authentication failure. The command prints fixed,
 secret-free details, never provider output. A worker reports the result in

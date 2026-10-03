@@ -41,12 +41,33 @@ pub fn install_shutdown_handler() -> Result<()> {
 /// bounded self-report queries (e.g. skill inventory, #966) that must never
 /// block a caller on a hung backend -- unlike `spawn_with_idle_watch`, there
 /// is no idle-vs-progress distinction here, just a hard deadline.
-pub fn run_bounded(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+pub fn run_bounded(cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+    run_bounded_input(cmd, timeout, None)
+}
+
+/// Same deadline and process-group ownership, with private piped request input.
+pub(crate) fn run_bounded_with_input(
+    cmd: Command,
+    timeout: Duration,
+    input: &[u8],
+) -> Option<std::process::Output> {
+    run_bounded_input(cmd, timeout, Some(input))
+}
+
+fn run_bounded_input(
+    mut cmd: Command,
+    timeout: Duration,
+    input: Option<&[u8]>,
+) -> Option<std::process::Output> {
     let mut stdout = tempfile::tempfile().ok()?;
     let mut stderr = tempfile::tempfile().ok()?;
     cmd.stdout(Stdio::from(stdout.try_clone().ok()?))
         .stderr(Stdio::from(stderr.try_clone().ok()?))
-        .stdin(Stdio::null());
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
     // Own process group so a timeout can reap the whole tree, not just the
     // direct child -- same discipline as every other timeout path in this
     // file (`kill_process_group`/`kill_process_group_by_pid`); without it a
@@ -54,6 +75,13 @@ pub fn run_bounded(mut cmd: Command, timeout: Duration) -> Option<std::process::
     // survives the SIGKILL below and leaks.
     prepare_process_group(&mut cmd);
     let mut child = cmd.spawn().ok()?;
+    if let Some(input) = input {
+        let mut stdin = child.stdin.take()?;
+        let input = input.to_vec();
+        thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -89,6 +117,21 @@ pub fn run_bounded(mut cmd: Command, timeout: Duration) -> Option<std::process::
             }
         }
     }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn bounded_private_stdin_cannot_block_the_process_deadline() {
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "sleep 60"]);
+    let start = Instant::now();
+    assert!(run_bounded_with_input(
+        command,
+        Duration::from_millis(100),
+        &vec![b'x'; 1024 * 1024]
+    )
+    .is_none());
+    assert!(start.elapsed() < Duration::from_secs(5));
 }
 
 pub fn shutdown_requested() -> bool {

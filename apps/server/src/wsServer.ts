@@ -4,7 +4,7 @@
  */
 
 import { WebSocket, WebSocketServer } from 'ws';
-import { requiresFleetAuthentication, trustedLanWebSocketMode, webSocketAccessValid } from './webSocketAuth.js';
+import { requiresFleetAuthentication, trustedLanWebSocketMode, webSocketAccessValid, webSocketCanApprovePairing } from './webSocketAuth.js';
 import { SERVER_VERSION } from './server.js';
 import { createServerPushBus } from './serverPushBus.js';
 import type { AuthHealthMonitor } from './authHealth.js';
@@ -57,11 +57,21 @@ class WebSocketSessionStore {
   profiles() {
     return [...new Set(this.getAll().map(([, info]) => info.profile))];
   }
+
+  /** Approval requests contribute to the badge only for their permitted reviewers. */
+  broadcastUnread(activityFeed: ActivityFeed) {
+    for (const [ws] of this.sessions) {
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      try { ws.send(JSON.stringify({ type: 'activity.unread', count: activityFeed.unreadCount(webSocketCanApprovePairing(ws)) } satisfies ServerMessage)); }
+      catch { console.error('Failed to send notification count to client.'); }
+    }
+  }
   
   broadcast(message: ServerMessage, exclude?: WebSocket, profile?: string) {
     const messageStr = JSON.stringify(message);
     for (const [ws, info] of this.sessions) {
       if (ws !== exclude && ws.readyState === WebSocket.OPEN) {
+        if (message.type === 'activity.event' && message.event.pairingRequestId && !webSocketCanApprovePairing(ws)) continue;
         // Profile-scoped chat pushes only reach clients subscribed to that
         // profile; everything else still fans out to all connected clients.
         if (profile && info.profile !== profile) continue;
@@ -164,9 +174,8 @@ export function createWebSocketHandler(
   // Read state and delivery receipts change events already sent. Both go to
   // every client: the Notifications view spans profiles.
   const unsubscribeActivity = activityFeed.onChange((change) => {
-    sessionStore.broadcast(change.kind === 'unread'
-      ? { type: 'activity.unread', count: change.count }
-      : { type: 'activity.updated', event: change.event });
+    if (change.kind === 'unread') sessionStore.broadcastUnread(activityFeed);
+    else sessionStore.broadcast({ type: 'activity.updated', event: change.event });
   });
   const unsubscribeLiveness = registryService.onLivenessTransition((transition) => {
     const event = activityFromNode(transition);
@@ -235,7 +244,7 @@ export function createWebSocketHandler(
             type: 'activity.replay',
             events: activityFeed.replay(profile, message.activityCursor)
           } satisfies ServerMessage));
-          ws.send(JSON.stringify({ type: 'activity.unread', count: activityFeed.unreadCount() } satisfies ServerMessage));
+          ws.send(JSON.stringify({ type: 'activity.unread', count: activityFeed.unreadCount(webSocketCanApprovePairing(ws)) } satisfies ServerMessage));
           console.log(`Client hello from ${message.clientVersion} with profile: ${profile}`);
           return;
         }

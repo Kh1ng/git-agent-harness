@@ -44,11 +44,13 @@ function Logins({ revision }: { revision: string }) {
     return () => { cancelled = true; };
   }, [revision]);
   const problems = rows?.filter((row) => LOGIN_PROBLEM[row.state]) ?? [];
+  const unverified = rows?.filter((row) => row.state === 'unknown' || row.state === 'error') ?? [];
   return <section className="mb-6 space-y-3" aria-labelledby="logins-title">
     <h2 id="logins-title" className="text-base font-semibold text-primary">Logins</h2>
     {error && <p className="text-sm text-warning">Login health is unavailable: {error}</p>}
     {rows && rows.length === 0 && <p className="text-sm text-secondary">No login checks reported yet. Nodes check their logins at start and every 30 minutes.</p>}
-    {rows && rows.length > 0 && problems.length === 0 && <p className="text-sm text-secondary">All {rows.length} checked logins work.</p>}
+    {rows && rows.length > 0 && rows.every(row => row.state === 'ok') && <p className="text-sm text-secondary">All {rows.length} checked logins work.</p>}
+    {unverified.length > 0 && <p className="text-sm text-secondary">{unverified.length} of {rows?.length} login checks could not verify login validity.</p>}
     {problems.length > 0 && <ul className="divide-y divide-subtle border-y border-critical/40">
       {problems.map((row) => <li key={`${row.node_id}|${row.backend}|${row.provider ?? ''}`} className="py-3 space-y-1">
         <div className="flex flex-wrap items-baseline justify-between gap-2">

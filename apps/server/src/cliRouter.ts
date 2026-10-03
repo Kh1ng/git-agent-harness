@@ -1,12 +1,14 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { CLI_ROUTER_STRATEGIES } from '@git-agent-harness/contracts';
 import type { mutationSafety } from './mutationSafety.js';
 import { requireOwner } from './authMiddleware.js';
+import { findGahBinary } from './gahCli.js';
 import type {
   CliRouterSnapshot,
   CliRouterSettingsView,
@@ -60,12 +62,20 @@ export function readSettings(): CliRouterStoredSettings | null {
     throw new Error('CLI router settings file is corrupted (missing required fields).');
   }
   try { validateRouterUrl(d.url); } catch { throw new Error('CLI router settings file is corrupted (invalid URL).'); }
-  return { url: d.url, apiKey: d.apiKey, managementKey: d.managementKey };
+  if (d.accountBackends !== undefined && !validAccountBackends(d.accountBackends)) throw new Error('CLI router account bindings are invalid.');
+  return { url: d.url, apiKey: d.apiKey, managementKey: d.managementKey,
+    ...(d.accountBackends !== undefined ? { accountBackends: d.accountBackends as Record<string, string> } : {}) };
 }
 
 /** Keys are opaque secrets: bounded, no control chars. Stored files may hold blank (unconfigured) values. */
 function validSecret(v: string, allowEmpty = false): boolean {
   return (allowEmpty || v.length > 0) && v.length <= 512 && !/[\x00-\x1F\x7F]/.test(v);
+}
+
+function validAccountBackends(value: unknown): value is Record<string, string> {
+  return isObj(value) && Object.keys(value).length <= 64 && Object.entries(value).every(([id, backend]) =>
+    boundedString(id) !== null && typeof backend === 'string' && /^(agy(?:-[a-zA-Z0-9_.-]+)?|claude|codex)$/.test(backend))
+    && new Set(Object.values(value).map(backend => backend === 'agy-main' ? 'agy' : backend)).size === Object.keys(value).length;
 }
 
 export function writeSettings(settings: CliRouterStoredSettings): void {
@@ -96,6 +106,7 @@ interface QuotaCache {
   quotas: CliRouterQuota[];
   quotaError?: string;
   observedAt: string;
+  checkedAt?: number;
 }
 const quotaCache = new Map<string, QuotaCache>();
 const cacheKey = (origin: string, file: { id: string; auth_index?: unknown }) => `${origin}\0${file.id}\0${String(file.auth_index ?? '')}`;
@@ -327,11 +338,14 @@ async function refreshAntigravityQuota(account: UpstreamAuthFile, deps: QuotaRef
       if (!isObj(b)) continue;
       const name = boundedString(b.displayName, 80) ?? 'Unknown';
       const window = boundedString(b.window, 40);
+      const pool = b.bucketId === 'gemini-weekly' ? 'google-native' : b.bucketId === '3p-weekly' ? 'external' : null;
       quotas.push({
         label: [boundedString(g.displayName, 80), window ? `${name} (${window})` : name].filter(Boolean).join(' · '),
         remainingPercent: typeof b.remainingFraction === 'number' ? percent(b.remainingFraction * 100) : null,
         resetAt: isoOrNull(b.resetTime),
         observedAt,
+        ...(window ? { window } : {}),
+        ...(pool ? { quotaPool: pool } : {}),
       });
     }
   }
@@ -355,6 +369,7 @@ async function refreshClaudeQuota(account: UpstreamAuthFile, deps: QuotaRefreshD
       remainingPercent: typeof w.utilization === 'number' ? percent(100 - w.utilization) : null,
       resetAt: isoOrNull(w.resets_at),
       observedAt,
+      window: key,
     });
   }
   return quotas;
@@ -377,6 +392,7 @@ async function refreshCodexQuota(account: UpstreamAuthFile, deps: QuotaRefreshDe
       remainingPercent: typeof w.used_percent === 'number' ? percent(100 - w.used_percent) : null,
       resetAt: Number.isFinite(resetSec) && resetSec > 0 && resetSec < 8.64e15 ? new Date(resetSec).toISOString() : null,
       observedAt,
+      window: key,
     });
   }
   return quotas;
@@ -403,6 +419,18 @@ async function refreshAccountQuota(account: UpstreamAuthFile, deps: QuotaRefresh
   }
 }
 
+/** The native append command owns locking, identity validation and durable storage. */
+async function recordQuota(record: Record<string, unknown>): Promise<void> {
+  await new Promise<void>((resolvePromise, reject) => {
+    const child = spawn(findGahBinary(), ['quota', 'record'], { stdio: ['pipe', 'ignore', 'ignore'] });
+    const timeout = setTimeout(() => { child.kill(); reject(new Error('Quota persistence timed out')); }, 5_000);
+    child.on('error', () => { clearTimeout(timeout); reject(new Error('Quota persistence unavailable')); });
+    child.on('close', code => { clearTimeout(timeout); code === 0 ? resolvePromise() : reject(new Error('Quota persistence failed')); });
+    child.stdin.on('error', () => undefined);
+    child.stdin.end(JSON.stringify(record));
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Router factory
 // ---------------------------------------------------------------------------
@@ -411,6 +439,10 @@ export interface CliRouterDeps {
   fetchFn?: typeof globalThis.fetch;
   readSettingsFn?: typeof readSettings;
   writeSettingsFn?: typeof writeSettings;
+  /** Tests can disable observation or advance the refresh clock without timers. */
+  autoRefresh?: boolean;
+  now?: () => number;
+  recordQuotaFn?: (record: Record<string, unknown>) => Promise<void>;
 }
 
 export function cliRouterRouter(
@@ -421,6 +453,69 @@ export function cliRouterRouter(
   const doFetch = deps.fetchFn;
   const doRead = deps.readSettingsFn ?? readSettings;
   const doWrite = deps.writeSettingsFn ?? writeSettings;
+  const now = deps.now ?? Date.now;
+  const doRecord = deps.recordQuotaFn ?? recordQuota;
+  const refreshInterval = 15 * 60_000;
+  let batch: Promise<void> | undefined;
+
+  async function observeAccount(account: UpstreamAuthFile, stored: CliRouterStoredSettings, force = false): Promise<QuotaCache | undefined> {
+    const origin = stored.url.replace(/\/$/, '');
+    const key = cacheKey(origin, account);
+    const previous = quotaCache.get(key);
+    if (!force && previous?.checkedAt !== undefined && now() - previous.checkedAt < refreshInterval) return previous;
+    const result = await refreshAccountQuota(account, { baseUrl: origin, managementKey: stored.managementKey, fetchFn: doFetch });
+    // A replaced connection must not receive an old in-flight reading.
+    const current = doRead();
+    if (current?.url !== stored.url || current.managementKey !== stored.managementKey
+      || JSON.stringify(current.accountBackends) !== JSON.stringify(stored.accountBackends)) return;
+    result.checkedAt = now();
+    quotaCache.set(key, result);
+    const provider = providerOf(account).toLowerCase();
+    const logical = provider === 'antigravity' ? 'agy' : provider === 'claude' || provider === 'codex' ? provider : null;
+    if (!logical) return result;
+    const bound = stored.accountBackends?.[account.id];
+    const backend = bound ?? logical;
+    const opaqueInstance = `cli-router:${createHash('sha256').update(key).digest('hex').slice(0, 24)}`;
+    const hasReading = result.quotas.length > 0 && !result.quotaError;
+    const observations: (Partial<CliRouterQuota> | undefined)[] = hasReading ? result.quotas
+      : provider === 'antigravity' ? [{ quotaPool: 'google-native' }, { quotaPool: 'external' }] : [undefined];
+    try {
+      for (const quota of observations) {
+        const family = quota?.quotaPool;
+        const nativeAccount = backend === 'agy-main' ? 'agy' : backend;
+        const pool = family ? `${nativeAccount}:${family}` : undefined;
+        const instance = bound ? (family ? `${backend}:${family}` : backend) : opaqueInstance;
+        await doRecord({
+          backend, backend_instance: instance,
+          ...(pool ? { quota_pool: pool } : {}),
+          ...(hasReading && quota ? {
+            ...(quota.window ? { quota_window: quota.window } : {}),
+            ...(typeof quota.remainingPercent === 'number' ? { quota_remaining_percent: quota.remainingPercent } : {}),
+            ...(quota.resetAt ? { quota_reset_at: quota.resetAt } : {}),
+            observed_at: quota.observedAt ?? result.observedAt,
+          } : {}),
+          checked_at: result.observedAt,
+          ...(result.quotaError ? { check_error: result.quotaError } : {}),
+          usage_source: 'cli_router',
+        });
+      }
+    } catch {
+      result.quotaError = 'Quota reading could not be saved for routing';
+    }
+    return result;
+  }
+
+  /** One bounded background batch serves every controller; refreshes never block page reads. */
+  function observeAccounts(accounts: UpstreamAuthFile[], stored: CliRouterStoredSettings): void {
+    if (deps.autoRefresh === false || batch) return;
+    // ponytail: serial refresh, up to 64 configured accounts per batch; add a
+    // bounded worker pool only if account refresh latency requires it.
+    batch = (async () => {
+      for (const account of accounts.slice(0, 64)) {
+        if (!account.disabled) await observeAccount(account, stored);
+      }
+    })().catch(() => undefined).finally(() => { batch = undefined; });
+  }
 
   router.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
 
@@ -457,18 +552,21 @@ export function cliRouterRouter(
 
     const baseUrl = stored.url.replace(/\/$/, '');
     try {
-      const [authFiles, models, routing] = await Promise.all([
+      const [authResult, modelsResult, routingResult] = await Promise.allSettled([
         fetchAuthFiles(baseUrl, stored.managementKey, doFetch),
         fetchModels(baseUrl, stored.apiKey, doFetch),
         fetchRoutingStrategy(baseUrl, stored.managementKey, doFetch),
       ]);
+      const authFiles = authResult.status === 'fulfilled' ? authResult.value : [];
+      if (authResult.status === 'fulfilled') observeAccounts(authFiles, stored);
+      const routing = routingResult.status === 'fulfilled' ? routingResult.value : { strategy: 'round-robin' as const, sessionAffinity: false };
       const snapshot: CliRouterSnapshot = {
         settings: settingsView,
-        status: 'connected',
+        status: [authResult, modelsResult, routingResult].every(result => result.status === 'fulfilled') ? 'connected' : 'unavailable',
         strategy: routing.strategy,
         sessionAffinity: routing.sessionAffinity,
         accounts: authFiles.map(f => mapAuthFileToAccount(f, baseUrl)),
-        models,
+        models: modelsResult.status === 'fulfilled' ? modelsResult.value : [],
       };
       return res.json(snapshot);
     } catch {
@@ -491,9 +589,12 @@ export function cliRouterRouter(
   router.put('/settings', requireOwner, mutation('cli_router.configure'), async (req: Request, res: Response) => {
     const body = req.body;
     // Validate allowed keys
-    const allowed = ['url', 'apiKey', 'managementKey'];
+    const allowed = ['url', 'apiKey', 'managementKey', 'accountBackends'];
     if (!isObj(body) || Object.keys(body).some(k => !allowed.includes(k))) {
-      return res.status(400).json({ error: 'invalid_request', message: 'Only url, apiKey, and managementKey are allowed.' });
+      return res.status(400).json({ error: 'invalid_request', message: 'Only url, apiKey, managementKey, and accountBackends are allowed.' });
+    }
+    if (body.accountBackends !== undefined && !validAccountBackends(body.accountBackends)) {
+      return res.status(400).json({ error: 'invalid_account_bindings', message: 'Account bindings must map up to 64 account ids to native AGY, Claude, or Codex backends.' });
     }
     for (const k of ['apiKey', 'managementKey']) {
       if (body[k] !== undefined && (typeof body[k] !== 'string' || (body[k] !== '' && !validSecret(body[k])))) {
@@ -531,12 +632,18 @@ export function cliRouterRouter(
       return res.status(502).json({ error: 'upstream_models_failed', message: 'Failed to communicate with the upstream models endpoint.' });
     }
     try {
-      await fetchAuthFiles(baseUrl, managementKey, doFetch);
+      const files = await fetchAuthFiles(baseUrl, managementKey, doFetch);
+      if (body.accountBackends && Object.entries(body.accountBackends as Record<string, string>).some(([id, backend]) => {
+        const file = files.find(f => f.id === id);
+        const provider = file && providerOf(file).toLowerCase();
+        return !file || (provider === 'antigravity' ? !backend.startsWith('agy') : provider !== backend);
+      })) return res.status(400).json({ error: 'invalid_account_bindings', message: 'Every binding must name a current account and its matching native backend.' });
     } catch (err) {
       return res.status(502).json({ error: 'upstream_management_failed', message: 'Failed to communicate with the upstream auth-files endpoint.' });
     }
 
-    try { doWrite({ url: baseUrl, apiKey, managementKey }); }
+    const accountBackends = body.accountBackends ?? (existing?.url === baseUrl ? existing.accountBackends : undefined);
+    try { doWrite({ url: baseUrl, apiKey, managementKey, ...(accountBackends ? { accountBackends } : {}) }); }
     catch { return res.status(500).json({ error: 'settings_write_failed', message: 'Failed to save CLI router settings.' }); }
     quotaCache.clear();
     return res.json({ success: true });
@@ -665,8 +772,7 @@ export function cliRouterRouter(
       return res.status(404).json({ error: 'account_not_found', message: 'Account not found.' });
     }
 
-    const cache = await refreshAccountQuota(account, { baseUrl, managementKey: stored.managementKey, fetchFn: doFetch });
-    quotaCache.set(cacheKey(baseUrl, account), cache);
+    await observeAccount(account, stored, true);
 
     // Return full updated snapshot
     try {
