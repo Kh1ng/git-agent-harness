@@ -379,7 +379,7 @@ export function vibeBackendSpec(overrides: { resolveInterpreter?: () => string }
   };
 }
 
-async function resolveOpenhandsEnv(gahProfile: string): Promise<Record<string, string>> {
+async function resolveOpenhandsEnv(gahProfile: string, includeApiKey = true): Promise<Record<string, string>> {
   const { oh_profile: profile } = await runConfigShowProfile(gahProfile);
   if (!profile) return {};
   if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(profile)) {
@@ -406,7 +406,7 @@ async function resolveOpenhandsEnv(gahProfile: string): Promise<Record<string, s
   };
   return {
     LLM_BASE_URL: process.env.LLM_BASE_URL ?? required('base_url'),
-    LLM_API_KEY: process.env.LLM_API_KEY ?? required('api_key'),
+    ...(includeApiKey ? { LLM_API_KEY: process.env.LLM_API_KEY ?? required('api_key') } : {}),
     LLM_MODEL: process.env.LLM_MODEL ?? required('model'),
     OPENHANDS_SUPPRESS_BANNER: '1'
   };
@@ -415,7 +415,7 @@ async function resolveOpenhandsEnv(gahProfile: string): Promise<Record<string, s
 /** OpenHands accepts a task file but not a raw stdin task. `/dev/stdin`
  * keeps the replayed transcript off argv while satisfying its headless CLI. */
 export function openhandsBackendSpec(
-  overrides: { resolveEnv?: (gahProfile: string) => Promise<Record<string, string>> } = {}
+  overrides: { resolveEnv?: (gahProfile: string) => Promise<Record<string, string>>; instanceCredential?: boolean } = {}
 ): HeadlessBackendSpec {
   return {
     id: 'openhands',
@@ -431,7 +431,7 @@ export function openhandsBackendSpec(
       '--override-with-envs'
     ],
     encodeStdin: (prompt) => prompt,
-    spawnEnv: overrides.resolveEnv ?? resolveOpenhandsEnv,
+    spawnEnv: overrides.resolveEnv ?? (profile => resolveOpenhandsEnv(profile, !overrides.instanceCredential)),
     parseReply: parseOpenhandsReply
   };
 }

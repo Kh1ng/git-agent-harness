@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execPath } from 'node:process';
@@ -638,5 +638,32 @@ printf 'read_file죰{"file_path": "target.md"}'
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+
+test('bound OpenHands profile supplies model metadata without requiring or returning its legacy key', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gah-bound-openhands-profile-'));
+  const saved = { HOME: process.env.HOME, GAH_BINARY: process.env.GAH_BINARY,
+    LLM_MODEL: process.env.LLM_MODEL, LLM_BASE_URL: process.env.LLM_BASE_URL };
+  const cli = join(dir, 'gah');
+  try {
+    process.env.HOME = dir;
+    process.env.GAH_BINARY = cli;
+    delete process.env.LLM_MODEL;
+    delete process.env.LLM_BASE_URL;
+    writeFileSync(cli, '#!/bin/sh\n'+ "echo '{\"profiles\":{\"bound\":{\"oh_profile\":\"work\"}}}'\n", { mode: 0o755 });
+    mkdirSync(join(dir, '.openhands', 'profiles'), { recursive: true });
+    const profile = join(dir, '.openhands', 'profiles', 'work.json');
+    writeFileSync(profile, JSON.stringify({ model: 'openai/gpt', base_url: 'https://source.example/v1' }));
+    const spec = openhandsBackendSpec({ instanceCredential: true });
+    assert.deepEqual(await spec.spawnEnv?.('bound'), { LLM_MODEL: 'openai/gpt', LLM_BASE_URL: 'https://source.example/v1', OPENHANDS_SUPPRESS_BANNER: '1' });
+    writeFileSync(profile, JSON.stringify({ model: 'openai/gpt', base_url: 'https://source.example/v1', api_key: 'old-profile-key' }));
+    assert.equal((await spec.spawnEnv?.('bound'))?.LLM_API_KEY, undefined);
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+    rmSync(dir, { recursive: true, force: true });
   }
 });
