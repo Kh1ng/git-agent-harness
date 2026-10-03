@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 mod identity;
+mod instances;
 pub(crate) use identity::current_source_records;
 pub use identity::{latest_windows_for_identity, latest_windows_for_identity_and_credential};
 
@@ -459,7 +460,16 @@ pub fn refresh_codex_and_store_for_identity(
     let Some(observation) = observation else {
         return Ok(None);
     };
-    let record = QuotaObservationRecord {
+    let record = record_from_codex_observation(observation, identity);
+    append(state_path, &record)?;
+    Ok(Some(record))
+}
+
+fn record_from_codex_observation(
+    observation: crate::ledger::summary::GroupQuotaObservation,
+    identity: &crate::execution_identity::ExecutionIdentity,
+) -> QuotaObservationRecord {
+    QuotaObservationRecord {
         backend: identity.logical_backend.clone(),
         backend_instance: Some(identity.backend_instance.clone()),
         model: identity.effective_model.clone(),
@@ -475,9 +485,7 @@ pub fn refresh_codex_and_store_for_identity(
         mistral_admin: None,
         account_usage: None,
         credential_id: None,
-    };
-    append(state_path, &record)?;
-    Ok(Some(record))
+    }
 }
 
 /// Persist both native Claude allowance windows under the default account's
@@ -515,6 +523,7 @@ pub fn refresh_stale_quota_observations(
         .clone()
         .unwrap_or_else(|| "codex".to_string());
     let mut handles = Vec::new();
+    handles.extend(instances::refresh(profile, now, store_path));
     if let Some(handle) =
         maybe_refresh_backend_instance(store_path, "claude", Some("claude"), now, {
             let path = store_path.to_path_buf();
@@ -712,7 +721,9 @@ fn maybe_refresh_source(
         // attempt and stops retrying every tick against a backend that
         // isn't configured here at all.
         let refresh = refresh();
-        if !matches!(&refresh, Ok(Some(_))) {
+        // Named refresh owns its scoped failure marker and rejects obsolete
+        // generations. A generic fallback must never revive a removed source.
+        if credential_id.is_none() && !matches!(&refresh, Ok(Some(_))) {
             let marker = QuotaObservationRecord {
                 backend: backend.clone(),
                 backend_instance: instance,

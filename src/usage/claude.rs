@@ -2,7 +2,7 @@
 use crate::quota_store::QuotaObservationRecord;
 use anyhow::{bail, Context, Result};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -32,16 +32,21 @@ fn native_access_token(now: OffsetDateTime) -> Result<String> {
     if configured_dir.as_ref().is_some_and(|path| path.is_empty()) {
         bail!("CLAUDE_CONFIG_DIR must name a directory");
     }
+    token_from_directory(configured_dir.as_deref().map(Path::new), now)
+}
+
+fn token_from_directory(configured_dir: Option<&Path>, now: OffsetDateTime) -> Result<String> {
     #[cfg(target_os = "macos")]
-    if configured_dir.is_none() {
-        // Claude's default macOS login lives in Keychain; an old credentials
-        // file can remain after login. Never fall through a custom config to
-        // this default account, or a denied/malformed Keychain read to a file.
+    {
+        // Claude namespaces custom config directories in its Keychain service.
+        // Never fall through to a default account or a file after a denied or
+        // malformed selected Keychain read; absence alone allows its file fallback.
         let mut command = Command::new("/usr/bin/security");
+        let service = keychain_service(configured_dir);
         command.args([
             "find-generic-password",
             "-s",
-            "Claude Code-credentials",
+            &service,
             "-a",
             &std::env::var("USER").context("Claude Keychain account unavailable")?,
             "-w",
@@ -57,7 +62,7 @@ fn native_access_token(now: OffsetDateTime) -> Result<String> {
         }
     }
     let directory = match configured_dir {
-        Some(path) => PathBuf::from(path),
+        Some(path) => path.to_path_buf(),
         None => PathBuf::from(
             std::env::var_os("HOME")
                 .filter(|home| !home.is_empty())
@@ -65,6 +70,22 @@ fn native_access_token(now: OffsetDateTime) -> Result<String> {
         )
         .join(".claude"),
     };
+    token_from_file(&directory, now)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn keychain_service(configured_dir: Option<&Path>) -> String {
+    use sha2::{Digest, Sha256};
+    let suffix = configured_dir
+        .map(|path| {
+            let digest = format!("{:x}", Sha256::digest(path.as_os_str().as_encoded_bytes()));
+            format!("-{}", &digest[..8])
+        })
+        .unwrap_or_default();
+    format!("Claude Code-credentials{suffix}")
+}
+
+fn token_from_file(directory: &Path, now: OffsetDateTime) -> Result<String> {
     let input = std::fs::read(directory.join(".credentials.json"))
         .context("auth_required: Claude OAuth credentials are unavailable")?;
     access_token(&input, now)
@@ -72,6 +93,15 @@ fn native_access_token(now: OffsetDateTime) -> Result<String> {
 
 pub fn refresh() -> Result<Vec<QuotaObservationRecord>> {
     let token = native_access_token(OffsetDateTime::now_utc())?;
+    refresh_token(&token)
+}
+
+pub(crate) fn refresh_directory(directory: &Path) -> Result<Vec<QuotaObservationRecord>> {
+    let token = token_from_directory(Some(directory), OffsetDateTime::now_utc())?;
+    refresh_token(&token)
+}
+
+fn refresh_token(token: &str) -> Result<Vec<QuotaObservationRecord>> {
     let escaped = token.replace('\\', "\\\\").replace('"', "\\\"");
     let mut command = Command::new("curl");
     command
@@ -146,6 +176,45 @@ pub(crate) fn parse(input: &[u8], now: OffsetDateTime) -> Result<Vec<QuotaObserv
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn custom_config_keychain_service_matches_claude_and_never_the_default() {
+        assert_eq!(keychain_service(None), "Claude Code-credentials");
+        assert_eq!(
+            keychain_service(Some(Path::new("/selected/.claude"))),
+            "Claude Code-credentials-ab73b519"
+        );
+        assert_ne!(
+            keychain_service(Some(Path::new("/selected/.claude"))),
+            keychain_service(Some(Path::new("/sibling/.claude")))
+        );
+    }
+    #[test]
+    fn explicit_oauth_directories_do_not_inherit_the_default_or_sibling_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("account-a");
+        let b = dir.path().join("account-b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(
+            a.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"synthetic-account-a","expiresAt":900000}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            b.join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"synthetic-account-b","expiresAt":900000}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            token_from_file(&a, OffsetDateTime::UNIX_EPOCH).unwrap(),
+            "synthetic-account-a"
+        );
+        assert_eq!(
+            token_from_file(&b, OffsetDateTime::UNIX_EPOCH).unwrap(),
+            "synthetic-account-b"
+        );
+        assert!(token_from_file(&dir.path().join("missing"), OffsetDateTime::UNIX_EPOCH).is_err());
+    }
 
     #[test]
     fn recognized_account_windows_keep_percentages_and_resets_separate() {

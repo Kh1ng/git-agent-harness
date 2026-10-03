@@ -164,9 +164,10 @@ pub fn run(command: QuotaCommands) -> Result<()> {
             names.sort();
             let mut refreshed_any = false;
             for name in names {
-                let profile = &cfg.profiles[name];
+                let mut profile = cfg.profiles[name].clone();
+                profile.routing = profile.effective_routing(&cfg.defaults);
                 let refreshed = quota_store::refresh_quota_observations_and_wait(
-                    profile,
+                    &profile,
                     time::OffsetDateTime::now_utc(),
                     &path,
                 );
