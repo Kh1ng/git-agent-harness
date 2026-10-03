@@ -103,9 +103,11 @@ test('relay rejects mismatched schema, credentials, redirects, and excessive res
   const workerUrl = await listen(worker);
   const invalid = quota(); invalid.profile.profile = 'different-profile';
   const invalidPercent = quota(); invalidPercent.candidates[0].quota_observations[0].quota_remaining_percent = 142;
+  const invalidCheck = quota(); invalidCheck.quota_checks[0].quota_observations = [{ backend: 'opencode', quota_remaining_percent: 142 }];
   for (const write of [
     (res: http.ServerResponse) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(invalid)); },
     (res: http.ServerResponse) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(invalidPercent)); },
+    (res: http.ServerResponse) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(invalidCheck)); },
     (res: http.ServerResponse) => { res.writeHead(401); res.end('upstream-private-token'); },
     (res: http.ServerResponse) => { res.writeHead(302, { location: targetUrl }); res.end(); },
     (res: http.ServerResponse) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('x'.repeat(1024*1024+1)); },
