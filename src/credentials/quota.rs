@@ -200,6 +200,70 @@ mod tests {
     }
     #[test]
     #[cfg(unix)]
+    fn replacement_and_removal_retire_future_dated_source_history() {
+        for remove in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let credentials = dir.path().join("credentials");
+            let path = dir.path().join("quota.jsonl");
+            let source = info("primary");
+            super::super::save_with_quota_at(
+                &credentials,
+                source.clone(),
+                "session=old",
+                Some(&path),
+            )
+            .unwrap();
+            let future = OffsetDateTime::now_utc() + time::Duration::days(7);
+            refresh_with(&source, &path, future, || {
+                Ok(Some(reading(&source, future)))
+            })
+            .unwrap();
+            let sibling = info("second");
+            refresh_with(&sibling, &path, future, || {
+                Ok(Some(reading(&sibling, future)))
+            })
+            .unwrap();
+            if remove {
+                super::super::remove_at(&credentials, &source.id, &path).unwrap();
+            } else {
+                super::super::save_with_quota_at(
+                    &credentials,
+                    source.clone(),
+                    "session=new",
+                    Some(&path),
+                )
+                .unwrap();
+            }
+            let records = quota_store::load(&path).unwrap();
+            let current = quota_store::current_source_records(&records);
+            assert!(current
+                .iter()
+                .filter(|r| r.credential_id.as_deref() == Some("primary"))
+                .all(|r| r.quota_remaining_percent.is_none() && r.account_usage.is_none()));
+            assert!(current
+                .iter()
+                .any(|r| r.credential_id.as_deref() == Some("second")
+                    && r.quota_remaining_percent == Some(40.0)));
+            let identity = ExecutionIdentity::legacy_candidate(
+                "mistral-dashboard",
+                None::<String>,
+                None::<String>,
+            );
+            assert!(quota_store::latest_windows_for_identity_and_credential(
+                &records,
+                &identity,
+                Some("primary")
+            )
+            .is_empty());
+            assert_eq!(
+                records.len(),
+                3,
+                "retired data stays in append-only history"
+            );
+        }
+    }
+    #[test]
+    #[cfg(unix)]
     fn in_flight_old_account_cannot_publish_after_rotation_or_removal() {
         for remove in [false, true] {
             let dir = tempfile::tempdir().unwrap();

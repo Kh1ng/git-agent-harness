@@ -95,21 +95,13 @@ pub(crate) fn current_source_records(
     records: &[QuotaObservationRecord],
 ) -> Vec<&QuotaObservationRecord> {
     let mut latest = std::collections::BTreeMap::<&String, &QuotaObservationRecord>::new();
-    let stamp = |record: &QuotaObservationRecord| {
-        record
-            .checked_at
-            .as_deref()
-            .or(record.observed_at.as_deref())
-            .and_then(|date| OffsetDateTime::parse(date, &Rfc3339).ok())
-    };
     for record in records {
         if let Some(id) = &record.credential_id {
-            if latest
-                .get(id)
-                .is_none_or(|current| stamp(record) >= stamp(current))
-            {
-                latest.insert(id, record);
-            }
+            // Source publication and lifecycle mutations share a per-source
+            // lock. Append order therefore identifies its current binding even
+            // if a previously captured check is future-dated or the clock rolls
+            // back. Window freshness still uses timestamps independently.
+            latest.insert(id, record);
         }
     }
     records
