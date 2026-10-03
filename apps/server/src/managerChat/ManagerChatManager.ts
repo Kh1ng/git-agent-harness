@@ -443,25 +443,26 @@ export async function startChatFromIssue(
   profile: string,
   issueNumber: number,
   backend?: string,
-  model?: string | null
+  model?: string | null,
+  nodeId?: string,
+  backendInstance?: string | null
 ) {
   const remote = profile.startsWith('gah-node:');
   const profileInfo = remote ? await workerProjectInfo(profile) : await findProfileInfo(profile);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   const { startIssueChat } = await import('./issueChats.js');
   const selectedBackend = backend ?? backendForProfile(profile);
+  const route = await chatRoute(profile, nodeId, selectedBackend);
   return startIssueChat({
     profile,
     profileInfo,
     issueNumber,
     backend: selectedBackend,
     model: model ?? null,
-    ...(remote ? {
-      create: async ({ title, branch }: { title: string; branch: string }) => storeSession(
-        { ...await createChatSession(profile, selectedBackend, model, title, null, undefined, null, { branch, worktree: true }), issueNumber },
-        chatSessionStoreOptions
-      )
-    } : {})
+    create: async ({ title, branch }: { title: string; branch: string }) => storeSession(
+      { ...await createChatSession(profile, selectedBackend, model, title, null, route.nodeId, backendInstance, { branch, worktree: true }), issueNumber },
+      chatSessionStoreOptions
+    )
   });
 }
 
@@ -479,25 +480,26 @@ export async function startChatFromPr(
   profile: string,
   prNumber: number,
   backend?: string,
-  model?: string | null
+  model?: string | null,
+  nodeId?: string,
+  backendInstance?: string | null
 ) {
   const remote = profile.startsWith('gah-node:');
   const profileInfo = remote ? await workerProjectInfo(profile) : await findProfileInfo(profile);
   if (!profileInfo) throw new Error(`Profile '${profile}' not found`);
   const { startPrChat } = await import('./prChats.js');
   const selectedBackend = backend ?? backendForProfile(profile);
+  const route = await chatRoute(profile, nodeId, selectedBackend);
   return startPrChat({
     profile,
     profileInfo,
     prNumber,
     backend: selectedBackend,
     model: model ?? null,
-    ...(remote ? {
-      create: async ({ title, branch }: { title: string; branch: string }) => storeSession(
-        { ...await createChatSession(profile, selectedBackend, model, title, null, undefined, null, { branch, worktree: false }), prNumber },
-        chatSessionStoreOptions
-      )
-    } : {})
+    create: async ({ title, branch }: { title: string; branch: string }) => storeSession(
+      { ...await createChatSession(profile, selectedBackend, model, title, null, route.nodeId, backendInstance, { branch, worktree: false }), prNumber },
+      chatSessionStoreOptions
+    )
   });
 }
 
