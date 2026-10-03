@@ -998,7 +998,7 @@ In the desktop app, open **Quota → Connect Mistral**, then choose
 usage access and saves the session privately on this device. The device needs
 an installed GAH collector to refresh usage.
 
-For another Mistral account, choose **Add Mistral account** in Provider
+For another Mistral account, choose **Connect another Mistral account** in Provider
 connections. Give the account a separate name and sign in in its isolated
 window. This preserves the existing default session. **Reconnect** updates only
 the selected account.
