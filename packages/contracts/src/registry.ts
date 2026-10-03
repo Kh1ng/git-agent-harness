@@ -127,6 +127,8 @@ export interface AuthProbe {
   backend: string;
   provider: string | null;
   state: AuthState;
+  /** Repository CLI package presence, independent of authentication. */
+  installed?: boolean;
   /** A fixed explanation chosen by GAH; never provider output. */
   detail?: string;
   /** probe: `gah auth-health`; dispatch: a failed dispatch attempt; chat: a failed chat turn. */
@@ -183,6 +185,13 @@ export type LoginRepairMethod =
   /** Only a terminal on that machine can do it. */
   | 'manual';
 
+/** Official installation guides for the repository tools GAH runs. */
+export function repositoryCli(program: string): { label: string; installUrl: string } | null {
+  if (program === 'gh') return { label: 'GitHub CLI', installUrl: 'https://cli.github.com/' };
+  if (program === 'glab') return { label: 'GitLab CLI', installUrl: 'https://gitlab.com/gitlab-org/cli#installation' };
+  return null;
+}
+
 /** One rule for web and server: which method repairs a login. */
 export function loginRepairMethod(login: { backend: string; provider: string | null }): LoginRepairMethod {
   if (login.backend === 'codex' && login.provider === null) return 'device_cli';
@@ -197,6 +206,7 @@ export function loginRepairMethod(login: { backend: string; provider: string | n
 /** What a device may see of a login repair: never CLI output, only the link,
  * the one-time code, fixed prompt text, and the outcome. */
 export type LoginRepairState =
+  | { status: 'install_required'; install_url: string }
   | { status: 'starting' }
   | { status: 'open_url'; url: string; code: string | null }
   | { status: 'awaiting_input'; url: string | null; prompt: string; secret: boolean }
