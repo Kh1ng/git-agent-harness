@@ -11,7 +11,10 @@ impl ExecutionIdentity {
         if self.state_root.is_none() {
             anyhow::bail!("named API credentials require an isolated instance state_root");
         }
-        let source = crate::credentials::get(id)?;
+        let source = match crate::credentials::get(id) {
+            Ok(value) => value,
+            Err(_) => anyhow::bail!("named credential unavailable"),
+        };
         let provider = match self.runner_kind.as_str() {
             "claude" => "anthropic",
             "codex" => "openai",
@@ -33,7 +36,10 @@ impl ExecutionIdentity {
         {
             anyhow::bail!("administrative credentials cannot run inference");
         }
-        let mut env = crate::credentials::execution_env(id, provider)?;
+        let mut env = match crate::credentials::execution_env(id, provider) {
+            Ok(value) => value,
+            Err(_) => anyhow::bail!("named credential does not match the execution provider"),
+        };
         // Keep the provider's standard scope name in the approval projection,
         // even when the owner selected an alternate environment variable.
         let standard = match crate::credentials::canonical_provider(&source.provider) {
@@ -99,7 +105,10 @@ impl ExecutionIdentity {
     /// Apply the selected source after ambient/profile values. OpenCode's
     /// explicit provider override also defeats literal keys in its config.
     pub fn apply_credential_env(&self, env: &mut Vec<(String, String)>) -> anyhow::Result<()> {
-        let selected = self.credential_env()?;
+        let selected = match self.credential_env() {
+            Ok(value) => value,
+            Err(_) => anyhow::bail!("named credential unavailable"),
+        };
         for (key, value) in &selected {
             env.retain(|(name, _)| name != key);
             env.push((key.clone(), value.clone()));
@@ -240,7 +249,10 @@ impl ExecutionIdentity {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(_) => anyhow::bail!("cannot provision isolated Hermes provider configuration"),
         }
-        let selected = self.credential_env()?;
+        let selected = match self.credential_env() {
+            Ok(value) => value,
+            Err(_) => anyhow::bail!("named credential unavailable"),
+        };
         let reference = format!("{}=${{{}}}\n", selected[0].0, selected[0].0);
         match std::fs::OpenOptions::new()
             .write(true)
@@ -257,7 +269,10 @@ impl ExecutionIdentity {
     }
 
     fn hermes_credential_config(&self) -> anyhow::Result<serde_json::Value> {
-        let selected = self.credential_env()?;
+        let selected = match self.credential_env() {
+            Ok(value) => value,
+            Err(_) => anyhow::bail!("named credential unavailable"),
+        };
         let source = crate::credentials::get(self.credential_id.as_deref().expect("named source"))?;
         let endpoint = provider_endpoint(&source.provider).ok_or_else(|| {
             anyhow::anyhow!(
@@ -273,7 +288,10 @@ impl ExecutionIdentity {
         let expected = self.hermes_credential_config()?;
         let root = self.state_root.as_ref().expect("validated isolated state");
         let home = root.join(".hermes");
-        let selected = self.credential_env()?;
+        let selected = match self.credential_env() {
+            Ok(value) => value,
+            Err(_) => anyhow::bail!("named credential unavailable"),
+        };
         let reference = format!("{}=${{{}}}\n", selected[0].0, selected[0].0);
         if std::fs::read_to_string(home.join(".env")).ok().as_deref() != Some(&reference)
             || home.join("auth.json").try_exists().unwrap_or(true)

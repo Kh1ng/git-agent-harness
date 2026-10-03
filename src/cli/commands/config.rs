@@ -327,7 +327,10 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("backend instance executable is unavailable"))?;
             identity.validate_launch_config(&std::env::current_dir()?)?;
             identity.validate_credential_args(&args)?;
-            let selected = identity.credential_env()?;
+            let selected = match identity.credential_env() {
+                Ok(value) => value,
+                Err(_) => anyhow::bail!("named credential unavailable"),
+            };
             crate::execution_identity::authorize_credential_env(
                 &cfg,
                 &profile,
@@ -362,7 +365,10 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             if let Ok(value) = std::env::var("OPENCODE_CONFIG_CONTENT") {
                 env.push(("OPENCODE_CONFIG_CONTENT".into(), value));
             }
-            identity.apply_credential_env(&mut env)?;
+            match identity.apply_credential_env(&mut env) {
+                Ok(()) => (),
+                Err(_) => anyhow::bail!("named credential unavailable"),
+            };
             let is_bridge = acp_bridge.is_some();
             let mut command = if let Some(bridge) = acp_bridge {
                 if !matches!(identity.runner_kind.as_str(), "codex" | "claude") {

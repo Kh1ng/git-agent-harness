@@ -107,7 +107,7 @@ fn validate(info: &CredentialInfo) -> Result<()> {
     Ok(())
 }
 
-fn validate_secret(info: &CredentialInfo, secret: &str) -> Result<()> {
+fn validate_value(info: &CredentialInfo, secret: &str) -> Result<()> {
     let limit = if info.kind == CredentialKind::MistralDashboard {
         32768
     } else {
@@ -119,6 +119,17 @@ fn validate_secret(info: &CredentialInfo, secret: &str) -> Result<()> {
         || secret.bytes().any(|byte| byte < 32 || byte == 127)
     {
         bail!("invalid credential value");
+    }
+    Ok(())
+}
+
+fn validate_metadata_value(info: &CredentialInfo, value: &str) -> Result<()> {
+    if value.len() >= 4
+        && [&info.id, &info.provider, &info.account_label]
+            .iter()
+            .any(|field| field.contains(value))
+    {
+        bail!("credential metadata must not contain its private value");
     }
     Ok(())
 }
@@ -177,7 +188,8 @@ fn read_at(root: &Path, id: &str) -> Result<StoredCredential> {
     let stored: StoredCredential = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow::anyhow!("invalid named credential record"))?;
     validate(&stored.info)?;
-    validate_secret(&stored.info, &stored.secret)?;
+    validate_value(&stored.info, &stored.secret)?;
+    validate_metadata_value(&stored.info, &stored.secret)?;
     if stored.info.id != id {
         bail!("named credential identity mismatch");
     }
@@ -302,14 +314,8 @@ fn save_with_quota_at(
         info.env_var = default_env(&info.provider).map(str::to_owned);
     }
     validate(&info)?;
-    validate_secret(&info, secret)?;
-    if secret.len() >= 4
-        && [&info.id, &info.provider, &info.account_label]
-            .iter()
-            .any(|value| value.contains(secret))
-    {
-        bail!("credential metadata must not contain its secret");
-    }
+    validate_value(&info, secret)?;
+    validate_metadata_value(&info, secret)?;
     private_directory(root, true)?;
     let mut file =
         tempfile::NamedTempFile::new_in(root).context("cannot save private credential")?;
@@ -377,7 +383,10 @@ pub(crate) fn selected(id: &str) -> Result<(CredentialInfo, String)> {
 /// Resolve a single explicitly bound API source. Dashboard cookies never enter
 /// execution, and a provider mismatch cannot fall back to an ambient key.
 pub fn execution_env(id: &str, expected_provider: &str) -> Result<Vec<(String, String)>> {
-    let (info, secret) = selected(id)?;
+    let (info, secret) = match selected(id) {
+        Ok(value) => value,
+        Err(_) => bail!("named credential unavailable"),
+    };
     execution_env_with(info, secret, expected_provider)
 }
 

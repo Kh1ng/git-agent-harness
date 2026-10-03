@@ -13,7 +13,30 @@ pub(in crate::dispatch) fn apply_execution_identity_env(
     } else {
         super::apply_backend_instance_env(profile, &identity.logical_backend, env_vars);
     }
-    identity.apply_credential_env(env_vars)
+    match identity.apply_credential_env(env_vars) {
+        Ok(()) => Ok(()),
+        Err(_) => anyhow::bail!("named credential unavailable"),
+    }
+}
+
+pub(super) fn authorize_identity(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    profile: &Profile,
+    work_id: Option<&str>,
+    identity: &ExecutionIdentity,
+) -> Result<()> {
+    let selected = match identity.credential_env() {
+        Ok(value) => value,
+        Err(_) => anyhow::bail!("named credential unavailable"),
+    };
+    crate::execution_identity::authorize_credential_env(
+        cfg,
+        profile_name,
+        profile,
+        work_id,
+        &selected,
+    )
 }
 
 pub(super) fn selected_llm(
@@ -43,4 +66,22 @@ pub(super) fn selected_llm(
             .clone();
     }
     Ok(selected_llm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_source_failure_returns_only_static_execution_error() {
+        let mut identity =
+            ExecutionIdentity::legacy_candidate("codex", None::<String>, None::<String>);
+        identity.state_root = Some(std::path::PathBuf::from("/isolated-test-account"));
+        // This source ID is rejected before any private value can be resolved.
+        identity.credential_id = Some("../secret-error-canary".into());
+        let profile = crate::config::tests::test_profile_for_notifications();
+        let error = apply_execution_identity_env(&profile, &identity, &mut Vec::new()).unwrap_err();
+        assert_eq!(format!("{error:#}"), "named credential unavailable");
+        assert!(!format!("{error:?}").contains("secret-error-canary"));
+    }
 }

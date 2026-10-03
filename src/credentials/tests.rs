@@ -92,9 +92,24 @@ fn bindings_fail_closed_and_cannot_change_runtime_configuration() {
     google.provider = "google".into();
     google.env_var = Some("GOOGLE_API_KEY".into());
     assert!(execution_env_with(google, "synthetic".into(), "gemini").is_ok());
-    assert!(validate_secret(&info("primary"), "value\nInjected: true").is_err());
+    assert!(validate_value(&info("primary"), "value\nInjected: true").is_err());
     assert_eq!(
         execution_env_with(info("primary"), "synthetic".into(), "nous").unwrap(),
         vec![("NOUS_API_KEY".into(), "synthetic".into())]
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn private_record_cannot_return_its_value_as_display_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("credentials");
+    save_at(&root, info("primary"), "synthetic-value").unwrap();
+    let path = root.join("primary.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["info"]["account_label"] = serde_json::json!("Account synthetic-value");
+    std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let error = list_at(&root).unwrap_err();
+    assert!(!format!("{error:#}").contains("synthetic-value"));
 }

@@ -441,14 +441,11 @@ pub(super) fn run_backend_with_reserved_route(
     // to ensure sccache is used when available.
     env_vars.extend(cargo_target.environment());
     apply_execution_identity_env(profile, identity, &mut env_vars)?;
-    crate::execution_identity::authorize_credential_env(
-        cfg,
-        profile_name,
-        profile,
-        work_id,
-        &identity.credential_env()?,
-    )?;
-    let selected_llm = execution_env::selected_llm(identity, llm, &env_vars)?;
+    execution_env::authorize_identity(cfg, profile_name, profile, work_id, identity)?;
+    let selected_llm = match execution_env::selected_llm(identity, llm, &env_vars) {
+        Ok(value) => value,
+        Err(_) => anyhow::bail!("selected inference configuration unavailable"),
+    };
     let llm = &selected_llm;
     env_vars.retain(|(key, _)| key != crate::runner::process::HARD_TIMEOUT_ENV);
     if let Some(seconds) = hard_timeout_seconds.filter(|seconds| *seconds > 0) {
