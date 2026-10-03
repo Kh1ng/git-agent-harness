@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import type { LoginRepairView } from '@git-agent-harness/contracts';
+import { repositoryCli, type LoginRepairView } from '@git-agent-harness/contracts';
 import { loginRepairApi } from '../api/client.js';
 import { ExternalAnchor } from './ExternalAnchor.js';
 
 const POLL_MS = 2_000;
-const FINISHED = new Set<LoginRepairView['status']>(['succeeded', 'failed', 'expired', 'manual']);
+const FINISHED = new Set<LoginRepairView['status']>(['succeeded', 'failed', 'expired', 'manual', 'install_required']);
 
-export type RepairableLogin = { node_id: string; node_name?: string; backend: string; provider: string | null };
+export type RepairableLogin = { node_id: string; node_name?: string; backend: string; provider: string | null; installed?: boolean };
 
 /** "Fix login" for one broken login (#1272). The login runs on the machine
  * that owns the credential; this device sees only the link, the code, and
@@ -55,6 +55,18 @@ export function LoginRepairPanel({ login }: { login: RepairableLogin }) {
   };
   const where = login.node_name ?? 'that machine';
 
+  const tool = repositoryCli(login.backend);
+  if (tool && (repair?.status === 'install_required' || !repair && login.installed === false)) {
+    return <div className="space-y-2" aria-label="Repository CLI installation">
+      <p className="text-sm text-primary">Install {tool.label} ({login.backend}) on {where} before signing in. GAH uses it to read issues and open pull requests.</p>
+      <div className="flex flex-wrap gap-2">
+        <ExternalAnchor href={tool.installUrl} className="btn-primary inline-flex min-h-11 items-center text-xs">Install {tool.label}</ExternalAnchor>
+        <button type="button" className="btn-secondary min-h-11 text-xs" disabled={busy} onClick={() => void start()}>{busy ? 'Checking…' : 'Check installation'}</button>
+      </div>
+      <p className="text-xs text-secondary">Follow the official installation guide, then check again. Sign-in starts only after the CLI is available.</p>
+      {error && <p role="alert" className="text-sm text-critical">{error}</p>}
+    </div>;
+  }
   if (!repair) {
     return <div className="space-y-1">
       <button type="button" className="btn-secondary min-h-11 text-xs" disabled={busy} onClick={() => void start()}>{busy ? 'Starting…' : 'Fix login'}</button>
