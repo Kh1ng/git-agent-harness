@@ -100,3 +100,23 @@ test('automatic success cannot be overwritten by an older pending slot response'
   await expect(component.getByRole('button', { name: 'Check connection', exact: true })).toHaveCount(0);
   await expect(component.getByRole('status')).not.toHaveText('Sign in to this account.');
 });
+
+test('usage-only keys cannot run instances and Nous lists compatible runners only', async ({ mount }) => {
+  const component = await mount(<NativeProviderConnections entries={[
+    { id: 'admin', provider: 'mistral', kind: 'api_key', account_label: 'Usage admin', env_var: 'MISTRAL_ADMIN_API_KEY' },
+    { id: 'nous', provider: 'nous', kind: 'api_key', account_label: 'Nous work', env_var: 'NOUS_API_KEY' },
+  ]} />);
+  const admin = component.locator('[data-credential-id="admin"]');
+  await expect(admin.getByText('Saved on this computer · Usage access only')).toBeVisible();
+  await expect(admin.getByRole('button', { name: 'Create local instance' })).toHaveCount(0);
+  await expect(admin.getByRole('button', { name: 'Use on instance' })).toHaveCount(0);
+  await expect(admin.getByRole('button', { name: 'Replace key' })).toBeVisible();
+  await expect(admin.getByRole('button', { name: 'Remove', exact: true })).toBeVisible();
+  await admin.getByRole('button', { name: 'Check usage' }).click();
+  await expect(admin.getByText('Saved on this computer · Usage access only · Usage check completed')).toBeVisible();
+  const nous = component.locator('[data-credential-id="nous"]');
+  await expect(nous.getByRole('option', { name: /codex-work|claude-work|vibe-work|agy-one/ })).toHaveCount(0);
+  await expect(nous.getByRole('option', { name: /opencode-work/ })).toHaveCount(1);
+  await nous.getByRole('button', { name: 'Create local instance' }).click();
+  await expect(nous.getByLabel('Local runner').locator('option')).toHaveText(['OpenCode', 'Hermes', 'OpenHands']);
+});

@@ -4,6 +4,13 @@ export type CredentialInfo = { id: string; provider: string; kind: 'api_key' | '
 type CredentialInstance = { profile: string; instance: string; runner_kind: string; credential_id: string | null };
 type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
+const usageOnly = (entry: CredentialInfo) => /_ADMIN_|_ADMINISTRATOR_/.test(entry.env_var ?? '');
+function supportsRunner(entry: CredentialInfo, runner: string): boolean {
+  if (usageOnly(entry)) return false;
+  const fixedProvider = ({ codex: 'openai', claude: 'anthropic', vibe: 'mistral' } as Record<string, string>)[runner];
+  return fixedProvider ? entry.provider === fixedProvider : ['opencode', 'hermes', 'openhands'].includes(runner);
+}
+
 /** Manages named credentials on this device. Only transient masked input goes
  * to native save; listing, status events and rendering contain metadata. */
 export function bindProviderConnections(section: HTMLElement, invoke: Invoke) {
@@ -23,6 +30,7 @@ export function bindProviderConnections(section: HTMLElement, invoke: Invoke) {
   const checks = new Map<string, string>();
   const enabled = new WeakMap<HTMLButtonElement, () => boolean>();
   let busy = false;
+  const connectionNote = (entry: CredentialInfo) => `Saved on this computer${usageOnly(entry) ? ' · Usage access only' : ''}${checks.has(entry.id) ? ` · ${checks.get(entry.id)}` : ''}`;
 
   function button(text: string, action: () => Promise<void>, available = () => true) {
     const button = document.createElement('button');
@@ -42,7 +50,7 @@ export function bindProviderConnections(section: HTMLElement, invoke: Invoke) {
       const heading = document.createElement('p');
       heading.textContent = `${entry.account_label} · ${entry.provider} · ${entry.kind === 'mistral_dashboard' ? 'Mistral sign-in' : 'API key'}`;
       const note = document.createElement('small');
-      note.textContent = `Saved on this computer${checks.has(entry.id) ? ` · ${checks.get(entry.id)}` : ''}`;
+      note.textContent = connectionNote(entry);
       row.append(heading, note);
       const actions = document.createElement('div');
       actions.className = 'actions';
@@ -50,90 +58,93 @@ export function bindProviderConnections(section: HTMLElement, invoke: Invoke) {
         try {
           await invoke('credential_refresh', { id: entry.id });
           checks.set(entry.id, 'Usage check completed');
-          note.textContent = 'Saved on this computer · Usage check completed';
+          note.textContent = connectionNote(entry);
           status.textContent = `Usage check completed for ${entry.account_label}. See Quota management for available readings.`;
         } catch {
           checks.set(entry.id, 'Usage check failed');
-          note.textContent = 'Saved on this computer · Usage check failed';
+          note.textContent = connectionNote(entry);
           status.textContent = `Usage is unavailable for ${entry.account_label}. This key remains saved; some providers require a separate account sign-in for usage.`;
         }
       }));
       if (entry.kind === 'mistral_dashboard') {
         actions.append(button('Reconnect', () => startLogin(entry.id, entry.account_label)));
       } else {
-        actions.append(button('Create local instance', async () => {
-          const create = document.createElement('div');
-          create.className = 'instance-create';
-          const title = document.createElement('p');
-          title.textContent = `Create an instance using ${entry.account_label} on this computer`;
-          create.append(title);
-          const field = (text: string, input: HTMLElement) => {
-            const label = document.createElement('label');
-            label.append(text, input);
-            create.append(label);
-          };
-          const profile = document.createElement('select');
-          profile.setAttribute('aria-label', 'Local profile');
-          const profiles = [...new Set(instances.map(instance => instance.profile))];
-          for (const name of profiles.length ? profiles : ['gah']) {
+        if (!usageOnly(entry)) {
+          actions.append(button('Create local instance', async () => {
+            const create = document.createElement('div');
+            create.className = 'instance-create';
+            const title = document.createElement('p');
+            title.textContent = `Create an instance using ${entry.account_label} on this computer`;
+            create.append(title);
+            const field = (text: string, input: HTMLElement) => {
+              const label = document.createElement('label');
+              label.append(text, input);
+              create.append(label);
+            };
+            const profile = document.createElement('select');
+            profile.setAttribute('aria-label', 'Local profile');
+            const profiles = [...new Set(instances.map(instance => instance.profile))];
+            for (const name of profiles.length ? profiles : ['gah']) {
+              const option = document.createElement('option');
+              option.value = option.textContent = name;
+              profile.append(option);
+            }
+            field('Profile', profile);
+            const runner = document.createElement('select');
+            runner.setAttribute('aria-label', 'Local runner');
+            for (const [value, name] of [['codex', 'Codex'], ['claude', 'Claude'], ['vibe', 'Vibe'], ['opencode', 'OpenCode'], ['hermes', 'Hermes'], ['openhands', 'OpenHands']]) {
+              if (!supportsRunner(entry, value)) continue;
+              const option = document.createElement('option');
+              option.value = value;
+              option.textContent = name;
+              runner.append(option);
+            }
+            runner.value = ({ mistral: 'vibe', nous: 'opencode', anthropic: 'claude', openai: 'codex' } as Record<string, string>)[entry.provider] ?? 'opencode';
+            field('Runner', runner);
+            const instance = document.createElement('input');
+            instance.setAttribute('aria-label', 'Local instance ID');
+            instance.maxLength = 64;
+            instance.autocomplete = 'off';
+            instance.spellcheck = false;
+            instance.placeholder = `${runner.value}-work`;
+            field('Instance ID', instance);
+            const createButton = button('Create and use key', async () => {
+              if (!instance.value.trim()) return;
+              await invoke('credential_add_instance', { profile: profile.value, instance: instance.value.trim(), runnerKind: runner.value, credentialId: entry.id });
+              await refresh();
+              status.textContent = `${profile.value} / ${instance.value.trim()} was created using ${entry.account_label} on this computer.`;
+            }, () => !!instance.value.trim());
+            instance.addEventListener('input', () => { createButton.disabled = busy || !instance.value.trim(); });
+            create.append(createButton, button('Cancel instance creation', async () => { create.remove(); }));
+            row.querySelector('.instance-create')?.remove();
+            row.append(create);
+            instance.focus();
+          }));
+          const binding = document.createElement('div');
+          binding.className = 'actions';
+          const select = document.createElement('select');
+          select.setAttribute('aria-label', `Local instance for ${entry.account_label}`);
+          const prompt = document.createElement('option');
+          prompt.value = '';
+          prompt.textContent = 'Select an existing local instance';
+          select.append(prompt);
+          for (const instance of instances.filter(instance => supportsRunner(entry, instance.runner_kind))) {
             const option = document.createElement('option');
-            option.value = option.textContent = name;
-            profile.append(option);
+            option.value = JSON.stringify([instance.profile, instance.instance]);
+            option.textContent = `${instance.profile} / ${instance.instance} · ${instance.runner_kind}${instance.credential_id === entry.id ? ' · using this key' : ''}`;
+            select.append(option);
           }
-          field('Profile', profile);
-          const runner = document.createElement('select');
-          runner.setAttribute('aria-label', 'Local runner');
-          for (const [value, name] of [['codex', 'Codex'], ['claude', 'Claude'], ['vibe', 'Vibe'], ['opencode', 'OpenCode'], ['hermes', 'Hermes'], ['openhands', 'OpenHands']]) {
-            const option = document.createElement('option');
-            option.value = value;
-            option.textContent = name;
-            runner.append(option);
-          }
-          runner.value = ({ mistral: 'vibe', nous: 'opencode', anthropic: 'claude', openai: 'codex' } as Record<string, string>)[entry.provider] ?? 'opencode';
-          field('Runner', runner);
-          const instance = document.createElement('input');
-          instance.setAttribute('aria-label', 'Local instance ID');
-          instance.maxLength = 64;
-          instance.autocomplete = 'off';
-          instance.spellcheck = false;
-          instance.placeholder = `${runner.value}-work`;
-          field('Instance ID', instance);
-          const createButton = button('Create and use key', async () => {
-            if (!instance.value.trim()) return;
-            await invoke('credential_add_instance', { profile: profile.value, instance: instance.value.trim(), runnerKind: runner.value, credentialId: entry.id });
+          const use = button('Use on instance', async () => {
+            if (!select.value) return;
+            const [profile, instance] = JSON.parse(select.value) as [string, string];
+            await invoke('credential_bind', { profile, instance, credentialId: entry.id });
             await refresh();
-            status.textContent = `${profile.value} / ${instance.value.trim()} was created using ${entry.account_label} on this computer.`;
-          }, () => !!instance.value.trim());
-          instance.addEventListener('input', () => { createButton.disabled = busy || !instance.value.trim(); });
-          create.append(createButton, button('Cancel instance creation', async () => { create.remove(); }));
-          row.querySelector('.instance-create')?.remove();
-          row.append(create);
-          instance.focus();
-        }));
-        const binding = document.createElement('div');
-        binding.className = 'actions';
-        const select = document.createElement('select');
-        select.setAttribute('aria-label', `Local instance for ${entry.account_label}`);
-        const prompt = document.createElement('option');
-        prompt.value = '';
-        prompt.textContent = 'Select an existing local instance';
-        select.append(prompt);
-        for (const instance of instances.filter(instance => instance.runner_kind !== 'agy')) {
-          const option = document.createElement('option');
-          option.value = JSON.stringify([instance.profile, instance.instance]);
-          option.textContent = `${instance.profile} / ${instance.instance} · ${instance.runner_kind}${instance.credential_id === entry.id ? ' · using this key' : ''}`;
-          select.append(option);
+            status.textContent = `${entry.account_label} is selected for ${profile} / ${instance} on this computer.`;
+          }, () => !!select.value);
+          select.addEventListener('change', () => { use.disabled = busy || !select.value; });
+          binding.append(select, use);
+          row.append(binding);
         }
-        const use = button('Use on instance', async () => {
-          if (!select.value) return;
-          const [profile, instance] = JSON.parse(select.value) as [string, string];
-          await invoke('credential_bind', { profile, instance, credentialId: entry.id });
-          await refresh();
-          status.textContent = `${entry.account_label} is selected for ${profile} / ${instance} on this computer.`;
-        }, () => !!select.value);
-        select.addEventListener('change', () => { use.disabled = busy || !select.value; });
-        binding.append(select, use);
-        row.append(binding);
         actions.append(button('Replace key', async () => {
           form.hidden = false;
           form.dataset.editId = entry.id;

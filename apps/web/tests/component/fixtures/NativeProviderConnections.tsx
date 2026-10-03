@@ -19,6 +19,9 @@ export function NativeProviderConnections({ entries: initialEntries, failUsage =
       } else if (command === 'credential_instances') {
         result = [
           { profile: 'local-work', instance: 'vibe-work', runner_kind: 'vibe', credential_id: null },
+          { profile: 'local-work', instance: 'codex-work', runner_kind: 'codex', credential_id: null },
+          { profile: 'local-work', instance: 'claude-work', runner_kind: 'claude', credential_id: null },
+          { profile: 'local-work', instance: 'opencode-work', runner_kind: 'opencode', credential_id: null },
           { profile: 'local-work', instance: 'agy-one', runner_kind: 'agy', credential_id: null },
         ];
       } else if (command === 'credential_save') {
