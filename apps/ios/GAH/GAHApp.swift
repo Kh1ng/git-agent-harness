@@ -442,7 +442,7 @@ private struct ControllerView: View {
                 Text("Open \(target.origin.absoluteString)? You will confirm this server before pairing.")
             }
             .sheet(isPresented: $showingConnection) {
-                ConnectionView(initial: proposedAddress ?? controller.address?.origin.absoluteString ?? "http://100.118.97.79") { target in
+                ConnectionView(initial: proposedAddress ?? controller.address?.origin.absoluteString ?? "") { target in
                     controller.connect(target)
                     proposedAddress = nil
                     showingConnection = false

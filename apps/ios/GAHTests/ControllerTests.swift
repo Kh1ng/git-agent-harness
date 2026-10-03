@@ -95,11 +95,11 @@ final class ControllerTests: XCTestCase {
                         offer + "&pair=abcdefghijklmnopqrstuvwxyzABCDEF", offer + "&server=e58dbf8c-9c0d-4bd4-b0f9-be02d42e16a8"] {
             XCTAssertThrowsError(try ServerAddress.pairing(invalid), invalid)
         }
-        let address = try ServerAddress("http://100.118.97.79/#pair=secret&server=identity")
-        XCTAssertEqual(ServerAddress.restorationURL(address.url)?.absoluteString, "http://100.118.97.79/")
-        XCTAssertTrue(address.contains(URL(string: "http://100.118.97.79:80/?page=nodes")!))
-        XCTAssertFalse(address.contains(URL(string: "http://100.118.97.79.example.com/")!))
-        XCTAssertFalse(address.contains(URL(string: "https://100.118.97.79/")!))
+        let address = try ServerAddress("http://100.64.0.10/#pair=secret&server=identity")
+        XCTAssertEqual(ServerAddress.restorationURL(address.url)?.absoluteString, "http://100.64.0.10/")
+        XCTAssertTrue(address.contains(URL(string: "http://100.64.0.10:80/?page=nodes")!))
+        XCTAssertFalse(address.contains(URL(string: "http://100.64.0.10.example.com/")!))
+        XCTAssertFalse(address.contains(URL(string: "https://100.64.0.10/")!))
         let chat = URL(string: "https://gah.example/?page=chat&profile=gah&chat=abc&token=secret#pair=secret")!
         XCTAssertEqual(ServerAddress.restorationURL(chat)?.absoluteString, "https://gah.example/?page=chat&profile=gah&chat=abc")
         let link = URL(string: "gah://open?url=https%3A%2F%2Fgah.example%2F%3Fpage%3Dchat")!
