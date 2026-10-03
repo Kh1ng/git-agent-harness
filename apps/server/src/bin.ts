@@ -25,6 +25,7 @@ import { apnsFromEnvironment } from './apns.js';
 import { channelDelivery, commandDelivery, deliverToAll } from './notifyDelivery.js';
 import { AuthHealthMonitor, AuthHealthProber, configureChatAuthHealth } from './authHealth.js';
 import { LoginRepairBroker, LoginRepairs, loadProviderKeys } from './loginRepair.js';
+import { createCliRouterQuotaObserver } from './cliRouter.js';
 import { startQuotaRefreshScheduler } from './quotaRefreshScheduler.js';
 
 const PORT = parseInt(process.env.PORT || '3773');
@@ -91,6 +92,8 @@ async function main() {
     })
     : undefined;
 
+  const cliRouterQuotaObserver = node.role === 'central' ? createCliRouterQuotaObserver() : undefined;
+
   // Create Express app
   const app = createExpressServer({
     coordinatorPort: PORT,
@@ -103,7 +106,8 @@ async function main() {
     authHealthProber,
     authHealthMonitor,
     loginRepairs,
-    loginRepairBroker
+    loginRepairBroker,
+    cliRouterQuotaObserver
   });
   
   // Create HTTP server from Express app
@@ -168,6 +172,7 @@ async function main() {
   // still matters.
   if (node.role === 'central') startChatMaintenanceScheduler();
 
+  let stopRouterQuotaRefresh: (() => void) | undefined;
   let stopQuotaRefresh: (() => Promise<void>) | undefined;
   // Start HTTP server
   server.listen(PORT, HOST, () => {
@@ -182,6 +187,7 @@ async function main() {
     if (cliAvailable) {
       authHealthProber.start();
       stopQuotaRefresh = startQuotaRefreshScheduler();
+      stopRouterQuotaRefresh = cliRouterQuotaObserver?.start();
     }
   });
   
@@ -196,6 +202,7 @@ async function main() {
     stopChatMaintenanceScheduler();
     authHealthProber.stop();
     server.close();
+    stopRouterQuotaRefresh?.();
     await stopQuotaRefresh?.();
     process.exit(0);
   };

@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::cmp::Ordering;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, serde::Deserialize, PartialEq)]
 pub struct SubscriptionCapacity {
     pub known_capacity: bool,
     pub exhausted: bool,
@@ -22,34 +22,16 @@ pub fn capacity(
     records: &[QuotaObservationRecord],
     now: OffsetDateTime,
 ) -> SubscriptionCapacity {
-    let matches = records.iter().filter(|record| {
-        record.backend == identity.logical_backend
-            && (record.model.is_none() || record.model == identity.effective_model)
-            && record
-                .backend_instance
-                .as_deref()
-                .is_none_or(|instance| instance == identity.backend_instance)
-            && record
-                .quota_pool
-                .as_deref()
-                .is_none_or(|pool| Some(pool) == identity.quota_pool.as_deref())
-            && (!identity.explicit_instance
-                || record.backend_instance.is_some()
-                || record.quota_pool.is_some())
-    });
-    let mut latest = std::collections::BTreeMap::new();
-    for record in matches {
-        let entry = latest
-            .entry(record.quota_window.as_deref())
-            .or_insert(record);
-        if record.checked_at.as_ref().or(record.observed_at.as_ref())
-            > entry.checked_at.as_ref().or(entry.observed_at.as_ref())
-        {
-            *entry = record;
-        }
-    }
+    let latest = crate::quota_store::latest_windows_for_identity(records, identity);
     let mut result = SubscriptionCapacity::default();
-    for record in latest.values() {
+    for record in latest {
+        if identity.explicit_instance
+            && identity.credential_id.is_none()
+            && record.backend_instance.is_none()
+            && record.quota_pool.is_none()
+        {
+            continue;
+        }
         let Some(observed) = record
             .observed_at
             .as_deref()
@@ -84,22 +66,12 @@ pub fn capacity(
         } else {
             result.known_capacity = true;
         }
-        // Each subscription uses its own window; a monthly balance is never weekly-paced.
-        let window = record
-            .quota_window
-            .as_deref()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let seconds = if window.contains("month") {
-            Some(30.0 * 86400.0)
-        } else if window.contains("week") {
-            Some(7.0 * 86400.0)
-        } else if window.contains("session") || window.contains("5h") || window.contains("five") {
-            Some(5.0 * 3600.0)
-        } else if window.contains("day") || window.contains("daily") {
-            Some(86400.0)
-        } else {
-            None
+        // Short-term throttles restrict eligibility, but are not a budget to spend.
+        // Provider window names are protocol values, not substring heuristics.
+        let seconds = match record.quota_window.as_deref() {
+            Some("weekly" | "seven_day" | "seven-day" | "7d" | "10080m") => Some(7.0 * 86400.0),
+            Some("monthly" | "vibe-code-included-monthly") => Some(30.0 * 86400.0),
+            _ => None,
         };
         if let (Some(reset), Some(seconds)) = (reset, seconds) {
             let pressure = (remaining / 100.0) / ((reset - now).as_seconds_f64() / seconds);
@@ -251,6 +223,58 @@ pub fn handoff_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_account_checks_and_retired_credentials_remove_capacity() {
+        let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
+        let mut identity =
+            ExecutionIdentity::legacy_candidate("claude", None::<String>, None::<String>);
+        identity.credential_id = Some("claude-one".into());
+        let reading: QuotaObservationRecord = serde_json::from_value(serde_json::json!({
+            "backend":"claude", "credential_id":"claude-one", "quota_window":"weekly",
+            "quota_remaining_percent":80, "observed_at":"2026-10-03T17:59:00Z",
+            "quota_reset_at":"2026-10-03T18:10:00Z"
+        }))
+        .unwrap();
+        let failed: QuotaObservationRecord = serde_json::from_value(serde_json::json!({
+            "backend":"claude", "credential_id":"claude-one", "checked_at":"2026-10-03T18:00:00Z",
+            "check_error":"network"
+        }))
+        .unwrap();
+        assert!(capacity(&identity, std::slice::from_ref(&reading), now).known_capacity);
+        let invalidated = capacity(&identity, &[reading.clone(), failed], now);
+        assert!(!invalidated.known_capacity);
+        assert_eq!(invalidated.reset_pressure, None);
+        let retired: QuotaObservationRecord = serde_json::from_value(serde_json::json!({
+            "backend":"claude", "credential_id":"claude-one", "usage_source":"credential_removed"
+        }))
+        .unwrap();
+        assert!(!capacity(&identity, &[reading, retired], now).known_capacity);
+    }
+
+    #[test]
+    fn subscription_pressure_uses_explicit_budget_windows() {
+        let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
+        let identity =
+            ExecutionIdentity::legacy_candidate("claude", None::<String>, None::<String>);
+        for (window, expected) in [
+            ("seven_day", Some(504.0)),
+            ("weekly", Some(504.0)),
+            ("vibe-code-included-monthly", Some(2160.0)),
+            ("five_hour", None),
+            ("session", None),
+            ("unknown_weekly_budget", None),
+        ] {
+            let reading = serde_json::from_value(serde_json::json!({
+                "backend":"claude", "quota_window":window, "quota_remaining_percent":50,
+                "observed_at":"2026-10-03T17:59:00Z", "quota_reset_at":"2026-10-03T18:10:00Z"
+            }))
+            .unwrap();
+            let result = capacity(&identity, &[reading], now);
+            assert!(result.known_capacity);
+            assert_eq!(result.reset_pressure, expected, "{window}");
+        }
+    }
+
     #[test]
     fn account_windows_freshness_and_subscription_preference() {
         let now = OffsetDateTime::parse("2026-10-02T18:00:00Z", &Rfc3339).unwrap();
