@@ -17,6 +17,8 @@ const URL: &str = "https://admin.mistral.ai/organization/usage";
 const API_PATH: &str = "/api/local-trpc/";
 const EVENT: &str = "gah:mistral-login";
 static CHECKING: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
+mod collector_args;
 
 #[derive(Clone, Serialize)]
 pub struct LoginStatus {
@@ -314,13 +316,7 @@ fn verify_and_save(gah: &Path, root: &Path, cookie: &str) -> LoginStatus {
     let store = check.dir.join("quota.jsonl");
     let mut command = super::command(gah.to_string_lossy().as_ref());
     command
-        .args([
-            "quota",
-            "refresh",
-            "--backend",
-            "mistral-dashboard",
-            "--store",
-        ])
+        .args(collector_args::REFRESH_ARGS)
         .arg(&store)
         .env("MISTRAL_DASHBOARD_COOKIE_FILE", check.dir.join("cookie"));
     let succeeded = run_gah(command, Duration::from_secs(95));

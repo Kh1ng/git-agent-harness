@@ -9,6 +9,35 @@ use clap::Parser;
 use git_agent_harness::cli::args::Cli;
 use predicates::prelude::*;
 
+#[path = "../../apps/desktop/mistral_login/collector_args.rs"]
+mod mistral_collector_args;
+
+#[test]
+fn native_mistral_refresh_arguments_match_the_real_cli_parser() {
+    use git_agent_harness::cli::args::{Commands, QuotaCommands};
+    let store = "/private/mistral-check/quota.jsonl";
+    let parsed = Cli::try_parse_from(
+        ["gah"]
+            .into_iter()
+            .chain(mistral_collector_args::REFRESH_ARGS)
+            .chain([store]),
+    )
+    .expect("native Mistral verification must use accepted CLI arguments");
+    let Commands::Quota {
+        command:
+            QuotaCommands::Refresh {
+                backend,
+                store_path,
+                ..
+            },
+    } = parsed.command
+    else {
+        panic!("native Mistral verification must refresh quota");
+    };
+    assert_eq!(backend, "mistral-dashboard");
+    assert_eq!(store_path.as_deref(), Some(store));
+}
+
 /// The top-level help text advertises the tool's identity unchanged.
 #[test]
 fn help_works() {

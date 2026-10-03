@@ -219,7 +219,7 @@ fn only_verified_session_is_atomically_saved_and_supported_record_is_used() {
         &root.0,
         r#"
 if [ "$2" = refresh ]; then
-  [ "$3" = --backend ] && [ "$4" = mistral-dashboard ] && [ "$5" = --store ] || exit 2
+  [ "$3" = --backend ] && [ "$4" = mistral-dashboard ] && [ "$5" = --store-path ] || exit 2
   [ -n "$MISTRAL_DASHBOARD_COOKIE_FILE" ] || exit 3
   printf '%s' '{"backend":"mistral-dashboard","account_usage":{"account_id":"synthetic"},"check_error":null}' > "$6"
 elif [ "$2" = record ]; then
