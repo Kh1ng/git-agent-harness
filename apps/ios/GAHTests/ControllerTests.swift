@@ -111,6 +111,21 @@ final class ControllerTests: XCTestCase {
         XCTAssertNil(server.chatURL(from: URL(string: "https://evil.example/?profile=gah&chat=session-7")!))
     }
 
+    func testFirstLaunchOffersAnEmptyConnectionForm() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-centralURL", ""] // Override restoration with an unconfigured origin.
+        app.launch()
+        XCTAssertTrue(app.buttons["Set up connection"].waitForExistence(timeout: 10))
+        app.buttons["Set up connection"].tap()
+        let field = app.descendants(matching: .any).matching(identifier: "serverAddress").firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "")
+        let evidence = XCTAttachment(screenshot: app.screenshot())
+        evidence.name = "Unconfigured connection form"
+        evidence.lifetime = .keepAlways
+        add(evidence)
+    }
+
     func testColdLaunchHTTP404OffersConnectionRecovery() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
