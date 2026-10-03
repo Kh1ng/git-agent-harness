@@ -29,6 +29,8 @@ pub struct UsageSummary {
 pub struct QuotaObservation {
     pub backend: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -613,6 +615,7 @@ fn aggregate_observations(
             observed_at: account.observed_at.clone(),
             usage_source: account.usage_source.clone(),
             account_usage: account.account_usage.clone(),
+            credential_id: account.credential_id.clone(),
         });
     }
 
@@ -670,6 +673,7 @@ fn convert_group_observation(obs: &ledger::summary::GroupQuotaObservation) -> Qu
         observed_at: obs.observed_at.clone(),
         usage_source: obs.usage_source.clone(),
         account_usage: None,
+        credential_id: None,
     }
 }
 
@@ -831,6 +835,7 @@ mod tests {
             usage_source: None,
             mistral_admin: None,
             account_usage: None,
+            credential_id: None,
         }
     }
 

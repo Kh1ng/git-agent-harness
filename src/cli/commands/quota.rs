@@ -26,6 +26,7 @@ pub fn run(command: QuotaCommands) -> Result<()> {
             println!("Recorded account-level quota observation.");
         }
         QuotaCommands::Refresh {
+            credential,
             backend,
             backend_instance,
             model,
@@ -33,6 +34,25 @@ pub fn run(command: QuotaCommands) -> Result<()> {
             command: cmd,
             store_path: store_arg,
         } => {
+            if let Some(id) = credential {
+                if backend != "codex"
+                    || backend_instance.is_some()
+                    || model.is_some()
+                    || quota_pool.is_some()
+                    || cmd.is_some()
+                {
+                    bail!("--credential selects its own provider; backend/instance/model/pool/command overrides are unsupported");
+                }
+                let path = store_arg
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(quota_store::store_path);
+                let record = crate::credentials::quota::refresh(&id, &path)?;
+                if let Some(error) = record.check_error {
+                    bail!("Quota refresh failed: {error}");
+                }
+                println!("Recorded named provider account check.");
+                return Ok(());
+            }
             let codex_cmd = cmd.unwrap_or_else(|| backend.clone());
             let path = store_arg
                 .map(std::path::PathBuf::from)

@@ -3,6 +3,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+pub(crate) mod quota;
 
 #[cfg(test)]
 mod tests;
@@ -40,6 +41,9 @@ pub fn canonical_provider(provider: &str) -> &str {
         "vibe" | "mistral-dashboard" => "mistral",
         "agy" | "agy-main" | "agy-second" => "antigravity",
         "gemini" => "google",
+        "nous-portal" => "nous",
+        "moonshot" => "kimi",
+        "x-ai" => "xai",
         other => other,
     }
 }
@@ -295,6 +299,8 @@ pub fn remove(id: &str) -> Result<()> {
     validate_id(id)?;
     let root = root()?;
     private_directory(&root, false)?;
+    let info = read_at(&root, id)?.info;
+    quota::removed(&info, &crate::quota_store::store_path())?;
     std::fs::remove_file(root.join(format!("{id}.json"))).context("named credential unavailable")
 }
 
