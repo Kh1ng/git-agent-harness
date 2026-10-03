@@ -73,6 +73,7 @@ import { DeviceAccess } from './deviceAccess.js';
 import { mutationSafety } from './mutationSafety.js';
 import { pairingRouter } from './pairing.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
+import { resolveChatProject } from './projectCatalog.js';
 import { RegistryService, NodeDoctorError } from './registryService.js';
 import { ClaimsService, ClaimConflictError } from './claimsService.js';
 import { backendForProfile, helperRouteFor, readSettings as readManagerChatSettings, setBackendForProfile, validHelperRoute, writeSettings as writeManagerChatSettings } from './managerChat/settingsStore.js';
@@ -1089,10 +1090,21 @@ export function createServer(
     }
   });
 
+  // Conversation identities select a catalog checkout; quota APIs need its
+  // configured profile name. Never infer a profile from an unregistered alias.
+  async function resolveQuotaProfile(profile: string): Promise<string | undefined> {
+    if (!profile.startsWith('gah-node:')) return profile;
+    try {
+      return (await resolveChatProject(profile, { localNodeId: getCoordinatorIdentity().node_id, listProfiles }))?.name;
+    } catch { return undefined; }
+  }
+
   app.get('/api/quota', async (req, res) => {
-    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const selectedProfile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
     const since = typeof req.query.since === 'string' ? req.query.since : '7d';
     try {
+      const profile = await resolveQuotaProfile(selectedProfile);
+      if (profile === undefined) return res.status(404).json({ error: 'quota_project_not_found' });
       const quota = await runQuota({ profile, since });
       res.json(quota);
     } catch (error) {
@@ -1105,14 +1117,19 @@ export function createServer(
 
   app.get('/api/registry/quota', async (req, res) => {
     if (node.role !== 'central') return res.status(403).json({ error: 'central_only' });
-    const profile = req.query.profile ?? DEFAULT_PROFILE;
+    const selectedProfile = req.query.profile ?? DEFAULT_PROFILE;
     const since = req.query.since ?? '7d';
-    if (typeof profile !== 'string' || !/^[a-zA-Z0-9_.-]{1,128}$/.test(profile)
+    if (typeof selectedProfile !== 'string' || (!selectedProfile.startsWith('gah-node:') && !/^[a-zA-Z0-9_.-]{1,128}$/.test(selectedProfile))
       || typeof since !== 'string' || !/^[1-9][0-9]{0,3}[mhdw]$/.test(since)) {
       return res.status(400).json({ error: 'invalid_quota_query' });
     }
     res.setHeader('Cache-Control', 'no-store');
-    try { res.json(await registryService.getNodeQuotas(profile, since)); }
+    try {
+      const profile = await resolveQuotaProfile(selectedProfile);
+      if (profile === undefined) return res.status(404).json({ error: 'quota_project_not_found' });
+      if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(profile)) return res.status(400).json({ error: 'invalid_quota_query' });
+      res.json(await registryService.getNodeQuotas(profile, since));
+    }
     catch { res.status(502).json({ error: 'node_quota_unavailable' }); }
   });
 
