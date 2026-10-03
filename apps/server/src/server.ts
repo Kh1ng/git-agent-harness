@@ -2173,7 +2173,9 @@ export function createServer(
       return;
     }
     try {
-      res.status(201).json(await startManagerChatFromIssue(profile, issueNumber, backend, model));
+      res.status(201).json(await startManagerChatFromIssue(profile, issueNumber, backend, model,
+        typeof req.body?.nodeId === 'string' ? req.body.nodeId : undefined,
+        typeof req.body?.backendInstance === 'string' ? req.body.backendInstance : null));
     } catch (error) {
       res.status(502).json({
         error: 'Failed to start chat from issue',
@@ -2207,7 +2209,9 @@ export function createServer(
       return;
     }
     try {
-      res.status(201).json(await startManagerChatFromPr(profile, prNumber, backend, model));
+      res.status(201).json(await startManagerChatFromPr(profile, prNumber, backend, model,
+        typeof req.body?.nodeId === 'string' ? req.body.nodeId : undefined,
+        typeof req.body?.backendInstance === 'string' ? req.body.backendInstance : null));
     } catch (error) {
       res.status(502).json({
         error: 'Failed to start chat from pull request',

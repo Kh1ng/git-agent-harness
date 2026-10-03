@@ -88,13 +88,11 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
 
   const nodeSnapshot = useChatNodes(project, backend || null, open, nodesRefreshKey);
   const projectInfo = profiles.find(candidate => candidate.name === project);
-  const remoteProject = projectInfo?.remote ?? false;
   const centralId = nodeSnapshot.nodes.find(node => node.role === 'central')?.nodeId ?? '';
   // Prefer the owning node, but never default to one that can't take the chat (#1275).
   const ownerId = projectInfo?.node_id;
-  const ownerUsable = !!ownerId && nodeSnapshot.nodes.find(node => node.nodeId === ownerId)?.eligible !== false;
-  const nodeId = mode !== 'blank' ? (remoteProject && ownerId ? ownerId : centralId)
-    : nodeChoice?.project === project ? nodeChoice.nodeId
+  const ownerUsable = !!ownerId && nodeSnapshot.nodes.some(node => node.nodeId === ownerId && node.eligible);
+  const nodeId = nodeChoice?.project === project ? nodeChoice.nodeId
     : ownerUsable ? ownerId : nodeSnapshot.nodes.find(node => node.eligible)?.nodeId ?? centralId;
   const selectedNode = nodeSnapshot.nodes.find(node => node.nodeId === nodeId);
   const nodeReady = !nodeSnapshot.loading && !nodeSnapshot.error && !!(selectedNode?.eligible ?? selectedNode?.chatCapable);
@@ -253,13 +251,13 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
   };
 
   const startFromSource = async (source: Exclude<ChatSource, 'blank'>, number: number) => {
-    if (!backend || creating) return;
+    if (!backend || creating || !nodeReady) return;
     setCreating(true);
     setError(null);
     try {
       const { session } = source === 'issue'
-        ? await gahApi.startChatFromIssue(project, number, backend, model)
-        : await gahApi.startChatFromPr(project, number, backend, model);
+        ? await gahApi.startChatFromIssue(project, number, backend, model, nodeId, backendInstance)
+        : await gahApi.startChatFromPr(project, number, backend, model, nodeId, backendInstance);
       onCreated(project, session.id);
       dialog.current?.close();
     } catch (err) {
@@ -270,17 +268,17 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
   };
 
   const create = async () => {
-    if (!backend || (mode === 'blank' && !nodeReady)) return;
+    if (!backend || !nodeReady) return;
     setCreating(true);
     setError(null);
     try {
       if (mode === 'issue') {
         if (!issue) return;
-        const { session } = await gahApi.startChatFromIssue(project, issue.number, backend, model);
+        const { session } = await gahApi.startChatFromIssue(project, issue.number, backend, model, nodeId, backendInstance);
         onCreated(project, session.id);
       } else if (mode === 'pr') {
         if (!pr) return;
-        const { session } = await gahApi.startChatFromPr(project, pr.number, backend, model);
+        const { session } = await gahApi.startChatFromPr(project, pr.number, backend, model, nodeId, backendInstance);
         onCreated(project, session.id);
       } else {
         const session = await gahApi.createChatSession(project, backend, model, title.trim() || undefined, nodeId, backendInstance);
@@ -425,7 +423,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
                     key={candidate.number}
                     type="button"
                     onClick={() => { setIssue(candidate); void startFromSource('issue', candidate.number); }}
-                    disabled={creating || !backend}
+                    disabled={creating || !backend || !nodeReady}
                     aria-pressed={issue?.number === candidate.number}
                     className={`rounded-md px-3 py-2 text-left ${issue?.number === candidate.number ? 'bg-accent/15 border border-accent/40' : 'border border-transparent hover:bg-white/5'}`}
                   >
@@ -467,7 +465,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
                     key={candidate.number}
                     type="button"
                     onClick={() => { setPr(candidate); void startFromSource('pr', candidate.number); }}
-                    disabled={creating || !backend}
+                    disabled={creating || !backend || !nodeReady}
                     aria-pressed={pr?.number === candidate.number}
                     className={`rounded-md px-3 py-2 text-left ${pr?.number === candidate.number ? 'bg-accent/15 border border-accent/40' : 'border border-transparent hover:bg-white/5'}`}
                   >
@@ -511,11 +509,9 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
           </div>
         </section>
 
-        {mode === 'blank' ? <>
-          <ChatNodePicker {...nodeSnapshot} value={nodeId} disabled={creating}
-            onChange={nodeId => setNodeChoice({ project, nodeId })} />
-          <p className="text-sm text-secondary">Each node uses its own checkout; files do not move.</p>
-        </> : <p className="text-sm text-secondary">{remoteProject ? 'This chat runs on the node that owns the project.' : 'Issue and PR chat setup runs on the central node.'}</p>}
+        <ChatNodePicker {...nodeSnapshot} value={nodeId} disabled={creating}
+          onChange={nodeId => setNodeChoice({ project, nodeId })} />
+        <p className="text-sm text-secondary">Each node uses its own checkout; files do not move.</p>
 
         <section className="space-y-2">
           <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
@@ -548,7 +544,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
               ))}
             </select>
           )}
-          {mode === 'blank' && backendInstances.length > 0 && (
+          {backendInstances.length > 0 && (
             <label className="block space-y-1 text-xs text-secondary">Account
               <select value={backendInstance ?? ''} onChange={(event) => setBackendInstance(event.target.value || null)} className="w-full rounded-md border border-subtle bg-raised px-2 py-1.5 text-primary">
                 <option value="">Default provider login</option>
@@ -588,7 +584,7 @@ export function NewChatModal({ open, currentProfile, profiles, backends, launche
           <button
             type="button"
             onClick={create}
-            disabled={creating || !backend || profiles.length === 0 || (mode === 'blank' && (!title.trim() || !nodeReady)) || (mode === 'issue' && !issue) || (mode === 'pr' && !pr)}
+            disabled={creating || !backend || !nodeReady || profiles.length === 0 || (mode === 'blank' && !title.trim()) || (mode === 'issue' && !issue) || (mode === 'pr' && !pr)}
             className="btn-primary text-xs"
           >
             {creating ? 'Creating…' : 'Start chat'}

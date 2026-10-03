@@ -344,9 +344,9 @@ export interface GahDataSource {
   getChatPreview(profile: string, sessionId: string): Promise<{ preview: ChatPreviewInfo | null }>;
   setChatPreview(profile: string, sessionId: string, port: number | null): Promise<{ preview: ChatPreviewInfo | null }>;
   getChatIssues(profile: string): Promise<{ issues: ChatIssueSummary[] }>;
-  startChatFromIssue(profile: string, issueNumber: number, backend?: string, model?: string | null): Promise<ChatIssueStartResult>;
+  startChatFromIssue(profile: string, issueNumber: number, backend?: string, model?: string | null, nodeId?: string, backendInstance?: string | null): Promise<ChatIssueStartResult>;
   getChatPrs(profile: string): Promise<{ prs: ChatPrSummary[] }>;
-  startChatFromPr(profile: string, prNumber: number, backend?: string, model?: string | null): Promise<ChatPrStartResult>;
+  startChatFromPr(profile: string, prNumber: number, backend?: string, model?: string | null, nodeId?: string, backendInstance?: string | null): Promise<ChatPrStartResult>;
   getPlanningEpics(profile: string, refresh?: boolean): Promise<PlanningEpicList>;
   getPlanningMap(profile: string, target: PlanningTarget, refresh?: boolean): Promise<PlanningMap>;
   getPlanningSettings(profile: string): Promise<PlanningSettings>;
@@ -751,14 +751,14 @@ export const gahApi: GahDataSource = {
   getChatIssues(profile) {
     return getJson<{ issues: ChatIssueSummary[] }>('/api/manager-chat/issues', { profile });
   },
-  startChatFromIssue(profile, issueNumber, backend, model) {
-    return postJson<ChatIssueStartResult, { profile: string; issueNumber: number; backend?: string; model?: string | null }>('/api/manager-chat/issues/start', { profile, issueNumber, backend, model });
+  startChatFromIssue(profile, issueNumber, backend, model, nodeId, backendInstance) {
+    return postJson<ChatIssueStartResult, { profile: string; issueNumber: number; backend?: string; model?: string | null; nodeId?: string; backendInstance?: string | null }>('/api/manager-chat/issues/start', { profile, issueNumber, backend, model, nodeId, backendInstance });
   },
   getChatPrs(profile) {
     return getJson<{ prs: ChatPrSummary[] }>('/api/manager-chat/prs', { profile });
   },
-  startChatFromPr(profile, prNumber, backend, model) {
-    return postJson<ChatPrStartResult, { profile: string; prNumber: number; backend?: string; model?: string | null }>('/api/manager-chat/prs/start', { profile, prNumber, backend, model });
+  startChatFromPr(profile, prNumber, backend, model, nodeId, backendInstance) {
+    return postJson<ChatPrStartResult, { profile: string; prNumber: number; backend?: string; model?: string | null; nodeId?: string; backendInstance?: string | null }>('/api/manager-chat/prs/start', { profile, prNumber, backend, model, nodeId, backendInstance });
   },
   getPlanningEpics(profile, refresh) {
     return getJson<PlanningEpicList>('/api/planning/epics', { profile, refresh: refresh ? '1' : undefined });
