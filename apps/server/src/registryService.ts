@@ -272,7 +272,7 @@ function isQuotaSnapshot(value: unknown, profile: string, since: string): value 
   const optionalText = (value: unknown) => value == null || typeof value === 'string';
   const observationsValid = (value: unknown): boolean => value === undefined || (Array.isArray(value)
     && value.every(observation => observation && typeof observation.backend === 'string'
-      && [observation.backend_instance, observation.model, observation.quota_pool, observation.quota_window,
+      && [observation.credential_id, observation.backend_instance, observation.model, observation.quota_pool, observation.quota_window,
         observation.quota_reset_at, observation.observed_at, observation.usage_source].every(optionalText)
       && accountUsageValid(observation.account_usage)
       && [observation.quota_used_percent, observation.quota_remaining_percent].every(percent => percent == null
@@ -284,12 +284,12 @@ function isQuotaSnapshot(value: unknown, profile: string, since: string): value 
     && snapshot.quota_checks.every(check => check && typeof check.backend === 'string'
       && typeof check.checked_at === 'string' && Number.isFinite(Date.parse(check.checked_at))
       && ['data', 'no_data', 'failed'].includes(check.status)
-      && [check.backend_instance, check.model, check.quota_pool, check.provider, check.error].every(optionalText)
+      && [check.credential_id, check.backend_instance, check.model, check.quota_pool, check.provider, check.error].every(optionalText)
       && observationsValid(check.quota_observations))
     && Array.isArray(snapshot.candidates) && snapshot.candidates.every(candidate => candidate
       && typeof candidate.backend === 'string' && (candidate.model === null || typeof candidate.model === 'string')
       && typeof candidate.configured === 'boolean' && typeof candidate.eligible_now === 'boolean'
-      && [candidate.backend_instance, candidate.quota_pool, candidate.provider, candidate.reason,
+      && [candidate.credential_id, candidate.backend_instance, candidate.quota_pool, candidate.provider, candidate.reason,
         candidate.unavailable_until, candidate.source, candidate.last_error_summary, candidate.observed_at].every(optionalText)
       && Array.isArray(candidate.modes) && candidate.modes.every(mode => typeof mode === 'string')
       && !!candidate.usage && typeof candidate.usage === 'object'

@@ -473,6 +473,7 @@ export interface QuotaUsageSummary {
 }
 
 export interface QuotaCandidateStatus {
+  credential_id?: string | null;
   /** Billing/subscription service, distinct from the runner or model vendor. */
   provider?: string | null;
   backend_instance?: string | null;
@@ -492,6 +493,7 @@ export interface QuotaCandidateStatus {
 }
 
 export interface QuotaCheck {
+  credential_id?: string | null;
   backend: string;
   provider?: string | null;
   backend_instance?: string | null;
@@ -570,6 +572,9 @@ export interface AccountUsageObservation {
 }
 
 export interface QuotaObservation {
+  credential_id?: string | null;
+  backend_instance?: string | null;
+  quota_pool?: string | null;
   backend: string;
   model?: string | null;
   quota_window?: string | null;

@@ -10,6 +10,39 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/registry/quota**', route => route.fulfill({ json: { profile: 'test-profile', since: '7d', nodes: [] } }));
 });
 
+test('named API connections remain visible when their provider has no usage reading', async ({ mount, page }) => {
+  const quota = JSON.parse(readFileSync(new URL('../../../server/tests/fixtures/gah/responses/quota.json', import.meta.url), 'utf8')) as QuotaSnapshot;
+  quota.candidates = [];
+  quota.quota_checks = [
+    { backend: 'opencode', provider: 'google', backend_instance: 'credential:google-personal', credential_id: 'google-personal', status: 'no_data', checked_at: new Date().toISOString() },
+    { backend: 'opencode', provider: 'google', backend_instance: 'credential:google-work', credential_id: 'google-work', status: 'no_data', checked_at: new Date().toISOString() },
+  ];
+  await page.route('**/api/cli-router', route => route.fulfill({ json: { settings: { url: null, hasApiKey: false, hasManagementKey: false }, status: 'unconfigured', strategy: 'round-robin', sessionAffinity: false, accounts: [], models: [] } }));
+  const component = await mount(<MockStoreProvider statusData={null} quotaData={quota}><WebSocketProvider><QuotaPage /></WebSocketProvider></MockStoreProvider>);
+  await expect(component.getByTestId('quota-candidate-opencode-0').getByText(/credential:google-personal/)).toBeVisible();
+  await expect(component.getByTestId('quota-candidate-opencode-1').getByText(/credential:google-work/)).toBeVisible();
+  await expect(component.getByText('This connection has no provider usage reading. Its allowance is unknown.')).toHaveCount(2);
+  await expect(component.getByRole('progressbar')).toHaveCount(0);
+});
+
+test('two credentials for the same verified account count one allowance', async ({ mount, page }) => {
+  const quota = JSON.parse(readFileSync(new URL('../../../server/tests/fixtures/gah/responses/quota.json', import.meta.url), 'utf8')) as QuotaSnapshot;
+  quota.candidates = [];
+  const checked = new Date().toISOString();
+  const account: AccountUsageObservation = { account_id: 'same-organization', workspace_id: null, period_start: '2026-10-01T00:00:00Z', period_end: checked, currency: 'USD', models: [] };
+  quota.quota_checks = ['personal', 'work'].map(id => ({
+    backend: 'mistral-dashboard', provider: 'mistral', backend_instance: `credential:${id}`, credential_id: id,
+    quota_pool: 'mistral-dashboard:verified-same-account', status: 'data', checked_at: checked,
+    quota_observations: [{ backend: 'mistral-dashboard', credential_id: id, quota_window: 'monthly', observed_at: checked, quota_remaining_percent: 25, account_usage: account }]
+  }));
+  await page.route('**/api/cli-router', route => route.fulfill({ json: { settings: { url: null, hasApiKey: false, hasManagementKey: false }, status: 'unconfigured', strategy: 'round-robin', sessionAffinity: false, accounts: [], models: [] } }));
+  const component = await mount(<MockStoreProvider statusData={null} quotaData={quota}><WebSocketProvider><QuotaPage /></WebSocketProvider></MockStoreProvider>);
+  const summary = component.getByLabel('Configured provider summaries');
+  await expect(summary.getByText('1 account observation · 1 with quota percentages', { exact: true })).toBeVisible();
+  await expect(component.getByTestId('quota-candidate-mistral-dashboard-0')).toBeVisible();
+  await expect(component.getByTestId('quota-candidate-mistral-dashboard-1')).toBeVisible();
+});
+
 test("renders recent no-data checks separately from stale quota data and exposes failures", async ({
   mount,
 }) => {
