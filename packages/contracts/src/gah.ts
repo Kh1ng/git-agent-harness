@@ -543,6 +543,32 @@ export interface DoctorSnapshot {
 // gah report --json (src/report.rs)
 // ---------------------------------------------------------------------------
 
+/** Provider dashboard consumption, separate from GAH task accounting and quota caps. */
+export interface AccountUsageModel {
+  model: string;
+  usage_type: 'vibe' | 'vibe_connectors';
+  requests?: number | null;
+  input_tokens?: number | null;
+  cached_input_tokens?: number | null;
+  output_tokens?: number | null;
+  cost?: number | null;
+}
+
+export interface AccountUsageObservation {
+  account_id: string;
+  workspace_id: string | null;
+  period_start: string;
+  period_end: string;
+  currency: 'USD';
+  requests?: number | null;
+  input_tokens?: number | null;
+  cached_input_tokens?: number | null;
+  output_tokens?: number | null;
+  cost?: number | null;
+  cost_source?: 'dashboard_prices' | null;
+  models: AccountUsageModel[];
+}
+
 export interface QuotaObservation {
   backend: string;
   model?: string | null;
@@ -552,6 +578,7 @@ export interface QuotaObservation {
   quota_reset_at?: string | null;
   observed_at?: string | null;
   usage_source?: string | null;
+  account_usage?: AccountUsageObservation | null;
 }
 
 export interface BackendModelComparison {

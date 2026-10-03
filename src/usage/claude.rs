@@ -133,6 +133,7 @@ pub(crate) fn parse(input: &[u8], now: OffsetDateTime) -> Result<Vec<QuotaObserv
             check_error: None,
             usage_source: Some("claude_oauth_usage".into()),
             mistral_admin: None,
+            account_usage: None,
         });
     }
     if records.is_empty() {

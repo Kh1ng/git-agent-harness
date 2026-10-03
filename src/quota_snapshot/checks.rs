@@ -117,7 +117,8 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
                     || record.quota_used_percent.is_some()
                     || record.quota_remaining_percent.is_some()
                     || record.quota_reset_at.is_some()
-                    || record.mistral_admin.is_some();
+                    || record.mistral_admin.is_some()
+                    || record.account_usage.is_some();
                 let status = if record.check_error.is_some() {
                     QuotaCheckStatus::Failed
                 } else if has_data {
@@ -171,6 +172,7 @@ mod tests {
                 .then(|| format!("{backend} check failed")),
             usage_source: None,
             mistral_admin: None,
+            account_usage: None,
         }
     }
 
@@ -208,6 +210,7 @@ mod tests {
                 quota_reset_at: None,
                 observed_at: Some("2026-08-22T19:47:14Z".to_string()),
                 usage_source: None,
+                account_usage: None,
             }],
         }];
 

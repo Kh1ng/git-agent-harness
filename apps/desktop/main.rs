@@ -12,6 +12,7 @@ use tauri::{
     Manager,
 };
 
+mod mistral_login;
 mod open_project;
 mod setup_check;
 
@@ -901,7 +902,9 @@ fn main() {
             open_project::desktop_open_context,
             open_project::open_local_checkout,
             setup_check::setup_check,
-            setup_check::open_setup_terminal
+            setup_check::open_setup_terminal,
+            mistral_login::mistral_login_start,
+            mistral_login::mistral_login_finish
         ])
         .setup(|app| {
             let settings = read_settings();
@@ -917,9 +920,9 @@ fn main() {
             // An inert UI marker; remote pages still have no IPC permissions.
             .initialization_script(
                 if cfg!(target_os = "macos") {
-                    "if (window === window.top) { window.__GAH_DESKTOP_SETTINGS__ = true; window.__GAH_DESKTOP_NATIVE_NOTIFICATIONS__ = true; window.__GAH_DESKTOP_OPEN_PROJECT__ = true; window.__GAH_DESKTOP_EXTERNAL_LINKS__ = true; }"
+                    "if (window === window.top) { window.__GAH_DESKTOP_SETTINGS__ = true; window.__GAH_DESKTOP_MISTRAL_LOGIN__ = true; window.__GAH_DESKTOP_NATIVE_NOTIFICATIONS__ = true; window.__GAH_DESKTOP_OPEN_PROJECT__ = true; window.__GAH_DESKTOP_EXTERNAL_LINKS__ = true; }"
                 } else {
-                    "if (window === window.top) { window.__GAH_DESKTOP_SETTINGS__ = true; window.__GAH_DESKTOP_OPEN_PROJECT__ = true; window.__GAH_DESKTOP_EXTERNAL_LINKS__ = true; }"
+                    "if (window === window.top) { window.__GAH_DESKTOP_SETTINGS__ = true; window.__GAH_DESKTOP_MISTRAL_LOGIN__ = true; window.__GAH_DESKTOP_OPEN_PROJECT__ = true; window.__GAH_DESKTOP_EXTERNAL_LINKS__ = true; }"
                 },
             )
             .on_page_load(|window, payload| {

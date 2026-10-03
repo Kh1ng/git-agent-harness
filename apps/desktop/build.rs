@@ -17,6 +17,8 @@ fn main() {
             "open_local_checkout",
             "setup_check",
             "open_setup_terminal",
+            "mistral_login_start",
+            "mistral_login_finish",
         ]),
     ))
     .expect("failed to build desktop permissions");

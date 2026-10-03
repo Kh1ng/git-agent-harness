@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import type { QuotaSnapshot } from '@git-agent-harness/contracts';
+import type { QuotaSnapshot, AccountUsageObservation } from '@git-agent-harness/contracts';
 import { MockStoreProvider } from '../../src/test-utils/MockStoreProvider.js';
 import { WebSocketProvider } from '../../src/ws/WebSocketContext.js';
 import { test, expect } from "@playwright/experimental-ct-react";
@@ -184,3 +184,67 @@ test('observation-only Nous accounts show balances without becoming generic Open
   await expect(filters.getByRole('button', { name: 'Anthropic (1)', exact: true })).toHaveCount(0);
   await expect(component.getByTestId('quota-candidate-claude-0')).toHaveCount(0);
 });
+
+for (const width of [390, 1440]) {
+  test(`dashboard consumption retains organization scope without assigning Vibe instances a quota at ${width}px`, async ({ mount, page }) => {
+    await page.setViewportSize({ width, height: 950 });
+    const quota = JSON.parse(readFileSync(new URL('../../../server/tests/fixtures/gah/responses/quota.json', import.meta.url), 'utf8')) as QuotaSnapshot;
+    quota.usage.total_tokens = 1200;
+    const template = { ...quota.candidates[0], backend: 'vibe', provider: 'mistral', model: null, observed_at: null, quota_observations: [] };
+    quota.candidates = [{ ...template, backend_instance: 'vibe-first' }, { ...template, backend_instance: 'vibe-second' }];
+    const accountUsage: AccountUsageObservation = {
+      account_id: 'customer-test', workspace_id: null, period_start: '2026-10-01T00:00:00Z', period_end: '2026-10-03T00:00:00Z', currency: 'USD',
+      requests: 42, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 0, cost: 12.34, cost_source: 'dashboard_prices',
+      models: [
+        { model: 'Vibe display alias', usage_type: 'vibe', requests: 40, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 0, cost: 12.32 },
+        { model: 'web_search', usage_type: 'vibe_connectors', requests: 2 }
+      ]
+    };
+    quota.quota_checks = [{ backend: 'mistral-dashboard', backend_instance: 'mistral-dashboard:organization-test', quota_pool: 'mistral-dashboard:organization-test', status: 'data', checked_at: new Date().toISOString(), quota_observations: [{ backend: 'mistral-dashboard', observed_at: new Date().toISOString(), usage_source: 'mistral_dashboard_session', account_usage: accountUsage }] }];
+    await page.route('**/api/cli-router', route => route.fulfill({ json: { settings: { url: null, hasApiKey: false, hasManagementKey: false }, status: 'unconfigured', strategy: 'round-robin', sessionAffinity: false, accounts: [], models: [] } }));
+    const component = await mount(<MockStoreProvider statusData={null} quotaData={quota}><WebSocketProvider><QuotaPage /></WebSocketProvider></MockStoreProvider>);
+    const dashboard = component.getByTestId('quota-candidate-mistral-dashboard-2');
+    await expect(component.getByRole('button', { name: 'Mistral (3)', exact: true })).toBeVisible();
+    const usage = dashboard.getByTestId('provider-account-usage');
+    await expect(usage.getByText('Organization scope · Account customer-test', { exact: true })).toBeVisible();
+    await expect(usage.getByText(/Period .*2026.*2026.*\(UTC\)/)).toBeVisible();
+    await expect(usage.getByText('42', { exact: true })).toBeVisible();
+    await expect(usage.getByText('$12.34', { exact: true })).toBeVisible();
+    await expect(usage.getByText('1,000', { exact: true }).first()).toBeVisible();
+    await expect(usage.getByText('0', { exact: true }).first()).toBeVisible();
+    await expect(usage.getByText(/Consumption priced at dashboard rates/)).toBeVisible();
+    await usage.getByText('Usage by model (2)', { exact: true }).click();
+    await expect(usage.getByText('Vibe display alias · Vibe', { exact: true })).toBeVisible();
+    await expect(usage.getByText('web_search · Vibe connector', { exact: true })).toBeVisible();
+    await expect(usage.getByText('Unknown', { exact: true })).toBeVisible();
+    await expect(dashboard.getByText('Availability unverified', { exact: true })).toBeVisible();
+    await expect(dashboard.getByText('Quota unknown', { exact: true })).toBeVisible();
+    await expect(dashboard.getByText('Usage details', { exact: true })).toHaveCount(0);
+    for (const index of [0, 1]) {
+      const candidate = component.getByTestId(`quota-candidate-vibe-${index}`);
+      await expect(candidate.getByText('Quota unknown', { exact: true })).toBeVisible();
+      await expect(candidate.getByTestId('provider-account-usage')).toHaveCount(0);
+    }
+    await expect(component.getByRole('progressbar')).toHaveCount(0);
+    await component.getByText('Usage and data freshness', { exact: true }).click();
+    await expect(component.locator('.stat-tile').filter({ hasText: 'Usage (7d)' }).getByText('1.2k', { exact: true })).toBeVisible();
+    const withAllowance: QuotaSnapshot = { ...quota, quota_checks: [{ ...quota.quota_checks[0], quota_observations: [{ ...quota.quota_checks[0].quota_observations![0], quota_window: 'vibe-code-included-monthly', quota_used_percent: 60, quota_remaining_percent: 40, quota_reset_at: '2026-11-01T00:00:00Z' }] }] };
+    await component.update(<MockStoreProvider statusData={null} quotaData={withAllowance}><WebSocketProvider><QuotaPage /></WebSocketProvider></MockStoreProvider>);
+    await expect(dashboard.getByRole('progressbar', { name: 'Vibe Code included monthly allowance: 60% used, 40% remaining' })).toBeVisible();
+    await expect(usage.getByText('$12.34', { exact: true })).toBeVisible();
+    await expect(dashboard.getByText(/Resets/)).toBeVisible();
+    await expect(dashboard.getByText('Quota unknown', { exact: true })).toHaveCount(0);
+    await expect(component.getByRole('progressbar')).toHaveCount(1);
+    await expect(component.getByTestId('quota-candidate-vibe-0').getByRole('progressbar')).toHaveCount(0);
+    await expect(component.getByTestId('quota-candidate-vibe-1').getByRole('progressbar')).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: `test-results/component/mistral-dashboard-${width}.png`, fullPage: true });
+    const allowanceUnavailable: QuotaSnapshot = { ...withAllowance, quota_checks: [{ ...withAllowance.quota_checks[0], quota_observations: [{ ...withAllowance.quota_checks[0].quota_observations![0], quota_used_percent: undefined, quota_remaining_percent: undefined, quota_reset_at: undefined }] }] };
+    await component.update(<MockStoreProvider statusData={null} quotaData={allowanceUnavailable}><WebSocketProvider><QuotaPage /></WebSocketProvider></MockStoreProvider>);
+    await expect(usage.getByText('$12.34', { exact: true })).toBeVisible();
+    await expect(dashboard.getByText('Monthly allowance reading unavailable', { exact: true })).toBeVisible();
+    await expect(dashboard.getByText('Quota unknown', { exact: true })).toBeVisible();
+    await expect(component.getByRole('progressbar')).toHaveCount(0);
+    await expect(dashboard.getByText(/Resets/)).toHaveCount(0);
+  });
+}

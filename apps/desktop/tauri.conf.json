@@ -28,7 +28,9 @@
             "allow-worker-status",
             "allow-set-worker-running",
             "allow-setup-check",
-            "allow-open-setup-terminal"
+            "allow-open-setup-terminal",
+            "allow-mistral-login-start",
+            "allow-mistral-login-finish"
           ],
           "local": true
         },

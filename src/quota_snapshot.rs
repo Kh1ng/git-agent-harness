@@ -46,6 +46,8 @@ pub struct QuotaObservation {
     pub observed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_usage: Option<crate::usage::account_usage::AccountUsageObservation>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -487,6 +489,9 @@ pub(super) fn quota_provider(backend: &str, model: Option<&str>) -> Option<Strin
     if model.is_some_and(|model| model.starts_with("gah-router/")) {
         return None; // The router's account inventory identifies the supplying subscription.
     }
+    if backend == "mistral-dashboard" {
+        return Some("mistral".into());
+    }
     if matches!(backend, "agy" | "agy-main" | "agy-second") {
         return Some("antigravity".to_string());
     }
@@ -607,6 +612,7 @@ fn aggregate_observations(
             quota_reset_at: account.quota_reset_at.clone(),
             observed_at: account.observed_at.clone(),
             usage_source: account.usage_source.clone(),
+            account_usage: account.account_usage.clone(),
         });
     }
 
@@ -663,6 +669,7 @@ fn convert_group_observation(obs: &ledger::summary::GroupQuotaObservation) -> Qu
         quota_reset_at: obs.quota_reset_at.clone(),
         observed_at: obs.observed_at.clone(),
         usage_source: obs.usage_source.clone(),
+        account_usage: None,
     }
 }
 
@@ -823,6 +830,7 @@ mod tests {
             check_error: None,
             usage_source: None,
             mistral_admin: None,
+            account_usage: None,
         }
     }
 

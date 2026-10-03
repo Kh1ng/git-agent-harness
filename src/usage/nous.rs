@@ -201,6 +201,7 @@ pub(crate) fn parse(input: &[u8], now: OffsetDateTime) -> Result<QuotaObservatio
         check_error: None,
         usage_source: Some("nous_portal_account".into()),
         mistral_admin: None,
+        account_usage: None,
     })
 }
 

@@ -43,6 +43,14 @@ pub fn run(command: QuotaCommands) -> Result<()> {
                 );
             }
             let is_vibe_admin = crate::config::canonical_backend_name(&backend) == "vibe";
+            if backend == "mistral-dashboard"
+                && (backend_instance.is_some()
+                    || model.is_some()
+                    || quota_pool.is_some()
+                    || codex_cmd != "mistral-dashboard")
+            {
+                bail!("Mistral dashboard refresh uses the owner-selected cookie's current account; command/instance/model/pool overrides are unsupported");
+            }
             if backend == "claude"
                 && (backend_instance.is_some()
                     || model.is_some()
@@ -68,6 +76,8 @@ pub fn run(command: QuotaCommands) -> Result<()> {
                 let record = crate::usage::nous::refresh()?;
                 quota_store::append(&path, &record)?;
                 Ok(Some(record))
+            } else if backend == "mistral-dashboard" {
+                crate::usage::mistral_dashboard::refresh_and_store(&path)
             } else if is_vibe_admin {
                 quota_store::refresh_vibe_admin_and_store(model.as_deref(), &path)
             } else if let Some(instance) = backend_instance {
