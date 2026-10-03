@@ -563,7 +563,7 @@ pub fn refresh_stale_quota_observations(
     {
         handles.push(handle);
     }
-    if std::env::var("NOUS_API_KEY").is_ok_and(|key| !key.is_empty()) {
+    if crate::usage::nous::configured() {
         if let Some(handle) = maybe_refresh_backend_instance(
             store_path,
             "opencode",
@@ -977,7 +977,7 @@ mod tests {
         std::fs::write(
             &script_path,
             format!(
-                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{rate_limit}' ;;\n  *api/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/code/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *v1/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *v1/admin/rate-limit*) cat '{rate_limit}' ;;\n  *v1/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
                 rate_limit = rate_limit_path.display(),
                 spend_limit = spend_limit_path.display(),
             ),
@@ -1054,7 +1054,7 @@ mod tests {
         std::fs::write(
             &script_path,
             format!(
-                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *api/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *api/admin/rate-limit*) cat '{rate_limit}' ;;\n  *api/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncfg=$(cat)\ncase \"$cfg\" in\n  *analytics/vibe/code/usage/by_workspace*) cat '{fixtures}/vibe_workspace_usage.json' ;;\n  *v1/admin/usage*) cat '{fixtures}/usage.json' ;;\n  *v1/admin/rate-limit*) cat '{rate_limit}' ;;\n  *v1/admin/spend-limit*) cat '{spend_limit}' ;;\n  *) exit 1 ;;\nesac\n",
                 rate_limit = rate_limit_path.display(),
                 spend_limit = spend_limit_path.display(),
             ),
