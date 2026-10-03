@@ -190,40 +190,42 @@ fn open_terminal(line: &str) -> bool {
 }
 
 /// Keeps the window open so the user can read how setup ended.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn held(line: &str) -> String {
     format!("{line}; printf '\\nPress Enter to close. '; read -r _")
 }
 
-/// gah's services are systemd units; WSL ships with systemd off.
-#[cfg(windows)]
-const WSL_SYSTEMD: &str = "{ systemctl --user show-environment >/dev/null 2>&1 || { echo 'Enable systemd in WSL (/etc/wsl.conf: [boot] systemd=true), run wsl --shutdown from Windows, then select the setup button again.' >&2; false; }; }";
-
-/// `start` gives WSL its own console. The script travels in an environment
-/// variable (WSLENV), so cmd never parses its quotes, pipes, or `&&`.
+/// Prepare WSL in a visible PowerShell console. The saved request contains
+/// only a distribution, central origin, and a fixed command without credentials.
 #[cfg(windows)]
 fn open_terminal(line: &str) -> bool {
     use std::os::windows::process::CommandExt;
-    let distribution = read_settings().wsl_distribution;
-    if !distribution.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+    let settings = read_settings();
+    let distribution = if settings.wsl_distribution.is_empty() { "Ubuntu" } else { &settings.wsl_distribution };
+    if !distribution.starts_with(|c: char| c.is_ascii_alphanumeric())
+        || !distribution.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
         return false;
     }
-    let distribution = if distribution.is_empty() {
-        String::new()
-    } else {
-        format!("--distribution {distribution} ")
-    };
-    let wslenv = std::env::var("WSLENV")
-        .map(|value| format!("{value}:GAH_SETUP/u"))
-        .unwrap_or_else(|_| "GAH_SETUP/u".into());
-    command("cmd")
-        .raw_arg(format!(
-            "/c start \"GAH setup\" wsl.exe {distribution}--exec bash -lc \"eval \\\"$GAH_SETUP\\\"\""
-        ))
-        .env("GAH_SETUP", held(&format!("{WSL_SYSTEMD} && {line}")))
-        .env("WSLENV", wslenv)
-        .status()
-        .is_ok_and(|status| status.success())
+    let Some(home) = std::env::var_os("USERPROFILE") else { return false; };
+    let directory = std::path::PathBuf::from(home).join(".config/gah");
+    let script = directory.join("setup-windows.ps1");
+    if std::fs::create_dir_all(&directory).is_err()
+        || std::fs::write(&script, include_str!("../../scripts/setup-windows.ps1")).is_err()
+    {
+        return false;
+    }
+    // The command travels in the environment, preserving quotes and pipes
+    // through both Windows process parsing and WSLENV.
+    let mut terminal = command("powershell.exe");
+    terminal.creation_flags(0x00000010); // CREATE_NEW_CONSOLE, overriding hidden probes.
+    terminal.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(script)
+        .args(["-Distribution", distribution])
+        .env("GAH_SETUP", line);
+    if !line.contains(STANDALONE_ENV) && !settings.central_url.is_empty() {
+        terminal.args(["-CentralUrl", &settings.central_url]);
+    }
+    terminal.spawn().is_ok()
 }
 
 /// The AppImage runtime points GTK, GIO, XDG, and library paths into its
