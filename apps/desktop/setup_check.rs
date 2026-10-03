@@ -1,12 +1,14 @@
 //! First-run setup from the app (#1284): shows `gah setup --check --json`
 //! and hands the work to a terminal (Terminal.app on macOS, the first
-//! emulator found on Linux), where `gah setup` can ask questions and
+//! emulator found on Linux, a WSL console on Windows), where `gah setup` can ask questions and
 //! sudo can ask for a password. The checklist logic lives in gah; the app
 //! only displays it.
 
 use serde::Serialize;
 
-use super::{command, installed_gah, local_only, read_settings, write_settings};
+use std::process::Command;
+
+use super::{command, local_only, read_settings, write_settings};
 
 /// The paste-line install. `gh auth token` lets it fetch while the
 /// repository is private; without a GitHub login it fetches anonymously.
@@ -32,25 +34,54 @@ pub struct SetupCheck {
     terminal: bool,
 }
 
-fn setup_command(standalone: bool) -> String {
-    match (installed_gah(), standalone) {
-        (Ok(gah), false) => format!("{} setup", shell_quote(&gah.to_string_lossy())),
-        (Ok(gah), true) => format!(
-            "{STANDALONE_ENV} {} setup --role central --yes",
-            shell_quote(&gah.to_string_lossy())
-        ),
-        (Err(_), false) => BOOTSTRAP.to_string(),
-        (Err(_), true) => BOOTSTRAP.replacen(" bash", &format!(" {STANDALONE_ENV} bash"), 1),
+/// A shell where setup installs gah: this computer, or WSL on Windows.
+/// Arguments added after it become `$@`.
+fn shell(script: &str) -> Command {
+    #[cfg(windows)]
+    let mut shell = {
+        let mut wsl = super::wsl_command(&read_settings());
+        wsl.args(["--exec", "bash", "-lc"]);
+        wsl
+    };
+    #[cfg(not(windows))]
+    let mut shell = {
+        let mut sh = command("sh");
+        sh.arg("-c");
+        sh
+    };
+    shell.args([script, "gah"]);
+    shell
+}
+
+/// gah as a word for `shell`, once setup has installed it.
+fn installed_gah() -> Option<String> {
+    #[cfg(windows)]
+    return shell("[ -x ~/.cargo/bin/gah ]")
+        .status()
+        .is_ok_and(|status| status.success())
+        .then(|| "~/.cargo/bin/gah".into());
+    #[cfg(not(windows))]
+    super::installed_gah().ok().map(|gah| shell_quote(&gah.to_string_lossy()))
+}
+
+fn setup_command(gah: Option<&str>, standalone: bool) -> String {
+    match (gah, standalone) {
+        (Some(gah), false) => format!("{gah} setup"),
+        (Some(gah), true) => format!("{STANDALONE_ENV} {gah} setup --role central --yes"),
+        (None, false) => BOOTSTRAP.to_string(),
+        (None, true) => BOOTSTRAP.replacen(" bash", &format!(" {STANDALONE_ENV} bash"), 1),
     }
 }
 
 /// The dashboard a standalone install serves on this computer.
 fn standalone_url() -> String {
-    // ponytail: gah-server.service hardcodes PORT=3773; launchd uses the desktop's port.
+    // ponytail: gah-server.service (Linux and WSL, which forwards localhost)
+    // hardcodes PORT=3773; launchd uses the desktop's port.
     let port = if cfg!(target_os = "macos") { read_settings().server_port } else { 3773 };
     format!("http://127.0.0.1:{port}")
 }
 
+#[cfg(any(not(windows), test))]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -64,16 +95,17 @@ fn applescript_string(value: &str) -> String {
 #[tauri::command]
 pub async fn setup_check(window: tauri::WebviewWindow, role: Option<String>) -> Result<SetupCheck, String> {
     local_only(&window)?;
-    let command_text = setup_command(false);
-    let terminal = cfg!(unix);
-    let Ok(gah) = installed_gah() else {
+    let gah = installed_gah();
+    let command_text = setup_command(gah.as_deref(), false);
+    let terminal = true;
+    let Some(gah) = gah else {
         return Ok(SetupCheck { installed: false, report: None, error: None, command: command_text, terminal });
     };
     let role = match role.as_deref() {
         Some("worker") => "worker",
         _ => "central",
     };
-    let output = command(&gah.to_string_lossy())
+    let output = shell(&format!("exec {gah} \"$@\""))
         .args(["setup", "--check", "--json", "--role", role])
         .output()
         .map_err(|error| format!("Cannot run gah: {error}"))?;
@@ -93,7 +125,7 @@ pub async fn setup_check(window: tauri::WebviewWindow, role: Option<String>) -> 
 pub fn open_setup_terminal(window: tauri::WebviewWindow, standalone: Option<bool>) -> Result<String, String> {
     local_only(&window)?;
     let standalone = standalone.unwrap_or(false);
-    let line = setup_command(standalone);
+    let line = setup_command(installed_gah().as_deref(), standalone);
     if !open_terminal(&line) {
         return Err(format!("No terminal opened. Run this in a terminal: {line}"));
     }
@@ -136,8 +168,7 @@ const LINUX_TERMINALS: &[(&str, &[&str])] = &[
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn open_terminal(line: &str) -> bool {
-    // Keep the window open so the user can read how setup ended.
-    let script = format!("{line}; printf '\\nPress Enter to close. '; read -r _");
+    let script = held(line);
     let changes = std::env::var("APPDIR")
         .map(|appdir| {
             let vars = std::env::vars_os()
@@ -158,9 +189,41 @@ fn open_terminal(line: &str) -> bool {
     })
 }
 
+/// Keeps the window open so the user can read how setup ended.
+#[cfg(not(target_os = "macos"))]
+fn held(line: &str) -> String {
+    format!("{line}; printf '\\nPress Enter to close. '; read -r _")
+}
+
+/// gah's services are systemd units; WSL ships with systemd off.
 #[cfg(windows)]
-fn open_terminal(_line: &str) -> bool {
-    false
+const WSL_SYSTEMD: &str = "{ systemctl --user show-environment >/dev/null 2>&1 || { echo 'Enable systemd in WSL (/etc/wsl.conf: [boot] systemd=true), run wsl --shutdown from Windows, then select the setup button again.' >&2; false; }; }";
+
+/// `start` gives WSL its own console. The script travels in an environment
+/// variable (WSLENV), so cmd never parses its quotes, pipes, or `&&`.
+#[cfg(windows)]
+fn open_terminal(line: &str) -> bool {
+    use std::os::windows::process::CommandExt;
+    let distribution = read_settings().wsl_distribution;
+    if !distribution.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+        return false;
+    }
+    let distribution = if distribution.is_empty() {
+        String::new()
+    } else {
+        format!("--distribution {distribution} ")
+    };
+    let wslenv = std::env::var("WSLENV")
+        .map(|value| format!("{value}:GAH_SETUP/u"))
+        .unwrap_or_else(|_| "GAH_SETUP/u".into());
+    command("cmd")
+        .raw_arg(format!(
+            "/c start \"GAH setup\" wsl.exe {distribution}--exec bash -lc \"eval \\\"$GAH_SETUP\\\"\""
+        ))
+        .env("GAH_SETUP", held(&format!("{WSL_SYSTEMD} && {line}")))
+        .env("WSLENV", wslenv)
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// The AppImage runtime points GTK, GIO, XDG, and library paths into its
@@ -193,8 +256,11 @@ mod tests {
         assert_eq!(shell_quote("/Users/o'neil/.cargo/bin/gah"), "'/Users/o'\"'\"'neil/.cargo/bin/gah'");
         assert!(BOOTSTRAP.contains("scripts/bootstrap.sh | GITHUB_TOKEN="));
         assert!(!BOOTSTRAP.contains('\n'), "Terminal runs it as one line");
-        let standalone = BOOTSTRAP.replacen(" bash", &format!(" {STANDALONE_ENV} bash"), 1);
-        assert!(standalone.ends_with(&format!("GITHUB_TOKEN=\"$t\" {STANDALONE_ENV} bash")));
+        assert!(setup_command(None, true).ends_with(&format!("GITHUB_TOKEN=\"$t\" {STANDALONE_ENV} bash")));
+        assert_eq!(
+            setup_command(Some("~/.cargo/bin/gah"), true),
+            format!("{STANDALONE_ENV} ~/.cargo/bin/gah setup --role central --yes")
+        );
     }
 
     #[test]

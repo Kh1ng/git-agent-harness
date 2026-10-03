@@ -238,8 +238,6 @@ void perform(async () => {
   const role = await invoke<RoleStatus>('node_role_status');
   showRole(role);
   nodeRole = role.role;
-  // Windows workers install through the Windows installer and WSL.
-  const setup = document.querySelector<HTMLElement>('#setup-section')!;
-  setup.hidden = navigator.userAgent.includes('Windows');
-  if (!setup.hidden) await refreshSetup();
+  // On Windows, setup and gah live in the selected WSL distribution.
+  await refreshSetup();
 });
