@@ -194,10 +194,10 @@ for (const width of [390, 1440]) {
     quota.candidates = [{ ...template, backend_instance: 'vibe-first' }, { ...template, backend_instance: 'vibe-second' }];
     const accountUsage: AccountUsageObservation = {
       account_id: 'customer-test', workspace_id: null, period_start: '2026-10-01T00:00:00Z', period_end: '2026-10-03T00:00:00Z', currency: 'USD',
-      requests: 2510, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 0, cost: 102.96817314, cost_source: 'dashboard_prices',
+      requests: 42, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 0, cost: 12.34, cost_source: 'dashboard_prices',
       models: [
-        { model: 'Vibe display alias', usage_type: 'vibe', requests: 2500, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 0, cost: 102.96 },
-        { model: 'web_search', usage_type: 'vibe_connectors', requests: 10 }
+        { model: 'Vibe display alias', usage_type: 'vibe', requests: 40, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 0, cost: 12.32 },
+        { model: 'web_search', usage_type: 'vibe_connectors', requests: 2 }
       ]
     };
     quota.quota_checks = [{ backend: 'mistral-dashboard', provider: 'mistral', backend_instance: 'mistral-dashboard:organization-test', quota_pool: 'mistral-dashboard:organization-test', status: 'data', checked_at: new Date().toISOString(), quota_observations: [{ backend: 'mistral-dashboard', observed_at: new Date().toISOString(), usage_source: 'mistral_dashboard_session', account_usage: accountUsage }] }];
@@ -207,8 +207,8 @@ for (const width of [390, 1440]) {
     const usage = dashboard.getByTestId('provider-account-usage');
     await expect(usage.getByText('Organization scope · Account customer-test', { exact: true })).toBeVisible();
     await expect(usage.getByText(/Period .*2026.*2026.*\(UTC\)/)).toBeVisible();
-    await expect(usage.getByText('2,510', { exact: true })).toBeVisible();
-    await expect(usage.getByText('$102.97', { exact: true })).toBeVisible();
+    await expect(usage.getByText('42', { exact: true })).toBeVisible();
+    await expect(usage.getByText('$12.34', { exact: true })).toBeVisible();
     await expect(usage.getByText('1,000', { exact: true }).first()).toBeVisible();
     await expect(usage.getByText('0', { exact: true }).first()).toBeVisible();
     await expect(usage.getByText(/Consumption priced at dashboard rates/)).toBeVisible();
@@ -227,10 +227,10 @@ for (const width of [390, 1440]) {
     await expect(component.getByRole('progressbar')).toHaveCount(0);
     await component.getByText('Usage and data freshness', { exact: true }).click();
     await expect(component.locator('.stat-tile').filter({ hasText: 'Usage (7d)' }).getByText('1.2k', { exact: true })).toBeVisible();
-    const withAllowance: QuotaSnapshot = { ...quota, quota_checks: [{ ...quota.quota_checks[0], quota_observations: [{ ...quota.quota_checks[0].quota_observations![0], quota_window: 'vibe-code-included-monthly', quota_used_percent: 81.04520142666667, quota_remaining_percent: 18.95479857333333, quota_reset_at: '2026-11-01T00:00:00Z' }] }] };
+    const withAllowance: QuotaSnapshot = { ...quota, quota_checks: [{ ...quota.quota_checks[0], quota_observations: [{ ...quota.quota_checks[0].quota_observations![0], quota_window: 'vibe-code-included-monthly', quota_used_percent: 60, quota_remaining_percent: 40, quota_reset_at: '2026-11-01T00:00:00Z' }] }] };
     await component.update(<MockStoreProvider statusData={null} quotaData={withAllowance}><WebSocketProvider><QuotaPage /></WebSocketProvider></MockStoreProvider>);
-    await expect(dashboard.getByRole('progressbar', { name: 'Vibe Code included monthly allowance: 81.0% used, 19.0% remaining' })).toBeVisible();
-    await expect(usage.getByText('$102.97', { exact: true })).toBeVisible();
+    await expect(dashboard.getByRole('progressbar', { name: 'Vibe Code included monthly allowance: 60% used, 40% remaining' })).toBeVisible();
+    await expect(usage.getByText('$12.34', { exact: true })).toBeVisible();
     await expect(dashboard.getByText(/Resets/)).toBeVisible();
     await expect(dashboard.getByText('Quota unknown', { exact: true })).toHaveCount(0);
     await expect(component.getByRole('progressbar')).toHaveCount(1);

@@ -29,8 +29,8 @@ test('relay preserves scoped dashboard consumption and rejects invalid or creden
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const usage: AccountUsageObservation = {
     account_id: 'customer-test', workspace_id: null, period_start: '2026-10-01T00:00:00Z', period_end: '2026-10-03T00:00:00Z', currency: 'USD',
-    requests: 2510, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 50, cost: 102.96817314, cost_source: 'dashboard_prices',
-    models: [{ model: 'Vibe display alias', usage_type: 'vibe', requests: 2510, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 50, cost: 102.96817314 }]
+    requests: 42, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 50, cost: 12.34, cost_source: 'dashboard_prices',
+    models: [{ model: 'Vibe display alias', usage_type: 'vibe', requests: 42, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 50, cost: 12.34 }]
   };
   let current: unknown = usage;
   const worker = http.createServer((_req, res) => {
@@ -52,7 +52,7 @@ test('relay preserves scoped dashboard consumption and rejects invalid or creden
   assert.equal(valid.quota?.usage.entries, 42, 'provider consumption never replaces task accounting');
   for (const invalid of [
     { ...usage, requests: -1 }, { ...usage, input_tokens: 0.5 }, { ...usage, cost: -1 },
-    { ...usage, cost: '102.97' }, { ...usage, currency: 'EUR' }, { ...usage, workspace_id: '' },
+    { ...usage, cost: '12.34' }, { ...usage, currency: 'EUR' }, { ...usage, workspace_id: '' },
     { ...usage, period_start: 'bad' }, { ...usage, period_end: '2026-09-01T00:00:00Z' },
     { ...usage, cookie: 'private-dashboard-session' },
     { ...usage, models: [{ ...usage.models[0], usage_type: 'api_tokens' }] },
