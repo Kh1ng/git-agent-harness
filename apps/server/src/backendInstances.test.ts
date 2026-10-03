@@ -35,6 +35,7 @@ async function exercise(real: boolean) {
   let rows = [instance('codex-paid', true), instance('codex-broken', false)];
   let toggles: Array<{ profile: string; instance: string; enabled: boolean }> = [];
   const additions: string[] = [];
+  const bindings: Array<string | undefined> = [];
   const labels: string[] = [];
   const router = real
     ? backendInstancesRouter(mutationSafety('test-node', join(directory, 'mutations')))
@@ -48,7 +49,8 @@ async function exercise(real: boolean) {
           toggles.push({ profile, instance: instanceName, enabled });
           rows = rows.map(row => (row.backend_instance === instanceName ? { ...row, enabled } : row));
         },
-        async (_profile, instanceName, runnerKind, accountLabel) => {
+        async (_profile, instanceName, runnerKind, accountLabel, _config, credentialId) => {
+          bindings.push(credentialId);
           additions.push(`${instanceName}:${runnerKind}:${accountLabel}`);
           rows.push({ ...instance(instanceName, true), runner_kind: runnerKind, logical_backend: runnerKind, account_label: accountLabel });
         },
@@ -71,7 +73,7 @@ async function exercise(real: boolean) {
   const post = (action: string, input: object, key: string, extra: Record<string, string> = {}) =>
     fetch(`${endpoint}/${action}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `test-${key}`, ...extra },
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `test-operation-${key}`, ...extra },
       body: JSON.stringify(input),
     });
   try {
@@ -99,6 +101,12 @@ async function exercise(real: boolean) {
     if (!real) {
       assert.equal((await post('add', { profile: 'real', instance: 'claude-work', runnerKind: 'claude', accountLabel: 'Work' }, 'owner-add-account')).status, 200);
       assert.deepEqual(additions, ['claude-work:claude:Work']);
+      for (const runnerKind of ['opencode', 'hermes', 'vibe', 'agy', 'openhands']) {
+        assert.equal((await post('add', { profile: 'real', instance: `${runnerKind}-work`, runnerKind, accountLabel: 'Work', credentialId: 'work-key' }, `add-${runnerKind}`)).status, 200);
+      }
+      assert.deepEqual(bindings, [undefined, 'work-key', 'work-key', 'work-key', 'work-key', 'work-key']);
+      assert.equal((await post('add', { profile: 'real', instance: 'bad', runnerKind: 'vibe', accountLabel: 'Work', credentialId: '../key' }, 'bad-key-reference')).status, 400);
+      assert.equal((await post('add', { profile: 'real', instance: 'bad', runnerKind: 'unknown', accountLabel: 'Work' }, 'bad-runner')).status, 400);
       assert.equal((await post('label', { profile: 'real', instance: 'claude-work', accountLabel: 'Client' }, 'owner-label-account')).status, 200);
       assert.deepEqual(labels, ['claude-work:Client']);
     }

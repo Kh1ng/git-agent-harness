@@ -772,5 +772,10 @@ export function createAcpBackend(
     state.process.kill();
   }
 
-  return { runTurn, listCommands, listModels, setModel, setReasoningEffort, steerTurn, cancelTurn };
+  function dispose(): void {
+    for (const state of connections.values()) state.process.kill();
+    connections.clear();
+  }
+
+  return { runTurn, listCommands, listModels, setModel, setReasoningEffort, steerTurn, cancelTurn, dispose };
 }

@@ -142,6 +142,11 @@ export function createHeadlessBackend(spec: HeadlessBackendSpec): ManagerAdapter
     displayName: spec.displayName,
     implemented: true,
 
+    dispose(): void {
+      for (const state of states.values()) state.child?.kill('SIGTERM');
+      states.clear();
+    },
+
     async runTurn(gahProfile, input) {
       const state = stateFor(gahProfile);
       const cwd = input.cwd ?? process.cwd();

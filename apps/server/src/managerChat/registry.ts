@@ -20,6 +20,7 @@ import {
 import { createHeadlessBackend, vibeBackendSpec, agyBackendSpec, openhandsBackendSpec } from './headlessAdapter.js';
 import type { ChatTranscriptTurn, ChatUsage } from '@git-agent-harness/contracts';
 import { runBackendInstanceRuntime } from '../gahCli.js';
+import { bindOpenCodeModels, instanceAcpSpawn, instanceHeadlessSpec } from './instanceLaunch.js';
 
 export type { ManagerCommandInfo, ManagerModelInfo, ManagerReasoningEffortInfo };
 
@@ -78,6 +79,8 @@ export interface ManagerAdapter extends ManagerBackendInfo {
   setReasoningEffort(gahProfile: string, effortId: string): Promise<void>;
   steerTurn(gahProfile: string, message: string): Promise<{ outcome: 'injected' }>;
   cancelTurn(gahProfile: string): Promise<void>;
+  /** Release processes when a selected credential or instance changes. */
+  dispose?(): void;
 }
 
 function acpManagerAdapter(
@@ -121,18 +124,37 @@ export async function resolveInstanceAdapter(profile: string, backendId: string,
   if (!instance) return resolveAdapter(backendId);
   const key = `${profile}\0${instance}`;
   const runtime = await runBackendInstanceRuntime(profile, instance);
+  if (runtime.logical_backend !== backendId) throw new Error(`Backend instance "${instance}" does not serve ${backendId}.`);
   const runtimeKey = JSON.stringify(runtime);
   const cached = INSTANCE_ADAPTERS.get(key);
   if (cached?.runtime === runtimeKey) return cached.adapter;
-  if (runtime.logical_backend !== backendId) throw new Error(`Backend instance "${instance}" does not serve ${backendId}.`);
   const label = runtime.account_label ? `${backendId} · ${runtime.account_label}` : `${backendId} · ${instance}`;
-  const adapter = runtime.runner_kind === 'codex'
-    ? acpManagerAdapter(backendId, label, () => codexSpawnSpec(runtime), { consecutiveFailureReconnectThreshold: 2 })
-    : runtime.runner_kind === 'claude'
-      ? acpManagerAdapter(backendId, label, () => claudeSpawnSpec(runtime))
-      : runtime.runner_kind === 'opencode'
-        ? acpManagerAdapter(backendId, label, () => opencodeSpawnSpec(runtime))
-        : (() => { throw new Error(`Backend instance "${instance}" is not supported by Manager Chat.`); })();
+  let adapter: ManagerAdapter;
+  switch (runtime.runner_kind) {
+    case 'codex':
+      adapter = acpManagerAdapter(backendId, label, () => instanceAcpSpawn(profile, runtime, codexSpawnSpec(runtime)), { consecutiveFailureReconnectThreshold: 2 });
+      break;
+    case 'claude':
+      adapter = acpManagerAdapter(backendId, label, () => instanceAcpSpawn(profile, runtime, claudeSpawnSpec(runtime)));
+      break;
+    case 'opencode':
+      adapter = acpManagerAdapter(backendId, label, () => instanceAcpSpawn(profile, runtime, opencodeSpawnSpec(runtime)));
+      break;
+    case 'hermes':
+      adapter = acpManagerAdapter(backendId, label, () => instanceAcpSpawn(profile, runtime, hermesSpawnSpec()));
+      break;
+    case 'vibe':
+    case 'agy':
+    case 'openhands': {
+      const spec = runtime.runner_kind === 'vibe' ? vibeBackendSpec()
+        : runtime.runner_kind === 'agy' ? agyBackendSpec() : openhandsBackendSpec();
+      adapter = { ...createHeadlessBackend(instanceHeadlessSpec(profile, runtime, spec)), displayName: label } as ManagerAdapter;
+      break;
+    }
+    default: throw new Error(`Backend instance "${instance}" is not supported by Manager Chat.`);
+  }
+  adapter = bindOpenCodeModels(adapter, runtime);
+  cached?.adapter.dispose?.();
   INSTANCE_ADAPTERS.set(key, { runtime: runtimeKey, adapter });
   return adapter;
 }
