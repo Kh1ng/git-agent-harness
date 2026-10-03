@@ -243,6 +243,27 @@ function isDoctorSnapshot(value: unknown, profile: string): value is DoctorSnaps
       && ['ok', 'warn', 'fail'].includes(check.status) && (check.profile == null || check.profile === profile));
 }
 
+function accountUsageValid(value: unknown): boolean {
+  if (value == null) return true;
+  if (typeof value !== 'object' || Array.isArray(value)) return false;
+  const usage = value as Record<string, unknown>;
+  const text = (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f]/.test(value);
+  const count = (value: unknown) => value == null || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0);
+  const cost = (value: unknown) => value == null || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
+  const metricsValid = (value: Record<string, unknown>) => [value.requests, value.input_tokens, value.cached_input_tokens, value.output_tokens].every(count) && cost(value.cost);
+  const fields = ['account_id', 'workspace_id', 'period_start', 'period_end', 'currency', 'requests', 'input_tokens', 'cached_input_tokens', 'output_tokens', 'cost', 'cost_source', 'models'];
+  return Object.keys(usage).every(key => fields.includes(key))
+    && text(usage.account_id) && (usage.workspace_id === null || text(usage.workspace_id))
+    && typeof usage.period_start === 'string' && Number.isFinite(Date.parse(usage.period_start))
+    && typeof usage.period_end === 'string' && Number.isFinite(Date.parse(usage.period_end))
+    && Date.parse(usage.period_end) >= Date.parse(usage.period_start)
+    && usage.currency === 'USD' && (usage.cost_source == null || usage.cost_source === 'dashboard_prices')
+    && metricsValid(usage) && Array.isArray(usage.models) && usage.models.length <= 1000
+    && usage.models.every(model => model && typeof model === 'object' && !Array.isArray(model)
+      && Object.keys(model).every(key => ['model', 'usage_type', 'requests', 'input_tokens', 'cached_input_tokens', 'output_tokens', 'cost'].includes(key))
+      && text(model.model) && ['vibe', 'vibe_connectors'].includes(model.usage_type) && metricsValid(model));
+}
+
 function isQuotaSnapshot(value: unknown, profile: string, since: string): value is QuotaSnapshot {
   if (!value || typeof value !== 'object') return false;
   const snapshot = value as Partial<QuotaSnapshot>;
@@ -251,6 +272,7 @@ function isQuotaSnapshot(value: unknown, profile: string, since: string): value 
     && value.every(observation => observation && typeof observation.backend === 'string'
       && [observation.backend_instance, observation.model, observation.quota_pool, observation.quota_window,
         observation.quota_reset_at, observation.observed_at, observation.usage_source].every(optionalText)
+      && accountUsageValid(observation.account_usage)
       && [observation.quota_used_percent, observation.quota_remaining_percent].every(percent => percent == null
         || (typeof percent === 'number' && Number.isFinite(percent) && percent >= 0 && percent <= 100))));
   return snapshot.schema_version === 2 && typeof snapshot.generated_at === 'string'

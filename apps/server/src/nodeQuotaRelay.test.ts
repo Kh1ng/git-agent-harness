@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import type { AccountUsageObservation } from '@git-agent-harness/contracts';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,6 +23,49 @@ async function listen(server: http.Server): Promise<string> {
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
+
+test('relay preserves scoped dashboard consumption and rejects invalid or credential-bearing metadata', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'gah-quota-dashboard-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const usage: AccountUsageObservation = {
+    account_id: 'customer-test', workspace_id: null, period_start: '2026-10-01T00:00:00Z', period_end: '2026-10-03T00:00:00Z', currency: 'USD',
+    requests: 2510, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 50, cost: 102.96817314, cost_source: 'dashboard_prices',
+    models: [{ model: 'Vibe display alias', usage_type: 'vibe', requests: 2510, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 50, cost: 102.96817314 }]
+  };
+  let current: unknown = usage;
+  const worker = http.createServer((_req, res) => {
+    const snapshot = quota();
+    snapshot.quota_checks[0].quota_observations = [{ backend: 'mistral-dashboard', usage_source: 'mistral_dashboard_session', account_usage: current }];
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(snapshot));
+  });
+  t.after(() => { worker.closeAllConnections(); worker.close(); });
+  const workerUrl = await listen(worker);
+  async function relay() {
+    const registry = new RegistryService(join(directory, `registry-${Math.random()}.json`));
+    registry.registerNode({ node_id: 'mac', display_name: 'Mac', advertised_url: workerUrl, version: '0.1.2', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback', secret_ref: 'env:UNUSED', profiles: ['gah'] });
+    return (await registry.getNodeQuotas('gah', '7d')).nodes[0];
+  }
+  const valid = await relay();
+  assert.equal(valid.state, 'available');
+  assert.deepEqual(valid.quota?.quota_checks[0].quota_observations?.[0].account_usage, usage);
+  assert.equal(valid.quota?.usage.entries, 42, 'provider consumption never replaces task accounting');
+  for (const invalid of [
+    { ...usage, requests: -1 }, { ...usage, input_tokens: 0.5 }, { ...usage, cost: -1 },
+    { ...usage, cost: '102.97' }, { ...usage, currency: 'EUR' }, { ...usage, workspace_id: '' },
+    { ...usage, period_start: 'bad' }, { ...usage, period_end: '2026-09-01T00:00:00Z' },
+    { ...usage, cookie: 'private-dashboard-session' },
+    { ...usage, models: [{ ...usage.models[0], usage_type: 'api_tokens' }] },
+    { ...usage, models: [{ ...usage.models[0], requests: Number.MAX_SAFE_INTEGER + 1 }] },
+    { ...usage, models: [{ ...usage.models[0], authorization: 'private-dashboard-session' }] }
+  ]) {
+    current = invalid;
+    const rejected = await relay();
+    assert.equal(rejected.state, 'unavailable');
+    assert.equal(rejected.quota, null);
+    assert.ok(!JSON.stringify(rejected).includes('private-dashboard-session'));
+  }
+});
 
 test('registered-node quota relay authenticates, scopes, caches, and keeps worker accounting separate', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'gah-quota-relay-'));

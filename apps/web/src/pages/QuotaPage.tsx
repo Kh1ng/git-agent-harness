@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { QuotaCheck, QuotaSnapshot, QuotaCandidateStatus, FleetQuotaSnapshot } from '@git-agent-harness/contracts';
+import type { QuotaCheck, QuotaSnapshot, QuotaCandidateStatus, FleetQuotaSnapshot, AccountUsageObservation, AccountUsageModel } from '@git-agent-harness/contracts';
 import { Gauge, ListChecks, CheckCircle2, Coins, Timer } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
@@ -302,6 +302,37 @@ type QuotaLedgerRow = Omit<QuotaCandidateStatus, 'usage'> & {
   observationOnly?: boolean;
 };
 
+function AccountUsageMetrics({ usage }: { usage: AccountUsageObservation | AccountUsageModel }) {
+  const connector = 'usage_type' in usage && usage.usage_type === 'vibe_connectors';
+  const metrics: [string, string][] = [
+    ['Requests', formatCount(usage.requests)],
+    ['Input tokens', formatCount(usage.input_tokens)],
+    ['Cached input tokens', formatCount(usage.cached_input_tokens)],
+    ['Output tokens', formatCount(usage.output_tokens)],
+    ['Consumption cost (USD)', formatCost(usage.cost)]
+  ];
+  return <dl className="grid grid-cols-2 gap-x-4 gap-y-2 tabular-nums">
+    {metrics.filter(([label]) => !connector || !label.includes('tokens')).map(([label, value]) => <div key={label}><dt className="text-muted">{label}</dt><dd className="text-primary">{value}</dd></div>)}
+  </dl>;
+}
+
+function AccountUsageDetails({ usage }: { usage: AccountUsageObservation }) {
+  const period = (value: string) => new Date(value).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
+  return <div className="space-y-3" data-testid="provider-account-usage">
+    <p className="text-muted break-words">{usage.workspace_id === null ? 'Organization scope' : `Workspace ${usage.workspace_id}`} · Account {usage.account_id}</p>
+    <p className="text-muted" title={`${usage.period_start} – ${usage.period_end}`}>Period {period(usage.period_start)} – {period(usage.period_end)} (UTC)</p>
+    <AccountUsageMetrics usage={usage} />
+    <p className="text-muted">{usage.cost_source === 'dashboard_prices' ? 'Consumption priced at dashboard rates; this is not a paid bill.' : 'Consumption cost source unavailable.'}</p>
+    <details>
+      <summary className="cursor-pointer text-primary">Usage by model ({usage.models.length})</summary>
+      <div className="space-y-3 mt-3">{usage.models.map((model, index) => <div key={`${model.model}-${model.usage_type}-${index}`} className="border-t border-subtle pt-3">
+        <p className="font-medium text-primary break-words mb-2">{model.model} · {model.usage_type === 'vibe_connectors' ? 'Vibe connector' : 'Vibe'}</p>
+        <AccountUsageMetrics usage={model} />
+      </div>)}</div>
+    </details>
+  </div>;
+}
+
 function QuotaCandidateLedger({ candidates: configuredCandidates, quotaChecks }: { candidates: QuotaCandidateStatus[]; quotaChecks: QuotaCheck[] }) {
   // An account observation is not permission to schedule work on that account.
   const observedAccounts: QuotaLedgerRow[] = quotaChecks.filter(check =>
@@ -348,7 +379,7 @@ function QuotaCandidateLedger({ candidates: configuredCandidates, quotaChecks }:
                 <section key={provider} className="quota-provider-summary">
                   <div className="flex items-center justify-between gap-3 mb-3"><h4 className="text-sm font-semibold text-primary">{providerLabel(provider)}</h4><span className="text-xs text-muted">{routingScopes.length} {routingScopes.length === 1 ? 'candidate' : 'candidates'}{scopes.length > routingScopes.length ? ` · ${scopes.length - routingScopes.length} observed accounts` : ''}</span></div>
                   {routingScopes.length > 0 ? <p className="text-2xl font-semibold text-primary tabular-nums">{routingScopes.filter(candidate => candidate.eligible_now).length}<span className="text-sm font-normal text-muted"> / {routingScopes.length} not blocked</span></p> : <p className="text-sm text-muted">No routing candidate</p>}
-                  <p className="text-xs text-muted mt-2">{observations.length} quota {observations.length === 1 ? 'observation' : 'observations'} · {observations.filter(observation => quotaPercentages(observation) !== null).length} with percentages</p>
+                  <p className="text-xs text-muted mt-2">{observations.length} account {observations.length === 1 ? 'observation' : 'observations'} · {observations.filter(observation => quotaPercentages(observation) !== null).length} with quota percentages</p>
                 </section>
               );
             })}
@@ -368,23 +399,26 @@ function QuotaCandidateLedger({ candidates: configuredCandidates, quotaChecks }:
                         {isStale(candidate.observed_at) && <StatusBadge tone="serious" label="Stale" />}
                       </div>
                       {!candidate.observationOnly && !candidate.eligible_now && <p className="text-xs text-secondary mt-2">{candidate.reason ?? 'Unknown reason'} · {formatRemaining(candidate.unavailable_until) ? `Resets in ${formatRemaining(candidate.unavailable_until)}` : 'No known reset time'}</p>}
-                      <p className="text-xs text-muted mt-2">{formatAge(candidate.observed_at) ? `Observed ${formatAge(candidate.observed_at)}` : 'No observation'}</p>
+                      {!candidate.observationOnly && <p className="text-xs text-muted mt-2">{formatAge(candidate.observed_at) ? `Observed ${formatAge(candidate.observed_at)}` : 'No observation'}</p>}
                     </div>
                     <div className="quota-account-windows">
                       {(candidate.quota_observations ?? []).length === 0 && <p className="text-xs text-muted">No quota windows reported for this candidate.</p>}
                       {(candidate.quota_observations ?? []).map((observation, observationIndex) => {
                         const percentages = quotaPercentages(observation);
-                        const label = `${observation.quota_window ?? 'Unknown window'}${observation.model ? ` · ${observation.model}` : ''}`;
+                        const window = observation.quota_window === 'vibe-code-included-monthly' ? 'Vibe Code included monthly allowance' : observation.quota_window ?? 'Unknown window';
+                        const label = `${window}${observation.model ? ` · ${observation.model}` : ''}`;
                         return (
                           <div key={observationIndex} className="min-w-0 text-xs text-secondary">
-                            <div className="flex flex-wrap items-start justify-between gap-2 mb-2"><span>{label}</span>{isStale(observation.observed_at) && <StatusBadge tone="serious" label="Stale" />}</div>
+                            <div className="flex flex-wrap items-start justify-between gap-2 mb-2"><span>{observation.account_usage ? 'Account consumption' : label}</span>{isStale(observation.observed_at) && <StatusBadge tone="serious" label="Stale" />}</div>
+                            {observation.account_usage && <AccountUsageDetails usage={observation.account_usage} />}
                             {percentages ? (
                               <>
+                                {observation.account_usage && <p className="text-primary mt-4 mb-2">{label}</p>}
                                 <div className="flex items-baseline justify-between gap-2 tabular-nums mb-2"><span>{formatQuotaPercent(percentages.used)} used</span><span className="font-semibold text-primary">{formatQuotaPercent(percentages.remaining)} remaining</span></div>
                                 <progress className={`usage-progress router-quota-progress ${percentages.remaining < 20 ? 'text-critical' : percentages.remaining < 60 ? 'text-warning' : 'text-good'}`} max={100} value={percentages.remaining} aria-label={`${label}: ${formatQuotaPercent(percentages.used)} used, ${formatQuotaPercent(percentages.remaining)} remaining`} />
                               </>
-                            ) : <p className="text-muted">No usage percentage available</p>}
-                            <p className="mt-2 text-muted">{formatQuotaMetadata(observation)}</p>
+                            ) : !observation.account_usage && <p className="text-muted">No usage percentage available</p>}
+                            <p className="mt-2 text-muted">{observation.account_usage && !percentages ? `source: ${observation.usage_source ?? 'Unknown'}` : formatQuotaMetadata(observation)}</p>
                             <p className="mt-1 text-muted">{formatAge(observation.observed_at) ? `Observed ${formatAge(observation.observed_at)}` : 'No observation time'}</p>
                           </div>
                         );
