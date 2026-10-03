@@ -259,19 +259,35 @@ fn anonymous_file(root: &std::path::Path) -> Result<std::fs::File, ()> {
 
 #[cfg(unix)]
 fn run(
+    command: std::process::Command,
+    input: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<Vec<u8>, ()> {
+    run_at(&super::config_dir(), command, input, timeout)
+}
+
+#[cfg(unix)]
+fn run_at(
+    root: &std::path::Path,
     mut command: std::process::Command,
     input: Option<&[u8]>,
     timeout: Duration,
 ) -> Result<Vec<u8>, ()> {
     use std::io::{Read, Seek, Write};
+    use std::os::unix::fs::DirBuilderExt;
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     use std::time::Instant;
-    let root = super::config_dir();
-    let mut output = anonymous_file(&root)?;
+    // A fresh installation has not saved settings or created this directory yet.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(root)
+        .map_err(|_| ())?;
+    let mut output = anonymous_file(root)?;
     let stdout = output.try_clone().map_err(|_| ())?;
     if let Some(input) = input {
-        let mut stdin = anonymous_file(&root)?;
+        let mut stdin = anonymous_file(root)?;
         stdin.write_all(input).map_err(|_| ())?;
         stdin.rewind().map_err(|_| ())?;
         command.stdin(Stdio::from(stdin));
@@ -321,6 +337,39 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn first_launch_initializes_private_io_without_persistent_secrets() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "gah-credential-first-launch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!root.exists());
+        let mut command = std::process::Command::new("sh");
+        command.args([
+            "-c",
+            "read -r value; test \"$value\" = 'test-only-secret'; printf 'metadata'",
+        ]);
+        let output = run_at(
+            &root,
+            command,
+            Some(b"test-only-secret\n"),
+            Duration::from_secs(2),
+        );
+        assert_eq!(output.unwrap(), b"metadata");
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        std::fs::remove_dir(root).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
