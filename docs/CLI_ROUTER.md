@@ -60,8 +60,15 @@ The MCP tool `gah_cli_router` returns the same read-only snapshot. Mutations req
 ## Operation and privacy
 
 Nous balances come from `https://portal.nousresearch.com/api/oauth/account`
-with `NOUS_API_KEY`. Run `gah quota refresh --backend nous` for a live check.
-Automatic quota refresh checks this account when the key is configured. GAH
+with an explicit `NOUS_API_KEY`, or the current native Hermes Nous sign-in when
+that key is absent. Run `gah quota refresh --backend nous` for a live check.
+Automatic refresh supports both sources. Native checks use Hermes's Portal
+resolver to renew expiring OAuth credentials without clearing inference
+cooldowns. `HERMES_HOME` selects the auth store; a missing custom store never
+falls back to the default account. Explicit keys keep precedence, including
+when rejected. Do not copy a short-lived Hermes OAuth token into `NOUS_API_KEY`.
+GAH uses the existing Hermes virtual environment under
+`~/.hermes/hermes-agent/venv` or `/usr/local/lib/hermes-agent/venv`. GAH
 records subscription credit percentages in the `nous-portal-api` pool. Purchased
 credits and rollover funds are not a monthly quota denominator. If the API does
 not supply a valid monthly cap, the percentage remains unknown.

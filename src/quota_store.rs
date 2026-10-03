@@ -563,7 +563,7 @@ pub fn refresh_stale_quota_observations(
     {
         handles.push(handle);
     }
-    if std::env::var("NOUS_API_KEY").is_ok_and(|key| !key.is_empty()) {
+    if crate::usage::nous::configured() {
         if let Some(handle) = maybe_refresh_backend_instance(
             store_path,
             "opencode",
