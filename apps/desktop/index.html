@@ -38,8 +38,10 @@
         <h2 id="setup-heading">Set up this computer</h2>
         <p id="setup-state" role="status">Checking what this computer has…</p>
         <ul id="setup-list" class="checklist" hidden></ul>
+        <p id="standalone-note" hidden>Standalone runs the dashboard and agents on this computer only. It accepts every setup default and connects this app when setup finishes.</p>
         <p id="setup-command" hidden>Run in a terminal: <code></code></p>
         <div class="actions">
+          <button id="setup-standalone" type="button" hidden aria-describedby="standalone-note">Set up standalone</button>
           <button id="setup-terminal" type="button" hidden>Finish setup in Terminal</button>
           <button id="setup-refresh" type="button">Check again</button>
         </div>

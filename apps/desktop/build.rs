@@ -15,6 +15,8 @@ fn main() {
             "open_external_url",
             "desktop_open_context",
             "open_local_checkout",
+            "setup_check",
+            "open_setup_terminal",
         ]),
     ))
     .expect("failed to build desktop permissions");
