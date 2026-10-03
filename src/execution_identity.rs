@@ -1,3 +1,5 @@
+mod credentials;
+pub use credentials::selected_codex_config_args;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +29,10 @@ pub struct ExecutionIdentity {
     /// instance. Like the executable, it must never enter durable identity.
     #[serde(skip, default)]
     pub state_root: Option<PathBuf>,
+    /// Explicit local credential source, resolved only for the selected child.
+    /// This binding never enters durable route or usage records.
+    #[serde(skip, default)]
+    pub credential_id: Option<String>,
     /// Whether `backend_instance` came from an explicit instance declaration
     /// rather than the legacy backend/quota compatibility projection.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -90,6 +96,7 @@ impl ExecutionIdentity {
             runner_kind: runner_kind_for_backend(&logical_backend).to_string(),
             executable: None,
             state_root: None,
+            credential_id: None,
             explicit_instance: false,
             requested_backend,
             logical_backend,
@@ -198,6 +205,45 @@ pub fn runner_kind_for_backend(backend: &str) -> &str {
     }
 }
 
+/// A selected key is subject to the same work-scoped external approval as
+/// keys from the profile's environment file. Missing work context fails closed.
+pub fn authorize_credential_env(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    profile: &crate::config::Profile,
+    work_id: Option<&str>,
+    env: &[(String, String)],
+) -> anyhow::Result<()> {
+    let scoped = env
+        .iter()
+        .filter(|(name, _)| {
+            profile
+                .external_credential_scopes
+                .values()
+                .any(|scope| scope.env_vars.contains(name))
+        })
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    if scoped.is_empty() {
+        return Ok(());
+    }
+    let work_id = work_id.ok_or_else(|| {
+        anyhow::anyhow!("selected credential requires work-scoped external API approval")
+    })?;
+    let entries = crate::ledger::read_entries(cfg)
+        .map_err(|_| anyhow::anyhow!("cannot verify selected credential approval"))?;
+    let allowed = crate::ledger::active_external_approval_env_vars_from_entries(
+        &entries,
+        profile_name,
+        &profile.repo_id,
+        work_id,
+    );
+    if scoped.iter().any(|name| !allowed.contains(*name)) {
+        anyhow::bail!("selected credential requires work-scoped external API approval");
+    }
+    Ok(())
+}
+
 /// Validate an operator-facing identity label before it can enter durable
 /// state. Labels are logical names, never filesystem/auth material.
 pub fn validate_operator_label(field: &str, value: &str) -> anyhow::Result<String> {
@@ -283,13 +329,18 @@ mod tests {
         let mut identity =
             ExecutionIdentity::legacy_candidate("codex", Some("gpt-5"), Some("codex-main"));
         identity.set_executable(Some(PathBuf::from("/secret/home/bin/codex")));
+        identity.credential_id = Some("source-id".into());
+        identity.auth_source_label = Some("display-label".into());
 
         let json = serde_json::to_string(&identity).unwrap();
 
         assert!(!json.contains("executable"));
         assert!(!json.contains("/secret"));
+        assert!(!json.contains("source-id"));
+        assert!(json.contains("display-label"));
         let restored: ExecutionIdentity = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.executable, None);
+        assert_eq!(restored.credential_id, None);
         assert_eq!(restored.backend_instance, "codex:codex-main");
     }
 }

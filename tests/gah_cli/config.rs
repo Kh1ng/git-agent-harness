@@ -1,6 +1,6 @@
 use super::*;
 
-fn config_with_profile() -> (tempfile::TempDir, std::path::PathBuf) {
+pub(super) fn config_with_profile() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = test_tempdir();
     let config = tmp.path().join("config.toml");
     let artifact_root = tmp.path().join("artifacts");

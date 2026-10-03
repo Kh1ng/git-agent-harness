@@ -14,6 +14,8 @@ mod config;
 mod conflict_resolution;
 #[path = "gah_cli/controller.rs"]
 mod controller;
+#[path = "gah_cli/credential_binding.rs"]
+mod credential_binding;
 #[path = "gah_cli/credentials_bridge.rs"]
 mod credentials_bridge;
 #[path = "gah_cli/dispatch.rs"]

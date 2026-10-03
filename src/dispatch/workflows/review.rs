@@ -576,7 +576,7 @@ pub(in crate::dispatch) fn review(
                     })?;
             record_route_attempt(ledger, &route)?;
             let mut attempt_env_vars =
-                review_attempt_environment(profile, &route.identity, &env_vars);
+                review_attempt_environment(profile, &route.identity, &env_vars)?;
             attempt_env_vars = review_external_env::filter_attempt_env_vars(
                 cfg,
                 profile,
@@ -1200,10 +1200,10 @@ fn review_attempt_environment(
     profile: &Profile,
     identity: &crate::execution_identity::ExecutionIdentity,
     base: &[(String, String)],
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>> {
     let mut env_vars = base.to_vec();
-    apply_execution_identity_env(profile, identity, &mut env_vars);
-    env_vars
+    apply_execution_identity_env(profile, identity, &mut env_vars)?;
+    Ok(env_vars)
 }
 
 #[allow(clippy::too_many_arguments)]

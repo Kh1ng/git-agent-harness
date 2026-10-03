@@ -616,7 +616,7 @@ pub enum ConfigCommands {
         #[arg(long, action = clap::ArgAction::Set)]
         enabled: bool,
     },
-    /// Add an isolated named Codex or Claude account to one profile.
+    /// Add an isolated named runner account to one profile.
     AddBackendInstance {
         #[arg(long = "config", visible_alias = "config-path")]
         config_path: Option<String>,
@@ -628,6 +628,39 @@ pub enum ConfigCommands {
         runner_kind: String,
         #[arg(long)]
         account_label: String,
+        #[arg(long)]
+        credential_id: Option<String>,
+    },
+    /// Bind a named local credential source to a declared execution instance.
+    SetBackendInstanceCredential {
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        instance: String,
+        #[arg(long)]
+        credential_id: String,
+    },
+    /// Launch a declared instance without exporting its key to a caller.
+    ExecBackendInstance {
+        #[arg(long = "config", visible_alias = "config-path")]
+        config_path: Option<String>,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        instance: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        work_id: Option<String>,
+        #[arg(long, conflicts_with = "adapter_program")]
+        acp_bridge: Option<String>,
+        /// Worker-selected Python interpreter for the fixed Vibe stdin bridge.
+        #[arg(long)]
+        adapter_program: Option<String>,
+        #[arg(last = true)]
+        args: Vec<String>,
     },
     /// Change the safe display label without changing durable instance identity.
     SetBackendInstanceLabel {

@@ -95,6 +95,39 @@ pub fn run_review_backend_for_identity(
     let stdout_path = session_dir.join("review-stdout.log");
     let stderr_path = session_dir.join("review-stderr.log");
     let _ = write_redacted_task(session_dir, prompt);
+    let mut bound_env = env_vars.to_vec();
+    identity.apply_instance_state_env(&mut bound_env);
+    let binding = identity
+        .validate_launch_config(worktree)
+        .and_then(|_| identity.credential_env())
+        .and_then(|selected| {
+            // Workflow approval filtering must not be undone by source injection.
+            if selected.iter().any(|entry| {
+                profile
+                    .external_credential_scopes
+                    .values()
+                    .any(|scope| scope.env_vars.contains(&entry.0))
+                    && !env_vars.contains(entry)
+            }) {
+                anyhow::bail!("selected credential requires work-scoped external API approval");
+            }
+            identity.apply_credential_env(&mut bound_env)
+        });
+    if let Err(error) = binding {
+        return ReviewRunResult {
+            outcome: ReviewProcessOutcome::SpawnFailure,
+            duration_secs: start.elapsed().as_secs_f64(),
+            stdout: String::new(),
+            stderr: error.to_string(),
+            idle_timeout_seconds: profile.review_timeout_seconds(),
+            hard_timeout_seconds,
+            last_progress_secs: None,
+            usage_artifact_path: None,
+            agy_cli_log_delta: None,
+            resources: crate::ledger::AttemptResourceUsage::never_launched(),
+        };
+    }
+    let env_vars = bound_env.as_slice();
 
     let configured = identity.executable.as_ref().map(|path| {
         if crate::runner::is_executable_path(path) {
@@ -209,7 +242,26 @@ pub fn run_review_backend_for_identity(
             };
         }
     };
+    if let Err(error) = identity.validate_credential_args(&invocation.argv) {
+        return ReviewRunResult {
+            outcome: ReviewProcessOutcome::SpawnFailure,
+            duration_secs: start.elapsed().as_secs_f64(),
+            stdout: String::new(),
+            stderr: error.to_string(),
+            idle_timeout_seconds: profile.review_timeout_seconds(),
+            hard_timeout_seconds,
+            last_progress_secs: None,
+            usage_artifact_path: None,
+            agy_cli_log_delta: None,
+            resources: crate::ledger::AttemptResourceUsage::never_launched(),
+        };
+    }
     cmd.args(&invocation.argv);
+    if identity.runner_kind == "codex" {
+        cmd.args(crate::execution_identity::selected_codex_config_args(
+            env_vars,
+        ));
+    }
     cmd.current_dir(worktree)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

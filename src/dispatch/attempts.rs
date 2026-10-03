@@ -257,16 +257,13 @@ pub(super) fn apply_execution_identity_env(
     profile: &Profile,
     identity: &crate::execution_identity::ExecutionIdentity,
     env_vars: &mut Vec<(String, String)>,
-) {
-    if let Some(state_root) = identity.state_root.as_ref() {
-        env_vars.retain(|(key, _)| key != "HOME");
-        env_vars.push((
-            "HOME".to_string(),
-            state_root.to_string_lossy().into_owned(),
-        ));
+) -> Result<()> {
+    if identity.state_root.is_some() {
+        identity.apply_instance_state_env(env_vars);
     } else {
         apply_backend_instance_env(profile, &identity.logical_backend, env_vars);
     }
+    identity.apply_credential_env(env_vars)
 }
 
 pub(super) fn external_env_vars_for_work_item(
@@ -416,6 +413,13 @@ pub(super) fn run_backend_with_reserved_route(
     let runner_kind = identity.runner_kind.as_str();
     let effective_model = identity.effective_model.as_deref();
     let executable = execution_identity_executable(profile, identity)?;
+    identity.validate_launch_config(wt)?;
+    identity.validate_credential_args(match identity.runner_kind.as_str() {
+        "claude" => &profile.claude_args,
+        "hermes" => &profile.hermes_args,
+        "opencode" => &profile.opencode_args,
+        _ => &[],
+    })?;
     let origin_before = worktree::git(&["remote", "get-url", "origin"], wt).ok();
     let mut env_vars =
         external_env_vars_for_work_item(cfg, profile_name, profile, work_id, env_path);
@@ -447,7 +451,36 @@ pub(super) fn run_backend_with_reserved_route(
     // Use the complete ScopedCargoTarget environment (CARGO_TARGET_DIR and RUSTC_WRAPPER)
     // to ensure sccache is used when available.
     env_vars.extend(cargo_target.environment());
-    apply_execution_identity_env(profile, identity, &mut env_vars);
+    apply_execution_identity_env(profile, identity, &mut env_vars)?;
+    crate::execution_identity::authorize_credential_env(
+        cfg,
+        profile_name,
+        profile,
+        work_id,
+        &identity.credential_env()?,
+    )?;
+    let mut selected_llm = runner::LlmConfig {
+        base_url: llm.base_url.clone(),
+        api_key: llm.api_key.clone(),
+        model: llm.model.clone(),
+    };
+    if identity.credential_id.is_some() && runner_kind == "openhands" {
+        selected_llm.base_url = env_vars
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "LLM_BASE_URL")
+            .ok_or_else(|| anyhow::anyhow!("selected credential has no OpenHands endpoint"))?
+            .1
+            .clone();
+        selected_llm.api_key = env_vars
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "LLM_API_KEY")
+            .ok_or_else(|| anyhow::anyhow!("selected credential has no OpenHands execution key"))?
+            .1
+            .clone();
+    }
+    let llm = &selected_llm;
     env_vars.retain(|(key, _)| key != crate::runner::process::HARD_TIMEOUT_ENV);
     if let Some(seconds) = hard_timeout_seconds.filter(|seconds| *seconds > 0) {
         env_vars.push((
