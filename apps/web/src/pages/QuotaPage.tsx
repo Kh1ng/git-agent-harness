@@ -12,6 +12,7 @@ import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { StatTile } from '../components/ui/StatTile.js';
 import { formatPercent, formatRemaining, formatAge, isStale, formatTokens, formatCount, formatCost, formatLocalTime } from '../lib/format.js';
 import { CliRouterPanel } from '../components/CliRouterPanel.js';
+import { MistralConnectionPanel } from '../components/MistralConnectionPanel.js';
 import { gahApi } from '../api/client.js';
 
 
@@ -178,6 +179,7 @@ export function QuotaPage() {
     return (
       <div className="quota-page space-y-6">
         {header}
+        <MistralConnectionPanel />
         <CliRouterPanel />
         <LoadingState label="Loading quota snapshot…" />
         <FleetQuotaPanel profile={profile} refreshKey={fleetRefresh} />
@@ -188,6 +190,7 @@ export function QuotaPage() {
     return (
       <div className="quota-page space-y-6">
         {header}
+        <MistralConnectionPanel />
         <CliRouterPanel />
         <ErrorState message={quota.error} endpoint="/api/quota" onRetry={refresh} />
         <FleetQuotaPanel profile={profile} refreshKey={fleetRefresh} />
@@ -203,6 +206,8 @@ export function QuotaPage() {
   return (
     <div className="quota-page space-y-6">
       {header}
+
+      <MistralConnectionPanel />
 
       <CliRouterPanel />
 
