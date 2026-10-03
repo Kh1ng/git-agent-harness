@@ -247,21 +247,23 @@ function accountUsageValid(value: unknown): boolean {
   if (value == null) return true;
   if (typeof value !== 'object' || Array.isArray(value)) return false;
   const usage = value as Record<string, unknown>;
-  const text = (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f]/.test(value);
+  const text = (value: unknown, limit: number) => typeof value === 'string' && value.length > 0 && Buffer.byteLength(value, 'utf8') <= limit && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
+  const timestamp = (value: unknown): value is string => typeof value === 'string' && value.length <= 64
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value));
   const count = (value: unknown) => value == null || (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0);
   const cost = (value: unknown) => value == null || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
   const metricsValid = (value: Record<string, unknown>) => [value.requests, value.input_tokens, value.cached_input_tokens, value.output_tokens].every(count) && cost(value.cost);
   const fields = ['account_id', 'workspace_id', 'period_start', 'period_end', 'currency', 'requests', 'input_tokens', 'cached_input_tokens', 'output_tokens', 'cost', 'cost_source', 'models'];
   return Object.keys(usage).every(key => fields.includes(key))
-    && text(usage.account_id) && (usage.workspace_id === null || text(usage.workspace_id))
-    && typeof usage.period_start === 'string' && Number.isFinite(Date.parse(usage.period_start))
-    && typeof usage.period_end === 'string' && Number.isFinite(Date.parse(usage.period_end))
-    && Date.parse(usage.period_end) >= Date.parse(usage.period_start)
+    && text(usage.account_id, 256) && (usage.workspace_id === null || text(usage.workspace_id, 256))
+    && timestamp(usage.period_start) && timestamp(usage.period_end)
+    && Date.parse(usage.period_end) > Date.parse(usage.period_start)
     && usage.currency === 'USD' && (usage.cost_source == null || usage.cost_source === 'dashboard_prices')
-    && metricsValid(usage) && Array.isArray(usage.models) && usage.models.length <= 1000
+    && metricsValid(usage) && Array.isArray(usage.models) && usage.models.length <= 128
     && usage.models.every(model => model && typeof model === 'object' && !Array.isArray(model)
       && Object.keys(model).every(key => ['model', 'usage_type', 'requests', 'input_tokens', 'cached_input_tokens', 'output_tokens', 'cost'].includes(key))
-      && text(model.model) && ['vibe', 'vibe_connectors'].includes(model.usage_type) && metricsValid(model));
+      && text(model.model, 512) && ['vibe', 'vibe_connectors'].includes(model.usage_type) && metricsValid(model))
+    && (usage.cost == null && !usage.models.some(model => model.cost != null) || usage.cost_source === 'dashboard_prices');
 }
 
 function isQuotaSnapshot(value: unknown, profile: string, since: string): value is QuotaSnapshot {

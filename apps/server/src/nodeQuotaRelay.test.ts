@@ -28,7 +28,7 @@ test('relay preserves scoped dashboard consumption and rejects invalid or creden
   const directory = mkdtempSync(join(tmpdir(), 'gah-quota-dashboard-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const usage: AccountUsageObservation = {
-    account_id: 'customer-test', workspace_id: null, period_start: '2026-10-01T00:00:00Z', period_end: '2026-10-03T00:00:00Z', currency: 'USD',
+    account_id: 'customer-test', workspace_id: null, period_start: '2026-10-01T00:00:00.066000+00:00', period_end: '2026-10-03T00:00:00+00:00', currency: 'USD',
     requests: 42, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 50, cost: 12.34, cost_source: 'dashboard_prices',
     models: [{ model: 'Vibe display alias', usage_type: 'vibe', requests: 42, input_tokens: 300, cached_input_tokens: 1000, output_tokens: 50, cost: 12.34 }]
   };
@@ -54,6 +54,12 @@ test('relay preserves scoped dashboard consumption and rejects invalid or creden
     { ...usage, requests: -1 }, { ...usage, input_tokens: 0.5 }, { ...usage, cost: -1 },
     { ...usage, cost: '12.34' }, { ...usage, currency: 'EUR' }, { ...usage, workspace_id: '' },
     { ...usage, period_start: 'bad' }, { ...usage, period_end: '2026-09-01T00:00:00Z' },
+    { ...usage, period_start: '42' }, { ...usage, period_start: '2026-10-01' }, { ...usage, period_end: usage.period_start },
+    { ...usage, account_id: 'x'.repeat(257) }, { ...usage, workspace_id: 'x'.repeat(257) },
+    { ...usage, account_id: '😀'.repeat(65) }, { ...usage, workspace_id: undefined }, { ...usage, account_id: 'customer\u0085' },
+    { ...usage, cost_source: undefined }, { ...usage, cost: undefined, cost_source: undefined },
+    { ...usage, models: Array(129).fill(usage.models[0]) },
+    { ...usage, models: [{ ...usage.models[0], model: 'x'.repeat(513) }] },
     { ...usage, cookie: 'private-dashboard-session' },
     { ...usage, models: [{ ...usage.models[0], usage_type: 'api_tokens' }] },
     { ...usage, models: [{ ...usage.models[0], requests: Number.MAX_SAFE_INTEGER + 1 }] },

@@ -200,10 +200,11 @@ for (const width of [390, 1440]) {
         { model: 'web_search', usage_type: 'vibe_connectors', requests: 2 }
       ]
     };
-    quota.quota_checks = [{ backend: 'mistral-dashboard', provider: 'mistral', backend_instance: 'mistral-dashboard:organization-test', quota_pool: 'mistral-dashboard:organization-test', status: 'data', checked_at: new Date().toISOString(), quota_observations: [{ backend: 'mistral-dashboard', observed_at: new Date().toISOString(), usage_source: 'mistral_dashboard_session', account_usage: accountUsage }] }];
+    quota.quota_checks = [{ backend: 'mistral-dashboard', backend_instance: 'mistral-dashboard:organization-test', quota_pool: 'mistral-dashboard:organization-test', status: 'data', checked_at: new Date().toISOString(), quota_observations: [{ backend: 'mistral-dashboard', observed_at: new Date().toISOString(), usage_source: 'mistral_dashboard_session', account_usage: accountUsage }] }];
     await page.route('**/api/cli-router', route => route.fulfill({ json: { settings: { url: null, hasApiKey: false, hasManagementKey: false }, status: 'unconfigured', strategy: 'round-robin', sessionAffinity: false, accounts: [], models: [] } }));
     const component = await mount(<MockStoreProvider statusData={null} quotaData={quota}><WebSocketProvider><QuotaPage /></WebSocketProvider></MockStoreProvider>);
     const dashboard = component.getByTestId('quota-candidate-mistral-dashboard-2');
+    await expect(component.getByRole('button', { name: 'Mistral (3)', exact: true })).toBeVisible();
     const usage = dashboard.getByTestId('provider-account-usage');
     await expect(usage.getByText('Organization scope · Account customer-test', { exact: true })).toBeVisible();
     await expect(usage.getByText(/Period .*2026.*2026.*\(UTC\)/)).toBeVisible();
@@ -238,5 +239,12 @@ for (const width of [390, 1440]) {
     await expect(component.getByTestId('quota-candidate-vibe-1').getByRole('progressbar')).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: `test-results/component/mistral-dashboard-${width}.png`, fullPage: true });
+    const allowanceUnavailable: QuotaSnapshot = { ...withAllowance, quota_checks: [{ ...withAllowance.quota_checks[0], quota_observations: [{ ...withAllowance.quota_checks[0].quota_observations![0], quota_used_percent: undefined, quota_remaining_percent: undefined, quota_reset_at: undefined }] }] };
+    await component.update(<MockStoreProvider statusData={null} quotaData={allowanceUnavailable}><WebSocketProvider><QuotaPage /></WebSocketProvider></MockStoreProvider>);
+    await expect(usage.getByText('$12.34', { exact: true })).toBeVisible();
+    await expect(dashboard.getByText('Monthly allowance reading unavailable', { exact: true })).toBeVisible();
+    await expect(dashboard.getByText('Quota unknown', { exact: true })).toBeVisible();
+    await expect(component.getByRole('progressbar')).toHaveCount(0);
+    await expect(dashboard.getByText(/Resets/)).toHaveCount(0);
   });
 }

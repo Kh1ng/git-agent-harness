@@ -288,13 +288,14 @@ function candidateProvider(candidate: Pick<QuotaCandidateStatus, 'backend' | 'pr
   if (candidate.provider) return candidate.provider;
   // The legacy second AGY runner is another account of the same provider.
   if (candidate.backend === 'agy-second') return 'agy';
+  if (candidate.backend === 'mistral-dashboard') return 'mistral';
   return candidate.backend === 'opencode' && candidate.model?.includes('/')
     ? candidate.model.split('/')[0]
     : candidate.backend === 'opencode' ? 'Unknown provider' : candidate.backend;
 }
 
 function providerLabel(provider: string): string {
-  return ({ nous: 'Nous', 'nous-portal': 'Nous', mistral: 'Mistral', antigravity: 'Antigravity', anthropic: 'Anthropic', openai: 'OpenAI', 'gah-router': 'CLI subscription router' } as Record<string, string>)[provider] ?? provider;
+  return ({ nous: 'Nous', 'nous-portal': 'Nous', mistral: 'Mistral', 'mistral-dashboard': 'Mistral', antigravity: 'Antigravity', anthropic: 'Anthropic', openai: 'OpenAI', 'gah-router': 'CLI subscription router' } as Record<string, string>)[provider] ?? provider;
 }
 
 type QuotaLedgerRow = Omit<QuotaCandidateStatus, 'usage'> & {
@@ -322,7 +323,7 @@ function AccountUsageDetails({ usage }: { usage: AccountUsageObservation }) {
     <p className="text-muted break-words">{usage.workspace_id === null ? 'Organization scope' : `Workspace ${usage.workspace_id}`} · Account {usage.account_id}</p>
     <p className="text-muted" title={`${usage.period_start} – ${usage.period_end}`}>Period {period(usage.period_start)} – {period(usage.period_end)} (UTC)</p>
     <AccountUsageMetrics usage={usage} />
-    <p className="text-muted">{usage.cost_source === 'dashboard_prices' ? 'Consumption priced at dashboard rates; this is not a paid bill.' : 'Consumption cost source unavailable.'}</p>
+    <p className="text-muted">{usage.cost_source === 'dashboard_prices' ? 'Consumption priced at dashboard rates.' : 'Consumption cost source unavailable.'}</p>
     <details>
       <summary className="cursor-pointer text-primary">Usage by model ({usage.models.length})</summary>
       <div className="space-y-3 mt-3">{usage.models.map((model, index) => <div key={`${model.model}-${model.usage_type}-${index}`} className="border-t border-subtle pt-3">
@@ -417,7 +418,9 @@ function QuotaCandidateLedger({ candidates: configuredCandidates, quotaChecks }:
                                 <div className="flex items-baseline justify-between gap-2 tabular-nums mb-2"><span>{formatQuotaPercent(percentages.used)} used</span><span className="font-semibold text-primary">{formatQuotaPercent(percentages.remaining)} remaining</span></div>
                                 <progress className={`usage-progress router-quota-progress ${percentages.remaining < 20 ? 'text-critical' : percentages.remaining < 60 ? 'text-warning' : 'text-good'}`} max={100} value={percentages.remaining} aria-label={`${label}: ${formatQuotaPercent(percentages.used)} used, ${formatQuotaPercent(percentages.remaining)} remaining`} />
                               </>
-                            ) : !observation.account_usage && <p className="text-muted">No usage percentage available</p>}
+                            ) : observation.account_usage
+                              ? observation.quota_window === 'vibe-code-included-monthly' && <p className="text-muted mt-4">Monthly allowance reading unavailable</p>
+                              : <p className="text-muted">No usage percentage available</p>}
                             <p className="mt-2 text-muted">{observation.account_usage && !percentages ? `source: ${observation.usage_source ?? 'Unknown'}` : formatQuotaMetadata(observation)}</p>
                             <p className="mt-1 text-muted">{formatAge(observation.observed_at) ? `Observed ${formatAge(observation.observed_at)}` : 'No observation time'}</p>
                           </div>
