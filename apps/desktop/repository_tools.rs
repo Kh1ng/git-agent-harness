@@ -1,6 +1,4 @@
 //! Detect repository CLI packages before asking the user to authenticate.
-#[cfg(not(any(windows, target_os = "macos")))]
-use super::command;
 use super::local_only;
 use serde::Serialize;
 
@@ -35,12 +33,23 @@ fn repository_tool_installed(program: &str) -> bool {
             program,
         ])
         .output();
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let output = command("which").arg(program).output();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     return output.is_ok_and(|output| output.status.success());
+    // `which` is not guaranteed on minimal Linux images, so search PATH here.
+    #[cfg(not(any(windows, target_os = "macos")))]
+    return std::env::var_os("PATH").is_some_and(|paths| path_has_executable(&paths, program));
     #[cfg(target_os = "macos")]
     super::open_project::which(program).is_some()
+}
+
+/// Minimal `which` for Linux: find an executable file named `program` in `paths`.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn path_has_executable(paths: &std::ffi::OsStr, program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(paths).any(|dir| {
+        std::fs::metadata(dir.join(program))
+            .is_ok_and(|meta| meta.is_file() && (meta.permissions().mode() & 0o111) != 0)
+    })
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -68,5 +77,36 @@ mod tests {
         assert!(!super::repository_tool_installed(
             "gah-missing-repository-tool"
         ));
+    }
+}
+
+#[cfg(all(test, not(any(windows, target_os = "macos"))))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn path_search_finds_only_executable_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "gah-repository-tools-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("gah-path-search-tool");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let plain = dir.join("gah-path-search-plain");
+        std::fs::write(&plain, "not executable").unwrap();
+        let paths = std::env::join_paths([&dir, dir.join("missing")]).unwrap();
+        assert!(super::path_has_executable(&paths, "gah-path-search-tool"));
+        assert!(!super::path_has_executable(&paths, "gah-path-search-plain"));
+        assert!(!super::path_has_executable(
+            &paths,
+            "gah-path-search-missing"
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
