@@ -9,7 +9,6 @@ import {
   Timer,
   GitMerge,
   AlertTriangle,
-  ShieldAlert,
   Play,
   Square
 } from 'lucide-react';
@@ -20,11 +19,10 @@ import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
 import { StatTile } from '../components/ui/StatTile.js';
 import { StatusBadge, classificationTone } from '../components/ui/StatusBadge.js';
-import { BlockedWorkItems } from '../components/BlockedWorkItems.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { formatPercent, formatAge, formatLocalTime, isStale, formatTokens, formatCount, oldestFetchedAt } from '../lib/format.js';
-import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
+import { AttentionTable, attentionRows } from '../components/AttentionTable.js';
 import { LiveAgentsCard } from '../components/LiveAgentsCard.js';
 
 type OverviewPageProps = {
@@ -107,6 +105,7 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {} }: Ov
   const reviewHeldWorkIds = snapshot?.review_held_work_ids ?? [];
   // Native issue prerequisites that block autonomous intake.
   const dependencyBlockers = snapshot?.dependency_blockers ?? [];
+  const attention = attentionRows({ blockers, dependencyBlockers, blockedWorkItems, reviewHeldWorkIds });
   const needsReviewMrs = (snapshot?.merge_requests ?? []).filter((m) => m.classification === 'NEEDS_REVIEW');
   const recentMerges = (snapshot?.merge_requests ?? []).filter((m) => m.classification === 'MERGED').slice(0, 5);
   const unavailableBackends = (quotaSnapshot?.candidates ?? []).filter((c) => !c.eligible_now);
@@ -169,56 +168,7 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {} }: Ov
       <LiveAgentsCard profile={profile ?? null} sessions={sessions} controllerRuns={controllerActivity}
         claims={snapshot?.active_claims ?? []} candidates={quotaSnapshot?.candidates ?? []} />
 
-      {(blockers.length > 0 || blockedWorkItems.length > 0 || reviewHeldWorkIds.length > 0 || dependencyBlockers.length > 0) && (
-        <div className="card-padded border-warning/30">
-          <h3 className="text-sm font-semibold text-primary mb-3 flex items-center gap-2">
-            <ShieldAlert size={16} className="text-warning" aria-hidden="true" />
-            Needs attention
-          </h3>
-          <ul className="space-y-2">
-            {blockers.map((b, i) => (
-              <li key={`blocker-${i}`} className="flex items-start gap-2 text-sm">
-                <StatusBadge tone="critical" label={b.kind.replace(/_/g, ' ')} />
-                <span className="text-secondary">{b.message || b.reason || 'Unknown'} — blocks all work</span>
-              </li>
-            ))}
-            {dependencyBlockers.map((dep, i) => (
-              <li key={`dependency-${i}`} className="flex items-start gap-2 text-sm">
-                <StatusBadge tone="warning" label="Dependency blocked" />
-                <span className="text-secondary">
-                  {dep.work_id}{dep.title ? ` — ${dep.title}` : ''}{dep.reason ? `: ${dep.reason}` : ''}
-                  {dep.dependencies.length > 0 && (
-                    <span className="ml-1 text-xs">
-                      (blocked on: {(dep.dependencies.filter(d => d.normalized_state !== 'closed').length > 0
-                        ? dep.dependencies.filter(d => d.normalized_state !== 'closed')
-                        : dep.dependencies
-                      ).map(d => `${d.identity} [${d.normalized_state}]`).join(', ')})
-                    </span>
-                  )}
-                </span>
-              </li>
-            ))}
-            {blockedWorkItems.length > 0 && (
-              <li>
-                <p className="text-xs font-medium text-secondary mb-2">
-                  Blocked work items — each carries its remediation plan:
-                </p>
-                <BlockedWorkItems blockers={blockedWorkItems} onOpenWork={onOpenWork} />
-              </li>
-            )}
-            {reviewHeldWorkIds.map((workId) => (
-              <li key={`review-hold-${workId}`} className="flex items-start gap-2 text-sm">
-                <StatusBadge tone="warning" label="Review hold" />
-                <span className="text-secondary">Manager review hold active on {workId}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <ControllerActivityCard activity={controllerActivity} />
-      </div>
+      {attention.length > 0 && <AttentionTable rows={attention} onOpenWork={onOpenWork} />}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <section>

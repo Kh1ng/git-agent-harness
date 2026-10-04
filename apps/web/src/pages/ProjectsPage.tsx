@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { CircleDot, ExternalLink, GitPullRequest, MessageSquare, Plus } from 'lucide-react';
+import { CircleDot, ExternalLink, GitPullRequest, MessageSquare } from 'lucide-react';
 import { ExternalAnchor } from '../components/ExternalAnchor';
 import type { ChatIssueSummary, ChatPrSummary, ChatSessionSummary } from '@git-agent-harness/contracts';
 import { useWebSocket } from '../ws/WebSocketContext.js';
@@ -8,12 +8,10 @@ import { toChatProfile, useChatProfiles } from '../hooks/useChatProfiles.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { ProjectRail } from '../components/ProjectRail.js';
-import { NewChatPanel } from '../components/NewChatPanel.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { BoundedCollection } from '../components/BoundedCollection.js';
 import { DEFAULT_CONVERSATION_ID, updateNavigation, type Page } from '../lib/navigationState.js';
 import { gahApi } from '../api/client.js';
-import type { ManagerBackendInfo } from '@git-agent-harness/contracts';
 
 /**
  * Where conversations come from (#1199): every project, its open and
@@ -40,11 +38,9 @@ export function ProjectsPage({ onNavigate }: { onNavigate: (page: Page) => void 
   const [workError, setWorkError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [retryEpoch, setRetryEpoch] = useState(0);
-  const [backends, setBackends] = useState<ManagerBackendInfo[]>([]);
   const [backend, setBackend] = useState<string>('');
   const [starting, setStarting] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
-  const [newChatOpen, setNewChatOpen] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
 
   const remote = current?.remote ?? false;
@@ -66,10 +62,9 @@ export function ProjectsPage({ onNavigate }: { onNavigate: (page: Page) => void 
     gahApi.getManagerChatSettings()
       .then((settings) => {
         if (cancelled) return;
-        setBackends(settings.availableBackends);
         setBackend(settings.profileOverrides[profile] ?? settings.defaultBackend);
       })
-      .catch(() => { if (!cancelled) setBackends([]); });
+      .catch(() => { /* The default backend stays unset; starting a chat then uses the server default. */ });
     return () => { cancelled = true; };
   }, [profile, reconnectSeq]);
 
@@ -135,11 +130,6 @@ export function ProjectsPage({ onNavigate }: { onNavigate: (page: Page) => void 
         lastUpdated={lastUpdated}
         onRefresh={() => { refreshSessions(); setRetryEpoch((value) => value + 1); }}
         refreshing={workLoading}
-        actions={
-          <button type="button" onClick={() => setNewChatOpen(true)} disabled={!isConnected || profiles.length === 0} className="btn-primary">
-            <Plus size={15} aria-hidden="true" /> New chat
-          </button>
-        }
       />
 
       <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[19rem_minmax(0,1fr)]">
@@ -165,19 +155,6 @@ export function ProjectsPage({ onNavigate }: { onNavigate: (page: Page) => void 
         </div>
 
         <section className="min-w-0 space-y-4" aria-label={`${projectLabel} work`}>
-          {newChatOpen && (
-            <NewChatPanel
-              currentProfile={profile}
-              profiles={profiles}
-              backends={backends}
-              onClose={() => setNewChatOpen(false)}
-              onCreated={(createdProfile, sessionId) => {
-                setProfileOverride(createdProfile);
-                updateNavigation({ profile: createdProfile, chat: sessionId });
-                onNavigate('chat');
-              }}
-            />
-          )}
           <div className="card-padded">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0">

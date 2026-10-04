@@ -13,6 +13,8 @@ export interface LiveAccount {
   id: string;
   name: string;
   backend: string;
+  /** The subscription or billing provider behind the account (openai, anthropic, antigravity…). */
+  provider: string | null;
   model: string | null;
   enabled: boolean;
   /** Why the account cannot take work, when it cannot. */
@@ -27,6 +29,8 @@ export interface LiveAgentRow {
   name: string;
   /** Backend and model, or a controller run's action. */
   detail: string | null;
+  provider: string | null;
+  model: string | null;
   state: LiveState;
   /** Work id of a busy row. */
   job: string | null;
@@ -70,6 +74,7 @@ export function liveAccounts(instances: BackendInstanceSummary[], candidates: Qu
       id: instance.backend_instance,
       name: instance.account_label ?? instance.backend_instance,
       backend: instance.logical_backend,
+      provider: instance.credential_provider ?? null,
       model: instance.supported_models[0] ?? null,
       enabled: instance.enabled,
       notReady: unhealthy ? instance.resolution_error ?? 'not ready' : null,
@@ -85,12 +90,14 @@ export function liveAccounts(instances: BackendInstanceSummary[], candidates: Qu
       existing.resumes = existing.resumes ?? resumes;
       existing.pausedReason = existing.pausedReason ?? (resumes ? candidate.reason ?? null : null);
       if (!existing.model) existing.model = candidate.model;
+      if (!existing.provider) existing.provider = candidate.provider ?? null;
       continue;
     }
     accounts.set(id, {
       id,
       name: id,
       backend: candidate.backend,
+      provider: candidate.provider ?? null,
       model: candidate.model,
       // A candidate is in the routing lists by definition; only a declared instance can be disabled.
       enabled: true,
@@ -112,6 +119,7 @@ interface LiveJob {
   since: string | null;
   backend: string | null;
   instance: string | null;
+  model: string | null;
   action: string | null;
 }
 
@@ -139,7 +147,7 @@ export function buildLiveRows(input: {
     if (!['starting', 'running', 'stopping'].includes(session.status)) continue;
     if (session.target) covered.add(session.target);
     jobs.push({ key: `session:${session.id}`, workId: session.target ?? null, mode: session.mode ?? null, since: session.startedAt ?? null,
-      backend: sessionBackend(session), instance: session.instanceId || null, action: null });
+      backend: sessionBackend(session), instance: session.instanceId || null, model: session.model ?? null, action: null });
   }
   for (const run of input.controllerRuns) {
     if (run.status !== 'running' || (run.work_id && covered.has(run.work_id))) continue;
@@ -147,14 +155,14 @@ export function buildLiveRows(input: {
     const ledger = run.work_id ? input.ledgers[run.work_id] : null;
     const [mode] = run.action.split(':');
     jobs.push({ key: `run:${run.run_id}`, workId: run.work_id, mode: ledger?.mode ?? (mode && !mode.includes(' ') ? mode : null), since: run.started_at,
-      backend: ledger?.effective_backend ?? ledger?.backend ?? null, instance: null, action: run.action });
+      backend: ledger?.effective_backend ?? ledger?.backend ?? null, instance: null, model: ledger?.effective_model ?? null, action: run.action });
   }
   for (const claim of input.claims) {
     if (covered.has(claim.work_id)) continue;
     covered.add(claim.work_id);
     const ledger = input.ledgers[claim.work_id];
     jobs.push({ key: `claim:${claim.work_id}`, workId: claim.work_id, mode: ledger?.mode ?? claim.scope, since: claim.claimed_at,
-      backend: ledger?.effective_backend ?? ledger?.backend ?? null, instance: null, action: null });
+      backend: ledger?.effective_backend ?? ledger?.backend ?? null, instance: null, model: ledger?.effective_model ?? null, action: null });
   }
   const claimAge = (workId: string | null) => (workId ? input.claims.find((claim) => claim.work_id === workId)?.age_seconds ?? null : null);
   const state = (job: LiveJob): LiveState => (job.mode && GATE_MODES.has(job.mode) ? 'gates' : 'working');
@@ -168,7 +176,9 @@ export function buildLiveRows(input: {
     rows.push({
       key: account.id,
       name: account.name,
-      detail: [account.backend, account.model].filter(Boolean).join(' · ') || null,
+      detail: account.backend,
+      provider: account.provider,
+      model: job?.model ?? account.model,
       state: job ? state(job) : !account.enabled ? 'halted' : account.notReady ? 'down' : account.resumes ? 'paused' : 'idle',
       job: job?.workId ?? null,
       mode: job?.mode ?? null,
@@ -184,6 +194,8 @@ export function buildLiveRows(input: {
       key: job.key,
       name: job.instance ?? job.backend ?? 'controller',
       detail: job.action ?? job.backend,
+      provider: null,
+      model: job.model,
       state: state(job),
       job: job.workId,
       mode: job.mode,
@@ -222,11 +234,17 @@ function LiveRow({ row, now, ledger }: { row: LiveAgentRow; now: number; ledger:
       <span className={`mt-1.5 h-2.5 w-2.5 rounded-full ${dot.className} ${dot.pulse ? 'motion-safe:animate-pulse' : ''}`} role="img" aria-label={dot.label} />
       <div className="min-w-0">
         <p className="truncate text-sm font-semibold text-primary" title={row.name}>{row.name}</p>
-        {row.detail && <p className="truncate text-[11px] text-muted" title={row.detail}>{row.detail}</p>}
+        {row.detail && row.detail !== row.name && <p className="truncate text-[11px] text-muted" title={row.detail}>{row.detail}</p>}
       </div>
       <div className="min-w-0">
         <p className="text-sm tabular-nums text-secondary">{line}</p>
-        {edits && <p className="truncate text-xs tabular-nums text-muted">{edits}</p>}
+        <p className="truncate text-xs tabular-nums text-muted">
+          {row.provider && <span className="rounded bg-raised px-1.5 py-0.5 text-[11px] text-secondary" title="Subscription">{row.provider}</span>}
+          {row.provider && (row.model || edits) ? ' ' : ''}
+          {row.model && <span title="Model">{row.model}</span>}
+          {row.model && edits ? ' · ' : ''}
+          {edits}
+        </p>
       </div>
     </li>
   );
@@ -289,6 +307,9 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
   }, [busyJobs]);
 
   const busy = rows.filter((row) => row.state === 'working' || row.state === 'gates').length;
+  // Busy, paused and broken accounts need a look; idle subscriptions wait below in grey.
+  const active = rows.filter((row) => row.state !== 'idle');
+  const idle = rows.filter((row) => row.state === 'idle');
   const lastRun = controllerRuns.filter((run) => run.status !== 'running')
     .sort((a, b) => Date.parse(b.finished_at ?? b.started_at) - Date.parse(a.finished_at ?? a.started_at))[0];
   return (
@@ -306,9 +327,23 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
       ) : rows.length === 0 ? (
         <p className="text-sm text-muted">No agent accounts configured for this profile and nothing running.</p>
       ) : (
-        <ul className="divide-y divide-subtle" aria-label="Agents">
-          {rows.map((row) => <LiveRow key={row.key} row={row} now={now} ledger={row.job ? ledgers[row.job] : null} />)}
-        </ul>
+        <>
+          {active.length > 0 ? (
+            <ul className="divide-y divide-subtle" aria-label="Agents">
+              {active.map((row) => <LiveRow key={row.key} row={row} now={now} ledger={row.job ? ledgers[row.job] : null} />)}
+            </ul>
+          ) : (
+            <p className="text-sm text-muted">Nothing is running; every subscription is idle.</p>
+          )}
+          {idle.length > 0 && (
+            <div className="mt-3 border-t border-subtle pt-2 opacity-70">
+              <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">Idle subscriptions ({idle.length})</h4>
+              <ul className="divide-y divide-subtle" aria-label="Idle subscriptions">
+                {idle.map((row) => <LiveRow key={row.key} row={row} now={now} ledger={null} />)}
+              </ul>
+            </div>
+          )}
+        </>
       )}
       {lastRun && (
         <p className="mt-2 truncate text-xs text-muted" title={lastRun.outcome ?? lastRun.action}>
