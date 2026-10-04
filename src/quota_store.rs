@@ -508,8 +508,8 @@ pub fn refresh_claude_and_store(state_path: &Path) -> Result<Option<QuotaObserva
 /// endpoint: Codex's app-server is a local CLI call, but
 /// vibe's is a real network call against the Mistral Admin API with its own
 /// rate limits. Best-effort: a refresh failure (backend not installed, no
-/// `MISTRAL_ADMIN_API_KEY`) must not fail the loop tick, so errors are
-/// swallowed here, not propagated.
+/// `MISTRAL_ADMIN_API_KEY`) must not abort the auto-refresh oneshot run, so errors are
+/// recorded per source rather than propagated.
 ///
 /// Returns the spawned refresh threads (one per backend that was actually
 /// due and not already in flight) so a caller that must outlive them -- the
@@ -890,12 +890,41 @@ mod tests {
         assert!(QUOTA_REFRESH_INTERVAL < tick);
         assert!(tick < QUOTA_FRESHNESS);
         let (_dir, path) = tmp_store();
-        let start = OffsetDateTime::now_utc();
+        let start = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
+        let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            "test-tick-cadence",
+            None::<String>,
+            None::<String>,
+        );
         for n in 0..4 {
-            maybe_refresh_backend(&path, "test-tick-cadence", start + tick * n, || Ok(None))
-                .unwrap_or_else(|| panic!("tick {n} was throttled"))
-                .join()
+            let now = start + tick * n;
+            if n > 0 {
+                assert!(
+                    crate::routing::subscription::capacity(&identity, &load(&path).unwrap(), now)
+                        .known_capacity,
+                    "capacity must stay known before tick {n} refreshes"
+                );
+            }
+            let refresh_path = path.clone();
+            maybe_refresh_backend(&path, "test-tick-cadence", now, move || {
+                let reading: QuotaObservationRecord = serde_json::from_value(serde_json::json!({
+                    "backend": "test-tick-cadence", "quota_window": "weekly",
+                    "quota_remaining_percent": 50, "observed_at": now.format(&Rfc3339).unwrap(),
+                    "checked_at": now.format(&Rfc3339).unwrap(),
+                    "quota_reset_at": (start + time::Duration::days(7)).format(&Rfc3339).unwrap()
+                }))
                 .unwrap();
+                append(&refresh_path, &reading)?;
+                Ok(Some(reading))
+            })
+            .unwrap_or_else(|| panic!("tick {n} was throttled"))
+            .join()
+            .unwrap();
+            assert!(
+                crate::routing::subscription::capacity(&identity, &load(&path).unwrap(), now)
+                    .known_capacity,
+                "capacity must be known after tick {n} refreshes"
+            );
         }
     }
 

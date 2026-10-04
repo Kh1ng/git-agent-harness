@@ -3,7 +3,7 @@
 # Issue #761: runs gah-quota-refresh.service every 15 minutes so account-level
 # quota observations are populated automatically, independent of whether any
 # dispatch happens to succeed. The auto-refresh command applies its own
-# per-source 14-minute throttle internally, so every tick refreshes each
+# per-source 14-minute throttle internally (#1331), so every tick refreshes each
 # source and readings never pass the 30-minute routing freshness window.
 #
 # Install:
