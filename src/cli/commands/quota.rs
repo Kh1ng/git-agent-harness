@@ -108,9 +108,15 @@ pub fn run(command: QuotaCommands) -> Result<()> {
                 );
                 identity.backend_instance =
                     execution_identity::validate_operator_label("backend instance", &instance)?;
-                quota_store::refresh_codex_and_store_for_identity(&codex_cmd, &identity, &path)
+                quota_store::refresh_codex_and_store(
+                    &codex_cmd,
+                    model.as_deref(),
+                    Some(&identity),
+                    &[],
+                    &path,
+                )
             } else {
-                quota_store::refresh_codex_and_store(&codex_cmd, model.as_deref(), &path)
+                quota_store::refresh_codex_and_store(&codex_cmd, model.as_deref(), None, &[], &path)
             };
 
             match refreshed {

@@ -328,40 +328,38 @@ fn has_quota_data(record: &QuotaObservationRecord) -> bool {
         || record.account_usage.is_some()
 }
 
-/// #166: read Codex app-server account-level quota and append
-/// the result to the durable store. Returns the stored record when Codex
-/// reported quota data and an error when the request fails or has no quota data.
+/// #166: read every Codex app-server account window and append one row per
+/// window. `identity` scopes the rows to an explicit instance and pool;
+/// without it they are ambient account readings. `environment` isolates a
+/// named instance's login. Errors when the request fails or has no quota data.
 pub fn refresh_codex_and_store(
     codex_cmd: &str,
     model: Option<&str>,
+    identity: Option<&crate::execution_identity::ExecutionIdentity>,
+    environment: &[(String, String)],
     state_path: &Path,
 ) -> Result<Option<QuotaObservationRecord>> {
-    let obs = crate::usage::refresh_codex_quota(codex_cmd, model)
-        .map_err(|e| anyhow::anyhow!("Codex app-server quota check failed: {e}"))?;
-    match obs {
-        Some(obs) => {
-            let rec = QuotaObservationRecord {
-                backend: obs.backend.clone(),
-                backend_instance: None,
-                model: obs.model.clone(),
-                quota_pool: None,
-                quota_window: obs.quota_window.clone(),
-                quota_used_percent: obs.quota_used_percent,
-                quota_remaining_percent: obs.quota_remaining_percent,
-                quota_reset_at: obs.quota_reset_at.clone(),
-                observed_at: obs.observed_at.clone(),
-                checked_at: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
-                check_error: None,
-                usage_source: obs.usage_source.clone(),
-                mistral_admin: None,
-                account_usage: None,
-                credential_id: None,
-            };
-            append(state_path, &rec)?;
-            Ok(Some(rec))
+    let records = crate::usage::refresh_codex_quota(codex_cmd, model, environment)
+        .map_err(|error| anyhow::anyhow!("Codex app-server quota check failed: {error}"))?;
+    append_scoped(state_path, records, identity)
+}
+
+/// Append a check's windows, scoped to `identity` when the source belongs to
+/// one explicit instance. Returns the first window for callers that report it.
+pub(crate) fn append_scoped(
+    state_path: &Path,
+    mut records: Vec<QuotaObservationRecord>,
+    identity: Option<&crate::execution_identity::ExecutionIdentity>,
+) -> Result<Option<QuotaObservationRecord>> {
+    for record in &mut records {
+        if let Some(identity) = identity {
+            record.backend = identity.logical_backend.clone();
+            record.backend_instance = Some(identity.backend_instance.clone());
+            record.quota_pool = identity.quota_pool.clone();
         }
-        None => Ok(None),
+        append(state_path, record)?;
     }
+    Ok(records.into_iter().next())
 }
 
 /// #154: refresh account-level Mistral Admin API data (aggregate usage,
@@ -448,46 +446,6 @@ pub(crate) fn refresh_vibe_admin_record(
     Ok(Some(rec))
 }
 
-/// Refresh and persist account quota for one explicit execution identity.
-pub fn refresh_codex_and_store_for_identity(
-    codex_cmd: &str,
-    identity: &crate::execution_identity::ExecutionIdentity,
-    state_path: &Path,
-) -> Result<Option<QuotaObservationRecord>> {
-    let observation =
-        crate::usage::refresh_codex_quota(codex_cmd, identity.effective_model.as_deref())
-            .map_err(|error| anyhow::anyhow!("Codex app-server quota check failed: {error}"))?;
-    let Some(observation) = observation else {
-        return Ok(None);
-    };
-    let record = record_from_codex_observation(observation, identity);
-    append(state_path, &record)?;
-    Ok(Some(record))
-}
-
-fn record_from_codex_observation(
-    observation: crate::ledger::summary::GroupQuotaObservation,
-    identity: &crate::execution_identity::ExecutionIdentity,
-) -> QuotaObservationRecord {
-    QuotaObservationRecord {
-        backend: identity.logical_backend.clone(),
-        backend_instance: Some(identity.backend_instance.clone()),
-        model: identity.effective_model.clone(),
-        quota_pool: identity.quota_pool.clone(),
-        quota_window: observation.quota_window,
-        quota_used_percent: observation.quota_used_percent,
-        quota_remaining_percent: observation.quota_remaining_percent,
-        quota_reset_at: observation.quota_reset_at,
-        observed_at: observation.observed_at,
-        checked_at: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
-        check_error: None,
-        usage_source: observation.usage_source,
-        mistral_admin: None,
-        account_usage: None,
-        credential_id: None,
-    }
-}
-
 /// Persist both native Claude allowance windows under the default account's
 /// explicit instance. Named Claude accounts cannot inherit these readings.
 pub fn refresh_claude_and_store(state_path: &Path) -> Result<Option<QuotaObservationRecord>> {
@@ -562,7 +520,7 @@ pub fn refresh_stale_quota_observations(
     if let Some(handle) = maybe_refresh_backend(store_path, "codex", now, {
         let codex_cmd = codex_cmd.clone();
         let path = store_path.to_path_buf();
-        move || refresh_codex_and_store(&codex_cmd, None, &path)
+        move || refresh_codex_and_store(&codex_cmd, None, None, &[], &path)
     }) {
         handles.push(handle);
     }

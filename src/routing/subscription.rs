@@ -217,6 +217,27 @@ pub fn handoff_routes(
 mod tests {
     use super::*;
     #[test]
+    fn codex_weekly_window_drives_pressure_and_an_empty_five_hour_window_exhausts() {
+        // #1334: both app-server windows reach routing independently.
+        let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
+        let identity = ExecutionIdentity::legacy_candidate("codex", None::<String>, None::<String>);
+        let response = |five_hour_used: u32| {
+            serde_json::json!({"rateLimits": {
+                "primary": {"usedPercent": five_hour_used, "windowDurationMins": 300,
+                    "resetsAt": (now + time::Duration::hours(2)).unix_timestamp()},
+                "secondary": {"usedPercent": 10, "windowDurationMins": 10080,
+                    "resetsAt": (now + time::Duration::days(1)).unix_timestamp()}
+            }})
+        };
+        let windows = crate::usage::codex_rate_limit_windows(&response(40), None, now);
+        let open = capacity(&identity, &windows, now);
+        assert!(open.known_capacity && !open.exhausted);
+        assert!(open.reset_pressure.is_some_and(|pressure| pressure > 1.0));
+        let windows = crate::usage::codex_rate_limit_windows(&response(100), None, now);
+        assert!(capacity(&identity, &windows, now).exhausted);
+    }
+
+    #[test]
     fn failed_account_checks_and_retired_credentials_remove_capacity() {
         let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
         let mut identity =
