@@ -500,9 +500,11 @@ pub fn refresh_claude_and_store(state_path: &Path) -> Result<Option<QuotaObserva
 
 /// Issue #761: nothing refreshed this store periodically -- only a human
 /// running `gah quota refresh` by hand did, so account-level quota data
-/// went stale for days even while dispatch itself was active. Called once
-/// per `gah loop` tick (see `controller::runtime::run_once`), throttled to
-/// `QUOTA_REFRESH_INTERVAL_SECONDS` per backend so this can't hammer either
+/// went stale for days even while dispatch itself was active. Called by
+/// `gah quota auto-refresh`, which the systemd timer and the dashboard server's
+/// scheduler both run every 15 minutes (not from `gah loop`; see
+/// `controller::runtime::probe`). Throttled to
+/// `QUOTA_REFRESH_INTERVAL` per source so this can't hammer either
 /// endpoint: Codex's app-server is a local CLI call, but
 /// vibe's is a real network call against the Mistral Admin API with its own
 /// rate limits. Best-effort: a refresh failure (backend not installed, no
@@ -511,8 +513,7 @@ pub fn refresh_claude_and_store(state_path: &Path) -> Result<Option<QuotaObserva
 ///
 /// Returns the spawned refresh threads (one per backend that was actually
 /// due and not already in flight) so a caller that must outlive them -- the
-/// dedicated `gah quota auto-refresh` oneshot CLI -- can join them; the
-/// fire-and-forget loop-tick caller simply drops the handles.
+/// dedicated `gah quota auto-refresh` oneshot CLI -- can join them.
 pub fn refresh_stale_quota_observations(
     profile: &crate::config::Profile,
     now: OffsetDateTime,
@@ -632,10 +633,14 @@ pub fn refresh_quota_observations_and_wait(
     count
 }
 
-/// How long a stale reading is trusted before another live check is worth
-/// the API/process cost. Conservative on purpose -- see the module-level
-/// doc comment on `refresh_stale_quota_observations`.
-const QUOTA_REFRESH_INTERVAL_SECONDS: i64 = 30 * 60;
+/// How long routing trusts an account reading (`routing::subscription::capacity`
+/// and live pacing). Older readings count as unknown capacity.
+pub const QUOTA_FRESHNESS: time::Duration = time::Duration::minutes(30);
+
+/// Minimum time between live checks of one source. It must stay below
+/// `QUOTA_FRESHNESS` minus the 15-minute scheduler tick, so every reading is
+/// replaced before routing stops trusting it (#1331).
+const QUOTA_REFRESH_INTERVAL: time::Duration = time::Duration::minutes(14);
 
 /// Refreshes run on detached threads so a provider check never delays a loop
 /// tick. Each provider call is bounded, and `IN_FLIGHT` prevents overlapping
@@ -689,7 +694,7 @@ fn maybe_refresh_source(
         .max();
     let due = match last_checked {
         None => true,
-        Some(last) => now - last > time::Duration::seconds(QUOTA_REFRESH_INTERVAL_SECONDS),
+        Some(last) => now - last > QUOTA_REFRESH_INTERVAL,
     };
     if !due {
         return None;
@@ -823,7 +828,7 @@ mod tests {
             "first call must actually refresh"
         );
 
-        // Ten minutes later, well inside QUOTA_REFRESH_INTERVAL_SECONDS.
+        // Ten minutes later, inside QUOTA_REFRESH_INTERVAL.
         let second = calls.clone();
         maybe_refresh_backend(
             &path,
@@ -865,7 +870,7 @@ mod tests {
         maybe_refresh_backend(
             &path,
             "test-refresh-again",
-            now + time::Duration::seconds(QUOTA_REFRESH_INTERVAL_SECONDS + 60),
+            now + QUOTA_REFRESH_INTERVAL + time::Duration::minutes(1),
             move || {
                 second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(None)
@@ -875,6 +880,23 @@ mod tests {
         .join()
         .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn every_fifteen_minute_tick_refreshes_before_routing_distrusts_the_reading() {
+        // #1331: a 30-minute throttle against a 30-minute freshness window
+        // skipped every other server tick, leaving routing blind half the hour.
+        let tick = time::Duration::minutes(15);
+        assert!(QUOTA_REFRESH_INTERVAL < tick);
+        assert!(tick < QUOTA_FRESHNESS);
+        let (_dir, path) = tmp_store();
+        let start = OffsetDateTime::now_utc();
+        for n in 0..4 {
+            maybe_refresh_backend(&path, "test-tick-cadence", start + tick * n, || Ok(None))
+                .unwrap_or_else(|| panic!("tick {n} was throttled"))
+                .join()
+                .unwrap();
+        }
     }
 
     #[test]
