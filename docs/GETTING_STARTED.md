@@ -90,7 +90,7 @@ code, so it cannot fall out of date.
 | --- | --- | --- |
 | git | Everything | Checks out your repositories and the work branches agents create. |
 | Rust toolchain (cargo) | Everything | Builds gah itself, and rebuilds it on every `gah update`. |
-| Node.js 20 or newer | Everything | Installs your agent CLI through npm, and runs the dashboard server and memory gateway. |
+| Node.js 22 or newer | Everything | Installs your agent CLI through npm, and runs the dashboard server and memory gateway. |
 | Your coding agent (Claude Code, Codex, or opencode) | Everything | The coding agent GAH runs for you. |
 | Your coding agent's login | Everything | The agent needs its own account to do any work. |
 | `gh` (GitHub) or `glab` (GitLab) | Everything | Reads issues and opens pull requests on your repositories. |
