@@ -49,3 +49,23 @@ fn watchdog_unit_runs_the_packaged_check_and_never_references_the_old_host_scrip
         );
     }
 }
+
+// No tracked unit may carry one machine's account or paths: `gah update`
+// installs these on every host, so host values are `%h` or `@GAH_*@` tokens.
+#[test]
+fn unit_templates_carry_no_host_specific_account_or_home() {
+    for entry in fs::read_dir("packaging/systemd").unwrap() {
+        let path = entry.unwrap().path();
+        let unit = fs::read_to_string(&path).unwrap();
+        for line in unit
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+        {
+            assert!(
+                !line.contains("/home/") && !line.starts_with("User=") || line == "User=@GAH_USER@",
+                "{}: {line}",
+                path.display()
+            );
+        }
+    }
+}

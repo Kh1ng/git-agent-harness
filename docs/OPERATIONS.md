@@ -157,14 +157,15 @@ the systemd unit: its control-group boundary additionally covers SIGKILL, when
 no in-process cleanup handler can run.
 
 The checked-in server template is
-`packaging/systemd/gah-server.service`. Before installing it, edit its `User`,
-`WorkingDirectory`, `GAH_CONFIG_PATH`, Node path, and `PATH` values for the
-host; its explicit toolchain `PATH` is required for dashboard-dispatched work.
-Then install it as a system service:
+`packaging/systemd/gah-server.service`. Its `User`, `WorkingDirectory`,
+`GAH_CONFIG_PATH`, Node path, and `PATH` are `@GAH_*@` tokens, so it is not a
+runnable unit as checked in; its explicit toolchain `PATH` is required for
+dashboard-dispatched work. `gah update --role central` fills the tokens in for
+the account and checkout it runs from and installs the result as a system
+service. Then enable it:
 
 ```bash
-sudo install -m 0644 packaging/systemd/gah-server.service /etc/systemd/system/gah-server.service
-sudo systemctl daemon-reload
+gah update --role central
 sudo systemctl enable --now gah-server
 ```
 

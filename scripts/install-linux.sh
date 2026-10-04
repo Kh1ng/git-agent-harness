@@ -217,7 +217,9 @@ case "${GAH_GATEWAY_MODE:-}" in
 esac
 
 if [ "$role" = "central" ]; then
-  sudo install -m 0644 packaging/systemd/gah-server.service /etc/systemd/system/gah-server.service
+  # `gah update` above already installed gah-server.service, rendered for this
+  # user and checkout. Never copy the template here: its @GAH_*@ tokens are
+  # not a runnable unit.
   sudo systemctl daemon-reload
   sudo systemctl enable --now gah-server.service
   sudo systemctl is-active --quiet gah-server.service

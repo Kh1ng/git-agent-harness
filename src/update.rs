@@ -9,7 +9,8 @@ use fs2::FileExt;
 use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
-use std::fs::{copy, create_dir_all, read_dir, File, OpenOptions};
+use std::fs::{copy, create_dir_all, read_dir, read_to_string, write, File, OpenOptions};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -436,22 +437,94 @@ fn copy_opencode_agent_configs(repo: &Path, config_home: &Path) -> Result<[PathB
 /// edit gah-loop@<profile>` drop-ins, so replacing this base template on every
 /// deterministic update is safe and prevents source/runtime ownership drift.
 fn copy_systemd_unit(repo: &Path, config_home: &Path, unit_file_name: &str) -> Result<PathBuf> {
-    let source = repo.join("packaging/systemd").join(unit_file_name);
-    if !source.is_file() {
-        bail!("systemd unit template is missing: {}", source.display());
-    }
+    let rendered = render_unit_template(repo, unit_file_name)?;
     let target = config_home.join("systemd/user").join(unit_file_name);
     let parent = target.parent().expect("systemd unit target has a parent");
     create_dir_all(parent)
         .with_context(|| format!("creating systemd user-unit directory {}", parent.display()))?;
-    copy(&source, &target).with_context(|| {
-        format!(
-            "installing systemd unit from {} to {}",
-            source.display(),
-            target.display()
-        )
-    })?;
+    write(&target, rendered)
+        .with_context(|| format!("installing systemd unit to {}", target.display()))?;
     Ok(target)
+}
+
+/// The values a unit template leaves as `@GAH_*@` tokens because systemd has
+/// no specifier for them: a system unit's `%h` is root's home, and neither the
+/// checkout nor a toolchain's bin directory is derivable from a specifier.
+/// Installing a template verbatim ran the server as the template author's
+/// account, which exists on no other machine (exit 217/USER).
+struct UnitHost {
+    user: String,
+    home: PathBuf,
+    repo: PathBuf,
+    cargo_bin: PathBuf,
+    node_bin: PathBuf,
+}
+
+impl UnitHost {
+    fn detect(repo: &Path) -> Result<Self> {
+        let user = match env::var("USER") {
+            Ok(user) if !user.is_empty() => user,
+            _ => captured(repo, "id", &["-un"])?,
+        };
+        let home = env::var_os("HOME")
+            .map(PathBuf::from)
+            .context("HOME is required to install GAH's systemd units")?;
+        let cargo_bin = installed_binary_path()?
+            .parent()
+            .expect("the installed binary path has a parent")
+            .to_path_buf();
+        let node_bin = env::var_os("PATH")
+            .and_then(|path| env::split_paths(&path).find(|dir| dir.join("node").is_file()))
+            .context("node is not on PATH; GAH's services need its location")?;
+        Ok(Self {
+            user,
+            home,
+            repo: repo.to_path_buf(),
+            cargo_bin,
+            node_bin,
+        })
+    }
+
+    fn render(&self, template: &str) -> Result<String> {
+        let mut rendered = template.to_string();
+        for (token, value) in [
+            ("@GAH_USER@", self.user.as_str().into()),
+            ("@GAH_HOME@", self.home.to_string_lossy()),
+            ("@GAH_REPO@", self.repo.to_string_lossy()),
+            ("@GAH_CARGO_BIN@", self.cargo_bin.to_string_lossy()),
+            ("@GAH_NODE_BIN@", self.node_bin.to_string_lossy()),
+        ] {
+            if !rendered.contains(token) {
+                continue;
+            }
+            // systemd splits Environment= and ExecStart= on whitespace and
+            // expands `%`; refuse rather than write a unit that means
+            // something else.
+            if value.is_empty() || value.contains(|c: char| c.is_whitespace() || c == '%') {
+                bail!("cannot write {token} into a systemd unit: unsupported value '{value}'");
+            }
+            rendered = rendered.replace(token, &value);
+        }
+        if let Some(line) = rendered.lines().find(|line| line.contains("@GAH_")) {
+            bail!("systemd unit template has an unknown token: {line}");
+        }
+        Ok(rendered)
+    }
+}
+
+/// Read a tracked unit template and fill in this host's values. Templates
+/// that only use systemd specifiers (`%h`, `%i`) pass through unchanged.
+fn render_unit_template(repo: &Path, unit_file_name: &str) -> Result<String> {
+    let source = repo.join("packaging/systemd").join(unit_file_name);
+    if !source.is_file() {
+        bail!("systemd unit template is missing: {}", source.display());
+    }
+    let template = read_to_string(&source)
+        .with_context(|| format!("reading systemd unit template {}", source.display()))?;
+    if !template.contains("@GAH_") {
+        return Ok(template);
+    }
+    UnitHost::detect(repo)?.render(&template)
 }
 
 /// Issue #894: keep the system-level control-plane unit in lockstep with the
@@ -473,14 +546,16 @@ fn install_server_unit_template(repo: &Path, server_service: &str) -> Result<Opt
     if !systemd_available() {
         return Ok(None);
     }
-    let source = repo.join("packaging/systemd/gah-server.service");
-    if !source.is_file() {
-        bail!("systemd unit template is missing: {}", source.display());
-    }
+    let rendered = render_unit_template(repo, "gah-server.service")?;
+    let mut staged = tempfile::NamedTempFile::new().context("staging the rendered server unit")?;
+    staged
+        .write_all(rendered.as_bytes())
+        .context("staging the rendered server unit")?;
     let target = PathBuf::from("/etc/systemd/system").join(server_service);
-    let source = source
+    let source = staged
+        .path()
         .to_str()
-        .context("systemd unit template path is not UTF-8")?;
+        .context("staged systemd unit path is not UTF-8")?;
     let target_arg = target
         .to_str()
         .context("systemd unit target path is not UTF-8")?;
@@ -821,7 +896,8 @@ mod tests {
         copy_opencode_agent_configs, ensure_clean, ensure_default_branch_checkout,
         install_prune_unit_template, install_quota_refresh_unit_template,
         install_server_unit_template, install_watchdog_unit_template, installed_binary_path,
-        resolve_web_deploy_root, run, stale_asset_names, HostRole, UpdateArgs, WEB_BUILD_ARGS,
+        resolve_web_deploy_root, run, stale_asset_names, HostRole, UnitHost, UpdateArgs,
+        WEB_BUILD_ARGS,
     };
     use crate::test_support::PathGuard;
     use std::collections::HashSet;
@@ -1073,11 +1149,16 @@ mod tests {
             perms.set_mode(0o755);
             std::fs::set_permissions(&systemctl, perms).unwrap();
         }
+        std::fs::write(bin_tmp.path().join("node"), "").unwrap();
         let _path_guard = PathGuard::set(bin_tmp.path().to_str().unwrap());
 
         let [service, timer] = install_prune_unit_template(repo).unwrap().unwrap();
         let service_text = std::fs::read_to_string(service).unwrap();
         assert!(service_text.contains("gah prune"));
+        // A user unit cannot switch accounts, and the checkout is this one.
+        assert!(!service_text.contains("User="), "{service_text}");
+        assert!(!service_text.contains("@GAH_"), "{service_text}");
+        assert!(service_text.contains(&format!("WorkingDirectory={}", repo.display())));
         assert!(service_text.contains("chatMaintenanceCli.js"));
         assert!(std::fs::read_to_string(timer)
             .unwrap()
@@ -1127,6 +1208,7 @@ mod tests {
         );
         let script_path = bin_tmp.path().join("sudo");
         std::fs::write(&script_path, script).unwrap();
+        std::fs::write(bin_tmp.path().join("node"), "").unwrap();
         // systemd_available() runs `systemctl --version`; without a fake
         // systemctl on PATH the unit install is skipped entirely (returns
         // None) and this test can't assert anything.
@@ -1159,6 +1241,64 @@ mod tests {
         assert!(record.contains("gah-server.service"), "{record}");
         assert!(record.contains("/etc/systemd/system"), "{record}");
         assert!(record.contains("daemon-reload"), "{record}");
+    }
+
+    /// The server unit is a system unit, so it must name the installing
+    /// account and its paths explicitly. Installing the template verbatim ran
+    /// it as the template author's account, which fails with 217/USER on
+    /// every other machine.
+    #[test]
+    fn unit_templates_are_rendered_for_the_installing_host() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let host = UnitHost {
+            user: "alice".into(),
+            home: "/home/alice".into(),
+            repo: "/srv/gah".into(),
+            cargo_bin: "/home/alice/.cargo/bin".into(),
+            node_bin: "/opt/node/bin".into(),
+        };
+        let server = host
+            .render(
+                &std::fs::read_to_string(repo.join("packaging/systemd/gah-server.service"))
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(server.contains("\nUser=alice\n"), "{server}");
+        assert!(server.contains("\nWorkingDirectory=/srv/gah\n"), "{server}");
+        assert!(server.contains("GAH_CONFIG_PATH=/home/alice/.config/gah/config.toml"));
+        assert!(server.contains("PATH=/home/alice/.cargo/bin:/opt/node/bin:"));
+        assert!(server.contains("\nExecStart=/opt/node/bin/node apps/server/dist/bin.js\n"));
+
+        let prune = host
+            .render(
+                &std::fs::read_to_string(repo.join("packaging/systemd/gah-prune.service")).unwrap(),
+            )
+            .unwrap();
+        assert!(
+            prune.contains("\nExecStart=/home/alice/.cargo/bin/gah prune\n"),
+            "{prune}"
+        );
+
+        for unit in [&server, &prune] {
+            assert!(!unit.contains("@GAH_"), "{unit}");
+            assert!(!unit.contains("khing"), "{unit}");
+        }
+    }
+
+    #[test]
+    fn unit_rendering_refuses_values_systemd_would_reinterpret() {
+        let host = UnitHost {
+            user: "alice".into(),
+            home: "/home/alice".into(),
+            repo: "/srv/my gah".into(),
+            cargo_bin: "/home/alice/.cargo/bin".into(),
+            node_bin: "/opt/node/bin".into(),
+        };
+        let error = host.render("WorkingDirectory=@GAH_REPO@\n").unwrap_err();
+        assert!(error.to_string().contains("@GAH_REPO@"), "{error}");
+        assert!(host.render("User=@GAH_NOPE@\n").is_err());
+        // Tokens a template does not use are never validated.
+        assert_eq!(host.render("User=@GAH_USER@\n").unwrap(), "User=alice\n");
     }
 
     #[test]

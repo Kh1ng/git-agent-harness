@@ -12,7 +12,9 @@
 # npm/npx equivalent) unless PATH is set explicitly here -- read-only CLI
 # calls (`gah status`, `gah report`, ...) don't need this and will appear
 # to work fine even when it's missing, which is what let this go unnoticed.
-# Adjust the cargo/node paths below to match your actual toolchain install.
+# The placeholders between `@` signs below are host values (user, home, checkout, Cargo and
+# Node bin directories); `gah update --role central` fills them in for the
+# machine it runs on.
 #
 # HOST/PORT (issue #643): the app defaults HOST to 0.0.0.0 and PORT to 3773.
 # Override either persistently by writing /etc/gah/server.env (not tracked in
@@ -23,10 +25,8 @@
 # Example /etc/gah/server.env:
 #   HOST=127.0.0.1
 #
-# Install:
-#   sudo cp gah-server.service /etc/systemd/system/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now gah-server.service
+# Install: `gah update --role central` renders this template and installs it
+# to /etc/systemd/system. Do not copy it by hand; the placeholders must be filled.
 [Unit]
 Description=Git Agent Harness API and WebSocket server
 After=network-online.target
@@ -34,17 +34,17 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=khing
-WorkingDirectory=/home/khing/workspace/agent-lab/repos/github/Kh1ng/git-agent-harness
+User=@GAH_USER@
+WorkingDirectory=@GAH_REPO@
 Environment=NODE_ENV=production
 Environment=PORT=3773
-Environment=GAH_CONFIG_PATH=/home/khing/.config/gah/config.toml
-Environment=PATH=/home/khing/.cargo/bin:/home/khing/.nvm/versions/node/v22.23.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=GAH_CONFIG_PATH=@GAH_HOME@/.config/gah/config.toml
+Environment=PATH=@GAH_CARGO_BIN@:@GAH_NODE_BIN@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Optional persistent override file; the leading "-" means systemd does not
 # fail the unit if it doesn't exist. Values here win over the Environment=
 # lines above since it's read after them.
 EnvironmentFile=-/etc/gah/server.env
-ExecStart=/home/khing/.nvm/versions/node/v22.23.1/bin/node apps/server/dist/bin.js
+ExecStart=@GAH_NODE_BIN@/node apps/server/dist/bin.js
 Restart=always
 RestartSec=5
 KillSignal=SIGTERM
