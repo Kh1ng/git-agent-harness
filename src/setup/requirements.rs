@@ -146,7 +146,9 @@ pub enum Status {
     Outdated {
         found: String,
     },
-    NotLoggedIn,
+    NotLoggedIn {
+        reason: String,
+    },
     /// Cannot be provided on this machine (e.g. no systemd).
     Unsupported {
         reason: String,
@@ -275,7 +277,9 @@ fn login_status(host: &dyn Host, program: &str, args: &[&str]) -> Status {
     if health.state == AuthState::Ok {
         Status::Ok { found: None }
     } else {
-        Status::NotLoggedIn
+        Status::NotLoggedIn {
+            reason: health.detail.unwrap_or_else(|| "not logged in".to_string()),
+        }
     }
 }
 
@@ -362,14 +366,18 @@ pub fn requirements(selection: &Selection, host: &dyn Host) -> Vec<Requirement> 
         feature: Feature::Core,
         optional: false,
         status: if !agent_installed {
-            Status::NotLoggedIn
+            Status::NotLoggedIn {
+                reason: "agent CLI is missing".to_string(),
+            }
         } else {
             match agent {
                 Agent::Claude => login_status(host, "claude", &["auth", "status", "--json"]),
                 Agent::Codex => login_status(host, "codex", &["login", "status"]),
                 Agent::Opencode => match host.probe("opencode", &["auth", "list"]) {
                     Some(probe) if probe.stdout.contains('●') => Status::Ok { found: None },
-                    _ => Status::NotLoggedIn,
+                    _ => Status::NotLoggedIn {
+                        reason: "not logged in".to_string(),
+                    },
                 },
             }
         },
@@ -427,7 +435,9 @@ pub fn requirements(selection: &Selection, host: &dyn Host) -> Vec<Requirement> 
         status: if provider_installed {
             login_status(host, cli, &["auth", "status"])
         } else {
-            Status::NotLoggedIn
+            Status::NotLoggedIn {
+                reason: "provider CLI is missing".to_string(),
+            }
         },
         action: Some(Action {
             kind: ActionKind::Login,
@@ -757,7 +767,7 @@ pub(crate) mod tests {
                 found: "v18.19.0".into()
             }
         );
-        assert_eq!(status("agent_login"), Status::NotLoggedIn);
+        assert!(matches!(status("agent_login"), Status::NotLoggedIn { .. }));
         assert!(status("provider_login").is_ok());
     }
 

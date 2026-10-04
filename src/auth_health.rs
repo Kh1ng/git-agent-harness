@@ -115,14 +115,14 @@ pub fn classify_status_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Au
         String::from_utf8_lossy(stderr)
     )
     .to_lowercase();
+    if success && said_logged_in(&lower) {
+        return AuthHealth::new(AuthState::Ok, None);
+    }
     if said_expired(&lower) {
         return AuthHealth::new(AuthState::Expired, Some("The saved login has expired."));
     }
     if said_logged_out(&lower) {
         return AuthHealth::new(AuthState::Missing, Some("Not logged in."));
-    }
-    if success && said_logged_in(&lower) {
-        return AuthHealth::new(AuthState::Ok, None);
     }
     if success {
         AuthHealth::new(
@@ -485,6 +485,13 @@ mod tests {
                 "You are not logged into any GitHub hosts. To log in, run: gh auth login\n"
             ),
             AuthState::Missing
+        );
+        assert_eq!(
+            text(
+                true,
+                "github.com\n  ✓ Logged in to github.com account octo (keyring)\n\nYou are not logged into any GitHub Enterprise Server hosts.\n"
+            ),
+            AuthState::Ok
         );
     }
 

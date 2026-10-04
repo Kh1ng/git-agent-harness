@@ -65,7 +65,7 @@ function statusText(status: SetupStatus): string {
     case 'ok': return status.found ? `found ${status.found}` : 'ready';
     case 'missing': return 'missing';
     case 'outdated': return `too old (found ${status.found})`;
-    case 'not_logged_in': return 'not logged in';
+    case 'not_logged_in': return status.reason ?? 'not logged in';
     case 'unsupported': return status.reason ?? 'not supported here';
   }
 }
