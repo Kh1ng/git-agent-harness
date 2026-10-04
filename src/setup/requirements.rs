@@ -324,18 +324,21 @@ pub fn requirements(selection: &Selection, host: &dyn Host) -> Vec<Requirement> 
         }),
         help: Some("https://rustup.rs"),
     });
+    let agent = selection.agent;
+    let min_node = match agent {
+        Agent::Claude => 22,
+        _ => 20,
+    };
     list.push(Requirement {
         id: "node",
-        label: "Node.js 20 or newer".into(),
+        label: format!("Node.js {min_node} or newer"),
         why: "Installs your agent CLI through npm, and runs the dashboard server and memory gateway.",
         feature: Feature::Core,
         optional: false,
-        status: command_status(host, "node", &["--version"], Some((20, 0))),
+        status: command_status(host, "node", &["--version"], Some((min_node, 0))),
         action: Some(Action { kind: ActionKind::Install, command: NODE_INSTALL.into(), sudo: false }),
         help: Some("https://nodejs.org/en/download"),
     });
-
-    let agent = selection.agent;
     let agent_status = command_status(host, agent.command(), &["--version"], None);
     let agent_installed = agent_status.is_ok();
     list.push(Requirement {
@@ -821,5 +824,18 @@ pub(crate) mod tests {
         let json = serde_json::to_value(report(selection(Role::CliOnly), &host)).unwrap();
         assert_eq!(json["requirements"][0]["status"]["state"], "missing");
         assert_eq!(json["selection"]["role"], "cli_only");
+    }
+
+    #[test]
+    fn node_20_is_rejected_because_claude_acp_requires_22() {
+        let host = FakeHost::new(Os::Linux, None).with("node --version", true, "v20.20.1");
+        let list = requirements(&selection(Role::CliOnly), &host);
+        let status = list.iter().find(|r| r.id == "node").unwrap().status.clone();
+        assert_eq!(
+            status,
+            Status::Outdated {
+                found: "v20.20.1".into()
+            }
+        );
     }
 }
