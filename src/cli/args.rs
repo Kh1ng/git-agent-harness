@@ -573,6 +573,8 @@ pub enum ConfigCommands {
         node_role: Option<crate::node_role::NodeRole>,
         #[arg(long)]
         registry_central_url: Option<String>,
+        #[arg(long, action = clap::ArgAction::Set)]
+        factory_module: Option<bool>,
         /// Clear the specified field(s).
         #[arg(long, value_delimiter = ',')]
         clear: Vec<String>,

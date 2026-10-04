@@ -175,16 +175,24 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         println!("Installed macOS LaunchAgent: {}", agent.display());
     }
 
-    match install_loop_unit_template(&repo)? {
-        Some(loop_unit) => println!("Installed loop unit: {}", loop_unit.display()),
-        None if cfg!(target_os = "macos") => {
-            println!("macOS worker lifecycle is owned by its LaunchAgent.")
-        }
-        None => println!(
-            "systemd not available on this host: skipping gah-loop@.service install. \
+    let factory_module = crate::config::load(None)
+        .map(|cfg| cfg.defaults.factory_module)
+        .unwrap_or(true);
+
+    if !factory_module {
+        println!("Factory automation module is disabled; skipping gah-loop@.service install.");
+    } else {
+        match install_loop_unit_template(&repo)? {
+            Some(loop_unit) => println!("Installed loop unit: {}", loop_unit.display()),
+            None if cfg!(target_os = "macos") => {
+                println!("macOS worker lifecycle is owned by its LaunchAgent.")
+            }
+            None => println!(
+                "systemd not available on this host: skipping gah-loop@.service install. \
              Run `gah loop --profile <p>` directly, or wire it into whatever this host \
              uses for supervised long-running processes."
-        ),
+            ),
+        }
     }
     match install_watchdog_unit_template(&repo)? {
         Some(watchdog_units) => {

@@ -1779,6 +1779,7 @@ export function createServer(
         current_manager: req.body.current_manager,
         notification_channel: req.body.notification_channel,
         telegram_chat_id: req.body.telegram_chat_id,
+        factory_module: req.body.factory_module,
         clear: req.body.clear,
       };
       await runConfigSet(options);

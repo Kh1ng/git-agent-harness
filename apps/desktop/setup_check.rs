@@ -64,12 +64,13 @@ fn installed_gah() -> Option<String> {
     super::installed_gah().ok().map(|gah| shell_quote(&gah.to_string_lossy()))
 }
 
-fn setup_command(gah: Option<&str>, standalone: bool) -> String {
+fn setup_command(gah: Option<&str>, standalone: bool, factory: bool) -> String {
+    let env = if factory { STANDALONE_ENV.to_string() } else { format!("{} GAH_FACTORY_MODULE=0", STANDALONE_ENV) };
     match (gah, standalone) {
         (Some(gah), false) => format!("{gah} setup"),
-        (Some(gah), true) => format!("{STANDALONE_ENV} {gah} setup --role central --yes"),
+        (Some(gah), true) => format!("{env} {gah} setup --role central --yes"),
         (None, false) => BOOTSTRAP.to_string(),
-        (None, true) => BOOTSTRAP.replacen(" bash", &format!(" {STANDALONE_ENV} bash"), 1),
+        (None, true) => BOOTSTRAP.replacen(" bash", &format!(" {env} bash"), 1),
     }
 }
 
@@ -96,7 +97,7 @@ fn applescript_string(value: &str) -> String {
 pub async fn setup_check(window: tauri::WebviewWindow, role: Option<String>) -> Result<SetupCheck, String> {
     local_only(&window)?;
     let gah = installed_gah();
-    let command_text = setup_command(gah.as_deref(), false);
+    let command_text = setup_command(gah.as_deref(), false, true);
     let terminal = true;
     let Some(gah) = gah else {
         return Ok(SetupCheck { installed: false, report: None, error: None, command: command_text, terminal });
@@ -122,10 +123,10 @@ pub async fn setup_check(window: tauri::WebviewWindow, role: Option<String>) -> 
 
 #[tauri::command]
 /// Returns the dashboard address saved for a standalone setup, else "".
-pub fn open_setup_terminal(window: tauri::WebviewWindow, standalone: Option<bool>) -> Result<String, String> {
+pub fn open_setup_terminal(window: tauri::WebviewWindow, standalone: Option<bool>, factory: Option<bool>) -> Result<String, String> {
     local_only(&window)?;
     let standalone = standalone.unwrap_or(false);
-    let line = setup_command(installed_gah().as_deref(), standalone);
+    let line = setup_command(installed_gah().as_deref(), standalone, factory.unwrap_or(true));
     if !open_terminal(&line) {
         return Err(format!("No terminal opened. Run this in a terminal: {line}"));
     }
@@ -256,9 +257,9 @@ mod tests {
         assert_eq!(shell_quote("/Users/o'neil/.cargo/bin/gah"), "'/Users/o'\"'\"'neil/.cargo/bin/gah'");
         assert!(BOOTSTRAP.contains("scripts/bootstrap.sh | GITHUB_TOKEN="));
         assert!(!BOOTSTRAP.contains('\n'), "Terminal runs it as one line");
-        assert!(setup_command(None, true).ends_with(&format!("GITHUB_TOKEN=\"$t\" {STANDALONE_ENV} bash")));
+        assert!(setup_command(None, true, true).ends_with(&format!("GITHUB_TOKEN=\"$t\" {STANDALONE_ENV} bash")));
         assert_eq!(
-            setup_command(Some("~/.cargo/bin/gah"), true),
+            setup_command(Some("~/.cargo/bin/gah"), true, true),
             format!("{STANDALONE_ENV} ~/.cargo/bin/gah setup --role central --yes")
         );
     }

@@ -238,6 +238,7 @@ pub struct ConfigProfileSummary {
 #[derive(serde::Serialize)]
 pub struct ConfigShowSummary {
     pub current_manager: Option<String>,
+    pub factory_module: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -246,6 +247,7 @@ pub struct ConfigShowFull {
     pub schema_version: u32,
     pub config_path: String,
     pub current_manager: Option<String>,
+    pub factory_module: bool,
     /// Issue #653: notification channel settings (no secrets — tokens and
     /// webhook URLs live in the environment).
     pub notifications: NotificationSettingsSummary,
@@ -459,6 +461,7 @@ fn build_profile_summary(
 pub fn config_show(cfg: &config::GahConfig) -> ConfigShowSummary {
     ConfigShowSummary {
         current_manager: cfg.defaults.current_manager.clone(),
+        factory_module: cfg.defaults.factory_module,
     }
 }
 
@@ -492,6 +495,7 @@ pub fn config_show_full(
         schema_version: CONFIG_SHOW_SCHEMA_VERSION,
         config_path: config_path.to_string_lossy().into_owned(),
         current_manager: cfg.defaults.current_manager.clone(),
+        factory_module: cfg.defaults.factory_module,
         notifications: NotificationSettingsSummary::from_defaults(&cfg.defaults),
         profiles,
     })
@@ -856,7 +860,10 @@ mod tests {
         let raw = config_show_json(&cfg).expect("json encoding should work");
         let payload: Value = serde_json::from_str(&raw).expect("json should parse");
 
-        assert_eq!(raw, r#"{"current_manager":"manager"}"#);
+        assert_eq!(
+            raw,
+            r#"{"current_manager":"manager","factory_module":true}"#
+        );
         assert_eq!(payload["current_manager"], "manager");
     }
 

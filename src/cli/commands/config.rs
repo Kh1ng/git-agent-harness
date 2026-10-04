@@ -42,6 +42,7 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             current_manager,
             node_role,
             registry_central_url,
+            factory_module,
             clear,
             notification_channel,
             telegram_chat_id,
@@ -62,6 +63,9 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             }
             if let Some(role) = node_role {
                 cfg.defaults.node_role = role;
+            }
+            if let Some(enabled) = factory_module {
+                cfg.defaults.factory_module = enabled;
             }
             if let Some(url) = registry_central_url {
                 cfg.defaults.registry_central_url = Some(url);

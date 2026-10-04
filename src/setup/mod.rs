@@ -145,6 +145,8 @@ impl wizard::Effects for SystemEffects {
 /// hidden prompt, so they stay out of shell history and process lists.
 #[derive(clap::Args)]
 pub struct Args {
+    #[arg(long, action = clap::ArgAction::Set)]
+    factory_module: Option<bool>,
     /// What this machine is for: central runs the dashboard.
     #[arg(long, value_enum)]
     role: Option<requirements::Role>,
@@ -221,6 +223,7 @@ pub fn run(args: Args) -> Result<()> {
         agent: args.agent,
         provider: args.provider,
         memory: args.memory,
+        factory_module: args.factory_module,
         project: args.project,
         central_url: args.central_url,
         gateway_url: args.gateway_url,

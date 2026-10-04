@@ -45,6 +45,7 @@ pub struct Options {
     pub agent: Option<Agent>,
     pub provider: Option<Provider>,
     pub memory: Option<MemoryMode>,
+    pub factory_module: Option<bool>,
     pub project: Option<PathBuf>,
     pub central_url: Option<String>,
     pub gateway_url: Option<String>,
@@ -189,6 +190,14 @@ impl<'a> Setup<'a> {
 
         // 4. Role-specific settings, checked before anything is built.
         let mut env = InstallEnv::default();
+        if let Some(enabled) = self.options.factory_module {
+            env.0.push((
+                "GAH_FACTORY_MODULE",
+                if enabled { "1" } else { "0" }.to_string(),
+            ));
+        } else if let Ok(val) = std::env::var("GAH_FACTORY_MODULE") {
+            env.0.push(("GAH_FACTORY_MODULE", val));
+        }
         let mut memory = MemoryMode::Off;
         match role {
             Role::Worker => self.worker_settings(&mut env)?,

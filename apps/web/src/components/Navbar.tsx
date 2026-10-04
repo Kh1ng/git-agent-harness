@@ -14,6 +14,7 @@ import {
   Orbit
 } from 'lucide-react';
 import type { Page } from '../App.js';
+import { useGahStore } from '../store/gahStore.js';
 
 type NavbarProps = {
   currentPage: Page;
@@ -37,9 +38,12 @@ const navItems: { id: Page; label: string; icon: typeof LayoutDashboard }[] = [
 ];
 
 function NavLinks({ currentPage, onSelect, activityUnreadCount = 0 }: { currentPage: Page; onSelect: (page: Page) => void; activityUnreadCount?: number }) {
+  const config = useGahStore((s) => s.config);
+  const factoryEnabled = config.data?.factory_module ?? true;
   return (
     <nav className="flex flex-col gap-0.5" aria-label="Primary">
       {navItems.map((item) => {
+        if (item.id === 'work' && !factoryEnabled) return null;
         const Icon = item.icon;
         const active = currentPage === item.id;
         return (

@@ -310,6 +310,7 @@ export function SettingsPage() {
         </SettingsSectionPanel>}
 
         {openSections.has('factory') && <SettingsSectionPanel id="factory">
+          <FactoryModuleToggle />
           <DispatchSettingsSection
             selectedName={selectedName}
             selected={selected}
@@ -1224,6 +1225,31 @@ function formatCandidateLabel(candidate: RoutingCandidateSummary): string {
 
 function formatList(values: string[]): string {
   return values.length > 0 ? values.join(', ') : 'any';
+}
+
+function FactoryModuleToggle() {
+  const config = useGahStore((s) => s.config);
+  const setConfig = useGahStore((s) => s.setConfig);
+  const [enabled, setEnabled] = useState(true);
+  useEffect(() => {
+    setEnabled(config.data?.factory_module ?? true);
+  }, [config.data?.factory_module]);
+  const handleSave = async (checked: boolean) => {
+    setEnabled(checked);
+    await setConfig({ factory_module: checked });
+  };
+  return (
+    <section className="card-padded max-w-md">
+      <h3 className="text-sm font-semibold text-primary mb-1">Factory Automation</h3>
+      <p className="text-xs text-muted mb-3">
+        Enable factory automation workflows, dashboard views, and recurring work loops.
+      </p>
+      <label className="flex items-center gap-2 text-sm text-primary cursor-pointer">
+        <input type="checkbox" checked={enabled} onChange={(e) => void handleSave(e.target.checked)} disabled={config.loading} />
+        Enable factory module
+      </label>
+    </section>
+  );
 }
 
 function GlobalManagerSection({ config, setConfig, clearConfigErrors }: GlobalManagerSectionProps) {

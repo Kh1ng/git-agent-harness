@@ -67,6 +67,12 @@ elif [ -n "${GAH_GATEWAY_MODE:-}" ]; then
 fi
 
 bash "$repo_root/scripts/configure-node-role.sh" "$role" "${gah_cli[@]}"
+if [ "${GAH_FACTORY_MODULE:-1}" = "0" ] || [ "${GAH_FACTORY_MODULE:-1}" = "false" ]; then
+  cargo run --bin gah -- config set --factory-module=false
+else
+  cargo run --bin gah -- config set --factory-module=true
+fi
+
 cargo run --bin gah -- update --repo "$repo_root" --role "$role"
 
 if [ "$role" = central ] && [ "${GAH_GATEWAY_MODE:-}" = colocated ]; then

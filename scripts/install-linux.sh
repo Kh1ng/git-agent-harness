@@ -27,6 +27,12 @@ esac
 # (generate-cli-capabilities) with no default-run set, so a bare
 # `cargo run` is ambiguous and errors instead of picking one.
 bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --bin gah --
+if [ "${GAH_FACTORY_MODULE:-1}" = "0" ] || [ "${GAH_FACTORY_MODULE:-1}" = "false" ]; then
+  cargo run --bin gah -- config set --factory-module=false
+else
+  cargo run --bin gah -- config set --factory-module=true
+fi
+
 cargo run --bin gah -- update --repo "$repo_root" --role "$role"
 
 # MagicDNS is useful only when this client accepts the tailnet DNS settings.

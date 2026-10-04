@@ -1152,6 +1152,7 @@ export async function runProfileRemove(options: ProfileRemoveOptions): Promise<v
 // ---------------------------------------------------------------------------
 
 export interface ConfigSetOptions {
+  factory_module?: boolean;
   current_manager?: string | null;
   /** Issue #653: none | telegram | discord. */
   notification_channel?: string;
@@ -1162,6 +1163,10 @@ export interface ConfigSetOptions {
 
 export function buildConfigSetArgs(options: ConfigSetOptions): string[] {
   const args = ['config', 'set'];
+
+  if (options.factory_module !== undefined && options.factory_module !== null) {
+    args.push(`--factory-module=${options.factory_module.toString()}`);
+  }
 
   if (options.current_manager !== undefined && options.current_manager !== null) {
     args.push('--current-manager', options.current_manager);

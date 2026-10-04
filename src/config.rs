@@ -31,8 +31,10 @@ pub struct GahConfig {
     #[serde(default)]
     pub context: crate::context::ContextConfig,
 }
-
-#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+pub fn default_true() -> bool {
+    true
+}
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct Defaults {
     pub artifact_root: String,
@@ -48,6 +50,8 @@ pub struct Defaults {
     /// "who's on call" is a cross-project fact. `None`/unrecognized means no wake
     /// even if a profile has autonomy enabled.
     pub current_manager: Option<String>,
+    #[serde(default = "default_true")]
+    pub factory_module: bool,
     /// See `crate::network_exposure` module docs (issue #879).
     pub network_exposure: crate::network_exposure::NetworkExposureLevel,
     /// See `crate::network_exposure` module docs.
@@ -68,6 +72,30 @@ pub struct Defaults {
     /// Telegram chat to deliver to when the channel is `telegram`.
     #[serde(default)]
     pub telegram_chat_id: Option<String>,
+}
+
+impl Default for Defaults {
+    fn default() -> Self {
+        Self {
+            artifact_root: Default::default(),
+            worktree_base: Default::default(),
+            llm_base_url: Default::default(),
+            llm_model_local: Default::default(),
+            llm_model_cloud: Default::default(),
+            routing: Default::default(),
+            current_manager: None,
+            // Existing installs predate the toggle; keep factory automation on.
+            factory_module: true,
+            network_exposure: Default::default(),
+            lan_cidrs: Default::default(),
+            tailscale_cidr: None,
+            registry_central_url: None,
+            node_role: Default::default(),
+            registry_preflight_mode: Default::default(),
+            notification_channel: Default::default(),
+            telegram_chat_id: None,
+        }
+    }
 }
 
 impl Defaults {

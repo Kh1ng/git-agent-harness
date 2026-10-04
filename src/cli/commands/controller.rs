@@ -178,6 +178,9 @@ pub fn run_route_approval(command: RouteApprovalCommands) -> Result<()> {
 pub fn run_loop(args: LoopArgs) -> Result<()> {
     runner::install_shutdown_handler()?;
     let cfg = config::load(args.config_path.as_deref())?;
+    if !cfg.defaults.factory_module {
+        anyhow::bail!("Factory automation module is disabled. Use `gah config set --factory-module=true` to enable it.");
+    }
     let resolved_config_path = config::resolve_config_path(args.config_path.as_deref());
 
     // Issue #881: advisory only -- unset registry_central_url skips this
@@ -248,12 +251,18 @@ pub fn run_loop(args: LoopArgs) -> Result<()> {
 
 pub fn run_events(args: EventsArgs) -> Result<()> {
     let cfg = config::load(args.config_path.as_deref())?;
+    if !cfg.defaults.factory_module {
+        anyhow::bail!("Factory automation module is disabled. Use `gah config set --factory-module=true` to enable it.");
+    }
     events::run(&cfg, &args.since, args.profile.as_deref(), args.json)?;
     Ok(())
 }
 
 pub fn run_status(args: StatusArgs) -> Result<()> {
     let cfg = config::load(args.config_path.as_deref())?;
+    if !cfg.defaults.factory_module {
+        anyhow::bail!("Factory automation module is disabled. Use `gah config set --factory-module=true` to enable it.");
+    }
     if args.role {
         let node = crate::node_role::NodeRoleStatus::resolve(&cfg.defaults)?;
         if args.json {
@@ -280,6 +289,9 @@ pub fn run_status(args: StatusArgs) -> Result<()> {
 
 pub fn run_sync(args: SyncArgs) -> Result<()> {
     let cfg = config::load(args.config_path.as_deref())?;
+    if !cfg.defaults.factory_module {
+        anyhow::bail!("Factory automation module is disabled. Use `gah config set --factory-module=true` to enable it.");
+    }
     sync::run(&cfg, &args.profile, args.json)?;
     Ok(())
 }

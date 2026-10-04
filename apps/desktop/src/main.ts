@@ -115,6 +115,7 @@ async function refreshSetup(): Promise<boolean> {
   list.hidden = list.childElementCount === 0;
   button.hidden = !pending || !result.terminal;
   document.querySelector<HTMLElement>('#setup-standalone')!.hidden = button.hidden;
+  document.querySelector<HTMLElement>("#setup-factory-preference")!.hidden = button.hidden;
   document.querySelector<HTMLElement>('#standalone-note')!.hidden = button.hidden;
   commandLine.hidden = !pending || result.terminal;
   commandLine.querySelector('code')!.textContent = result.command;
@@ -211,7 +212,8 @@ document.querySelector('#setup-refresh')!.addEventListener('click', () => {
 });
 document.querySelector('#setup-standalone')!.addEventListener('click', () => {
   void perform(async () => {
-    central.value = await invoke<string>('open_setup_terminal', { standalone: true });
+    const factory = document.querySelector<HTMLInputElement>('#setup-factory-module')!.checked;
+    central.value = await invoke<string>('open_setup_terminal', { standalone: true, factory });
     nodeRole = 'central';
     standaloneStarted = true;
     document.querySelector('#setup-state')!.textContent = 'Standalone setup is running in Terminal. Select Check again when it finishes to open the dashboard.';
