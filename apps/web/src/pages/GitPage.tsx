@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import { GitBranch, GitCommit, GitPullRequest, ExternalLink } from 'lucide-react';
+import { FolderGit2, GitBranch, GitCommit, GitPullRequest, ExternalLink } from 'lucide-react';
 import { ExternalAnchor } from '../components/ExternalAnchor';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
-import { gahApi } from '../api/client.js';
+import { gahApi, type GitWorktreeSummary } from '../api/client.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { CommitPrDialog } from '../components/CommitPrDialog.js';
@@ -16,7 +16,7 @@ interface GitStatus { branch: string; changes: { status: string; path: string }[
 interface GitLog { commits: { hash: string; short: string; subject: string; author: string; ago: string }[] }
 interface GitPrs { prs: ChatPrSummary[]; warning?: string }
 
-type Tab = 'status' | 'log' | 'prs';
+type Tab = 'status' | 'worktrees' | 'log' | 'prs';
 
 export function GitPage() {
   const wsProfile = useWebSocket().profile;
@@ -31,6 +31,7 @@ export function GitPage() {
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [log, setLog] = useState<GitLog | null>(null);
   const [prs, setPrs] = useState<GitPrs | null>(null);
+  const [worktrees, setWorktrees] = useState<GitWorktreeSummary[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,14 +42,17 @@ export function GitPage() {
     setLoading(true);
     setError(null);
     try {
-      const [s, l, p] = await Promise.all([
+      const [s, l, p, w] = await Promise.all([
         gahApi.getGitStatus(profile),
         gahApi.getGitLog(profile, 20),
         gahApi.getGitPrs(profile),
+        // An older server has no worktree route; the rest of the page still loads.
+        gahApi.getGitWorktrees(profile).catch(() => null),
       ]);
       setStatus(s);
       setLog(l);
       setPrs(p);
+      setWorktrees(w ? w.worktrees.filter((worktree) => !worktree.main) : null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -62,6 +66,7 @@ export function GitPage() {
 
   const tabs: { id: Tab; label: string }[] = [
     { id: 'status', label: 'Status' },
+    { id: 'worktrees', label: worktrees?.length ? `Worktrees (${worktrees.length})` : 'Worktrees' },
     { id: 'log', label: 'Log' },
     { id: 'prs', label: 'Pull Requests' },
   ];
@@ -116,7 +121,13 @@ export function GitPage() {
             <span className="text-xs text-muted">{status.changes.length} changed file{status.changes.length !== 1 ? 's' : ''}</span>
           </div>
           {status.changes.length === 0 ? (
-            <EmptyState icon={GitBranch} title="Working tree clean" description="Nothing to commit." />
+            <EmptyState
+              icon={GitBranch}
+              title="Working tree clean"
+              description={worktrees?.length
+                ? `Nothing to commit in this checkout. Agents are working in ${worktrees.length} separate worktree${worktrees.length !== 1 ? 's' : ''}; see the Worktrees tab.`
+                : 'Nothing to commit.'}
+            />
           ) : (
             <div className="card overflow-hidden">
               <table className="table-base">
@@ -131,6 +142,58 @@ export function GitPage() {
                     <tr key={i}>
                       <td><span className="font-mono text-xs bg-raised px-1.5 py-0.5 rounded">{c.status}</span></td>
                       <td className="font-mono text-xs text-primary">{c.path}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'worktrees' && !worktrees && !loading && (
+        <EmptyState icon={FolderGit2} title="Worktrees unavailable" description="This server does not report worktrees yet. Update it to see them here." />
+      )}
+      {tab === 'worktrees' && worktrees && (
+        <div className="space-y-4">
+          <p className="text-xs text-muted">
+            Each agent job and chat works in its own copy of the repository. A clean worktree is removed automatically once its pull request is merged or closed.
+          </p>
+          {worktrees.length === 0 ? (
+            <EmptyState icon={FolderGit2} title="No worktrees" description="No agent job or chat has a worktree right now." />
+          ) : (
+            <div className="card overflow-hidden">
+              <table className="table-base">
+                <thead>
+                  <tr>
+                    <th>Branch</th>
+                    <th>Pull request</th>
+                    <th className="w-28">Changed files</th>
+                    <th>Path</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {worktrees.map((worktree) => (
+                    <tr key={worktree.path}>
+                      <td className="font-mono text-xs text-primary">{worktree.branch ?? `detached at ${worktree.head.slice(0, 8)}`}</td>
+                      <td className="text-sm text-primary">
+                        {worktree.pullRequest ? (
+                          <span className="inline-flex items-center gap-2">
+                            <span className="text-xs text-muted">#{worktree.pullRequest.number}</span>
+                            {worktree.pullRequest.title}
+                            {worktree.pullRequest.isDraft && <span className="text-xs text-muted">[draft]</span>}
+                            {worktree.pullRequest.url && (
+                              <ExternalAnchor href={worktree.pullRequest.url} className="text-muted hover:text-primary">
+                                <ExternalLink size={13} />
+                              </ExternalAnchor>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-muted">No open pull request</span>
+                        )}
+                      </td>
+                      <td className="text-xs text-secondary">{worktree.changedFiles === null ? 'unreadable' : worktree.changedFiles}</td>
+                      <td className="font-mono text-xs text-muted">{worktree.path}</td>
                     </tr>
                   ))}
                 </tbody>

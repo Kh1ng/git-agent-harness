@@ -28,6 +28,21 @@ interface GitLogResult {
   commits: { hash: string; short: string; subject: string; author: string; ago: string }[];
 }
 
+export interface GitWorktree {
+  path: string;
+  /** Null for a detached HEAD. */
+  branch: string | null;
+  head: string;
+  /** The profile's own checkout, as opposed to a linked job or chat worktree. */
+  main: boolean;
+  /** Null when the directory is gone or git could not read it. */
+  changedFiles: number | null;
+}
+
+interface GitWorktreesResult {
+  worktrees: GitWorktree[];
+}
+
 interface GitCommitResult {
   hash: string;
 }
@@ -183,6 +198,7 @@ export function cliInDir(bin: string, args: string[], cwd: string): { ok: boolea
 const gitStatusCache = new AsyncTtlCache<string, GitStatusResult>(DEFAULT_GIT_CACHE_TTL_MS);
 const gitBranchesCache = new AsyncTtlCache<string, GitBranchesResult>(DEFAULT_GIT_CACHE_TTL_MS);
 const gitLogCache = new AsyncTtlCache<string, GitLogResult>(DEFAULT_GIT_CACHE_TTL_MS);
+const gitWorktreesCache = new AsyncTtlCache<string, GitWorktreesResult>(DEFAULT_GIT_CACHE_TTL_MS);
 
 function statusCacheKey(profile: string, sessionId?: string): string {
   return sessionId ? `${profile}:${sessionId}` : profile;
@@ -219,6 +235,37 @@ export async function getGitBranchesCached(profile: string, cwd: string): Promis
     const branches = out.split('\n').filter(Boolean);
     const current = gitInDir(cwd, ['branch', '--show-current']).out.trim();
     return { branches, current };
+  });
+}
+
+/** Parses `git worktree list --porcelain`; the first entry is the main checkout. */
+export function parseWorktreeList(porcelain: string): Omit<GitWorktree, 'changedFiles'>[] {
+  return porcelain.split(/\n\s*\n/).flatMap((block, index) => {
+    const fields = new Map(block.split('\n').filter(Boolean).map((line) => {
+      const space = line.indexOf(' ');
+      return space === -1 ? [line, ''] as const : [line.slice(0, space), line.slice(space + 1)] as const;
+    }));
+    const path = fields.get('worktree');
+    if (!path || fields.has('bare')) return [];
+    const ref = fields.get('branch');
+    return [{ path, branch: ref ? ref.replace(/^refs\/heads\//, '') : null, head: fields.get('HEAD') ?? '', main: index === 0 }];
+  });
+}
+
+/**
+ * Cached worktrees of a profile's repository: its own checkout plus every
+ * linked worktree agents and chats work in, with a changed-file count each.
+ * Key: profile
+ */
+export async function getGitWorktreesCached(profile: string, cwd: string): Promise<GitWorktreesResult> {
+  return gitWorktreesCache.get(profile, async () => {
+    const { ok, out, err } = gitInDir(cwd, ['worktree', 'list', '--porcelain']);
+    if (!ok) throw new Error(err);
+    const worktrees = parseWorktreeList(out).map((worktree) => {
+      const status = gitInDir(worktree.path, ['status', '--porcelain']);
+      return { ...worktree, changedFiles: status.ok ? status.out.split('\n').filter(Boolean).length : null };
+    });
+    return { worktrees };
   });
 }
 

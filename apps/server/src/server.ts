@@ -112,7 +112,7 @@ import { timed } from './serverTiming.js';
 import type { AuthHealthMonitor, AuthHealthProber } from './authHealth.js';
 import { LoginRepairError, type LoginRepairBroker, type LoginRepairs, type RepairPrincipal } from './loginRepair.js';
 import { createWorkerChatRouter } from './workerChat.js';
-import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitReviewState, getReviewChangesForHelper, getSelectedChangesForHelper, commitGitChanges, cliInDir } from './gitCache.js';
+import { getGitStatusCached, getGitBranchesCached, getGitLogCached, getGitWorktreesCached, getGitReviewState, getReviewChangesForHelper, getSelectedChangesForHelper, commitGitChanges, cliInDir } from './gitCache.js';
 import { commitMessageInput, helperFallback, linkedIssueNumbers, prSummaryInput, publicSuggestion, readHelperUsage, recordHelperUsage, runHelperTask, type HelperTaskResult } from './managerChat/helperTasks.js';
 import { fetchLinkedChatIssues } from './managerChat/issueChats.js';
 import { createGitLabMergeRequest, findOpenPullRequest, publishPullRequest, updatePullRequest } from './gitPullRequest.js';
@@ -2516,6 +2516,25 @@ export function createServer(
     try {
       const result = await getGitBranchesCached(profile, cwd);
       res.json(result);
+    } catch (error) {
+      res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get('/api/git/worktrees', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    const cwd = await resolveLocalPath(profile);
+    if (!cwd) return res.status(404).json({ error: 'Profile not found' });
+    try {
+      const { worktrees } = await getGitWorktreesCached(profile, cwd);
+      // Best-effort: the list is still useful when the provider is unreachable.
+      const prs = await listManagerChatPrs(profile).catch(() => []);
+      res.json({
+        worktrees: worktrees.map((worktree) => {
+          const pr = worktree.branch ? prs.find((candidate) => candidate.headRefName === worktree.branch) : undefined;
+          return { ...worktree, pullRequest: pr ? { number: pr.number, title: pr.title, url: pr.url, isDraft: pr.isDraft } : null };
+        })
+      });
     } catch (error) {
       res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
     }
