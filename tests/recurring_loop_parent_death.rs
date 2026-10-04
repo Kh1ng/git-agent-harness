@@ -29,6 +29,14 @@ fn run_git(repo: &std::path::Path, args: &[&str]) {
     );
 }
 
+fn gah_command(gah: &str, root: &std::path::Path) -> Command {
+    let mut command = Command::new(gah);
+    command
+        .env("HOME", root.join("home"))
+        .env("GAH_CANONICAL_CONFIG", root.join("canonical.toml"));
+    command
+}
+
 fn wait_until_gone(pid: i32, description: &str) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while process_exists(pid) && Instant::now() < deadline {
@@ -134,6 +142,7 @@ validation_commands = ["true"]
         std::process::id()
     ));
     let gah = env!("CARGO_BIN_EXE_gah");
+    fs::create_dir_all(tmp.path().join("home")).unwrap();
     let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
     let launcher = r#"
 "$GAH_BIN" loop --profile test --config-path "$GAH_CONFIG" >"$GAH_LOG" 2>&1 &
@@ -153,7 +162,7 @@ exit 0
     let events_path = tmp.path().join("events.jsonl");
     let claims_path = tmp.path().join("work-claims.json");
     let mut unaffected = ProcessGroupGuard::new(
-        Command::new(gah)
+        gah_command(gah, tmp.path())
             .args([
                 "loop",
                 "--profile",
@@ -179,6 +188,8 @@ exit 0
     eprintln!("launcher log: {}", log_path.display());
     let status = Command::new("/bin/sh")
         .args(["-c", launcher])
+        .env("HOME", tmp.path().join("home"))
+        .env("GAH_CANONICAL_CONFIG", tmp.path().join("canonical.toml"))
         .env("GAH_BIN", gah)
         .env("GAH_CONFIG", &config)
         .env("GAH_LOG", &log_path)
@@ -221,7 +232,7 @@ exit 0
         log.contains("shutdown requested"),
         "loop did not exit gracefully: {log}"
     );
-    let claims = Command::new(gah)
+    let claims = gah_command(gah, tmp.path())
         .args([
             "claims",
             "list",
@@ -238,7 +249,7 @@ exit 0
     assert!(claims.status.success());
     let claims_json: serde_json::Value = serde_json::from_slice(&claims.stdout).unwrap();
     assert_eq!(claims_json.as_array().map(Vec::len), Some(0));
-    let once = Command::new(gah)
+    let once = gah_command(gah, tmp.path())
         .args([
             "loop",
             "--profile",

@@ -516,10 +516,6 @@ fn rpc_request(transport: &mut CodexTransport, method: &str, params: Value) -> R
     }
 }
 
-pub(crate) fn read_account_rate_limits(executable: &Path, timeout: Duration) -> Result<Value> {
-    read_account_rate_limits_with_env(executable, timeout, &[])
-}
-
 pub(crate) fn read_account_rate_limits_with_env(
     executable: &Path,
     timeout: Duration,

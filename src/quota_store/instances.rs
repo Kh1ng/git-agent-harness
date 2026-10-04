@@ -1,8 +1,8 @@
 //! Native OAuth probes use the explicitly isolated runner account, never a
 //! named API key's ambient login or a sibling's default state directory.
-use super::{append, maybe_refresh_backend_instance, QuotaObservationRecord};
+use super::{append_scoped, maybe_refresh_backend_instance};
 use crate::{config, execution_identity::ExecutionIdentity};
-use anyhow::{bail, Result};
+use anyhow::bail;
 use std::path::Path;
 use time::OffsetDateTime;
 
@@ -45,8 +45,12 @@ pub(super) fn refresh(
                     instance.quota_pool.as_deref(),
                 );
                 identity.backend_instance = instance_id;
-                let records = match instance.runner_kind.as_str() {
-                    "claude" => crate::usage::claude::refresh_directory(&root.join(".claude"))?,
+                match instance.runner_kind.as_str() {
+                    "claude" => append_scoped(
+                        &path,
+                        crate::usage::claude::refresh_directory(&root.join(".claude"))?,
+                        Some(&identity),
+                    ),
                     "codex" => {
                         let crate::runner::ExecutableResolution::Found(executable) =
                             crate::runner::resolve_backend_instance_executable(&instance)
@@ -60,39 +64,22 @@ pub(super) fn refresh(
                                 root.join(".codex").to_string_lossy().into_owned(),
                             ),
                         ];
-                        let Some(observation) = crate::usage::refresh_codex_quota_with_env(
+                        super::refresh_codex_and_store(
                             executable.to_string_lossy().as_ref(),
                             None,
+                            Some(&identity),
                             &environment,
-                        )?
-                        else {
-                            bail!("Codex account usage unavailable");
-                        };
-                        vec![super::record_from_codex_observation(observation, &identity)]
+                            &path,
+                        )
                     }
                     _ => unreachable!(),
-                };
-                store_records(&path, records, &identity)
+                }
             })
         {
             handles.push(handle);
         }
     }
     handles
-}
-
-fn store_records(
-    path: &Path,
-    mut records: Vec<QuotaObservationRecord>,
-    identity: &ExecutionIdentity,
-) -> Result<Option<QuotaObservationRecord>> {
-    for record in &mut records {
-        record.backend = identity.logical_backend.clone();
-        record.backend_instance = Some(identity.backend_instance.clone());
-        record.quota_pool = identity.quota_pool.clone();
-        append(path, record)?;
-    }
-    Ok(records.into_iter().next())
 }
 
 #[cfg(test)]

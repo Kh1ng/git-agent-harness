@@ -48,6 +48,16 @@ fn help_works() {
         .stdout(predicate::str::contains("git agent harness"));
 }
 
+/// The top-level version flag resolves and advertises the built version.
+#[test]
+fn version_works() {
+    super::bin()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+}
+
 /// `gah --help` enumerates every top-level subcommand so operators can
 /// discover the full surface.
 #[test]
@@ -137,7 +147,7 @@ fn profile_add_set_and_clear_preserve_max_open_managed_mrs() {
         ])
         .assert()
         .success();
-    let cfg = git_agent_harness::config::load(Some(config_path.to_str().unwrap())).unwrap();
+    let cfg = crate::support::load_config(Some(config_path.to_str().unwrap())).unwrap();
     assert_eq!(cfg.profiles["test"].max_open_managed_mrs, Some(7));
 
     super::bin()
@@ -152,7 +162,7 @@ fn profile_add_set_and_clear_preserve_max_open_managed_mrs() {
         ])
         .assert()
         .success();
-    let cfg = git_agent_harness::config::load(Some(config_path.to_str().unwrap())).unwrap();
+    let cfg = crate::support::load_config(Some(config_path.to_str().unwrap())).unwrap();
     assert_eq!(cfg.profiles["test"].max_open_managed_mrs, Some(3));
 
     super::bin()
@@ -167,7 +177,7 @@ fn profile_add_set_and_clear_preserve_max_open_managed_mrs() {
         ])
         .assert()
         .success();
-    let cfg = git_agent_harness::config::load(Some(config_path.to_str().unwrap())).unwrap();
+    let cfg = crate::support::load_config(Some(config_path.to_str().unwrap())).unwrap();
     assert_eq!(cfg.profiles["test"].max_open_managed_mrs, None);
 }
 

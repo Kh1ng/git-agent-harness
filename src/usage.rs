@@ -1,4 +1,3 @@
-use crate::ledger::summary::GroupQuotaObservation;
 use crate::ledger::{AttemptBehaviorMetrics, LedgerUsage};
 use regex::Regex;
 use serde_json::Value;
@@ -765,65 +764,6 @@ pub fn parse_codex_transcript_attribution(transcript: &str) -> LedgerUsage {
     usage
 }
 
-/// Parse the result from Codex app-server's `account/rateLimits/read`.
-/// Extracts rate-limit and quota data (primary/secondary windows, reset
-/// timestamps) into the quota fields of `LedgerUsage`. Returns an empty
-/// (all-`None`) `LedgerUsage` when the payload does not contain a
-/// `rateLimits` object.
-pub fn parse_codex_rate_limits_json(output: &str) -> LedgerUsage {
-    let Ok(root) = serde_json::from_str::<serde_json::Value>(output) else {
-        return LedgerUsage::default();
-    };
-
-    let Some(rate_limits) = root
-        .pointer("/rateLimitsByLimitId/codex")
-        .or_else(|| root.get("rateLimits"))
-        .or_else(|| root.pointer("/result/rateLimitsByLimitId/codex"))
-        .or_else(|| root.pointer("/result/rateLimits"))
-    else {
-        return LedgerUsage::default();
-    };
-
-    let mut usage = LedgerUsage::default();
-    let mut has_data = false;
-
-    if let Some(primary) = rate_limits.get("primary") {
-        if let Some(pct) = primary.get("usedPercent").and_then(|v| v.as_f64()) {
-            usage.quota_used_percent = Some(pct);
-            has_data = true;
-        }
-        if let Some(mins) = primary.get("windowDurationMins").and_then(|v| v.as_u64()) {
-            usage.quota_window = Some(format!("{}m", mins));
-            has_data = true;
-        }
-        if let Some(ts) = primary.get("resetsAt").and_then(|v| v.as_i64()) {
-            if let Ok(dt) = time::OffsetDateTime::from_unix_timestamp(ts) {
-                if let Ok(formatted) = dt.format(&time::format_description::well_known::Rfc3339) {
-                    usage.quota_reset_at = Some(formatted);
-                    has_data = true;
-                }
-            }
-        }
-    }
-
-    // `quota_remaining_percent` must be the complement of `quota_used_percent`
-    // for the *same* window (primary) -- it previously read `secondary`'s
-    // usedPercent instead, silently mixing a different quota window (e.g.
-    // Codex's 5h primary vs its weekly secondary) into what looked like one
-    // consistent used/remaining pair. `secondary` isn't represented in this
-    // single-row `LedgerUsage` shape yet; a real per-window breakdown is
-    // issue #166's job when it wires this into a live refresh path.
-    if let Some(pct) = usage.quota_used_percent {
-        usage.quota_remaining_percent = Some(100.0 - pct);
-    }
-
-    if has_data {
-        usage.usage_source = Some("codex_app_server".to_string());
-    }
-
-    usage
-}
-
 /// A real quota-window/quota-reset-at value is a short human string ("weekly",
 /// "5h", an ISO timestamp). `[^\n\r]+` alone is unbounded and backend log
 /// text is not always newline-delimited per logical line (e.g. a diff or
@@ -865,38 +805,66 @@ fn find_string_after(text: &str, keys: &[&str]) -> Option<String> {
     })
 }
 
-/// #166 (within #151): convert Codex app-server quota fields into a
-/// structured `GroupQuotaObservation`.
-///
-/// This is the real caller for `parse_codex_rate_limits_json` (which previously
-/// had no call site outside its own unit tests). Feeding the account-level
-/// rate-limit data through here — instead of the generic regex scraper — is
-/// exactly the cross-cutting ask in #151: "JSON where the source is JSON --
-/// don't regex-scrape a `--json` flag's own output."
-///
-/// Returns `None` when the payload carries no rate-limit/quota data (never
-/// fabricates a percentage; an absent quota reading stays unknown).
-pub fn codex_rate_limits_to_quota_observation(
-    output: &str,
-    backend: &str,
+/// Account windows from Codex app-server `account/rateLimits/read`: one record
+/// per window present. `primary` and `secondary` are independent limits (for
+/// example 5-hour and weekly), so neither may stand in for the other. Empty
+/// when the payload has no rate-limit data; nothing is fabricated.
+pub fn codex_rate_limit_windows(
+    response: &Value,
     model: Option<&str>,
-) -> Option<GroupQuotaObservation> {
-    let usage = parse_codex_rate_limits_json(output);
-    usage.usage_source.as_ref()?;
-    Some(GroupQuotaObservation {
-        backend: backend.to_string(),
-        model: model.map(|m| m.to_string()),
-        quota_window: usage.quota_window,
-        quota_used_percent: usage.quota_used_percent,
-        quota_remaining_percent: usage.quota_remaining_percent,
-        quota_reset_at: usage.quota_reset_at,
-        observed_at: usage.observed_at.or_else(|| {
-            time::OffsetDateTime::now_utc()
-                .format(&time::format_description::well_known::Rfc3339)
-                .ok()
-        }),
-        usage_source: usage.usage_source,
-    })
+    now: time::OffsetDateTime,
+) -> Vec<crate::quota_store::QuotaObservationRecord> {
+    use time::format_description::well_known::Rfc3339;
+    let Some(limits) = [
+        "/rateLimitsByLimitId/codex",
+        "/rateLimits",
+        "/result/rateLimitsByLimitId/codex",
+        "/result/rateLimits",
+    ]
+    .into_iter()
+    .find_map(|pointer| response.pointer(pointer)) else {
+        return Vec::new();
+    };
+    let observed_at = now.format(&Rfc3339).ok();
+    ["primary", "secondary"]
+        .into_iter()
+        .filter_map(|key| {
+            let window = limits.get(key)?;
+            let used = window
+                .get("usedPercent")
+                .and_then(Value::as_f64)
+                .filter(|used| (0.0..=100.0).contains(used));
+            let quota_window = window
+                .get("windowDurationMins")
+                .and_then(Value::as_u64)
+                .map(|minutes| format!("{minutes}m"));
+            let quota_reset_at = window
+                .get("resetsAt")
+                .and_then(Value::as_i64)
+                .and_then(|seconds| time::OffsetDateTime::from_unix_timestamp(seconds).ok())
+                .and_then(|reset| reset.format(&Rfc3339).ok());
+            if used.is_none() && quota_window.is_none() && quota_reset_at.is_none() {
+                return None;
+            }
+            Some(crate::quota_store::QuotaObservationRecord {
+                backend: "codex".into(),
+                credential_id: None,
+                backend_instance: None,
+                model: model.map(str::to_string),
+                quota_pool: None,
+                quota_window,
+                quota_used_percent: used,
+                quota_remaining_percent: used.map(|used| 100.0 - used),
+                quota_reset_at,
+                observed_at: observed_at.clone(),
+                checked_at: observed_at.clone(),
+                check_error: None,
+                usage_source: Some("codex_app_server".into()),
+                mistral_admin: None,
+                account_usage: None,
+            })
+        })
+        .collect()
 }
 
 /// How long the Codex app-server quota request gets before it's treated as hung and
@@ -908,51 +876,34 @@ pub fn codex_rate_limits_to_quota_observation(
 /// work; this is generous, not tight.
 const CODEX_QUOTA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// #166 (within #151): read account quota through Codex's supported
-/// `account/rateLimits/read` app-server method.
-///
-/// Provider/process failures and successful responses without rate-limit data
-/// are errors so the quota snapshot reports `failed` with a useful reason
-/// instead of a bare `no_data` marker.
+/// #166 (within #151): read every account window through Codex's supported
+/// `account/rateLimits/read` app-server method. `environment` isolates a named
+/// instance's login. Process failures and responses without rate-limit data
+/// are errors so the quota snapshot reports `failed` with a useful reason.
 pub fn refresh_codex_quota(
     codex_cmd: &str,
     model: Option<&str>,
-) -> std::io::Result<Option<GroupQuotaObservation>> {
-    refresh_codex_quota_with_env(codex_cmd, model, &[])
-}
-
-pub(crate) fn refresh_codex_quota_with_env(
-    codex_cmd: &str,
-    model: Option<&str>,
     environment: &[(String, String)],
-) -> std::io::Result<Option<GroupQuotaObservation>> {
-    let response = if environment.is_empty() {
-        crate::manager::codex::read_account_rate_limits(
-            std::path::Path::new(codex_cmd),
-            CODEX_QUOTA_TIMEOUT,
-        )
-    } else {
-        crate::manager::codex::read_account_rate_limits_with_env(
-            std::path::Path::new(codex_cmd),
-            CODEX_QUOTA_TIMEOUT,
-            environment,
-        )
+) -> anyhow::Result<Vec<crate::quota_store::QuotaObservationRecord>> {
+    let response = crate::manager::codex::read_account_rate_limits_with_env(
+        std::path::Path::new(codex_cmd),
+        CODEX_QUOTA_TIMEOUT,
+        environment,
+    )?;
+    let windows = codex_rate_limit_windows(&response, model, time::OffsetDateTime::now_utc());
+    if windows.is_empty() {
+        anyhow::bail!("Codex app-server returned no rate-limit data");
     }
-    .map_err(std::io::Error::other)?;
-    let output = serde_json::to_string(&response).map_err(std::io::Error::other)?;
-    codex_rate_limits_to_quota_observation(&output, "codex", model)
-        .map(Some)
-        .ok_or_else(|| std::io::Error::other("Codex app-server returned no rate-limit data"))
+    Ok(windows)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::codex_rate_limits_to_quota_observation;
+    use super::codex_rate_limit_windows;
     use super::extract_agy_output_summary;
     use super::parse_agy_cli_log_delta;
     use super::parse_agy_output_json;
     use super::parse_codex_exec_json;
-    use super::parse_codex_rate_limits_json;
     use super::parse_codex_transcript_attribution;
     use super::parse_generic_usage;
     use super::parse_opencode_session_metadata;
@@ -1064,59 +1015,59 @@ mod tests {
 
     const CODEX_RATE_LIMITS_JSON: &str = include_str!("../tests/fixtures/codex-status-json.json");
 
+    fn codex_windows(json: &str) -> Vec<crate::quota_store::QuotaObservationRecord> {
+        codex_rate_limit_windows(
+            &serde_json::from_str(json).unwrap(),
+            Some("gpt-5"),
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+    }
+
     #[test]
-    fn codex_rate_limits_json_extracts_quota_fields() {
-        let usage = parse_codex_rate_limits_json(CODEX_RATE_LIMITS_JSON);
-        assert_eq!(usage.quota_used_percent, Some(25.0));
-        // Must be the complement of quota_used_percent for the SAME
-        // (primary) window, not a mix-in of secondary's usedPercent.
-        assert_eq!(usage.quota_remaining_percent, Some(75.0));
-        assert_eq!(usage.quota_window.as_deref(), Some("300m"));
-        // 1777534802 -> 2026-04-29-ish (UTC)
-        assert!(usage.quota_reset_at.is_some());
-        assert_eq!(usage.usage_source.as_deref(), Some("codex_app_server"));
+    fn codex_rate_limits_keep_each_window_with_its_own_values() {
+        // #1334: secondary (weekly) used to be dropped, and before that its
+        // percent was mixed into the primary (5-hour) row.
+        let windows = codex_windows(CODEX_RATE_LIMITS_JSON);
+        let summary: Vec<_> = windows
+            .iter()
+            .map(|w| {
+                (
+                    w.quota_window.as_deref(),
+                    w.quota_used_percent,
+                    w.quota_remaining_percent,
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (Some("300m"), Some(25.0), Some(75.0)),
+                (Some("10080m"), Some(18.0), Some(82.0)),
+            ]
+        );
+        for window in &windows {
+            assert_eq!(window.backend, "codex");
+            assert_eq!(window.model.as_deref(), Some("gpt-5"));
+            assert_eq!(window.usage_source.as_deref(), Some("codex_app_server"));
+            assert!(window.quota_reset_at.is_some());
+            assert!(window.observed_at.is_some());
+        }
     }
 
     #[test]
     fn codex_app_server_response_prefers_the_named_codex_limit() {
-        let usage = parse_codex_rate_limits_json(
+        let windows = codex_windows(
             r#"{"rateLimits":{"primary":{"usedPercent":80,"windowDurationMins":300}},"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":7,"windowDurationMins":10080}},"codex_bengalfox":{"primary":{"usedPercent":99,"windowDurationMins":300}}}}"#,
         );
-        assert_eq!(usage.quota_used_percent, Some(7.0));
-        assert_eq!(usage.quota_remaining_percent, Some(93.0));
-        assert_eq!(usage.quota_window.as_deref(), Some("10080m"));
+        assert_eq!(windows.len(), 1, "a missing secondary is not fabricated");
+        assert_eq!(windows[0].quota_used_percent, Some(7.0));
+        assert_eq!(windows[0].quota_window.as_deref(), Some("10080m"));
     }
 
     #[test]
-    fn codex_rate_limits_json_returns_empty_for_non_json_input() {
-        let usage = parse_codex_rate_limits_json("not json at all");
-        assert_eq!(usage.usage_source, None);
-    }
-
-    #[test]
-    fn codex_rate_limits_json_returns_empty_for_missing_rate_limits() {
-        let usage = parse_codex_rate_limits_json(r#"{"some":"data"}"#);
-        assert_eq!(usage.usage_source, None);
-    }
-
-    #[test]
-    fn codex_rate_limits_to_quota_observation_maps_quota_fields() {
-        let obs =
-            codex_rate_limits_to_quota_observation(CODEX_RATE_LIMITS_JSON, "codex", Some("gpt-5"))
-                .expect("must produce an observation when rate-limit data exists");
-        assert_eq!(obs.backend, "codex");
-        assert_eq!(obs.model.as_deref(), Some("gpt-5"));
-        assert_eq!(obs.quota_used_percent, Some(25.0));
-        assert_eq!(obs.quota_remaining_percent, Some(75.0));
-        assert_eq!(obs.quota_window.as_deref(), Some("300m"));
-        assert_eq!(obs.usage_source.as_deref(), Some("codex_app_server"));
-        assert!(obs.observed_at.is_some());
-    }
-
-    #[test]
-    fn codex_rate_limits_to_quota_observation_is_none_without_data() {
-        let obs = codex_rate_limits_to_quota_observation(r#"{"some":"data"}"#, "codex", None);
-        assert!(obs.is_none());
+    fn codex_rate_limits_without_data_produce_no_windows() {
+        assert!(codex_windows(r#"{"some":"data"}"#).is_empty());
+        assert!(codex_windows(r#"{"rateLimits":{"primary":{},"secondary":null}}"#).is_empty());
     }
 
     // ── Existing generic parser tests ────────────────────────────────────

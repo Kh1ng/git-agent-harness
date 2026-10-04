@@ -1686,6 +1686,12 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   app.get('/api/git/log', (_req, res) => {
     res.json({ commits: [{ hash: '1111111111111111111111111111111111111111', short: '1111111', subject: 'Mock commit', author: 'GAH', ago: '1 minute ago' }] });
   });
+  app.get('/api/git/worktrees', (_req, res) => res.json({
+    worktrees: [
+      { path: '/workspace/mock', branch: 'main', head: 'a'.repeat(40), main: true, changedFiles: 0 },
+      { path: '/workspace/worktrees/gah-mock-1', branch: 'gah/mock-1', head: 'b'.repeat(40), main: false, changedFiles: 2 }
+    ]
+  }));
   app.get('/api/git/prs', (_req, res) => res.json({
     prs: state.gitPrs.map((pr) => ({ ...pr, body: state.gitPrBodies[pr.number] ?? null }))
   }));

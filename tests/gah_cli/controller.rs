@@ -761,7 +761,7 @@ fn loop_once_prunes_terminal_and_abandoned_open_worktrees_but_retains_live_claim
             .unwrap();
     }
 
-    let cfg = config::load(Some(cfg_path.to_str().unwrap())).unwrap();
+    let cfg = support::load_config(Some(cfg_path.to_str().unwrap())).unwrap();
     let profile = config::get_profile(&cfg, "real").unwrap();
     for (work_id, branch, mr_url) in [
         (
