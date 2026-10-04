@@ -81,7 +81,7 @@ pub enum QuotaCommands {
     },
     /// Refresh account-level quota for every configured profile's
     /// quota-tracked backends (codex, claude, vibe, nous, mistral-dashboard), throttled to one live check per
-    /// backend per interval (30 min) and bounded so a hung backend can never
+    /// source per interval (14 min) and bounded so a hung backend can never
     /// wedge the caller. Runs each due refresh to completion before exiting
     /// (it JOINS the refresh threads, unlike the fire-and-forget loop-tick
     /// probe), so a systemd oneshot timer can run it safely. Intended for

@@ -34,7 +34,7 @@ pub fn capacity(
         };
         if record.check_error.is_some()
             || observed > now
-            || now - observed > time::Duration::minutes(30)
+            || now - observed > crate::quota_store::QUOTA_FRESHNESS
         {
             continue;
         }
