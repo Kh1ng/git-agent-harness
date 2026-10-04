@@ -35,7 +35,7 @@ const WAKE_AUTONOMY_OPTIONS: { value: WakeAutonomyValue; label: string }[] = [
 const SETTINGS_INDEX: { heading: string; section: SettingsSectionId | null; keywords: string }[] = [
   { heading: 'Connection & pairing', section: null, keywords: 'access token device pair qr central server' },
   { heading: 'Profile context', section: null, keywords: 'profile repo project provider' },
-  { heading: 'Appearance', section: 'general', keywords: 'theme dark light nodes standalone navbar' },
+  { heading: 'Appearance', section: 'general', keywords: 'theme dark light nodes standalone navbar notifications popup bell' },
   { heading: 'Node readiness', section: 'general', keywords: 'doctor checks health authentication' },
   { heading: 'Global manager', section: 'general', keywords: 'manager wake autonomy' },
   { heading: 'Notification channel', section: 'general', keywords: 'notifications alerts telegram' },
@@ -53,7 +53,7 @@ const SETTINGS_INDEX: { heading: string; section: SettingsSectionId | null; keyw
 
 export function SettingsPage() {
   const { providers, providerStatuses, sendMessage, isConnected, serverVersion, profile } = useWebSocket();
-  const { theme, setTheme, showNodes, setShowNodes, profileOverride, setProfileOverride } = useUiStore();
+  const { theme, setTheme, showNodes, setShowNodes, notificationPopups, setNotificationPopups, profileOverride, setProfileOverride } = useUiStore();
   const profiles = useGahStore((s) => s.profiles);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
   const config = useGahStore((s) => s.config);
@@ -283,6 +283,13 @@ export function SettingsPage() {
           <span>
             Always show Nodes
             <span className="block text-xs text-muted">Nodes is hidden while this install is standalone (no worker nodes). Turn this on to add one.</span>
+          </span>
+        </label>
+        <label className="mt-3 flex items-start gap-2 text-sm text-primary">
+          <input type="checkbox" checked={notificationPopups} onChange={(event) => setNotificationPopups(event.target.checked)} className="mt-1" />
+          <span>
+            Pop up new notifications
+            <span className="block text-xs text-muted">A new notification opens under the bell for 3 seconds, then waits in the Notifications menu until you clear it.</span>
           </span>
         </label>
       </section>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   LayoutDashboard,
   ListChecks,
@@ -24,6 +24,12 @@ type NavbarProps = {
   /** Standalone installs have no worker nodes, so Nodes stays out of the way. */
   hideNodes?: boolean;
   activityUnreadCount?: number;
+  /** Chat is open, docked in the right sidebar or filling the main panel. */
+  chatOpen: boolean;
+  /** Desktop: the Chat button opens and closes the right sidebar. */
+  onChatToggle: () => void;
+  /** Right-aligned controls shared by the desktop and phone bars. */
+  actions?: ReactNode;
 };
 
 export const FRONTEND_BUILD = `v${__GAH_VERSION__} (${__GAH_COMMIT__})`;
@@ -36,9 +42,12 @@ const mainItems: NavItem<MainPage>[] = [
   { id: 'telemetry', label: 'Telemetry', icon: BarChart3 },
   { id: 'nodes', label: 'Nodes', icon: Server },
   { id: 'quota', label: 'Quota', icon: Gauge },
-  { id: 'planning', label: 'Planning', icon: Orbit },
-  { id: 'chat', label: 'Chat', icon: MessageSquare }
+  { id: 'planning', label: 'Planning', icon: Orbit }
 ];
+
+/** Chat is not a main-panel tab on desktop: its button sits at the right of
+ * the navbar and opens the right sidebar. The phone drawer lists it as a page. */
+const chatItem: NavItem<MainPage> = { id: 'chat', label: 'Chat', icon: MessageSquare };
 
 /** The left sidebar: each entry opens beside the main panel. */
 const sideItems: NavItem<SideView>[] = [
@@ -91,9 +100,9 @@ export function ActivityBar({ sideView, onToggle, activityUnreadCount = 0 }: {
   );
 }
 
-/** Desktop: a top navbar for the main panel. Mobile (<1024px): a top bar with
- * a hamburger that opens a slide-in drawer listing every page. */
-export function Navbar({ currentPage, sideView, onPageChange, hideNodes = false, activityUnreadCount = 0 }: NavbarProps) {
+/** Desktop: a top navbar for the main panel. Mobile (<1024px): the same bar
+ * with a hamburger that opens a slide-in drawer listing every page. */
+export function Navbar({ currentPage, sideView, onPageChange, hideNodes = false, activityUnreadCount = 0, chatOpen, onChatToggle, actions }: NavbarProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawer = useRef<HTMLDialogElement>(null);
 
@@ -118,10 +127,9 @@ export function Navbar({ currentPage, sideView, onPageChange, hideNodes = false,
 
   return (
     <>
-      {/* Desktop top navbar */}
-      <div className="hidden shrink-0 items-center gap-4 border-b border-subtle bg-card px-3 lg:flex">
+      <header className="mobile-app-header z-30 flex shrink-0 items-center gap-2 border-b border-subtle bg-card px-4 lg:min-h-0 lg:gap-4 lg:px-3">
         <h1 className="shrink-0 text-sm font-semibold tracking-tight text-primary">Git Agent Harness</h1>
-        <nav className="flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto" aria-label="Primary">
+        <nav className="hidden min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto lg:flex" aria-label="Primary">
           {items.map((item) => {
             const Icon = item.icon;
             const active = currentPage === item.id;
@@ -139,22 +147,23 @@ export function Navbar({ currentPage, sideView, onPageChange, hideNodes = false,
             );
           })}
         </nav>
-        <p className="shrink-0 font-mono text-[10px] text-muted" data-testid="frontend-build">{FRONTEND_BUILD}</p>
-      </div>
-
-      {/* Mobile top bar */}
-      <header className="mobile-app-header lg:hidden z-30 flex shrink-0 items-center justify-between px-4 bg-card border-b border-subtle">
-        <div>
-          <h1 className="text-sm font-semibold text-primary">Git Agent Harness</h1>
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          <button type="button" onClick={onChatToggle} aria-pressed={chatOpen}
+            className={`top-nav-link hidden rounded-md !border-b-0 !py-2 lg:flex ${chatOpen ? 'nav-link-active' : ''}`}>
+            <MessageSquare size={16} aria-hidden="true" />
+            Chat
+          </button>
+          {actions}
+          <p className="hidden font-mono text-[10px] text-muted lg:block" data-testid="frontend-build">{FRONTEND_BUILD}</p>
+          <button
+            onClick={() => setDrawerOpen(true)}
+            className="btn-secondary !min-h-11 !min-w-11 !px-2 lg:hidden"
+            aria-label="Open navigation menu"
+            aria-expanded={drawerOpen}
+          >
+            <Menu size={18} aria-hidden="true" />
+          </button>
         </div>
-        <button
-          onClick={() => setDrawerOpen(true)}
-          className="btn-secondary !min-h-11 !min-w-11 !px-2"
-          aria-label="Open navigation menu"
-          aria-expanded={drawerOpen}
-        >
-          <Menu size={18} aria-hidden="true" />
-        </button>
       </header>
 
       {/* Mobile drawer */}
@@ -186,7 +195,7 @@ export function Navbar({ currentPage, sideView, onPageChange, hideNodes = false,
           </button>
         </div>
         <nav className="flex flex-col gap-0.5" aria-label="Primary">
-          {[...items, ...sideItems].map((item) => {
+          {[...items, chatItem, ...sideItems].map((item) => {
             const Icon = item.icon;
             const active = sideView ? sideView === item.id : currentPage === item.id;
             return (

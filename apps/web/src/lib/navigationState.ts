@@ -9,7 +9,7 @@ export type MainPage = Exclude<Page, SideView>;
 export const isSideView = (page: Page): page is SideView => sideViews.some(view => view === page);
 
 /** `epic` is the issue number the Planning page maps; `map` a `.plan/maps/` slug instead. */
-type NavigationState = { page: MainPage; side: SideView | null; profile: string | null; chat: string | null; epic: string | null; map: string | null };
+type NavigationState = { page: MainPage; side: SideView | null; /** Chat open in the right sidebar. */ dock: 'chat' | null; profile: string | null; chat: string | null; epic: string | null; map: string | null };
 
 /** URLs restore a control surface and conversation, never credentials or commands. */
 export function readNavigation(search = window.location.search): NavigationState {
@@ -24,6 +24,7 @@ export function readNavigation(search = window.location.search): NavigationState
     // Links from before the sidebar name a sidebar view as the page.
     page: isSideView(page) ? 'overview' : page,
     side: sideViews.find(view => view === params.get('side')) ?? (isSideView(page) ? page : null),
+    dock: params.get('dock') === 'chat' && page !== 'chat' ? 'chat' : null,
     profile: validProfile,
     chat: validProfile && chat && /^[a-zA-Z0-9_-]{1,128}$/.test(chat) ? chat : null,
     epic: validProfile && epic && /^[1-9][0-9]{0,9}$/.test(epic) ? epic : null,
@@ -35,7 +36,7 @@ export function readNavigation(search = window.location.search): NavigationState
 export function updateNavigation(update: Partial<NavigationState>): void {
   const url = new URL(window.location.href);
   const next = { ...readNavigation(), ...update };
-  for (const key of ['page', 'side', 'profile', 'chat', 'epic', 'map'] as const) {
+  for (const key of ['page', 'side', 'dock', 'profile', 'chat', 'epic', 'map'] as const) {
     if (next[key]) url.searchParams.set(key, next[key]);
     else url.searchParams.delete(key);
   }
