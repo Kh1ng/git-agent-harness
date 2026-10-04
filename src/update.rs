@@ -25,6 +25,7 @@ pub struct UpdateArgs {
 }
 
 pub fn run(args: UpdateArgs) -> Result<()> {
+    units::UnitValues::ensure_installing_account()?;
     if args.role == HostRole::Worker && args.restart_server {
         bail!("--restart-server requires --role central; a worker never runs gah-server.service");
     }

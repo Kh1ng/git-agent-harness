@@ -183,11 +183,20 @@ case "${GAH_GATEWAY_MODE:-}" in
     node_dir="$(dirname "$(command -v node)")"
     gateway_unit_dst="$HOME/.config/systemd/user/tdai-memory-gateway.service"
     install -d -m 0755 "$(dirname "$gateway_unit_dst")"
-    sed \
-      -e "s|%h/workspace/agent-lab/repos/github/Kh1ng/TencentDB-Agent-Memory/MemoryCore|$GAH_GATEWAY_MEMORYCORE_PATH|g" \
-      -e "s|^Environment=PATH=.*|Environment=PATH=$node_dir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|" \
-      -e "s|^ExecStart=npx tsx|ExecStart=$node_dir/npx tsx|" \
-      packaging/systemd/tdai-memory-gateway.service > "$gateway_unit_dst"
+    # gateway-unit-render:start
+    python3 - "$GAH_GATEWAY_MEMORYCORE_PATH" "$node_dir" "$gateway_unit_dst" <<'PYTHON'
+import pathlib, sys
+
+template = pathlib.Path('packaging/gateway/tdai-memory-gateway.service').read_text()
+for placeholder, value in zip(('@MEMORYCORE@', '@NODE_DIR@'), sys.argv[1:3]):
+    if not pathlib.Path(value).is_absolute() or any(ord(c) < 32 or ord(c) == 127 or c in '\"\\$' for c in value):
+        raise SystemExit('Gateway paths must be absolute and contain no quotes, backslashes, dollar signs, or control characters')
+    if placeholder == '@NODE_DIR@' and ':' in value:
+        raise SystemExit('Gateway Node directory cannot contain a colon')
+    template = template.replace(placeholder, value.replace('%', '%%'))
+pathlib.Path(sys.argv[3]).write_text(template)
+PYTHON
+    # gateway-unit-render:end
     systemctl --user daemon-reload
     systemctl --user enable --now tdai-memory-gateway.service
 

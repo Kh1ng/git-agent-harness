@@ -16,9 +16,21 @@ pub(super) struct UnitValues {
 }
 
 impl UnitValues {
+    /// Reject sudo invocation rather than deploy root-owned user state or a
+    /// service that runs under an identity different from the invoking account.
+    pub(super) fn ensure_installing_account() -> Result<()> {
+        if env::var_os("SUDO_USER").is_some() {
+            bail!(
+                "run gah update without sudo; GAH requests sudo only for system unit installation"
+            );
+        }
+        Ok(())
+    }
+
     /// Resolve every value from the running account and its PATH, the same
     /// environment that just built the server.
     pub(super) fn resolve(repo: &Path) -> Result<Self> {
+        Self::ensure_installing_account()?;
         let user = Command::new("id")
             .arg("-un")
             .output()
@@ -156,9 +168,16 @@ mod tests {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             let template = std::fs::read_to_string(&path).unwrap();
-            for developer_value in ["khing", "/home/", ".nvm/versions"] {
+            for developer_value in [
+                "kh1ng",
+                "khing",
+                "/home/",
+                ".nvm/versions",
+                "%h/.cargo/bin/gah",
+                "/usr/local/bin/hermes",
+            ] {
                 assert!(
-                    !template.contains(developer_value),
+                    !template.to_lowercase().contains(developer_value),
                     "{} hardcodes {developer_value}",
                     path.display()
                 );
@@ -167,6 +186,55 @@ mod tests {
             assert!(!rendered.contains("@USER@") && !rendered.contains("@PATH@"));
             assert!(!rendered.contains("@NODE@") && !rendered.contains("@REPO@"));
             assert!(!rendered.contains("@CONFIG@") && !rendered.contains("@GAH@"));
+        }
+    }
+
+    #[test]
+    fn resolves_runtime_paths_from_the_installing_environment() {
+        let _exec = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("node");
+        std::fs::write(&node, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _path = crate::test_support::PathGuard::set(dir.path());
+        let resolved = UnitValues::resolve(dir.path()).unwrap();
+        assert_eq!(resolved.repo, dir.path().canonicalize().unwrap());
+        assert_eq!(resolved.node.as_deref(), Some(node.as_path()));
+        assert_eq!(resolved.gah, super::super::installed_binary_path().unwrap());
+        assert_eq!(resolved.config, crate::config::resolve_config_path(None));
+        assert!(resolved.user.is_some());
+        assert_eq!(
+            env::split_paths(&resolved.path).next().as_deref(),
+            Some(dir.path())
+        );
+        assert!(find_on_path("gah-uninstalled-test-binary").is_none());
+    }
+
+    #[test]
+    fn cli_units_use_the_resolved_binary() {
+        let mut values = values("/srv/tester");
+        values.gah = PathBuf::from("/opt/custom cargo/bin/gah");
+        for name in [
+            "gah-loop@.service",
+            "gah-quota-refresh.service",
+            "gah-watchdog.service",
+            "gah-prune.service",
+        ] {
+            let template = std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("packaging/systemd")
+                    .join(name),
+            )
+            .unwrap();
+            let rendered = render(&template, &values).unwrap();
+            assert!(
+                rendered.contains("ExecStart=\"/opt/custom cargo/bin/gah\""),
+                "{name}"
+            );
         }
     }
 

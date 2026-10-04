@@ -33,7 +33,7 @@ Environment=XDG_STATE_HOME=%h/.local/state
 EnvironmentFile=-%h/.config/gah/gah-loop.env
 EnvironmentFile=-%h/.config/gah/provider-keys.env
 Environment="PATH=@PATH@"
-ExecStart=%h/.cargo/bin/gah quota auto-refresh
+ExecStart="@GAH@" quota auto-refresh
 TimeoutStartSec=300
 StandardOutput=journal
 StandardError=journal

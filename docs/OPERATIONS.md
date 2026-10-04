@@ -143,7 +143,8 @@ of the prebuild gate issue.
   a blocker repair; that incident is exactly what this contract prevents. The
   timer is installed by `gah update`/`scripts/install.sh` alongside the loop
   unit but is never automatically enabled — opt in once you've configured an
-  alert command in `gah-watchdog.service`'s `ExecStart`:
+  alert command in a `systemctl --user edit gah-watchdog.service` drop-in.
+  The packaged check writes to the journal and requires no alert transport:
   ```bash
   systemctl --user enable --now gah-watchdog.timer
   ```
