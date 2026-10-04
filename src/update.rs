@@ -267,6 +267,7 @@ fn install_macos_launch_agent(repo: &Path, role: HostRole) -> Result<Option<Path
     };
     let role_name = match role {
         HostRole::Central => "central",
+        HostRole::Standalone => "standalone",
         HostRole::Worker => "worker",
     };
     run_command(
@@ -281,7 +282,7 @@ fn install_macos_launch_agent(repo: &Path, role: HostRole) -> Result<Option<Path
         ],
     )?;
     let label = match role {
-        HostRole::Central => "dev.git-agent-harness.server.plist",
+        HostRole::Central | HostRole::Standalone => "dev.git-agent-harness.server.plist",
         HostRole::Worker => "dev.git-agent-harness.worker.plist",
     };
     let target = env::var_os("HOME")

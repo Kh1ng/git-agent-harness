@@ -568,7 +568,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
   const skillBackend = activeSession?.backend ?? activeBackendId;
   const skillSessionId = sessionId && sessionId !== 'default' ? sessionId : undefined;
   const nodeSnapshot = useChatNodes(profile, skillBackend, isConnected, nodesRefreshKey);
-  const centralNodeId = nodeSnapshot.nodes.find(node => node.role === 'central')?.nodeId;
+  const centralNodeId = nodeSnapshot.nodes.find(node => node.role === 'central' || node.role === 'standalone')?.nodeId;
   const chosenNode = nodeChoice?.profile === profile && nodeChoice.sessionId === sessionId ? nodeChoice.nodeId
     : activeSession?.nodeId ?? currentProfileInfo?.node_id ?? centralNodeId ?? '';
   const selectedNode = nodeSnapshot.nodes.find(node => node.nodeId === chosenNode);

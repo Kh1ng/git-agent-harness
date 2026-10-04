@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub enum NodeRole {
     #[default]
     Central,
+    Standalone,
     Worker,
 }
 
@@ -17,8 +18,11 @@ impl NodeRole {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "central" => Ok(Self::Central),
+            "standalone" => Ok(Self::Standalone),
             "worker" => Ok(Self::Worker),
-            other => bail!("invalid node role '{other}' (expected 'central' or 'worker')"),
+            other => {
+                bail!("invalid node role '{other}' (expected 'central', 'standalone', or 'worker')")
+            }
         }
     }
 }

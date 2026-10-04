@@ -381,7 +381,7 @@ export interface PmParentStatus {
 }
 
 export interface NodeRoleStatus {
-  role: 'central' | 'worker';
+  role: 'central' | 'standalone' | 'worker';
   central_url: string | null;
 }
 

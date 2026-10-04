@@ -416,7 +416,7 @@ export interface ChatReclaimResult {
 export interface ChatNodeInfo {
   nodeId: string;
   displayName: string;
-  role: 'central' | 'worker';
+  role: 'central' | 'standalone' | 'worker';
   chatCapable: boolean;
   lastSeenAt: string | null;
   state?: import('./registry.js').NodeObservationState | 'unknown';
