@@ -16,7 +16,8 @@
 //! no other thread's fork() can ever land inside that window.
 
 use std::ffi::OsString;
-use std::sync::{Mutex, MutexGuard};
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 static PATH_LOCK: Mutex<()> = Mutex::new(());
 static EXEC_LOCK: Mutex<()> = Mutex::new(());
@@ -24,6 +25,48 @@ static AVAILABILITY_LOCK: Mutex<()> = Mutex::new(());
 static QUOTA_STORE_LOCK: Mutex<()> = Mutex::new(());
 static CLAIM_STATE_LOCK: Mutex<()> = Mutex::new(());
 static MISTRAL_ADMIN_KEY_LOCK: Mutex<()> = Mutex::new(());
+
+// A process-global env override would race other tests calling config::load().
+// The explicit test fixture is thread-local; every other test sees an empty
+// private directory, even if the runner has GAH_CANONICAL_CONFIG set.
+static CANONICAL_CONFIG_TEST_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+thread_local! {
+    static CANONICAL_CONFIG_TEST_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn canonical_config_path() -> PathBuf {
+    CANONICAL_CONFIG_TEST_OVERRIDE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| {
+            CANONICAL_CONFIG_TEST_DIR
+                .get_or_init(|| tempfile::tempdir().expect("create isolated canonical config dir"))
+                .path()
+                .join("canonical.toml")
+        })
+}
+
+pub(crate) fn set_canonical_config_override(path: impl Into<PathBuf>) {
+    CANONICAL_CONFIG_TEST_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(path.into()));
+}
+
+pub(crate) fn clear_canonical_config_override() {
+    CANONICAL_CONFIG_TEST_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+}
+
+#[test]
+fn unit_tests_do_not_inherit_operator_canonical_config() {
+    clear_canonical_config_override();
+    let path = canonical_config_path();
+    assert_ne!(
+        path,
+        crate::config::default_config_dir().join("canonical.toml")
+    );
+    if let Some(operator_path) = std::env::var_os("GAH_CANONICAL_CONFIG") {
+        assert_ne!(path, PathBuf::from(operator_path));
+    }
+    assert!(!path.exists());
+}
 
 /// Scoped override for `MISTRAL_ADMIN_API_KEY`, serialized against every
 /// other test that reads/writes this process-global env var (in both

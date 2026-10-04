@@ -42,6 +42,9 @@ fn spawn_bin(state_root: &std::path::Path) -> ProcessCommand {
     let mut cmd = ProcessCommand::new(
         std::env::var("CARGO_BIN_EXE_gah").unwrap_or_else(|_| "target/debug/gah".into()),
     );
+    fs::create_dir_all(state_root.join("home")).unwrap();
+    cmd.env("HOME", state_root.join("home"));
+    cmd.env("GAH_CANONICAL_CONFIG", state_root.join("canonical.toml"));
     cmd.env("XDG_STATE_HOME", state_root.join("state"));
     cmd.env(
         "GAH_AVAILABILITY_PATH",

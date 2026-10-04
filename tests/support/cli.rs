@@ -9,6 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tempfile::TempDir;
 
 #[cfg(unix)]
@@ -137,6 +138,9 @@ pub fn isolate_gah_command<C: TestCommandEnvironment>(command: C) -> IsolatedCom
     isolate_command(command, |command, root| {
         let tmp = root.join("tmp");
         fs::create_dir_all(&tmp).unwrap();
+        fs::create_dir_all(root.join("home")).unwrap();
+        command.env_path("HOME", &root.join("home"));
+        command.env_path("GAH_CANONICAL_CONFIG", &root.join("canonical.toml"));
         command.env_path("XDG_STATE_HOME", &root.join("xdg-state"));
         command.env_path("XDG_RUNTIME_DIR", &root.join("xdg-runtime"));
         command.env_path("GAH_AVAILABILITY_PATH", &root.join("availability.json"));
@@ -157,6 +161,25 @@ pub fn gah_process_command() -> IsolatedCommand<std::process::Command> {
         std::env::var("CARGO_BIN_EXE_gah").unwrap_or_else(|_| "target/debug/gah".into()),
     );
     isolate_gah_command(command)
+}
+
+/// Direct integration-test calls into the production library do not have
+/// `cfg(test)`, so scope their canonical lookup to an empty fixture too.
+pub fn load_config(path: Option<&str>) -> anyhow::Result<git_agent_harness::config::GahConfig> {
+    static CANONICAL_ENV_LOCK: Mutex<()> = Mutex::new(());
+    let _lock = CANONICAL_ENV_LOCK.lock().unwrap();
+    let isolated = test_tempdir();
+    let original = std::env::var_os("GAH_CANONICAL_CONFIG");
+    std::env::set_var(
+        "GAH_CANONICAL_CONFIG",
+        isolated.path().join("canonical.toml"),
+    );
+    let result = git_agent_harness::config::load(path);
+    match original {
+        Some(value) => std::env::set_var("GAH_CANONICAL_CONFIG", value),
+        None => std::env::remove_var("GAH_CANONICAL_CONFIG"),
+    }
+    result
 }
 
 pub fn write_executable(path: &Path, body: &str) {
