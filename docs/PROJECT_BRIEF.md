@@ -33,6 +33,29 @@ dashboard. Prefer correctness, observability, and safe failure over throughput.
 - Review approval requires concrete evidence for the changed behavior and any
   relevant compatibility boundary. Missing evidence is a human-review outcome.
 
+Design rules, after *A Philosophy of Software Design* (Ousterhout). They shape
+the code the ticket needs; they are not a reason to widen the change.
+
+- Prefer deep modules: a small interface over a substantial implementation.
+  Do not add a function or type that only forwards to another.
+- Hide each design decision in one place. If a format, default, or rule is
+  spelled out in two modules, give it one owner.
+- Pull complexity downward: handle the hard case inside the module instead of
+  adding a parameter, flag, or config knob for every caller.
+- Each layer offers a different abstraction. A wrapper with the same signature
+  as what it wraps is a red flag.
+- Define errors out of existence where the caller can do nothing useful, and
+  handle the rest once, close to the cause. Never hide a failure the operator
+  must see.
+- Choose precise names. A name that needs a comment to explain it, or fits
+  two different things, is wrong.
+- Comments say what the code cannot: why, invariants, units, and what a
+  caller must know. Do not restate the code.
+- When a design choice is not obvious, sketch a second design before writing
+  the first, and say in the handoff why you chose this one.
+- When you modify code, leave its design as if the change had been planned
+  from the start, within the ticket's scope.
+
 ## Verification
 
 Run the ticket's explicit verification commands first. For broad Rust changes,
