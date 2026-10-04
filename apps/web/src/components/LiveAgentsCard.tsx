@@ -4,23 +4,37 @@ import type { ActiveClaim, BackendInstanceSummary, ControllerActivity, LedgerEnt
 import { backendInstancesApi, gahApi } from '../api/client.js';
 import { formatLocalTime } from '../lib/format.js';
 
-/** What an agent account is doing right now, in the order the row is sorted. */
+/** What an agent account is doing right now, in the order the rows sort. */
 export type LiveState = 'working' | 'gates' | 'paused' | 'down' | 'halted' | 'idle';
+
+/** An agent account: a declared backend instance, or a routing candidate
+ * from the quota snapshot when the profile declares no instances. */
+export interface LiveAccount {
+  id: string;
+  name: string;
+  backend: string;
+  model: string | null;
+  enabled: boolean;
+  /** Why the account cannot take work, when it cannot. */
+  notReady: string | null;
+  /** Quota resume time, when routing skips it until then. */
+  resumes: string | null;
+  pausedReason: string | null;
+}
 
 export interface LiveAgentRow {
   key: string;
   name: string;
-  /** Runner and model, or the account label's backend. */
+  /** Backend and model, or a controller run's action. */
   detail: string | null;
   state: LiveState;
-  /** Work id or controller action for a busy row. */
+  /** Work id of a busy row. */
   job: string | null;
   mode: string | null;
   /** ISO time the job started; drives the elapsed timer. */
   since: string | null;
   /** The active claim's age in seconds at the last status refresh. */
   claimAgeSeconds: number | null;
-  /** Quota resume time for a paused row. */
   resumes: string | null;
   reason: string | null;
 }
@@ -34,6 +48,7 @@ const DOT: Record<LiveState, { className: string; pulse: boolean; label: string 
   halted: { className: 'bg-critical', pulse: false, label: 'halted' },
   down: { className: 'bg-critical', pulse: false, label: 'down' }
 };
+const GATE_MODES = new Set(['review', 'validate', 'validation', 'merge', 'routine_review']);
 
 /** `1h 05m`, `4m 20s`, `12s`; never negative. */
 export function formatDuration(ms: number): string {
@@ -45,95 +60,139 @@ export function formatDuration(ms: number): string {
   return `${s}s`;
 }
 
-const GATE_MODES = new Set(['review', 'validate', 'validation', 'merge']);
+/** Declared instances first; candidates fill in accounts the profile only
+ * knows through routing. A candidate that names an instance refines it. */
+export function liveAccounts(instances: BackendInstanceSummary[], candidates: QuotaCandidateStatus[], now: number): LiveAccount[] {
+  const accounts = new Map<string, LiveAccount>();
+  for (const instance of instances) {
+    const unhealthy = instance.healthy === false || instance.auth_ready === false || instance.executable_resolved === false;
+    accounts.set(instance.backend_instance, {
+      id: instance.backend_instance,
+      name: instance.account_label ?? instance.backend_instance,
+      backend: instance.logical_backend,
+      model: instance.supported_models[0] ?? null,
+      enabled: instance.enabled,
+      notReady: unhealthy ? instance.resolution_error ?? 'not ready' : null,
+      resumes: null,
+      pausedReason: null
+    });
+  }
+  for (const candidate of candidates) {
+    const id = candidate.backend_instance ?? candidate.backend;
+    const resumes = !candidate.eligible_now && candidate.unavailable_until && Date.parse(candidate.unavailable_until) > now ? candidate.unavailable_until : null;
+    const existing = accounts.get(id) ?? [...accounts.values()].find((account) => !candidate.backend_instance && account.backend === candidate.backend);
+    if (existing) {
+      existing.resumes = existing.resumes ?? resumes;
+      existing.pausedReason = existing.pausedReason ?? (resumes ? candidate.reason ?? null : null);
+      if (!existing.model) existing.model = candidate.model;
+      continue;
+    }
+    accounts.set(id, {
+      id,
+      name: id,
+      backend: candidate.backend,
+      model: candidate.model,
+      // A candidate is in the routing lists by definition; only a declared instance can be disabled.
+      enabled: true,
+      notReady: !candidate.eligible_now && !resumes ? candidate.reason ?? 'not eligible' : null,
+      resumes,
+      pausedReason: resumes ? candidate.reason ?? null : null
+    });
+  }
+  return [...accounts.values()];
+}
 
-function sessionMatches(session: Session, instance: BackendInstanceSummary): boolean {
-  if (session.instanceId === instance.backend_instance) return true;
-  const backend = session.backend ?? session.providerKind;
-  return backend === instance.logical_backend || backend === instance.backend_instance;
+/** A job in flight: a dashboard session, a running controller run, or a
+ * claim the loop holds. `backend` comes from the session, else from the
+ * job's latest ledger entry once it has loaded. */
+interface LiveJob {
+  key: string;
+  workId: string | null;
+  mode: string | null;
+  since: string | null;
+  backend: string | null;
+  instance: string | null;
+  action: string | null;
+}
+
+function sessionBackend(session: Session): string | null {
+  return session.backend ?? (session.providerKind as string | undefined) ?? null;
 }
 
 /**
- * One row per configured agent account (backend instance), from what the
- * dashboard already holds: the live session list, running controller runs,
- * the status snapshot's active claims, and the quota snapshot's availability.
- * A busy session on an unconfigured backend gets a row of its own.
+ * One row per agent account, busy rows first, from what the dashboard
+ * already holds: the live session list, running controller runs, the status
+ * snapshot's active claims, and the quota snapshot's availability. A job
+ * that no account explains gets a row of its own.
  */
 export function buildLiveRows(input: {
-  instances: BackendInstanceSummary[];
+  accounts: LiveAccount[];
   sessions: Session[];
   controllerRuns: ControllerActivity[];
   claims: ActiveClaim[];
-  candidates: QuotaCandidateStatus[];
-  now: number;
+  /** Latest ledger entry per busy work id, when fetched. */
+  ledgers: Record<string, LedgerEntry | null | undefined>;
 }): LiveAgentRow[] {
-  const busy = input.sessions.filter((session) => ['starting', 'running', 'stopping'].includes(session.status));
-  const claimed = new Set<string>();
-  const rows: LiveAgentRow[] = [];
-  const claimFor = (workId: string | null | undefined) => (workId ? input.claims.find((claim) => claim.work_id === workId) ?? null : null);
-
-  for (const instance of input.instances) {
-    const session = busy.find((candidate) => !claimed.has(candidate.id) && sessionMatches(candidate, instance)) ?? null;
-    if (session) claimed.add(session.id);
-    const candidate = input.candidates.find((item) => item.backend_instance === instance.backend_instance)
-      ?? input.candidates.find((item) => !item.backend_instance && item.backend === instance.logical_backend) ?? null;
-    const resumes = candidate && !candidate.eligible_now && candidate.unavailable_until && Date.parse(candidate.unavailable_until) > input.now
-      ? candidate.unavailable_until : null;
-    const unhealthy = instance.healthy === false || instance.auth_ready === false || instance.executable_resolved === false;
-    const state: LiveState = session ? (session.mode && GATE_MODES.has(session.mode) ? 'gates' : 'working')
-      : !instance.enabled ? 'halted'
-      : unhealthy ? 'down'
-      : resumes ? 'paused'
-      : 'idle';
-    const claim = claimFor(session?.target);
-    rows.push({
-      key: instance.backend_instance,
-      name: instance.account_label ?? instance.backend_instance,
-      detail: [instance.logical_backend, session?.model ?? instance.supported_models[0]].filter(Boolean).join(' · ') || null,
-      state,
-      job: session?.target ?? null,
-      mode: session?.mode ?? null,
-      since: session?.startedAt ?? null,
-      claimAgeSeconds: claim?.age_seconds ?? null,
-      resumes,
-      reason: state === 'down' ? instance.resolution_error ?? 'not ready' : state === 'paused' ? candidate?.reason ?? null : null
-    });
+  const jobs: LiveJob[] = [];
+  const covered = new Set<string>();
+  for (const session of input.sessions) {
+    if (!['starting', 'running', 'stopping'].includes(session.status)) continue;
+    if (session.target) covered.add(session.target);
+    jobs.push({ key: `session:${session.id}`, workId: session.target ?? null, mode: session.mode ?? null, since: session.startedAt ?? null,
+      backend: sessionBackend(session), instance: session.instanceId || null, action: null });
   }
-
-  for (const session of busy) {
-    if (claimed.has(session.id)) continue;
-    const claim = claimFor(session.target);
-    rows.push({
-      key: `session:${session.id}`,
-      name: session.instanceId || session.backend || session.providerKind,
-      detail: [session.backend ?? session.providerKind, session.model].filter(Boolean).join(' · ') || null,
-      state: session.mode && GATE_MODES.has(session.mode) ? 'gates' : 'working',
-      job: session.target ?? null,
-      mode: session.mode ?? null,
-      since: session.startedAt ?? null,
-      claimAgeSeconds: claim?.age_seconds ?? null,
-      resumes: null,
-      reason: null
-    });
-  }
-
   for (const run of input.controllerRuns) {
-    if (run.status !== 'running') continue;
-    const claim = claimFor(run.work_id);
+    if (run.status !== 'running' || (run.work_id && covered.has(run.work_id))) continue;
+    if (run.work_id) covered.add(run.work_id);
+    const ledger = run.work_id ? input.ledgers[run.work_id] : null;
+    const [mode] = run.action.split(':');
+    jobs.push({ key: `run:${run.run_id}`, workId: run.work_id, mode: ledger?.mode ?? (mode && !mode.includes(' ') ? mode : null), since: run.started_at,
+      backend: ledger?.effective_backend ?? ledger?.backend ?? null, instance: null, action: run.action });
+  }
+  for (const claim of input.claims) {
+    if (covered.has(claim.work_id)) continue;
+    covered.add(claim.work_id);
+    const ledger = input.ledgers[claim.work_id];
+    jobs.push({ key: `claim:${claim.work_id}`, workId: claim.work_id, mode: ledger?.mode ?? claim.scope, since: claim.claimed_at,
+      backend: ledger?.effective_backend ?? ledger?.backend ?? null, instance: null, action: null });
+  }
+  const claimAge = (workId: string | null) => (workId ? input.claims.find((claim) => claim.work_id === workId)?.age_seconds ?? null : null);
+  const state = (job: LiveJob): LiveState => (job.mode && GATE_MODES.has(job.mode) ? 'gates' : 'working');
+
+  const used = new Set<string>();
+  const rows: LiveAgentRow[] = [];
+  for (const account of input.accounts) {
+    const job = jobs.find((candidate) => !used.has(candidate.key)
+      && (candidate.instance === account.id || (!candidate.instance || candidate.instance === candidate.backend) && candidate.backend === account.backend)) ?? null;
+    if (job) used.add(job.key);
     rows.push({
-      key: `run:${run.run_id}`,
-      name: 'controller',
-      detail: run.action.replace(/^dispatch:\s*/i, ''),
-      state: 'working',
-      job: run.work_id,
-      mode: null,
-      since: run.started_at,
-      claimAgeSeconds: claim?.age_seconds ?? null,
+      key: account.id,
+      name: account.name,
+      detail: [account.backend, account.model].filter(Boolean).join(' · ') || null,
+      state: job ? state(job) : !account.enabled ? 'halted' : account.notReady ? 'down' : account.resumes ? 'paused' : 'idle',
+      job: job?.workId ?? null,
+      mode: job?.mode ?? null,
+      since: job?.since ?? null,
+      claimAgeSeconds: claimAge(job?.workId ?? null),
+      resumes: job ? null : account.resumes,
+      reason: job ? null : account.notReady ?? account.pausedReason
+    });
+  }
+  for (const job of jobs) {
+    if (used.has(job.key)) continue;
+    rows.push({
+      key: job.key,
+      name: job.instance ?? job.backend ?? 'controller',
+      detail: job.action ?? job.backend,
+      state: state(job),
+      job: job.workId,
+      mode: job.mode,
+      since: job.since,
+      claimAgeSeconds: claimAge(job.workId),
       resumes: null,
       reason: null
     });
   }
-
   return rows
     .map((row, index) => ({ row, index }))
     .sort((a, b) => RANK[a.row.state] - RANK[b.row.state] || a.index - b.index)
@@ -142,21 +201,15 @@ export function buildLiveRows(input: {
 
 function LiveRow({ row, now, ledger }: { row: LiveAgentRow; now: number; ledger: LedgerEntry | null | undefined }) {
   const dot = DOT[row.state];
-  const job = row.job ? <span className="font-mono text-primary">{row.job}</span> : 'the next job';
+  const job = row.job ? <span className="font-mono text-primary">{row.job}</span> : 'a job';
+  const elapsed = row.since ? <> for {formatDuration(now - Date.parse(row.since))}</> : null;
   let line: ReactNode;
-  if (row.state === 'working') {
-    line = <>{row.mode ? `${row.mode} on ` : 'working on '}{job}{row.since && <> for {formatDuration(now - Date.parse(row.since))}</>}</>;
-  } else if (row.state === 'gates') {
-    line = <>{row.mode ?? 'gates'} on {job}{row.since && <> for {formatDuration(now - Date.parse(row.since))}</>}</>;
-  } else if (row.state === 'paused') {
-    line = <>paused on quota, resumes in {formatDuration(Date.parse(row.resumes!) - now)} ({formatLocalTime(row.resumes) ?? row.resumes})</>;
-  } else if (row.state === 'halted') {
-    line = 'disabled, routing skips it';
-  } else if (row.state === 'down') {
-    line = <>not ready{row.reason ? `: ${row.reason}` : ''}</>;
-  } else {
-    line = 'idle, waiting for the router';
-  }
+  if (row.state === 'working') line = <>{row.mode ? `${row.mode} on ` : 'working on '}{job}{elapsed}</>;
+  else if (row.state === 'gates') line = <>{row.mode ?? 'gates'} on {job}{elapsed}</>;
+  else if (row.state === 'paused') line = <>paused on quota{row.reason ? ` (${row.reason})` : ''}, resumes in {formatDuration(Date.parse(row.resumes!) - now)} ({formatLocalTime(row.resumes) ?? row.resumes})</>;
+  else if (row.state === 'halted') line = 'disabled, routing skips it';
+  else if (row.state === 'down') line = <>not ready{row.reason ? `: ${row.reason}` : ''}</>;
+  else line = 'idle, waiting for the router';
   const busy = row.state === 'working' || row.state === 'gates';
   const files = ledger?.files_changed;
   const edits = busy ? [
@@ -180,9 +233,10 @@ function LiveRow({ row, now, ledger }: { row: LiveAgentRow; now: number; ledger:
 }
 
 /**
- * Live: what each agent account is doing now. Rows come from
- * `buildLiveRows`; the elapsed timers tick every second while any row is
- * busy, and a busy row's latest ledger entry supplies its file count.
+ * Live: what each agent account is doing now. Elapsed timers tick every
+ * second while any row is busy; each busy job's latest ledger entry names
+ * its backend and the files it changed. The footer is the controller's
+ * latest run, so an idle fleet still says why.
  */
 export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, candidates }: {
   profile: string | null;
@@ -205,11 +259,16 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
     return () => { cancelled = true; };
   }, [profile, sessions.length]);
 
-  const rows = useMemo(() => buildLiveRows({ instances: instances ?? [], sessions, controllerRuns, claims, candidates, now }),
-    // `now` only matters for the paused cut-off; the timer below re-renders rows anyway.
+  const accounts = useMemo(() => liveAccounts(instances ?? [], candidates, now),
+    // `now` only sets the paused cut-off; the timer below re-renders the rows anyway.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [instances, sessions, controllerRuns, claims, candidates]);
-  const busyJobs = useMemo(() => [...new Set(rows.filter((row) => (row.state === 'working' || row.state === 'gates') && row.job).map((row) => row.job!))].slice(0, 8), [rows]);
+    [instances, candidates]);
+  const rows = useMemo(() => buildLiveRows({ accounts, sessions, controllerRuns, claims, ledgers }), [accounts, sessions, controllerRuns, claims, ledgers]);
+  const busyJobs = useMemo(() => [...new Set([
+    ...sessions.filter((session) => ['starting', 'running', 'stopping'].includes(session.status)).map((session) => session.target),
+    ...controllerRuns.filter((run) => run.status === 'running').map((run) => run.work_id),
+    ...claims.map((claim) => claim.work_id)
+  ].filter((id): id is string => !!id))].slice(0, 8), [sessions, controllerRuns, claims]);
 
   useEffect(() => {
     if (busyJobs.length === 0) return;
@@ -217,7 +276,6 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
     return () => window.clearInterval(timer);
   }, [busyJobs.length]);
 
-  // Each busy job's latest ledger entry carries the files it changed so far.
   useEffect(() => {
     let cancelled = false;
     for (const job of busyJobs) {
@@ -231,6 +289,8 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
   }, [busyJobs]);
 
   const busy = rows.filter((row) => row.state === 'working' || row.state === 'gates').length;
+  const lastRun = controllerRuns.filter((run) => run.status !== 'running')
+    .sort((a, b) => Date.parse(b.finished_at ?? b.started_at) - Date.parse(a.finished_at ?? a.started_at))[0];
   return (
     <section className="card-padded" aria-labelledby="live-agents-title">
       <div className="mb-2 flex items-center justify-between gap-3">
@@ -238,7 +298,7 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
           <Radio size={15} className="text-accent" aria-hidden="true" />
           Live: what each agent is doing now
         </h3>
-        <span className="text-xs tabular-nums text-muted">{busy > 0 ? `${busy} busy of ${rows.length}` : rows.length > 0 ? `${rows.length} idle` : ''}</span>
+        <span className="text-xs tabular-nums text-muted">{busy > 0 ? `${busy} busy of ${rows.length}` : rows.length > 0 ? `${rows.length} accounts, none busy` : ''}</span>
       </div>
       {instancesError && <p role="alert" className="mb-2 text-xs text-critical">Cannot load agent accounts: {instancesError}</p>}
       {instances === null && !instancesError ? (
@@ -249,6 +309,12 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
         <ul className="divide-y divide-subtle" aria-label="Agents">
           {rows.map((row) => <LiveRow key={row.key} row={row} now={now} ledger={row.job ? ledgers[row.job] : null} />)}
         </ul>
+      )}
+      {lastRun && (
+        <p className="mt-2 truncate text-xs text-muted" title={lastRun.outcome ?? lastRun.action}>
+          Last run: {lastRun.work_id ? <span className="font-mono">{lastRun.work_id}</span> : null} {lastRun.action.split(':')[0]} · {lastRun.status}
+          {lastRun.finished_at ? ` ${formatDuration(now - Date.parse(lastRun.finished_at))} ago` : ''}{lastRun.outcome ? ` · ${lastRun.outcome}` : ''}
+        </p>
       )}
     </section>
   );
