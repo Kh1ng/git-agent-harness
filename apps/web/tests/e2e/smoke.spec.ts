@@ -30,6 +30,8 @@ const ROUTES: { label: string; heading: string }[] = [
 ];
 
 test.beforeEach(async ({ page }) => {
+  // An empty registry is a standalone install, which hides Nodes unless asked for.
+  await page.addInitScript(() => localStorage.setItem('gah-show-nodes', 'true'));
   await page.route('**/api/registry/fleet/snapshot', (route) => route.fulfill({
     json: { nodes: [], observations: [], leases: [] }
   }));
@@ -72,12 +74,46 @@ for (const viewport of VIEWPORTS) {
 test.describe('desktop content', () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test('sidebar navigation is present with all core sections', async ({ page }) => {
+  test('the top navbar and the sidebar strip hold all core sections', async ({ page }) => {
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: 'Primary' });
+    const sidebar = page.getByRole('navigation', { name: 'Sidebar' });
     for (const route of ROUTES) {
-      await expect(nav.getByRole('button', { name: route.label, exact: true })).toBeVisible();
+      const owner = route.label === 'Activity' || route.label === 'Settings' ? sidebar : nav;
+      await expect(owner.getByRole('button', { name: route.label, exact: true })).toBeVisible();
     }
+  });
+
+  test('a sidebar icon opens its view beside the main panel and closes it again', async ({ page }) => {
+    await page.goto('/?page=git');
+    const settings = page.getByRole('navigation', { name: 'Sidebar' }).getByRole('button', { name: 'Settings', exact: true });
+    const panel = page.getByRole('complementary', { name: 'Settings' });
+    await settings.click();
+    await expect(settings).toHaveAttribute('aria-expanded', 'true');
+    await expect(panel.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+    await expect(page.getByRole('main')).toBeVisible();
+    const share = await panel.evaluate((element) => element.getBoundingClientRect().width / window.innerWidth);
+    expect(share).toBeGreaterThan(0.2);
+    expect(share).toBeLessThan(0.35);
+    expect(new URL(page.url()).searchParams.get('side')).toBe('settings');
+    await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Quota', exact: true }).click();
+    await expect(panel).toBeVisible();
+    await settings.click();
+    await expect(panel).toHaveCount(0);
+    expect(new URL(page.url()).searchParams.get('side')).toBeNull();
+  });
+
+  test('Nodes is hidden on a standalone install until Settings asks for it', async ({ page }) => {
+    await page.addInitScript(() => localStorage.removeItem('gah-show-nodes'));
+    await page.goto('/');
+    const nav = page.getByRole('navigation', { name: 'Primary' });
+    await expect(nav.getByRole('button', { name: 'Overview', exact: true })).toBeVisible();
+    await expect(nav.getByRole('button', { name: 'Nodes', exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('searchbox', { name: 'Search settings' }).fill('nodes');
+    await page.getByRole('list', { name: 'Matching settings' }).getByRole('button', { name: /Appearance/ }).click();
+    await page.getByRole('checkbox', { name: /Always show Nodes/ }).check();
+    await expect(nav.getByRole('button', { name: 'Nodes', exact: true })).toBeVisible();
   });
 
   test('theme toggle switches data-theme attribute', async ({ page }) => {

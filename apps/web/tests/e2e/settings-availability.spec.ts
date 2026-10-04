@@ -42,7 +42,6 @@ test('Settings and Quota share candidate eligibility, timestamps, refresh failur
   const quotaCandidate = page.getByTestId('quota-candidate-agy-0');
   await expect(quotaCandidate.getByText('Unavailable', { exact: true })).toBeVisible();
   await expect(quotaCandidate.getByText(/^Account quota exhausted ·/)).toBeVisible();
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   snapshot.candidates[0].eligible_now = true;
   snapshot.candidates[0].reason = null;
   await page.getByRole('button', { name: 'Refresh', exact: true }).first().click();

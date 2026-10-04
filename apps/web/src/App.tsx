@@ -2,12 +2,12 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { LoadingState } from './components/ui/EmptyState.js';
 import { useWebSocket } from './ws/WebSocketContext.js';
 import { OverviewPage } from './pages/OverviewPage.js';
-import { Navbar } from './components/Navbar.js';
+import { ActivityBar, Navbar } from './components/Navbar.js';
 import { PwaStatusBars } from './components/PwaStatusBars.js';
 import { SessionDetailModal } from './components/SessionDetailModal.js';
 import { activityPath, type Session } from '@git-agent-harness/contracts';
-import { readNavigation, takeActivityDeepLink, updateNavigation, type Page } from './lib/navigationState.js';
-import { activityApi } from './api/client.js';
+import { isSideView, readNavigation, takeActivityDeepLink, updateNavigation, type MainPage, type Page, type SideView } from './lib/navigationState.js';
+import { activityApi, gahApi } from './api/client.js';
 import { ActivityToast } from './components/ActivityToast.js';
 import { WorkDetailDrawer } from './components/WorkDetailDrawer.js';
 import { generateProviderInstanceId } from '@git-agent-harness/shared';
@@ -26,10 +26,33 @@ const PlanningPage = lazy(() => import('./pages/PlanningPage.js').then((module) 
 
 export type { Page } from './lib/navigationState.js';
 
+/** From this width the sidebar opens beside the main panel; below it, an open
+ * sidebar view takes the whole content area. */
+const SPLIT_LAYOUT = '(min-width: 1280px)';
+
+/** A standalone install is a central node with no worker nodes registered.
+ * The last answer is remembered so the navbar doesn't flicker on load; an
+ * unknown or unreadable registry keeps Nodes visible. */
+function useStandalone(reconnectSeq: number, activityRevision: number): boolean {
+  const [standalone, setStandalone] = useState(() => window.localStorage.getItem('gah-standalone') === 'true');
+  useEffect(() => {
+    let current = true;
+    gahApi.getFleetSnapshot().then((fleet) => {
+      if (!current) return;
+      const next = fleet.nodes.length === 0;
+      window.localStorage.setItem('gah-standalone', String(next));
+      setStandalone(next);
+    }).catch(() => { /* Keep the last known answer. */ });
+    return () => { current = false; };
+  }, [reconnectSeq, activityRevision]);
+  return standalone;
+}
+
 export function App() {
-  const [currentPage, setCurrentPage] = useState<Page>(() => (new URLSearchParams(window.location.hash.slice(1)).has('pair') || new URLSearchParams(window.location.search).has('pairingRequest')) ? 'settings' : readNavigation().page);
+  const [currentPage, setCurrentPage] = useState<MainPage>(() => readNavigation().page);
+  const [sideView, setSideView] = useState<SideView | null>(() => (new URLSearchParams(window.location.hash.slice(1)).has('pair') || new URLSearchParams(window.location.search).has('pairingRequest')) ? 'settings' : readNavigation().side);
   const [chatLauncherRequest, setChatLauncherRequest] = useState(0);
-  useEffect(() => updateNavigation({ page: currentPage }), [currentPage]);
+  useEffect(() => updateNavigation({ page: currentPage, side: sideView }), [currentPage, sideView]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
   const [dismissedActivityId, setDismissedActivityId] = useState<string | null>(null);
@@ -39,7 +62,16 @@ export function App() {
     if (openedActivityId) void activityApi.markRead([openedActivityId]).catch(() => { /* It stays unread and visible. */ });
   }, [openedActivityId]);
   const profileOverride = useUiStore((state) => state.profileOverride);
-  const { isConnected, isConnecting, sessions, liveActivity, activityUnreadCount, profile, sendMessage } = useWebSocket();
+  const showNodes = useUiStore((state) => state.showNodes);
+  const { isConnected, isConnecting, sessions, liveActivity, activityUnreadCount, profile, sendMessage, reconnectSeq, activityRevision } = useWebSocket();
+  const standalone = useStandalone(reconnectSeq, activityRevision);
+
+  /** Pages link to each other by name; a sidebar view opens in the sidebar. */
+  const navigate = (page: Page) => {
+    if (isSideView(page)) return setSideView(page);
+    setCurrentPage(page);
+    if (!window.matchMedia(SPLIT_LAYOUT).matches) setSideView(null);
+  };
 
   const renderPage = () => {
     switch (currentPage) {
@@ -51,25 +83,21 @@ export function App() {
         return <TelemetryPage />;
       case 'quota':
         return <QuotaPage />;
-      case 'events':
-        return <EventsPage openedEventId={openedActivityId} />;
-      case 'settings':
-        return <SettingsPage />;
       case 'chat':
-        return <ManagerChatPage launcherRequest={chatLauncherRequest} onNavigate={setCurrentPage} onOpenWork={setSelectedWorkId} />;
+        return <ManagerChatPage launcherRequest={chatLauncherRequest} onNavigate={navigate} onOpenWork={setSelectedWorkId} />;
       case 'projects':
-        return <ProjectsPage onNavigate={setCurrentPage} />;
+        return <ProjectsPage onNavigate={navigate} />;
       case 'git':
         return <GitPage />;
       case 'planning':
-        return <PlanningPage onNavigate={setCurrentPage} />;
+        return <PlanningPage onNavigate={navigate} />;
       case 'overview':
       default:
         return (
           <OverviewPage
             sessions={sessions}
             onSelectSession={setSelectedSession}
-            onNavigate={setCurrentPage}
+            onNavigate={navigate}
             onOpenWork={setSelectedWorkId}
           />
         );
@@ -79,26 +107,38 @@ export function App() {
   const isChatPage = currentPage === 'chat';
   const handlePrimaryNavigation = (page: Page) => {
     if (page === 'chat') setChatLauncherRequest((request) => request + 1);
-    setCurrentPage(page);
+    navigate(page);
   };
 
   return (
-    <div className={`app-shell bg-page ${isChatPage
-      ? 'flex h-dvh flex-col overflow-hidden lg:grid lg:grid-cols-[14rem_minmax(0,1fr)] lg:grid-rows-[auto_minmax(0,1fr)]'
-      : 'min-h-dvh lg:flex'}`}>
+    <div className="app-shell flex h-dvh flex-col overflow-hidden bg-page">
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 bg-card text-primary p-3 rounded-md">Skip to content</a>
       <PwaStatusBars />
-      <Navbar currentPage={currentPage} onPageChange={handlePrimaryNavigation} activityUnreadCount={activityUnreadCount} />
+      <Navbar currentPage={currentPage} sideView={sideView} onPageChange={handlePrimaryNavigation} hideNodes={standalone && !showNodes} activityUnreadCount={activityUnreadCount} />
 
-      <div className={`min-w-0 flex-1 ${isChatPage ? 'flex min-h-0 flex-col lg:col-start-2 lg:row-start-2' : ''}`}>
-        <main id="main-content" tabIndex={-1} className={`mx-auto w-full max-w-[1400px] px-4 py-4 sm:px-6 sm:py-6 ${isChatPage ? 'flex min-h-0 flex-1 flex-col' : ''}`}>
-          {!isConnected && !isConnecting && currentPage !== 'settings' && (
-            <p role="status" className="mb-3 text-sm text-secondary">
-              Disconnected. <button className="min-h-11 text-accent underline" onClick={() => setCurrentPage('settings')}>Open connection settings</button>
-            </p>
-          )}
-          <Suspense fallback={<LoadingState label="Loading page…" />}>{renderPage()}</Suspense>
-        </main>
+      {/* Left to right: icon strip, sidebar view, main panel. A right sidebar belongs after the main panel. */}
+      <div className="flex min-h-0 flex-1">
+        <ActivityBar sideView={sideView} onToggle={(view) => setSideView(sideView === view ? null : view)} activityUnreadCount={activityUnreadCount} />
+
+        {sideView && (
+          <aside id="side-panel" aria-label={sideView === 'settings' ? 'Settings' : 'Activity'}
+            className="side-panel min-w-0 flex-1 overflow-y-auto px-4 py-4 xl:w-[clamp(20rem,25vw,30rem)] xl:flex-none xl:border-r xl:border-subtle">
+            <Suspense fallback={<LoadingState label="Loading…" />}>
+              {sideView === 'settings' ? <SettingsPage /> : <EventsPage openedEventId={openedActivityId} />}
+            </Suspense>
+          </aside>
+        )}
+
+        <div className={`min-h-0 min-w-0 flex-1 flex-col ${sideView ? 'hidden xl:flex' : 'flex'} ${isChatPage ? '' : 'overflow-y-auto'}`}>
+          <main id="main-content" tabIndex={-1} className={`mx-auto w-full max-w-[1400px] px-4 py-4 sm:px-6 sm:py-6 ${isChatPage ? 'flex min-h-0 flex-1 flex-col' : ''}`}>
+            {!isConnected && !isConnecting && sideView !== 'settings' && (
+              <p role="status" className="mb-3 text-sm text-secondary">
+                Disconnected. <button className="min-h-11 text-accent underline" onClick={() => setSideView('settings')}>Open connection settings</button>
+              </p>
+            )}
+            <Suspense fallback={<LoadingState label="Loading page…" />}>{renderPage()}</Suspense>
+          </main>
+        </div>
       </div>
 
       {selectedSession && (
@@ -124,7 +164,7 @@ export function App() {
           })}
         />
       )}
-      {liveActivity && liveActivity.id !== dismissedActivityId && currentPage !== 'events' && (
+      {liveActivity && liveActivity.id !== dismissedActivityId && sideView !== 'events' && (
         <ActivityToast
           event={liveActivity}
           onOpen={() => window.location.assign(activityPath(liveActivity))}

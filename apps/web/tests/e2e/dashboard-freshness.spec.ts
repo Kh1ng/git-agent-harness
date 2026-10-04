@@ -104,12 +104,12 @@ test.describe('last-updated indicator', () => {
   });
 
   for (const route of [
-    { label: 'Overview', heading: 'Overview' },
-    { label: 'Quota', heading: 'Quota management' },
-    { label: 'Telemetry', heading: 'Telemetry' },
-    { label: 'Factory', heading: 'Factory' },
-    { label: 'Activity', heading: 'Activity' },
-    { label: 'Settings', heading: 'Settings' },
+    { label: 'Overview', heading: 'Overview', panel: '#main-content' },
+    { label: 'Quota', heading: 'Quota management', panel: '#main-content' },
+    { label: 'Telemetry', heading: 'Telemetry', panel: '#main-content' },
+    { label: 'Factory', heading: 'Factory', panel: '#main-content' },
+    { label: 'Activity', heading: 'Activity', panel: '#side-panel' },
+    { label: 'Settings', heading: 'Settings', panel: '#side-panel' },
   ]) {
     test(`${route.label} shows a live "Updated ... ago" readout once data loads`, async ({ page }) => {
       await page.goto('/');
@@ -117,7 +117,7 @@ test.describe('last-updated indicator', () => {
       await expect(page.getByRole('heading', { name: route.heading, exact: true })).toBeVisible({
         timeout: 15000,
       });
-      await expect(page.getByText(/^Updated (just now|\d+[smhd] ago)$/)).toBeVisible({ timeout: 15000 });
+      await expect(page.locator(route.panel).getByText(/^Updated (just now|\d+[smhd] ago)$/)).toBeVisible({ timeout: 15000 });
     });
   }
 });

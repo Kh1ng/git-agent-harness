@@ -2,8 +2,14 @@ const pages = ['overview', 'work', 'telemetry', 'quota', 'events', 'settings', '
 export type Page = typeof pages[number];
 export const DEFAULT_CONVERSATION_ID = 'default';
 
+/** Pages that open in the collapsible left sidebar; every other page fills the main panel. */
+const sideViews = ['events', 'settings'] as const;
+export type SideView = typeof sideViews[number];
+export type MainPage = Exclude<Page, SideView>;
+export const isSideView = (page: Page): page is SideView => sideViews.some(view => view === page);
+
 /** `epic` is the issue number the Planning page maps; `map` a `.plan/maps/` slug instead. */
-type NavigationState = { page: Page; profile: string | null; chat: string | null; epic: string | null; map: string | null };
+type NavigationState = { page: MainPage; side: SideView | null; profile: string | null; chat: string | null; epic: string | null; map: string | null };
 
 /** URLs restore a control surface and conversation, never credentials or commands. */
 export function readNavigation(search = window.location.search): NavigationState {
@@ -13,8 +19,11 @@ export function readNavigation(search = window.location.search): NavigationState
   const epic = params.get('epic');
   const map = params.get('map');
   const validProfile = profile && profile.trim() === profile && profile.length <= 512 && !/[\x00-\x1f\x7f]/.test(profile) ? profile : null;
+  const page = pages.find(page => page === params.get('page')) ?? 'overview';
   return {
-    page: pages.find(page => page === params.get('page')) ?? 'overview',
+    // Links from before the sidebar name a sidebar view as the page.
+    page: isSideView(page) ? 'overview' : page,
+    side: sideViews.find(view => view === params.get('side')) ?? (isSideView(page) ? page : null),
     profile: validProfile,
     chat: validProfile && chat && /^[a-zA-Z0-9_-]{1,128}$/.test(chat) ? chat : null,
     epic: validProfile && epic && /^[1-9][0-9]{0,9}$/.test(epic) ? epic : null,
@@ -26,7 +35,7 @@ export function readNavigation(search = window.location.search): NavigationState
 export function updateNavigation(update: Partial<NavigationState>): void {
   const url = new URL(window.location.href);
   const next = { ...readNavigation(), ...update };
-  for (const key of ['page', 'profile', 'chat', 'epic', 'map'] as const) {
+  for (const key of ['page', 'side', 'profile', 'chat', 'epic', 'map'] as const) {
     if (next[key]) url.searchParams.set(key, next[key]);
     else url.searchParams.delete(key);
   }

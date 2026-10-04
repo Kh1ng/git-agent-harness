@@ -112,8 +112,9 @@ test('replay de-duplicates durable activity', async ({ page }) => {
   });
   await page.goto('/?page=events');
   await expect(page.getByRole('heading', { name: 'Activity', exact: true })).toBeVisible();
-  await expect(page.getByRole('listitem').filter({ hasText: 'Work finished' })).toHaveCount(1);
-  await expect(page.getByRole('listitem')).toHaveCount(3);
+  const feed = page.getByRole('complementary', { name: 'Activity' });
+  await expect(feed.getByRole('listitem').filter({ hasText: 'Work finished' })).toHaveCount(1);
+  await expect(feed.getByRole('listitem')).toHaveCount(3);
 });
 
 test('a live event is visible on the current surface and opens the feed', async ({ page }) => {

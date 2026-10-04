@@ -28,7 +28,8 @@ test('connection settings restore dashboard access after the first valid token',
   // merely by changing its profile key. Only the credential refresh can recover it.
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.locator('section').filter({ hasText: 'Which configured GAH repo' }).getByRole('combobox').selectOption('fixture');
-  await page.getByRole('button', { name: 'Overview', exact: true }).click();
+  // The sidebar stays open beside the main panel until its icon closes it.
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect.poll(() => rejectedReads).toBeGreaterThan(0);
   await expect(page.getByRole('alert')).toContainText('Coordinator token required');
   await expect(page.getByLabel('Access token', { exact: true })).toHaveCount(0);

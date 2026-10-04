@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Sun, Moon, Info, ExternalLink, Save, Loader2, RefreshCw, Eye, EyeOff, Copy, Check, ChevronRight } from 'lucide-react';
+import { Sun, Moon, Info, ExternalLink, Save, Loader2, RefreshCw, Eye, EyeOff, Copy, Check, ChevronRight, Search } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { ExternalAnchor } from '../components/ExternalAnchor';
 import { useUiStore } from '../store/uiStore.js';
@@ -23,15 +23,37 @@ const SETTINGS_REFRESH_MS = 60 * 1000;
 const SETTINGS_SECTIONS_KEY = 'gah.settings.openSections';
 type SettingsSectionId = 'general' | 'skills' | 'memory' | 'factory';
 const SETTINGS_SECTION_IDS: SettingsSectionId[] = ['general', 'skills', 'memory', 'factory'];
+const SETTINGS_SECTION_TITLES: Record<SettingsSectionId, string> = { general: 'General', skills: 'Skill bank', memory: 'TDAI / memory', factory: 'Factory / profile management' };
 const WAKE_AUTONOMY_OPTIONS: { value: WakeAutonomyValue; label: string }[] = [
   { value: 'off', label: 'Off' },
   { value: 'review_only', label: 'Review only' },
   { value: 'full', label: 'Full' },
 ];
 
+/** What the search bar finds: each card's heading, the section that holds it
+ * (none for the cards above the sections), and words people look for it by. */
+const SETTINGS_INDEX: { heading: string; section: SettingsSectionId | null; keywords: string }[] = [
+  { heading: 'Connection & pairing', section: null, keywords: 'access token device pair qr central server' },
+  { heading: 'Profile context', section: null, keywords: 'profile repo project provider' },
+  { heading: 'Appearance', section: 'general', keywords: 'theme dark light nodes standalone navbar' },
+  { heading: 'Node readiness', section: 'general', keywords: 'doctor checks health authentication' },
+  { heading: 'Global manager', section: 'general', keywords: 'manager wake autonomy' },
+  { heading: 'Notification channel', section: 'general', keywords: 'notifications alerts telegram' },
+  { heading: 'Chat', section: 'general', keywords: 'manager chat backend model helper routing' },
+  { heading: 'Update GAH', section: 'general', keywords: 'version upgrade release' },
+  { heading: 'Add a Node', section: 'general', keywords: 'worker install register' },
+  { heading: 'Agent backends', section: 'general', keywords: 'providers eligibility availability quota' },
+  { heading: 'Central skill bank', section: 'skills', keywords: 'skills versions' },
+  { heading: 'TDAI memory gateway', section: 'memory', keywords: 'memory recall context policy credentials' },
+  { heading: 'Memory gateway', section: 'memory', keywords: 'memory setup install' },
+  { heading: 'Dispatch settings', section: 'factory', keywords: 'factory parallel workers validation timeout autonomy' },
+  { heading: 'Effective profile configuration', section: 'factory', keywords: 'routing candidates prompt policies backend instances config' },
+  { heading: 'Profile Management', section: 'factory', keywords: 'add edit delete profile' }
+];
+
 export function SettingsPage() {
   const { providers, providerStatuses, sendMessage, isConnected, serverVersion, profile } = useWebSocket();
-  const { theme, setTheme, profileOverride, setProfileOverride } = useUiStore();
+  const { theme, setTheme, showNodes, setShowNodes, profileOverride, setProfileOverride } = useUiStore();
   const profiles = useGahStore((s) => s.profiles);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
   const config = useGahStore((s) => s.config);
@@ -110,8 +132,33 @@ export function SettingsPage() {
     });
   };
 
+  const root = useRef<HTMLDivElement>(null);
+  const [query, setQuery] = useState('');
+  const [wantedHeading, setWantedHeading] = useState<string | null>(null);
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const matches = terms.length === 0 ? [] : SETTINGS_INDEX.filter((entry) => {
+    const text = `${entry.heading} ${entry.keywords}`.toLowerCase();
+    return terms.every((term) => text.includes(term));
+  });
+  // A section renders its cards after it opens, some only once their data loads.
+  useEffect(() => {
+    if (!wantedHeading) return;
+    let tries = 0;
+    const timer = window.setInterval(() => {
+      const heading = Array.from(root.current?.querySelectorAll('h2, h3') ?? []).find((element) => element.textContent?.trim().startsWith(wantedHeading));
+      if (heading) heading.scrollIntoView({ block: 'start' });
+      if (heading || ++tries >= 20) { window.clearInterval(timer); setWantedHeading(null); }
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [wantedHeading]);
+  const openResult = (entry: typeof SETTINGS_INDEX[number]) => {
+    if (entry.section) setSectionOpen(entry.section, true);
+    setQuery('');
+    setWantedHeading(entry.heading);
+  };
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" ref={root}>
       <PageHeader
         title="Settings"
         description="Connection, devices, and preferences"
@@ -119,6 +166,28 @@ export function SettingsPage() {
         refreshing={profiles.loading || config.loading}
         lastUpdated={lastUpdated}
       />
+
+      <div className="max-w-4xl">
+        <label className="relative block">
+          <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden="true" />
+          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)}
+            aria-label="Search settings" placeholder="Search settings"
+            className="w-full rounded-md border border-subtle bg-raised py-2 pl-9 pr-3 text-sm text-primary placeholder:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" />
+        </label>
+        {terms.length > 0 && (
+          <ul className="card mt-2 divide-y divide-subtle" aria-label="Matching settings">
+            {matches.length === 0 && <li className="px-3 py-2 text-sm text-muted">No settings match.</li>}
+            {matches.map((entry) => (
+              <li key={entry.heading}>
+                <button type="button" onClick={() => openResult(entry)} className="flex min-h-11 w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm text-primary hover:bg-white/5">
+                  {entry.heading}
+                  {entry.section && <span className="text-xs text-muted">{SETTINGS_SECTION_TITLES[entry.section]}</span>}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
 
       <section className="card-padded max-w-4xl" aria-labelledby="connection-settings-title">
         <h2 id="connection-settings-title" className="text-base font-semibold text-primary">Connection & pairing</h2>
@@ -184,10 +253,10 @@ export function SettingsPage() {
 
       <div className="max-w-4xl space-y-3">
         <div className="grid gap-3 sm:grid-cols-2">
-          <SettingsSectionButton id="general" title="General" description="Appearance, chat, updates, and backends." open={openSections.has('general')} onToggle={setSectionOpen} />
-          <SettingsSectionButton id="skills" title="Skill bank" description="Versioned skills available to backends." open={openSections.has('skills')} onToggle={setSectionOpen} />
-          <SettingsSectionButton id="memory" title="TDAI / memory" description="Gateway health, credentials, and recall policy." open={openSections.has('memory')} onToggle={setSectionOpen} />
-          <SettingsSectionButton id="factory" title="Factory / profile management" description="Dispatch, effective config, and profiles." open={openSections.has('factory')} onToggle={setSectionOpen} />
+          <SettingsSectionButton id="general" title={SETTINGS_SECTION_TITLES.general} description="Appearance, chat, updates, and backends." open={openSections.has('general')} onToggle={setSectionOpen} />
+          <SettingsSectionButton id="skills" title={SETTINGS_SECTION_TITLES.skills} description="Versioned skills available to backends." open={openSections.has('skills')} onToggle={setSectionOpen} />
+          <SettingsSectionButton id="memory" title={SETTINGS_SECTION_TITLES.memory} description="Gateway health, credentials, and recall policy." open={openSections.has('memory')} onToggle={setSectionOpen} />
+          <SettingsSectionButton id="factory" title={SETTINGS_SECTION_TITLES.factory} description="Dispatch, effective config, and profiles." open={openSections.has('factory')} onToggle={setSectionOpen} />
         </div>
 
         {openSections.has('general') && <SettingsSectionPanel id="general">
@@ -209,6 +278,13 @@ export function SettingsPage() {
             Light
           </button>
         </div>
+        <label className="mt-4 flex items-start gap-2 text-sm text-primary">
+          <input type="checkbox" checked={showNodes} onChange={(event) => setShowNodes(event.target.checked)} className="mt-1" />
+          <span>
+            Always show Nodes
+            <span className="block text-xs text-muted">Nodes is hidden while this install is standalone (no worker nodes). Turn this on to add one.</span>
+          </span>
+        </label>
       </section>
 
       <section className="card-padded max-w-3xl">

@@ -86,8 +86,8 @@ test('Settings persists sections and saves memory configuration through the shar
     contextPolicies: {}
   });
 
+  // The open sidebar view is part of the URL, so Settings is still open.
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await page.getByRole('button', { name: 'Settings' }).click();
   const reloadedMemorySection = page.getByRole('button', { name: /TDAI \/ memory/ });
   await expect(reloadedMemorySection).toHaveAttribute('aria-expanded', 'true');
 

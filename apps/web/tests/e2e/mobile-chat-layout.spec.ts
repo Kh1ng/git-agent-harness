@@ -162,12 +162,13 @@ test('chat keeps the composer inside short and offline viewports', async ({ page
   await expectComposerInsideViewport();
   await page.setViewportSize({ width: 1024, height: 400 });
   await expectComposerInsideViewport();
+  // A short desktop window keeps every page reachable: the top navbar
+  // scrolls sideways instead of wrapping, and the sidebar strip stays in view.
   const primaryNavigation = page.getByRole('navigation', { name: 'Primary' });
-  const sidebar = primaryNavigation.locator('..');
   await expect(primaryNavigation).toBeVisible();
-  expect(await sidebar.evaluate((element) => element.scrollHeight > element.clientHeight
-    && getComputedStyle(element).overflowY === 'auto')).toBe(true);
-  const settings = primaryNavigation.getByRole('button', { name: 'Settings', exact: true });
-  await settings.scrollIntoViewIfNeeded();
-  await expect(settings).toBeInViewport();
+  expect(await primaryNavigation.evaluate((element) => getComputedStyle(element).overflowX)).toBe('auto');
+  const chat = primaryNavigation.getByRole('button', { name: 'Chat', exact: true });
+  await chat.scrollIntoViewIfNeeded();
+  await expect(chat).toBeInViewport();
+  await expect(page.getByRole('navigation', { name: 'Sidebar' }).getByRole('button', { name: 'Settings', exact: true })).toBeInViewport();
 });
