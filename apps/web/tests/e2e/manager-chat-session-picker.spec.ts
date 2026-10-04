@@ -45,25 +45,37 @@ test('selecting a chat keeps the project rail and opens its own provider', async
   await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible();
   await expect(page.getByRole('complementary', { name: 'Chat navigation' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex', { timeout: 10_000 });
-  await expect(page).toHaveURL(/[?&]page=chat/);
+  // Beside the project view, the chat opens docked; expanding it keeps the conversation.
+  await expect(page).toHaveURL(/[?&]dock=chat/);
   await expect(page).toHaveURL(/[?&]chat=/);
-
-  // The expanded project view remains available as a separate destination.
-  await page.getByRole('button', { name: 'Chat', exact: true }).first().click();
-  await page.getByRole('dialog', { name: 'New chat' }).getByRole('button', { name: 'View all projects' }).click();
+  await page.getByRole('button', { name: 'Expand chat' }).click();
+  await expect(page).toHaveURL(/[?&]page=chat/);
   await expect(page.getByRole('complementary', { name: 'Chat navigation' })).toBeVisible();
 });
 
-test('the main Chat action opens the lightweight launcher', async ({ page, request }) => {
+test('the Chat action opens no launcher; New chat is a panel inside the chat', async ({ page, request }) => {
   await selectScenario(request, 'normal');
   await page.goto('/?page=chat&profile=fixture&chat=default');
   await expect(page.getByRole('complementary', { name: 'Chat navigation' })).toBeVisible();
 
+  // Expanded, the Chat button docks the chat back beside the page it covered.
   await page.getByRole('button', { name: 'Chat', exact: true }).first().click();
-  const launcher = page.getByRole('dialog', { name: 'New chat' });
-  await expect(launcher.getByRole('heading', { name: 'Start a chat' })).toBeVisible();
-  await expect(launcher.getByRole('button', { name: 'View all projects' })).toBeVisible();
-  await expect(launcher.getByRole('button', { name: /Start from an issue in Fixture/ })).toBeVisible();
+  await expect(page).toHaveURL(/[?&]dock=chat/);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'New chat' })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'New chat', exact: true }).click();
+  const panel = page.getByRole('region', { name: 'New chat' });
+  await expect(panel.getByRole('button', { name: 'Start chat' })).toBeDisabled();
+  // Project, node and provider wait behind Extra settings; the summary names the current choice.
+  await expect(panel.getByRole('combobox', { name: 'Run on node' })).toBeHidden();
+  await expect(panel.getByText('Extra settings')).toBeVisible();
+  await panel.getByText('Extra settings').click();
+  await expect(panel.getByRole('button', { name: /Fixture/ })).toBeVisible();
+  await expect(panel.getByRole('combobox', { name: 'Run on node' })).toBeVisible();
+  await panel.getByRole('button', { name: 'View all projects' }).click();
+  await expect(page).toHaveURL(/[?&]page=projects/);
+  await expect(panel).toHaveCount(0);
 });
 
 test('the open issues queue starts a seeded chat in one step', async ({ page, request }) => {
@@ -76,5 +88,5 @@ test('the open issues queue starts a seeded chat in one step', async ({ page, re
   await first.click();
 
   await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible({ timeout: 10_000 });
-  await expect(page).toHaveURL(/[?&]page=chat/);
+  await expect(page).toHaveURL(/[?&](page|dock)=chat/);
 });

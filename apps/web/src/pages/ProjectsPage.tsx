@@ -8,7 +8,7 @@ import { toChatProfile, useChatProfiles } from '../hooks/useChatProfiles.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { ProjectRail } from '../components/ProjectRail.js';
-import { NewChatModal } from '../components/NewChatModal.js';
+import { NewChatPanel } from '../components/NewChatPanel.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { BoundedCollection } from '../components/BoundedCollection.js';
 import { DEFAULT_CONVERSATION_ID, updateNavigation, type Page } from '../lib/navigationState.js';
@@ -165,6 +165,19 @@ export function ProjectsPage({ onNavigate }: { onNavigate: (page: Page) => void 
         </div>
 
         <section className="min-w-0 space-y-4" aria-label={`${projectLabel} work`}>
+          {newChatOpen && (
+            <NewChatPanel
+              currentProfile={profile}
+              profiles={profiles}
+              backends={backends}
+              onClose={() => setNewChatOpen(false)}
+              onCreated={(createdProfile, sessionId) => {
+                setProfileOverride(createdProfile);
+                updateNavigation({ profile: createdProfile, chat: sessionId });
+                onNavigate('chat');
+              }}
+            />
+          )}
           <div className="card-padded">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0">
@@ -259,18 +272,6 @@ export function ProjectsPage({ onNavigate }: { onNavigate: (page: Page) => void 
         </section>
       </div>
 
-      <NewChatModal
-        open={newChatOpen}
-        currentProfile={profile}
-        profiles={profiles}
-        backends={backends}
-        onClose={() => setNewChatOpen(false)}
-        onCreated={(createdProfile, sessionId) => {
-          setProfileOverride(createdProfile);
-          updateNavigation({ profile: createdProfile, chat: sessionId });
-          onNavigate('chat');
-        }}
-      />
     </div>
   );
 }

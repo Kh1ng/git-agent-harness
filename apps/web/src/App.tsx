@@ -55,7 +55,6 @@ export function App() {
   // Chat lives in the right sidebar; `currentPage === 'chat'` is the same chat expanded over the main panel.
   const [chatDocked, setChatDocked] = useState(() => readNavigation().dock === 'chat');
   const [pageBehindChat, setPageBehindChat] = useState<MainPage>('overview');
-  const [chatLauncherRequest, setChatLauncherRequest] = useState(0);
   useEffect(() => updateNavigation({ page: currentPage, side: sideView, dock: chatDocked && currentPage !== 'chat' ? 'chat' : null }), [currentPage, sideView, chatDocked]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
@@ -80,8 +79,8 @@ export function App() {
     setCurrentPage(page);
   };
   const toggleChat = () => {
-    // Expanded, the Chat button keeps its old job: the new-chat launcher.
-    if (currentPage === 'chat') setChatLauncherRequest((request) => request + 1);
+    // Expanded, the Chat button docks the chat back beside the main panel.
+    if (currentPage === 'chat') { if (window.matchMedia(SPLIT_LAYOUT).matches) expandChat(false); }
     else if (chatDocked) setChatDocked(false);
     else navigate('chat');
   };
@@ -91,7 +90,7 @@ export function App() {
     setChatDocked(!expanded);
   };
   const chat = (docked: boolean) => (
-    <ManagerChatPage docked={docked} launcherRequest={chatLauncherRequest} onNavigate={navigate} onOpenWork={setSelectedWorkId} />
+    <ManagerChatPage docked={docked} onNavigate={navigate} onOpenWork={setSelectedWorkId} />
   );
 
   const renderPage = () => {
@@ -126,16 +125,12 @@ export function App() {
   };
 
   const isChatPage = currentPage === 'chat';
-  const handlePrimaryNavigation = (page: Page) => {
-    if (page === 'chat') setChatLauncherRequest((request) => request + 1);
-    navigate(page);
-  };
 
   return (
     <div className="app-shell flex h-dvh flex-col overflow-hidden bg-page">
       <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 bg-card text-primary p-3 rounded-md">Skip to content</a>
       <PwaStatusBars />
-      <Navbar currentPage={currentPage} sideView={sideView} onPageChange={handlePrimaryNavigation} hideNodes={standalone && !showNodes} activityUnreadCount={activityUnreadCount}
+      <Navbar currentPage={currentPage} sideView={sideView} onPageChange={navigate} hideNodes={standalone && !showNodes} activityUnreadCount={activityUnreadCount}
         chatOpen={isChatPage || chatDocked} onChatToggle={toggleChat}
         actions={<NotificationsMenu liveActivity={sideView === 'events' ? null : liveActivity} unreadCount={activityUnreadCount} revision={activityRevision} autoPopup={notificationPopups} onViewAll={() => setSideView('events')} />} />
 

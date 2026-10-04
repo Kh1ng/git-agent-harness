@@ -118,8 +118,9 @@ for (const width of [320, 390]) {
     // New chat opens the existing creation flow without discarding the
     // current conversation first.
     await page.getByRole('button', { name: 'New chat', exact: true }).click();
-    const launcher = page.getByRole('dialog', { name: 'New chat' });
+    const launcher = page.getByRole('region', { name: 'New chat' });
     await expect(page).toHaveURL(/[?&]chat=mock-session-1/);
+    await launcher.getByText('Extra settings').click();
     const firstProject = launcher.getByRole('button', { name: /Fixture/ });
     await expect(firstProject).toBeVisible();
     expect((await firstProject.boundingBox())!.height).toBeGreaterThanOrEqual(44);
@@ -167,7 +168,8 @@ test('chat keeps the composer inside short and offline viewports', async ({ page
   const primaryNavigation = page.getByRole('navigation', { name: 'Primary' });
   await expect(primaryNavigation).toBeVisible();
   expect(await primaryNavigation.evaluate((element) => getComputedStyle(element).overflowX)).toBe('auto');
-  const chat = primaryNavigation.getByRole('button', { name: 'Chat', exact: true });
+  // Chat sits at the navbar's right end, outside the scrolling page list.
+  const chat = page.getByRole('button', { name: 'Chat', exact: true });
   await chat.scrollIntoViewIfNeeded();
   await expect(chat).toBeInViewport();
   await expect(page.getByRole('navigation', { name: 'Sidebar' }).getByRole('button', { name: 'Settings', exact: true })).toBeInViewport();

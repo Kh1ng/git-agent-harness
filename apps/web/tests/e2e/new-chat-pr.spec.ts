@@ -17,19 +17,19 @@ async function openChat(page: Page): Promise<void> {
   await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible();
 }
 
-async function openNewChatModal(page: Page): Promise<void> {
+async function openNewChatPanel(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'New chat' }).click();
-  await expect(page.getByRole('dialog', { name: 'New chat' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'New chat' })).toBeVisible();
 }
 
 test('PR tab lists open PRs and starts a chat seeded with one', async ({ page, request }) => {
   await selectScenario(request, 'normal');
   await openProjects(page);
-  await openNewChatModal(page);
+  await openNewChatPanel(page);
 
   // The mock reports no issues but two open PRs for the fixture project;
   // the PR tab renders author + draft/review state like the issue tab.
-  const dialog = page.getByRole('dialog', { name: 'New chat' });
+  const dialog = page.getByRole('region', { name: 'New chat' });
   await dialog.getByRole('tab', { name: 'From PR' }).click();
   await expect(dialog.getByText('#12 Ship the PR chat mode')).toBeVisible();
   await expect(dialog.getByText('octocat · approved')).toBeVisible();
@@ -41,10 +41,10 @@ test('PR tab lists open PRs and starts a chat seeded with one', async ({ page, r
       : route.continue());
   await dialog.getByText('#12 Ship the PR chat mode').click();
 
-  // The modal closes, the chat page opens on the fresh session, and its
+  // The panel closes, the chat opens on the fresh session, and its
   // transcript is seeded with the PR.
   await expect(dialog).toHaveCount(0);
-  await expect(page).toHaveURL(/[?&]page=chat/);
+  await expect(page).toHaveURL(/[?&](page|dock)=chat/);
   await expect(page.getByText('Head branch: feat/pr-chat')).toBeVisible();
   await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await expect(page.getByRole('link', { name: 'View PR' })).toHaveAttribute('href', 'https://github.com/Kh1ng/git-agent-harness/pull/12');
@@ -69,8 +69,8 @@ test('PR tab empty and failed states match the issue tab', async ({ page, reques
   // No open PRs: same empty state as the issue tab, Start disabled.
   await page.route('**/api/manager-chat/prs**', (route) =>
     route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ prs: [] }) }));
-  await openNewChatModal(page);
-  const empty = page.getByRole('dialog', { name: 'New chat' });
+  await openNewChatPanel(page);
+  const empty = page.getByRole('region', { name: 'New chat' });
   await empty.getByRole('tab', { name: 'From PR' }).click();
   await expect(empty.getByText('No open pull requests for this project.')).toBeVisible();
   await expect(empty.getByRole('button', { name: 'Start chat' })).toBeDisabled();
@@ -89,8 +89,8 @@ test('PR tab empty and failed states match the issue tab', async ({ page, reques
         ? route.fulfill({ status: 503, json: { message: 'Provider temporarily unavailable' } })
         : route.fulfill({ json: { [source.path]: [{ number: source.number, title: 'Recovered provider item', labels: [], author: 'octocat', isDraft: false, reviewState: null }] } });
     });
-    await openNewChatModal(page);
-    const dialog = page.getByRole('dialog', { name: 'New chat' });
+    await openNewChatPanel(page);
+    const dialog = page.getByRole('region', { name: 'New chat' });
     await dialog.getByRole('tab', { name: source.tab }).click();
     await expect(dialog.getByRole('alert')).toContainText(`Could not load ${source.label}. Provider temporarily unavailable`);
     await expect(dialog.getByText(source.empty)).toHaveCount(0);

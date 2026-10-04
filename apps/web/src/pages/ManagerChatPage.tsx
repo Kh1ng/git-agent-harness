@@ -6,7 +6,7 @@ import { ExternalAnchor } from '../components/ExternalAnchor';
 import { useUiStore } from '../store/uiStore.js';
 import { ChatNodePicker } from '../components/ChatNodePicker.js';
 import { useChatNodes } from '../hooks/useChatNodes.js';
-import { NewChatModal, type ChatProfile } from '../components/NewChatModal.js';
+import { NewChatPanel, type ChatProfile } from '../components/NewChatPanel.js';
 import { toChatProfile } from '../hooks/useChatProfiles.js';
 import { formatChatName } from '../lib/format.js';
 import { DEFAULT_CONVERSATION_ID, readNavigation, updateNavigation, type Page } from '../lib/navigationState.js';
@@ -452,7 +452,7 @@ function associatedWorkId(session: ChatSessionSummary): string | null {
   return session.issueNumber ? `#${session.issueNumber}` : null;
 }
 
-export function ManagerChatPage({ launcherRequest = 0, docked = false, onNavigate, onOpenWork }: { launcherRequest?: number; /** In the right sidebar: always the narrow layout. */ docked?: boolean; onNavigate?: (page: Page) => void; onOpenWork?: (workId: string) => void }) {
+export function ManagerChatPage({ docked = false, onNavigate, onOpenWork }: { /** In the right sidebar: always the narrow layout. */ docked?: boolean; onNavigate?: (page: Page) => void; onOpenWork?: (workId: string) => void }) {
   const { sendMessage, messages, isConnected, reconnectSeq } = useWebSocket();
   const wsProfile = useWebSocket().profile;
   const profileOverride = useUiStore((s) => s.profileOverride);
@@ -1368,7 +1368,6 @@ export function ManagerChatPage({ launcherRequest = 0, docked = false, onNavigat
   };
 
   const [newChatOpen, setNewChatOpen] = useState(false);
-  const [launcherOpen, setLauncherOpen] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const toolsRef = useRef<HTMLDivElement>(null);
@@ -1433,7 +1432,7 @@ export function ManagerChatPage({ launcherRequest = 0, docked = false, onNavigat
     }
   };
 
-  /** New-chat completion: switch project if the modal picked another one,
+  /** New-chat completion: switch project if the panel picked another one,
    * then select the fresh session (its history effect clears the view).
    * The pending ref keeps the id alive through the profile-switch effect,
    * same as a cross-project picker selection. */
@@ -1445,13 +1444,6 @@ export function ManagerChatPage({ launcherRequest = 0, docked = false, onNavigat
     refreshSessions(createdProfile);
     setSessionId(createdSessionId);
   };
-
-  useEffect(() => {
-    if (launcherRequest > 0) {
-      setLauncherOpen(true);
-      setNewChatOpen(true);
-    }
-  }, [launcherRequest]);
 
   const chatTitle = activeSession ? formatChatName(activeSession) : 'Default conversation';
   const projectName = currentProfileInfo?.repo?.split('/').pop() ?? profile;
@@ -1726,17 +1718,6 @@ export function ManagerChatPage({ launcherRequest = 0, docked = false, onNavigat
         );
       })()}
 
-      <NewChatModal
-        open={newChatOpen}
-        launcher={launcherOpen}
-        currentProfile={profile}
-        profiles={availableProfiles}
-        backends={availableBackends}
-        nodesRefreshKey={nodesRefreshKey}
-        onClose={() => { setNewChatOpen(false); setLauncherOpen(false); }}
-        onViewAllProjects={onNavigate ? () => onNavigate('projects') : undefined}
-        onCreated={handleChatCreated}
-      />
       {sessionDetailOpen && activeSession && (
         <ChatSessionDetailDrawer
           session={activeSession}
@@ -1883,19 +1864,30 @@ export function ManagerChatPage({ launcherRequest = 0, docked = false, onNavigat
       <div className="flex h-full min-h-0 min-w-0 flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto h-full max-w-3xl space-y-4 px-1 pb-2">
-          {!historyLoaded && turns.length === 0 && (
+          {newChatOpen && (
+            <NewChatPanel
+              currentProfile={profile}
+              profiles={availableProfiles}
+              backends={availableBackends}
+              nodesRefreshKey={nodesRefreshKey}
+              onClose={() => setNewChatOpen(false)}
+              onViewAllProjects={onNavigate ? () => { setNewChatOpen(false); onNavigate('projects'); } : undefined}
+              onCreated={handleChatCreated}
+            />
+          )}
+          {!newChatOpen && !historyLoaded && turns.length === 0 && (
             <div className="h-full flex flex-col items-center justify-center text-center text-muted gap-2">
               <MessageSquare size={24} className="opacity-50 animate-pulse" aria-hidden="true" />
               <p className="text-sm">Loading conversation…</p>
             </div>
           )}
-          {historyLoaded && turns.length === 0 && (
+          {!newChatOpen && historyLoaded && turns.length === 0 && (
             <div className="h-full flex flex-col items-center justify-center text-center text-muted gap-2">
               <MessageSquare size={24} className="opacity-50" aria-hidden="true" />
               <p className="text-sm" title="Context is shared across backends — switching models keeps this session's memory.">Ask about status, blockers, or next steps. Type "/" for commands.</p>
             </div>
           )}
-          {turns.filter((turn) => !turn.tool || !liveTools[turn.tool.toolCallId]).map((turn, i) => (
+          {!newChatOpen && turns.filter((turn) => !turn.tool || !liveTools[turn.tool.toolCallId]).map((turn, i) => (
             <div key={i} className={`flex flex-col ${turn.role === 'user' ? 'items-end' : 'items-start'}`}>
               {turn.role === 'tool' && turn.tool ? (
                 <ToolCallCard tool={turn.tool} />
