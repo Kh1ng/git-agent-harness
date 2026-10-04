@@ -8,7 +8,9 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 pub(crate) fn backend(info: &CredentialInfo) -> &str {
     match (info.kind, info.provider.as_str(), info.env_var.as_deref()) {
-        (CredentialKind::MistralDashboard, _, _) => "mistral-dashboard",
+        (CredentialKind::MistralDashboard | CredentialKind::MistralLogin, _, _) => {
+            "mistral-dashboard"
+        }
         (CredentialKind::ApiKey, "nous", _) => "opencode",
         (CredentialKind::ApiKey, "mistral", Some("MISTRAL_ADMIN_API_KEY")) => "vibe",
         _ => &info.provider,
@@ -36,8 +38,13 @@ fn unknown(info: &CredentialInfo, now: OffsetDateTime) -> QuotaObservationRecord
 }
 
 pub(crate) fn refresh(id: &str, path: &Path) -> Result<QuotaObservationRecord> {
-    refresh_selected_at(&super::root()?, id, path, |info, secret| {
+    let root = super::root()?;
+    refresh_selected_at(&root, id, path, |selected| {
+        let (info, secret) = (&selected.info, selected.secret.as_str());
         match (info.kind, info.provider.as_str(), info.env_var.as_deref()) {
+            (CredentialKind::MistralLogin, _, _) => {
+                refresh_mistral_login(&root, selected).map(Some)
+            }
             (CredentialKind::MistralDashboard, _, _) => {
                 crate::usage::mistral_dashboard::refresh_cookie(secret).map(Some)
             }
@@ -56,12 +63,12 @@ fn refresh_selected_at(
     root: &Path,
     id: &str,
     path: &Path,
-    collect: impl FnOnce(&CredentialInfo, &str) -> Result<Option<QuotaObservationRecord>>,
+    collect: impl FnOnce(&super::StoredCredential) -> Result<Option<QuotaObservationRecord>>,
 ) -> Result<QuotaObservationRecord> {
     // Secret and generation come from one atomic record. Network calls hold no
     // source lock; rotation/deletion and publication share only a short lock.
     let selected = super::read_at(root, id)?;
-    let result = collect(&selected.info, &selected.secret);
+    let result = collect(&selected);
     let _guard = super::source_lock(root, id)?;
     let current = super::read_at(root, id)
         .map_err(|_| anyhow::anyhow!("credential changed during quota check"))?;
@@ -69,6 +76,42 @@ fn refresh_selected_at(
         anyhow::bail!("credential changed during quota check");
     }
     refresh_with(&selected.info, path, OffsetDateTime::now_utc(), || result)
+}
+
+/// Reuse the cached dashboard session; sign in again only when Mistral rejects
+/// it, so central does not log in every refresh. The new session is cached for
+/// this exact revision, so a rotated password never inherits it.
+fn refresh_mistral_login(
+    root: &Path,
+    selected: &super::StoredCredential,
+) -> Result<QuotaObservationRecord> {
+    use crate::usage::mistral_dashboard::{refresh_cookie, sign_in};
+    refresh_mistral_login_with(root, selected, refresh_cookie, sign_in)
+}
+
+fn refresh_mistral_login_with(
+    root: &Path,
+    selected: &super::StoredCredential,
+    refresh_cookie: impl Fn(&str) -> Result<QuotaObservationRecord>,
+    sign_in: impl FnOnce(&str, &str) -> Result<String>,
+) -> Result<QuotaObservationRecord> {
+    let auth_required = |error: &anyhow::Error| error.to_string().starts_with("auth_required:");
+    if let Some(session) = &selected.session {
+        match refresh_cookie(session) {
+            Err(error) if auth_required(&error) => {}
+            other => return other,
+        }
+    }
+    let login = super::mistral_login(&selected.secret)?;
+    let session = sign_in(&login.email, &login.password)?;
+    super::cache_session_at(root, &selected.info.id, &selected.revision, &session)?;
+    refresh_cookie(&session).map_err(|error| {
+        if auth_required(&error) {
+            anyhow::anyhow!("auth_required: Mistral accepted the saved password but rejected the new dashboard session; the account may require a second factor")
+        } else {
+            error
+        }
+    })
 }
 
 // Replacing a key can change its billing account. Clear that source before the
@@ -96,11 +139,13 @@ fn refresh_with(
             // Mistral dashboard returns a verified customer/workspace pool.
             // Legacy collectors with a fixed ambient pool cannot identify a
             // named account, so keep them source-scoped until verified.
-            if info.kind != CredentialKind::MistralDashboard
-                && record
-                    .quota_pool
-                    .as_deref()
-                    .is_none_or(|pool| !pool.starts_with("nous:"))
+            if !matches!(
+                info.kind,
+                CredentialKind::MistralDashboard | CredentialKind::MistralLogin
+            ) && record
+                .quota_pool
+                .as_deref()
+                .is_none_or(|pool| !pool.starts_with("nous:"))
             {
                 record.backend_instance = Some(format!("credential:{}", info.id));
                 record.quota_pool = None;
@@ -332,22 +377,22 @@ mod tests {
                 Some(&path),
             )
             .unwrap();
-            let result =
-                refresh_selected_at(&credentials, &source.id, &path, |selected, secret| {
-                    assert_eq!(secret, "session=old");
-                    if remove {
-                        super::super::remove_at(&credentials, &source.id, &path).unwrap();
-                    } else {
-                        super::super::save_with_quota_at(
-                            &credentials,
-                            source.clone(),
-                            "session=new",
-                            Some(&path),
-                        )
-                        .unwrap();
-                    }
-                    Ok(Some(reading(selected, OffsetDateTime::now_utc())))
-                });
+            let result = refresh_selected_at(&credentials, &source.id, &path, |stored| {
+                let selected = &stored.info;
+                assert_eq!(stored.secret, "session=old");
+                if remove {
+                    super::super::remove_at(&credentials, &source.id, &path).unwrap();
+                } else {
+                    super::super::save_with_quota_at(
+                        &credentials,
+                        source.clone(),
+                        "session=new",
+                        Some(&path),
+                    )
+                    .unwrap();
+                }
+                Ok(Some(reading(selected, OffsetDateTime::now_utc())))
+            });
             assert!(result.is_err());
             let records = quota_store::load(&path).unwrap();
             assert!(quota_store::current_source_records(&records)
@@ -447,5 +492,68 @@ mod tests {
         let windows = quota_store::latest_windows_for_identity(&records, &identity);
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].credential_id.as_deref(), Some("second"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mistral_login_signs_in_only_when_the_cached_session_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("credentials");
+        let source = CredentialInfo {
+            id: "console".into(),
+            provider: "mistral".into(),
+            kind: CredentialKind::MistralLogin,
+            account_label: "Mistral console".into(),
+            env_var: None,
+        };
+        let login = r#"{"email":"owner@example.com","password":"synthetic-pass"}"#;
+        super::super::save_at(&root, source.clone(), login).unwrap();
+        let now = OffsetDateTime::now_utc();
+        let dashboard = |accepted: &'static str| {
+            let source = source.clone();
+            move |cookie: &str| {
+                if cookie == accepted {
+                    Ok(reading(&source, now))
+                } else {
+                    anyhow::bail!("auth_required: Mistral dashboard session expired")
+                }
+            }
+        };
+        let never = |_: &str, _: &str| -> Result<String> { panic!("must not sign in") };
+
+        // No cached session: sign in once with the stored login, then cache it.
+        let stored = super::super::read_at(&root, "console").unwrap();
+        let signed_in = |email: &str, password: &str| {
+            assert_eq!((email, password), ("owner@example.com", "synthetic-pass"));
+            Ok("ory_session_a=1".to_string())
+        };
+        refresh_mistral_login_with(&root, &stored, dashboard("ory_session_a=1"), signed_in)
+            .unwrap();
+        let stored = super::super::read_at(&root, "console").unwrap();
+        assert_eq!(stored.session.as_deref(), Some("ory_session_a=1"));
+
+        // A valid cached session is reused without a login.
+        refresh_mistral_login_with(&root, &stored, dashboard("ory_session_a=1"), never).unwrap();
+
+        // An expired session triggers exactly one re-login.
+        refresh_mistral_login_with(&root, &stored, dashboard("ory_session_b=2"), |_, _| {
+            Ok("ory_session_b=2".to_string())
+        })
+        .unwrap();
+        let stored = super::super::read_at(&root, "console").unwrap();
+        assert_eq!(stored.session.as_deref(), Some("ory_session_b=2"));
+
+        // A non-auth failure is reported, not retried with the password.
+        let outage = |_: &str| -> Result<QuotaObservationRecord> {
+            anyhow::bail!("Mistral dashboard HTTP request failed")
+        };
+        assert!(refresh_mistral_login_with(&root, &stored, outage, never).is_err());
+
+        // A fresh session the dashboard still rejects points at a second factor.
+        let error = refresh_mistral_login_with(&root, &stored, dashboard("none"), |_, _| {
+            Ok("ory_session_c=3".to_string())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("second factor"));
     }
 }

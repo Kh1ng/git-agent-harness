@@ -14,6 +14,7 @@ pub fn run(command: CredentialCommands) -> Result<()> {
                     let kind = match record.kind {
                         CredentialKind::ApiKey => "api_key",
                         CredentialKind::MistralDashboard => "mistral_dashboard",
+                        CredentialKind::MistralLogin => "mistral_login",
                     };
                     println!("{}\t{}\t{}", record.id, record.provider, kind);
                 }

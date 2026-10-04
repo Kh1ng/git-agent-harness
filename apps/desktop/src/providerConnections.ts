@@ -1,6 +1,6 @@
 import type { MistralLoginResult } from './mistralLogin.js';
 
-export type CredentialInfo = { id: string; provider: string; kind: 'api_key' | 'mistral_dashboard'; account_label: string; env_var: string | null };
+export type CredentialInfo = { id: string; provider: string; kind: 'api_key' | 'mistral_dashboard' | 'mistral_login'; account_label: string; env_var: string | null };
 type CredentialInstance = { profile: string; instance: string; runner_kind: string; credential_id: string | null };
 type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
