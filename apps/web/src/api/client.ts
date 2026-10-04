@@ -277,7 +277,6 @@ export interface GitWorktreeSummary {
   main: boolean;
   /** Null when the directory could not be read. */
   changedFiles: number | null;
-  pullRequest: { number: number; title: string; url: string | null; isDraft: boolean } | null;
 }
 
 export interface GahDataSource {

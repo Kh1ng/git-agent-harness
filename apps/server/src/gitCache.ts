@@ -3,7 +3,9 @@
  * with an in-memory TTL cache so that UI surfaces render instantly on
  * repeat and never hammer the provider.
  */
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { promisify } from 'node:util';
 import type { GitReviewState } from '@git-agent-harness/contracts';
 import { AsyncTtlCache } from './asyncTtlCache.js';
 
@@ -238,9 +240,9 @@ export async function getGitBranchesCached(profile: string, cwd: string): Promis
   });
 }
 
-/** Parses `git worktree list --porcelain`; the first entry is the main checkout. */
-export function parseWorktreeList(porcelain: string): Omit<GitWorktree, 'changedFiles'>[] {
-  return porcelain.split(/\n\s*\n/).flatMap((block, index) => {
+/** Parses `git worktree list --porcelain`, skipping bare entries. */
+export function parseWorktreeList(porcelain: string): Omit<GitWorktree, 'changedFiles' | 'main'>[] {
+  return porcelain.split(/\n\s*\n/).flatMap((block) => {
     const fields = new Map(block.split('\n').filter(Boolean).map((line) => {
       const space = line.indexOf(' ');
       return space === -1 ? [line, ''] as const : [line.slice(0, space), line.slice(space + 1)] as const;
@@ -248,23 +250,35 @@ export function parseWorktreeList(porcelain: string): Omit<GitWorktree, 'changed
     const path = fields.get('worktree');
     if (!path || fields.has('bare')) return [];
     const ref = fields.get('branch');
-    return [{ path, branch: ref ? ref.replace(/^refs\/heads\//, '') : null, head: fields.get('HEAD') ?? '', main: index === 0 }];
+    return [{ path, branch: ref ? ref.replace(/^refs\/heads\//, '') : null, head: fields.get('HEAD') ?? '' }];
   });
+}
+
+const execFileAsync = promisify(execFile);
+
+function realpathOr(path: string): string {
+  try { return realpathSync(path); } catch { return path; }
 }
 
 /**
  * Cached worktrees of a profile's repository: its own checkout plus every
  * linked worktree agents and chats work in, with a changed-file count each.
+ * Async so a repo with many worktrees doesn't block the event loop, and
+ * `--no-optional-locks` so the status read never takes index.lock out from
+ * under an agent committing in that worktree.
  * Key: profile
  */
 export async function getGitWorktreesCached(profile: string, cwd: string): Promise<GitWorktreesResult> {
   return gitWorktreesCache.get(profile, async () => {
-    const { ok, out, err } = gitInDir(cwd, ['worktree', 'list', '--porcelain']);
-    if (!ok) throw new Error(err);
-    const worktrees = parseWorktreeList(out).map((worktree) => {
-      const status = gitInDir(worktree.path, ['status', '--porcelain']);
-      return { ...worktree, changedFiles: status.ok ? status.out.split('\n').filter(Boolean).length : null };
-    });
+    const git = (dir: string, args: string[]) =>
+      execFileAsync('git', ['--no-optional-locks', ...args], { cwd: dir, encoding: 'utf8', timeout: SUBPROCESS_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES });
+    const { stdout } = await git(cwd, ['worktree', 'list', '--porcelain']);
+    const own = realpathOr(cwd);
+    const worktrees = await Promise.all(parseWorktreeList(stdout).map(async (worktree) => {
+      const changedFiles = await git(worktree.path, ['status', '--porcelain'])
+        .then(({ stdout: out }) => out.split('\n').filter(Boolean).length, () => null);
+      return { ...worktree, main: realpathOr(worktree.path) === own, changedFiles };
+    }));
     return { worktrees };
   });
 }
@@ -321,6 +335,7 @@ export async function commitGitChanges(
   for (const key of gitLogCache.keys()) {
     if (key === profile || key.startsWith(`${profile}:`)) gitLogCache.delete(key);
   }
+  gitWorktreesCache.delete(profile);
   const rev = gitInDir(cwd, ['rev-parse', 'HEAD']);
   return { hash: rev.ok ? rev.out.trim() : '' };
 }

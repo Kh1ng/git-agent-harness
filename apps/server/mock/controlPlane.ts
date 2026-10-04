@@ -1688,8 +1688,8 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   });
   app.get('/api/git/worktrees', (_req, res) => res.json({
     worktrees: [
-      { path: '/workspace/mock', branch: 'main', head: 'a'.repeat(40), main: true, changedFiles: 0, pullRequest: null },
-      { path: '/workspace/worktrees/gah-mock-1', branch: 'gah/mock-1', head: 'b'.repeat(40), main: false, changedFiles: 2, pullRequest: null }
+      { path: '/workspace/mock', branch: 'main', head: 'a'.repeat(40), main: true, changedFiles: 0 },
+      { path: '/workspace/worktrees/gah-mock-1', branch: 'gah/mock-1', head: 'b'.repeat(40), main: false, changedFiles: 2 }
     ]
   }));
   app.get('/api/git/prs', (_req, res) => res.json({

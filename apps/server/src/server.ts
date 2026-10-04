@@ -2526,15 +2526,7 @@ export function createServer(
     const cwd = await resolveLocalPath(profile);
     if (!cwd) return res.status(404).json({ error: 'Profile not found' });
     try {
-      const { worktrees } = await getGitWorktreesCached(profile, cwd);
-      // Best-effort: the list is still useful when the provider is unreachable.
-      const prs = await listManagerChatPrs(profile).catch(() => []);
-      res.json({
-        worktrees: worktrees.map((worktree) => {
-          const pr = worktree.branch ? prs.find((candidate) => candidate.headRefName === worktree.branch) : undefined;
-          return { ...worktree, pullRequest: pr ? { number: pr.number, title: pr.title, url: pr.url, isDraft: pr.isDraft } : null };
-        })
-      });
+      res.json(await getGitWorktreesCached(profile, cwd));
     } catch (error) {
       res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
     }

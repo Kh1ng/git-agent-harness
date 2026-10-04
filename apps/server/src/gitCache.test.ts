@@ -32,9 +32,9 @@ describe('git worktrees', () => {
       'worktree /bare.git', 'bare', ''
     ].join('\n'));
     assert.deepEqual(parsed, [
-      { path: '/repo', branch: 'main', head: 'aaa', main: true },
-      { path: '/trees/gah-gah-1', branch: 'gah/gah-1', head: 'bbb', main: false },
-      { path: '/trees/detached', branch: null, head: 'ccc', main: false }
+      { path: '/repo', branch: 'main', head: 'aaa' },
+      { path: '/trees/gah-gah-1', branch: 'gah/gah-1', head: 'bbb' },
+      { path: '/trees/detached', branch: null, head: 'ccc' }
     ]);
   });
 
