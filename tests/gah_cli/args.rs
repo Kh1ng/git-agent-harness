@@ -48,6 +48,16 @@ fn help_works() {
         .stdout(predicate::str::contains("git agent harness"));
 }
 
+/// The top-level version flag resolves and advertises the built version.
+#[test]
+fn version_works() {
+    super::bin()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+}
+
 /// `gah --help` enumerates every top-level subcommand so operators can
 /// discover the full surface.
 #[test]
