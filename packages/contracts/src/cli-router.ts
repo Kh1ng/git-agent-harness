@@ -30,7 +30,7 @@ export interface CliRouterQuota {
   remainingPercent: number | null;
   resetAt: string | null;
   observedAt?: string;
-  /** Provider-reported window and pool identifiers, never inferred from display text. */
+  /** Routing window names use provider keys or reported durations; pools use provider identifiers. */
   window?: string;
   quotaPool?: string;
 }

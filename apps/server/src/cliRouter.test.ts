@@ -9,7 +9,7 @@ import express from 'express';
 import rateLimit from 'express-rate-limit';
 import { authMiddleware } from './authMiddleware.js';
 import { mutationSafety } from './mutationSafety.js';
-import { cliRouterRouter, validateRouterUrl, boundedUpstreamFetch, readSettings, writeSettings } from './cliRouter.js';
+import { createCliRouterQuotaObserver, cliRouterRouter, validateRouterUrl, boundedUpstreamFetch, readSettings, writeSettings } from './cliRouter.js';
 import { DeviceAccess, DEVICE_COOKIE } from './deviceAccess.js';
 import type { CliRouterSnapshot, CliRouterStoredSettings } from '@git-agent-harness/contracts';
 
@@ -906,4 +906,112 @@ test('changing router origin requires both new keys before any connection attemp
     assert.equal(rec.calls.length, 0);
     assert.equal(ctx.currentSettings?.url, 'https://old.example.com');
   } finally { await ctx.cleanup(); }
+});
+
+
+test('server lifecycle tolerates timer jitter, throttles inventory and stops on shutdown', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = Date.now();
+  const records: Record<string, unknown>[] = [];
+  const rec = recordingFetch(c => {
+    if (c.url.endsWith('/auth-files')) return { status: 200, body: { files: [file({ id: 'background', provider: 'claude' })] } };
+    if (c.url.endsWith('/api-call')) return { status: 200, body: { status_code: 200, body: { seven_day: { utilization: 20, resets_at: '2026-10-09T18:00:00Z' } } } };
+  });
+  const observer = createCliRouterQuotaObserver({
+    readSettingsFn: () => ({ url: 'https://background.example.com', apiKey: 'k', managementKey: 'm', accountBackends: { background: 'claude' } }),
+    fetchFn: rec.fn, now: () => now, recordQuotaFn: async record => { records.push(record); }
+  });
+  const stop = observer.start();
+  try {
+    await observer.refresh();
+    assert.equal(records.length, 1, 'no dashboard or HTTP request was made');
+    assert.equal(records[0].quota_window, 'weekly');
+    await Promise.all([observer.refresh(), observer.refresh()]);
+    assert.equal(rec.calls.length, 2, 'inventory and usage are both throttled');
+    now += 15 * 60_000 - 5; // Timer and wall clocks can differ by a few milliseconds.
+    t.mock.timers.tick(15 * 60_000);
+    await observer.refresh();
+    assert.equal(records.length, 2);
+    stop();
+    now += 15 * 60_000;
+    t.mock.timers.tick(15 * 60_000);
+    await observer.refresh();
+    assert.equal(records.length, 2, 'shutdown prevents future refresh');
+  } finally { stop(); }
+});
+
+test('persisted router windows use routing names and skip per-model Claude buckets', async () => {
+  // #1332: raw keys (primary_window, seven_day_opus) either never earned reset
+  // pressure or could exhaust the whole account from one model's bucket.
+  const bodies: Record<string, unknown> = {
+    claude: { five_hour: { utilization: 30 }, seven_day: { utilization: 20 }, seven_day_opus: { utilization: 100 } },
+    codex: { rate_limit: {
+      primary_window: { used_percent: 40, limit_window_seconds: 18_000 },
+      secondary_window: { used_percent: 10, limit_window_seconds: 604_800 },
+      code_review_window: { used_percent: 5 },
+    } },
+  };
+  for (const [provider, expected] of [
+    ['claude', [['5-hour', 70], ['weekly', 80]]],
+    ['codex', [['300m', 60], ['10080m', 90], ['code_review_window', 95]]],
+  ] as const) {
+    const records: Record<string, unknown>[] = [];
+    const observer = createCliRouterQuotaObserver({
+      readSettingsFn: () => ({ url: `https://${provider}.windows.example.com`, apiKey: 'k', managementKey: 'm' }),
+      fetchFn: async url => new Response(JSON.stringify(String(url).endsWith('/auth-files')
+        ? { files: [file({ provider })] }
+        : { status_code: 200, body: bodies[provider] })),
+      recordQuotaFn: async record => { records.push(record); }
+    });
+    await observer.refresh();
+    assert.deepEqual(records.map(r => [r.quota_window, r.quota_remaining_percent]), expected);
+  }
+});
+
+test('shutdown prevents in-flight quota publication', async () => {
+  let started!: () => void;
+  const inFlight = new Promise<void>(resolve => { started = resolve; });
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  const records: Record<string, unknown>[] = [];
+  const observer = createCliRouterQuotaObserver({
+    readSettingsFn: () => ({ url: 'https://shutdown.example.com', apiKey: 'k', managementKey: 'm' }),
+    fetchFn: async (url) => {
+      if (String(url).endsWith('/api-call')) { started(); await waiting; }
+      return new Response(JSON.stringify(String(url).endsWith('/auth-files')
+        ? { files: [file({ provider: 'claude' })] }
+        : { status_code: 200, body: { seven_day: { utilization: 20 } } }));
+    },
+    recordQuotaFn: async record => { records.push(record); }
+  });
+  const stop = observer.start();
+  const refresh = observer.refresh();
+  await inFlight;
+  stop();
+  release();
+  await refresh;
+  assert.deepEqual(records, []);
+});
+
+test('unrecognized Claude windows preserve prior routing readings', async () => {
+  let now = Date.now();
+  let body: unknown = { seven_day: { utilization: 20 } };
+  const records: Record<string, unknown>[] = [];
+  const observer = createCliRouterQuotaObserver({
+    readSettingsFn: () => ({ url: 'https://claude.unknown-windows.example.com', apiKey: 'k', managementKey: 'm' }),
+    now: () => now,
+    fetchFn: async url => new Response(JSON.stringify(String(url).endsWith('/auth-files')
+      ? { files: [file({ provider: 'claude' })] }
+      : { status_code: 200, body })),
+    recordQuotaFn: async record => { records.push(record); }
+  });
+  await observer.refresh();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].quota_window, 'weekly');
+  for (const unrecognized of [{ seven_day_opus: { utilization: 100 } }, { extra_usage: { utilization: 100 } }, {}]) {
+    body = unrecognized;
+    now += 15 * 60_000;
+    await observer.refresh();
+    assert.equal(records.length, 1, 'a response without account windows must not invalidate prior readings');
+  }
 });

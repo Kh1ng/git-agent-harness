@@ -6,8 +6,9 @@ fn account_rate_limits_read_round_trips_over_app_server() {
     let f = fixture();
     make_json_rpc_codex(&f.bin_dir, &f.record_dir);
 
-    let response = read_account_rate_limits(&f.bin_dir.join("codex"), Duration::from_secs(1))
-        .expect("quota request must use the app-server RPC");
+    let response =
+        read_account_rate_limits_with_env(&f.bin_dir.join("codex"), Duration::from_secs(1), &[])
+            .expect("quota request must use the app-server RPC");
 
     assert_eq!(
         response.pointer("/rateLimitsByLimitId/codex/primary/usedPercent"),

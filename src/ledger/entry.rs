@@ -367,6 +367,9 @@ pub struct RoutingDiagnostics {
     pub selected_quota_pool: Option<String>,
     #[serde(default)]
     pub selected_pace_band: Option<String>,
+    /// Fresh subscription capacity at launch; absent for historical routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_subscription_capacity: Option<crate::routing::subscription::SubscriptionCapacity>,
     #[serde(default)]
     pub selected_cost_class: Option<String>,
     #[serde(default)]

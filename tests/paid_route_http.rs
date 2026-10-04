@@ -1,5 +1,7 @@
 //! Exercise the HTTP approval adapter against a real CLI and isolated ledger.
 //! No backend is launched and no provider/notification command is configured.
+mod support;
+
 use git_agent_harness::{config, ledger};
 use std::fs;
 use std::path::Path;
@@ -17,6 +19,7 @@ fn paid_route_http_controls_round_trip_real_ledger() {
         return;
     }
     let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join("home")).unwrap();
     let cfg_path = tmp.path().join("config.toml");
     let ledger_path = tmp.path().join("ledger.jsonl");
     let location = tmp.path().display().to_string();
@@ -54,7 +57,7 @@ auth_source_label = "unused"
         ),
     )
     .unwrap();
-    let cfg = config::load(cfg_path.to_str()).unwrap();
+    let cfg = support::load_config(cfg_path.to_str()).unwrap();
     let profile = config::get_profile(&cfg, "real").unwrap();
     let mut gate = ledger::LedgerEntry::new("real", profile, "auto", "fix", "#822", None, None);
     gate.work_id = Some("#822".into());
@@ -89,6 +92,8 @@ auth_source_label = "unused"
         .current_dir(root)
         .env("GAH_REAL_PAID_ROUTE_TEST", "1")
         .env("GAH_BINARY", env!("CARGO_BIN_EXE_gah"))
+        .env("HOME", tmp.path().join("home"))
+        .env("GAH_CANONICAL_CONFIG", tmp.path().join("canonical.toml"))
         .env("GAH_CONFIG_PATH", &cfg_path)
         .env("GAH_LEDGER_PATH", &ledger_path)
         .env("XDG_STATE_HOME", tmp.path().join("state"))

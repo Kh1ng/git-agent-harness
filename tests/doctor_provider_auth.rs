@@ -308,7 +308,7 @@ fn worker_doctor_uses_central_memory_but_keeps_role_and_provider_checks() {
     for (stored_role, override_role, provider_ready, succeeds, memory_status) in [
         ("worker", None, true, true, Some("ok")),
         ("central", Some("worker"), true, true, Some("ok")),
-        ("worker", Some("central"), true, false, Some("fail")),
+        ("worker", Some("central"), true, true, Some("warn")),
         ("worker", Some("invalid"), true, false, None),
         ("worker", None, false, false, Some("ok")),
     ] {

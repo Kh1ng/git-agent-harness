@@ -107,7 +107,7 @@ import { usageRollup } from './managerChat/usageRollup.js';
 import { MessagingBridge } from './managerChat/messagingBridge.js';
 import { projectRoutes } from './projectRoutes.js';
 import { chatNodes, chatRoute, configureChatRouting } from './chatRouting.js';
-import { cliRouterRouter } from './cliRouter.js';
+import { cliRouterRouter, type createCliRouterQuotaObserver } from './cliRouter.js';
 import { timed } from './serverTiming.js';
 import type { AuthHealthMonitor, AuthHealthProber } from './authHealth.js';
 import { LoginRepairError, type LoginRepairBroker, type LoginRepairs, type RepairPrincipal } from './loginRepair.js';
@@ -171,6 +171,7 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   /** This node's login repairs (#1272); central reaches a worker's through its route. */
   loginRepairs?: LoginRepairs;
   loginRepairBroker?: LoginRepairBroker;
+  cliRouterQuotaObserver?: ReturnType<typeof createCliRouterQuotaObserver>;
 };
 
 const activityKinds = new Set<ActivityKind>([
@@ -512,7 +513,7 @@ export function createServer(
       standardHeaders: true,
       legacyHeaders: false
     }));
-    app.use('/api/cli-router', cliRouterRouter(mutation));
+    app.use('/api/cli-router', cliRouterRouter(mutation, {}, configDeps.cliRouterQuotaObserver));
   }
   if (node.role === 'central') {
     app.get('/api/manager-chat/bridge/operators', requireOwner, (_req, res) => {

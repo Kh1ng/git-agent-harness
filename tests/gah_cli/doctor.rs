@@ -73,7 +73,7 @@ fn emits_structured_readiness_checks_without_text_noise() {
 }
 
 #[test]
-fn doctor_fails_when_manager_memory_is_missing() {
+fn doctor_warns_but_passes_when_manager_memory_is_missing() {
     let tmp = test_tempdir();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -96,9 +96,9 @@ fn doctor_fails_when_manager_memory_is_missing() {
         .env("PATH", prepend_path(&fake_bin))
         .env("GITHUB_TOKEN", "token")
         .assert()
-        .failure()
-        .stdout(predicate::str::contains("[FAIL]"))
-        .stdout(predicate::str::contains("manager memory"));
+        .success()
+        .stdout(predicate::str::contains("[WARN] manager memory"))
+        .stdout(predicate::str::contains("[FAIL]").not());
 }
 
 #[test]

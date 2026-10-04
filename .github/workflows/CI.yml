@@ -139,7 +139,15 @@ jobs:
 
       - name: cargo test
         if: steps.rust-test-scope.outputs.has_rust_changes == 'true'
-        run: cargo test
+        run: |
+          mkdir -p "$HOME/.config/gah"
+          cat > "$HOME/.config/gah/canonical.toml" <<'TOML'
+          [routing]
+          routine_reviewer = { backend = "codex", model = "default" }
+          improve_candidates = [{ backend = "agy", model = "test-model", priority = 100, included_in_quota = true }]
+          review_candidates = [{ backend = "codex", model = "default", priority = 100, included_in_quota = true }]
+          TOML
+          env -u GAH_CANONICAL_CONFIG cargo test
 
       - name: cargo clippy
         if: steps.rust-test-scope.outputs.has_rust_changes == 'true'

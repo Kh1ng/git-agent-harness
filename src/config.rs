@@ -412,34 +412,12 @@ pub fn resolve_config_path(config_path: Option<&str>) -> PathBuf {
 pub fn canonical_config_path() -> PathBuf {
     #[cfg(test)]
     {
-        if let Some(path) = CANONICAL_CONFIG_TEST_OVERRIDE.with(|cell| cell.borrow().clone()) {
-            return path;
-        }
+        crate::test_support::canonical_config_path()
     }
+    #[cfg(not(test))]
     std::env::var("GAH_CANONICAL_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| default_config_dir().join("canonical.toml"))
-}
-
-// Tests used to coordinate this via a process-global env var (GAH_CANONICAL_CONFIG)
-// guarded by a mutex, but that only serialized the tests that *set* the var --
-// any other test calling `load()` concurrently on a different thread could still
-// read the env var mid-mutation. A thread-local override sidesteps the race
-// entirely: cargo test gives each running test exclusive use of its own thread.
-#[cfg(test)]
-thread_local! {
-    static CANONICAL_CONFIG_TEST_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-pub(crate) fn set_canonical_config_override(path: impl Into<PathBuf>) {
-    CANONICAL_CONFIG_TEST_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(path.into()));
-}
-
-#[cfg(test)]
-pub(crate) fn clear_canonical_config_override() {
-    CANONICAL_CONFIG_TEST_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -690,10 +668,11 @@ pub fn get_profile_mut<'a>(config: &'a mut GahConfig, name: &str) -> Result<&'a 
 #[cfg(test)]
 pub mod tests {
     use super::{
-        add_profile, canonical_backend_name, clear_canonical_config_override, get_profile_mut,
-        load, load_canonical_routing, merge_routing_policy, remove_profile, save,
-        set_canonical_config_override, CandidateConfig, GahConfig, Profile, RoutingPolicy,
+        add_profile, canonical_backend_name, get_profile_mut, load, load_canonical_routing,
+        merge_routing_policy, remove_profile, save, CandidateConfig, GahConfig, Profile,
+        RoutingPolicy,
     };
+    use crate::test_support::{clear_canonical_config_override, set_canonical_config_override};
 
     /// Build a structurally complete `Profile` for unit tests in other modules
     /// (e.g. `notifications`). Mirrors the shape of `dispatch::tests::profile`

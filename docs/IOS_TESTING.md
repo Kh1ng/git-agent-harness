@@ -14,14 +14,31 @@ The owner requested an installable iPhone app. The SwiftUI shell adds a persiste
 2. Sign into Xcode under Settings > Accounts. Select your development team for the GAH target.
 3. Enable Developer Mode under iPhone Settings > Privacy & Security if needed.
 4. Build and run `apps/ios/GAH.xcodeproj` on the iPhone. A dashboard refresh cannot update the native scanner integration.
-5. Turn on Tailscale. Use central `http://100.118.97.79`.
+5. Turn on Tailscale. Use your configured central HTTPS origin, including its port if required.
+
+## Repeatable physical navigation check
+
+After pairing the app, run this read-only smoke test from the Mac:
+
+```sh
+GAH_IOS_DEVICE=YOUR_IPHONE_UDID \
+GAH_IOS_TEAM=YOUR_DEVELOPMENT_TEAM \
+GAH_IOS_CENTRAL_URL=https://central.example.ts.net:8443 \
+GAH_IOS_EXPECTED_NODE=YOUR_WORKER_NAME \
+bash scripts/test-ios-central.sh
+```
+
+It builds and installs the current app, then opens Nodes, Chat, Git, Telemetry, and Settings through the existing paired session.
+It also checks Settings after backgrounding and a process restart. It exports screenshots and the XCTest result bundle to a temporary evidence directory.
+It sends no coding turn, worker command, or device revocation. Missing authentication fails the test.
+The simulator suite skips this check unless explicitly configured. Camera, keyboard, cellular handoff, and Live Activity acceptance still require the steps below.
 
 ## Acceptance run
 
 Record a pass or the exact failure for each step. Do not count an untested step as a pass.
 
 1. In the owner dashboard, open **Settings > Connection & pairing** and generate a new QR code. In GAH, open **Settings > Connection & pairing > Scan pairing QR code**. Confirm that no separate globe button appears above the dashboard. Scan the code, confirm the server identity, and name this device. If central cannot load, use **Connection settings** in the error message. If the app has no saved address, use **Set up connection**.
-2. Close and reopen GAH. Confirm it remains paired. Open Nodes and check the Windows worker named 12VHFAILURE.
+2. Close and reopen GAH. Confirm it remains paired. Open Nodes and check your expected Windows worker.
 3. Open Chat. Select the GAH project and the existing Windows worker acceptance conversation. Confirm earlier messages load and the selected execution node is Windows.
 4. Open a new test chat on Windows using Claude. Send: `Read-only mobile check: print GAH_IPHONE_OK and the current working directory. Do not edit files or run builds.` Confirm the reply appears on both phone and desktop. Record the node, conversation ID, and result.
 5. Start another harmless read-only turn. Confirm streaming works and Stop remains reachable with the keyboard open. Stop once, and verify central reports the turn has stopped.

@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::cmp::Ordering;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, serde::Deserialize, PartialEq)]
 pub struct SubscriptionCapacity {
     pub known_capacity: bool,
     pub exhausted: bool,
@@ -22,34 +22,9 @@ pub fn capacity(
     records: &[QuotaObservationRecord],
     now: OffsetDateTime,
 ) -> SubscriptionCapacity {
-    let matches = records.iter().filter(|record| {
-        record.backend == identity.logical_backend
-            && (record.model.is_none() || record.model == identity.effective_model)
-            && record
-                .backend_instance
-                .as_deref()
-                .is_none_or(|instance| instance == identity.backend_instance)
-            && record
-                .quota_pool
-                .as_deref()
-                .is_none_or(|pool| Some(pool) == identity.quota_pool.as_deref())
-            && (!identity.explicit_instance
-                || record.backend_instance.is_some()
-                || record.quota_pool.is_some())
-    });
-    let mut latest = std::collections::BTreeMap::new();
-    for record in matches {
-        let entry = latest
-            .entry(record.quota_window.as_deref())
-            .or_insert(record);
-        if record.checked_at.as_ref().or(record.observed_at.as_ref())
-            > entry.checked_at.as_ref().or(entry.observed_at.as_ref())
-        {
-            *entry = record;
-        }
-    }
+    let latest = crate::quota_store::latest_windows_for_identity(records, identity);
     let mut result = SubscriptionCapacity::default();
-    for record in latest.values() {
+    for record in latest {
         let Some(observed) = record
             .observed_at
             .as_deref()
@@ -59,7 +34,7 @@ pub fn capacity(
         };
         if record.check_error.is_some()
             || observed > now
-            || now - observed > time::Duration::minutes(30)
+            || now - observed > crate::quota_store::QUOTA_FRESHNESS
         {
             continue;
         }
@@ -84,22 +59,12 @@ pub fn capacity(
         } else {
             result.known_capacity = true;
         }
-        // Each subscription uses its own window; a monthly balance is never weekly-paced.
-        let window = record
-            .quota_window
-            .as_deref()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let seconds = if window.contains("month") {
-            Some(30.0 * 86400.0)
-        } else if window.contains("week") {
-            Some(7.0 * 86400.0)
-        } else if window.contains("session") || window.contains("5h") || window.contains("five") {
-            Some(5.0 * 3600.0)
-        } else if window.contains("day") || window.contains("daily") {
-            Some(86400.0)
-        } else {
-            None
+        // Short-term throttles restrict eligibility, but are not a budget to spend.
+        // Provider window names are protocol values, not substring heuristics.
+        let seconds = match record.quota_window.as_deref() {
+            Some("weekly" | "seven_day" | "seven-day" | "7d" | "10080m") => Some(7.0 * 86400.0),
+            Some("monthly" | "vibe-code-included-monthly") => Some(30.0 * 86400.0),
+            _ => None,
         };
         if let (Some(reset), Some(seconds)) = (reset, seconds) {
             let pressure = (remaining / 100.0) / ((reset - now).as_seconds_f64() / seconds);
@@ -251,6 +216,110 @@ pub fn handoff_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn codex_weekly_window_drives_pressure_and_an_empty_five_hour_window_exhausts() {
+        // #1334: both app-server windows reach routing independently.
+        let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
+        let identity = ExecutionIdentity::legacy_candidate("codex", None::<String>, None::<String>);
+        let response = |five_hour_used: u32| {
+            serde_json::json!({"rateLimits": {
+                "primary": {"usedPercent": five_hour_used, "windowDurationMins": 300,
+                    "resetsAt": (now + time::Duration::hours(2)).unix_timestamp()},
+                "secondary": {"usedPercent": 10, "windowDurationMins": 10080,
+                    "resetsAt": (now + time::Duration::days(1)).unix_timestamp()}
+            }})
+        };
+        let windows = crate::usage::codex_rate_limit_windows(&response(40), None, now);
+        let open = capacity(&identity, &windows, now);
+        assert!(open.known_capacity && !open.exhausted);
+        assert!(open.reset_pressure.is_some_and(|pressure| pressure > 1.0));
+        let windows = crate::usage::codex_rate_limit_windows(&response(100), None, now);
+        assert!(capacity(&identity, &windows, now).exhausted);
+    }
+
+    #[test]
+    fn failed_account_checks_and_retired_credentials_remove_capacity() {
+        let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
+        let mut identity =
+            ExecutionIdentity::legacy_candidate("claude", None::<String>, None::<String>);
+        identity.credential_id = Some("claude-one".into());
+        let reading: QuotaObservationRecord = serde_json::from_value(serde_json::json!({
+            "backend":"claude", "credential_id":"claude-one", "quota_window":"weekly",
+            "quota_remaining_percent":80, "observed_at":"2026-10-03T17:59:00Z",
+            "quota_reset_at":"2026-10-03T18:10:00Z"
+        }))
+        .unwrap();
+        let failed: QuotaObservationRecord = serde_json::from_value(serde_json::json!({
+            "backend":"claude", "credential_id":"claude-one", "checked_at":"2026-10-03T18:00:00Z",
+            "check_error":"network"
+        }))
+        .unwrap();
+        assert!(capacity(&identity, std::slice::from_ref(&reading), now).known_capacity);
+        let invalidated = capacity(&identity, &[reading.clone(), failed], now);
+        assert!(!invalidated.known_capacity);
+        assert_eq!(invalidated.reset_pressure, None);
+        let retired: QuotaObservationRecord = serde_json::from_value(serde_json::json!({
+            "backend":"claude", "credential_id":"claude-one", "usage_source":"credential_removed"
+        }))
+        .unwrap();
+        assert!(!capacity(&identity, &[reading, retired], now).known_capacity);
+    }
+
+    #[test]
+    fn subscription_pressure_uses_explicit_budget_windows() {
+        let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
+        for (backend, window, expected) in [
+            ("claude", "seven_day", Some(504.0)),
+            ("claude", "weekly", Some(504.0)),
+            ("codex", "10080m", Some(504.0)),
+            ("codex", "300m", None),
+            ("codex", "code_review_window", None),
+            ("vibe", "vibe-code-included-monthly", Some(2160.0)),
+            ("claude", "five_hour", None),
+            ("claude", "session", None),
+            ("claude", "unknown_weekly_budget", None),
+        ] {
+            let identity =
+                ExecutionIdentity::legacy_candidate(backend, None::<String>, None::<String>);
+            let reading = serde_json::from_value(serde_json::json!({
+                "backend":backend, "quota_window":window, "quota_remaining_percent":50,
+                "observed_at":"2026-10-03T17:59:00Z", "quota_reset_at":"2026-10-03T18:10:00Z"
+            }))
+            .unwrap();
+            let result = capacity(&identity, &[reading], now);
+            assert!(result.known_capacity);
+            assert_eq!(result.reset_pressure, expected, "{window}");
+        }
+    }
+
+    #[test]
+    fn ambient_readings_cannot_replace_or_invalidate_explicit_instance_capacity() {
+        let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
+        let mut identity =
+            ExecutionIdentity::legacy_candidate("agy", None::<String>, None::<String>);
+        identity.explicit_instance = true;
+        identity.backend_instance = "agy-second".into();
+        let scoped: QuotaObservationRecord = serde_json::from_value(serde_json::json!({
+            "backend":"agy", "backend_instance":"agy-second", "quota_window":"weekly",
+            "quota_remaining_percent":80, "observed_at":"2026-10-03T17:50:00Z",
+            "quota_reset_at":"2026-10-09T18:00:00Z"
+        }))
+        .unwrap();
+        let expected = capacity(&identity, std::slice::from_ref(&scoped), now);
+        assert!(expected.known_capacity);
+        let mut ambient = scoped.clone();
+        ambient.backend_instance = None;
+        ambient.observed_at = Some("2026-10-03T17:55:00Z".into());
+        ambient.quota_remaining_percent = Some(10.0);
+        assert_eq!(
+            capacity(&identity, &[scoped.clone(), ambient.clone()], now),
+            expected
+        );
+        ambient.check_error = Some("unavailable".into());
+        ambient.quota_window = None;
+        assert_eq!(capacity(&identity, &[scoped, ambient], now), expected);
+    }
+
     #[test]
     fn account_windows_freshness_and_subscription_preference() {
         let now = OffsetDateTime::parse("2026-10-02T18:00:00Z", &Rfc3339).unwrap();

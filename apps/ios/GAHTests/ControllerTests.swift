@@ -29,6 +29,50 @@ private func fixtureControl(_ path: String) throws {
 }
 
 final class ControllerTests: XCTestCase {
+    // Opt-in physical smoke test. It reads central through the app's existing
+    // paired session and leaves chats, workers, and server settings untouched.
+    func testPhysicalCentralNavigationAndBackgroundRecovery() throws {
+        guard let raw = ProcessInfo.processInfo.environment["GAH_IOS_LIVE_CENTRAL_URL"] else {
+            throw XCTSkip("Run scripts/test-ios-central.sh for physical central validation.")
+        }
+        let address = try ServerAddress(raw)
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-centralURL", address.origin.absoluteString]
+        app.launch()
+        let menu = app.webViews.buttons["Open navigation menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 30))
+        for page in ["Nodes", "Chat", "Git", "Telemetry", "Settings"] {
+            menu.tap()
+            app.webViews.buttons[page].firstMatch.tap()
+            XCTAssertFalse(app.webViews.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Authentication token required")).firstMatch.waitForExistence(timeout: 2))
+            XCTAssertFalse(app.buttons["Retry connection"].exists)
+            if page == "Nodes", let node = ProcessInfo.processInfo.environment["GAH_IOS_EXPECTED_NODE"] {
+                XCTAssertTrue(app.webViews.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", node)).firstMatch.waitForExistence(timeout: 30))
+            }
+            let evidence = XCTAttachment(screenshot: app.screenshot())
+            #if targetEnvironment(simulator)
+            evidence.name = "Simulator central \(page)"
+            #else
+            evidence.name = "Physical central \(page)"
+            #endif
+            evidence.lifetime = .keepAlways
+            add(evidence)
+            // First-time chat opens its project chooser; dismissing it is local
+            // navigation and does not create a conversation or call a provider.
+            if page == "Chat", app.webViews.staticTexts["Start a chat"].exists {
+                app.webViews.buttons["Close"].tap()
+            }
+        }
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(app.webViews.staticTexts["Connection & pairing"].waitForExistence(timeout: 20))
+        app.terminate()
+        app.launchArguments = [] // Let persisted navigation drive the cold launch.
+        app.launch()
+        XCTAssertTrue(app.webViews.staticTexts["Connection & pairing"].waitForExistence(timeout: 30))
+    }
+
     func testActivityNotificationPayloadIsBounded() {
         let valid: [String: Any] = ["type": "activity", "id": "event-1", "title": "Work finished", "body": "#941 passed"]
         XCTAssertEqual(activityNotificationRequest(from: valid), ActivityNotificationRequest(id: "event-1", title: "Work finished", body: "#941 passed", url: nil))
@@ -51,11 +95,11 @@ final class ControllerTests: XCTestCase {
                         offer + "&pair=abcdefghijklmnopqrstuvwxyzABCDEF", offer + "&server=e58dbf8c-9c0d-4bd4-b0f9-be02d42e16a8"] {
             XCTAssertThrowsError(try ServerAddress.pairing(invalid), invalid)
         }
-        let address = try ServerAddress("http://100.118.97.79/#pair=secret&server=identity")
-        XCTAssertEqual(ServerAddress.restorationURL(address.url)?.absoluteString, "http://100.118.97.79/")
-        XCTAssertTrue(address.contains(URL(string: "http://100.118.97.79:80/?page=nodes")!))
-        XCTAssertFalse(address.contains(URL(string: "http://100.118.97.79.example.com/")!))
-        XCTAssertFalse(address.contains(URL(string: "https://100.118.97.79/")!))
+        let address = try ServerAddress("http://100.64.0.10/#pair=secret&server=identity")
+        XCTAssertEqual(ServerAddress.restorationURL(address.url)?.absoluteString, "http://100.64.0.10/")
+        XCTAssertTrue(address.contains(URL(string: "http://100.64.0.10:80/?page=nodes")!))
+        XCTAssertFalse(address.contains(URL(string: "http://100.64.0.10.example.com/")!))
+        XCTAssertFalse(address.contains(URL(string: "https://100.64.0.10/")!))
         let chat = URL(string: "https://gah.example/?page=chat&profile=gah&chat=abc&token=secret#pair=secret")!
         XCTAssertEqual(ServerAddress.restorationURL(chat)?.absoluteString, "https://gah.example/?page=chat&profile=gah&chat=abc")
         let link = URL(string: "gah://open?url=https%3A%2F%2Fgah.example%2F%3Fpage%3Dchat")!
@@ -65,6 +109,21 @@ final class ControllerTests: XCTestCase {
         XCTAssertEqual(server.chatURL(from: URL(string: "gah://chat?profile=gah&chat=session-7")!)?.absoluteString,
                        "https://gah.example/?page=chat&profile=gah&chat=session-7")
         XCTAssertNil(server.chatURL(from: URL(string: "https://evil.example/?profile=gah&chat=session-7")!))
+    }
+
+    func testFirstLaunchOffersAnEmptyConnectionForm() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-centralURL", ""] // Override restoration with an unconfigured origin.
+        app.launch()
+        XCTAssertTrue(app.buttons["Set up connection"].waitForExistence(timeout: 10))
+        app.buttons["Set up connection"].tap()
+        let field = app.descendants(matching: .any).matching(identifier: "serverAddress").firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "")
+        let evidence = XCTAttachment(screenshot: app.screenshot())
+        evidence.name = "Unconfigured connection form"
+        evidence.lifetime = .keepAlways
+        add(evidence)
     }
 
     func testColdLaunchHTTP404OffersConnectionRecovery() throws {

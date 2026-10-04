@@ -381,6 +381,7 @@ fn the_wsl_register_script_names_every_profile_unless_told_one() {
         .arg("--node")
         .arg(&node)
         .env("HOME", &home)
+        .env("GAH_CANONICAL_CONFIG", temp.path().join("canonical.toml"))
         .output()
         .unwrap();
     assert!(output.status.success(), "{}", text(&output));

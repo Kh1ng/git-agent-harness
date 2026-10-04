@@ -137,7 +137,7 @@ fn profile_add_set_and_clear_preserve_max_open_managed_mrs() {
         ])
         .assert()
         .success();
-    let cfg = git_agent_harness::config::load(Some(config_path.to_str().unwrap())).unwrap();
+    let cfg = crate::support::load_config(Some(config_path.to_str().unwrap())).unwrap();
     assert_eq!(cfg.profiles["test"].max_open_managed_mrs, Some(7));
 
     super::bin()
@@ -152,7 +152,7 @@ fn profile_add_set_and_clear_preserve_max_open_managed_mrs() {
         ])
         .assert()
         .success();
-    let cfg = git_agent_harness::config::load(Some(config_path.to_str().unwrap())).unwrap();
+    let cfg = crate::support::load_config(Some(config_path.to_str().unwrap())).unwrap();
     assert_eq!(cfg.profiles["test"].max_open_managed_mrs, Some(3));
 
     super::bin()
@@ -167,7 +167,7 @@ fn profile_add_set_and_clear_preserve_max_open_managed_mrs() {
         ])
         .assert()
         .success();
-    let cfg = git_agent_harness::config::load(Some(config_path.to_str().unwrap())).unwrap();
+    let cfg = crate::support::load_config(Some(config_path.to_str().unwrap())).unwrap();
     assert_eq!(cfg.profiles["test"].max_open_managed_mrs, None);
 }
 

@@ -471,7 +471,7 @@ Doctor checks:
 - expected provider token env vars are present
 - push URL can be derived
 - artifact/worktree paths are writable
-- `docs/MANAGER_MEMORY.md` exists
+- `docs/MANAGER_MEMORY.md` exists (a warning when missing; the file is optional)
 - generated-artifact publication patterns are valid
 
 ## First Dispatch
