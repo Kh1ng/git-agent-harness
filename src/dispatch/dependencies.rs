@@ -124,7 +124,9 @@ pub(crate) fn github_list_pages(
     const MAX_PAGES: usize = 100;
     let output = provider_command("gh")
         .args(["api", "--method", "GET", endpoint])
-        .args(["--paginate", "--slurp", "-f", "per_page=100"])
+        // No `--slurp`: gh gained it in 2.48, and distribution packages
+        // (Ubuntu 24.04 ships 2.45) reject the unknown flag.
+        .args(["--paginate", "-f", "per_page=100"])
         .output()
         .map_err(|e| DependencyRelationshipError::ProviderError {
             message: format!("gh api list {endpoint} failed: {e}"),
@@ -164,27 +166,36 @@ pub(crate) fn github_list_pages(
     let malformed = |detail: &str| DependencyRelationshipError::MalformedResponse {
         message: format!("GitHub list {endpoint}: {detail}"),
     };
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| malformed(&format!("cannot parse response: {e}")))?;
-    // `--slurp` wraps each page in an outer array; a bare list of objects is
-    // accepted as one page.
-    let pages = value
-        .as_array()
-        .ok_or_else(|| malformed("expected an array"))?;
-    if pages.len() > MAX_PAGES {
-        return Err(DependencyRelationshipError::PaginationError {
-            message: format!(
-                "GitHub list {endpoint} reached {MAX_PAGES} pages; refusing a partial list"
-            ),
-        });
-    }
+    // `--paginate` prints one JSON array per page, back to back; some gh
+    // versions merge them into a single array. Read every document. An array
+    // nested inside one is a page too, which is the shape `--slurp` produced.
+    let mut pages = 0;
     let mut items = Vec::new();
-    for page in pages {
-        match page {
-            serde_json::Value::Array(entries) => items.extend(entries.iter().cloned()),
-            serde_json::Value::Object(_) => items.push(page.clone()),
-            _ => return Err(malformed("page was not an array")),
+    for document in serde_json::Deserializer::from_slice(&output.stdout).into_iter() {
+        let document: serde_json::Value =
+            document.map_err(|e| malformed(&format!("cannot parse response: {e}")))?;
+        let entries = document
+            .as_array()
+            .ok_or_else(|| malformed("expected an array"))?;
+        let nested = entries.iter().filter(|entry| entry.is_array()).count();
+        pages += nested.max(1);
+        if pages > MAX_PAGES {
+            return Err(DependencyRelationshipError::PaginationError {
+                message: format!(
+                    "GitHub list {endpoint} reached {MAX_PAGES} pages; refusing a partial list"
+                ),
+            });
         }
+        for entry in entries {
+            match entry {
+                serde_json::Value::Array(page) => items.extend(page.iter().cloned()),
+                serde_json::Value::Object(_) => items.push(entry.clone()),
+                _ => return Err(malformed("page was not an array")),
+            }
+        }
+    }
+    if pages == 0 {
+        return Err(malformed("empty response"));
     }
     Ok(items)
 }
@@ -1386,20 +1397,29 @@ mod tests {
             let items: Vec<_> = range.map(|n| format!("{{\"number\":{n}}}")).collect();
             format!("[{}]", items.join(","))
         };
-        let slurped = format!("[{},{}]", page(2..102), page(102..112));
+        // gh 2.45 (Ubuntu 24.04) has no `--slurp`: the fake rejects it the way
+        // the real one does, with a usage error.
         let fake_gh = |output: &str| {
             write_fake_bin(
                 bin_dir.path(),
                 "gh",
                 &format!(
-                    "#!/bin/sh\ncase \"$*\" in *--paginate*--slurp*) printf '%s' '{output}' ;; *) echo unpaginated >&2; exit 1 ;; esac\n"
+                    "#!/bin/sh\ncase \"$*\" in *--slurp*) echo 'unknown flag: --slurp' >&2; exit 1 ;; *--paginate*) printf '%s' '{output}' ;; *) echo unpaginated >&2; exit 1 ;; esac\n"
                 ),
             );
         };
-        fake_gh(&slurped);
-        let found = fetch_github_sub_issues(&profile, "1").unwrap();
-        assert_eq!(found.len(), 110);
-        assert_eq!(found.last().map(String::as_str), Some("111"));
+        // One array per page back to back, one merged array, and the nested
+        // shape `--slurp` used to produce all hold the same 110 issues.
+        for output in [
+            format!("{}{}", page(2..102), page(102..112)),
+            page(2..112),
+            format!("[{},{}]", page(2..102), page(102..112)),
+        ] {
+            fake_gh(&output);
+            let found = fetch_github_sub_issues(&profile, "1").unwrap();
+            assert_eq!(found.len(), 110, "{output}");
+            assert_eq!(found.last().map(String::as_str), Some("111"));
+        }
 
         fake_gh("{\"message\":\"nope\"}");
         assert!(matches!(
