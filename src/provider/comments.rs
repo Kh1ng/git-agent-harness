@@ -1,6 +1,7 @@
 use super::{
     gitlab_api, gitlab_find_mr_by_branch, gitlab_project_id, provider_command,
-    provider_output_with_transient_retry, redacted_provider_output, Profile, ProviderKind, Result,
+    provider_output_with_transient_retry, publication_body, redacted_provider_output, Profile,
+    ProviderKind, Result,
 };
 
 /// Identifies the provider conversation that owns a comment. Review threads
@@ -21,7 +22,7 @@ pub fn update_comment(
 ) -> Result<()> {
     ensure_write_allowed(profile, "update_comment")?;
     let comment_id = numeric_id("comment", comment_id)?;
-    let body = crate::redact::redact(body);
+    let body = publication_body(body);
     match ProviderKind::parse(&profile.provider) {
         Ok(ProviderKind::Github) => mutate_github(profile, comment_id, "PATCH", Some(&body)),
         Ok(ProviderKind::Gitlab) => {

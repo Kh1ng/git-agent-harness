@@ -3,6 +3,7 @@ use crate::provider_kind::ProviderKind;
 use anyhow::{Context, Result};
 use std::fmt;
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 use url::Url;
@@ -22,6 +23,19 @@ const GAH_REVIEW_STATE_LABELS: [&str; 5] = [
 const PROVIDER_ERROR_MAX_CHARS: usize = 4_096;
 pub(crate) const PROVIDER_TITLE_MAX_CHARS: usize = 255;
 const PROVIDER_NETWORK_ATTEMPTS: u8 = 3;
+
+/// Keep machine-local home paths out of provider-visible text, including
+/// agent summaries copied into PR bodies and issue comments.
+fn publication_body(body: &str) -> String {
+    static HOME_PATH: OnceLock<regex::Regex> = OnceLock::new();
+    let home_path = HOME_PATH.get_or_init(|| {
+        regex::Regex::new(r#"(?:/home/[^/\s`"'<>]+|/Users/[^/\s`"'<>]+|/root\b)(?:/[^\s`"'<>]*)?"#)
+            .expect("valid home path regex")
+    });
+    home_path
+        .replace_all(&crate::redact::redact(body), "[local path removed]")
+        .into_owned()
+}
 #[cfg(not(test))]
 const PROVIDER_NETWORK_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
@@ -438,7 +452,7 @@ pub(crate) fn create_provider_issue(
     labels: &[String],
 ) -> Result<ProviderIssue> {
     let title = crate::redact::redact(title);
-    let body = crate::redact::redact(body);
+    let body = publication_body(body);
     let kind = require_provider_kind(profile)?;
     let value = match kind {
         ProviderKind::Github => {
@@ -500,7 +514,7 @@ pub fn create_draft_mr(
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
         anyhow::bail!("delivery_mode=handoff: create_draft_mr is disallowed in handoff mode");
     }
-    let body = crate::redact::redact(body);
+    let body = publication_body(body);
     match ProviderKind::parse(&profile.provider) {
         Ok(ProviderKind::Gitlab) => gitlab_mr(profile, branch, title, &body),
         Ok(ProviderKind::Github) => github_mr(profile, branch, title, &body),
@@ -517,7 +531,7 @@ pub fn post_review_comment(
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
         anyhow::bail!("delivery_mode=handoff: post_review_comment is disallowed in handoff mode");
     }
-    let body = crate::redact::redact(body);
+    let body = publication_body(body);
     match ProviderKind::parse(&profile.provider) {
         Ok(ProviderKind::Gitlab) => gitlab_post_review_comment(profile, branch, &body, labels),
         Ok(ProviderKind::Github) => github_post_review_comment(profile, branch, &body, labels),
@@ -531,7 +545,7 @@ pub fn post_issue_comment(profile: &Profile, issue_number: &str, body: &str) -> 
     if profile.delivery_mode == crate::config::DeliveryMode::Handoff {
         anyhow::bail!("delivery_mode=handoff: post_issue_comment is disallowed in handoff mode");
     }
-    let body = crate::redact::redact(body);
+    let body = publication_body(body);
     match ProviderKind::parse(&profile.provider) {
         Ok(ProviderKind::Github) => github_post_issue_comment(profile, issue_number, &body),
         Ok(ProviderKind::Gitlab) => {

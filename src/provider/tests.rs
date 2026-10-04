@@ -237,13 +237,24 @@ fn github_mr_body_is_redacted_before_it_reaches_provider_cli() {
         &github_profile(),
         "gah/test",
         "title",
-        "summary Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+        "summary Authorization: Bearer abcdefghijklmnopqrstuvwxyz; artifacts /home/operator/.local/share/gah/artifacts/session-123",
     )
     .unwrap();
 
     let args = fs::read_to_string(args_path).unwrap();
     assert!(!args.contains("abcdefghijklmnopqrstuvwxyz"));
     assert!(args.contains("[REDACTED:TOKEN]"));
+    assert!(!args.contains("/home/operator/"));
+    assert!(args.contains("[local path removed]"));
+}
+
+#[test]
+fn provider_publication_bodies_remove_home_paths_from_prs_and_comments() {
+    let body = "Session: `session-123`; artifacts /home/operator/.local/share/gah/artifacts/session-123; mac /Users/operator/gah/session-123";
+    let published = super::publication_body(body);
+    assert!(published.contains("Session: `session-123`"));
+    assert!(!published.contains("/home/operator/"));
+    assert!(!published.contains("/Users/operator/"));
 }
 
 #[test]

@@ -1319,7 +1319,7 @@ fn record_review_output_invalid(
     if profile.publishing.allow_issue_comments {
         let body = format!(
             "GAH rejected this reviewer response as unsafe repair context: `{reason}`. No FixMr was dispatched. The next configured reviewer will be tried within the bounded review budget.\n\nSession: `{}`",
-            session_dir.display()
+            session_dir.file_name().and_then(|name| name.to_str()).unwrap_or("unknown")
         );
         provider::post_review_comment(
             profile,
