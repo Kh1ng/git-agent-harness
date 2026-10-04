@@ -41,7 +41,11 @@ pub fn run(args: UpdateArgs) -> Result<()> {
 
     // This is the authoritative CLI deployment step. It replaces the Cargo
     // executable selected by PATH, unlike a target/release-only build.
-    run_command(&repo, "cargo", &["install", "--path", ".", "--force"])?;
+    run_command(
+        &repo,
+        "cargo",
+        &["install", "--path", ".", "--force", "--locked"],
+    )?;
 
     let binary = installed_binary_path()?;
     if !binary.is_file() {

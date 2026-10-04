@@ -485,7 +485,7 @@ impl<'a> Setup<'a> {
         let source = self.options.source.clone();
         let (command, what) = match selection.role {
             Role::CliOnly => (
-                "cargo install --path . --force".to_string(),
+                "cargo install --path . --force --locked".to_string(),
                 "Build and install the gah command",
             ),
             Role::Central | Role::Worker => (
@@ -761,6 +761,33 @@ mod tests {
                 .any(|line| line.contains("Shared memory: gah setup --memory")),
             "skipped memory says how to add it"
         );
+    }
+
+    #[test]
+    fn a_clionly_machine_installs_with_locked() {
+        let host = ready_host();
+        let mut prompter = Script {
+            answers: ["", "y"].map(String::from).into(),
+            ..Default::default()
+        };
+        let mut effects = Recorder::default();
+        Setup {
+            host: &host,
+            prompter: &mut prompter,
+            effects: &mut effects,
+            options: Options {
+                role: Some(Role::CliOnly),
+                agent: Some(Agent::Claude),
+                provider: Some(Provider::Github),
+                source: PathBuf::from("/src"),
+                ..Default::default()
+            },
+        }
+        .run()
+        .unwrap();
+        assert_eq!(effects.commands.len(), 1);
+        let (command, _env) = &effects.commands[0];
+        assert_eq!(command, "cargo install --path . --force --locked");
     }
 
     #[test]
