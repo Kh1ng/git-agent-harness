@@ -252,6 +252,9 @@ mod tests {
         for (window, expected) in [
             ("seven_day", Some(504.0)),
             ("weekly", Some(504.0)),
+            ("10080m", Some(504.0)),
+            ("300m", None),
+            ("code_review_window", None),
             ("vibe-code-included-monthly", Some(2160.0)),
             ("five_hour", None),
             ("session", None),

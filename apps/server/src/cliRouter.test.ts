@@ -992,3 +992,26 @@ test('shutdown prevents in-flight quota publication', async () => {
   await refresh;
   assert.deepEqual(records, []);
 });
+
+test('unrecognized Claude windows preserve prior routing readings', async () => {
+  let now = Date.now();
+  let body: unknown = { seven_day: { utilization: 20 } };
+  const records: Record<string, unknown>[] = [];
+  const observer = createCliRouterQuotaObserver({
+    readSettingsFn: () => ({ url: 'https://claude.unknown-windows.example.com', apiKey: 'k', managementKey: 'm' }),
+    now: () => now,
+    fetchFn: async url => new Response(JSON.stringify(String(url).endsWith('/auth-files')
+      ? { files: [file({ provider: 'claude' })] }
+      : { status_code: 200, body })),
+    recordQuotaFn: async record => { records.push(record); }
+  });
+  await observer.refresh();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].quota_window, 'weekly');
+  for (const unrecognized of [{ seven_day_opus: { utilization: 100 } }, { extra_usage: { utilization: 100 } }, {}]) {
+    body = unrecognized;
+    now += 15 * 60_000;
+    await observer.refresh();
+    assert.equal(records.length, 1, 'a response without account windows must not invalidate prior readings');
+  }
+});

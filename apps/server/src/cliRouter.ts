@@ -484,6 +484,9 @@ export function createCliRouterQuotaObserver(deps: CliRouterDeps = {}) {
     const backend = bound ?? logical;
     const opaqueInstance = `cli-router:${createHash('sha256').update(key).digest('hex').slice(0, 24)}`;
     const routable = provider === 'claude' ? result.quotas.filter(quota => quota.window) : result.quotas;
+    // A shape change or model-only response is not an account-wide check.
+    // Preserve prior windows until their normal freshness limit expires.
+    if (provider === 'claude' && !result.quotaError && routable.length === 0) return result;
     const hasReading = routable.length > 0 && !result.quotaError;
     const observations: (Partial<CliRouterQuota> | undefined)[] = hasReading ? routable
       : provider === 'antigravity' ? [{ quotaPool: 'google-native' }, { quotaPool: 'external' }] : [undefined];
