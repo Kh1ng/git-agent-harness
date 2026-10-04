@@ -25,6 +25,7 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { formatPercent, formatAge, formatLocalTime, isStale, formatTokens, formatCount, oldestFetchedAt } from '../lib/format.js';
 import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
+import { LiveAgentsCard } from '../components/LiveAgentsCard.js';
 
 type OverviewPageProps = {
   sessions: Session[];
@@ -164,6 +165,9 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {} }: Ov
             hint={(quotaSnapshot?.candidates.length ?? 0) === 0 ? 'No quota snapshot' : `${quotaSnapshot!.candidates.length} candidates`} />
         </button>
       </div>
+
+      <LiveAgentsCard profile={profile ?? null} sessions={sessions} controllerRuns={controllerActivity}
+        claims={snapshot?.active_claims ?? []} candidates={quotaSnapshot?.candidates ?? []} />
 
       {(blockers.length > 0 || blockedWorkItems.length > 0 || reviewHeldWorkIds.length > 0 || dependencyBlockers.length > 0) && (
         <div className="card-padded border-warning/30">
