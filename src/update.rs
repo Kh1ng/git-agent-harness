@@ -13,6 +13,8 @@ use std::fs::{copy, create_dir_all, read_dir, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+mod units;
+
 pub use crate::node_role::NodeRole as HostRole;
 
 pub struct UpdateArgs {
@@ -444,7 +446,11 @@ fn copy_systemd_unit(repo: &Path, config_home: &Path, unit_file_name: &str) -> R
     let parent = target.parent().expect("systemd unit target has a parent");
     create_dir_all(parent)
         .with_context(|| format!("creating systemd user-unit directory {}", parent.display()))?;
-    copy(&source, &target).with_context(|| {
+    let template = std::fs::read_to_string(&source)
+        .with_context(|| format!("reading systemd unit template {}", source.display()))?;
+    let rendered = units::render(&template, &units::UnitValues::resolve(repo)?)
+        .with_context(|| format!("rendering {unit_file_name}"))?;
+    std::fs::write(&target, rendered).with_context(|| {
         format!(
             "installing systemd unit from {} to {}",
             source.display(),
@@ -478,9 +484,17 @@ fn install_server_unit_template(repo: &Path, server_service: &str) -> Result<Opt
         bail!("systemd unit template is missing: {}", source.display());
     }
     let target = PathBuf::from("/etc/systemd/system").join(server_service);
-    let source = source
+    // #1322: render for this account; the tracked template has placeholders.
+    let template = std::fs::read_to_string(&source)
+        .with_context(|| format!("reading systemd unit template {}", source.display()))?;
+    let rendered = units::render(&template, &units::UnitValues::resolve(repo)?)
+        .context("rendering gah-server.service")?;
+    let staged = tempfile::NamedTempFile::new().context("staging gah-server.service")?;
+    std::fs::write(staged.path(), rendered).context("staging gah-server.service")?;
+    let source = staged
+        .path()
         .to_str()
-        .context("systemd unit template path is not UTF-8")?;
+        .context("staged systemd unit path is not UTF-8")?;
     let target_arg = target
         .to_str()
         .context("systemd unit target path is not UTF-8")?;
@@ -1118,12 +1132,14 @@ mod tests {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
         let bin_tmp = TempDir::new().unwrap();
         let record_path = bin_tmp.path().join("sudo-argv.log");
+        let unit_path = bin_tmp.path().join("installed.service");
         // Fake `sudo` that just logs its args and forwards to the real
         // `install`/`systemctl` is too fragile; instead log and succeed so
         // the test asserts the *plan* of the update, not the root-owned copy.
         let script = format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"install\" ]; then exit 0; fi\nif [ \"$1\" = \"systemctl\" ] && [ \"$2\" = \"daemon-reload\" ]; then exit 0; fi\nexit 0\n",
-            record_path.display()
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"install\" ]; then cp \"$8\" '{}'; exit 0; fi\nif [ \"$1\" = \"systemctl\" ] && [ \"$2\" = \"daemon-reload\" ]; then exit 0; fi\nexit 0\n",
+            record_path.display(),
+            unit_path.display()
         );
         let script_path = bin_tmp.path().join("sudo");
         std::fs::write(&script_path, script).unwrap();
@@ -1159,6 +1175,21 @@ mod tests {
         assert!(record.contains("gah-server.service"), "{record}");
         assert!(record.contains("/etc/systemd/system"), "{record}");
         assert!(record.contains("daemon-reload"), "{record}");
+        // #1322: the installed unit is rendered for this account, not copied.
+        let unit = std::fs::read_to_string(&unit_path).unwrap();
+        for placeholder in ["@USER@", "@REPO@", "@CONFIG@", "@NODE@", "@PATH@"] {
+            assert!(!unit.contains(placeholder), "{placeholder}: {unit}");
+        }
+        let user =
+            String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout).unwrap();
+        assert!(
+            unit.contains(&format!("\nUser={}\n", user.trim())),
+            "{unit}"
+        );
+        assert!(unit.contains(&format!(
+            "\nWorkingDirectory={}\n",
+            repo.canonicalize().unwrap().display()
+        )));
     }
 
     #[test]
