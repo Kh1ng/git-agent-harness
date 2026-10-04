@@ -184,18 +184,22 @@ case "${GAH_GATEWAY_MODE:-}" in
     gateway_unit_dst="$HOME/.config/systemd/user/tdai-memory-gateway.service"
     install -d -m 0755 "$(dirname "$gateway_unit_dst")"
     # gateway-unit-render:start
-    python3 - "$GAH_GATEWAY_MEMORYCORE_PATH" "$node_dir" "$gateway_unit_dst" <<'PYTHON'
-import pathlib, sys
+    node --input-type=module - "$GAH_GATEWAY_MEMORYCORE_PATH" "$node_dir" "$gateway_unit_dst" <<'JAVASCRIPT'
+import { readFileSync, writeFileSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 
-template = pathlib.Path('packaging/gateway/tdai-memory-gateway.service').read_text()
-for placeholder, value in zip(('@MEMORYCORE@', '@NODE_DIR@'), sys.argv[1:3]):
-    if not pathlib.Path(value).is_absolute() or any(ord(c) < 32 or ord(c) == 127 or c in '\"\\$' for c in value):
-        raise SystemExit('Gateway paths must be absolute and contain no quotes, backslashes, dollar signs, or control characters')
-    if placeholder == '@NODE_DIR@' and ':' in value:
-        raise SystemExit('Gateway Node directory cannot contain a colon')
-    template = template.replace(placeholder, value.replace('%', '%%'))
-pathlib.Path(sys.argv[3]).write_text(template)
-PYTHON
+let template = readFileSync('packaging/gateway/tdai-memory-gateway.service', 'utf8');
+for (const [placeholder, value] of [['@MEMORYCORE@', process.argv[2]], ['@NODE_DIR@', process.argv[3]]]) {
+  if (!isAbsolute(value) || /["\\$\x00-\x1f\x7f]/.test(value)) {
+    throw new Error('Gateway paths must be absolute and contain no quotes, backslashes, dollar signs, or control characters');
+  }
+  if (placeholder === '@NODE_DIR@' && value.includes(':')) {
+    throw new Error('Gateway Node directory cannot contain a colon');
+  }
+  template = template.replaceAll(placeholder, value.replaceAll('%', '%%'));
+}
+writeFileSync(process.argv[4], template);
+JAVASCRIPT
     # gateway-unit-render:end
     systemctl --user daemon-reload
     systemctl --user enable --now tdai-memory-gateway.service
