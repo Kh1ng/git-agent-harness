@@ -247,21 +247,21 @@ mod tests {
     #[test]
     fn subscription_pressure_uses_explicit_budget_windows() {
         let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
-        let identity =
-            ExecutionIdentity::legacy_candidate("claude", None::<String>, None::<String>);
-        for (window, expected) in [
-            ("seven_day", Some(504.0)),
-            ("weekly", Some(504.0)),
-            ("10080m", Some(504.0)),
-            ("300m", None),
-            ("code_review_window", None),
-            ("vibe-code-included-monthly", Some(2160.0)),
-            ("five_hour", None),
-            ("session", None),
-            ("unknown_weekly_budget", None),
+        for (backend, window, expected) in [
+            ("claude", "seven_day", Some(504.0)),
+            ("claude", "weekly", Some(504.0)),
+            ("codex", "10080m", Some(504.0)),
+            ("codex", "300m", None),
+            ("codex", "code_review_window", None),
+            ("vibe", "vibe-code-included-monthly", Some(2160.0)),
+            ("claude", "five_hour", None),
+            ("claude", "session", None),
+            ("claude", "unknown_weekly_budget", None),
         ] {
+            let identity =
+                ExecutionIdentity::legacy_candidate(backend, None::<String>, None::<String>);
             let reading = serde_json::from_value(serde_json::json!({
-                "backend":"claude", "quota_window":window, "quota_remaining_percent":50,
+                "backend":backend, "quota_window":window, "quota_remaining_percent":50,
                 "observed_at":"2026-10-03T17:59:00Z", "quota_reset_at":"2026-10-03T18:10:00Z"
             }))
             .unwrap();
