@@ -13,9 +13,6 @@ export type Theme = 'dark' | 'light';
 interface UiStoreState {
   theme: Theme;
   profileOverride: string | null;
-  /** Keep Nodes in the navbar on a standalone install (no worker nodes). */
-  showNodes: boolean;
-  setShowNodes: (show: boolean) => void;
   /** Pop a new notification open under the bell for a few seconds. */
   notificationPopups: boolean;
   setNotificationPopups: (enabled: boolean) => void;
@@ -33,15 +30,10 @@ function initialTheme(): Theme {
 export const useUiStore = create<UiStoreState>((set) => ({
   theme: initialTheme(),
   profileOverride: typeof window === 'undefined' ? null : readNavigation().profile,
-  showNodes: typeof window !== 'undefined' && window.localStorage.getItem('gah-show-nodes') === 'true',
   notificationPopups: typeof window === 'undefined' || window.localStorage.getItem('gah-notification-popups') !== 'false',
   setNotificationPopups: (notificationPopups) => {
     if (typeof window !== 'undefined') window.localStorage.setItem('gah-notification-popups', String(notificationPopups));
     set({ notificationPopups });
-  },
-  setShowNodes: (showNodes) => {
-    if (typeof window !== 'undefined') window.localStorage.setItem('gah-show-nodes', String(showNodes));
-    set({ showNodes });
   },
   setTheme: (theme) => {
     if (typeof document !== 'undefined') {

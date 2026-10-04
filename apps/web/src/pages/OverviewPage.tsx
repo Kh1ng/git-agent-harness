@@ -14,7 +14,7 @@ import {
   Square
 } from 'lucide-react';
 import type { Page } from '../App.js';
-import type { Session, DependencyBlocker } from '@git-agent-harness/contracts';
+import type { Session } from '@git-agent-harness/contracts';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -23,20 +23,18 @@ import { StatusBadge, classificationTone } from '../components/ui/StatusBadge.js
 import { BlockedWorkItems } from '../components/BlockedWorkItems.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
-import { SessionCard } from '../components/SessionCard.js';
 import { formatPercent, formatAge, formatLocalTime, isStale, formatTokens, formatCount, oldestFetchedAt } from '../lib/format.js';
 import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
 
 type OverviewPageProps = {
   sessions: Session[];
-  onSelectSession: (session: Session) => void;
   onNavigate: (page: Page) => void;
   onOpenWork?: (workId: string) => void;
 };
 
 const OVERVIEW_REFRESH_MS = 5 * 60 * 1000;
 
-export function OverviewPage({ sessions, onSelectSession, onNavigate, onOpenWork = () => {} }: OverviewPageProps) {
+export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {} }: OverviewPageProps) {
   const { status, quota, loopStatus, loopAction } = useGahStore();
   const { profile: wsProfile, controllerActivity } = useWebSocket();
   const profileOverride = useUiStore((s) => s.profileOverride);
@@ -144,7 +142,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate, onOpenWork
         <p className="text-xs text-critical -mt-4">{loopAction.error}</p>
       )}
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         <StatTile label="Tasks (7d)" value={formatCount(usage?.entries)} icon={ListChecks} />
         <StatTile
           label="Success rate"
@@ -159,6 +157,12 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate, onOpenWork
           hint={usage?.requests_count !== null && usage?.requests_count !== undefined ? `${formatCount(usage.requests_count)} requests` : undefined}
         />
         <StatTile label="Active work" value={String(activeWorkCount)} icon={Timer} hint={`${activeSessions.length} dashboard · ${activeControllerRuns.length} controller`} />
+        {/* The full candidate list lives on Usage > Quota; the tile only says whether routing is constrained. */}
+        <button type="button" onClick={() => onNavigate('quota')} className="text-left" aria-label="Backend availability: open Quota">
+          <StatTile label="Backends" icon={CheckCircle2}
+            value={(quotaSnapshot?.candidates.length ?? 0) === 0 ? '—' : unavailableBackends.length === 0 ? 'All eligible' : `${unavailableBackends.length} down`}
+            hint={(quotaSnapshot?.candidates.length ?? 0) === 0 ? 'No quota snapshot' : `${quotaSnapshot!.candidates.length} candidates`} />
+        </button>
       </div>
 
       {(blockers.length > 0 || blockedWorkItems.length > 0 || reviewHeldWorkIds.length > 0 || dependencyBlockers.length > 0) && (
@@ -210,61 +214,6 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate, onOpenWork
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <ControllerActivityCard activity={controllerActivity} />
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <section>
-          <h3 className="text-sm font-semibold text-primary mb-3">What's running now</h3>
-          {activeWorkCount === 0 ? (
-            <EmptyState icon={Timer} title="No active sessions" description="Dispatched work will appear here while it runs." />
-          ) : (
-            <div className="space-y-3">
-              {activeControllerRuns.map((run) => (
-                <div key={run.run_id} className="card-padded flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="font-mono text-xs text-primary">{run.work_id ?? 'unassigned'}</p>
-                    <p className="text-xs text-secondary mt-1">{run.action}</p>
-                    <p className="text-[10px] text-muted mt-1 truncate">run {run.run_id}</p>
-                  </div>
-                  <StatusBadge tone="good" label="running" />
-                </div>
-              ))}
-              {activeSessions.slice(0, 4).map((session) => (
-                <SessionCard key={session.id} session={session} onClick={() => onSelectSession(session)} />
-              ))}
-            </div>
-          )}
-          <button onClick={() => onNavigate('work')} className="text-xs text-accent hover:underline mt-2">
-            View all work →
-          </button>
-        </section>
-
-        <section>
-          <h3 className="text-sm font-semibold text-primary mb-3">Backend availability</h3>
-          {unavailableBackends.length === 0 && (quotaSnapshot?.candidates.length ?? 0) === 0 ? (
-            <EmptyState icon={CheckCircle2} title="No quota snapshot recorded" description="Everything is eligible by default until a configured candidate reports otherwise." />
-          ) : unavailableBackends.length === 0 ? (
-            <div className="card-padded flex items-center gap-2 text-sm text-good">
-              <CheckCircle2 size={16} aria-hidden="true" />
-              All configured candidates eligible
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {unavailableBackends.map((a, i) => (
-                <div key={i} className="card-padded flex items-center justify-between text-sm">
-                  <span className="text-primary">
-                    {a.model ? `${a.backend}/${a.model}` : a.backend}
-                    {a.quota_pool ? ` · ${a.quota_pool}` : ''}
-                  </span>
-                  <StatusBadge tone="critical" label={a.reason ?? 'unavailable'} />
-                </div>
-              ))}
-            </div>
-          )}
-          <button onClick={() => onNavigate('quota')} className="text-xs text-accent hover:underline mt-2">
-            View quota detail →
-          </button>
-        </section>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

@@ -4,8 +4,8 @@ for (const scenario of [
   { pageName: 'Settings', section: 'General', paths: ['/api/manager-chat/settings', '/api/admin/update'] },
   { pageName: 'Settings', section: 'Skill bank', paths: ['/api/skills'] },
   { pageName: 'Settings', section: 'TDAI / memory', paths: ['/api/settings/gateway'] },
-  { pageName: 'Git', section: '', paths: ['/api/git/status', '/api/git/log', '/api/git/prs'] },
-  { pageName: 'Telemetry', section: '', paths: ['/api/usage/rollup'] }
+  { pageName: 'Projects', tab: 'Git', section: '', paths: ['/api/git/status', '/api/git/log', '/api/git/prs'] },
+  { pageName: 'Usage', section: '', paths: ['/api/usage/rollup'] }
 ]) {
   test(`${[scenario.pageName, scenario.section].filter(Boolean).join(" ")} recovers protected reads after the first token without navigation`, async ({ page }) => {
     const rejected = new Set<string>();
@@ -32,13 +32,15 @@ for (const scenario of [
       };
     });
     await page.goto('/');
-    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('button', { name: 'Profile', exact: true }).click();
     await page.locator('section').filter({ hasText: 'Which configured GAH repo' }).getByRole('combobox').selectOption('fixture');
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
     if (scenario.pageName === 'Settings') {
       const button = page.getByRole('button', { name: new RegExp(`^${scenario.section}`) });
       if (await button.getAttribute('aria-expanded') !== 'true') await button.click();
     } else {
       await page.getByRole('button', { name: scenario.pageName, exact: true }).click();
+      if ('tab' in scenario && scenario.tab) await page.getByRole('navigation', { name: 'Page tabs' }).getByRole('button', { name: scenario.tab, exact: true }).click();
     }
     await expect.poll(() => [...rejected].sort()).toEqual([...scenario.paths].sort());
     if (scenario.pageName === 'Settings') {

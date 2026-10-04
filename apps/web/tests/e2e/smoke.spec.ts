@@ -19,25 +19,25 @@ const VIEWPORTS = [
   { name: 'small-mobile', width: 360, height: 800 }
 ];
 
-const ROUTES: { label: string; heading: string }[] = [
+/** A navbar entry, and for a grouped page the tab that shows it. */
+const ROUTES: { label: string; tab?: string; heading: string }[] = [
   { label: 'Overview', heading: 'Overview' },
-  { label: 'Nodes', heading: 'Nodes' },
+  { label: 'Fleet', heading: 'Fleet' },
   { label: 'Factory', heading: 'Factory' },
-  { label: 'Telemetry', heading: 'Telemetry' },
-  { label: 'Quota', heading: 'Quota management' },
+  { label: 'Usage', heading: 'Telemetry' },
+  { label: 'Usage', tab: 'Quota', heading: 'Quota management' },
+  { label: 'Projects', tab: 'Git', heading: 'Git' },
   { label: 'Activity', heading: 'Activity' },
   { label: 'Settings', heading: 'Settings' }
 ];
 
 test.beforeEach(async ({ page }) => {
-  // An empty registry is a standalone install, which hides Nodes unless asked for.
-  await page.addInitScript(() => localStorage.setItem('gah-show-nodes', 'true'));
   await page.route('**/api/registry/fleet/snapshot', (route) => route.fulfill({
     json: { nodes: [], observations: [], leases: [] }
   }));
 });
 
-async function navigateTo(page: import('@playwright/test').Page, label: string, isMobile: boolean) {
+async function navigateTo(page: import('@playwright/test').Page, label: string, isMobile: boolean, tab?: string) {
   if (isMobile) {
     const menuButton = page.getByRole('button', { name: 'Open navigation menu' });
     if (await menuButton.isVisible()) {
@@ -45,6 +45,7 @@ async function navigateTo(page: import('@playwright/test').Page, label: string, 
     }
   }
   await page.getByRole('button', { name: label, exact: true }).click();
+  if (tab) await page.getByRole('navigation', { name: 'Page tabs' }).getByRole('button', { name: tab, exact: true }).click();
 }
 
 for (const viewport of VIEWPORTS) {
@@ -56,7 +57,7 @@ for (const viewport of VIEWPORTS) {
       const isMobile = viewport.width < 1024;
 
       for (const route of ROUTES) {
-        await navigateTo(page, route.label, isMobile);
+        await navigateTo(page, route.label, isMobile, route.tab);
         await expect(page.getByRole('heading', { name: route.heading, exact: true })).toBeVisible();
 
         const { scrollWidth, clientWidth } = await page.evaluate(() => ({
@@ -96,24 +97,31 @@ test.describe('desktop content', () => {
     expect(share).toBeGreaterThan(0.2);
     expect(share).toBeLessThan(0.35);
     expect(new URL(page.url()).searchParams.get('side')).toBe('settings');
-    await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Quota', exact: true }).click();
+    await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Usage', exact: true }).click();
     await expect(panel).toBeVisible();
     await settings.click();
     await expect(panel).toHaveCount(0);
     expect(new URL(page.url()).searchParams.get('side')).toBeNull();
   });
 
-  test('Nodes is hidden on a standalone install until Settings asks for it', async ({ page }) => {
-    await page.addInitScript(() => localStorage.removeItem('gah-show-nodes'));
+  test('a navbar group shows its pages as tabs and keeps the open tab', async ({ page }) => {
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: 'Primary' });
-    await expect(nav.getByRole('button', { name: 'Overview', exact: true })).toBeVisible();
-    await expect(nav.getByRole('button', { name: 'Nodes', exact: true })).toHaveCount(0);
-    await page.getByRole('button', { name: 'Settings', exact: true }).click();
-    await page.getByRole('searchbox', { name: 'Search settings' }).fill('nodes');
-    await page.getByRole('list', { name: 'Matching settings' }).getByRole('button', { name: /Appearance/ }).click();
-    await page.getByRole('checkbox', { name: /Always show Nodes/ }).check();
-    await expect(nav.getByRole('button', { name: 'Nodes', exact: true })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Page tabs' })).toHaveCount(0);
+    await nav.getByRole('button', { name: 'Usage', exact: true }).click();
+    const tabs = page.getByRole('navigation', { name: 'Page tabs' });
+    await expect(page.getByRole('heading', { name: 'Telemetry', exact: true })).toBeVisible();
+    await tabs.getByRole('button', { name: 'Quota', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Quota management', exact: true })).toBeVisible();
+    expect(new URL(page.url()).searchParams.get('page')).toBe('quota');
+    // The group button is a no-op while one of its tabs is open.
+    await nav.getByRole('button', { name: 'Usage', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Quota management', exact: true })).toBeVisible();
+    await expect(nav.getByRole('button', { name: 'Usage', exact: true })).toHaveAttribute('aria-current', 'page');
+    // Fleet is always listed: it is where a standalone install adds its first node.
+    await nav.getByRole('button', { name: 'Fleet', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Fleet', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Node readiness' })).toBeVisible();
   });
 
   test('theme toggle switches data-theme attribute', async ({ page }) => {
@@ -127,7 +135,7 @@ test.describe('desktop content', () => {
 
   test('quota page never shows a bare 0% for an unknown observation', async ({ page }) => {
     await page.goto('/');
-    await navigateTo(page, 'Quota', false);
+    await navigateTo(page, 'Usage', false, 'Quota');
     // The page's own title always renders (even mid-load or on a total
     // data-fetch failure -- see PageHeader placement in QuotaPage.tsx), and
     // whatever the data state, the literal string "0%" must never appear:

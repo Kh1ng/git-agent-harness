@@ -2,17 +2,16 @@ import { expect, test } from '@playwright/test';
 
 const MOCK_BASE_URL = process.env.GAH_MOCK_BASE_URL ?? 'http://127.0.0.1:3774';
 
-test('Settings exposes validation timeout and persists profile updates in the shared mock', async ({ page, request }) => {
+test('the Profile sidebar exposes validation timeout and persists profile updates in the shared mock', async ({ page, request }) => {
   test.setTimeout(120_000);
   await request.post(`${MOCK_BASE_URL}/api/mock/reset`);
 
   await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 60_000 });
   await page.evaluate(() => localStorage.clear());
   await page.reload({ waitUntil: 'domcontentloaded' });
-  const settingsButton = page.getByRole('button', { name: 'Settings' });
-  await expect(settingsButton).toBeVisible({ timeout: 60_000 });
-  await settingsButton.click();
-  await page.getByText('Factory / profile management', { exact: true }).click();
+  const profileButton = page.getByRole('button', { name: 'Profile', exact: true });
+  await expect(profileButton).toBeVisible({ timeout: 60_000 });
+  await profileButton.click();
 
   const validationTimeoutInput = page
     .getByText('Validation command timeout (seconds)')

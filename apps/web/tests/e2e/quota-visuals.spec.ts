@@ -42,7 +42,8 @@ test('quota windows compare exact percentages and distinguish missing, stale, an
   }));
 
   await page.goto('/');
-  await page.getByRole('button', { name: 'Quota', exact: true }).click();
+  await page.getByRole('button', { name: 'Usage', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Page tabs' }).getByRole('button', { name: 'Quota', exact: true }).click();
 
   const codex = page.getByTestId('quota-candidate-codex-0');
   const claude = page.getByTestId('quota-candidate-claude-0');

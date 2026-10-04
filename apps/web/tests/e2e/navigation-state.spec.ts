@@ -27,8 +27,6 @@ test('a mobile conversation link restores its project and chat after reload and 
   const mock = process.env.GAH_MOCK_BASE_URL ?? 'http://127.0.0.1:3774';
   expect((await request.post(`${mock}/api/mock/scenario`, { data: { name: 'normal' } })).ok()).toBe(true);
   await page.setViewportSize({ width: 390, height: 844 });
-  // The fixture has no worker nodes; Nodes is hidden on a standalone install unless asked for.
-  await page.addInitScript(() => localStorage.setItem('gah-show-nodes', 'true'));
   await page.goto('/?page=chat&profile=fixture&chat=mock-session-1#keep-marker');
   const chatSelect = page.getByRole('combobox', { name: 'Chat', exact: true });
   await expect(chatSelect).toHaveValue('mock-session-1');
@@ -37,7 +35,7 @@ test('a mobile conversation link restores its project and chat after reload and 
   await page.reload();
   await expect(chatSelect).toHaveValue('mock-session-1');
   await page.getByRole('button', { name: 'Open navigation menu' }).click();
-  await page.getByRole('dialog', { name: 'Navigation menu' }).getByRole('button', { name: 'Nodes', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Navigation menu' }).getByRole('button', { name: 'Fleet', exact: true }).click();
   await expect.poll(() => new URL(page.url()).searchParams.get('page')).toBe('nodes');
   await page.getByRole('button', { name: 'Open navigation menu' }).click();
   await page.getByRole('dialog', { name: 'Navigation menu' }).getByRole('button', { name: 'Chat', exact: true }).click();

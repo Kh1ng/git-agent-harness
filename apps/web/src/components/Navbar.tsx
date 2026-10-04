@@ -11,18 +11,20 @@ import {
   MessageSquare,
   GitBranch,
   Server,
-  Orbit
+  Orbit,
+  FolderGit2,
+  FolderCog
 } from 'lucide-react';
 import type { MainPage, Page, SideView } from '../lib/navigationState.js';
 
 type NavItem<Id extends Page> = { id: Id; label: string; icon: typeof LayoutDashboard };
+/** A navbar entry: its own page, plus the pages shown as tabs under it. */
+type NavGroup = NavItem<MainPage> & { tabs?: NavItem<MainPage>[] };
 
 type NavbarProps = {
   currentPage: MainPage;
   sideView: SideView | null;
   onPageChange: (page: Page) => void;
-  /** Standalone installs have no worker nodes, so Nodes stays out of the way. */
-  hideNodes?: boolean;
   activityUnreadCount?: number;
   /** Chat is open, docked in the right sidebar or filling the main panel. */
   chatOpen: boolean;
@@ -34,16 +36,50 @@ type NavbarProps = {
 
 export const FRONTEND_BUILD = `v${__GAH_VERSION__} (${__GAH_COMMIT__})`;
 
-/** The top navbar: each entry fills the main panel. */
-const mainItems: NavItem<MainPage>[] = [
+/** The top navbar: each entry fills the main panel. A group opens on its
+ * first page and lists the rest as tabs above the page. */
+const mainItems: NavGroup[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'git', label: 'Git', icon: GitBranch },
   { id: 'work', label: 'Factory', icon: ListChecks },
-  { id: 'telemetry', label: 'Telemetry', icon: BarChart3 },
-  { id: 'nodes', label: 'Nodes', icon: Server },
-  { id: 'quota', label: 'Quota', icon: Gauge },
-  { id: 'planning', label: 'Planning', icon: Orbit }
+  { id: 'projects', label: 'Projects', icon: FolderGit2, tabs: [
+    { id: 'projects', label: 'Projects', icon: FolderGit2 },
+    { id: 'git', label: 'Git', icon: GitBranch },
+    { id: 'planning', label: 'Planning', icon: Orbit }
+  ] },
+  { id: 'telemetry', label: 'Usage', icon: BarChart3, tabs: [
+    { id: 'telemetry', label: 'Telemetry', icon: BarChart3 },
+    { id: 'quota', label: 'Quota', icon: Gauge }
+  ] },
+  { id: 'nodes', label: 'Fleet', icon: Server }
 ];
+
+const groupOf = (page: MainPage) => mainItems.find((group) => group.id === page || group.tabs?.some((tab) => tab.id === page));
+
+/** The tabs shown above a page that belongs to a navbar group; none for a page on its own. */
+export function pageTabs(page: MainPage): NavItem<MainPage>[] | null {
+  return groupOf(page)?.tabs ?? null;
+}
+
+/** Tabs above the main panel for the pages a navbar group holds. */
+export function PageTabs({ currentPage, onPageChange }: { currentPage: MainPage; onPageChange: (page: Page) => void }) {
+  const tabs = pageTabs(currentPage);
+  if (!tabs) return null;
+  return (
+    <nav aria-label="Page tabs" className="mb-4 flex gap-0.5 overflow-x-auto border-b border-subtle">
+      {tabs.map((tab) => {
+        const Icon = tab.icon;
+        const active = currentPage === tab.id;
+        return (
+          <button key={tab.id} type="button" onClick={() => onPageChange(tab.id)}
+            className={`top-nav-link ${active ? 'top-nav-link-active' : ''}`} aria-current={active ? 'page' : undefined}>
+            <Icon size={14} aria-hidden="true" />
+            {tab.label}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
 
 /** Chat is not a main-panel tab on desktop: its button sits at the right of
  * the navbar and opens the right sidebar. The phone drawer lists it as a page. */
@@ -52,12 +88,9 @@ const chatItem: NavItem<MainPage> = { id: 'chat', label: 'Chat', icon: MessageSq
 /** The left sidebar: each entry opens beside the main panel. */
 const sideItems: NavItem<SideView>[] = [
   { id: 'events', label: 'Activity', icon: Radio },
+  { id: 'profile', label: 'Profile', icon: FolderCog },
   { id: 'settings', label: 'Settings', icon: Settings }
 ];
-
-function visibleMainItems(currentPage: MainPage, hideNodes: boolean) {
-  return mainItems.filter((item) => item.id !== 'nodes' || !hideNodes || currentPage === 'nodes');
-}
 
 function UnreadBadge({ count, className = '' }: { count: number; className?: string }) {
   if (count <= 0) return null;
@@ -102,7 +135,7 @@ export function ActivityBar({ sideView, onToggle, activityUnreadCount = 0 }: {
 
 /** Desktop: a top navbar for the main panel. Mobile (<1024px): the same bar
  * with a hamburger that opens a slide-in drawer listing every page. */
-export function Navbar({ currentPage, sideView, onPageChange, hideNodes = false, activityUnreadCount = 0, chatOpen, onChatToggle, actions }: NavbarProps) {
+export function Navbar({ currentPage, sideView, onPageChange, activityUnreadCount = 0, chatOpen, onChatToggle, actions }: NavbarProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawer = useRef<HTMLDialogElement>(null);
 
@@ -123,7 +156,9 @@ export function Navbar({ currentPage, sideView, onPageChange, hideNodes = false,
     onPageChange(page);
     setDrawerOpen(false);
   };
-  const items = visibleMainItems(currentPage, hideNodes);
+  const items = mainItems;
+  // A group stays on the tab it is showing; its button only moves between groups.
+  const selectGroup = (group: NavGroup) => { if (groupOf(currentPage) !== group) handleSelect(group.id); };
 
   return (
     <>
@@ -132,12 +167,12 @@ export function Navbar({ currentPage, sideView, onPageChange, hideNodes = false,
         <nav className="hidden min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto lg:flex" aria-label="Primary">
           {items.map((item) => {
             const Icon = item.icon;
-            const active = currentPage === item.id;
+            const active = groupOf(currentPage) === item;
             return (
               <button
                 key={item.id}
                 type="button"
-                onClick={() => handleSelect(item.id)}
+                onClick={() => selectGroup(item)}
                 className={`top-nav-link ${active ? 'top-nav-link-active' : ''}`}
                 aria-current={active ? 'page' : undefined}
               >
@@ -195,14 +230,15 @@ export function Navbar({ currentPage, sideView, onPageChange, hideNodes = false,
           </button>
         </div>
         <nav className="flex flex-col gap-0.5" aria-label="Primary">
-          {[...items, chatItem, ...sideItems].map((item) => {
+          {[...items, chatItem, ...sideItems].map((item: NavItem<Page>) => {
             const Icon = item.icon;
-            const active = sideView ? sideView === item.id : currentPage === item.id;
+            const group = items.find((candidate) => candidate.id === item.id);
+            const active = sideView ? sideView === item.id : (groupOf(currentPage) ?? { id: currentPage }).id === item.id;
             return (
               <button
                 key={item.id}
                 type="button"
-                onClick={() => handleSelect(item.id)}
+                onClick={() => { if (group) selectGroup(group); else handleSelect(item.id); setDrawerOpen(false); }}
                 className={`nav-link ${active ? 'nav-link-active' : ''}`}
                 aria-current={active ? 'page' : undefined}
               >

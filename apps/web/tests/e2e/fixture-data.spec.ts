@@ -12,8 +12,9 @@ import { expect, test, type Page } from '@playwright/test';
  * test clicks the nav button like the smoke spec does rather than page.goto.
  */
 
-async function navigateTo(page: Page, label: string) {
+async function navigateTo(page: Page, label: string, tab?: string) {
   await page.getByRole('button', { name: label, exact: true }).click();
+  if (tab) await page.getByRole('navigation', { name: 'Page tabs' }).getByRole('button', { name: tab, exact: true }).click();
 }
 
 test('Overview renders fixture profile + status data from the hermetic server', async ({ page }) => {
@@ -26,7 +27,7 @@ test('Overview renders fixture profile + status data from the hermetic server', 
 
 test('Quota page renders the fixture quota snapshot observations', async ({ page }) => {
   await page.goto('/');
-  await navigateTo(page, 'Quota');
+  await navigateTo(page, 'Usage', 'Quota');
   // responses/quota.json carries codex/claude candidate ledger rows with quota windows.
   await expect(page.getByText('codex', { exact: false }).first()).toBeVisible();
   await expect(page.getByText('claude', { exact: false }).first()).toBeVisible();
@@ -44,7 +45,7 @@ test('Quota page renders the fixture quota snapshot observations', async ({ page
 
 test('Telemetry page renders a backend row from the fixture report', async ({ page }) => {
   await page.goto('/');
-  await navigateTo(page, 'Telemetry');
+  await navigateTo(page, 'Usage');
   // responses/report.json carries codex + claude comparison rows.
   await expect(page.getByText('codex', { exact: false }).first()).toBeVisible();
   await expect(page.getByText('claude', { exact: false }).first()).toBeVisible();
@@ -55,9 +56,9 @@ test('Telemetry page renders a backend row from the fixture report', async ({ pa
   await expect(chatUsage.getByText(/\$0\.0500 API equivalent/)).toBeVisible();
 });
 
-test('Settings profile section lists the fixture profile', async ({ page }) => {
+test('the Profile sidebar lists the fixture profile', async ({ page }) => {
   await page.goto('/');
-  await navigateTo(page, 'Settings');
+  await navigateTo(page, 'Profile');
   // responses/profile-list.json contains the synthetic 'fixture' profile,
   // rendered as "Fixture (fixture)" in the profile selector.
   const profileSelect = page

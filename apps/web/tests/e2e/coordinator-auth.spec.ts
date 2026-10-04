@@ -26,10 +26,10 @@ test('connection settings restore dashboard access after the first valid token',
   await page.goto('/');
   // Pin the profile before authentication so welcome cannot recover the panel
   // merely by changing its profile key. Only the credential refresh can recover it.
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Profile', exact: true }).click();
   await page.locator('section').filter({ hasText: 'Which configured GAH repo' }).getByRole('combobox').selectOption('fixture');
   // The sidebar stays open beside the main panel until its icon closes it.
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Profile', exact: true }).click();
   await expect.poll(() => rejectedReads).toBeGreaterThan(0);
   await expect(page.getByRole('alert')).toContainText('Coordinator token required');
   await expect(page.getByLabel('Access token', { exact: true })).toHaveCount(0);
@@ -76,7 +76,7 @@ test('the first token restores mounted Chat projects, provider choices, git, and
   await page.goto('/');
   // Pin through the UI before protecting reads. Welcome cannot repair Chat by
   // changing its profile; every Chat mount request below must fail until login.
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Profile', exact: true }).click();
   await page.locator('section').filter({ hasText: 'Which configured GAH repo' }).getByRole('combobox').selectOption('fixture');
   protectReads = true;
   await page.getByRole('button', { name: 'Chat', exact: true }).click();

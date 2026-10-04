@@ -30,7 +30,7 @@ test('empty dispatch telemetry keeps manager-chat usage and unavailable-turn ide
   await page.route('**/api/report/series?**', route => route.fulfill({ json: { series: [], bucket: 'daily' } }));
 
   await page.goto('/');
-  await page.getByRole('button', { name: 'Telemetry', exact: true }).click();
+  await page.getByRole('button', { name: 'Usage', exact: true }).click();
 
   const managerUsage = page.locator('section').filter({ hasText: 'Manager chat usage' });
   await expect(managerUsage.getByText('claude', { exact: true })).toBeVisible();
@@ -46,7 +46,7 @@ test('empty dispatch telemetry keeps manager-chat usage and unavailable-turn ide
   await expect(page.getByText('No dispatch-ledger data', { exact: true })).toBeVisible();
 
   await page.reload();
-  await page.getByRole('button', { name: 'Telemetry', exact: true }).click();
+  await page.getByRole('button', { name: 'Usage', exact: true }).click();
   await expect(page.getByText('claude-opus-4-1 · 6.2M · 3 turns', { exact: true })).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
