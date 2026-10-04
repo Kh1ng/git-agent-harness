@@ -61,7 +61,7 @@ export function LoginRepairPanel({ login }: { login: RepairableLogin }) {
       <p className="text-sm text-primary">Install {tool.label} ({login.backend}) on {where} before signing in. GAH uses it to read issues and open pull requests.</p>
       <div className="flex flex-wrap gap-2">
         <ExternalAnchor href={tool.installUrl} className="btn-primary inline-flex min-h-11 items-center text-xs">Install {tool.label}</ExternalAnchor>
-        <button type="button" className="btn-secondary min-h-11 text-xs" disabled={busy} onClick={() => void start()}>{busy ? 'Checking…' : 'Check installation'}</button>
+        <button type="button" className="btn-secondary min-h-11 text-xs" disabled={busy} onClick={() => void start()}>{busy ? 'Checking…' : 'Check and sign in'}</button>
       </div>
       <p className="text-xs text-secondary">Follow the official installation guide, then check again. Sign-in starts only after the CLI is available.</p>
       {error && <p role="alert" className="text-sm text-critical">{error}</p>}

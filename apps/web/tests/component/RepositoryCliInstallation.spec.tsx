@@ -13,7 +13,7 @@ for (const [backend, provider, label, url] of [
     const component = await mount(<LoginRepairPanel login={{ node_id: 'central', node_name: 'This computer', backend, provider, installed: false }} />);
     await expect(component.getByRole('link', { name: `Install ${label}` })).toHaveAttribute('href', url);
     await expect(component.getByRole('button', { name: 'Fix login' })).toHaveCount(0);
-    await component.getByRole('button', { name: 'Check installation' }).click();
+    await component.getByRole('button', { name: 'Check and sign in' }).click();
     await expect(component.getByText('Sign-in starts only after the CLI is available.', { exact: false })).toBeVisible();
     await expect(component.getByRole('link', { name: 'Open sign-in page' })).toHaveCount(0);
   });
