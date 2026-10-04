@@ -29,6 +29,10 @@ esac
 bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --bin gah --
 cargo run --bin gah -- update --repo "$repo_root" --role "$role"
 
+# Both roles install user systemd units (timers, loop) which must survive
+# logouts. Enable linger for the installing user so the user manager persists.
+sudo loginctl enable-linger "$(id -un)"
+
 # MagicDNS is useful only when this client accepts the tailnet DNS settings.
 # The tailnet-wide toggle still belongs to the Tailscale admin console.
 if command -v tailscale >/dev/null 2>&1; then

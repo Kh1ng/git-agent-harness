@@ -478,6 +478,32 @@ pub fn requirements(selection: &Selection, host: &dyn Host) -> Vec<Requirement> 
             action: None,
             help: None,
         });
+        if os == Os::Linux {
+            let user = host
+                .probe("id", &["-un"])
+                .map(|p| p.stdout.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "unknown".into());
+            list.push(Requirement {
+                id: "user_lingering",
+                label: "user lingering".into(),
+                why: "Keeps the user's systemd manager and timers running after they log out.",
+                feature,
+                optional: false,
+                status: match host.probe("loginctl", &["show-user", &user, "-p", "Linger"]) {
+                    Some(probe) if probe.stdout.trim() == "Linger=yes" => {
+                        Status::Ok { found: None }
+                    }
+                    _ => Status::Missing,
+                },
+                action: Some(Action {
+                    kind: ActionKind::Install,
+                    command: format!("sudo loginctl enable-linger {}", user),
+                    sudo: true,
+                }),
+                help: None,
+            });
+        }
         list.push(Requirement {
             id: "tailscale",
             label: "Tailscale".into(),
@@ -707,7 +733,7 @@ pub(crate) mod tests {
             &selection(Role::Central),
             &FakeHost::new(Os::Linux, Some(PackageManager::Apt)),
         );
-        assert!(ids(&list).ends_with(&["curl", "service_manager", "tailscale"]));
+        assert!(ids(&list).ends_with(&["curl", "service_manager", "user_lingering", "tailscale"]));
         let tailscale = list.iter().find(|r| r.id == "tailscale").unwrap();
         assert!(tailscale.optional && !tailscale.blocking());
         let systemd = list.iter().find(|r| r.id == "service_manager").unwrap();
