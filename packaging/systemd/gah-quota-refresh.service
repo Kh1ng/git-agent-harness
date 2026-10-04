@@ -18,7 +18,7 @@
 #
 # The PATH below matters the same way it does for gah-loop@.service: the
 # codex backend CLI may live in a rustup/nvm-managed bin dir that a systemd
-# unit's default PATH doesn't include. Adjust to match your toolchain.
+# unit's default PATH doesn't include. `gah update` renders @PATH@.
 [Unit]
 Description=GAH account-level quota refresh (issue #761)
 After=network-online.target
@@ -32,7 +32,7 @@ Environment=GAH_CONFIG=%h/.config/gah/config.toml
 Environment=XDG_STATE_HOME=%h/.local/state
 EnvironmentFile=-%h/.config/gah/gah-loop.env
 EnvironmentFile=-%h/.config/gah/provider-keys.env
-Environment=PATH=%h/.nvm/versions/node/v22.23.1/bin:%h/.opencode/bin:%h/.local/bin:%h/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment="PATH=@PATH@"
 ExecStart=%h/.cargo/bin/gah quota auto-refresh
 TimeoutStartSec=300
 StandardOutput=journal

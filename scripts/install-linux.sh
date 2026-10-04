@@ -217,10 +217,18 @@ case "${GAH_GATEWAY_MODE:-}" in
 esac
 
 if [ "$role" = "central" ]; then
-  sudo install -m 0644 packaging/systemd/gah-server.service /etc/systemd/system/gah-server.service
-  sudo systemctl daemon-reload
+  # `gah update` above rendered and installed the unit for this account (#1322).
   sudo systemctl enable --now gah-server.service
-  sudo systemctl is-active --quiet gah-server.service
+  # Restart=always hides a crash loop from a single is-active check: require
+  # the service to stay up without restarting, and show why when it does not.
+  sleep 5
+  if ! sudo systemctl is-active --quiet gah-server.service \
+    || [ "$(systemctl show -p NRestarts --value gah-server.service)" != "0" ]; then
+    echo "ERROR: gah-server.service did not stay running." >&2
+    sudo systemctl status --no-pager gah-server.service >&2 || true
+    sudo journalctl -u gah-server.service -n 50 --no-pager >&2 || true
+    exit 1
+  fi
 else
   echo "Role is 'worker': skipping gah-server.service (this host doesn't serve the control plane)."
 fi
