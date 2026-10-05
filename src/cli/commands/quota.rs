@@ -92,6 +92,11 @@ pub fn run(command: QuotaCommands) -> Result<()> {
 
             let refreshed = if backend == "claude" {
                 quota_store::refresh_claude_and_store(&path)
+            } else if backend == "agy" {
+                if backend_instance.is_some() || model.is_some() || quota_pool.is_some() {
+                    bail!("Antigravity usage reports its own model pools and windows; instance/model/pool overrides are unsupported");
+                }
+                quota_store::refresh_agy_and_store(&codex_cmd, &backend, None, &path)
             } else if backend == "nous" {
                 let record = crate::usage::nous::refresh()?;
                 quota_store::append(&path, &record)?;

@@ -456,6 +456,20 @@ pub fn refresh_claude_and_store(state_path: &Path) -> Result<Option<QuotaObserva
     Ok(records.into_iter().next())
 }
 
+/// Capture the native Antigravity account's independent model pools and windows.
+pub fn refresh_agy_and_store(
+    executable: &str,
+    backend: &str,
+    home: Option<&Path>,
+    state_path: &Path,
+) -> Result<Option<QuotaObservationRecord>> {
+    let records = crate::usage::agy::refresh(executable, backend, home)?;
+    for record in &records {
+        append(state_path, record)?;
+    }
+    Ok(records.into_iter().next())
+}
+
 /// Issue #761: nothing refreshed this store periodically -- only a human
 /// running `gah quota refresh` by hand did, so account-level quota data
 /// went stale for days even while dispatch itself was active. Called by
@@ -490,6 +504,23 @@ pub fn refresh_stale_quota_observations(
         })
     {
         handles.push(handle);
+    }
+    let agy_cmd = profile.agy_path.clone().unwrap_or_else(|| "agy".into());
+    for (backend, home) in [
+        ("agy", None),
+        ("agy-second", profile.agy_second_home.as_deref()),
+    ] {
+        if backend == "agy-second" && home.is_none() {
+            continue;
+        }
+        let path = store_path.to_path_buf();
+        let command = agy_cmd.clone();
+        let home = home.map(PathBuf::from);
+        if let Some(handle) = maybe_refresh_backend(store_path, backend, now, move || {
+            refresh_agy_and_store(&command, backend, home.as_deref(), &path)
+        }) {
+            handles.push(handle);
+        }
     }
     if crate::usage::nous::configured() {
         if let Some(handle) = maybe_refresh_backend_instance(
@@ -640,7 +671,14 @@ fn maybe_refresh_source(
         .filter(|record| {
             record.backend == backend
                 && record.credential_id.as_deref() == credential_id
-                && (credential_id.is_some() || record.backend_instance.as_deref() == instance)
+                && (credential_id.is_some()
+                    || record.backend_instance.as_deref() == instance
+                    || (instance.is_none()
+                        && matches!(backend, "agy" | "agy-second")
+                        && record
+                            .backend_instance
+                            .as_deref()
+                            .is_some_and(|id| id.starts_with(&format!("{backend}:")))))
         })
         .filter_map(|record| {
             record
@@ -749,6 +787,26 @@ mod tests {
                 return false;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn agy_pool_readings_throttle_the_account_probe() {
+        let (_dir, path) = tmp_store();
+        let now = OffsetDateTime::now_utc();
+        for backend in ["agy", "agy-second"] {
+            let record: QuotaObservationRecord = serde_json::from_value(serde_json::json!({
+                "backend": backend,
+                "backend_instance": format!("{backend}:google-native"),
+                "quota_pool": format!("{backend}:google-native"),
+                "quota_window": "weekly",
+                "quota_remaining_percent": 80.0,
+                "checked_at": now.format(&Rfc3339).unwrap(),
+                "observed_at": now.format(&Rfc3339).unwrap()
+            }))
+            .unwrap();
+            append(&path, &record).unwrap();
+            assert!(maybe_refresh_backend(&path, backend, now, || panic!("not due")).is_none());
         }
     }
 
