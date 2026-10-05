@@ -62,6 +62,8 @@ type SetupCheck = {
 let nodeRole: 'central' | 'worker' = 'central';
 let standaloneStarted = false;
 let factoryLoaded = false;
+/** True once the checkbox reflects the host or the user; until then setup must not send a factory choice. */
+let factoryChosen = false;
 const factory = document.querySelector<HTMLInputElement>('#factory-enabled')!;
 
 function statusText(status: SetupStatus): string {
@@ -93,7 +95,7 @@ async function refreshSetup(): Promise<boolean> {
   const pending = !result.installed || !(result.report?.application_ready ?? result.report?.ready);
   document.querySelector<HTMLElement>('#factory-save')!.hidden = !result.installed;
   if (result.report && typeof result.report.factory_enabled === 'boolean') {
-    if (!factoryLoaded) { factory.checked = result.report.factory_enabled; factoryLoaded = true; }
+    if (!factoryLoaded) { factory.checked = result.report.factory_enabled; factoryLoaded = true; factoryChosen = true; }
     document.querySelector('#factory-state')!.textContent = result.report.factory_enabled
       ? `Factory module enabled · ${result.report.factory_ready ? 'prerequisites ready' : 'prerequisites missing'}. Start each project loop explicitly from the dashboard.`
       : 'Factory module disabled · local application remains available.';
@@ -234,12 +236,14 @@ document.querySelector('#setup-refresh')!.addEventListener('click', () => {
 });
 document.querySelector('#setup-standalone')!.addEventListener('click', () => {
   void perform(async () => {
-    central.value = await invoke<string>('open_setup_terminal', { standalone: true, factoryEnabled: factory.checked });
+    // An unloaded checkbox is not a choice: omit it so the installer preserves an existing configuration.
+    central.value = await invoke<string>('open_setup_terminal', factoryChosen ? { standalone: true, factoryEnabled: factory.checked } : { standalone: true });
     nodeRole = 'central';
     standaloneStarted = true;
     document.querySelector('#setup-state')!.textContent = 'Standalone setup is running in Terminal. Select Check again when it finishes to open the dashboard.';
   });
 });
+factory.addEventListener('change', () => { factoryChosen = true; });
 document.querySelector('#factory-save')!.addEventListener('click', () => {
   void perform(async () => {
     await invoke('set_factory_enabled', { enabled: factory.checked });

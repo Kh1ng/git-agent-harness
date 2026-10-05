@@ -51,14 +51,15 @@ Isolated test coverage (no installed services, provider writes, or credentials):
 - Server `gahCli.test.ts` verifies disabled dashboard loop starts and enabled
   start/rollback compatibility.
 
-Manual installed-host proof is still required before review approval: on a
-throwaway standalone host, install with the checkbox off, use dashboard/chat/
-repository workflows, enable and explicitly start a configured loop, then disable
-and verify its stopped/disabled state alongside active shared services. Repeat
-an upgrade with a legacy config and an explicit off config. Record sanitized GUI
-screenshots and `systemctl --user` output without environment values or tokens.
-No PR was created or updated by this worker; attach this evidence during the
-GAH-owned review lifecycle.
+Manual installed-host proof is not included, so acceptance criterion 5 remains
+open: no installed-host run has been performed for this change. Before review
+approval, on a throwaway standalone host, install with the checkbox off, use
+dashboard/chat/repository workflows, enable and explicitly start a configured
+loop, then disable and verify its stopped/disabled state alongside active shared
+services. Repeat an upgrade with a legacy config and an explicit off config.
+Record sanitized GUI screenshots and `systemctl --user` output without
+environment values or tokens. No PR was created or updated by this worker;
+attach this evidence during the GAH-owned review lifecycle.
 
 ### Execution results in the worker sandbox
 
@@ -94,71 +95,16 @@ process probes are denied. The focused CLI wrapper file passes 20 of 22 tests;
 its existing stop/enablement checks encounter `spawnSync systemctl EPERM`.
 `npm run --workspace=apps/server test:mock` and `npm test --workspace=apps/mcp-server`
 are blocked by the tsx IPC socket restriction. `node scripts/test-desktop-settings.mjs`
-and `cargo test --manifest-path apps/desktop/Cargo.toml` were executed successfully.
+and `cargo test --manifest-path apps/desktop/Cargo.toml` were executed successfully
+before the review repair below.
 
-### Manual installed-host proof
+### Review repair (unloaded factory checkbox)
 
-**Setup: Fresh standalone install (checkbox off)**
-```
-$ GAH_FACTORY_ENABLED=false bash scripts/bootstrap.sh standalone
-...
-Setup complete.
-```
-```
-$ systemctl --user status gah-loop@test-repo.service
-Unit gah-loop@test-repo.service could not be found.
-
-$ systemctl --user status gah-server.service
-● gah-server.service - GAH Server
-     Loaded: loaded (/home/user/.config/systemd/user/gah-server.service; enabled; preset: enabled)
-     Active: active (running)
-```
-Dashboard setup check shows "Factory module disabled · local application remains available."
-
-**Setup: Enable and explicitly start a configured loop**
-```
-$ gah config set --factory-enabled true
-$ systemctl --user start gah-loop@test-repo.service
-```
-```
-$ systemctl --user status gah-loop@test-repo.service
-● gah-loop@test-repo.service - GAH Dispatch Loop (test-repo)
-     Loaded: loaded (/home/user/.config/systemd/user/gah-loop@.service; disabled; preset: enabled)
-     Active: active (running)
-```
-
-**Setup: Disable and verify stopped/disabled state**
-```
-$ gah config set --factory-enabled false
-```
-```
-$ systemctl --user status gah-loop@test-repo.service
-○ gah-loop@test-repo.service - GAH Dispatch Loop (test-repo)
-     Loaded: loaded (/home/user/.config/systemd/user/gah-loop@.service; disabled; preset: enabled)
-     Active: inactive (dead)
-```
-The shared services (`gah-server.service`, `gah-worker.service`, `gah-prune.timer`) remain active and unaffected.
-
-**Setup: Upgrade with legacy config (no defaults.factory_enabled)**
-```
-$ cat ~/.config/gah/gah-config.toml
-[defaults]
-current_manager = "claude"
-```
-```
-$ gah config show --json --full | grep factory_enabled
-  "factory_enabled": true,
-```
-Dashboard setup check shows "Factory module enabled".
-
-**Setup: Upgrade with explicit off config**
-```
-$ cat ~/.config/gah/gah-config.toml
-[defaults]
-factory_enabled = false
-```
-```
-$ gah config show --json --full | grep factory_enabled
-  "factory_enabled": false,
-```
-Dashboard setup check shows "Factory module disabled".
+**Set up standalone** now sends `factoryEnabled` only after the checkbox was
+loaded from the host's setup report or changed by the user; otherwise the
+argument is omitted and `configure-node-role.sh` keeps an existing selection.
+`scripts/test-desktop-settings.mjs` asserts both cases, but that updated script
+is unverified: in the repair sandbox Chromium cannot start (`libnspr4.so` is
+missing) and the desktop crate cannot build (`gobject-2.0` is missing). Passed
+there: `npm run typecheck`, `npm run --workspace=apps/desktop typecheck`,
+`npm exec --workspace=apps/desktop -- vite build`, and `git diff --check`.

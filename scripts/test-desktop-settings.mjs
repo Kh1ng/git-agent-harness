@@ -25,7 +25,7 @@ try {
         central_url: 'http://central.test', wsl_distribution: '',
         presence: { dock: false, tray: true, launch_window: true },
       };
-      if (command === 'open_setup_terminal') { window.setupInstalled = true; window.factoryEnabled = args.factoryEnabled; return 'http://127.0.0.1:3773'; }
+      if (command === 'open_setup_terminal') { window.setupInstalled = true; window.factoryEnabled = args.factoryEnabled ?? false; return 'http://127.0.0.1:3773'; }
       if (command === 'setup_check' && !window.setupInstalled) return { installed: false, report: null, terminal: true };
       if (command === 'setup_check') return { installed: true, report: { ready: true, application_ready: true, factory_enabled: window.factoryEnabled, factory_ready: window.factoryEnabled, requirements: [] }, terminal: true };
       if (command === 'set_factory_enabled') { window.factoryEnabled = args.enabled; return; }
@@ -50,6 +50,12 @@ try {
   await page.getByText('GitLab CLI (glab) is required', { exact: false }).waitFor();
   assert.equal(await page.getByRole('link', { name: 'Install GitLab CLI' }).getAttribute('href'), 'https://gitlab.com/gitlab-org/cli#installation');
   assert.equal(await page.getByLabel('Enable factory automation').isChecked(), false);
+  // The checkbox was never loaded from the host, so setup must leave the choice to the installer.
+  await page.getByRole('button', { name: 'Set up standalone' }).click();
+  assert.deepEqual(await page.evaluate(() => window.calls.at(-1)), ['open_setup_terminal', { standalone: true }]);
+  await page.evaluate(() => { window.setupInstalled = false; });
+  await page.getByLabel('Enable factory automation').setChecked(true);
+  await page.getByLabel('Enable factory automation').setChecked(false);
   await page.getByRole('button', { name: 'Set up standalone' }).click();
   assert.deepEqual(await page.evaluate(() => window.calls.at(-1)), ['open_setup_terminal', { standalone: true, factoryEnabled: false }]);
   await page.getByRole('button', { name: 'Check again', exact: true }).click();
