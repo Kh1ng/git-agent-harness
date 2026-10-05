@@ -627,6 +627,11 @@ pub(crate) fn improve(
                 worktree::cleanup(&wt, repo);
                 anyhow::bail!("backend descendant cleanup failed; refusing to retry");
             }
+            if let Some(detail) = exit_failure.config_error.as_deref() {
+                let n = attempt + 1;
+                let who = format!("{} {} attempt {n}", route.effective_backend, args.mode);
+                return stall::stop_on_refused_writes(ledger, &wt, repo, profile, &who, detail);
+            }
             if stalled_before_changes {
                 let availability_result =
                     record_exact_route_unavailability(&route, &log_text, failure_log_path);

@@ -741,9 +741,15 @@ Each backend authenticates through its own CLI, not through GAH:
 
 By default, `gah` injects necessary flags so implementation dispatches can make progress, while review dispatches remain read-only:
 
-- **codex** — Implementation dispatches run with `--sandbox workspace-write --add-dir <GAH_BUILD_CACHE>`.
-- **claude** — Implementation dispatches run with `--permission-mode acceptEdits` and `--allowedTools Edit,Bash,Replace,Write,View,StrReplace`.
+- **codex** — Implementation dispatches run with `--sandbox workspace-write --add-dir <GAH_BUILD_CACHE>`. A profile `codex_args` that chooses its own sandbox (`--sandbox`/`-s`, `--full-auto`, `--dangerously-bypass-approvals-and-sandbox`) replaces the default sandbox mode.
+- **claude** — Implementation dispatches run with `--permission-mode acceptEdits` and `--allowedTools Edit,Write,MultiEdit,NotebookEdit,Bash`. A profile `claude_args` that sets `--permission-mode` (or `--dangerously-skip-permissions`) or `--allowedTools` replaces the matching default.
 - **Other runners** — Depend on their own CLI defaults.
+
+If the backend CLI still refuses the run's writes and the attempt changes
+nothing, GAH appends a `GAH: backend writes refused (configuration error): …`
+line to `backend-output.log` naming the setting to fix, records the attempt as
+`environment_error`, and ends the dispatch without spending the remaining
+retries.
 
 Validate that a profile's declared backends and tokens are actually present
 before trusting an unattended run:

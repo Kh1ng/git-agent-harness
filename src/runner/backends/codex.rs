@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use crate::runner::backends::write_refusal;
 use crate::runner::output;
 use crate::runner::process::{spawn_with_idle_watch, write_redacted_task};
 use crate::runner::resolve::{codex_model_args, filtered_codex_args};
@@ -30,11 +31,16 @@ pub(crate) fn run_with_executable(
     // usage extraction in parse_codex_exec_json (usage.rs).
     cmd.arg("exec").arg("--json").arg(task);
 
+    // Issue #1367: an implementation run must be able to write the worktree
+    // and the build cache. Profile codex_args that choose a sandbox win.
     let filtered_extra = filtered_codex_args(extra_args);
-    if !filtered_extra
-        .iter()
-        .any(|arg| arg.starts_with("--sandbox"))
-    {
+    let profile_sets_sandbox = filtered_extra.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-s" | "--sandbox" | "--full-auto" | "--dangerously-bypass-approvals-and-sandbox"
+        ) || arg.starts_with("--sandbox=")
+    });
+    if !profile_sets_sandbox {
         cmd.arg("--sandbox").arg("workspace-write");
     }
     if let Some(target) = env_vars
@@ -55,6 +61,7 @@ pub(crate) fn run_with_executable(
         .current_dir(worktree);
     crate::runner::apply_child_env(&mut cmd, env_vars);
 
+    let worktree_before = write_refusal::worktree_state(worktree);
     let (exit_code, duration_secs, resources) = spawn_with_idle_watch(
         cmd,
         &log_path,
@@ -63,22 +70,31 @@ pub(crate) fn run_with_executable(
         "launching codex; is it installed and on PATH?",
     )?;
 
-    let mut exit_code = exit_code;
     let output_text = fs::read_to_string(&log_path).unwrap_or_default();
     let transcript_path =
         crate::runner::review_usage::find_codex_transcript(env_vars, &output_text)
             .map(|path| path.to_string_lossy().into_owned());
 
-    if output_text.contains("writing is blocked by read-only sandbox") {
-        let msg = "\nGAH: Codex writes were refused. This is a configuration error: ensure codex_args includes --sandbox workspace-write with sufficient allowed directories.\n";
-        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path) {
-            use std::io::Write;
-            let _ = f.write_all(msg.as_bytes());
-        }
-        if exit_code == 0 {
-            exit_code = 1;
-        }
-    }
+    // Issue #1367: a run whose writes the sandbox rejected and that left the
+    // worktree untouched cannot succeed on retry. Runs GAH killed (negative
+    // exit) keep their own classification.
+    let exit_code = if exit_code >= 0
+        && write_refusal::codex_refused_writes(&output_text)
+        && !write_refusal::worktree_changed_since(worktree_before.as_deref(), worktree)
+    {
+        let cause = if profile_sets_sandbox {
+            "profile codex_args overrides GAH's default --sandbox workspace-write; make it allow workspace writes or remove the override"
+        } else {
+            "GAH's default --sandbox workspace-write was not enough; check the Codex config (sandbox_mode, approval policy) or set profile codex_args"
+        };
+        write_refusal::report(
+            &log_path,
+            exit_code,
+            &format!("codex could not write to the worktree and changed nothing. {cause}."),
+        )
+    } else {
+        exit_code
+    };
     Ok(RunResult {
         exit_code,
         duration_secs,
@@ -209,6 +225,178 @@ mod tests {
             .windows(2)
             .any(|args| { args[0] == "--add-dir" && args[1] == cache_root.to_string_lossy() }));
         assert!(!argv.iter().any(|arg| arg.contains("allow-write-dir")));
+    }
+
+    #[test]
+    fn run_codex_profile_sandbox_choice_replaces_the_default() {
+        for profile_args in [
+            vec!["-s", "read-only"],
+            vec!["--sandbox=danger-full-access"],
+            vec!["--full-auto"],
+            vec!["--dangerously-bypass-approvals-and-sandbox"],
+        ] {
+            let _exec_guard = crate::test_support::ExecGuard::new();
+            let f = fixture();
+            make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
+            let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+            let extra: Vec<String> = profile_args.iter().map(|arg| arg.to_string()).collect();
+
+            run_with_executable(
+                Path::new("codex"),
+                &f.worktree,
+                "task",
+                &f.session_dir,
+                None,
+                &extra,
+                &envs,
+                300,
+            )
+            .unwrap();
+
+            let argv = recorded_argv(&f.record_dir);
+            assert!(
+                !argv.contains(&"workspace-write".to_string()),
+                "{profile_args:?} got {argv:?}"
+            );
+            assert!(argv.contains(&profile_args[0].to_string()));
+        }
+    }
+
+    const PATCH_FAILED: &str = r#"{"type":"item.completed","item":{"id":"i1","type":"file_change","changes":[{"path":"progress.txt","kind":"update"}],"status":"failed"}}"#;
+
+    /// A fake `codex` that prints `events` as its `--json` stream and
+    /// optionally edits the worktree.
+    fn make_event_bin(f: &Fixture, events: &[&str], edits_worktree: bool) -> Vec<(String, String)> {
+        let edit = if edits_worktree {
+            "echo changed > progress.txt\n"
+        } else {
+            ""
+        };
+        make_fake_bin(
+            &f.bin_dir,
+            "codex",
+            &format!(
+                "#!/bin/sh\n{edit}cat <<'GAH_EOF'\n{}\nGAH_EOF\n",
+                events.join("\n")
+            ),
+        );
+        vec![(
+            "PATH".to_string(),
+            format!(
+                "{}:{}",
+                f.bin_dir.to_str().unwrap(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )]
+    }
+
+    #[test]
+    fn run_codex_rejected_writes_without_changes_fail_as_configuration_error() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        let envs = make_event_bin(&f, &[PATCH_FAILED], false);
+
+        let result = run_with_executable(
+            Path::new("codex"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        let detail = write_refusal::refusal_detail(&log).expect("marker line");
+        assert!(detail.contains("GAH's default --sandbox"), "got: {detail}");
+        assert!(detail.contains("codex_args"), "got: {detail}");
+    }
+
+    #[test]
+    fn run_codex_rejected_writes_name_the_profile_override() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        let envs = make_event_bin(&f, &[PATCH_FAILED], false);
+
+        let result = run_with_executable(
+            Path::new("codex"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &["--sandbox".to_string(), "read-only".to_string()],
+            &envs,
+            300,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        let detail = write_refusal::refusal_detail(&log).expect("marker line");
+        assert!(
+            detail.contains("profile codex_args overrides"),
+            "got: {detail}"
+        );
+    }
+
+    #[test]
+    fn run_codex_rejected_patch_does_not_fail_a_run_that_changed_the_worktree() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        let envs = make_event_bin(&f, &[PATCH_FAILED], true);
+
+        let result = run_with_executable(
+            Path::new("codex"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(write_refusal::refusal_detail(&log).is_none());
+    }
+
+    #[test]
+    fn run_codex_reading_refusal_wording_does_not_fail_a_successful_run() {
+        // Reading GAH's own source or the issue text puts the sandbox phrase
+        // and the marker itself into command output.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        let read_source = format!(
+            r#"{{"type":"item.completed","item":{{"id":"i1","type":"command_execution","command":"cat src/runner/backends/write_refusal.rs","aggregated_output":"writing is blocked by read-only sandbox {}x","exit_code":0,"status":"completed"}}}}"#,
+            write_refusal::WRITE_REFUSED_MARKER
+        );
+        let envs = make_event_bin(&f, &[&read_source], false);
+
+        let result = run_with_executable(
+            Path::new("codex"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("writing is blocked by read-only sandbox"));
+        assert!(write_refusal::refusal_detail(&log).is_none());
     }
 
     #[test]
