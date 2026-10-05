@@ -525,6 +525,193 @@ pub(super) fn defer_if_branch_attached(
     )
 }
 
+/// Issue #1381: explain why an iteration admitted no new work. Names every
+/// blocked work item with its reason code, reports node capacity (active
+/// workers against the limit, plus the live deferral reason when node
+/// pressure refused admission), and says so when the queue is empty, so a
+/// quiet iteration is never indistinguishable from a frozen loop.
+pub(super) fn no_admission_diagnostics(
+    snapshot: &crate::status::StatusSnapshot,
+    active_workers: usize,
+    worker_limit: usize,
+    node_deferral: Option<&str>,
+) -> String {
+    let mut parts = Vec::new();
+    if snapshot.blocked_work_items.is_empty() {
+        parts.push("blocked items: none".to_string());
+    } else {
+        let blocked = snapshot
+            .blocked_work_items
+            .iter()
+            .map(|blocker| {
+                format!(
+                    "{} [{}]",
+                    blocker.source_reference.as_deref().unwrap_or("unknown"),
+                    blocker
+                        .reason_code
+                        .as_deref()
+                        .or(blocker.reason.as_deref())
+                        .unwrap_or(blocker.kind.as_str())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!(
+            "blocked items ({}): {blocked}",
+            snapshot.blocked_work_items.len()
+        ));
+    }
+    parts.push(match node_deferral {
+        Some(reason) => format!(
+            "node capacity: {active_workers}/{worker_limit} workers active, admission deferred ({reason})"
+        ),
+        None => format!(
+            "node capacity: {active_workers}/{worker_limit} workers active, no node deferral"
+        ),
+    });
+    if snapshot.merge_requests.is_empty() && snapshot.available_tickets.is_empty() {
+        parts.push("queue: empty (no open MRs or eligible tickets)".to_string());
+    } else {
+        parts.push(format!(
+            "queue: {} open MR(s), {} ticket(s) considered",
+            snapshot.merge_requests.len(),
+            snapshot.available_tickets.len()
+        ));
+    }
+    format!("No work admitted -- {}", parts.join("; "))
+}
+
+/// Prefer the ticket identity, falling back to the PR reference when no
+/// ticket identity is available.
+pub(super) fn human_required_report_identity(action: &NextAction) -> Option<&str> {
+    match action {
+        NextAction::HumanRequired { reference, .. } => action.work_id().or(reference.as_deref()),
+        _ => action.work_id(),
+    }
+}
+
+fn matching_human_required_report(
+    history: &[crate::events::ControllerEvent],
+    profile_name: &str,
+    identity: Option<&str>,
+    reason_code: Option<&str>,
+) -> bool {
+    history
+        .iter()
+        .rev()
+        .find(|event| {
+            event.event_type == "human_required"
+                && event.profile.as_deref() == Some(profile_name)
+                && event.work_id.as_deref() == identity
+        })
+        .is_some_and(|event| event.reason_code.as_deref() == reason_code)
+}
+
+/// Issue #1381: a human-required stop for the same work item and reason code
+/// as the newest human_required event for this profile has already been
+/// reported; repeating it every tick only floods the event stream.
+pub(super) fn human_required_already_reported(
+    history: &[crate::events::ControllerEvent],
+    profile_name: &str,
+    action: &NextAction,
+) -> bool {
+    if !matches!(action, NextAction::HumanRequired { .. }) {
+        return false;
+    }
+    matching_human_required_report(
+        history,
+        profile_name,
+        human_required_report_identity(action),
+        action.human_required_reason_code(),
+    )
+}
+
+/// Issue #1381: report each individually blocked work item (for example a PR
+/// past its fix retry cap) once, even when the loop dispatches other work.
+/// An item is skipped when the newest human_required event for the same
+/// profile and work item already carries the same reason code.
+pub(super) fn report_blocked_work_items_once(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    snapshot: &crate::status::StatusSnapshot,
+) -> Result<()> {
+    let history = crate::events::read_events(cfg)?;
+    for blocker in snapshot
+        .blocked_work_items
+        .iter()
+        .filter(|blocker| blocker.kind == "human_required")
+    {
+        let Some(reference) = blocker.source_reference.as_deref() else {
+            continue;
+        };
+        let identity = snapshot
+            .merge_requests
+            .iter()
+            .find(|mr| mr.branch == reference || mr.work_id.as_deref() == Some(reference))
+            .map(|mr| {
+                mr.work_id
+                    .as_deref()
+                    .or(mr.url.as_deref())
+                    .unwrap_or(&mr.branch)
+            })
+            .unwrap_or(reference);
+        let reason_code = blocker.reason_code.as_deref().or(blocker.reason.as_deref());
+        let already_reported =
+            matching_human_required_report(&history, profile_name, Some(identity), reason_code);
+        if already_reported {
+            continue;
+        }
+        let profile = crate::config::get_profile(cfg, profile_name)?;
+        let reason = blocker
+            .message
+            .as_deref()
+            .or(blocker.reason.as_deref())
+            .unwrap_or("human required");
+        crate::notifications::notify_event(
+            cfg,
+            profile,
+            crate::notifications::NotifyEvent::HumanRequired {
+                reason,
+                reference: Some(identity),
+                reason_code,
+                failure_class: "human_required",
+                failure_stage: None,
+                error_summary: None,
+                attempt_count: None,
+                mr_url: snapshot
+                    .merge_requests
+                    .iter()
+                    .find(|mr| mr.branch == reference || mr.work_id.as_deref() == Some(reference))
+                    .and_then(|mr| mr.url.as_deref()),
+            },
+        );
+        let action = NextAction::HumanRequired {
+            work_id: Some(identity.to_owned()),
+            reference: Some(reference.to_owned()),
+            reason: reason.to_owned(),
+            reason_code: reason_code.map(str::to_owned),
+        };
+        let plan = remediation_plan_for_action(cfg, profile_name, &action);
+        crate::events::record_with_reason_code_and_plan(
+            cfg,
+            crate::events::EventType::HumanRequired,
+            Some(profile_name),
+            Some(identity),
+            format!(
+                "Blocked work item {reference}: {}",
+                blocker
+                    .message
+                    .as_deref()
+                    .or(blocker.reason.as_deref())
+                    .unwrap_or("human required")
+            ),
+            reason_code,
+            blocker.remediation_plan.as_ref().or(plan.as_ref()),
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
