@@ -100,7 +100,8 @@ mod tests {
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
         let plain = dir.join("gah-path-search-plain");
         std::fs::write(&plain, "not executable").unwrap();
-        let paths = std::env::join_paths([&dir, dir.join("missing")]).unwrap();
+        let missing = dir.join("missing");
+        let paths = std::env::join_paths([&dir, &missing]).unwrap();
         assert!(super::path_has_executable(&paths, "gah-path-search-tool"));
         assert!(!super::path_has_executable(&paths, "gah-path-search-plain"));
         assert!(!super::path_has_executable(
