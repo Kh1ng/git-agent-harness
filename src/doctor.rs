@@ -92,6 +92,7 @@ pub fn run(
         }
         failed |= !check_profile(&cfg.defaults, profile);
         if validate {
+            failed |= !check_candidate_models(&cfg.defaults, profile);
             failed |= !check_validation_commands(profile);
             failed |= !check_env_files(profile);
             failed |= !check_backend_executables(&cfg.defaults, profile);
@@ -912,6 +913,121 @@ fn check_candidate_model_consistency(defaults: &Defaults, profile: &Profile) -> 
     }
 }
 
+fn parse_agy_models(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            // `agy models` prints the selectable label after the tab.
+            let label = line.split_once('\t')?.1.trim();
+            (!label.is_empty()).then(|| label.to_string())
+        })
+        .collect()
+}
+
+fn check_candidate_models(defaults: &Defaults, profile: &Profile) -> bool {
+    let routing = profile.effective_routing(defaults);
+    let mut candidates = Vec::new();
+    if let Some(candidate) = &routing.routine_reviewer {
+        candidates.push(candidate);
+    }
+    candidates.extend(&routing.escalatory_reviewers);
+    for list in [
+        &routing.pm_candidates,
+        &routing.improve_candidates,
+        &routing.review_candidates,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        candidates.extend(list);
+    }
+    for rule in &routing.task_routing_rules {
+        candidates.extend(&rule.candidates);
+    }
+    let mut cache = std::collections::HashMap::new();
+    let mut valid = true;
+    for candidate in candidates {
+        let Some(model) = candidate.model.as_deref() else {
+            continue;
+        };
+        let instance = candidate
+            .instance
+            .as_deref()
+            .and_then(|name| routing.backend_instances.get(name));
+        let runner_kind = instance
+            .map(|entry| entry.runner_kind.as_str())
+            .unwrap_or(&candidate.backend);
+        if runner_kind != "agy" {
+            continue;
+        }
+        let resolution = if let Some(instance) = instance {
+            crate::runner::resolve_backend_instance_executable(instance)
+        } else {
+            crate::runner::resolve_backend_executable(profile, &candidate.backend)
+        };
+        let crate::runner::ExecutableResolution::Found(path) = resolution else {
+            // The executable check reports this separately.
+            continue;
+        };
+        let models = cache.entry(path.clone()).or_insert_with(|| {
+            Command::new(&path)
+                .arg("models")
+                .output()
+                .map(|result| {
+                    if !result.status.success() {
+                        return Err(format!(
+                            "agy models exited {}: {}",
+                            result.status,
+                            String::from_utf8_lossy(&result.stderr).trim()
+                        ));
+                    }
+                    let models = parse_agy_models(&String::from_utf8_lossy(&result.stdout));
+                    if models.is_empty() {
+                        Err("agy models returned no selectable models".to_string())
+                    } else {
+                        Ok(models)
+                    }
+                })
+                .unwrap_or_else(|error| Err(format!("cannot run agy models: {error}")))
+        });
+        let label = format!(
+            "{}/{}",
+            candidate.instance.as_deref().unwrap_or(&candidate.backend),
+            model
+        );
+        match models {
+            Ok(models) if models.iter().any(|available| available == model) => {
+                print_check(
+                    CheckStatus::Pass,
+                    "candidate model",
+                    &format!("{label}: accepted by agy"),
+                );
+            }
+            Ok(models) => {
+                print_check(
+                    CheckStatus::Fail,
+                    "candidate model",
+                    &format!(
+                        "{label}: invalid model; available models: {}",
+                        models.join(", ")
+                    ),
+                );
+                valid = false;
+            }
+            Err(error) => {
+                print_check(
+                    CheckStatus::Fail,
+                    "candidate model",
+                    &format!("{label}: {error}"),
+                );
+                valid = false;
+            }
+        }
+    }
+    valid
+}
+
 fn which(bin: &str) -> bool {
     Command::new("which")
         .arg(bin)
@@ -968,6 +1084,38 @@ impl CheckStatus {
 mod tests {
     use super::{check_push_url, gitlab_provider_auth, ProviderAuthFailure, ProviderAuthResult};
     use crate::config::{Profile, RoutingPolicy};
+
+    #[test]
+    fn agy_model_list_rejects_unknown_candidate() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("agy");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'gemini-id\\tGemini 3.7 Flash (High)\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let mut profile = gitlab_profile(None);
+        profile.agy_path = Some(executable.display().to_string());
+        profile.routing.pm_candidates = Some(vec![crate::config::CandidateConfig {
+            backend: "agy".into(),
+            model: Some("default".into()),
+            ..Default::default()
+        }]);
+        assert!(!super::check_candidate_models(
+            &crate::config::Defaults::default(),
+            &profile
+        ));
+        profile.routing.pm_candidates.as_mut().unwrap()[0].model =
+            Some("Gemini 3.7 Flash (High)".into());
+        assert!(super::check_candidate_models(
+            &crate::config::Defaults::default(),
+            &profile
+        ));
+    }
 
     fn gitlab_profile(api_base: Option<&str>) -> Profile {
         Profile {

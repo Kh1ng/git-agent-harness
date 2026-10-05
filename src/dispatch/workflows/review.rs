@@ -725,6 +725,31 @@ pub(in crate::dispatch) fn review(
                 profile,
                 ledger,
             );
+            if review_outcome_allows_reroute(&attempt.outcome) {
+                let failure_output = review_failure_output(
+                    &attempt.outcome,
+                    &attempt.stdout,
+                    &attempt.stderr,
+                    attempt.idle_timeout_seconds,
+                );
+                if let Some(message) = crate::model_validation::invalid_model_message(
+                    &failure_output,
+                    &route_label(&route.effective_backend, route.effective_model.as_deref()),
+                ) {
+                    ledger.set_failure(
+                        crate::ledger::FailureClass::ConfigError,
+                        crate::ledger::FailureStage::Review,
+                    );
+                    ledger.error_summary = Some(message.clone());
+                    ledger.human_required = true;
+                    ledger.human_required_reason_code =
+                        Some(HumanRequiredReason::ConfigurationInfra.as_str().into());
+                    if let Some(record) = ledger.attempts.last_mut() {
+                        record.failure_class = Some("config_error".into());
+                    }
+                    anyhow::bail!("{message}");
+                }
+            }
             if !fresh_context && !attempt.stdout.trim().is_empty() {
                 prior_review_context = utf8_safe_suffix(&attempt.stdout, 20_000).to_string();
             }

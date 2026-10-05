@@ -19,6 +19,7 @@ pub enum FailureClass {
     HarnessError,
     EnvironmentError,
     BackendError,
+    ConfigError,
     AgentNoProgress,
     AgentFailure,
     /// The reviewer process completed, but its structured payload could not
@@ -57,6 +58,7 @@ impl FailureClass {
             Self::HarnessError => "harness_error",
             Self::EnvironmentError => "environment_error",
             Self::BackendError => "backend_error",
+            Self::ConfigError => "config_error",
             Self::AgentNoProgress => "agent_no_progress",
             Self::AgentFailure => "agent_failure",
             Self::ReviewOutputInvalid => "review_output_invalid",

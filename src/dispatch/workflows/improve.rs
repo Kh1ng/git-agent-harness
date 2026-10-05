@@ -544,14 +544,28 @@ pub(crate) fn improve(
                 .as_deref()
                 .unwrap_or(&result.log_path);
             let exit_failure = stall::classify_backend_exit_failure(&log_text, result.exit_code);
+            let invalid_model = crate::model_validation::invalid_model_message(
+                &log_text,
+                &route_label(&route.effective_backend, route.effective_model.as_deref()),
+            );
             let stalled = exit_failure.stalled;
             let stalled_before_changes = exit_failure.stalled_before_changes;
             let stalled_during_validation = exit_failure.stalled_during_validation;
             let cleanup_failed = exit_failure.cleanup_failed;
             ledger.set_failure(
-                exit_failure.failure_class,
+                if invalid_model.is_some() {
+                    crate::ledger::FailureClass::ConfigError
+                } else {
+                    exit_failure.failure_class
+                },
                 crate::ledger::FailureStage::AgentRun,
             );
+            if let Some(message) = &invalid_model {
+                ledger.error_summary = Some(message.clone());
+                ledger.human_required = true;
+                ledger.human_required_reason_code =
+                    Some(HumanRequiredReason::ConfigurationInfra.as_str().into());
+            }
             if cleanup_failed {
                 ledger.validation_result = Some("not_run_process_cleanup_failed".into());
                 ledger.error_summary = Some("backend descendant cleanup failed".into());
@@ -573,7 +587,11 @@ pub(crate) fn improve(
                         stalled_during_validation
                             .then(|| "not_run_backend_stalled_during_validation".into())
                     }),
-                failure_class: Some(exit_failure.failure_class.as_str().into()),
+                failure_class: Some(if invalid_model.is_some() {
+                    crate::ledger::FailureClass::ConfigError.as_str().into()
+                } else {
+                    exit_failure.failure_class.as_str().into()
+                }),
                 failure_stage: Some(crate::ledger::FailureStage::AgentRun.as_str().into()),
                 duration_seconds: Some(attempt_start.elapsed().as_secs_f64()),
                 diff_path: None,
@@ -595,6 +613,10 @@ pub(crate) fn improve(
                 ledger,
             );
             shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
+            if let Some(message) = invalid_model {
+                worktree::cleanup(&wt, repo);
+                anyhow::bail!("{message}");
+            }
             if stalled {
                 notify_event(
                     cfg,
