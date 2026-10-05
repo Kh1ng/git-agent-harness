@@ -205,7 +205,12 @@ export function bestFit(cells: RoleModelMetrics[]): RoleBestFit[] {
 /** The ledger file as entries; lines that are not JSON are skipped. */
 export function readLedger(path: string): LedgerEntry[] {
   const entries: LedgerEntry[] = [];
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
+  let text: string;
+  try { text = readFileSync(path, 'utf8'); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return entries; // No job has run yet.
+    throw error;
+  }
+  for (const line of text.split('\n')) {
     if (!line.trim()) continue;
     try { entries.push(JSON.parse(line) as LedgerEntry); } catch { /* A half-written or foreign line. */ }
   }

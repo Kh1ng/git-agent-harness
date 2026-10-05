@@ -8,7 +8,7 @@ import { updateNavigation } from '../lib/navigationState.js';
 /**
  * "Project: <name>" at the far left of the navbar. Opening it lists every
  * configured project (a GAH profile) to switch the whole dashboard to, plus
- * Import from Git (the Projects page's import form) and Create new (the
+ * Import from Git (the chat's project rail import form) and Create new (the
  * Profile sidebar's add form).
  */
 export function ProjectSwitcher({ onImport, onCreate }: { onImport: () => void; onCreate: () => void }) {

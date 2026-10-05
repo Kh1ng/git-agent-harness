@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Radio } from 'lucide-react';
 import type { ActiveClaim, BackendInstanceSummary, ControllerActivity, DeviceAgent, LedgerEntry, QuotaCandidateStatus, Session } from '@git-agent-harness/contracts';
 import { backendInstancesApi, gahApi } from '../api/client.js';
@@ -54,6 +54,7 @@ const DOT: Record<LiveState, { className: string; pulse: boolean; label: string 
   halted: { className: 'bg-critical', pulse: false, label: 'halted' },
   down: { className: 'bg-critical', pulse: false, label: 'down' }
 };
+const LEDGER_REFRESH_MS = 60 * 1000;
 const GATE_MODES = new Set(['review', 'validate', 'validation', 'merge', 'routine_review']);
 
 /** `codex` → `Codex`: agent and model names lead with a capital. */
@@ -136,7 +137,6 @@ interface LiveJob {
   mode: string | null;
   since: string | null;
   backend: string | null;
-  instance: string | null;
   model: string | null;
   action: string | null;
   runId: string | null;
@@ -169,7 +169,10 @@ export function buildLiveRows(input: {
     if (!['starting', 'running', 'stopping'].includes(session.status)) continue;
     if (session.target) covered.add(session.target);
     jobs.push({ key: `session:${session.id}`, workId: session.target ?? null, mode: session.mode ?? null, since: session.startedAt ?? null,
-      backend: sessionBackend(session), instance: session.instanceId || null, model: session.model ?? null, action: null, runId: null });
+      // ponytail: jobs match accounts on backend only, since a session's instanceId is the
+      // dashboard's provider slot (`codex_instance_0`), not a backend instance. With two
+      // accounts on one backend the first takes the job; match on account once sessions carry it.
+      backend: sessionBackend(session), model: session.model ?? null, action: null, runId: null });
   }
   for (const run of input.controllerRuns) {
     if (run.status !== 'running' || (run.work_id && covered.has(run.work_id))) continue;
@@ -177,14 +180,14 @@ export function buildLiveRows(input: {
     const ledger = run.work_id ? input.ledgers[run.work_id] : null;
     const [mode] = run.action.split(':');
     jobs.push({ key: `run:${run.run_id}`, workId: run.work_id, mode: ledger?.mode ?? (mode && !mode.includes(' ') ? mode : null), since: run.started_at,
-      backend: ledger?.effective_backend ?? ledger?.backend ?? null, instance: null, model: ledger?.effective_model ?? null, action: run.action, runId: run.run_id });
+      backend: ledger?.effective_backend ?? ledger?.backend ?? null, model: ledger?.effective_model ?? null, action: run.action, runId: run.run_id });
   }
   for (const claim of input.claims) {
     if (covered.has(claim.work_id)) continue;
     covered.add(claim.work_id);
     const ledger = input.ledgers[claim.work_id];
     jobs.push({ key: `claim:${claim.work_id}`, workId: claim.work_id, mode: ledger?.mode ?? claim.scope, since: claim.claimed_at,
-      backend: ledger?.effective_backend ?? ledger?.backend ?? null, instance: null, model: ledger?.effective_model ?? null, action: null, runId: input.controllerRuns.find((run) => run.status === 'running' && run.work_id === claim.work_id)?.run_id ?? null });
+      backend: ledger?.effective_backend ?? ledger?.backend ?? null, model: ledger?.effective_model ?? null, action: null, runId: input.controllerRuns.find((run) => run.status === 'running' && run.work_id === claim.work_id)?.run_id ?? null });
   }
   // Pair loop jobs with the factory's agent processes, oldest with oldest: the
   // loop starts a job's agent right after it claims the work. With one process
@@ -205,8 +208,7 @@ export function buildLiveRows(input: {
   const used = new Set<string>();
   const rows: LiveAgentRow[] = [];
   for (const account of input.accounts) {
-    const job = jobs.find((candidate) => !used.has(candidate.key)
-      && (candidate.instance === account.id || (!candidate.instance || candidate.instance === candidate.backend) && candidate.backend === account.backend)) ?? null;
+    const job = jobs.find((candidate) => !used.has(candidate.key) && candidate.backend === account.backend) ?? null;
     if (job) used.add(job.key);
     rows.push({
       key: account.id,
@@ -227,10 +229,10 @@ export function buildLiveRows(input: {
   for (const job of jobs) {
     if (used.has(job.key)) continue;
     // A second job on an account that is already busy still belongs to that subscription.
-    const account = input.accounts.find((candidate) => candidate.id === job.instance) ?? input.accounts.find((candidate) => candidate.backend === job.backend);
+    const account = input.accounts.find((candidate) => candidate.backend === job.backend);
     rows.push({
       key: job.key,
-      name: account?.name ?? job.instance ?? job.backend ?? 'controller',
+      name: account?.name ?? job.backend ?? 'controller',
       detail: account ? account.backend : job.action ?? job.backend,
       provider: account?.provider ?? null,
       model: job.model ?? account?.model ?? null,
@@ -350,17 +352,31 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
     return () => window.clearInterval(timer);
   }, [busyJobs.length]);
 
+  // Each attempt writes a new ledger entry, so a busy job's is re-read every
+  // minute; another project starts from an empty cache.
+  const [ledgerEpoch, setLedgerEpoch] = useState(0);
+  const fetchedIn = useRef(new Map<string, number>());
+  useEffect(() => { fetchedIn.current.clear(); setLedgers({}); }, [profile]);
+  useEffect(() => {
+    if (busyJobs.length === 0) return;
+    const timer = window.setInterval(() => setLedgerEpoch((epoch) => epoch + 1), LEDGER_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [busyJobs.length]);
   useEffect(() => {
     let cancelled = false;
+    const pending = new Set<string>();
     for (const job of busyJobs) {
-      if (job in ledgers) continue;
+      if (fetchedIn.current.get(job) === ledgerEpoch) continue;
+      fetchedIn.current.set(job, ledgerEpoch);
+      pending.add(job);
       gahApi.getWorkTimeline(job)
         .then((entries) => { if (!cancelled) setLedgers((current) => ({ ...current, [job]: entries.at(-1) ?? null })); })
-        .catch(() => { if (!cancelled) setLedgers((current) => ({ ...current, [job]: null })); });
+        .catch(() => { if (!cancelled) setLedgers((current) => ({ ...current, [job]: current[job] ?? null })); })
+        .finally(() => pending.delete(job));
     }
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busyJobs]);
+    // A read cut short is read again on the next run.
+    return () => { cancelled = true; for (const job of pending) fetchedIn.current.delete(job); };
+  }, [busyJobs, ledgerEpoch, profile]);
 
   const busy = rows.filter((row) => row.state === 'working' || row.state === 'gates').length;
   // Busy, paused and broken accounts need a look; idle subscriptions wait below in grey.

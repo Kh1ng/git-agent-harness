@@ -26,7 +26,6 @@ import { AttentionTable, attentionRows } from '../components/AttentionTable.js';
 import { LiveAgentsCard, agentDisplayName } from '../components/LiveAgentsCard.js';
 import type { WatchableRun } from '../components/AgentLiveView.js';
 import { NonFactoryAgentsCard } from '../components/NonFactoryAgentsCard.js';
-import { updateNavigation } from '../lib/navigationState.js';
 
 type OverviewPageProps = {
   sessions: Session[];
@@ -44,7 +43,7 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, onWa
   const { status, quota, loopStatus, loopAction } = useGahStore();
   const { profile: wsProfile, controllerActivity } = useWebSocket();
   const profileOverride = useUiStore((s) => s.profileOverride);
-  const setProfileOverride = useUiStore((s) => s.setProfileOverride);
+  const openChatSession = useUiStore((s) => s.openChatSession);
   const profile = profileOverride ?? wsProfile;
   const fetchStatus = useGahStore((s) => s.fetchStatus);
   const fetchQuota = useGahStore((s) => s.fetchQuota);
@@ -180,7 +179,7 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, onWa
           if (row.runId) onWatchRun(asRun(row), watchable.map(asRun));
         } : undefined} />
 
-      <NonFactoryAgentsCard device={deviceAgents.data} deviceError={deviceAgents.error} onOpenChat={(chatProfile, sessionId) => { setProfileOverride(chatProfile); updateNavigation({ profile: chatProfile, chat: sessionId }); onNavigate('chat'); }} />
+      <NonFactoryAgentsCard device={deviceAgents.data} deviceError={deviceAgents.error} onOpenChat={(chatProfile, sessionId) => { openChatSession(chatProfile, sessionId); onNavigate('chat'); }} />
 
       {attention.length > 0 && <AttentionTable rows={attention} onOpenWork={onOpenWork} />}
 

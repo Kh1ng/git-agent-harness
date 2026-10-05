@@ -1307,7 +1307,9 @@ export function createServer(
     const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
     const since = typeof req.query.since === 'string' ? req.query.since : '7d';
     try {
-      const report = await runReport({ profile, since: 'all' });
+      // Only ledger_path is used; roleMetrics applies `since` itself. `gah report`
+      // accepts only Nd/Nh, so ask for the cheapest valid window.
+      const report = await runReport({ profile, since: '1d' });
       res.json(roleMetrics(readLedger(report.ledger_path), { since, profile: profile ?? null, prices: readPriceBook().prices }));
     } catch (error) {
       res.status(502).json({ error: 'Failed to compute role metrics', message: error instanceof Error ? error.message : String(error) });
@@ -2369,7 +2371,8 @@ export function createServer(
   // Read-only view of a running factory job's agent output, for debugging.
   app.get('/api/factory-runs/:runId/output', (req, res) => {
     try {
-      res.json(factoryRunOutput(req.params.runId, Number(req.query.after ?? 0), undefined, req.query.full === '1'));
+      const since = typeof req.query.log === 'string' ? req.query.log : null;
+      res.json(factoryRunOutput(req.params.runId, Number(req.query.after ?? 0), undefined, req.query.full === '1', since));
     } catch (error) {
       res.status(502).json({ error: 'Failed to read run output', message: error instanceof Error ? error.message : String(error) });
     }

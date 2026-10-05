@@ -33,3 +33,17 @@ test('the Git issues sidebar lists open issues and opens the work drawer', async
   await panel.getByRole('button', { name: 'Back to the list' }).click();
   await expect(panel.getByRole('heading', { name: 'Git issues', exact: true })).toBeVisible();
 });
+
+test('Start chat on an issue switches a chat that is already docked to the new conversation', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?page=overview&profile=fixture&dock=chat&side=issues');
+  const dock = page.getByRole('complementary', { name: 'Chat', exact: true });
+  const picker = dock.getByRole('combobox', { name: 'Chat', exact: true });
+  await expect(picker).toHaveValue('');
+  const panel = page.getByRole('complementary', { name: 'Git issues' });
+  await panel.getByRole('button', { name: 'Start a chat on #1087' }).click();
+  await expect.poll(() => new URL(page.url()).searchParams.get('chat')).toMatch(/.+/);
+  const chat = new URL(page.url()).searchParams.get('chat')!;
+  await expect(picker).toHaveValue(chat);
+  await expect(picker.locator('option:checked')).toContainText('#1087');
+});

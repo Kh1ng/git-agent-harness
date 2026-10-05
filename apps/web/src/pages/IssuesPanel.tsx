@@ -2,7 +2,6 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { CircleDot, ExternalLink, MessageSquare } from 'lucide-react';
 import type { ChatIssueSummary } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
-import { updateNavigation } from '../lib/navigationState.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
@@ -26,7 +25,7 @@ export function IssuesPanel({ renderDetail, detailWorkId, onSelectWork, onDetail
   /** Opens the chat once an issue's conversation has been started. */
   onOpenChat: () => void;
 }) {
-  const setProfileOverride = useUiStore((state) => state.setProfileOverride);
+  const openChatSession = useUiStore((state) => state.openChatSession);
   const [starting, setStarting] = useState<number | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   useEffect(() => { onDetailChange?.(detailWorkId !== null); return () => onDetailChange?.(false); }, [detailWorkId, onDetailChange]);
@@ -61,8 +60,7 @@ export function IssuesPanel({ renderDetail, detailWorkId, onSelectWork, onDetail
       const settings = await gahApi.getManagerChatSettings();
       const backend = settings.profileOverrides[profile] ?? settings.defaultBackend;
       const { session } = await gahApi.startChatFromIssue(profile, number, backend, null);
-      setProfileOverride(profile);
-      updateNavigation({ profile, chat: session.id });
+      openChatSession(profile, session.id);
       onOpenChat();
     } catch (err) {
       setStartError(err instanceof Error ? err.message : String(err));

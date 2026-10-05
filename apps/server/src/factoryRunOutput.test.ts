@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { appendFileSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { factoryRunOutput, findRunLogOnDisk, parseRunLine, readRunOutput } from './factoryRunOutput.js';
@@ -110,4 +110,32 @@ test('a line longer than the read window is still read whole', () => {
   assert.equal(big1.events[0].kind, 'command');
   assert.equal(big1.events[0].status, 'completed');
   assert.ok(big1.events[0].output!.length < 4100);
+});
+
+test('an offset into one log is not applied to the next log the run writes', () => {
+  const sessions = join(mkdtempSync(join(tmpdir(), 'gah-run-output-')), 'sessions');
+  mkdirSync(join(sessions, RUN, 'attempt-1'), { recursive: true });
+  const first = join(sessions, RUN, 'attempt-1', 'backend-output.log');
+  writeFileSync(first, line({ type: 'item.completed', item: { type: 'agent_message', text: 'x'.repeat(500) } }));
+  const one = factoryRunOutput(RUN, 0, { logs: new Map([[RUN, { file: first, attempt: 1 }]]), roots: new Set() });
+  assert.equal(one.log, 'attempt-1/backend-output.log');
+
+  // The review starts: a shorter log than the offset the viewer holds.
+  mkdirSync(join(sessions, RUN, 'review-attempt-1'), { recursive: true });
+  const review = join(sessions, RUN, 'review-attempt-1', 'review-stdout.log');
+  writeFileSync(review, line({ type: 'item.completed', item: { type: 'agent_message', text: 'Reviewing.' } }) + 'y'.repeat(600) + '\n');
+  const two = factoryRunOutput(RUN, one.next, { logs: new Map([[RUN, { file: review, attempt: 1 }]]), roots: new Set() }, false, one.log);
+  assert.equal(two.log, 'review-attempt-1/review-stdout.log');
+  assert.equal(two.events[0].text, 'Reviewing.', 'the new log is read from its start');
+});
+
+test('the partial first line of a long log is skipped by bytes, not decoded characters', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'gah-run-output-')), 'backend-output.log');
+  // Multi-byte characters straddle the read window's start.
+  writeFileSync(file, `${'é'.repeat(200 * 1024)}\n${line({ type: 'item.completed', item: { type: 'agent_message', text: 'After.' } })}`);
+  const output = readRunOutput(file, 1, 0);
+  assert.equal(output.truncated, true);
+  assert.deepEqual(output.events.map((event) => event.text), ['After.']);
+  assert.equal(readRunOutput(file, 1, output.next).events.length, 0, 'next is the exact end of the log');
+  assert.equal(output.next, statSync(file).size);
 });

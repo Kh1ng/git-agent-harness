@@ -213,8 +213,9 @@ export function Navbar({ currentPage, sideView, onPageChange, activityUnreadCoun
     setDrawerOpen(false);
   };
   const items = mainItems;
-  // A group stays on the tab it is showing; its button only moves between groups.
-  const selectGroup = (group: NavGroup) => { if (groupOf(currentPage) !== group) handleSelect(group.id); };
+  // A group stays on the tab it is showing. Choosing the current group still
+  // navigates to that tab, so a side view covering the main panel closes.
+  const selectGroup = (group: NavGroup) => handleSelect(groupOf(currentPage) === group ? currentPage : group.id);
 
   return (
     <>

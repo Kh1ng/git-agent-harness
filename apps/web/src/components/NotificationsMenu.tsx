@@ -30,8 +30,10 @@ function NotificationCard({ event, onClear, clearLabel }: { event: ActivityEvent
 
 /** The bell at the right of the top navbar. A new notification pops open
  * under it for a few seconds; it then waits in the menu until it is cleared. */
-export function NotificationsMenu({ liveActivity, unreadCount, revision, autoPopup }: {
+export function NotificationsMenu({ liveActivity, muted = false, unreadCount, revision, autoPopup }: {
   liveActivity: ActivityEvent | null;
+  /** The Activity sidebar is showing it already: count it as seen without popping it open. */
+  muted?: boolean;
   unreadCount: number;
   /** Changes whenever the server's notification list does. */
   revision: number;
@@ -43,12 +45,18 @@ export function NotificationsMenu({ liveActivity, unreadCount, revision, autoPop
   const [error, setError] = useState('');
   const menu = useRef<HTMLDivElement>(null);
 
+  // Each notification pops at most once, so closing the Activity sidebar does not bring back the last one.
+  const seen = useRef<string | null>(null);
   useEffect(() => {
-    if (!liveActivity || !autoPopup) return;
-    setPopup(liveActivity);
+    if (!liveActivity || liveActivity.id === seen.current) return;
+    seen.current = liveActivity.id;
+    if (autoPopup && !muted) setPopup(liveActivity);
+  }, [liveActivity, autoPopup, muted]);
+  useEffect(() => {
+    if (!popup) return;
     const timer = window.setTimeout(() => setPopup(null), POPUP_MS);
     return () => window.clearTimeout(timer);
-  }, [liveActivity, autoPopup]);
+  }, [popup]);
 
   useEffect(() => {
     if (!open) return;

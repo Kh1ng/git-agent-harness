@@ -457,6 +457,8 @@ export function ManagerChatPage({ docked = false, onNavigate, onOpenWork }: { /*
   const wsProfile = useWebSocket().profile;
   const profileOverride = useUiStore((s) => s.profileOverride);
   const setProfileOverride = useUiStore((s) => s.setProfileOverride);
+  const chatRequest = useUiStore((s) => s.chatRequest);
+  const clearChatRequest = useUiStore((s) => s.clearChatRequest);
   const profile = profileOverride ?? wsProfile ?? 'gah';
   const [availableProfiles, setAvailableProfiles] = useState<ChatProfile[]>([]);
   const [nodeChoice, setNodeChoice] = useState<{ profile: string; sessionId: string | null; nodeId: string } | null>(null);
@@ -701,6 +703,15 @@ export function ManagerChatPage({ docked = false, onNavigate, onOpenWork }: { /*
     refreshSessions(profile);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile]);
+  // After the [profile] effect, so a conversation opened in another project wins over its reset.
+  useEffect(() => {
+    if (!chatRequest) return;
+    setSelection({ profile: chatRequest.profile, sessionId: chatRequest.sessionId });
+    // The new conversation is not in the list yet.
+    refreshSessions(chatRequest.profile);
+    clearChatRequest();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatRequest, clearChatRequest]);
 
   const refreshStorage = async (forProfile = profile) => {
     setStorageLoading(true);

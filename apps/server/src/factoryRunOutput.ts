@@ -132,7 +132,7 @@ export function parseRunLine(line: string): FactoryRunEvent[] {
 /** Read a run's log from `after`, whole lines only. The first read of a long
  * log starts near its end. A command's "running" event is dropped when the
  * same read also holds its result. */
-export function readRunOutput(file: string, attempt: number, after: number, full = false): FactoryRunOutput {
+export function readRunOutput(file: string, attempt: number, after: number, full = false, log = basename(file)): FactoryRunOutput {
   const size = statSync(file).size;
   let start = Number.isFinite(after) && after > 0 && after <= size ? Math.floor(after) : 0;
   // `full` reads from the very start, for copying a job's whole output.
@@ -142,43 +142,47 @@ export function readRunOutput(file: string, attempt: number, after: number, full
   // widen the read until it holds a complete line, up to a hard limit.
   let window = READ_BYTES;
   let text = '';
+  let read = 0;
   for (;;) {
     const length = Math.min(size - start, window);
     const buffer = Buffer.alloc(length);
     const fd = openSync(file, 'r');
-    let read = 0;
     try { read = readSync(fd, buffer, 0, length, start); } finally { closeSync(fd); }
-    text = buffer.toString('utf8', 0, read);
+    let from = 0;
     if (truncated && window === READ_BYTES) {
-      // Skip the partial first line the window cut into.
-      const firstBreak = text.indexOf('\n');
-      if (firstBreak !== -1) {
-        start += Buffer.byteLength(text.slice(0, firstBreak + 1));
-        text = text.slice(firstBreak + 1);
-      }
+      // Skip the partial first line the window cut into, in bytes: it may start mid-character.
+      const firstBreak = buffer.subarray(0, read).indexOf(0x0a);
+      if (firstBreak !== -1) from = firstBreak + 1;
     }
+    start += from;
+    read -= from;
+    text = buffer.toString('utf8', from, from + read);
     if (text.includes('\n') || start + length >= size || window >= MAX_LINE_BYTES) break;
     window *= 2;
   }
   if (!text.includes('\n') && window >= MAX_LINE_BYTES && start + window < size) {
     // A line longer than the limit: step over what was read so the view keeps moving.
-    return { found: true, attempt, truncated: true, next: start + Buffer.byteLength(text), events: [{ kind: 'raw', text: 'A very long output line was skipped.' }] };
+    return { found: true, attempt, log, truncated: true, next: start + read, events: [{ kind: 'raw', text: 'A very long output line was skipped.' }] };
   }
   const lastBreak = text.lastIndexOf('\n');
   const complete = lastBreak === -1 ? '' : text.slice(0, lastBreak + 1);
   const events = complete.split('\n').flatMap(parseRunLine);
   const finished = new Set(events.filter((event) => event.kind === 'command' && event.status !== 'running').map((event) => event.text));
   return {
-    found: true, attempt, truncated,
+    found: true, attempt, log, truncated,
     next: start + Buffer.byteLength(complete),
     events: events.filter((event) => !(event.kind === 'command' && event.status === 'running' && finished.has(event.text)))
   };
 }
 
-/** The output of a run a loop on this node is working on, or has just finished. */
-export function factoryRunOutput(runId: string, after: number, open = openRunLogs(), full = false): FactoryRunOutput {
-  if (!RUN_ID.test(runId)) return { found: false, attempt: null, next: 0, truncated: false, events: [] };
-  const log = open.logs.get(runId) ?? findRunLogOnDisk(runId, open.roots);
-  if (!log) return { found: false, attempt: null, next: 0, truncated: false, events: [] };
-  return readRunOutput(log.file, log.attempt, after, full);
+/** The output of a run a loop on this node is working on, or has just finished.
+ * `after` is an offset into the log named `since`; when the run has moved on
+ * to another log (a new attempt, or its review) reading starts over. */
+export function factoryRunOutput(runId: string, after: number, open = openRunLogs(), full = false, since: string | null = null): FactoryRunOutput {
+  if (!RUN_ID.test(runId)) return { found: false, attempt: null, log: null, next: 0, truncated: false, events: [] };
+  const found = open.logs.get(runId) ?? findRunLogOnDisk(runId, open.roots);
+  if (!found) return { found: false, attempt: null, log: null, next: 0, truncated: false, events: [] };
+  // The log's path inside the run directory, e.g. `review-attempt-1/review-stdout.log`.
+  const log = found.file.slice(found.file.lastIndexOf(runId) + runId.length + 1);
+  return readRunOutput(found.file, found.attempt, since !== null && since !== log ? 0 : after, full, log);
 }

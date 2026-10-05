@@ -33,9 +33,9 @@ test('rows derive their state from sessions, runs, claims, instance health and q
   const rows = buildLiveRows({
     accounts,
     sessions: [
-      { id: 's1', providerKind: 'github', instanceId: 'claude-main', status: 'running', backend: 'claude', model: 'opus', target: '#946', mode: 'improve', startedAt: '2026-10-04T11:55:00Z' },
-      { id: 's2', providerKind: 'github', instanceId: 'other', status: 'running', backend: 'other', target: '#950', mode: 'review', startedAt: '2026-10-04T11:59:30Z' },
-      { id: 's3', providerKind: 'github', instanceId: 'vibe', status: 'stopped', backend: 'vibe', target: '#900' }
+      { id: 's1', providerKind: 'github', instanceId: 'claude_instance_0', status: 'running', backend: 'claude', model: 'opus', target: '#946', mode: 'improve', startedAt: '2026-10-04T11:55:00Z' },
+      { id: 's2', providerKind: 'github', instanceId: 'other_instance_0', status: 'running', backend: 'other', target: '#950', mode: 'review', startedAt: '2026-10-04T11:59:30Z' },
+      { id: 's3', providerKind: 'github', instanceId: 'vibe_instance_0', status: 'stopped', backend: 'vibe', target: '#900' }
     ] as never,
     controllerRuns: [
       // A loop job: its ledger entry names the backend, so it lands on that account.
@@ -116,7 +116,7 @@ test('Overview shows each agent account with its job, elapsed time, claim and fi
   await page.routeWebSocket('**/ws**', (ws) => {
     ws.send(JSON.stringify({
       type: 'server.welcome', serverVersion: '0.0.0-test', serverProviderCatalog: { providers: [] }, providers: {},
-      sessions: [{ id: 's1', providerKind: 'github', instanceId: 'claude-main', status: 'running', backend: 'claude', model: 'opus', target: '#946', mode: 'improve', startedAt }]
+      sessions: [{ id: 's1', providerKind: 'github', instanceId: 'claude_instance_0', status: 'running', backend: 'claude', model: 'opus', target: '#946', mode: 'improve', startedAt }]
     }));
     ws.send(JSON.stringify({ type: 'activity.replay', events: [] }));
   });
@@ -227,6 +227,34 @@ test('Watch live opens a read-only view of a running job in the left sidebar and
   expect(copied).toContain('[files] update src/controller/decision.rs');
   expect(polls).toBeGreaterThan(1);
   expect(new URL(page.url()).searchParams.get('side')).toBe('agents');
+});
+
+test('the live view waits for a slow read before the next, and names the log its offset belongs to', async ({ page }) => {
+  const RUN = '8c4013e4-2937-4bac-b258-115ae2b3d7e1';
+  await page.route('**/api/controller-activity**', (route) => route.fulfill({ json: [
+    { run_id: RUN, profile: 'fixture', work_id: '#1381', started_at: new Date(Date.now() - 120_000).toISOString(), finished_at: null, action: 'dispatch_ticket: 1381', status: 'running', outcome: null }
+  ] }));
+  await page.route('**/api/work/**', (route) => route.fulfill({ json: [] }));
+  const logs: (string | null)[] = [];
+  await page.route(`**/api/factory-runs/${RUN}/output**`, async (route) => {
+    const url = new URL(route.request().url());
+    logs.push(url.searchParams.get('log'));
+    const first = Number(url.searchParams.get('after')) === 0;
+    // Slower than the poll interval.
+    if (first) await new Promise((resolve) => setTimeout(resolve, 2500));
+    await route.fulfill({ json: { found: true, attempt: 1, log: 'attempt-1/backend-output.log', next: 100, truncated: false,
+      events: first ? [{ kind: 'message', text: 'Read once.' }] : [] } });
+  });
+  await page.goto('/?page=overview&profile=fixture');
+  await page.getByRole('region', { name: 'Factory Agents Status' }).getByRole('button', { name: 'Watch #1381 live' }).click();
+  const view = page.getByRole('complementary', { name: 'Running agents' });
+  await expect(view).toContainText('Read once.');
+  await expect.poll(() => logs.length, { timeout: 8000 }).toBeGreaterThan(2);
+  // A second read from the same offset would have shown it twice.
+  await expect(view.getByRole('list', { name: 'Agent output' }).getByRole('listitem')).toHaveCount(1);
+  // StrictMode mounts the view twice, so two reads start with no log.
+  expect(logs.filter((log) => log === null).length).toBeLessThanOrEqual(2);
+  expect(logs.filter((log) => log !== null).every((log) => log === 'attempt-1/backend-output.log')).toBe(true);
 });
 
 test('the live view lists every running factory agent and switches between them', async ({ page }) => {

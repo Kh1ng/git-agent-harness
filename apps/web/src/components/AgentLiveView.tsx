@@ -68,9 +68,13 @@ export function AgentLiveView({ runId, title, subtitle, onBack, runs = [], onSel
     setCopyState('copying');
     try {
       const all: FactoryRunEvent[] = [];
+      let log: string | null = null;
       for (let offset = 0, round = 0; round < 200; round++) {
-        const output = await gahApi.getFactoryRunOutput(runId, offset, true);
+        const output = await gahApi.getFactoryRunOutput(runId, offset, true, log);
         if (!output.found) break;
+        // The run moved on to another log mid-copy: the server started it over, so does the copy.
+        if (log !== null && output.log !== log) all.length = 0;
+        log = output.log;
         const done = new Set(output.events.filter((event) => event.kind === 'command' && event.status !== 'running').map((event) => event.text));
         for (let index = all.length - 1; index >= 0; index--) if (all[index].kind === 'command' && all[index].status === 'running' && done.has(all[index].text)) all.splice(index, 1);
         all.push(...output.events);
@@ -89,19 +93,21 @@ export function AgentLiveView({ runId, title, subtitle, onBack, runs = [], onSel
   const [error, setError] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [follow, setFollow] = useState(true);
-  const next = useRef(0);
+  /** Where the last read stopped: a byte offset into one of the run's logs. */
+  const next = useRef<{ log: string | null; offset: number }>({ log: null, offset: 0 });
   const end = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let current = true;
-    next.current = 0;
+    let timer: number | undefined;
+    next.current = { log: null, offset: 0 };
     setEvents([]); setState('loading'); setTruncated(false);
     const poll = async () => {
       try {
-        const output = await gahApi.getFactoryRunOutput(runId, next.current);
+        const output = await gahApi.getFactoryRunOutput(runId, next.current.offset, false, next.current.log);
         if (!current) return;
         if (!output.found) { setState((previous) => (previous === 'error' ? previous : 'gone')); return; }
-        next.current = output.next;
+        next.current = { log: output.log, offset: output.next };
         if (output.truncated) setTruncated(true);
         if (output.events.length > 0) {
           setEvents((previous) => {
@@ -115,9 +121,13 @@ export function AgentLiveView({ runId, title, subtitle, onBack, runs = [], onSel
         if (current) { setError(err instanceof Error ? err.message : String(err)); setState((previous) => (previous === 'loading' ? 'error' : previous)); }
       }
     };
-    void poll();
-    const timer = window.setInterval(poll, POLL_MS);
-    return () => { current = false; window.clearInterval(timer); };
+    // The next poll waits for this one, so a slow response is never read twice.
+    const loop = async () => {
+      await poll();
+      if (current) timer = window.setTimeout(loop, POLL_MS);
+    };
+    void loop();
+    return () => { current = false; window.clearTimeout(timer); };
   }, [runId]);
 
   useEffect(() => { if (follow) end.current?.scrollIntoView({ block: 'end' }); }, [events, follow]);

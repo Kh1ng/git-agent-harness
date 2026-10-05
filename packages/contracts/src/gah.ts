@@ -1869,6 +1869,8 @@ export interface FactoryRunOutput {
   /** False when no running loop on this node has that run's log open. */
   found: boolean;
   attempt: number | null;
+  /** Which of the run's logs `next` is an offset into; pass it back as `log`. */
+  log: string | null;
   /** Byte offset to pass as `after` next time. */
   next: number;
   /** True when earlier output was skipped to keep the first read bounded. */

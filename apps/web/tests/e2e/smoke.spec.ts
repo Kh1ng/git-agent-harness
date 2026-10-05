@@ -155,3 +155,13 @@ test.describe('desktop content', () => {
     await expect(page.getByText('0%', { exact: true })).toHaveCount(0);
   });
 });
+
+test('choosing the current group closes a sidebar view that covers the page', async ({ page }) => {
+  // Below 1280px an open sidebar view takes the content area.
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await page.goto('/?page=overview&profile=fixture&side=settings');
+  await expect(page).toHaveURL(/[?&]side=settings/);
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Overview', exact: true }).click();
+  await expect(page).not.toHaveURL(/[?&]side=/);
+  await expect(page).toHaveURL(/[?&]page=overview/);
+});

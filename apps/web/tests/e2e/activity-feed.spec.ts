@@ -352,3 +352,26 @@ for (const popups of [true, false]) {
     if (popups) await expect(toggle).toBeChecked(); else await expect(toggle).not.toBeChecked();
   });
 }
+
+test('closing the Activity sidebar does not pop open a notification it already showed', async ({ page }) => {
+  // Only on the socket, so seeing it in the sidebar proves the live event arrived.
+  const live = { ...offline, id: 'evt-live-only', title: 'Live-only notice' };
+  await page.routeWebSocket('**/ws**', (ws) => {
+    ws.send(JSON.stringify(welcome));
+    ws.onMessage((raw) => {
+      if (JSON.parse(String(raw)).type !== 'client.hello') return;
+      ws.send(JSON.stringify({ type: 'activity.replay', events: [] }));
+      ws.send(JSON.stringify({ type: 'activity.event', event: live }));
+    });
+  });
+  // The notification arrives while the Activity sidebar is open: it shows there, not under the bell.
+  await page.goto('/?page=overview&side=events');
+  const popup = page.getByRole('complementary', { name: 'New activity' });
+  await expect(page.getByRole('complementary', { name: 'Activity' })).toContainText('Live-only notice');
+  expect(await popup.count()).toBe(0);
+  await page.getByRole('navigation', { name: 'Sidebar' }).getByRole('button', { name: 'Activity', exact: true }).click();
+  await expect(page).not.toHaveURL(/[?&]side=events/);
+  await page.waitForTimeout(500);
+  // Not a retrying assertion: a pop-up folds away by itself after a few seconds.
+  expect(await popup.count()).toBe(0);
+});

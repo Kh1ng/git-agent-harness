@@ -83,15 +83,18 @@ export function App() {
   const statusSnapshot = useGahStore((state) => state.status.data);
   // The device's agent processes: what the factory is running right now, and what runs beside it.
   const [deviceAgents, setDeviceAgents] = useState<{ data: DeviceAgentsSnapshot | null; error: string | null }>({ data: null, error: null });
+  // Each read scans the device's processes: fast while an agents view shows them, at the
+  // quota cadence for the navbar rings otherwise, and not at all from a hidden tab.
+  const agentsVisible = currentPage === 'overview' || sideView === 'agents';
   useEffect(() => {
     let current = true;
-    const load = () => gahApi.getDeviceAgents()
+    const load = () => document.hidden ? undefined : gahApi.getDeviceAgents()
       .then((data) => { if (current) setDeviceAgents({ data, error: null }); })
       .catch((err) => { if (current) setDeviceAgents((state) => ({ data: state.data, error: err instanceof Error ? err.message : String(err) })); });
     void load();
-    const timer = window.setInterval(load, DEVICE_AGENTS_REFRESH_MS);
+    const timer = window.setInterval(load, agentsVisible ? DEVICE_AGENTS_REFRESH_MS : QUOTA_REFRESH_MS);
     return () => { current = false; window.clearInterval(timer); };
-  }, [reconnectSeq]);
+  }, [reconnectSeq, agentsVisible]);
   const busySubscriptions = useMemo(() => busySubscriptionIds({ subscriptions, sessions, controllerRuns: controllerActivity, claims: statusSnapshot?.active_claims ?? [], recentLedger: statusSnapshot?.recent_ledger, factoryAgents: deviceAgents.data?.factory_agents }),
     [subscriptions, sessions, controllerActivity, statusSnapshot, deviceAgents.data]);
 
@@ -173,7 +176,7 @@ export function App() {
       <Navbar currentPage={currentPage} sideView={sideView} onPageChange={navigate} activityUnreadCount={activityUnreadCount}
         chatOpen={isChatPage || chatDocked} onChatToggle={toggleChat}
         onImportProject={() => { requestAction('import'); expandChat(true); }} onCreateProject={() => { requestAction('create'); setSideView('profile'); }}
-        actions={<><SubscriptionUsageMenu subscriptions={subscriptions} busy={busySubscriptions} onOpenQuota={() => navigate('quota')} /><NotificationsMenu liveActivity={sideView === 'events' ? null : liveActivity} unreadCount={activityUnreadCount} revision={activityRevision} autoPopup={notificationPopups} /></>} />
+        actions={<><SubscriptionUsageMenu subscriptions={subscriptions} busy={busySubscriptions} onOpenQuota={() => navigate('quota')} /><NotificationsMenu liveActivity={liveActivity} muted={sideView === 'events'} unreadCount={activityUnreadCount} revision={activityRevision} autoPopup={notificationPopups} /></>} />
 
       {/* Left to right: icon strip, sidebar view, main panel, chat sidebar. */}
       <div className="flex min-h-0 flex-1">
