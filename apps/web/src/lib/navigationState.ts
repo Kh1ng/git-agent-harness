@@ -1,4 +1,6 @@
-const pages = ['overview', 'work', 'telemetry', 'quota', 'events', 'issues', 'profile', 'settings', 'chat', 'projects', 'git', 'nodes', 'planning'] as const;
+const pages = ['overview', 'work', 'telemetry', 'quota', 'events', 'issues', 'profile', 'settings', 'chat', 'git', 'nodes', 'planning'] as const;
+/** Pages that no longer exist, and where their links go now. */
+const LEGACY_PAGES: Record<string, Page> = { projects: 'git' };
 export type Page = typeof pages[number];
 export const DEFAULT_CONVERSATION_ID = 'default';
 
@@ -19,7 +21,8 @@ export function readNavigation(search = window.location.search): NavigationState
   const epic = params.get('epic');
   const map = params.get('map');
   const validProfile = profile && profile.trim() === profile && profile.length <= 512 && !/[\x00-\x1f\x7f]/.test(profile) ? profile : null;
-  const page = pages.find(page => page === params.get('page')) ?? 'overview';
+  const requested = params.get('page') ?? '';
+  const page = pages.find(page => page === requested) ?? LEGACY_PAGES[requested] ?? 'overview';
   return {
     // Links from before the sidebar name a sidebar view as the page.
     page: isSideView(page) ? 'overview' : page,

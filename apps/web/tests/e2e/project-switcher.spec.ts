@@ -32,11 +32,23 @@ test('the switcher changes the project for every page and keeps it in the URL', 
   await expect(current.getByRole('combobox')).toHaveCount(0);
 });
 
+test('the GitHub dropdown opens the repository pages', async ({ page }) => {
+  await page.goto('/?page=overview');
+  await page.getByRole('button', { name: 'GitHub', exact: true }).click();
+  const menu = page.getByRole('menu', { name: 'GitHub pages' });
+  await expect(menu.getByRole('menuitem', { name: 'Issues' })).toHaveAttribute('href', /\/issues$/);
+  await expect(menu.getByRole('menuitem', { name: 'Pull requests' })).toHaveAttribute('href', /\/pulls$/);
+  // Old Projects links land on Git now.
+  await page.goto('/?page=projects&profile=fixture');
+  await expect(page.getByRole('heading', { name: 'Git', exact: true })).toBeVisible();
+});
+
 test('Import from Git opens the Projects import form and Create new opens the add profile form', async ({ page }) => {
   await page.goto('/?page=overview');
   await page.getByRole('button', { name: /^Project:/ }).click();
   await page.getByRole('menuitem', { name: 'Import from Git' }).click();
-  await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
+  // The import form is the chat rail's; the chat opens expanded to show it.
+  await expect(page).toHaveURL(/[?&]page=chat/);
   const rail = page.getByRole('complementary', { name: 'Chat navigation' });
   await expect(rail.locator('details').filter({ hasText: 'Import from Git' })).toHaveAttribute('open', '');
   await expect(rail.getByRole('button', { name: 'Import repository' })).toBeVisible();

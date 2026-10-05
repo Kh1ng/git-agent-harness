@@ -1,7 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { CircleDot, ExternalLink } from 'lucide-react';
+import { CircleDot, ExternalLink, MessageSquare } from 'lucide-react';
 import type { ChatIssueSummary } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
+import { updateNavigation } from '../lib/navigationState.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
@@ -14,12 +15,17 @@ import { formatAge } from '../lib/format.js';
  * The Git issues sidebar: the current project's open issues, newest first,
  * each opening the work detail drawer that Needs attention uses.
  */
-export function IssuesPanel({ renderDetail, onDetailChange }: {
+export function IssuesPanel({ renderDetail, onDetailChange, onOpenChat }: {
   /** The work detail for an issue, rendered inside this sidebar; `onBack` returns to the list. */
   renderDetail: (workId: string, onBack: () => void) => ReactNode;
   /** Lets the shell widen the sidebar while a detail is open. */
   onDetailChange?: (open: boolean) => void;
+  /** Opens the chat once an issue's conversation has been started. */
+  onOpenChat: () => void;
 }) {
+  const setProfileOverride = useUiStore((state) => state.setProfileOverride);
+  const [starting, setStarting] = useState<number | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
   const [detailWorkId, setDetailWorkId] = useState<string | null>(null);
   useEffect(() => { onDetailChange?.(detailWorkId !== null); return () => onDetailChange?.(false); }, [detailWorkId, onDetailChange]);
   const { profile: wsProfile, reconnectSeq } = useWebSocket();
@@ -43,6 +49,25 @@ export function IssuesPanel({ renderDetail, onDetailChange }: {
     return () => { cancelled = true; };
   }, [profile, reconnectSeq, epoch]);
   const refresh = () => setEpoch((value) => value + 1);
+
+  /** Start a chat seeded with the issue on the profile's default chat backend, then open it. */
+  const startChat = async (number: number) => {
+    if (!profile || starting !== null) return;
+    setStarting(number);
+    setStartError(null);
+    try {
+      const settings = await gahApi.getManagerChatSettings();
+      const backend = settings.profileOverrides[profile] ?? settings.defaultBackend;
+      const { session } = await gahApi.startChatFromIssue(profile, number, backend, null);
+      setProfileOverride(profile);
+      updateNavigation({ profile, chat: session.id });
+      onOpenChat();
+    } catch (err) {
+      setStartError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStarting(null);
+    }
+  };
   useWsReconnectRefresh(refresh);
 
   const terms = query.trim().toLowerCase();
@@ -77,6 +102,10 @@ export function IssuesPanel({ renderDetail, onDetailChange }: {
                   {[issue.labels.join(', '), issue.updatedAt ? `updated ${formatAge(issue.updatedAt)}` : null].filter(Boolean).join(' · ')}
                 </span>
               </button>
+              <button type="button" onClick={() => void startChat(issue.number)} disabled={starting !== null}
+                className="shrink-0 p-1 text-muted hover:text-primary disabled:opacity-50" aria-label={`Start a chat on #${issue.number}`} title="Start a chat seeded with this issue">
+                <MessageSquare size={13} aria-hidden="true" />
+              </button>
               {issue.url && (
                 <ExternalAnchor href={issue.url} className="shrink-0 p-1 text-muted hover:text-primary" aria-label={`Open #${issue.number} on the provider`}>
                   <ExternalLink size={13} aria-hidden="true" />
@@ -86,6 +115,7 @@ export function IssuesPanel({ renderDetail, onDetailChange }: {
           ))}
         </ul>
       )}
+      {startError && <p role="alert" className="text-xs text-critical">Could not start the chat: {startError}</p>}
       {error && issues && <p role="alert" className="text-xs text-critical">Refresh failed: {error}. Showing the last list.</p>}
     </div>
   );

@@ -45,11 +45,13 @@ test('selecting a chat keeps the project rail and opens its own provider', async
   await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible();
   await expect(page.getByRole('complementary', { name: 'Chat navigation' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex', { timeout: 10_000 });
-  // Beside the project view, the chat opens docked; expanding it keeps the conversation.
-  await expect(page).toHaveURL(/[?&]dock=chat/);
-  await expect(page).toHaveURL(/[?&]chat=/);
-  await page.getByRole('button', { name: 'Expand chat' }).click();
   await expect(page).toHaveURL(/[?&]page=chat/);
+  await expect(page).toHaveURL(/[?&]chat=mock-session-1/);
+  // Docking keeps the conversation; expanding again brings the rail back.
+  await page.getByRole('button', { name: 'Chat', exact: true }).first().click();
+  await expect(page).toHaveURL(/[?&]dock=chat/);
+  await expect(page).toHaveURL(/[?&]chat=mock-session-1/);
+  await page.getByRole('button', { name: 'Expand chat' }).click();
   await expect(page.getByRole('complementary', { name: 'Chat navigation' })).toBeVisible();
 });
 
@@ -73,20 +75,20 @@ test('the Chat action opens no launcher; New chat is a panel inside the chat', a
   await panel.getByText('Extra settings').click();
   await expect(panel.getByRole('button', { name: /Fixture/ })).toBeVisible();
   await expect(panel.getByRole('combobox', { name: 'Run on node' })).toBeVisible();
-  await panel.getByRole('button', { name: 'View all projects' }).click();
-  await expect(page).toHaveURL(/[?&]page=projects/);
+  await panel.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(panel).toHaveCount(0);
 });
 
-test('the open issues queue starts a seeded chat in one step', async ({ page, request }) => {
+test('the Git issues sidebar starts a seeded chat in one step', async ({ page, request }) => {
   await selectScenario(request, 'normal');
-  await openProjects(page);
-
-  const issues = page.getByRole('region', { name: 'Open issues' });
-  const first = issues.getByRole('button', { name: 'Start chat', exact: true }).first();
-  await expect(first).toBeEnabled({ timeout: 10_000 });
-  await first.click();
+  await page.goto('/?page=overview&profile=fixture');
+  await page.getByRole('navigation', { name: 'Sidebar' }).getByRole('button', { name: 'Git issues', exact: true }).click();
+  // The mock's own open issue; starting a chat on it is validated server side.
+  const start = page.getByRole('button', { name: 'Start a chat on #1087' });
+  await expect(start).toBeEnabled({ timeout: 10_000 });
+  await start.click();
 
   await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible({ timeout: 10_000 });
   await expect(page).toHaveURL(/[?&](page|dock)=chat/);
+  await expect(page).toHaveURL(/[?&]chat=mock-session-/);
 });

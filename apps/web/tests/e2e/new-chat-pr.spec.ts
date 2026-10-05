@@ -17,11 +17,11 @@ async function openChat(page: Page): Promise<void> {
   await expect(page.getByPlaceholder(/Message the manager/)).toBeVisible();
 }
 
-/** New chat lives inside the chat: dock it beside the page, then open the panel. */
+/** New chat lives inside the chat, expanded or docked. */
 async function openNewChatPanel(page: Page): Promise<void> {
-  const dock = page.getByRole('complementary', { name: 'Chat', exact: true });
-  if (!await dock.isVisible()) await page.getByRole('button', { name: 'Chat', exact: true }).click();
-  await dock.getByRole('button', { name: 'New chat' }).click();
+  const button = page.getByRole('button', { name: 'New chat', exact: true });
+  if (await button.count() === 0) await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  await button.first().click();
   await expect(page.getByRole('region', { name: 'New chat' })).toBeVisible();
 }
 

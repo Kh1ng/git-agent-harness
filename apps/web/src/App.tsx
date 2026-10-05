@@ -25,7 +25,6 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage.js').then((module) 
 const ManagerChatPage = lazy(() => import('./pages/ManagerChatPage.js').then((module) => ({ default: module.ManagerChatPage })));
 const GitPage = lazy(() => import('./pages/GitPage.js').then((module) => ({ default: module.GitPage })));
 const NodesPage = lazy(() => import('./pages/NodesPage.js').then((module) => ({ default: module.NodesPage })));
-const ProjectsPage = lazy(() => import('./pages/ProjectsPage.js').then((module) => ({ default: module.ProjectsPage })));
 const PlanningPage = lazy(() => import('./pages/PlanningPage.js').then((module) => ({ default: module.PlanningPage })));
 const IssuesPanel = lazy(() => import('./pages/IssuesPanel.js').then((module) => ({ default: module.IssuesPanel })));
 const ProfilePanel = lazy(() => import('./pages/ProfilePanel.js').then((module) => ({ default: module.ProfilePanel })));
@@ -123,8 +122,6 @@ export function App() {
         return <QuotaPage />;
       case 'chat':
         return chat(false);
-      case 'projects':
-        return <ProjectsPage onNavigate={navigate} />;
       case 'git':
         return <GitPage />;
       case 'planning':
@@ -149,7 +146,7 @@ export function App() {
       <PwaStatusBars />
       <Navbar currentPage={currentPage} sideView={sideView} onPageChange={navigate} activityUnreadCount={activityUnreadCount}
         chatOpen={isChatPage || chatDocked} onChatToggle={toggleChat}
-        onImportProject={() => { requestAction('import'); navigate('projects'); }} onCreateProject={() => { requestAction('create'); setSideView('profile'); }}
+        onImportProject={() => { requestAction('import'); expandChat(true); }} onCreateProject={() => { requestAction('create'); setSideView('profile'); }}
         actions={<><SubscriptionUsageMenu subscriptions={subscriptions} onOpenQuota={() => navigate('quota')} /><NotificationsMenu liveActivity={sideView === 'events' ? null : liveActivity} unreadCount={activityUnreadCount} revision={activityRevision} autoPopup={notificationPopups} /></>} />
 
       {/* Left to right: icon strip, sidebar view, main panel, chat sidebar. */}
@@ -160,7 +157,7 @@ export function App() {
           <aside id="side-panel" aria-label={SIDE_VIEW_LABELS[sideView]}
             className={`side-panel min-w-0 flex-1 overflow-y-auto px-4 py-4 xl:flex-none xl:border-r xl:border-subtle ${sideDetailOpen ? 'xl:w-[clamp(28rem,40vw,44rem)]' : 'xl:w-[clamp(20rem,25vw,30rem)]'}`}>
             <Suspense fallback={<LoadingState label="Loading…" />}>
-              {sideView === 'settings' ? <SettingsPage /> : sideView === 'profile' ? <ProfilePanel /> : sideView === 'issues' ? <IssuesPanel renderDetail={(workId, onBack) => workDetail(workId, onBack, true)} onDetailChange={setSideDetailOpen} /> : <EventsPage openedEventId={openedActivityId} />}
+              {sideView === 'settings' ? <SettingsPage /> : sideView === 'profile' ? <ProfilePanel /> : sideView === 'issues' ? <IssuesPanel renderDetail={(workId, onBack) => workDetail(workId, onBack, true)} onDetailChange={setSideDetailOpen} onOpenChat={() => navigate('chat')} /> : <EventsPage openedEventId={openedActivityId} />}
             </Suspense>
           </aside>
         )}

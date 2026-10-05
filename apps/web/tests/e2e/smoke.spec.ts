@@ -26,7 +26,8 @@ const ROUTES: { label: string; tab?: string; heading: string }[] = [
   { label: 'Factory', heading: 'Factory' },
   { label: 'Usage', heading: 'Telemetry' },
   { label: 'Usage', tab: 'Quota', heading: 'Quota management' },
-  { label: 'Projects', tab: 'Git', heading: 'Git' },
+  { label: 'Projects', heading: 'Git' },
+  { label: 'Projects', tab: 'Planning', heading: 'Planning' },
   { label: 'Activity', heading: 'Activity' },
   { label: 'Settings', heading: 'Settings' }
 ];

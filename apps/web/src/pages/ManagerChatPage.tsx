@@ -1871,7 +1871,6 @@ export function ManagerChatPage({ docked = false, onNavigate, onOpenWork }: { /*
               backends={availableBackends}
               nodesRefreshKey={nodesRefreshKey}
               onClose={() => setNewChatOpen(false)}
-              onViewAllProjects={onNavigate ? () => { setNewChatOpen(false); onNavigate('projects'); } : undefined}
               onCreated={handleChatCreated}
             />
           )}

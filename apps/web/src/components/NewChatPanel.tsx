@@ -23,7 +23,6 @@ interface NewChatPanelProps {
   nodesRefreshKey?: string;
   backends: ManagerBackendInfo[];
   onClose: () => void;
-  onViewAllProjects?: () => void;
   /** Blank chat: (profile, sessionId). Issue/PR chat: same shape — the
    * session is opened the same way either way. */
   onCreated: (profile: string, sessionId: string) => void;
@@ -44,7 +43,7 @@ interface NewChatPanelProps {
  * "From PR" opens a read-only chat seeded with a pull request — no branch,
  * no worktree, nothing at the provider is touched.
  */
-export function NewChatPanel({ currentProfile, profiles, backends, onClose, onCreated, onViewAllProjects, nodesRefreshKey = '' }: NewChatPanelProps) {
+export function NewChatPanel({ currentProfile, profiles, backends, onClose, onCreated, nodesRefreshKey = '' }: NewChatPanelProps) {
   const [project, setProject] = useState(currentProfile);
   const [nodeChoice, setNodeChoice] = useState<{ project: string; nodeId: string } | null>(null);
   const [backend, setBackend] = useState<string>('');
@@ -466,11 +465,6 @@ export function NewChatPanel({ currentProfile, profiles, backends, onClose, onCr
     {error && <p className="text-xs text-red-400">{error}</p>}
 
     <div className="flex items-center justify-end gap-2 pt-1">
-      {onViewAllProjects && (
-        <button type="button" onClick={onViewAllProjects} className="mr-auto text-xs text-accent hover:underline">
-          View all projects
-        </button>
-      )}
       <button type="button" onClick={onClose} className="btn-secondary text-xs">Cancel</button>
       <button
         type="button"

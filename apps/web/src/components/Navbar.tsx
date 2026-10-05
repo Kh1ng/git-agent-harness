@@ -17,6 +17,7 @@ import {
   CircleDot
 } from 'lucide-react';
 import { ProjectSwitcher } from './ProjectSwitcher.js';
+import { RepoLinksMenu } from './RepoLinksMenu.js';
 import type { MainPage, Page, SideView } from '../lib/navigationState.js';
 
 type NavItem<Id extends Page> = { id: Id; label: string; icon: typeof LayoutDashboard };
@@ -46,8 +47,7 @@ export const FRONTEND_BUILD = `v${__GAH_VERSION__} (${__GAH_COMMIT__})`;
 const mainItems: NavGroup[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'work', label: 'Factory', icon: ListChecks },
-  { id: 'projects', label: 'Projects', icon: FolderGit2, tabs: [
-    { id: 'projects', label: 'Projects', icon: FolderGit2 },
+  { id: 'git', label: 'Projects', icon: FolderGit2, tabs: [
     { id: 'git', label: 'Git', icon: GitBranch },
     { id: 'planning', label: 'Planning', icon: Orbit }
   ] },
@@ -169,6 +169,7 @@ export function Navbar({ currentPage, sideView, onPageChange, activityUnreadCoun
       <header className="mobile-app-header z-30 flex shrink-0 items-center gap-2 border-b border-subtle bg-card px-4 lg:min-h-0 lg:gap-4 lg:px-3">
         <h1 className="sr-only">Git Agent Harness</h1>
         <ProjectSwitcher onImport={onImportProject} onCreate={onCreateProject} />
+        <RepoLinksMenu />
         <nav className="hidden min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto lg:flex" aria-label="Primary">
           {items.map((item) => {
             const Icon = item.icon;

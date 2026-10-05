@@ -119,8 +119,7 @@ test('the first token restores mounted Chat projects, provider choices, git, and
   await expect(page.getByText('Coordinator token required', { exact: true })).toHaveCount(0);
   // The session backend has its own model loader, independent of the default
   // composer; existing chats are reached through Projects.
-  await page.getByRole('button', { name: 'New chat', exact: true }).click();
-  await page.getByRole('region', { name: 'New chat' }).getByRole('button', { name: 'View all projects' }).click();
+  await page.getByRole('button', { name: 'Expand chat' }).click();
   await page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ }).click();
   await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex');
 });

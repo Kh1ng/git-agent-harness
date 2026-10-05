@@ -22,7 +22,7 @@ test('the Git issues sidebar lists open issues and opens the work drawer', async
   await panel.getByRole('searchbox', { name: 'Filter issues' }).fill('retry');
   await expect(issues).toHaveCount(1);
   // The detail expands inside the sidebar, not over the page; Back returns to the list.
-  await issues.first().getByRole('button').click();
+  await issues.first().getByRole('button').first().click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(panel.getByRole('button', { name: 'Back to the list' })).toBeVisible();
   await expect(panel).toContainText('#946');
