@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { factoryRunOutput, parseRunLine, readRunOutput } from './factoryRunOutput.js';
+import { factoryRunOutput, findRunLogOnDisk, parseRunLine, readRunOutput } from './factoryRunOutput.js';
 
 const RUN = '8c4013e4-2937-4bac-b258-115ae2b3d7e1';
 const line = (value: unknown) => `${JSON.stringify(value)}\n`;
@@ -21,6 +21,8 @@ test('parseRunLine reads Codex items, Claude messages and unknown lines', () => 
     [{ kind: 'message', text: 'Looking.' }, { kind: 'command', text: 'Bash {"command":"ls"}', status: 'running' }]);
   assert.deepEqual(parseRunLine('Reading additional input from stdin...'), [{ kind: 'raw', text: 'Reading additional input from stdin...' }]);
   assert.deepEqual(parseRunLine(line({ type: 'turn.started' })), []);
+  assert.deepEqual(parseRunLine(line({ type: 'turn.failed', error: { message: 'Selected model is at capacity.' } })),
+    [{ kind: 'command', text: 'The agent\'s turn failed', output: 'Selected model is at capacity.', status: 'failed' }]);
   assert.deepEqual(parseRunLine('   '), []);
 });
 
@@ -39,16 +41,29 @@ test('readRunOutput follows a growing log by offset and only returns whole lines
   assert.deepEqual(readRunOutput(file, 1, second.next).events, []);
 });
 
-test('factoryRunOutput only serves logs a running loop holds open', () => {
-  const file = join(mkdtempSync(join(tmpdir(), 'gah-run-output-')), 'backend-output.log');
+test('factoryRunOutput serves logs a loop holds open, then the run directory once it has closed them', () => {
+  const sessions = join(mkdtempSync(join(tmpdir(), 'gah-run-output-')), 'sessions');
+  mkdirSync(join(sessions, RUN, 'attempt-1'), { recursive: true });
+  const file = join(sessions, RUN, 'attempt-1', 'backend-output.log');
   writeFileSync(file, line({ type: 'item.completed', item: { type: 'agent_message', text: 'Hello.' } }));
-  const logs = new Map([[RUN, { file, attempt: 2 }]]);
-  const output = factoryRunOutput(RUN, 0, logs);
+  const held = { logs: new Map([[RUN, { file, attempt: 2 }]]), roots: new Set<string>() };
+  const output = factoryRunOutput(RUN, 0, held);
   assert.equal(output.found, true);
   assert.equal(output.attempt, 2);
   assert.equal(output.events[0].text, 'Hello.');
-  assert.equal(factoryRunOutput('00000000-0000-4000-8000-000000000000', 0, logs).found, false);
-  assert.equal(factoryRunOutput('../../etc/passwd', 0, logs).found, false);
+  assert.equal(factoryRunOutput('00000000-0000-4000-8000-000000000000', 0, held).found, false);
+  assert.equal(factoryRunOutput('../../etc/passwd', 0, { logs: new Map(), roots: new Set([sessions]) }).found, false);
+
+  // The loop has moved on: the run is found under a sessions directory it was seen using,
+  // and a review's output (written later) is the step to show.
+  mkdirSync(join(sessions, RUN, 'review-attempt-1'), { recursive: true });
+  const review = join(sessions, RUN, 'review-attempt-1', 'review-stdout.log');
+  writeFileSync(review, line({ type: 'item.completed', item: { type: 'agent_message', text: 'Reviewing.' } }));
+  utimesSync(review, new Date(Date.now() + 5000), new Date(Date.now() + 5000));
+  const closed = { logs: new Map(), roots: new Set([sessions]) };
+  assert.equal(factoryRunOutput(RUN, 0, closed).events[0].text, 'Reviewing.');
+  assert.deepEqual(findRunLogOnDisk(RUN, [sessions]), { file: review, attempt: 1 });
+  assert.equal(findRunLogOnDisk('00000000-0000-4000-8000-000000000000', [sessions]), null);
 });
 
 test('a line longer than the read window is still read whole', () => {

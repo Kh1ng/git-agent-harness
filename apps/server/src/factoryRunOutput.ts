@@ -1,8 +1,10 @@
 import { closeSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, statSync } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import type { FactoryRunEvent, FactoryRunOutput } from '@git-agent-harness/contracts';
 
-const RUN_LOG = /\/sessions\/([0-9a-f-]{36})\/attempt-(\d+)\/backend-output\.log$/i;
+/** A run's agent output: an implementation attempt's `backend-output.log`,
+ * or a review attempt's `review-stdout.log`. */
+const RUN_LOG = /^(.*\/sessions)\/([0-9a-f-]{36})\/(?:(?:review-)?attempt-(\d+)\/)?(?:backend-output|review-stdout)\.log$/i;
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** How much of a log one read returns, and how much of a command's output. */
 const READ_BYTES = 256 * 1024;
@@ -11,12 +13,19 @@ const OUTPUT_TAIL = 4000;
 const MAX_LINE_BYTES = 8 * 1024 * 1024;
 const TEXT_LIMIT = 4000;
 
-/** The backend output logs that running `gah` processes hold open, by run id
- * (the newest attempt wins). The loop keeps a job's log open while its agent
- * runs, so this needs no knowledge of where a profile keeps its artifacts. */
-export function openRunLogs(): Map<string, { file: string; attempt: number }> {
-  const logs = new Map<string, { file: string; attempt: number }>();
-  if (process.platform !== 'linux') return logs;
+export interface RunLog { file: string; attempt: number }
+
+/** `sessions` directories seen under a running loop, kept so a job that has
+ * just ended (and whose log the loop has closed) can still be read. */
+const knownSessionRoots = new Set<string>();
+
+/** The agent output logs that running `gah` processes hold open, by run id
+ * (the newest wins), plus the `sessions` directories they live in. The loop
+ * keeps a job's log open while its agent runs, so this needs no knowledge of
+ * where a profile keeps its artifacts. */
+export function openRunLogs(): { logs: Map<string, RunLog>; roots: Set<string> } {
+  const logs = new Map<string, RunLog>();
+  if (process.platform !== 'linux') return { logs, roots: knownSessionRoots };
   for (const entry of readdirSync('/proc')) {
     if (!/^\d+$/.test(entry)) continue;
     try {
@@ -27,15 +36,42 @@ export function openRunLogs(): Map<string, { file: string; attempt: number }> {
         try { target = readlinkSync(`/proc/${entry}/fd/${fd}`); } catch { continue; }
         const match = RUN_LOG.exec(target);
         if (!match) continue;
-        const attempt = Number(match[2]);
-        const known = logs.get(match[1]);
-        if (!known || attempt > known.attempt) logs.set(match[1], { file: target, attempt });
+        knownSessionRoots.add(match[1]);
+        const attempt = Number(match[3] ?? 1);
+        const known = logs.get(match[2]);
+        // Within a run, the log written last is the step in progress (a review follows its attempt).
+        if (!known || mtime(target) >= mtime(known.file)) logs.set(match[2], { file: target, attempt });
       }
     } catch {
       // Not our process, or it exited mid-read.
     }
   }
-  return logs;
+  return { logs, roots: knownSessionRoots };
+}
+
+function mtime(file: string): number {
+  try { return statSync(file).mtimeMs; } catch { return 0; }
+}
+
+/** A run's newest output log on disk, under one of the known `sessions`
+ * directories: for a job whose log the loop has already closed. */
+export function findRunLogOnDisk(runId: string, roots: Iterable<string>): RunLog | null {
+  let best: (RunLog & { at: number }) | null = null;
+  for (const root of roots) {
+    const directory = join(root, runId);
+    let entries: string[];
+    try { entries = readdirSync(directory); } catch { continue; }
+    for (const entry of ['', ...entries]) {
+      const attempt = /^(?:review-)?attempt-(\d+)$/.exec(entry);
+      if (entry && !attempt) continue;
+      for (const name of ['backend-output.log', 'review-stdout.log']) {
+        const file = join(directory, entry, name);
+        const at = mtime(file);
+        if (at > 0 && (!best || at > best.at)) best = { file, attempt: Number(attempt?.[1] ?? 1), at };
+      }
+    }
+  }
+  return best ? { file: best.file, attempt: best.attempt } : null;
 }
 
 const clip = (text: string, limit = TEXT_LIMIT) => (text.length > limit ? `${text.slice(0, limit)}…` : text);
@@ -81,6 +117,10 @@ export function parseRunLine(line: string): FactoryRunEvent[] {
       }
       return [];
     });
+  }
+  if (type === 'turn.failed' || type === 'error') {
+    const message = (record.error as { message?: unknown } | undefined)?.message ?? record.message;
+    return [{ kind: 'command', text: type === 'turn.failed' ? 'The agent\'s turn failed' : 'Error', output: typeof message === 'string' ? clip(message) : null, status: 'failed' }];
   }
   if (type === 'thread.started' || type === 'turn.started' || type === 'turn.completed' || type === 'system' || type === 'result') {
     return type === 'result' && typeof record.result === 'string' ? [{ kind: 'message', text: clip(record.result) }] : [];
@@ -133,9 +173,10 @@ export function readRunOutput(file: string, attempt: number, after: number): Fac
   };
 }
 
-/** The output of a run a loop on this node is working on right now. */
-export function factoryRunOutput(runId: string, after: number, logs = openRunLogs()): FactoryRunOutput {
-  const log = RUN_ID.test(runId) ? logs.get(runId) : undefined;
+/** The output of a run a loop on this node is working on, or has just finished. */
+export function factoryRunOutput(runId: string, after: number, open = openRunLogs()): FactoryRunOutput {
+  if (!RUN_ID.test(runId)) return { found: false, attempt: null, next: 0, truncated: false, events: [] };
+  const log = open.logs.get(runId) ?? findRunLogOnDisk(runId, open.roots);
   if (!log) return { found: false, attempt: null, next: 0, truncated: false, events: [] };
   return readRunOutput(log.file, log.attempt, after);
 }

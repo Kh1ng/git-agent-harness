@@ -57,7 +57,7 @@ export function AgentLiveView({ runId, title, subtitle, onBack }: { runId: strin
       try {
         const output = await gahApi.getFactoryRunOutput(runId, next.current);
         if (!current) return;
-        if (!output.found) { setState((previous) => (previous === 'loading' ? 'gone' : previous === 'live' ? 'gone' : previous)); return; }
+        if (!output.found) { setState((previous) => (previous === 'error' ? previous : 'gone')); return; }
         next.current = output.next;
         if (output.truncated) setTruncated(true);
         if (output.events.length > 0) {
@@ -92,7 +92,7 @@ export function AgentLiveView({ runId, title, subtitle, onBack }: { runId: strin
       <div className="flex items-center justify-between gap-2 text-xs text-muted">
         <span role="status">
           {state === 'loading' ? 'Connecting to the job…'
-            : state === 'gone' ? (events.length > 0 ? 'The job has ended. This is its output up to the end.' : 'No running job has this output open on this node.')
+            : state === 'gone' ? (events.length > 0 ? 'The job has ended. This is its output up to the end.' : 'No output yet. A job writes its first lines a few seconds after it starts; this view keeps checking.')
             : state === 'error' ? `Cannot read the job's output: ${error}`
             : <><span className="mr-1.5 inline-block h-2 w-2 rounded-full bg-good motion-safe:animate-pulse" aria-hidden="true" />Following · {events.length} steps</>}
         </span>
