@@ -273,25 +273,40 @@ impl RoutingPolicy {
     pub fn max_implementation_failures_per_ticket(&self) -> u32 {
         self.max_implementation_failures_per_ticket.unwrap_or(8)
     }
+
     pub fn find_quota_pool(
         &self,
         mode: &str,
         backend: &str,
         model: Option<&str>,
     ) -> Option<String> {
-        let candidates = match JobKind::parse(mode).map(|kind| kind.family()) {
-            Ok(JobFamily::Pm) => self.pm_candidates.as_ref(),
-            Ok(JobFamily::Review) => self.review_candidates.as_ref(),
-            Ok(JobFamily::ImproveLike) => self.improve_candidates.as_ref(),
-            _ => None,
-        };
-        let configured = candidates.and_then(|list| {
-            list.iter()
-                .find(|c| c.backend == backend && c.model.as_deref() == model)
-                .and_then(|c| c.quota_pool.as_deref())
-        });
+        // An allow-list entry is authoritative for its kind: it replaces
+        // that kind's candidate pool, so its quota tag wins over the ordinary
+        // pool declarations.
+        let configured = self
+            .allowed_models_for(mode)
+            .and_then(|list| configured_quota_pool(list, backend, model))
+            .or_else(|| {
+                let candidates = match JobKind::parse(mode).map(|kind| kind.family()) {
+                    Ok(JobFamily::Pm) => self.pm_candidates.as_ref(),
+                    Ok(JobFamily::Review) => self.review_candidates.as_ref(),
+                    Ok(JobFamily::ImproveLike) => self.improve_candidates.as_ref(),
+                    _ => None,
+                };
+                candidates.and_then(|list| configured_quota_pool(list, backend, model))
+            });
         crate::availability::resolve_candidate_quota_pool(backend, model, configured)
     }
+}
+
+fn configured_quota_pool<'a>(
+    list: &'a [CandidateConfig],
+    backend: &str,
+    model: Option<&str>,
+) -> Option<&'a str> {
+    list.iter()
+        .find(|c| c.backend == backend && c.model.as_deref() == model)
+        .and_then(|c| c.quota_pool.as_deref())
 }
 
 impl Profile {

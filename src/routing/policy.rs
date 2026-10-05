@@ -569,7 +569,15 @@ pub(super) fn configured_route_requires_approval(
             .any(|candidate| matches(candidate) && candidate.requires_approval)
     });
 
+    let allowed_models_require_approval =
+        routing.allowed_models_for(mode).is_some_and(|candidates| {
+            candidates
+                .iter()
+                .any(|candidate| matches(candidate) && candidate.requires_approval)
+        });
+
     mode_candidates_require_approval
+        || allowed_models_require_approval
         || (is_review_mode(mode)
             && routing
                 .escalatory_reviewers
@@ -751,10 +759,12 @@ pub(super) fn configured_route_candidate(
         _ => None,
     };
 
-    let configured = mode_candidates
-        .into_iter()
-        .flatten()
-        .find(matches)
+    // For an allow-listed kind the allow-list IS that kind's candidate pool,
+    // so its entry metadata is authoritative on the explicit route too.
+    let configured = routing
+        .allowed_models_for(mode)
+        .and_then(|list| list.iter().find(matches))
+        .or_else(|| mode_candidates.into_iter().flatten().find(matches))
         .or_else(|| {
             routing
                 .pm_candidates

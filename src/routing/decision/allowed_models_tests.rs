@@ -1,7 +1,10 @@
 use super::super::test_support::{
     backend_available, candidate_config, defaults, path, profile, record_unavailable,
 };
-use super::{decide_with, RouteDecision, RouteError, RouteRequest};
+use super::CandidateIdentity;
+use super::{
+    decide_with, decide_with_runtime, RouteDecision, RouteError, RouteRequest, RoutingRuntimeState,
+};
 use crate::availability::{Reason, Source};
 use crate::config::{Profile, RoutingPolicy};
 use tempfile::TempDir;
@@ -176,4 +179,122 @@ fn allowed_models_merge_by_job_kind_with_profile_entries_winning() {
     assert!(merged.allows_model("pm", "agy", None));
     assert!(!merged.allows_model("pm", "claude", None));
     assert!(merged.allows_model("improve", "anything", None));
+}
+
+#[test]
+fn auto_backend_model_override_outside_the_allow_list_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let err = decide(
+        &opus_only_review_profile(),
+        request("review", "auto", Some("sonnet")),
+        &tmp,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains(
+        "claude/sonnet is not in routing.allowed_models for review jobs on this profile"
+    ));
+}
+
+#[test]
+fn auto_backend_model_override_on_the_allow_list_is_selected() {
+    let tmp = TempDir::new().unwrap();
+    let decision = decide(
+        &opus_only_review_profile(),
+        request("review", "auto", Some("opus")),
+        &tmp,
+    )
+    .unwrap();
+
+    assert_eq!(decision.effective_backend, "claude");
+    assert_eq!(decision.effective_model.as_deref(), Some("opus"));
+}
+
+#[test]
+fn auto_backend_model_override_on_a_backend_level_allow_list_entry_is_selected() {
+    let tmp = TempDir::new().unwrap();
+    let mut profile = opus_only_review_profile();
+    profile.routing.allowed_models.insert(
+        "review".into(),
+        vec![candidate_config("claude", None, None)],
+    );
+
+    let decision = decide(&profile, request("review", "auto", Some("sonnet")), &tmp).unwrap();
+    assert_eq!(decision.effective_backend, "claude");
+    assert_eq!(decision.effective_model.as_deref(), Some("sonnet"));
+}
+
+fn approval_gated_review_profile() -> Profile {
+    let mut profile = profile();
+    let mut entry = candidate_config("claude", Some("opus"), Some("claude-team"));
+    entry.requires_approval = true;
+    profile
+        .routing
+        .allowed_models
+        .insert("review".into(), vec![entry]);
+    profile
+}
+
+#[test]
+fn allow_list_only_entry_requires_approval_on_the_explicit_route() {
+    let tmp = TempDir::new().unwrap();
+    let err = decide(
+        &approval_gated_review_profile(),
+        request("review", "claude", Some("opus")),
+        &tmp,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<RouteError>(),
+        Some(RouteError::ApprovalRequired { backend, model, .. })
+            if backend == "claude" && model.as_deref() == Some("opus")
+    ));
+}
+
+#[test]
+fn approved_allow_list_entry_dispatches_on_the_explicit_route_with_its_quota_pool() {
+    let tmp = TempDir::new().unwrap();
+    let mut runtime = RoutingRuntimeState::default();
+    runtime
+        .approved
+        .insert(CandidateIdentity::new("claude", Some("opus")));
+
+    let decision = decide_with_runtime(
+        &defaults(),
+        &approval_gated_review_profile(),
+        request("review", "claude", Some("opus")),
+        &runtime,
+        &path(&tmp),
+        OffsetDateTime::now_utc(),
+        backend_available,
+    )
+    .unwrap();
+
+    assert_eq!(decision.effective_backend, "claude");
+    assert_eq!(decision.effective_model.as_deref(), Some("opus"));
+    assert_eq!(
+        decision.effective_quota_pool.as_deref(),
+        Some("claude-team")
+    );
+}
+
+#[test]
+fn auto_backend_model_override_keeps_the_quota_pool_from_the_allow_list() {
+    let tmp = TempDir::new().unwrap();
+    let mut profile = opus_only_review_profile();
+    profile.routing.allowed_models.insert(
+        "review".into(),
+        vec![candidate_config(
+            "claude",
+            Some("opus"),
+            Some("claude-team"),
+        )],
+    );
+
+    let decision = decide(&profile, request("review", "auto", Some("opus")), &tmp).unwrap();
+    assert_eq!(decision.effective_backend, "claude");
+    assert_eq!(decision.effective_model.as_deref(), Some("opus"));
+    assert_eq!(
+        decision.effective_quota_pool.as_deref(),
+        Some("claude-team")
+    );
 }

@@ -193,11 +193,27 @@ where
         backend_available,
     )?;
     if let Some(model) = auto_model_override.filter(|_| !decision.fallback_used) {
+        // The candidate list an allow-listed kind returns IS the allow-list,
+        // so the configured-candidate re-validation below never matches an
+        // off-list model. Gate the swap directly: a kind with an entry only
+        // ever runs on its listed pairs, explicit --model included.
+        if !profile.effective_routing(defaults).allows_model(
+            &mode,
+            &decision.effective_backend,
+            Some(&model),
+        ) {
+            anyhow::bail!(
+                "{}/{} is not in routing.allowed_models for {} jobs on this profile",
+                decision.effective_backend,
+                model,
+                mode
+            );
+        }
         // The requested model may not match any configured candidate at all
-        // (an ad-hoc override unrelated to the routing config) -- that's
-        // fine, nothing gates it. But if it DOES match a configured
-        // candidate for the selected backend, that candidate must pass the
-        // same eligibility checks (availability, already-attempted,
+        // (an ad-hoc override unrelated to the routing config) -- then the
+        // allow-list check above is the only gate. But if it DOES match a
+        // configured candidate for the selected backend, that candidate must
+        // pass the same eligibility checks (availability, already-attempted,
         // requires_approval) every other candidate had to pass, or an
         // explicit --model flag would be a standing bypass of the approval
         // gate this routing layer exists to enforce.
