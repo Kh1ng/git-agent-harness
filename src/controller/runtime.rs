@@ -37,6 +37,7 @@ use dispatch_state::{
 mod intake;
 use intake::{
     action_creates_managed_mr, action_intake_key, apply_parallel_projection, retain_unclaimed_work,
+    unavailable_work_ids,
 };
 #[path = "runtime/admission.rs"]
 mod admission;
@@ -561,7 +562,11 @@ fn run_parallel_once(
                     cfg,
                     profile_name,
                     &action,
-                    &capacity_deferred_work_ids,
+                    &unavailable_work_ids(
+                        &capacity_deferred_work_ids,
+                        &claimed_work_ids,
+                        &executed_work_ids,
+                    ),
                 )? {
                     action = redispatch;
                 }
