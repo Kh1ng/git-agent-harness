@@ -318,3 +318,37 @@ test('a push link opens its notification unread, highlighted, with delivery rece
   await page.getByRole('tab', { name: 'All activity' }).click();
   await expect(page.getByRole('listitem').filter({ hasText: 'Work finished' })).toHaveCount(1);
 });
+
+// Settings > Appearance > "Pop up new notifications": on, a new notification
+// opens under the bell; off, it only raises the bell's counter.
+for (const popups of [true, false]) {
+  test(`a new notification ${popups ? 'pops open under the bell' : 'only raises the bell counter when pop-ups are off'}`, async ({ page }) => {
+    if (!popups) await page.addInitScript(() => localStorage.setItem('gah-notification-popups', 'false'));
+    await page.routeWebSocket('**/ws**', (ws) => {
+      ws.send(JSON.stringify(welcome));
+      ws.onMessage((raw) => {
+        if (JSON.parse(String(raw)).type !== 'client.hello') return;
+        ws.send(JSON.stringify({ type: 'activity.replay', events: [] }));
+        ws.send(JSON.stringify({ type: 'activity.event', event: offline }));
+        ws.send(JSON.stringify({ type: 'activity.unread', count: 1 }));
+      });
+    });
+    await page.goto('/?page=overview');
+    const bell = page.getByRole('button', { name: 'Notifications', exact: true });
+    await expect(bell.getByLabel('1 unread')).toBeVisible();
+    const popup = page.getByRole('complementary', { name: 'New activity' });
+    if (popups) {
+      await expect(popup).toContainText('Mac worker is offline');
+      await expect(popup).toHaveCount(0, { timeout: 6000 });
+    } else {
+      await page.waitForTimeout(500);
+      await expect(popup).toHaveCount(0);
+    }
+    // The switch lives in Settings and is found by search.
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('searchbox', { name: 'Search settings' }).fill('popup');
+    await page.getByRole('list', { name: 'Matching settings' }).getByRole('button', { name: /Appearance/ }).click();
+    const toggle = page.getByRole('checkbox', { name: /Pop up new notifications/ });
+    if (popups) await expect(toggle).toBeChecked(); else await expect(toggle).not.toBeChecked();
+  });
+}

@@ -199,7 +199,7 @@ export function SettingsPage() {
           <input type="checkbox" checked={notificationPopups} onChange={(event) => setNotificationPopups(event.target.checked)} className="mt-1" />
           <span>
             Pop up new notifications
-            <span className="block text-xs text-muted">A new notification opens under the bell for 3 seconds, then waits in the Notifications menu until you clear it.</span>
+            <span className="block text-xs text-muted">On: a new notification opens under the bell for 3 seconds. Off: it only adds to the bell's counter. Either way it waits in the Notifications menu until you clear it.</span>
           </span>
         </label>
       </section>
