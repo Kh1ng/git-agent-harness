@@ -1,4 +1,4 @@
-import type { ActiveClaim, ControllerActivity, QuotaCandidateStatus, QuotaObservation, QuotaSnapshot, RecentLedgerSummary, Session } from '@git-agent-harness/contracts';
+import type { ActiveClaim, ControllerActivity, DeviceAgent, QuotaCandidateStatus, QuotaObservation, QuotaSnapshot, RecentLedgerSummary, Session } from '@git-agent-harness/contracts';
 
 /** One rate-limit window of a subscription, as the provider reports it. */
 export interface UsageWindow {
@@ -133,6 +133,8 @@ export function busySubscriptionIds(input: {
   controllerRuns: ControllerActivity[];
   claims: ActiveClaim[];
   recentLedger: RecentLedgerSummary | null | undefined;
+  /** Agent processes in factory worktrees: each is a subscription at work. */
+  factoryAgents?: DeviceAgent[];
 }): Set<string> {
   const byBackend = (backend: string | null | undefined, instance?: string | null) =>
     input.subscriptions.find((usage) => instance && usage.id === instance) ?? input.subscriptions.find((usage) => usage.backend === backend);
@@ -140,6 +142,10 @@ export function busySubscriptionIds(input: {
   for (const session of input.sessions) {
     if (!['starting', 'running', 'stopping'].includes(session.status)) continue;
     const match = byBackend(session.backend ?? session.providerKind, session.instanceId);
+    if (match) busy.add(match.id);
+  }
+  for (const agent of input.factoryAgents ?? []) {
+    const match = byBackend(agent.tool);
     if (match) busy.add(match.id);
   }
   const recent = input.recentLedger;

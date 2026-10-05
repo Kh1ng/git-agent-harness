@@ -51,6 +51,8 @@ test('windows are named and sized from the provider names, and projected to rese
   expect([...busySubscriptionIds({ subscriptions, sessions: [], controllerRuns: [{ run_id: 'r', profile: 'gah', work_id: '#1', started_at: '', finished_at: null, action: 'fix', status: 'running', outcome: null }],
     claims: [], recentLedger: { most_recent_work_id: '#1', most_recent_effective_backend: 'codex' } as never })]).toEqual(['codex']);
   expect(busySubscriptionIds({ subscriptions, sessions: [], controllerRuns: [], claims: [], recentLedger: { most_recent_work_id: '#1', most_recent_effective_backend: 'codex' } as never }).size).toBe(0);
+  // A factory agent process is a subscription at work, whatever the ledger says.
+  expect([...busySubscriptionIds({ subscriptions, sessions: [], controllerRuns: [], claims: [], recentLedger: null, factoryAgents: [{ pid: 1, tool: 'codex', cwd: '/w', started_at: null }] })]).toEqual(['codex']);
 });
 
 test('the navbar shows a ring per subscription and opens its windows; Quota lists collapsible cards', async ({ page }) => {

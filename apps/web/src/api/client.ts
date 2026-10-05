@@ -332,6 +332,8 @@ export interface GahDataSource {
   setManagerChatReasoningEffort(profile: string, effortId: string, nodeId?: string): Promise<{ success: boolean }>;
   getChatSessions(profile: string): Promise<{ sessions: ChatSessionSummary[] }>;
   getAllChatSessions(): Promise<{ projects: ChatSessionProjectGroup[] }>;
+  /** Agent CLIs running on this device outside the factory. */
+  getDeviceAgents(): Promise<import('@git-agent-harness/contracts').DeviceAgentsSnapshot>;
   createChatSession(profile: string, backend?: string, model?: string | null, title?: string, nodeId?: string, backendInstance?: string | null): Promise<ChatSessionSummary>;
   updateChatSession(profile: string, sessionId: string, patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string }): Promise<ChatSessionSummary>;
   archiveChatSession(profile: string, sessionId: string): Promise<ChatSessionSummary>;
@@ -712,6 +714,9 @@ export const gahApi: GahDataSource = {
   },
   getAllChatSessions() {
     return getJson<{ projects: ChatSessionProjectGroup[] }>('/api/manager-chat/sessions/all');
+  },
+  getDeviceAgents() {
+    return getJson<import('@git-agent-harness/contracts').DeviceAgentsSnapshot>('/api/device-agents');
   },
   createChatSession(profile, backend, model, title, nodeId, backendInstance) {
     return postJson<ChatSessionSummary, { profile: string; backend?: string; backendInstance?: string; model?: string | null; title?: string; nodeId?: string }>('/api/manager-chat/sessions', {

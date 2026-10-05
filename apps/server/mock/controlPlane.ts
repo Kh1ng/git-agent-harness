@@ -1524,6 +1524,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   });
   app.get('/api/events', (_req, res) => res.json([]));
   app.get('/api/controller-activity', (_req, res) => res.json([]));
+  app.get('/api/device-agents', (_req, res) => res.json({ supported: true, generated_at: new Date(FIXED_NOW).toISOString(), agents: [], factory_agents: [] }));
   app.get('/api/route-approvals', (_req, res) => res.json([]));
 
   app.get('/api/work/:workId', (req, res) => {

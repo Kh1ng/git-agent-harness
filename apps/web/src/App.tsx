@@ -7,7 +7,8 @@ import { PwaStatusBars } from './components/PwaStatusBars.js';
 import { SessionDetailModal } from './components/SessionDetailModal.js';
 import type { Session } from '@git-agent-harness/contracts';
 import { isSideView, readNavigation, takeActivityDeepLink, updateNavigation, type MainPage, type Page, type SideView } from './lib/navigationState.js';
-import { activityApi } from './api/client.js';
+import { activityApi, gahApi } from './api/client.js';
+import type { DeviceAgentsSnapshot } from '@git-agent-harness/contracts';
 import { NotificationsMenu } from './components/NotificationsMenu.js';
 import { SubscriptionUsageMenu } from './components/SubscriptionUsageMenu.js';
 import { busySubscriptionIds, subscriptionUsage } from './lib/subscriptionUsage.js';
@@ -39,6 +40,7 @@ const SIDE_VIEW_LABELS: Record<SideView, string> = { events: 'Activity', issues:
 
 /** The navbar's subscription rings follow the quota snapshot at this cadence. */
 const QUOTA_REFRESH_MS = 5 * 60 * 1000;
+const DEVICE_AGENTS_REFRESH_MS = 10 * 1000;
 
 export function App() {
   const [currentPage, setCurrentPage] = useState<MainPage>(() => readNavigation().page);
@@ -74,8 +76,19 @@ export function App() {
   }, [activeProfile, fetchQuota, reconnectSeq]);
   const subscriptions = useMemo(() => subscriptionUsage(quota.data), [quota.data]);
   const statusSnapshot = useGahStore((state) => state.status.data);
-  const busySubscriptions = useMemo(() => busySubscriptionIds({ subscriptions, sessions, controllerRuns: controllerActivity, claims: statusSnapshot?.active_claims ?? [], recentLedger: statusSnapshot?.recent_ledger }),
-    [subscriptions, sessions, controllerActivity, statusSnapshot]);
+  // The device's agent processes: what the factory is running right now, and what runs beside it.
+  const [deviceAgents, setDeviceAgents] = useState<{ data: DeviceAgentsSnapshot | null; error: string | null }>({ data: null, error: null });
+  useEffect(() => {
+    let current = true;
+    const load = () => gahApi.getDeviceAgents()
+      .then((data) => { if (current) setDeviceAgents({ data, error: null }); })
+      .catch((err) => { if (current) setDeviceAgents((state) => ({ data: state.data, error: err instanceof Error ? err.message : String(err) })); });
+    void load();
+    const timer = window.setInterval(load, DEVICE_AGENTS_REFRESH_MS);
+    return () => { current = false; window.clearInterval(timer); };
+  }, [reconnectSeq]);
+  const busySubscriptions = useMemo(() => busySubscriptionIds({ subscriptions, sessions, controllerRuns: controllerActivity, claims: statusSnapshot?.active_claims ?? [], recentLedger: statusSnapshot?.recent_ledger, factoryAgents: deviceAgents.data?.factory_agents }),
+    [subscriptions, sessions, controllerActivity, statusSnapshot, deviceAgents.data]);
 
   /** Pages link to each other by name; a sidebar view opens in the sidebar. */
   const navigate = (page: Page) => {
@@ -137,6 +150,7 @@ export function App() {
         return (
           <OverviewPage
             sessions={sessions}
+            deviceAgents={deviceAgents}
             onNavigate={navigate}
             onOpenWork={openWorkInSidebar}
           />

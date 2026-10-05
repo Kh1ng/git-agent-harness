@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Radio } from 'lucide-react';
-import type { ActiveClaim, BackendInstanceSummary, ControllerActivity, LedgerEntry, QuotaCandidateStatus, Session } from '@git-agent-harness/contracts';
+import type { ActiveClaim, BackendInstanceSummary, ControllerActivity, DeviceAgent, LedgerEntry, QuotaCandidateStatus, Session } from '@git-agent-harness/contracts';
 import { backendInstancesApi, gahApi } from '../api/client.js';
 import { formatLocalTime } from '../lib/format.js';
 
@@ -53,6 +53,11 @@ const DOT: Record<LiveState, { className: string; pulse: boolean; label: string 
   down: { className: 'bg-critical', pulse: false, label: 'down' }
 };
 const GATE_MODES = new Set(['review', 'validate', 'validation', 'merge', 'routine_review']);
+
+/** `codex` → `Codex`: agent and model names lead with a capital. */
+export function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
 
 /** `1h 05m`, `4m 20s`, `12s`; never negative. */
 export function formatDuration(ms: number): string {
@@ -140,6 +145,9 @@ export function buildLiveRows(input: {
   claims: ActiveClaim[];
   /** Latest ledger entry per busy work id, when fetched. */
   ledgers: Record<string, LedgerEntry | null | undefined>;
+  /** Agent processes running in factory worktrees: the only source for a
+   * running dispatch's backend, which the ledger records when it ends. */
+  factoryAgents?: DeviceAgent[];
 }): LiveAgentRow[] {
   const jobs: LiveJob[] = [];
   const covered = new Set<string>();
@@ -164,6 +172,11 @@ export function buildLiveRows(input: {
     jobs.push({ key: `claim:${claim.work_id}`, workId: claim.work_id, mode: ledger?.mode ?? claim.scope, since: claim.claimed_at,
       backend: ledger?.effective_backend ?? ledger?.backend ?? null, instance: null, model: ledger?.effective_model ?? null, action: null });
   }
+  // Pair each job that names no backend with a factory agent process, oldest
+  // with oldest: the loop starts a job's agent right after it claims the work.
+  const processes = [...(input.factoryAgents ?? [])].sort((a, b) => (a.started_at ?? '').localeCompare(b.started_at ?? ''));
+  const unnamed = jobs.filter((job) => !job.backend).sort((a, b) => (a.since ?? '').localeCompare(b.since ?? ''));
+  unnamed.forEach((job, index) => { job.backend = processes[index]?.tool ?? null; job.model = job.model ?? processes[index]?.model ?? null; });
   const claimAge = (workId: string | null) => (workId ? input.claims.find((claim) => claim.work_id === workId)?.age_seconds ?? null : null);
   const state = (job: LiveJob): LiveState => (job.mode && GATE_MODES.has(job.mode) ? 'gates' : 'working');
 
@@ -190,12 +203,14 @@ export function buildLiveRows(input: {
   }
   for (const job of jobs) {
     if (used.has(job.key)) continue;
+    // A second job on an account that is already busy still belongs to that subscription.
+    const account = input.accounts.find((candidate) => candidate.id === job.instance) ?? input.accounts.find((candidate) => candidate.backend === job.backend);
     rows.push({
       key: job.key,
-      name: job.instance ?? job.backend ?? 'controller',
-      detail: job.action ?? job.backend,
-      provider: null,
-      model: job.model,
+      name: account?.name ?? job.instance ?? job.backend ?? 'controller',
+      detail: account ? account.backend : job.action ?? job.backend,
+      provider: account?.provider ?? null,
+      model: job.model ?? account?.model ?? null,
       state: state(job),
       job: job.workId,
       mode: job.mode,
@@ -233,16 +248,16 @@ function LiveRow({ row, now, ledger }: { row: LiveAgentRow; now: number; ledger:
     <li className="grid grid-cols-[12px_minmax(5rem,10rem)_minmax(0,1fr)] items-start gap-3 py-2" data-live-state={row.state}>
       <span className={`mt-1.5 h-2.5 w-2.5 rounded-full ${dot.className} ${dot.pulse ? 'motion-safe:animate-pulse' : ''}`} role="img" aria-label={dot.label} />
       <div className="min-w-0">
-        <p className="truncate text-sm font-semibold text-primary" title={row.name}>{row.name}</p>
+        <p className="truncate text-sm font-semibold text-primary" title={[row.name, row.model].filter(Boolean).join(' ')}>
+          {capitalize(row.name)}{row.model && <span className="font-normal text-secondary"> {capitalize(row.model)}</span>}
+        </p>
         {row.detail && row.detail !== row.name && <p className="truncate text-[11px] text-muted" title={row.detail}>{row.detail}</p>}
       </div>
       <div className="min-w-0">
         <p className="text-sm tabular-nums text-secondary">{line}</p>
         <p className="truncate text-xs tabular-nums text-muted">
           {row.provider && <span className="rounded bg-raised px-1.5 py-0.5 text-[11px] text-secondary" title="Subscription">{row.provider}</span>}
-          {row.provider && (row.model || edits) ? ' ' : ''}
-          {row.model && <span title="Model">{row.model}</span>}
-          {row.model && edits ? ' · ' : ''}
+          {row.provider && edits ? ' ' : ''}
           {edits}
         </p>
       </div>
@@ -256,7 +271,9 @@ function LiveRow({ row, now, ledger }: { row: LiveAgentRow; now: number; ledger:
  * its backend and the files it changed. The footer is the controller's
  * latest run, so an idle fleet still says why.
  */
-export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, candidates }: {
+export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, candidates, factoryAgents }: {
+  /** Agent processes in factory worktrees, from the device scan. */
+  factoryAgents?: DeviceAgent[];
   profile: string | null;
   sessions: Session[];
   controllerRuns: ControllerActivity[];
@@ -281,7 +298,7 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
     // `now` only sets the paused cut-off; the timer below re-renders the rows anyway.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [instances, candidates]);
-  const rows = useMemo(() => buildLiveRows({ accounts, sessions, controllerRuns, claims, ledgers }), [accounts, sessions, controllerRuns, claims, ledgers]);
+  const rows = useMemo(() => buildLiveRows({ accounts, sessions, controllerRuns, claims, ledgers, factoryAgents }), [accounts, sessions, controllerRuns, claims, ledgers, factoryAgents]);
   const busyJobs = useMemo(() => [...new Set([
     ...sessions.filter((session) => ['starting', 'running', 'stopping'].includes(session.status)).map((session) => session.target),
     ...controllerRuns.filter((run) => run.status === 'running').map((run) => run.work_id),
@@ -315,9 +332,9 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
   return (
     <section className="card-padded" aria-labelledby="live-agents-title">
       <div className="mb-2 flex items-center justify-between gap-3">
-        <h3 id="live-agents-title" className="flex items-center gap-2 text-sm font-semibold text-primary">
+        <h3 id="live-agents-title" className="flex items-center gap-2 text-sm font-semibold text-primary" title="Live: what each agent is doing now within the Factory">
           <Radio size={15} className="text-accent" aria-hidden="true" />
-          Live: what each agent is doing now
+          Factory Agents Status
         </h3>
         <span className="text-xs tabular-nums text-muted">{busy > 0 ? `${busy} busy of ${rows.length}` : rows.length > 0 ? `${rows.length} accounts, none busy` : ''}</span>
       </div>

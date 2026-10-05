@@ -49,6 +49,23 @@ test('rows derive their state from sessions, runs, claims, instance health and q
     ],
     ledgers: { '#951': { effective_backend: 'vibe', mode: 'fix', files_changed: 2 } as never, '#953': null }
   });
+
+  // A running dispatch has no ledger entry: the factory's agent processes name its backend.
+  const idle = liveAccounts([], [candidate('codex'), candidate('claude')] as never, now);
+  const named = buildLiveRows({
+    accounts: idle, sessions: [], ledgers: {},
+    controllerRuns: [
+      { run_id: 'a', profile: 'gah', work_id: '#1380', started_at: '2026-10-04T11:54:43Z', finished_at: null, action: 'dispatch_ticket: 1380', status: 'running', outcome: null },
+      { run_id: 'b', profile: 'gah', work_id: '#1381', started_at: '2026-10-04T11:54:47Z', finished_at: null, action: 'dispatch_ticket: 1381', status: 'running', outcome: null }
+    ],
+    claims: [],
+    factoryAgents: [
+      { pid: 2, tool: 'claude', cwd: '/w/b', started_at: '2026-10-04T11:55:14Z' },
+      { pid: 1, tool: 'codex', cwd: '/w/a', started_at: '2026-10-04T11:55:13Z', model: 'gpt-6-luna' }
+    ]
+  });
+  // The process's own --model wins; otherwise the account's routing model is shown.
+  expect(named.map((row) => [row.name, row.state, row.job, row.model])).toEqual([['codex', 'working', '#1380', 'gpt-6-luna'], ['claude', 'working', '#1381', 'm']]);
   expect(rows.map((row) => [row.name, row.state, row.job, row.mode])).toEqual([
     ['Work account', 'working', '#946', 'improve'],
     ['vibe', 'working', '#951', 'fix'],
@@ -92,17 +109,52 @@ test('Overview shows each agent account with its job, elapsed time, claim and fi
     ws.send(JSON.stringify({ type: 'activity.replay', events: [] }));
   });
   await page.goto('/?page=overview&profile=fixture');
-  const live = page.getByRole('region', { name: 'Live: what each agent is doing now' });
+  const live = page.getByRole('region', { name: 'Factory Agents Status' });
   const agents = live.getByRole('list', { name: 'Agents' }).getByRole('listitem');
   await expect(agents).toHaveCount(2);
-  await expect(agents.nth(0)).toContainText('Work account');
+  // The name line carries the model: "Work account Opus".
+  await expect(agents.nth(0)).toContainText('Work account Opus');
   await expect(agents.nth(0)).toContainText(/improve on #946 for 5m \d\ds/);
   await expect(agents.nth(0)).toContainText('3 files changed · claimed 4m 50s ago · last attempt 1m');
   await expect(agents.nth(0).getByRole('img', { name: 'working' })).toBeVisible();
-  await expect(agents.nth(1)).toContainText('codex-work');
+  await expect(agents.nth(1)).toContainText('Codex-work');
   await expect(agents.nth(1)).toContainText('disabled, routing skips it');
   await expect(live).toContainText('1 busy of 2');
+  await expect(live.getByRole('heading', { name: 'Factory Agents Status' })).toHaveAttribute('title', 'Live: what each agent is doing now within the Factory');
   // The timer ticks while a row is busy.
   const before = await agents.nth(0).textContent();
   await expect.poll(async () => (await agents.nth(0).textContent()) !== before, { timeout: 5000 }).toBe(true);
+});
+
+test('Non Factory Agents lists device CLIs outside the factory and dashboard chats in use', async ({ page }) => {
+  await page.route('**/api/device-agents', (route) => route.fulfill({ json: { supported: true, generated_at: new Date().toISOString(), factory_agents: [], agents: [
+    { pid: 4242, tool: 'claude', model: 'opus-5-5', title: 'Fix the checkout flow', last_activity_at: new Date(Date.now() - 5_000).toISOString(), cwd: '/home/me/Projects/site', started_at: new Date(Date.now() - 12 * 60_000).toISOString() },
+    { pid: 4250, tool: 'claude', model: null, title: 'Plan the launch', last_activity_at: new Date(Date.now() - 40 * 60_000).toISOString(), cwd: '/home/me/Projects/site', started_at: null },
+    { pid: 4300, tool: 'codex', cwd: null, started_at: null }
+  ] } }));
+  await page.route('**/api/manager-chat/sessions/all', (route) => route.fulfill({ json: { projects: [{ profile: 'fixture', sessions: [
+    { id: 'chat-1', profile: 'fixture', backend: 'codex', model: 'gpt-6-sol', title: 'Fix the retry loop', branch: 'gah/chat-1', outcome: 'live', lastActiveAt: Date.now() - 3 * 60_000, createdAt: Date.now() - 3_600_000, worktreePath: null, reasoningEffort: null },
+    { id: 'chat-2', profile: 'fixture', backend: 'claude', model: null, title: 'Yesterday', branch: 'gah/chat-2', outcome: 'live', lastActiveAt: Date.now() - 26 * 3_600_000, createdAt: 0, worktreePath: null, reasoningEffort: null }
+  ] }] } }));
+  await page.goto('/?page=overview&profile=fixture');
+  const panel = page.getByRole('region', { name: 'Non Factory Agents' });
+  const rows = panel.getByRole('list', { name: 'Non factory agents' }).getByRole('listitem');
+  await expect(rows).toHaveCount(4);
+  await expect(panel).toContainText('4 open');
+  // Working: a transcript written seconds ago. The title says what it is doing.
+  await expect(rows.nth(0)).toContainText('Claude Opus-5-5');
+  await expect(rows.nth(0)).toHaveAttribute('data-agent-state', 'working');
+  await expect(rows.nth(0)).toContainText('Fix the checkout flow');
+  await expect(rows.nth(0)).toContainText(/~\/Projects\/site · open 12m \d\ds · pid 4242/);
+  // Idle: open, but nothing written for a while.
+  await expect(rows.nth(1)).toHaveAttribute('data-agent-state', 'idle');
+  await expect(rows.nth(1)).toContainText(/idle, waiting for 40m/);
+  await expect(rows.nth(1)).toContainText('Plan the launch');
+  // No transcript known: just running.
+  await expect(rows.nth(2)).toHaveAttribute('data-agent-state', 'running');
+  await expect(rows.nth(2)).toContainText('working directory not readable');
+  await expect(rows.nth(3)).toContainText('Codex Gpt-6-sol');
+  await expect(panel.getByText('Yesterday')).toHaveCount(0);
+  await rows.nth(3).getByRole('button', { name: 'Fix the retry loop' }).click();
+  await expect(page).toHaveURL(/[?&]chat=chat-1/);
 });

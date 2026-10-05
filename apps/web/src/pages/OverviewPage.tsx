@@ -13,7 +13,7 @@ import {
   Square
 } from 'lucide-react';
 import type { Page } from '../App.js';
-import type { Session } from '@git-agent-harness/contracts';
+import type { DeviceAgentsSnapshot, Session } from '@git-agent-harness/contracts';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -24,19 +24,24 @@ import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyStat
 import { formatPercent, formatAge, formatLocalTime, isStale, formatTokens, formatCount, oldestFetchedAt } from '../lib/format.js';
 import { AttentionTable, attentionRows } from '../components/AttentionTable.js';
 import { LiveAgentsCard } from '../components/LiveAgentsCard.js';
+import { NonFactoryAgentsCard } from '../components/NonFactoryAgentsCard.js';
+import { updateNavigation } from '../lib/navigationState.js';
 
 type OverviewPageProps = {
   sessions: Session[];
   onNavigate: (page: Page) => void;
   onOpenWork?: (workId: string) => void;
+  /** The device's agent processes; absent in isolation (component tests). */
+  deviceAgents?: { data: DeviceAgentsSnapshot | null; error: string | null };
 };
 
 const OVERVIEW_REFRESH_MS = 5 * 60 * 1000;
 
-export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {} }: OverviewPageProps) {
+export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, deviceAgents = { data: null, error: null } }: OverviewPageProps) {
   const { status, quota, loopStatus, loopAction } = useGahStore();
   const { profile: wsProfile, controllerActivity } = useWebSocket();
   const profileOverride = useUiStore((s) => s.profileOverride);
+  const setProfileOverride = useUiStore((s) => s.setProfileOverride);
   const profile = profileOverride ?? wsProfile;
   const fetchStatus = useGahStore((s) => s.fetchStatus);
   const fetchQuota = useGahStore((s) => s.fetchQuota);
@@ -166,7 +171,9 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {} }: Ov
       </div>
 
       <LiveAgentsCard profile={profile ?? null} sessions={sessions} controllerRuns={controllerActivity}
-        claims={snapshot?.active_claims ?? []} candidates={quotaSnapshot?.candidates ?? []} />
+        claims={snapshot?.active_claims ?? []} candidates={quotaSnapshot?.candidates ?? []} factoryAgents={deviceAgents.data?.factory_agents} />
+
+      <NonFactoryAgentsCard device={deviceAgents.data} deviceError={deviceAgents.error} onOpenChat={(chatProfile, sessionId) => { setProfileOverride(chatProfile); updateNavigation({ profile: chatProfile, chat: sessionId }); onNavigate('chat'); }} />
 
       {attention.length > 0 && <AttentionTable rows={attention} onOpenWork={onOpenWork} />}
 

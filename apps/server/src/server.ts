@@ -67,6 +67,7 @@ import type {
 import { getFleetDispatch, sessionStore } from './wsServer.js';
 import { ActivityFeed, validateNotificationPreferences } from './activityFeed.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
+import { deviceAgentsSnapshot } from './deviceAgents.js';
 import { deriveControllerActivity } from './controllerActivity.js';
 import { authMiddleware, coordinatorTokenMatches, isLocalAddress, requireOwner } from './authMiddleware.js';
 import { DeviceAccess } from './deviceAccess.js';
@@ -2322,6 +2323,17 @@ export function createServer(
         error: 'Failed to load gah events',
         message: error instanceof Error ? error.message : String(error)
       });
+    }
+  });
+
+  // Agent CLIs on this device the factory did not start (claude, codex, …),
+  // so the dashboard can show what else is using the subscriptions.
+  app.get('/api/device-agents', async (_req, res) => {
+    try {
+      const profiles = await listProfiles();
+      res.json(deviceAgentsSnapshot(profiles.map((profile) => profile.worktree_base).filter((root): root is string => !!root)));
+    } catch (error) {
+      res.status(502).json({ error: 'Failed to list device agents', message: error instanceof Error ? error.message : String(error) });
     }
   });
 

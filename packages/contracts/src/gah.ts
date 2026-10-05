@@ -1821,3 +1821,33 @@ export interface PaidRouteApproval {
   requested: boolean;
 }
 export type PaidRouteScope = Pick<PaidRouteApproval, 'profile' | 'work_id' | 'backend' | 'backend_instance' | 'model'>;
+
+/** A coding-agent CLI running on this device outside the factory
+ * (GET /api/device-agents). Only the tool, where it runs and since when:
+ * never its command line, which can carry a prompt. */
+export interface DeviceAgent {
+  pid: number;
+  /** The CLI: claude, codex, gemini, opencode, vibe… */
+  tool: string;
+  /** Working directory, when the process lets us read it. */
+  cwd: string | null;
+  /** ISO start time, when known. */
+  started_at: string | null;
+  /** The model named on its command line (`--model`), when it names one. */
+  model?: string | null;
+  /** The conversation's own title, when the tool records one. Never prompt text. */
+  title?: string | null;
+  /** ISO time the conversation's transcript was last written: recent means working, old means idle. */
+  last_activity_at?: string | null;
+}
+
+export interface DeviceAgentsSnapshot {
+  /** False where this host cannot list processes (anything but Linux for now). */
+  supported: boolean;
+  generated_at: string;
+  /** Agents running outside every factory worktree. */
+  agents: DeviceAgent[];
+  /** Agents the factory started, in its worktrees. A running dispatch has no
+   * ledger entry yet, so this is the only place its backend shows. */
+  factory_agents: DeviceAgent[];
+}
