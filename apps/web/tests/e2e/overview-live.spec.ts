@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { buildLiveRows, formatDuration, liveAccounts } from '../../src/components/LiveAgentsCard.js';
+import { agentDisplayName, buildLiveRows, formatDuration, liveAccounts } from '../../src/components/LiveAgentsCard.js';
 
 // Overview's Live card: one row per agent account, busy rows first, with
 // the job, how long it has run, its claim, and the files its last attempt
@@ -85,6 +85,10 @@ test('rows derive their state from sessions, runs, claims, instance health and q
   expect(formatDuration(now - Date.parse(rows[0].since!))).toBe('5m 00s');
   expect(formatDuration(3_900_000)).toBe('1h 05m');
   expect(formatDuration(-5)).toBe('0s');
+  expect(agentDisplayName('agy:google-native')).toBe('Antigravity');
+  expect(agentDisplayName('agy')).toBe('Antigravity');
+  expect(agentDisplayName('codex')).toBe('Codex');
+  expect(agentDisplayName('agyle')).toBe('Agyle');
 });
 
 test('Overview shows each agent account with its job, elapsed time, claim and files changed', async ({ page }) => {
@@ -152,6 +156,7 @@ test('Non Factory Agents lists device CLIs outside the factory and dashboard cha
   await expect(rows.nth(1)).toContainText('Plan the launch');
   // No transcript known: just running.
   await expect(rows.nth(2)).toHaveAttribute('data-agent-state', 'running');
+  await expect(rows.nth(2).getByRole('img', { name: 'running' })).toHaveClass(/bg-good/);
   await expect(rows.nth(2)).toContainText('working directory not readable');
   await expect(rows.nth(3)).toContainText('Codex Gpt-6-sol');
   await expect(panel.getByText('Yesterday')).toHaveCount(0);

@@ -49,52 +49,125 @@ export function agentSessionId(argv: string[]): string | null {
   return null;
 }
 
-/** What a transcript says about its conversation without reading any prompt. */
-export type SessionDescriber = (tool: string, argv: string[]) => { title: string | null; last_activity_at: string | null } | null;
+/** What is known about a conversation without reading any prompt. */
+export interface SessionDescription { title: string | null; last_activity_at: string | null; model?: string | null }
+export type SessionDescriber = (tool: string, info: ProcessInfo) => SessionDescription | null;
 
-const TITLE_TAIL_BYTES = 512 * 1024;
+const TAIL_BYTES = 512 * 1024;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/**
- * A Claude Code conversation's title and last write, from its transcript
- * under `<home>/.claude/projects/<project>/<session>.jsonl`. Only the
- * `ai-title` / `custom-title` records are read out; the last one wins.
- */
-export function describeClaudeSession(sessionId: string, home = homedir()): { title: string | null; last_activity_at: string | null } | null {
+function readSlice(file: string, start: number, length: number): string {
+  const buffer = Buffer.alloc(length);
+  const fd = openSync(file, 'r');
+  try { return buffer.toString('utf8', 0, readSync(fd, buffer, 0, length, start)); } finally { closeSync(fd); }
+}
+
+/** Claude Code's transcript directory for a working directory. */
+function claudeProjectDir(home: string, cwd: string): string {
+  return join(home, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'));
+}
+
+/** The transcript of a known session, wherever its project directory is. */
+function claudeTranscript(sessionId: string, home: string): string | null {
   const projects = join(home, '.claude', 'projects');
-  let file: string | null = null;
   try {
     for (const project of readdirSync(projects)) {
       const candidate = join(projects, project, `${sessionId}.jsonl`);
-      try { statSync(candidate); file = candidate; break; } catch { /* Not in this project. */ }
+      try { statSync(candidate); return candidate; } catch { /* Not in this project. */ }
     }
-  } catch {
-    return null;
-  }
-  if (!file) return null;
-  const stat = statSync(file);
-  let title: string | null = null;
-  try {
-    const length = Math.min(stat.size, TITLE_TAIL_BYTES);
-    const buffer = Buffer.alloc(length);
-    const fd = openSync(file, 'r');
-    try { readSync(fd, buffer, 0, length, stat.size - length); } finally { closeSync(fd); }
-    for (const line of buffer.toString('utf8').split('\n')) {
-      if (!line.includes('"ai-title"') && !line.includes('"custom-title"')) continue;
-      try {
-        const record = JSON.parse(line) as { type?: string; aiTitle?: unknown; customTitle?: unknown };
-        const value = record.type === 'ai-title' ? record.aiTitle : record.type === 'custom-title' ? record.customTitle : null;
-        if (typeof value === 'string' && value.trim()) title = value.trim().slice(0, 120);
-      } catch { /* A line cut by the tail window. */ }
-    }
-  } catch { /* The title stays unknown. */ }
-  return { title, last_activity_at: stat.mtime.toISOString() };
+  } catch { /* No Claude Code state on this host. */ }
+  return null;
 }
 
-const describeSession: SessionDescriber = (tool, argv) => {
-  if (tool !== 'claude') return null;
-  const sessionId = agentSessionId(argv);
-  return sessionId ? describeClaudeSession(sessionId) : null;
-};
+/** A process started without a session id wrote its transcript's first
+ * record moments after it started: the closest such transcript in its
+ * working directory's project, within three minutes, is its own. */
+function claudeTranscriptByStart(info: ProcessInfo, home: string): string | null {
+  if (!info.cwd || !info.startedAt) return null;
+  const directory = claudeProjectDir(home, info.cwd);
+  const started = Date.parse(info.startedAt);
+  let best: { file: string; gap: number } | null = null;
+  try {
+    for (const name of readdirSync(directory)) {
+      if (!name.endsWith('.jsonl') || !UUID.test(name.slice(0, -'.jsonl'.length))) continue;
+      const file = join(directory, name);
+      const first = /"timestamp":"([^"]+)"/.exec(readSlice(file, 0, 4096));
+      const gap = first ? Date.parse(first[1]) - started : NaN;
+      if (Number.isFinite(gap) && gap >= -5_000 && gap < 180_000 && (!best || Math.abs(gap) < Math.abs(best.gap))) best = { file, gap };
+    }
+  } catch { /* No transcripts for this directory. */ }
+  return best?.file ?? null;
+}
+
+/** Titles and models the Claude desktop app keeps per CLI session. */
+export function claudeDesktopSessions(home = homedir()): Map<string, { title: string | null; model: string | null }> {
+  const sessions = new Map<string, { title: string | null; model: string | null }>();
+  for (const root of [join(home, '.config', 'Claude'), join(home, 'Library', 'Application Support', 'Claude')]) {
+    const base = join(root, 'claude-code-sessions');
+    try {
+      for (const account of readdirSync(base)) for (const workspace of readdirSync(join(base, account))) {
+        for (const name of readdirSync(join(base, account, workspace))) {
+          if (!name.endsWith('.json')) continue;
+          try {
+            const record = JSON.parse(readFileSync(join(base, account, workspace, name), 'utf8')) as { cliSessionId?: unknown; title?: unknown; model?: unknown };
+            if (typeof record.cliSessionId !== 'string') continue;
+            sessions.set(record.cliSessionId, {
+              title: typeof record.title === 'string' && record.title.trim() ? record.title.trim().slice(0, 120) : null,
+              model: typeof record.model === 'string' && record.model ? record.model : null
+            });
+          } catch { /* A record being rewritten. */ }
+        }
+      }
+    } catch { /* The desktop app is not installed here. */ }
+  }
+  return sessions;
+}
+
+/**
+ * A Claude Code conversation's title, model and last write. The title is the
+ * desktop app's, else the transcript's last `ai-title` / `custom-title`
+ * record; the model is the desktop app's, else the last assistant turn's.
+ * Nothing a person typed is read out.
+ */
+export function describeClaudeTranscript(file: string, desktop?: { title: string | null; model: string | null }): SessionDescription {
+  const stat = statSync(file);
+  let title: string | null = null;
+  let model: string | null = null;
+  try {
+    const length = Math.min(stat.size, TAIL_BYTES);
+    for (const line of readSlice(file, stat.size - length, length).split('\n')) {
+      if (line.includes('"ai-title"') || line.includes('"custom-title"')) {
+        try {
+          const record = JSON.parse(line) as { type?: string; aiTitle?: unknown; customTitle?: unknown };
+          const value = record.type === 'ai-title' ? record.aiTitle : record.type === 'custom-title' ? record.customTitle : null;
+          if (typeof value === 'string' && value.trim()) title = value.trim().slice(0, 120);
+        } catch { /* A line cut by the tail window. */ }
+      } else if (line.includes('"type":"assistant"')) {
+        const match = /"model":"([\w.:\-\[\]/]{1,80})"/.exec(line);
+        if (match && !match[1].startsWith('<')) model = match[1];
+      }
+    }
+  } catch { /* Title and model stay unknown. */ }
+  return { title: desktop?.title ?? title, model: desktop?.model ?? model, last_activity_at: stat.mtime.toISOString() };
+}
+
+export function describeClaudeSession(sessionId: string, home = homedir()): SessionDescription | null {
+  const file = claudeTranscript(sessionId, home);
+  return file ? describeClaudeTranscript(file, claudeDesktopSessions(home).get(sessionId)) : null;
+}
+
+/** The describer for one scan: desktop records are read once. */
+export function claudeDescriber(home = homedir()): SessionDescriber {
+  let desktop: ReturnType<typeof claudeDesktopSessions> | null = null;
+  return (tool, info) => {
+    if (tool !== 'claude') return null;
+    const sessionId = agentSessionId(info.argv);
+    const file = sessionId ? claudeTranscript(sessionId, home) : claudeTranscriptByStart(info, home);
+    if (!file) return null;
+    desktop ??= claudeDesktopSessions(home);
+    return describeClaudeTranscript(file, desktop.get(basename(file, '.jsonl')));
+  };
+}
 
 function inside(path: string, root: string): boolean {
   const base = root.endsWith(sep) ? root : root + sep;
@@ -123,8 +196,10 @@ export function classifyAgents(processes: ProcessInfo[], factoryRoots: string[],
     const row: DeviceAgent = { pid: info.pid, tool, cwd: info.cwd, started_at: info.startedAt, model: agentModel(info.argv) };
     if (info.cwd && roots.some((root) => inside(info.cwd!, root))) { factory_agents.push(row); continue; }
     // Only someone's own session gets its title looked up; factory jobs are named by their work id.
-    const described = describe(tool, info.argv);
-    agents.push(described ? { ...row, ...described } : row);
+    const described = describe(tool, info);
+    // `--model default` names no model; the conversation's own record does.
+    const model = row.model && row.model !== 'default' ? row.model : described?.model ?? null;
+    agents.push(described ? { ...row, title: described.title, last_activity_at: described.last_activity_at, model } : { ...row, model });
   }
   const newestFirst = (a: DeviceAgent, b: DeviceAgent) => (b.started_at ?? '').localeCompare(a.started_at ?? '') || a.pid - b.pid;
   return { agents: agents.sort(newestFirst), factory_agents: factory_agents.sort(newestFirst) };
@@ -172,5 +247,5 @@ export function readLinuxProcesses(): ProcessInfo[] {
 export function deviceAgentsSnapshot(factoryRoots: string[]): DeviceAgentsSnapshot {
   const generated_at = new Date().toISOString();
   if (process.platform !== 'linux') return { supported: false, generated_at, agents: [], factory_agents: [] };
-  return { supported: true, generated_at, ...classifyAgents(readLinuxProcesses(), factoryRoots, process.pid, describeSession) };
+  return { supported: true, generated_at, ...classifyAgents(readLinuxProcesses(), factoryRoots, process.pid, claudeDescriber()) };
 }

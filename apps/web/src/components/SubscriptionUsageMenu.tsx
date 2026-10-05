@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { formatUntil, projectedPercent, usageTone, type SubscriptionUsage, type UsageWindow } from '../lib/subscriptionUsage.js';
 import { formatLocalTime } from '../lib/format.js';
 import { UsageRing } from './UsageRing.js';
+import { agentDisplayName } from './LiveAgentsCard.js';
 
 const BAR_CLASS = { good: 'bg-accent', warning: 'bg-warning', critical: 'bg-critical', unknown: 'bg-muted' } as const;
 
@@ -44,7 +45,7 @@ export function SubscriptionDetail({ usage, now }: { usage: SubscriptionUsage; n
       <div className="flex items-center gap-2">
         <UsageRing usage={usage} size={22} />
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-primary">{usage.providerLabel} <span className="font-normal text-muted">· {usage.id}</span></p>
+          <p className="truncate text-sm font-semibold text-primary">{usage.providerLabel} <span className="font-normal text-muted">· {agentDisplayName(usage.id)}</span></p>
           {usage.model && <p className="truncate text-[11px] text-muted">{usage.model}</p>}
         </div>
       </div>

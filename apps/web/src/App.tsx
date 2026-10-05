@@ -39,7 +39,7 @@ const SPLIT_LAYOUT = '(min-width: 1280px)';
 const SIDE_VIEW_LABELS: Record<SideView, string> = { events: 'Activity', issues: 'Git issues', profile: 'Profile', settings: 'Settings' };
 
 /** The navbar's subscription rings follow the quota snapshot at this cadence. */
-const QUOTA_REFRESH_MS = 5 * 60 * 1000;
+const QUOTA_REFRESH_MS = 60 * 1000;
 const DEVICE_AGENTS_REFRESH_MS = 10 * 1000;
 
 export function App() {

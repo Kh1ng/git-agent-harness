@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { agentModel, agentSessionId, agentTool, classifyAgents, describeClaudeSession, deviceAgentsSnapshot } from './deviceAgents.js';
+import { agentModel, agentSessionId, agentTool, claudeDescriber, classifyAgents, describeClaudeSession, deviceAgentsSnapshot } from './deviceAgents.js';
 
 test('agentTool recognises agent CLIs run directly or through a launcher', () => {
   assert.equal(agentTool(['claude']), 'claude');
@@ -81,8 +81,35 @@ test('a Claude session is described by its title record and last write, never it
   const { agents, factory_agents } = classifyAgents([
     { pid: 1, ppid: 0, argv: ['claude', `--resume=${id}`], cwd: '/home/me/site', startedAt: null },
     { pid: 2, ppid: 0, argv: ['claude', `--resume=${id}`], cwd: '/w/job', startedAt: null }
-  ], ['/w'], 99, (tool, argv) => tool === 'claude' ? describeClaudeSession(agentSessionId(argv)!, home) : null);
+  ], ['/w'], 99, claudeDescriber(home));
   assert.equal(agents[0].title, 'Fix the checkout flow');
   assert.equal(factory_agents[0].title, undefined);
   assert.ok(!JSON.stringify(agents).includes('secret prompt'));
+});
+
+test('a session started without an id is found by its start time; default resolves to the real model', () => {
+  const home = mkdtempSync(join(tmpdir(), 'gah-device-agents-'));
+  const project = join(home, '.claude', 'projects', '-home-me-my-site');
+  mkdirSync(project, { recursive: true });
+  const mine = '11111111-1111-4111-8111-111111111111';
+  const other = '22222222-2222-4222-8222-222222222222';
+  writeFileSync(join(project, `${mine}.jsonl`), [
+    JSON.stringify({ type: 'queue-operation', timestamp: '2026-10-04T22:34:49.354Z', sessionId: mine }),
+    JSON.stringify({ type: 'assistant', message: { model: 'claude-opus-5-5', content: [] } }),
+    JSON.stringify({ type: 'assistant', message: { model: 'claude-fable-5-1', content: [] } })
+  ].join('\n'));
+  writeFileSync(join(project, `${other}.jsonl`), JSON.stringify({ type: 'queue-operation', timestamp: '2026-10-04T18:00:00.000Z', sessionId: other }));
+  // The desktop app's record supplies the thread name people see there.
+  const desktop = join(home, '.config', 'Claude', 'claude-code-sessions', 'account', 'workspace');
+  mkdirSync(desktop, { recursive: true });
+  writeFileSync(join(desktop, 'local_a.json'), JSON.stringify({ cliSessionId: mine, title: 'Fix GAH dashboard glitches', model: 'claude-fable-5-1' }));
+
+  const { agents } = classifyAgents([
+    { pid: 1, ppid: 0, argv: ['claude', '--model', 'default'], cwd: '/home/me/my.site', startedAt: '2026-10-04T22:34:47.560Z' },
+    { pid: 2, ppid: 0, argv: ['claude', '--model', 'default'], cwd: '/home/me/elsewhere', startedAt: '2026-10-04T22:34:47.560Z' }
+  ], [], 99, claudeDescriber(home));
+  assert.equal(agents.find((agent) => agent.pid === 1)?.title, 'Fix GAH dashboard glitches');
+  assert.equal(agents.find((agent) => agent.pid === 1)?.model, 'claude-fable-5-1');
+  // Nothing known: no invented model, and never the word "default".
+  assert.equal(agents.find((agent) => agent.pid === 2)?.model, null);
 });

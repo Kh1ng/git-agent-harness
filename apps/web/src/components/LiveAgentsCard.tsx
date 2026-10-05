@@ -59,6 +59,11 @@ export function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+/** The name people know an agent by: `agy` and its instances are Antigravity. */
+export function agentDisplayName(name: string): string {
+  return /^agy(?:[:\-_]|$)/i.test(name) ? 'Antigravity' : capitalize(name);
+}
+
 /** `1h 05m`, `4m 20s`, `12s`; never negative. */
 export function formatDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -249,7 +254,7 @@ function LiveRow({ row, now, ledger }: { row: LiveAgentRow; now: number; ledger:
       <span className={`mt-1.5 h-2.5 w-2.5 rounded-full ${dot.className} ${dot.pulse ? 'motion-safe:animate-pulse' : ''}`} role="img" aria-label={dot.label} />
       <div className="min-w-0">
         <p className="truncate text-sm font-semibold text-primary" title={[row.name, row.model].filter(Boolean).join(' ')}>
-          {capitalize(row.name)}{row.model && <span className="font-normal text-secondary"> {capitalize(row.model)}</span>}
+          {agentDisplayName(row.name)}{row.model && <span className="font-normal text-secondary"> {capitalize(row.model)}</span>}
         </p>
         {row.detail && row.detail !== row.name && <p className="truncate text-[11px] text-muted" title={row.detail}>{row.detail}</p>}
       </div>

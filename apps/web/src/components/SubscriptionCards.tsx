@@ -3,6 +3,7 @@ import { ChevronRight } from 'lucide-react';
 import { formatUntil, projectedPercent, usageTone, type SubscriptionUsage } from '../lib/subscriptionUsage.js';
 import { formatAge } from '../lib/format.js';
 import { UsageRing } from './UsageRing.js';
+import { agentDisplayName } from './LiveAgentsCard.js';
 import { UsageWindowRow } from './SubscriptionUsageMenu.js';
 
 const DOT_CLASS = { good: 'bg-good', warning: 'bg-warning', critical: 'bg-critical', unknown: 'bg-muted/40' } as const;
@@ -16,7 +17,7 @@ function SubscriptionCard({ usage, now, open, onToggle }: { usage: SubscriptionU
           <UsageRing usage={usage} size={24} />
           <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
             <span className="truncate text-sm font-medium text-primary">{usage.providerLabel}</span>
-            <span className="truncate text-xs text-muted">{usage.id}{usage.model ? ` · ${usage.model}` : ''}</span>
+            <span className="truncate text-xs text-muted">{agentDisplayName(usage.id)}{usage.model ? ` · ${usage.model}` : ''}</span>
           </span>
           <ChevronRight size={16} className={`shrink-0 text-muted transition-transform ${open ? 'rotate-90' : ''}`} aria-hidden="true" />
         </button>
