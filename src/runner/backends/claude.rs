@@ -51,7 +51,21 @@ pub(crate) fn run_with_executable(
     if let Some(model) = effective_model {
         cmd.args(["--model", model]);
     }
-    cmd.args(filtered_backend_args("claude", extra_args));
+    let filtered_extra = filtered_backend_args("claude", extra_args);
+    if !filtered_extra
+        .iter()
+        .any(|arg| arg.starts_with("--permission-mode"))
+    {
+        cmd.args(["--permission-mode", "acceptEdits"]);
+    }
+    if !filtered_extra
+        .iter()
+        .any(|arg| arg.starts_with("--allowedTools"))
+    {
+        // Issue #1367: default to allowing necessary write tools
+        cmd.args(["--allowedTools", "Edit,Bash,Replace,Write,View,StrReplace"]);
+    }
+    cmd.args(filtered_extra);
     crate::runner::apply_child_env(&mut cmd, env_vars);
 
     let (exit_code, duration_secs, resources) = spawn_with_idle_watch(
@@ -61,6 +75,15 @@ pub(crate) fn run_with_executable(
         idle_timeout_seconds,
         "launching claude; is it installed and on PATH?",
     )?;
+
+    let output_text = fs::read_to_string(&log_path).unwrap_or_default();
+    if output_text.contains("denies Edit")
+        || output_text.contains("rejected by permission")
+        || output_text.contains("Tool execution was blocked")
+        || output_text.contains("requires approval")
+    {
+        anyhow::bail!("Claude writes were refused. This is a configuration error: ensure claude_args includes --permission-mode acceptEdits and sufficient --allowedTools.");
+    }
 
     // Locate the transcript for the pinned session id so per-attempt usage
     // parsing can consume it.

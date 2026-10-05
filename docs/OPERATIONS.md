@@ -737,6 +737,14 @@ Each backend authenticates through its own CLI, not through GAH:
   `agy-second` is isolated by `agy_second_home` as a distinct account.
 - **vibe**, **opencode**, **openhands** — their own respective CLI auth.
 
+### Runner permissions
+
+By default, `gah` injects necessary flags so implementation dispatches can make progress, while review dispatches remain read-only:
+
+- **codex** — Implementation dispatches run with `--sandbox workspace-write,allow-write-dir=<GAH_BUILD_CACHE>`.
+- **claude** — Implementation dispatches run with `--permission-mode acceptEdits` and `--allowedTools Edit,Bash,Replace,Write,View,StrReplace`.
+- **Other runners** — Depend on their own CLI defaults.
+
 Validate that a profile's declared backends and tokens are actually present
 before trusting an unattended run:
 

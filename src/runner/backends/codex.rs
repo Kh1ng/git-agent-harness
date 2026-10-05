@@ -28,10 +28,27 @@ pub(crate) fn run_with_executable(
     let mut cmd = Command::new(executable);
     // Issue #152: --json produces structured JSONL output for programmatic
     // usage extraction in parse_codex_exec_json (usage.rs).
-    cmd.arg("exec")
-        .arg("--json")
-        .arg(task)
-        .args(filtered_codex_args(extra_args))
+    cmd.arg("exec").arg("--json").arg(task);
+
+    let filtered_extra = filtered_codex_args(extra_args);
+    if !filtered_extra
+        .iter()
+        .any(|arg| arg.starts_with("--sandbox"))
+    {
+        let mut sandbox_arg = "workspace-write".to_string();
+        if let Some(target) = env_vars
+            .iter()
+            .find(|(k, _)| k == "CARGO_TARGET_DIR")
+            .map(|(_, v)| v)
+        {
+            if let Some(cache_root) = Path::new(target).parent().and_then(|p| p.parent()) {
+                sandbox_arg.push_str(&format!(",allow-write-dir={}", cache_root.display()));
+            }
+        }
+        cmd.arg("--sandbox").arg(sandbox_arg);
+    }
+
+    cmd.args(filtered_extra)
         .args(codex_model_args(model))
         .args(crate::execution_identity::selected_codex_config_args(
             env_vars,
@@ -48,6 +65,9 @@ pub(crate) fn run_with_executable(
     )?;
 
     let output_text = fs::read_to_string(&log_path).unwrap_or_default();
+    if output_text.contains("writing is blocked by read-only sandbox") {
+        anyhow::bail!("Codex writes were refused. This is a configuration error: ensure codex_args includes --sandbox workspace-write with sufficient allowed directories.");
+    }
     let transcript_path =
         crate::runner::review_usage::find_codex_transcript(env_vars, &output_text)
             .map(|path| path.to_string_lossy().into_owned());
