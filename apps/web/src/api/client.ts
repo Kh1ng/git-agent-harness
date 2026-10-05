@@ -32,6 +32,7 @@ import type {
   LedgerEntry,
   ControllerEvent,
   ControllerActivity,
+  LoopDecision,
   ProfileSummary,
   WakeAutonomyValue,
   ConfigSummary,
@@ -234,6 +235,8 @@ export interface ProfileUpdateData {
   validation_timeout_seconds?: number | null;
   max_parallel_workers?: number;
   manager_wake_autonomy?: WakeAutonomyValue;
+  /** Hold approved schema/API contract changes for human review (#1405). */
+  hold_contract_changes?: boolean;
   clear?: string[];
 }
 
@@ -294,6 +297,7 @@ export interface GahDataSource {
   getWorkTimeline(workId: string): Promise<LedgerEntry[]>;
   getEvents(params?: { profile?: string; since?: string }): Promise<ControllerEvent[]>;
   getControllerActivity(params?: { profile?: string; since?: string }): Promise<ControllerActivity[]>;
+  getLoopDecision(profile: string): Promise<LoopDecision | null>;
   getProfiles(): Promise<ProfileSummary[]>;
   getProjects(): Promise<ProjectSummary[]>;
   addProject(profile: string): Promise<ProjectSummary>;
@@ -527,6 +531,9 @@ export const gahApi: GahDataSource = {
       profile: params.profile,
       since: params.since
     });
+  },
+  getLoopDecision(profile) {
+    return getJson<LoopDecision | null>('/api/loop/last-decision', { profile });
   },
   getControllerActivity(params = {}) {
     return getJson<ControllerActivity[]>('/api/controller-activity', {
