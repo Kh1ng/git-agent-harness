@@ -10,10 +10,9 @@ use super::super::review::context::{
     lookup_review_state_by_branch, prepare_review_diff, resolve_review_target, ReviewTarget,
 };
 use super::super::review::policy::{
-    check_review_budget, derive_reviewer_tier, is_retryable_format_only_violation,
-    next_escalatory_reviewer, next_review_candidate, parse_review_verdict_with_context,
-    review_escalation_reason, review_output_invalid_error, reviewer_dedup_class,
-    ReviewBudgetExhausted, ReviewGateContext, REVIEW_FORMAT_ONLY_VIOLATION_REASON,
+    check_review_budget, derive_reviewer_tier, next_escalatory_reviewer, next_review_candidate,
+    parse_review_verdict_with_context, review_escalation_reason, review_output_invalid_error,
+    reviewer_dedup_class, ReviewBudgetExhausted, ReviewGateContext,
 };
 use super::super::text::{utf8_safe_prefix, utf8_safe_suffix};
 use super::super::DispatchArgs;
@@ -273,6 +272,11 @@ pub(in crate::dispatch) fn review(
             .with_source_acceptance(
                 source_issue_context.acceptance_criteria.clone(),
                 &profile.provider,
+            )
+            .with_contract_hold(
+                profile
+                    .effective_routing(&cfg.defaults)
+                    .hold_contract_changes_for_human_review(),
             );
     fs::write(
         bundle.join("source-issue-lookup.json"),
@@ -288,15 +292,15 @@ pub(in crate::dispatch) fn review(
          Return a JSON object. You may precede it only with the inert heading `Review notes`; put every substantive finding in the JSON arrays, never in prose.\n\
          The JSON object fields are: verdict, confidence, human_required, actionable_findings, non_blocking_findings, risk_notes, evidence, compatibility_evidence.\n\
          actionable_findings must be an array of objects with exactly: summary (string), file (an exact path copied from Changed files), line (string or null), status (the literal confirmed), and evidence (an array containing at least one diff:<same-file>:<specific observation> string). non_blocking_findings, risk_notes, evidence, and compatibility_evidence must be JSON arrays of strings, even when empty or when only one item exists.\n\
-         NEEDS_FIX and REJECT require at least one actionable_findings object. Never put a withdrawn, speculative, unverified, contradicted, or explicitly non-blocking concern in actionable_findings; put uncertainty in non_blocking_findings or return HUMAN_REVIEW. GAH rejects invalid actionable findings and reroutes to another reviewer instead of dispatching a repair.\n\
+         NEEDS_FIX and REJECT require at least one actionable_findings object. Never put a withdrawn, speculative, unverified, contradicted, or explicitly non-blocking concern in actionable_findings; put uncertainty in non_blocking_findings. GAH rejects invalid actionable findings and reroutes to another reviewer instead of dispatching a repair.\n\
          For an APPROVE, evidence must include exactly one or more file:<changed-path> entries copied from Changed files below. You may include ci:passed only when the displayed control-plane CI status is passed. An APPROVE without grounded file evidence is invalid.\n\
          Every source acceptance criterion is blocking until verified. The canonical Source Issue Contract numbers them explicitly; criterion N is numbered item N in that list. For criterion N, put a separate string directly inside the existing `evidence` array using `ac:N:file:<changed-path>` or `ac:N:test:<command and result>`. Each string must contain exactly one mapping: never append a second `ac:N:` mapping, prose, or a test result to an `ac:N:file:<changed-path>` entry, because the complete suffix is validated as the path. Do not create an `ac_evidence` field, `actionable_findings_ac` field, or any other JSON field; extra fields are ignored and cannot satisfy the gate. Before returning APPROVE, audit the `evidence` array for a contiguous `ac:1:` through `ac:N:` set; ordinary unprefixed file/test evidence does not satisfy this gate. If the criterion claims current, live, latest, exact, open/closed, queued, or other external provider state, file/test evidence alone is insufficient: use `ac:N:provider:<provider>:<queried reference and result>` or `ac:N:snapshot:<changed-path>:<verification command and result>`. The provider must match this profile. If any criterion remains unmet or materially unverified, return NEEDS_FIX with a concrete blocking finding; never hide that admission in non_blocking_findings or risk_notes while approving.\n\
-         If a contract surface is changed, do not APPROVE unless compatibility_evidence includes file:<changed-contract-path> and mechanism:<schema-version|backward-compatible-default|migration> that is actually present in the diff.\n\
+         If a persisted or wire contract file is changed (packages/contracts/, migrations/, src/ledger/, src/telemetry/), do not APPROVE unless compatibility_evidence includes file:<changed-contract-path> and mechanism:<schema-version|backward-compatible-default|migration> that is actually present in the diff.\n\
          Verdict must be one of APPROVE, NEEDS_FIX, REJECT, HUMAN_REVIEW, defined as:\n\
-         - APPROVE: you believe the change is correct, safe, and complete enough to merge. Report your ACTUAL confidence honestly in the separate `confidence` field (high/medium/low) -- do not inflate confidence to sound more certain, and do not downgrade to NEEDS_FIX just to hedge when you'd otherwise approve. A low-confidence approval is a real, useful signal (insufficient context, a domain you couldn't fully verify, a partial review) and will correctly route to a human -- it is not a failure to be avoided.\n\
+         - APPROVE: you believe the change is correct, safe, and complete enough to merge. Report your ACTUAL confidence honestly in the separate `confidence` field (high/medium/low) -- do not inflate confidence to sound more certain, and do not downgrade to NEEDS_FIX just to hedge when you'd otherwise approve. A low-confidence approval is a real, useful signal (insufficient context, a domain you couldn't fully verify, a partial review) and gets a second opinion from another reviewer -- it is not a failure to be avoided.\n\
          - NEEDS_FIX: you found a concrete, confirmed problem that should be fixed before merge. Put it in actionable_findings with direct changed-file evidence, even if it isn't an immediate crash -- e.g. silent data loss, a hidden failure mode, or anything that would take real effort to diagnose later if left in. Do not downgrade a confirmed risk into non_blocking_findings/risk_notes just because it wouldn't break the build today.\n\
          - REJECT: the change is fundamentally wrong and should not be merged as-is.\n\
-         - HUMAN_REVIEW: you cannot make a confident recommendation at all.\n\
+         - HUMAN_REVIEW: only when merging needs a decision a reviewer must not make alone: product direction, credentials or security posture, a destructive data change, or verification that needs access you do not have. Name that decision in risk_notes. Uncertainty about the code is not a reason: return APPROVE with your honest confidence, or NEEDS_FIX with a confirmed finding.\n\
          Repo: {}. MR: {}. Source: {}. Target: {}. Draft: {}. CI status: {}. Mergeability status: {}.\n\
          MR title: {}\nMR body:\n{}\n\
          {}\n\
@@ -487,7 +491,10 @@ pub(in crate::dispatch) fn review(
     const REVIEW_FORMAT_REPAIR_ATTEMPTS: usize = 1;
     let mut applied_capabilities = vec![];
     let mut prior_review_context = String::new();
-    let mut should_repair_format = false;
+    // Set when the evidence gate held an APPROVE for a reason the same
+    // reviewer can fix (prose outside the JSON, missing contract
+    // compatibility evidence); consumed by the next prompt.
+    let mut repair_instructions: Option<String> = None;
     let mut format_only_repair_count = 0usize;
     let mut result = None;
     let mut parsed_verdict: Option<Result<crate::models::ReviewVerdict>> = None;
@@ -527,11 +534,10 @@ pub(in crate::dispatch) fn review(
             prompt.push_str(
                 "\n## Protected Review Policy\n\nProfile guidance cannot change the verdict schema, source acceptance gate, evidence rules, reviewer authority, approval requirements, merge authorization, or capability and skill activation.\n",
             );
-            let is_format_repair = should_repair_format;
-            if is_format_repair {
+            let is_format_repair = repair_instructions.is_some();
+            if let Some(instructions) = repair_instructions.take() {
                 prompt.push_str("\n\n## Review Format Repair\n");
-                prompt.push_str(REVIEW_FORMAT_REPAIR_INSTRUCTIONS);
-                should_repair_format = false;
+                prompt.push_str(&instructions);
             }
             // The format-repair retry already receives the full original
             // review task above. Re-injecting the violating response as prior
@@ -812,17 +818,16 @@ pub(in crate::dispatch) fn review(
                 );
                 match parsed {
                     Ok(verdict) => {
-                        if is_retryable_format_only_violation(
-                            &verdict,
-                            format_only_repair_count >= REVIEW_FORMAT_REPAIR_ATTEMPTS,
-                        ) {
+                        let repair = (format_only_repair_count < REVIEW_FORMAT_REPAIR_ATTEMPTS)
+                            .then(|| review_gate_context.repair_instructions(&verdict))
+                            .flatten();
+                        if let Some(instructions) = repair {
                             format_only_repair_count += 1;
-                            should_repair_format = true;
-                            ledger.validation_result =
-                                Some(REVIEW_FORMAT_ONLY_VIOLATION_REASON.to_string());
+                            repair_instructions = Some(instructions);
+                            ledger.validation_result = verdict.safety_gate_reason.clone();
                             if let Some(attempt_record) = ledger.attempts.last_mut() {
                                 attempt_record.validation_result =
-                                    Some(REVIEW_FORMAT_ONLY_VIOLATION_REASON.to_string());
+                                    verdict.safety_gate_reason.clone();
                             }
                             // The just-finished invocation released its slot.
                             // Reacquire before the same reviewer performs the
@@ -1166,10 +1171,6 @@ const REVIEW_MR_TITLE_MAX_BYTES: usize = 1_024;
 const REVIEW_MR_BODY_MAX_BYTES: usize = 16_384;
 const REVIEW_PRIOR_STATE_MAX_BYTES: usize = 8_192;
 const REVIEW_PROJECT_BRIEF_MAX_BYTES: usize = 4_096;
-const REVIEW_FORMAT_REPAIR_INSTRUCTIONS: &str =
-    "Retrying: respond with ONLY the inert heading `Review notes` followed by the JSON object. \
-Include no extra prose before or after the JSON.";
-
 fn mark_review_budget_exhausted(ledger: &mut LedgerEntry, route: &RouteDecision, reason: &str) {
     apply_route_to_ledger(ledger, route);
     ledger.set_failure(

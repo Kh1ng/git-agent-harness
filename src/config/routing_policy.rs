@@ -153,6 +153,10 @@ pub struct RoutingPolicy {
     /// `None` inherits the canonical/defaults policy (resolved to `Auto`).
     #[serde(default)]
     pub merge_policy: Option<MergePolicy>,
+    /// Hold an APPROVE that changes a persisted or wire contract without
+    /// compatibility evidence for a human. Unset means on (#1405).
+    #[serde(default)]
+    pub hold_contract_changes_for_human_review: Option<bool>,
 }
 
 impl RoutingPolicy {
@@ -224,6 +228,10 @@ impl RoutingPolicy {
     #[allow(dead_code)] // enforced by dispatch review budget checks (#113)
     pub fn max_paid_reviews_per_ticket(&self) -> u32 {
         self.max_paid_reviews_per_ticket.unwrap_or(3)
+    }
+
+    pub fn hold_contract_changes_for_human_review(&self) -> bool {
+        self.hold_contract_changes_for_human_review.unwrap_or(true)
     }
 
     pub fn max_implementation_failures_per_ticket(&self) -> u32 {
@@ -426,5 +434,8 @@ pub(super) fn merge_routing_policy(
     capabilities.extend(repo.review_required_capabilities);
     repo.review_required_capabilities = capabilities;
     repo.merge_policy = repo.merge_policy.or(canonical.merge_policy);
+    repo.hold_contract_changes_for_human_review = repo
+        .hold_contract_changes_for_human_review
+        .or(canonical.hold_contract_changes_for_human_review);
     repo
 }
