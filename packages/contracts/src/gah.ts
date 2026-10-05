@@ -1542,7 +1542,7 @@ export interface ManagerChatSettingsSummary {
   helperRoutes: HelperRoutePreference[];
 }
 
-export type HelperTaskKind = 'chat_title' | 'commit_message' | 'pr_summary';
+export type HelperTaskKind = 'chat_title' | 'commit_message' | 'pr_summary' | 'price_table';
 
 /** One explicit helper route for one source account. Missing routes use the
  * source account and an advertised Luna model only when the source is Codex. */
@@ -1906,6 +1906,14 @@ export interface RoleModelMetrics {
   tokens_per_delivered: number | null;
   total_cost_usd: number | null;
   cost_per_delivered_usd: number | null;
+  /** What the measured tokens would cost at the provider's published API
+   * price: an equivalent, not a bill (subscriptions are flat-rate). Null when
+   * no price is known for the model or no attempt recorded a token breakdown. */
+  api_equivalent_usd: number | null;
+  api_equivalent_per_delivered_usd: number | null;
+  /** Attempts the equivalent covers, and the price row it used. */
+  priced: number;
+  priced_as: string | null;
   median_duration_seconds: number | null;
   /** Reviewers only: verdicts given, blocking findings per review, and how
    * the verdicts held up (a NEEDS_FIX followed by a passing fix, an APPROVE
@@ -1932,4 +1940,49 @@ export interface RoleMetricsReport {
   harness_errors: number;
   cells: RoleModelMetrics[];
   best_fit: RoleBestFit[];
+}
+
+/** A model's published API price in US dollars per million tokens. */
+export interface ModelPrice {
+  provider: string;
+  /** The model as the provider's pricing page names it. */
+  model: string;
+  input: number;
+  output: number;
+  /** Reading a cached prompt prefix; null when the page lists none. */
+  cached_input: number | null;
+  cache_write: number | null;
+  source_url: string;
+  /** When this row last changed (or was first seen). */
+  changed_at: string;
+}
+
+export interface ModelPriceChange {
+  at: string;
+  provider: string;
+  model: string;
+  field: 'input' | 'output' | 'cached_input' | 'cache_write' | 'added' | 'removed';
+  from: number | null;
+  to: number | null;
+}
+
+export interface ModelPriceSourceStatus {
+  provider: string;
+  url: string;
+  checked_at: string | null;
+  ok: boolean;
+  /** table: read from the page's own price table; helper_model: a table was
+   * not found and the low-cost helper model extracted the rows. */
+  method: 'table' | 'helper_model' | null;
+  rows: number;
+  error: string | null;
+}
+
+/** GET /api/model-prices. */
+export interface ModelPriceBook {
+  checked_at: string | null;
+  sources: ModelPriceSourceStatus[];
+  prices: ModelPrice[];
+  /** Newest first, bounded. */
+  history: ModelPriceChange[];
 }

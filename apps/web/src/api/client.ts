@@ -335,6 +335,9 @@ export interface GahDataSource {
   /** Agent CLIs running on this device outside the factory. */
   /** Per role and model, what the ledger says (delivered rate with confidence, validation, review acceptance, tokens). */
   getRoleMetrics(profile: string | undefined, since: string): Promise<import('@git-agent-harness/contracts').RoleMetricsReport>;
+  /** Published API prices per model, with what changed and when each source was last checked. */
+  getModelPrices(): Promise<import('@git-agent-harness/contracts').ModelPriceBook>;
+  refreshModelPrices(): Promise<import('@git-agent-harness/contracts').ModelPriceBook>;
   getDeviceAgents(): Promise<import('@git-agent-harness/contracts').DeviceAgentsSnapshot>;
   /** A running factory job's agent output from byte offset `after`. Read-only. */
   getFactoryRunOutput(runId: string, after: number, full?: boolean): Promise<import('@git-agent-harness/contracts').FactoryRunOutput>;
@@ -724,6 +727,12 @@ export const gahApi: GahDataSource = {
   },
   getRoleMetrics(profile, since) {
     return getJson<import('@git-agent-harness/contracts').RoleMetricsReport>('/api/report/roles', { ...(profile ? { profile } : {}), since });
+  },
+  getModelPrices() {
+    return getJson<import('@git-agent-harness/contracts').ModelPriceBook>('/api/model-prices');
+  },
+  refreshModelPrices() {
+    return postJson<import('@git-agent-harness/contracts').ModelPriceBook, Record<string, never>>('/api/model-prices/refresh', {});
   },
   getDeviceAgents() {
     return getJson<import('@git-agent-harness/contracts').DeviceAgentsSnapshot>('/api/device-agents');

@@ -70,6 +70,8 @@ import type { SessionOptions } from './sessions/SessionManager.js';
 import { deviceAgentsSnapshot } from './deviceAgents.js';
 import { factoryRunOutput } from './factoryRunOutput.js';
 import { readLedger, roleMetrics } from './roleMetrics.js';
+import { readPriceBook, refreshModelPrices } from './modelPricing.js';
+import { helperPriceExtractor } from './modelPriceHelper.js';
 import { deriveControllerActivity } from './controllerActivity.js';
 import { authMiddleware, coordinatorTokenMatches, isLocalAddress, requireOwner } from './authMiddleware.js';
 import { DeviceAccess } from './deviceAccess.js';
@@ -1289,12 +1291,24 @@ export function createServer(
 
   // Per role and model, what the ledger says: delivered rate with its
   // confidence, validation, first-review acceptance, tokens per delivered PR.
+  // Published API prices per model, checked daily, so token counts can be read as dollars.
+  app.get('/api/model-prices', (_req, res) => {
+    res.json(readPriceBook());
+  });
+  app.post('/api/model-prices/refresh', requireOwner, async (_req, res) => {
+    try {
+      res.json(await refreshModelPrices({ extract: helperPriceExtractor(DEFAULT_PROFILE) }));
+    } catch (error) {
+      res.status(502).json({ error: 'Failed to check model prices', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   app.get('/api/report/roles', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
     const since = typeof req.query.since === 'string' ? req.query.since : '7d';
     try {
       const report = await runReport({ profile, since: 'all' });
-      res.json(roleMetrics(readLedger(report.ledger_path), { since, profile: profile ?? null }));
+      res.json(roleMetrics(readLedger(report.ledger_path), { since, profile: profile ?? null, prices: readPriceBook().prices }));
     } catch (error) {
       res.status(502).json({ error: 'Failed to compute role metrics', message: error instanceof Error ? error.message : String(error) });
     }

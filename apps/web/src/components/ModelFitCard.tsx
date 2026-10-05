@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Award, Info } from 'lucide-react';
-import type { RoleMetricsReport, RoleModelMetrics } from '@git-agent-harness/contracts';
+import { Award, Info, RefreshCw } from 'lucide-react';
+import type { ModelPriceBook, RoleMetricsReport, RoleModelMetrics } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
-import { formatTokens } from '../lib/format.js';
+import { formatAge, formatTokens } from '../lib/format.js';
 import { StatusBadge } from './ui/StatusBadge.js';
 import { agentDisplayName } from './LiveAgentsCard.js';
 
@@ -12,6 +12,7 @@ const CONFIDENCE: Record<RoleModelMetrics['confidence'], { label: string; tone: 
   high: { label: 'high confidence', tone: 'good' }, medium: { label: 'medium confidence', tone: 'good' }, low: { label: 'low confidence', tone: 'warning' }, none: { label: 'too few to judge', tone: 'unknown' }
 };
 
+const usd = (value: number) => (value < 0.01 ? '<$0.01' : `$${value.toFixed(2)}`);
 const pct = (value: number | null) => (value === null ? '—' : `${Math.round(value * 100)}%`);
 const roleLabel = (role: string) => ROLE_LABEL[role] ?? role.replace(/_/g, ' ');
 /** "Codex gpt-6-sol", with the account only when it is a named one ("Mixed" means attempts spanned accounts). */
@@ -53,9 +54,16 @@ function CellRow({ cell }: { cell: RoleModelMetrics }) {
           <td className="py-2 pr-4 tabular-nums" title="Of this model's pull requests that were reviewed, approved on the first review">{cell.reviewed === 0 ? '—' : <>{pct(cell.first_review_acceptance)} <span className="text-muted">({cell.approved_first_review}/{cell.reviewed})</span></>}</td>
         </>
       )}
-      <td className="py-2 pr-4 tabular-nums" title={cell.cost_per_delivered_usd !== null ? 'Dollars recorded by the backend' : 'Tokens, since subscription backends record no dollar cost; "per attempt" when not every attempt was measured'}>
-        {cell.cost_per_delivered_usd !== null ? `$${cell.cost_per_delivered_usd.toFixed(2)}`
-          : cell.tokens_per_delivered !== null ? formatTokens(Math.round(cell.tokens_per_delivered))
+      <td className="py-2 pr-4 tabular-nums" title={cell.cost_per_delivered_usd !== null ? 'Dollars recorded by the backend'
+        : cell.priced_as ? `What the tokens would cost at ${cell.priced_as}'s published API price (${cell.priced} of ${cell.attempts} attempts priced). An equivalent, not your subscription bill.`
+        : 'No published price is known for this model'}>
+        {cell.cost_per_delivered_usd !== null ? usd(cell.cost_per_delivered_usd)
+          : cell.api_equivalent_per_delivered_usd !== null ? usd(cell.api_equivalent_per_delivered_usd)
+          : cell.api_equivalent_usd !== null ? <>{usd(cell.api_equivalent_usd / Math.max(1, cell.priced))} <span className="text-muted">per attempt</span></>
+          : '—'}
+      </td>
+      <td className="py-2 pr-4 tabular-nums" title='Tokens; "per attempt" when not every attempt was measured or nothing was delivered'>
+        {cell.tokens_per_delivered !== null ? formatTokens(Math.round(cell.tokens_per_delivered))
           : cell.tokens_per_attempt !== null ? <>{formatTokens(Math.round(cell.tokens_per_attempt))} <span className="text-muted">per attempt</span></>
           : '—'}
       </td>
@@ -82,7 +90,24 @@ export function ModelFitCard({ profile, since }: { profile: string | null; since
       .catch((err) => { if (current) setError(err instanceof Error ? err.message : String(err)); });
     return () => { current = false; };
   }, [profile, since, epoch]);
-  useWsReconnectRefresh(() => setEpoch((value) => value + 1));
+  const [priceEpoch, setPriceEpoch] = useState(0);
+  useWsReconnectRefresh(() => { setEpoch((value) => value + 1); setPriceEpoch((value) => value + 1); });
+
+  const [prices, setPrices] = useState<ModelPriceBook | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [priceError, setPriceError] = useState<string | null>(null);
+  useEffect(() => {
+    let current = true;
+    gahApi.getModelPrices().then((book) => { if (current) setPrices(book); }).catch(() => { /* Prices are optional: the card still shows tokens. */ });
+    return () => { current = false; };
+  }, [priceEpoch]);
+  const checkPrices = async () => {
+    setChecking(true); setPriceError(null);
+    // New prices change the dollar columns, so the metrics are read again; the book itself is already in hand.
+    try { setPrices(await gahApi.refreshModelPrices()); setEpoch((value) => value + 1); }
+    catch (err) { setPriceError(err instanceof Error ? err.message : String(err)); }
+    finally { setChecking(false); }
+  };
 
   const roles = [...new Set(report?.cells.map((cell) => cell.role) ?? [])].sort((a, b) => ['improve', 'fix', 'review', 'pm'].indexOf(a) - ['improve', 'fix', 'review', 'pm'].indexOf(b));
   return (
@@ -93,8 +118,32 @@ export function ModelFitCard({ profile, since }: { profile: string | null; since
       </div>
       <p className="mb-3 flex items-start gap-1.5 text-xs text-muted">
         <Info size={13} className="mt-0.5 shrink-0" aria-hidden="true" />
-        <span>Delivered: a pull request that was not sent back by its first review. Harness errors (capacity, admission) are listed beside attempts and count against nothing. Cost is in tokens because subscription backends record no dollars.</span>
+        <span>Delivered: a pull request that was not sent back by its first review. Harness errors (capacity, admission) are listed beside attempts and count against nothing. API cost is what the tokens would cost at the provider's published price, not your subscription bill.</span>
       </p>
+      <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted" aria-label="Model prices">
+        <span>
+          {prices === null ? 'Prices: loading…'
+            : prices.checked_at === null ? 'Prices: not checked yet (the server checks daily)'
+            : <>Prices: {prices.prices.length} models, checked {formatAge(prices.checked_at) ?? prices.checked_at}
+              {prices.sources.map((source) => <span key={source.provider} className={source.ok ? '' : 'text-warning'} title={source.error ?? source.url}> · {source.provider}{source.ok ? (source.method === 'helper_model' ? ' (read by helper model)' : '') : ' failed'}</span>)}</>}
+        </span>
+        <button type="button" onClick={() => void checkPrices()} disabled={checking} className="inline-flex items-center gap-1 text-accent hover:underline disabled:opacity-50">
+          <RefreshCw size={11} className={checking ? 'animate-spin' : ''} aria-hidden="true" /> {checking ? 'Checking…' : 'Check now'}
+        </button>
+        {priceError && <span role="alert" className="text-critical">Price check failed: {priceError}</span>}
+        {prices && prices.history.length > 0 && (
+          <details className="basis-full">
+            <summary className="cursor-pointer text-secondary hover:text-primary">{prices.history.length} price change{prices.history.length === 1 ? '' : 's'} recorded</summary>
+            <ul className="mt-1 space-y-0.5 tabular-nums" aria-label="Price changes">
+              {prices.history.slice(0, 20).map((change, index) => (
+                <li key={index}>
+                  {formatAge(change.at) ?? change.at}: {change.model} {change.field === 'added' ? 'added' : change.field === 'removed' ? 'removed' : `${change.field.replace('_', ' ')} $${change.from} → $${change.to}`}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
       {error && <p role="alert" className="text-sm text-critical">Cannot compute model metrics: {error}</p>}
       {!error && report === null && <p className="text-sm text-muted">Reading the ledger…</p>}
       {report && report.cells.length === 0 && <p className="text-sm text-muted">No attempts by a model in this window.</p>}
@@ -134,6 +183,7 @@ export function ModelFitCard({ profile, since }: { profile: string | null; since
                   <th className="py-2 pr-4 font-medium">{reviewer ? 'Verdict given' : 'Delivered'}</th>
                   <th className="py-2 pr-4 font-medium">{reviewer ? 'Verdicts' : 'Validation'}</th>
                   <th className="py-2 pr-4 font-medium">{reviewer ? 'Held up' : 'First review'}</th>
+                  <th className="py-2 pr-4 font-medium">{reviewer ? 'API cost per review' : 'API cost per delivered'}</th>
                   <th className="py-2 pr-4 font-medium">{reviewer ? 'Tokens per review' : 'Tokens per delivered'}</th>
                   <th className="py-2 pr-4 font-medium">Median time</th>
                   <th className="py-2 font-medium">Confidence</th>

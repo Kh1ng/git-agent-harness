@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
-import type { LedgerEntry, RoleBestFit, RoleMetricsReport, RoleModelMetrics } from '@git-agent-harness/contracts';
+import type { LedgerEntry, ModelPrice, RoleBestFit, RoleMetricsReport, RoleModelMetrics } from '@git-agent-harness/contracts';
+import { apiEquivalentUsd, priceFor } from './modelPricing.js';
 
 /** Ledger modes that are not a model doing a job. */
 const NOT_ATTEMPTS = new Set(['review_hold', 'review_hold_release', 'clear_attempts', 'tombstone']);
@@ -57,6 +58,7 @@ function emptyCell(role: string, backend: string, instance: string | null, model
     role, backend, backend_instance: instance, model, attempts: 0, harness_errors: 0, delivered: 0, delivered_rate: null, delivered_rate_low: null,
     validation_ran: 0, validation_passed: 0, validation_pass_rate: null, reviewed: 0, approved_first_review: 0, first_review_acceptance: null,
     measured: 0, total_tokens: null, tokens_per_attempt: null, tokens_per_delivered: null, total_cost_usd: null, cost_per_delivered_usd: null,
+    api_equivalent_usd: null, api_equivalent_per_delivered_usd: null, priced: 0, priced_as: null,
     median_duration_seconds: null, review_verdicts: [], blocking_findings_per_review: null, verdicts_vindicated: 0, verdicts_overturned: 0,
     confidence: 'none', durations: [], blockingFindings: 0, keyOf: key(role, backend, model)
   };
@@ -69,7 +71,7 @@ function emptyCell(role: string, backend: string, instance: string | null, model
  * by a passing fix was right; an APPROVE whose work needed a fix afterwards
  * was not.
  */
-export function roleMetrics(entries: LedgerEntry[], options: { since?: string; profile?: string | null; now?: number } = {}): RoleMetricsReport {
+export function roleMetrics(entries: LedgerEntry[], options: { since?: string; profile?: string | null; now?: number; /** Published API prices, to show what the tokens would cost. */ prices?: ModelPrice[] } = {}): RoleMetricsReport {
   const since = options.since ?? '7d';
   const window = sinceMs(since);
   const now = options.now ?? Date.now();
@@ -107,6 +109,13 @@ export function roleMetrics(entries: LedgerEntry[], options: { since?: string; p
     if (typeof tokens === 'number') { cell.measured++; cell.total_tokens = (cell.total_tokens ?? 0) + tokens; }
     const cost = entry.usage?.actual_cost_usd ?? entry.usage?.estimated_cost_usd;
     if (typeof cost === 'number') cell.total_cost_usd = (cell.total_cost_usd ?? 0) + cost;
+    const price = priceFor(cell.model, options.prices ?? []);
+    const equivalent = price ? apiEquivalentUsd(entry.usage, price) : null;
+    if (price && equivalent !== null) {
+      cell.priced++;
+      cell.priced_as = price.model;
+      cell.api_equivalent_usd = (cell.api_equivalent_usd ?? 0) + equivalent;
+    }
     const validation = entry.validation_result ?? '';
     if (validation === 'passed' || validation === 'failed') {
       cell.validation_ran++;
@@ -146,6 +155,8 @@ export function roleMetrics(entries: LedgerEntry[], options: { since?: string; p
       tokens_per_attempt: cell.measured > 0 && cell.total_tokens !== null ? cell.total_tokens / cell.measured : null,
       tokens_per_delivered: cell.delivered > 0 && cell.total_tokens !== null && cell.measured === cell.attempts ? cell.total_tokens / cell.delivered : null,
       cost_per_delivered_usd: cell.delivered > 0 && cell.total_cost_usd !== null ? cell.total_cost_usd / cell.delivered : null,
+      // Failed attempts are part of what a delivered PR cost, so every attempt must be priced.
+      api_equivalent_per_delivered_usd: cell.delivered > 0 && cell.api_equivalent_usd !== null && cell.priced === cell.attempts ? cell.api_equivalent_usd / cell.delivered : null,
       median_duration_seconds: median(durations),
       blocking_findings_per_review: reviews > 0 ? blockingFindings / reviews : null,
       confidence: confidenceFor(cell.attempts)
