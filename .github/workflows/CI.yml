@@ -160,8 +160,10 @@ jobs:
             || fail 'dashboard did not answer on loopback'
           curl -fsS http://127.0.0.1:3773/health | grep -q '"status":"healthy"' \
             || fail '/health did not report healthy'
-          gah status --role --json | grep -q '"role":"standalone"' \
-            || fail 'gah status does not report the standalone role'
+          role_json="$(gah status --role --json 2>&1)" \
+            || fail "gah status --role --json exited non-zero: $role_json"
+          printf '%s' "$role_json" | grep -Eq '"role":[[:space:]]*"standalone"' \
+            || fail "gah status does not report the standalone role: $role_json"
 
   test:
     runs-on: ubuntu-latest
