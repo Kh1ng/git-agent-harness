@@ -4,7 +4,7 @@ use super::recovery::{
     defer_if_branch_attached, detect_stuck_loop, human_required_already_reported,
     latest_clear_attempts_timestamp, no_admission_diagnostics, recently_capacity_deferred_work_ids,
     reconcile_abandoned_dispatches, record_action_events, remediation_plan_for_action,
-    retain_snapshot_candidates,
+    report_blocked_work_items_once, retain_snapshot_candidates,
 };
 use super::NextAction;
 use anyhow::Result;
@@ -229,6 +229,10 @@ pub fn run_once(
         &profile.repo_id,
     );
 
+    // Issue #1381: blocked items are reported once even when other work is
+    // dispatched this tick.
+    report_blocked_work_items_once(cfg, profile_name, &snapshot)?;
+
     // For parallel > 1, we need to decide multiple actions
     if parallel > 1 {
         run_parallel_once(
@@ -382,27 +386,14 @@ pub fn run_once(
                 | NextAction::NoOp { .. }
         )
         .then(|| no_admission_diagnostics(&snapshot, 0, 1, None));
-        if human_required_already_reported(&history, profile_name, &action) {
-            // Issue #1381: a blocked PR is reported once, not on every tick.
-        } else if matches!(action, NextAction::HumanRequired { .. }) {
-            crate::events::record_with_reason_code_and_plan(
-                cfg,
-                stop_event_type,
-                Some(profile_name),
-                action.work_id(),
-                outcome.clone(),
-                action.human_required_reason_code(),
-                remediation_plan_for_action(cfg, profile_name, &action).as_ref(),
-            )?;
-        } else {
-            crate::events::record(
-                cfg,
-                stop_event_type,
-                Some(profile_name),
-                action.work_id(),
-                outcome.clone(),
-            )?;
-        }
+        record_stop_event(
+            cfg,
+            profile_name,
+            &history,
+            &action,
+            stop_event_type,
+            &outcome,
+        )?;
 
         if json {
             println!(
@@ -418,6 +409,42 @@ pub fn run_once(
         }
     }
     Ok(())
+}
+
+/// Record the stop event for a wait/human-required/no-op action. A repeated
+/// human-required report is suppressed (issue #1381), and human-required
+/// events always persist their reason code and remediation plan so the
+/// deduplication can recognise them on the next tick.
+fn record_stop_event(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    history: &[crate::events::ControllerEvent],
+    action: &NextAction,
+    stop_event_type: crate::events::EventType,
+    outcome: &str,
+) -> Result<()> {
+    if human_required_already_reported(history, profile_name, action) {
+        return Ok(());
+    }
+    if matches!(action, NextAction::HumanRequired { .. }) {
+        crate::events::record_with_reason_code_and_plan(
+            cfg,
+            stop_event_type,
+            Some(profile_name),
+            action.work_id(),
+            outcome,
+            action.human_required_reason_code(),
+            remediation_plan_for_action(cfg, profile_name, action).as_ref(),
+        )
+    } else {
+        crate::events::record(
+            cfg,
+            stop_event_type,
+            Some(profile_name),
+            action.work_id(),
+            outcome,
+        )
+    }
 }
 
 /// TICKET-096: Parallel execution for multiple actions
@@ -779,15 +806,14 @@ fn run_parallel_once(
                             _ => unreachable!(),
                         };
                         let history = crate::events::read_events(cfg)?;
-                        if !human_required_already_reported(&history, profile_name, &action) {
-                            crate::events::record(
-                                cfg,
-                                stop_event_type,
-                                Some(profile_name),
-                                action.work_id(),
-                                outcome.clone(),
-                            )?;
-                        }
+                        record_stop_event(
+                            cfg,
+                            profile_name,
+                            &history,
+                            &action,
+                            stop_event_type,
+                            &outcome,
+                        )?;
 
                         results.push((next_sequence, LoopOnceResult { action, outcome }));
                     }
@@ -1383,6 +1409,66 @@ default_target_branch = "main"
         });
         assert!(human_required_already_reported(&history, "real", &action));
         assert!(!human_required_already_reported(&history, "other", &action));
+    }
+
+    fn events_test_config() -> (tempfile::TempDir, crate::config::GahConfig) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::config::GahConfig {
+            context: Default::default(),
+            defaults: crate::config::Defaults {
+                artifact_root: tmp.path().to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            profiles: std::collections::HashMap::new(),
+        };
+        (tmp, cfg)
+    }
+
+    #[test]
+    fn stop_event_for_capped_pr_persists_reason_code_and_dedupes_across_ticks() {
+        let (_tmp, cfg) = events_test_config();
+        let action = NextAction::HumanRequired {
+            work_id: Some("TICKET-A".into()),
+            reason: "fix cap exceeded".into(),
+            reference: Some("branch-A".into()),
+            reason_code: Some("fix_retry_cap_exceeded".into()),
+        };
+        for _ in 0..3 {
+            let history = crate::events::read_events(&cfg).unwrap();
+            super::record_stop_event(
+                &cfg,
+                "real",
+                &history,
+                &action,
+                crate::events::EventType::HumanRequired,
+                "Human required: fix cap exceeded (branch-A) [code=fix_retry_cap_exceeded]",
+            )
+            .unwrap();
+        }
+        let events = crate::events::read_events(&cfg).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(
+            events[0].reason_code.as_deref(),
+            Some("fix_retry_cap_exceeded")
+        );
+    }
+
+    #[test]
+    fn blocked_pr_is_reported_once_alongside_other_dispatch() {
+        let (_tmp, cfg) = events_test_config();
+        let mut snapshot = empty_snapshot();
+        snapshot.blocked_work_items.push(capped_pr_blocker());
+        for _ in 0..3 {
+            super::report_blocked_work_items_once(&cfg, "real", &snapshot).unwrap();
+        }
+        let events = crate::events::read_events(&cfg).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].event_type, "human_required");
+        assert_eq!(events[0].work_id.as_deref(), Some("branch-A"));
+        assert_eq!(
+            events[0].reason_code.as_deref(),
+            Some("fix_retry_cap_exceeded")
+        );
     }
 
     #[test]

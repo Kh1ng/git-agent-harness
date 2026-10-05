@@ -606,6 +606,56 @@ pub(super) fn human_required_already_reported(
         })
 }
 
+/// Issue #1381: report each individually blocked work item (for example a PR
+/// past its fix retry cap) once, even when the loop dispatches other work.
+/// An item is skipped when the newest human_required event for the same
+/// profile and work item already carries the same reason code.
+pub(super) fn report_blocked_work_items_once(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    snapshot: &crate::status::StatusSnapshot,
+) -> Result<()> {
+    let history = crate::events::read_events(cfg)?;
+    for blocker in snapshot
+        .blocked_work_items
+        .iter()
+        .filter(|blocker| blocker.kind == "human_required")
+    {
+        let Some(reference) = blocker.source_reference.as_deref() else {
+            continue;
+        };
+        let reason_code = blocker.reason_code.as_deref().or(blocker.reason.as_deref());
+        let already_reported = history
+            .iter()
+            .rev()
+            .find(|event| {
+                event.event_type == "human_required"
+                    && event.profile.as_deref() == Some(profile_name)
+                    && event.work_id.as_deref() == Some(reference)
+            })
+            .is_some_and(|event| event.reason_code.as_deref() == reason_code);
+        if already_reported {
+            continue;
+        }
+        crate::events::record_with_reason_code(
+            cfg,
+            crate::events::EventType::HumanRequired,
+            Some(profile_name),
+            Some(reference),
+            format!(
+                "Blocked work item {reference}: {}",
+                blocker
+                    .message
+                    .as_deref()
+                    .or(blocker.reason.as_deref())
+                    .unwrap_or("human required")
+            ),
+            reason_code,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
