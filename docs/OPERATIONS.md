@@ -1019,20 +1019,24 @@ and task usage; missing allowance or price data remains unknown.
 
 A node without a desktop session, such as central, can sign in to Mistral
 itself. Save the console email and password as a `mistral_login` connection.
-Type them on that node; they are read from stdin and never appear in argv:
+Type them on that node; they are read from stdin and never appear in argv.
+The JSON is built from the environment so quotes and backslashes in the
+password survive:
 
 ```sh
-read -r MISTRAL_EMAIL; read -rs MISTRAL_PASSWORD
-printf '{"email":"%s","password":"%s"}' "$MISTRAL_EMAIL" "$MISTRAL_PASSWORD" |
+read -r MISTRAL_EMAIL; read -rs MISTRAL_PASSWORD; export MISTRAL_EMAIL MISTRAL_PASSWORD
+python3 -c 'import json, os; print(json.dumps({"email": os.environ["MISTRAL_EMAIL"], "password": os.environ["MISTRAL_PASSWORD"]}))' |
   gah credentials save --id mistral-console --provider mistral \
     --kind mistral_login --account-label "Mistral console"
-unset MISTRAL_PASSWORD
+unset MISTRAL_EMAIL MISTRAL_PASSWORD
 ```
 
 The connection is stored in the owner-only credential directory and is never
 passed to a runner. GAH keeps the resulting dashboard session in the same
 private record. It signs in again only when Mistral rejects that session. A
-wrong password or a second-factor prompt is reported as `auth_required`. GAH
+wrong password or a second-factor prompt is reported as `auth_required`, and
+GAH stops signing in with that login until it is saved again, so a bad
+password is not retried on every refresh. GAH
 stores only the email and password, so an account with an authenticator app
 needs a reconnect through the desktop window instead.
 

@@ -40,6 +40,10 @@ struct StoredCredential {
     /// secret drops it; it never enters execution or public output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session: Option<String>,
+    /// Fixed-text `auth_required` reason Mistral gave for this revision's
+    /// login. Set, it stops repeat sign-ins until the login is saved again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    login_rejected: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -349,6 +353,7 @@ fn save_with_quota_at(
             secret: secret.to_owned(),
             revision: uuid::Uuid::new_v4().to_string(),
             session: None,
+            login_rejected: None,
         },
     )?;
     let _guard = source_lock(root, &info.id)?;
@@ -381,12 +386,32 @@ fn write_private(root: &Path, stored: &StoredCredential) -> Result<tempfile::Nam
 /// Cache a freshly signed-in session without changing the source revision.
 /// A rotation or removal since `revision` was read discards the session.
 pub(crate) fn cache_session_at(root: &Path, id: &str, revision: &str, session: &str) -> Result<()> {
+    update_revision_at(root, id, revision, |stored| {
+        stored.session = Some(session.to_owned())
+    })
+}
+
+/// Remember that Mistral refused this revision's login, so refreshes stop
+/// signing in until a new login is saved (which starts a new revision).
+pub(crate) fn reject_login_at(root: &Path, id: &str, revision: &str, reason: &str) -> Result<()> {
+    update_revision_at(root, id, revision, |stored| {
+        stored.session = None;
+        stored.login_rejected = Some(reason.to_owned());
+    })
+}
+
+fn update_revision_at(
+    root: &Path,
+    id: &str,
+    revision: &str,
+    change: impl FnOnce(&mut StoredCredential),
+) -> Result<()> {
     let _guard = source_lock(root, id)?;
     let mut stored = read_at(root, id)?;
     if stored.revision != revision {
         bail!("credential changed during quota check");
     }
-    stored.session = Some(session.to_owned());
+    change(&mut stored);
     write_private(root, &stored)?
         .persist(root.join(format!("{id}.json")))
         .map_err(|_| anyhow::anyhow!("cannot save private credential"))?;

@@ -96,22 +96,32 @@ fn refresh_mistral_login_with(
     sign_in: impl FnOnce(&str, &str) -> Result<String>,
 ) -> Result<QuotaObservationRecord> {
     let auth_required = |error: &anyhow::Error| error.to_string().starts_with("auth_required:");
+    // A refused login is not retried every refresh tick: repeated password
+    // attempts against the owner's account risk a lockout or sign-in alerts.
+    if let Some(reason) = &selected.login_rejected {
+        anyhow::bail!("{reason}; save the Mistral login again to retry");
+    }
     if let Some(session) = &selected.session {
         match refresh_cookie(session) {
             Err(error) if auth_required(&error) => {}
             other => return other,
         }
     }
+    let (id, revision) = (&selected.info.id, &selected.revision);
+    let reject = |error: anyhow::Error| {
+        super::reject_login_at(root, id, revision, &error.to_string())?;
+        Err(error)
+    };
     let login = super::mistral_login(&selected.secret)?;
-    let session = sign_in(&login.email, &login.password)?;
-    super::cache_session_at(root, &selected.info.id, &selected.revision, &session)?;
-    refresh_cookie(&session).map_err(|error| {
-        if auth_required(&error) {
-            anyhow::anyhow!("auth_required: Mistral accepted the saved password but rejected the new dashboard session; the account may require a second factor")
-        } else {
-            error
-        }
-    })
+    let session = match sign_in(&login.email, &login.password) {
+        Err(error) if auth_required(&error) => return reject(error),
+        other => other?,
+    };
+    super::cache_session_at(root, id, revision, &session)?;
+    match refresh_cookie(&session) {
+        Err(error) if auth_required(&error) => reject(anyhow::anyhow!("auth_required: Mistral accepted the saved password but rejected the new dashboard session; the account may require a second factor")),
+        other => other,
+    }
 }
 
 // Replacing a key can change its billing account. Clear that source before the
@@ -555,5 +565,32 @@ mod tests {
         })
         .unwrap_err();
         assert!(error.to_string().contains("second factor"));
+
+        // That refusal is remembered for this revision: no repeat sign-in.
+        let stored = super::super::read_at(&root, "console").unwrap();
+        assert_eq!(stored.session, None);
+        let error = refresh_mistral_login_with(&root, &stored, dashboard("ory_session_c=3"), never)
+            .unwrap_err();
+        assert!(error.to_string().starts_with("auth_required:"));
+
+        // A wrong password is remembered the same way until the login is saved again.
+        super::super::save_at(&root, source.clone(), login).unwrap();
+        let stored = super::super::read_at(&root, "console").unwrap();
+        let wrong = |_: &str, _: &str| -> Result<String> {
+            anyhow::bail!("auth_required: Mistral rejected the saved email or password")
+        };
+        assert!(refresh_mistral_login_with(&root, &stored, dashboard("none"), wrong).is_err());
+        let stored = super::super::read_at(&root, "console").unwrap();
+        assert!(refresh_mistral_login_with(&root, &stored, dashboard("none"), never).is_err());
+
+        // A non-auth sign-in failure (outage) is not remembered.
+        super::super::save_at(&root, source.clone(), login).unwrap();
+        let stored = super::super::read_at(&root, "console").unwrap();
+        let down = |_: &str, _: &str| -> Result<String> {
+            anyhow::bail!("Mistral sign-in failed (HTTP 500)")
+        };
+        assert!(refresh_mistral_login_with(&root, &stored, dashboard("none"), down).is_err());
+        let stored = super::super::read_at(&root, "console").unwrap();
+        assert_eq!(stored.login_rejected, None);
     }
 }
