@@ -1,0 +1,56 @@
+#!/bin/bash
+cat << 'INNER' > codex_diff.patch
+--- src/runner/backends/codex.rs
++++ src/runner/backends/codex.rs
+@@ -35,16 +35,16 @@
+         .iter()
+         .any(|arg| arg.starts_with("--sandbox"))
+     {
+         cmd.arg("--sandbox").arg("workspace-write");
+-        if let Some(target) = env_vars
+-            .iter()
+-            .find(|(k, _)| k == "CARGO_TARGET_DIR")
+-            .map(|(_, v)| v)
+-        {
+-            if let Some(cache_root) = Path::new(target).parent().and_then(|p| p.parent()) {
+-                cmd.arg("--add-dir").arg(cache_root);
+-            }
+-        }
++    }
++    if let Some(target) = env_vars
++        .iter()
++        .find(|(k, _)| k == "CARGO_TARGET_DIR")
++        .map(|(_, v)| v)
++    {
++        if let Some(cache_root) = Path::new(target).parent().and_then(|p| p.parent()) {
++            cmd.arg("--add-dir").arg(cache_root);
++        }
+     }
+ 
+     cmd.args(filtered_extra)
+@@ -62,13 +62,20 @@
+         "launching codex; is it installed and on PATH?",
+     )?;
+ 
++    let mut exit_code = exit_code;
+     let output_text = fs::read_to_string(&log_path).unwrap_or_default();
+-    if output_text.contains("writing is blocked by read-only sandbox") {
+-        anyhow::bail!("Codex writes were refused. This is a configuration error: ensure codex_args includes --sandbox workspace-write with sufficient allowed directories.");
+-    }
+     let transcript_path =
+         crate::runner::review_usage::find_codex_transcript(env_vars, &output_text)
+             .map(|path| path.to_string_lossy().into_owned());
++
++    if output_text.contains("writing is blocked by read-only sandbox") {
++        let msg = "\nGAH: Codex writes were refused. This is a configuration error: ensure codex_args includes --sandbox workspace-write with sufficient allowed directories.\n";
++        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path) {
++            use std::io::Write;
++            let _ = f.write_all(msg.as_bytes());
++        }
++        if exit_code == 0 { exit_code = 1; }
++    }
+     Ok(RunResult {
+         exit_code,
+         duration_secs,
+INNER
+patch -p0 < codex_diff.patch
