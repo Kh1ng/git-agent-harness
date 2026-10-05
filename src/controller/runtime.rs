@@ -386,7 +386,7 @@ pub fn run_once(
                 | NextAction::NoOp { .. }
         )
         .then(|| no_admission_diagnostics(&snapshot, 0, 1, None));
-        record_stop_event(
+        let newly_reported = record_stop_event(
             cfg,
             profile_name,
             &history,
@@ -400,7 +400,7 @@ pub fn run_once(
                 "{}",
                 serde_json::to_string_pretty(&LoopOnceResult { action, outcome })?
             );
-        } else {
+        } else if newly_reported {
             println!("Decided: {} -- {}", action.kind(), action.reason());
             println!("{outcome}");
             if let Some(note) = admission_note {
@@ -414,7 +414,8 @@ pub fn run_once(
 /// Record the stop event for a wait/human-required/no-op action. A repeated
 /// human-required report is suppressed (issue #1381), and human-required
 /// events always persist their reason code and remediation plan so the
-/// deduplication can recognise them on the next tick.
+/// deduplication can recognise them on the next tick. Returns false when the
+/// report was a repeat, so callers can suppress repeated text output too.
 fn record_stop_event(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
@@ -422,9 +423,9 @@ fn record_stop_event(
     action: &NextAction,
     stop_event_type: crate::events::EventType,
     outcome: &str,
-) -> Result<()> {
+) -> Result<bool> {
     if human_required_already_reported(history, profile_name, action) {
-        return Ok(());
+        return Ok(false);
     }
     if matches!(action, NextAction::HumanRequired { .. }) {
         crate::events::record_with_reason_code_and_plan(
@@ -435,7 +436,8 @@ fn record_stop_event(
             outcome,
             action.human_required_reason_code(),
             remediation_plan_for_action(cfg, profile_name, action).as_ref(),
-        )
+        )?;
+        Ok(true)
     } else {
         crate::events::record(
             cfg,
@@ -443,7 +445,8 @@ fn record_stop_event(
             Some(profile_name),
             action.work_id(),
             outcome,
-        )
+        )?;
+        Ok(true)
     }
 }
 
@@ -477,6 +480,8 @@ fn run_parallel_once(
     let mut results: Vec<(usize, LoopOnceResult)> = Vec::new();
     // Issue #1381: why the most recent fill attempt admitted nothing.
     let mut no_admission_note: Option<String> = None;
+    // Sequences whose human-required stop repeated the previous tick's report.
+    let mut repeated_stop_sequences: HashSet<usize> = HashSet::new();
 
     fn observe_snapshot(
         cfg: &crate::config::GahConfig,
@@ -806,14 +811,16 @@ fn run_parallel_once(
                             _ => unreachable!(),
                         };
                         let history = crate::events::read_events(cfg)?;
-                        record_stop_event(
+                        if !record_stop_event(
                             cfg,
                             profile_name,
                             &history,
                             &action,
                             stop_event_type,
                             &outcome,
-                        )?;
+                        )? {
+                            repeated_stop_sequences.insert(next_sequence);
+                        }
 
                         results.push((next_sequence, LoopOnceResult { action, outcome }));
                     }
@@ -868,14 +875,22 @@ fn run_parallel_once(
     })?;
 
     results.sort_by_key(|(sequence, _)| *sequence);
-    let results: Vec<LoopOnceResult> = results.into_iter().map(|(_, result)| result).collect();
+    let (reported, results): (Vec<bool>, Vec<LoopOnceResult>) = results
+        .into_iter()
+        .map(|(sequence, result)| (!repeated_stop_sequences.contains(&sequence), result))
+        .unzip();
 
     // Output results
     if json {
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
-        for (i, result) in results.iter().enumerate() {
-            if i > 0 {
+        for (printed, (result, _)) in results
+            .iter()
+            .zip(&reported)
+            .filter(|(_, new)| **new)
+            .enumerate()
+        {
+            if printed > 0 {
                 println!("---");
             }
             println!(
@@ -1433,9 +1448,9 @@ default_target_branch = "main"
             reference: Some("branch-A".into()),
             reason_code: Some("fix_retry_cap_exceeded".into()),
         };
-        for _ in 0..3 {
+        for tick in 0..3 {
             let history = crate::events::read_events(&cfg).unwrap();
-            super::record_stop_event(
+            let newly_reported = super::record_stop_event(
                 &cfg,
                 "real",
                 &history,
@@ -1444,6 +1459,7 @@ default_target_branch = "main"
                 "Human required: fix cap exceeded (branch-A) [code=fix_retry_cap_exceeded]",
             )
             .unwrap();
+            assert_eq!(newly_reported, tick == 0, "tick {tick} must report once");
         }
         let events = crate::events::read_events(&cfg).unwrap();
         assert_eq!(events.len(), 1, "{events:?}");
