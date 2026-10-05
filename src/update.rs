@@ -28,7 +28,7 @@ pub struct UpdateArgs {
 pub fn run(args: UpdateArgs) -> Result<()> {
     units::UnitValues::ensure_installing_account()?;
     if args.role == HostRole::Worker && args.restart_server {
-        bail!("--restart-server requires --role central; a worker never runs gah-server.service");
+        bail!("--restart-server requires --role central or standalone; a worker never runs gah-server.service");
     }
 
     let repo = resolve_repo(args.repo.as_deref())?;
@@ -84,7 +84,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         )?;
     }
 
-    if args.role == HostRole::Central {
+    if matches!(args.role, HostRole::Central | HostRole::Standalone) {
         // The control-plane server is part of the MVP; web/desktop/mobile
         // clients intentionally have independent release workflows. A
         // worker node dispatches jobs only and never serves this.
@@ -249,7 +249,9 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             &["is-active", "--quiet", &args.server_service],
         )?;
         println!("Restarted service: {}", args.server_service);
-    } else if args.role == HostRole::Central && !cfg!(target_os = "macos") {
+    } else if matches!(args.role, HostRole::Central | HostRole::Standalone)
+        && !cfg!(target_os = "macos")
+    {
         println!(
             "Server not restarted; pass --restart-server when this host serves the control plane."
         );
@@ -281,6 +283,7 @@ fn install_macos_launch_agent(repo: &Path, role: HostRole) -> Result<Option<Path
     };
     let role_name = match role {
         HostRole::Central => "central",
+        HostRole::Standalone => "standalone",
         HostRole::Worker => "worker",
     };
     run_command(
@@ -295,7 +298,7 @@ fn install_macos_launch_agent(repo: &Path, role: HostRole) -> Result<Option<Path
         ],
     )?;
     let label = match role {
-        HostRole::Central => "dev.git-agent-harness.server.plist",
+        HostRole::Central | HostRole::Standalone => "dev.git-agent-harness.server.plist",
         HostRole::Worker => "dev.git-agent-harness.worker.plist",
     };
     let target = env::var_os("HOME")

@@ -1959,7 +1959,7 @@ function GatewaySettingsSection({ configuredProfiles }: { configuredProfiles: Pr
 export function AddNodeSection() {
   const [centralUrl, setCentralUrl] = useState(window.location.origin);
   const [os, setOs] = useState<'windows' | 'linux' | 'macos'>('windows');
-  const [role, setRole] = useState<'desktop' | 'worker' | 'both' | 'central'>('both');
+  const [role, setRole] = useState<'desktop' | 'worker' | 'both' | 'central' | 'standalone'>('both');
   const [gatewayUrl, setGatewayUrl] = useState('');
   const osName = { windows: 'Windows', linux: 'Linux', macos: 'macOS' }[os];
   const [command, setCommand] = useState('');
@@ -1969,7 +1969,7 @@ export function AddNodeSection() {
   const reveal = async () => {
     setBusy(true); setError(''); setCommand(''); setCopied(false);
     try {
-      setCommand((await gahApi.getNodeSetupCommand({ os, centralUrl, role, ...(role === 'central' && gatewayUrl ? { gatewayUrl } : {}) })).command);
+      setCommand((await gahApi.getNodeSetupCommand({ os, centralUrl, role, ...((role === 'central' || role === 'standalone') && gatewayUrl ? { gatewayUrl } : {}) })).command);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setBusy(false); }
   };
@@ -1982,7 +1982,7 @@ export function AddNodeSection() {
           <option value="windows">Windows</option><option value="linux">Linux</option><option value="macos">macOS</option>
         </select>
       </label>
-      {role !== 'central' && <label className="block text-xs text-secondary mb-3">Central LAN or VPN address
+      {role !== 'central' && role !== 'standalone' && <label className="block text-xs text-secondary mb-3">Central LAN or VPN address
         <input disabled={busy} type="url" className="input w-full mt-1 min-h-11" value={centralUrl} onChange={(event) => { setCentralUrl(event.target.value); setCommand(''); }} placeholder="http://192.168.1.10:3773" />
       </label>}
       <label className="block text-xs text-secondary mb-3">Install
@@ -1993,11 +1993,14 @@ export function AddNodeSection() {
             <option value="worker">Headless WSL worker only</option>
           </> : <>
             <option value="worker">Worker CLI</option>
-            {os === 'linux' && <option value="central">Central server</option>}
+            {os === 'linux' && <>
+              <option value="central">Networked central server</option>
+              <option value="standalone">Standalone central server (local-only)</option>
+            </>}
           </>}
         </select>
       </label>
-      {role === 'central' && <label className="block text-xs text-secondary mb-3">Remote memory gateway (optional)
+      {(role === 'central' || role === 'standalone') && <label className="block text-xs text-secondary mb-3">Remote memory gateway (optional)
         <input disabled={busy} type="url" className="input w-full mt-1 min-h-11" value={gatewayUrl} onChange={(event) => { setGatewayUrl(event.target.value); setCommand(''); }} placeholder="https://memory.example.com" />
       </label>}
       {os === 'windows' ? <p className="text-xs text-muted mb-3">For remote access, save your token in Central access token above first. The generated command contains that token; use it only on a computer you trust.</p>

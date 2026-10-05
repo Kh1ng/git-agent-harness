@@ -68,7 +68,7 @@ function browserToken(req: IncomingMessage): string | null {
 
 /** Reject unauthorized upgrades before a socket can receive welcome data or invoke handlers.
  * Native fleet clients retain Authorization; browsers send a non-echoed credential protocol. */
-export function createAuthorizedWebSocketServer(server: Server, role?: 'central' | 'worker', access?: DeviceAccess, now = Date.now): WebSocketServer {
+export function createAuthorizedWebSocketServer(server: Server, role?: 'central' | 'standalone' | 'worker', access?: DeviceAccess, now = Date.now): WebSocketServer {
   const compatibilityRequests = new WeakSet<IncomingMessage>();
   const deviceRequests = new WeakMap<IncomingMessage, { id: string; expires_at: string }>();
   const wss = new WebSocketServer({

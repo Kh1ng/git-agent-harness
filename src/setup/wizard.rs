@@ -4,7 +4,7 @@
 //! `scripts/install.sh`, adds the first project, and ends with what was set
 //! up and how to add the rest later.
 
-use super::host::{self, Host};
+use super::host::{self, Host, Os};
 use super::project;
 use super::requirements::{
     self, Action, ActionKind, Agent, MemoryMode, Provider, Requirement, Role, Selection, Status,
@@ -121,19 +121,43 @@ impl<'a> Setup<'a> {
         say(&mut self, "");
 
         // 1. What is this machine for?
+        // #1318: node networking is opt-in. On Linux -- where the loopback-only
+        // standalone role is supported -- accepting the default sets up the
+        // local machine; a networked role (central or worker) is an explicit
+        // choice. macOS has no standalone support yet, so its default stays
+        // the central role and standalone remains an explicit choice.
         let role = match self.options.role {
             Some(role) => role,
             None => {
-                let options = [
-                    "My main machine: dashboard, chats, and phone control (central node)"
-                        .to_string(),
-                    "A worker that runs jobs for a central node I already have".to_string(),
-                    "Just the command line, no server".to_string(),
-                ];
-                [Role::Central, Role::Worker, Role::CliOnly]
-                    [self.ask_choice("What is this machine for?", &options, 0)?]
+                let (options, roles) = if self.host.os() == Os::Linux {
+                    (
+                        [
+                            "A local dashboard and worker on this machine (standalone)".to_string(),
+                            "My main machine: dashboard, chats, and phone control (central node)"
+                                .to_string(),
+                            "A worker that runs jobs for a central node I already have".to_string(),
+                            "Just the command line, no server".to_string(),
+                        ],
+                        [Role::Standalone, Role::Central, Role::Worker, Role::CliOnly],
+                    )
+                } else {
+                    (
+                        [
+                            "My main machine: dashboard, chats, and phone control (central node)"
+                                .to_string(),
+                            "A worker that runs jobs for a central node I already have".to_string(),
+                            "Just the command line, no server".to_string(),
+                            "A local dashboard and worker on this machine (standalone)".to_string(),
+                        ],
+                        [Role::Central, Role::Worker, Role::CliOnly, Role::Standalone],
+                    )
+                };
+                roles[self.ask_choice("What is this machine for?", &options, 0)?]
             }
         };
+        if role == Role::Standalone && self.host.os() != Os::Linux {
+            bail!("Standalone setup requires Linux.");
+        }
 
         // 2. A repository to work on names its provider.
         // A worker's projects come from the central dashboard (Chat → import).
@@ -192,7 +216,7 @@ impl<'a> Setup<'a> {
         let mut memory = MemoryMode::Off;
         match role {
             Role::Worker => self.worker_settings(&mut env)?,
-            Role::Central => memory = self.memory_settings(&mut env)?,
+            Role::Central | Role::Standalone => memory = self.memory_settings(&mut env)?,
             Role::CliOnly => {}
         }
         let selection = Selection {
@@ -490,7 +514,7 @@ impl<'a> Setup<'a> {
                 "cargo metadata --locked --format-version 1 >/dev/null && cargo install --path . --force --locked".to_string(),
                 "Build and install the gah command",
             ),
-            Role::Central | Role::Worker => (
+            Role::Central | Role::Standalone | Role::Worker => (
                 "scripts/install.sh".to_string(),
                 "Build GAH and install its background service",
             ),
@@ -510,6 +534,7 @@ impl<'a> Setup<'a> {
             "GAH_NODE_ROLE",
             match selection.role {
                 Role::Worker => "worker",
+                Role::Standalone => "standalone",
                 _ => "central",
             }
             .to_string(),
@@ -545,7 +570,9 @@ impl<'a> Setup<'a> {
                 self.prompter
                     .say(&format!("  · {}: {how}", requirement.label));
             }
-            if selection.role == Role::Central && selection.memory == MemoryMode::Off {
+            if matches!(selection.role, Role::Central | Role::Standalone)
+                && selection.memory == MemoryMode::Off
+            {
                 self.prompter
                     .say("  · Shared memory: gah setup --memory colocated (or --memory remote)");
             }
@@ -559,6 +586,9 @@ impl<'a> Setup<'a> {
                 self.prompter
                     .say("  · Add a worker from Settings → Add a Node.");
             }
+            Role::Standalone => self
+                .prompter
+                .say("  · Open the dashboard at http://127.0.0.1:3773."),
             Role::Worker => self
                 .prompter
                 .say("  · This worker appears under Nodes on the central dashboard."),
@@ -739,7 +769,7 @@ mod tests {
     fn a_ready_central_machine_asks_three_questions_then_installs() {
         let host = ready_host();
         let mut prompter = Script {
-            answers: ["0", "", "0", "0", "0", "y"].map(String::from).into(),
+            answers: ["1", "", "0", "0", "0", "y"].map(String::from).into(),
             ..Default::default()
         };
         let mut effects = Recorder::default();
@@ -766,6 +796,70 @@ mod tests {
                 .any(|line| line.contains("Shared memory: gah setup --memory")),
             "skipped memory says how to add it"
         );
+    }
+
+    #[test]
+    fn accepting_the_default_role_sets_up_standalone_so_networking_is_opt_in() {
+        let host = ready_host();
+        let mut prompter = Script {
+            answers: ["0", "", "0", "0", "0", "y"].map(String::from).into(),
+            ..Default::default()
+        };
+        let mut effects = Recorder::default();
+        Setup {
+            host: &host,
+            prompter: &mut prompter,
+            effects: &mut effects,
+            options: Options {
+                provider: None,
+                source: PathBuf::from("/src"),
+                ..Default::default()
+            },
+        }
+        .run()
+        .unwrap();
+        assert_eq!(effects.commands[0].0, "scripts/install.sh");
+        assert!(effects.commands[0]
+            .1
+            .contains(&("GAH_NODE_ROLE".into(), "standalone".into())));
+        assert!(prompter
+            .said
+            .iter()
+            .any(|line| line.contains("http://127.0.0.1:3773")));
+    }
+
+    #[test]
+    fn standalone_setup_installs_the_local_control_plane() {
+        let host = ready_host();
+        let mut prompter = Script {
+            answers: [""].map(String::from).into(),
+            ..Default::default()
+        };
+        let mut effects = Recorder::default();
+        Setup {
+            host: &host,
+            prompter: &mut prompter,
+            effects: &mut effects,
+            options: Options {
+                role: Some(Role::Standalone),
+                agent: Some(Agent::Claude),
+                provider: Some(Provider::Github),
+                memory: Some(MemoryMode::Off),
+                source: PathBuf::from("/src"),
+                yes: true,
+                ..Default::default()
+            },
+        }
+        .run()
+        .unwrap();
+        assert_eq!(effects.commands[0].0, "scripts/install.sh");
+        assert!(effects.commands[0]
+            .1
+            .contains(&("GAH_NODE_ROLE".into(), "standalone".into())));
+        assert!(prompter
+            .said
+            .iter()
+            .any(|line| line.contains("http://127.0.0.1:3773")));
     }
 
     #[test]
@@ -852,7 +946,7 @@ mod tests {
     fn a_worker_checks_its_central_node_before_building() {
         let host = ready_host();
         let mut prompter = Script {
-            answers: ["1", "0", "0", "https://central.example/", "token-123", "y"]
+            answers: ["2", "0", "0", "https://central.example/", "token-123", "y"]
                 .map(String::from)
                 .into(),
             ..Default::default()
@@ -885,7 +979,7 @@ mod tests {
         assert!(env.contains(&("COORDINATOR_TOKEN".into(), "token-123".into())));
 
         let mut prompter = Script {
-            answers: ["1", "0", "0", "https://central.example", "bad"]
+            answers: ["2", "0", "0", "https://central.example", "bad"]
                 .map(String::from)
                 .into(),
             ..Default::default()
