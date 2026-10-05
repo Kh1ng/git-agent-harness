@@ -61,15 +61,31 @@ fn configured_home_path_re(home: &str) -> Option<regex::Regex> {
 /// /Users, and /root roots then remain as defense-in-depth.
 pub(super) fn publication_body(body: &str) -> String {
     let redacted = crate::redact::redact(body);
-    let redacted = match operator_home().as_deref().and_then(configured_home_path_re) {
-        Some(home_re) => home_re
-            .replace_all(&redacted, "[local path removed]")
-            .into_owned(),
-        None => redacted,
+    // Web URL paths can resemble local home paths. Apply both home filters
+    // only outside HTTP(S) links; file URLs still contain local paths.
+    static WEB_URL_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let web_url_re = WEB_URL_RE.get_or_init(|| {
+        regex::Regex::new(r#"(?i)https?://[^\s`"'<>]+"#).expect("valid web URL regex")
+    });
+    let home_re = operator_home().as_deref().and_then(configured_home_path_re);
+    let redact_paths = |text: &str| {
+        let text = match &home_re {
+            Some(re) => re.replace_all(text, "[local path removed]"),
+            None => std::borrow::Cow::Borrowed(text),
+        };
+        standard_home_path_re()
+            .replace_all(&text, "[local path removed]")
+            .into_owned()
     };
-    standard_home_path_re()
-        .replace_all(&redacted, "[local path removed]")
-        .into_owned()
+    let mut published = String::with_capacity(redacted.len());
+    let mut offset = 0;
+    for url in web_url_re.find_iter(&redacted) {
+        published.push_str(&redact_paths(&redacted[offset..url.start()]));
+        published.push_str(url.as_str());
+        offset = url.end();
+    }
+    published.push_str(&redact_paths(&redacted[offset..]));
+    published
 }
 
 pub(super) fn draft_mr_title(title: &str) -> String {

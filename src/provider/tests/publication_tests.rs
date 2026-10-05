@@ -44,6 +44,29 @@ fn provider_publication_bodies_remove_a_home_without_a_standard_root_prefix() {
 }
 
 #[test]
+fn provider_publication_bodies_preserve_web_urls_with_home_like_paths() {
+    let _guard = HomeOverride::set("/srv/gah-operator".to_string());
+    for url in [
+        "https://docs.example.com/root/reference",
+        "http://docs.example.com/home/operator/reference",
+        "https://docs.example.com/Users/operator/reference",
+        "https://docs.example.com/srv/gah-operator/reference",
+        "HTTPS://docs.example.com/root/reference",
+    ] {
+        let body = format!(
+            "[reference]({url}) <{url}> `{url}` local `/root/private` /srv/gah-operator/private file:///home/operator/private"
+        );
+        let published = crate::provider::publication_body(&body);
+        assert_eq!(
+            published,
+            format!(
+                "[reference]({url}) <{url}> `{url}` local `[local path removed]` [local path removed] file://[local path removed]"
+            )
+        );
+    }
+}
+
+#[test]
 fn github_mr_missing_gh_produces_actionable_error() {
     let tmp = TempDir::new().unwrap();
     let empty_bin = tmp.path().join("bin");
