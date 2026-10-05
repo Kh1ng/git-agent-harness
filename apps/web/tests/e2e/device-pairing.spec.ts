@@ -103,7 +103,7 @@ test('QR/manual pairing confirms the server, persists an HttpOnly session, and r
     await expect(phone.getByRole('heading', { name: 'Confirm this server' })).toBeVisible();
     await expect(phone.getByText('Connection error: WebSocket connection error')).toHaveCount(0);
     await expect(scanner).toHaveCount(0);
-    expect(new URL(phone.url()).searchParams.get('page')).toBe('settings');
+    expect(new URL(phone.url()).searchParams.get('side')).toBe('settings');
     await expect(phone.getByText(`Pairing test central · ${origin}`, { exact: true })).toBeVisible();
     await expect(phone.getByText(/Dashboard control: read projects and chats, run agent work/)).toBeVisible();
     await expect(phone.getByText(/permits unencrypted HTTP/)).toBeVisible();

@@ -112,8 +112,9 @@ test('replay de-duplicates durable activity', async ({ page }) => {
   });
   await page.goto('/?page=events');
   await expect(page.getByRole('heading', { name: 'Activity', exact: true })).toBeVisible();
-  await expect(page.getByRole('listitem').filter({ hasText: 'Work finished' })).toHaveCount(1);
-  await expect(page.getByRole('listitem')).toHaveCount(3);
+  const feed = page.getByRole('complementary', { name: 'Activity' });
+  await expect(feed.getByRole('listitem').filter({ hasText: 'Work finished' })).toHaveCount(1);
+  await expect(feed.getByRole('listitem')).toHaveCount(3);
 });
 
 test('a live event is visible on the current surface and opens the feed', async ({ page }) => {
@@ -316,4 +317,61 @@ test('a push link opens its notification unread, highlighted, with delivery rece
   await expect(page).not.toHaveURL(/event=/);
   await page.getByRole('tab', { name: 'All activity' }).click();
   await expect(page.getByRole('listitem').filter({ hasText: 'Work finished' })).toHaveCount(1);
+});
+
+// Settings > Appearance > "Pop up new notifications": on, a new notification
+// opens under the bell; off, it only raises the bell's counter.
+for (const popups of [true, false]) {
+  test(`a new notification ${popups ? 'pops open under the bell' : 'only raises the bell counter when pop-ups are off'}`, async ({ page }) => {
+    if (!popups) await page.addInitScript(() => localStorage.setItem('gah-notification-popups', 'false'));
+    await page.routeWebSocket('**/ws**', (ws) => {
+      ws.send(JSON.stringify(welcome));
+      ws.onMessage((raw) => {
+        if (JSON.parse(String(raw)).type !== 'client.hello') return;
+        ws.send(JSON.stringify({ type: 'activity.replay', events: [] }));
+        ws.send(JSON.stringify({ type: 'activity.event', event: offline }));
+        ws.send(JSON.stringify({ type: 'activity.unread', count: 1 }));
+      });
+    });
+    await page.goto('/?page=overview');
+    const bell = page.getByRole('button', { name: 'Notifications', exact: true });
+    await expect(bell.getByLabel('1 unread')).toBeVisible();
+    const popup = page.getByRole('complementary', { name: 'New activity' });
+    if (popups) {
+      await expect(popup).toContainText('Mac worker is offline');
+      await expect(popup).toHaveCount(0, { timeout: 6000 });
+    } else {
+      await page.waitForTimeout(500);
+      await expect(popup).toHaveCount(0);
+    }
+    // The switch lives in Settings and is found by search.
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('searchbox', { name: 'Search settings' }).fill('popup');
+    await page.getByRole('list', { name: 'Matching settings' }).getByRole('button', { name: /Appearance/ }).click();
+    const toggle = page.getByRole('checkbox', { name: /Pop up new notifications/ });
+    if (popups) await expect(toggle).toBeChecked(); else await expect(toggle).not.toBeChecked();
+  });
+}
+
+test('closing the Activity sidebar does not pop open a notification it already showed', async ({ page }) => {
+  // Only on the socket, so seeing it in the sidebar proves the live event arrived.
+  const live = { ...offline, id: 'evt-live-only', title: 'Live-only notice' };
+  await page.routeWebSocket('**/ws**', (ws) => {
+    ws.send(JSON.stringify(welcome));
+    ws.onMessage((raw) => {
+      if (JSON.parse(String(raw)).type !== 'client.hello') return;
+      ws.send(JSON.stringify({ type: 'activity.replay', events: [] }));
+      ws.send(JSON.stringify({ type: 'activity.event', event: live }));
+    });
+  });
+  // The notification arrives while the Activity sidebar is open: it shows there, not under the bell.
+  await page.goto('/?page=overview&side=events');
+  const popup = page.getByRole('complementary', { name: 'New activity' });
+  await expect(page.getByRole('complementary', { name: 'Activity' })).toContainText('Live-only notice');
+  expect(await popup.count()).toBe(0);
+  await page.getByRole('navigation', { name: 'Sidebar' }).getByRole('button', { name: 'Activity', exact: true }).click();
+  await expect(page).not.toHaveURL(/[?&]side=events/);
+  await page.waitForTimeout(500);
+  // Not a retrying assertion: a pop-up folds away by itself after a few seconds.
+  expect(await popup.count()).toBe(0);
 });

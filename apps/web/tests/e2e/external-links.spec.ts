@@ -16,11 +16,11 @@ const ROUTES: Route[] = [
   { path: '/', marker: (page) => page.getByRole('heading', { name: 'Overview' }) },
   { path: '/?page=chat&profile=fixture&chat=default', marker: (page) => page.getByRole('button', { name: /Mock session/ }) },
   { path: '/?page=git&profile=fixture', marker: (page) => page.getByRole('heading', { name: 'Git' }) },
-  { path: '/?page=nodes', marker: (page) => page.getByRole('heading', { name: 'Nodes' }) },
+  { path: '/?page=nodes', marker: (page) => page.getByRole('heading', { name: 'Fleet' }) },
   { path: '/?page=work&profile=fixture', marker: (page) => page.getByRole('heading', { name: 'Factory' }) },
   { path: '/?page=telemetry&profile=fixture', marker: (page) => page.getByRole('heading', { name: 'Telemetry' }) },
   { path: '/?page=quota&profile=fixture', marker: (page) => page.getByRole('heading', { name: 'Quota' }) },
-  { path: '/?page=activity&profile=fixture', marker: (page) => page.getByRole('heading', { name: 'Activity' }) },
+  { path: '/?page=events&profile=fixture', marker: (page) => page.getByRole('heading', { name: 'Activity', exact: true }) },
   { path: '/?page=settings', marker: (page) => page.getByRole('heading', { name: 'Settings' }) },
 ];
 

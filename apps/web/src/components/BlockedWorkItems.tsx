@@ -22,7 +22,7 @@ export function BlockedWorkItems({ blockers, onOpenWork }: { blockers: Blocker[]
   );
 }
 
-function BlockedWorkItem({ blocker, onOpenWork }: { blocker: Blocker; onOpenWork?: (workId: string) => void }) {
+export function BlockedWorkItem({ blocker, onOpenWork }: { blocker: Blocker; onOpenWork?: (workId: string) => void }) {
   const [copied, setCopied] = useState<string | null>(null);
   const [clearing, setClearing] = useState(false);
   const [error, setError] = useState<string | null>(null);

@@ -4,6 +4,7 @@ import type { ChatNodeInfo, ChatSessionSummary, ProfileSummary, ProjectSummary }
 import { formatChatName } from '../lib/format.js';
 import { BoundedCollection } from './BoundedCollection.js';
 import { projectKey } from '@git-agent-harness/contracts';
+import { useUiStore } from '../store/uiStore.js';
 import { gahApi } from '../api/client.js';
 
 /**
@@ -63,6 +64,15 @@ export function ProjectRail({
   const archivedSessions = sessions.filter((session) => session.outcome !== 'live');
   const sessionClasses = (active: boolean) =>
     `block w-full rounded-md px-2 py-1.5 text-left ${active ? 'bg-accent/15' : 'hover:bg-white/5'}`;
+
+  const pendingAction = useUiStore((state) => state.pendingAction);
+  const requestAction = useUiStore((state) => state.requestAction);
+  const [importOpen, setImportOpen] = useState(false);
+  useEffect(() => {
+    if (pendingAction !== 'import') return;
+    setImportOpen(true);
+    requestAction(null);
+  }, [pendingAction, requestAction]);
 
   const importProject = async () => {
     if (!gitUrl.trim()) return;
@@ -183,7 +193,7 @@ export function ProjectRail({
       </section>
 
       <div className="mt-4 border-t border-subtle pt-3 space-y-2">
-        <details className="pt-1">
+        <details className="pt-1" open={importOpen} onToggle={(event) => setImportOpen(event.currentTarget.open)}>
           <summary className="cursor-pointer select-none text-xs font-medium text-secondary hover:text-primary">Import from Git</summary>
           <div className="mt-2 space-y-2">
             <label className="block space-y-1 text-xs text-secondary">

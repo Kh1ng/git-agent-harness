@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { createAuthorizedWebSocketServer } from './webSocketAuth.js';
+import { startModelPriceRefresh } from './modelPricing.js';
+import { helperPriceExtractor } from './modelPriceHelper.js';
 import { DeviceAccess } from './deviceAccess.js';
 import { createServer as createExpressServer, initializeSkillBank } from './server.js';
 import { createServer as createHttpServer } from 'http';
@@ -177,6 +179,8 @@ async function main() {
   // Start HTTP server
   server.listen(PORT, HOST, () => {
     logLifecycle(`Git Agent Harness server listening on ${HOST}:${PORT}`);
+    // Model prices: checked a few seconds after start when a day old, then daily.
+    if (process.env.GAH_DISABLE_PRICE_REFRESH !== '1') startModelPriceRefresh(helperPriceExtractor('gah'), logLifecycle);
     console.log(`WebSocket server available on ws://${HOST}:${PORT}`);
     console.log(`Health check available on http://${HOST}:${PORT}/health`);
     const warning = networkExposureWarning(HOST);

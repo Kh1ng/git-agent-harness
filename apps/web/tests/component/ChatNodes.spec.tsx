@@ -1,6 +1,6 @@
-import { expect, test } from '@playwright/experimental-ct-react';
+import { expect, test, type Locator } from '@playwright/experimental-ct-react';
 import React from 'react';
-import { NewChatModal, type ChatProfile } from '../../src/components/NewChatModal.js';
+import { NewChatPanel, type ChatProfile } from '../../src/components/NewChatPanel.js';
 
 const local: ChatProfile = {
   name: 'gah', display_name: 'Local project', repo: 'owner/gah', provider: 'github', local_path: '/tmp/gah',
@@ -15,6 +15,12 @@ const nodes = [
   { nodeId: 'stale', displayName: 'Offline laptop', role: 'worker', chatCapable: false, eligible: false, reason: 'Observation is stale', lastSeenAt: null }
 ];
 const backends = [{ id: 'claude', displayName: 'Claude', implemented: true }];
+
+/** Project, node and provider sit behind "Extra settings"; a node problem opens it on its own. */
+async function openExtras(panel: Locator): Promise<void> {
+  const details = panel.locator('details');
+  if (!await details.evaluate((element) => (element as HTMLDetailsElement).open)) await details.locator('summary').click();
+}
 
 for (const source of ['issue', 'pr'] as const) {
   test(`${source} creation replaces an offline owner and preserves the chosen node and account`, async ({ mount, page }) => {
@@ -32,9 +38,10 @@ for (const source of ['issue', 'pr'] as const) {
       return route.fulfill({ json: { models: [], currentModelId: null } });
     });
     const project: ChatProfile = { ...remote, name: 'gah-node:stale:remote', node_id: 'stale' };
-    const modal = await mount(<NewChatModal open currentProfile={project.name} profiles={[project]} backends={backends}
+    const modal = await mount(<NewChatPanel currentProfile={project.name} profiles={[project]} backends={backends}
       onClose={() => {}} onCreated={() => {}} />);
     await modal.getByRole('tab', { name: source === 'issue' ? 'From issue' : 'From PR' }).click();
+    await openExtras(modal);
     const picker = modal.getByRole('combobox', { name: 'Run on node' });
     await expect(picker).toHaveValue('central');
     await picker.selectOption('worker');
@@ -63,7 +70,7 @@ test('node readiness retries, unavailable workers stay disabled, and remote crea
     }
     return route.fulfill({ json: {} });
   });
-  const modal = await mount(<NewChatModal open currentProfile="gah" profiles={[local, remote]} backends={backends}
+  const modal = await mount(<NewChatPanel currentProfile="gah" profiles={[local, remote]} backends={backends}
     onClose={() => {}} onCreated={() => {}} />);
   await expect(modal.getByRole('button', { name: 'Retry nodes' })).toBeVisible();
   await expect(modal.getByRole('button', { name: 'Start chat' })).toBeDisabled();
@@ -106,9 +113,10 @@ test('a late node response cannot replace the newly selected project readiness',
     if (url.pathname.endsWith('/settings')) return route.fulfill({ json: { profileOverrides: {}, defaultBackend: 'claude' } });
     return route.fulfill({ json: { models: [], currentModelId: null } });
   });
-  const modal = await mount(<NewChatModal open currentProfile="gah" profiles={[local, remote]} backends={backends}
+  const modal = await mount(<NewChatPanel currentProfile="gah" profiles={[local, remote]} backends={backends}
     onClose={() => {}} onCreated={() => {}} />);
   await expect.poll(() => pending.length).toBeGreaterThan(0);
+  await openExtras(modal);
   await modal.getByRole('button', { name: 'Remote project' }).click();
   const picker = modal.getByRole('combobox', { name: 'Run on node' });
   await expect(picker).toHaveValue('worker');
@@ -126,8 +134,9 @@ test('a project whose owner is unavailable defaults to an eligible node (#1275)'
     return route.fulfill({ json: {} });
   });
   const ownedByStale: ChatProfile = { ...local, node_id: 'stale' };
-  const modal = await mount(<NewChatModal open currentProfile="gah" profiles={[ownedByStale]} backends={backends}
+  const modal = await mount(<NewChatPanel currentProfile="gah" profiles={[ownedByStale]} backends={backends}
     onClose={() => {}} onCreated={() => {}} />);
+  await openExtras(modal);
   await expect(modal.getByRole('combobox', { name: 'Run on node' })).toHaveValue('central');
   await modal.getByRole('textbox', { name: 'Chat name' }).fill('Blank chat');
   await expect(modal.getByRole('button', { name: 'Start chat' })).toBeEnabled();
@@ -147,9 +156,10 @@ test('a worker-only project starts a chat from an issue (#1276)', async ({ mount
     }
     return route.fulfill({ json: {} });
   });
-  const modal = await mount(<NewChatModal open currentProfile={remote.name} profiles={[remote]} backends={backends}
+  const modal = await mount(<NewChatPanel currentProfile={remote.name} profiles={[remote]} backends={backends}
     onClose={() => {}} onCreated={() => {}} />);
   await modal.getByRole('tab', { name: 'From issue' }).click();
+  await openExtras(modal);
   await expect(modal.getByRole('combobox', { name: 'Run on node' })).toHaveValue('worker');
   // Picking an issue starts the chat immediately.
   await modal.getByText('Worker bug').click();
@@ -170,9 +180,10 @@ test('a worker-only project starts a chat from a pull request (#1276)', async ({
     }
     return route.fulfill({ json: {} });
   });
-  const modal = await mount(<NewChatModal open currentProfile={remote.name} profiles={[remote]} backends={backends}
+  const modal = await mount(<NewChatPanel currentProfile={remote.name} profiles={[remote]} backends={backends}
     onClose={() => {}} onCreated={() => {}} />);
   await modal.getByRole('tab', { name: 'From PR' }).click();
+  await openExtras(modal);
   await expect(modal.getByRole('combobox', { name: 'Run on node' })).toHaveValue('worker');
   await modal.getByText('Worker fix').click();
   await expect.poll(() => started).toMatchObject({ profile: remote.name, prNumber: 9, backend: 'claude' });

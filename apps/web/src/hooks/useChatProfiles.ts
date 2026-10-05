@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { gahApi } from '../api/client.js';
-import type { ChatProfile } from '../components/NewChatModal.js';
+import type { ChatProfile } from '../components/NewChatPanel.js';
 import type { ProjectSummary } from '@git-agent-harness/contracts';
 
 export function toChatProfile(project: ProjectSummary): ChatProfile {
