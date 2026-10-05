@@ -618,7 +618,7 @@ fn task_rule_dimension_matches(values: &[String], value: Option<&str>) -> bool {
         || value.is_some_and(|value| values.iter().any(|item| item.eq_ignore_ascii_case(value)))
 }
 
-fn route_candidates(
+pub(super) fn route_candidates(
     routing: &RoutingPolicy,
     raw: &[crate::config::CandidateConfig],
 ) -> Vec<RouteCandidate> {

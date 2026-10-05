@@ -5,7 +5,8 @@ use super::policy::{
     any_available_backend, append_reorder_reason, auto_candidates, builtin_backend,
     configured_route_candidate, configured_route_requires_approval, is_genuine_agent_failure,
     order_candidates, policy_backend_model, policy_candidates, review_fallback_backend,
-    review_fallback_model, same_destination, task_rule_candidates, RouteCandidate,
+    review_fallback_model, route_candidates, same_destination, task_rule_candidates,
+    RouteCandidate,
 };
 use super::reservation::max_concurrent_skip;
 use super::types::{
@@ -23,6 +24,8 @@ use std::path::Path;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+#[cfg(test)]
+mod allowed_models_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -304,7 +307,17 @@ where
     let requested_model = req.requested_model.map(str::to_string);
     let effective_routing = profile.effective_routing(defaults);
 
+    let allowed_models = effective_routing.allowed_models_for(req.mode);
+
     if req.requested_backend != "auto" {
+        if !effective_routing.allows_model(req.mode, req.requested_backend, req.requested_model) {
+            anyhow::bail!(
+                "{}/{} is not in routing.allowed_models for {} jobs on this profile",
+                req.requested_backend,
+                req.requested_model.unwrap_or("default"),
+                req.mode
+            );
+        }
         // No auto_model_override is ever applied on this path (it only
         // triggers for requested_backend == "auto"), so the candidate list
         // is never consulted here.
@@ -322,8 +335,10 @@ where
         .map(|decision| (decision, Vec::new()));
     }
 
+    // An allow-listed job kind routes only within its list, so class-specific
+    // rules and the ordinary pools below do not apply to it.
     if let Some((rule_index, candidates)) = task_rule_candidates(&effective_routing, req.mode, task)
-        .filter(|(_, list)| !list.is_empty())
+        .filter(|(_, list)| !list.is_empty() && allowed_models.is_none())
     {
         let escalate =
             is_genuine_agent_failure(req.last_failure_class) || !runtime.attempted.is_empty();
@@ -385,18 +400,20 @@ where
 
     let mut is_profile_policy = false;
 
-    let candidates =
-        if let Some(c) = policy_candidates(&profile.routing, req.mode).filter(|l| !l.is_empty()) {
-            is_profile_policy = true;
-            Some(c)
-        } else if policy_candidates(&defaults.routing, req.mode)
-            .filter(|l| !l.is_empty())
-            .is_some()
-        {
-            policy_candidates(&effective_routing, req.mode).filter(|l| !l.is_empty())
-        } else {
-            None
-        };
+    let candidates = if let Some(allowed) = allowed_models {
+        Some(route_candidates(&effective_routing, allowed))
+    } else if let Some(c) = policy_candidates(&profile.routing, req.mode).filter(|l| !l.is_empty())
+    {
+        is_profile_policy = true;
+        Some(c)
+    } else if policy_candidates(&defaults.routing, req.mode)
+        .filter(|l| !l.is_empty())
+        .is_some()
+    {
+        policy_candidates(&effective_routing, req.mode).filter(|l| !l.is_empty())
+    } else {
+        None
+    };
 
     if let Some(candidates) = candidates {
         let escalate =
@@ -418,7 +435,9 @@ where
         let mut fallback_used = false;
         let mut confidence_impact = None;
         let mut human_required = false;
-        let mut reason = if is_profile_policy {
+        let mut reason = if allowed_models.is_some() {
+            format!("allowed models for {} jobs", req.mode)
+        } else if is_profile_policy {
             "profile routing policy".to_string()
         } else {
             "global routing policy".to_string()

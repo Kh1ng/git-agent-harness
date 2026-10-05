@@ -227,6 +227,8 @@ pub struct ConfigProfileSummary {
     pub improve_candidates: Vec<RoutingCandidateSummary>,
     pub review_candidates: Vec<RoutingCandidateSummary>,
     pub task_routing_rules: Vec<TaskRoutingRuleSummary>,
+    /// Strict allow-lists by job kind; a kind without an entry is open.
+    pub allowed_models: BTreeMap<String, Vec<RoutingCandidateSummary>>,
     pub routine_reviewer: Option<RoutingCandidateSummary>,
     pub escalatory_reviewers: Vec<RoutingCandidateSummary>,
     pub context: ConfigProfileContextSummary,
@@ -421,6 +423,11 @@ fn build_profile_summary(
         improve_candidates,
         review_candidates,
         task_routing_rules,
+        allowed_models: routing
+            .allowed_models
+            .iter()
+            .map(|(kind, list)| (kind.clone(), list.iter().map(to_summary).collect()))
+            .collect(),
         routine_reviewer: routine_reviewer.as_ref().map(to_summary),
         escalatory_reviewers: escalatory_reviewers
             .iter()

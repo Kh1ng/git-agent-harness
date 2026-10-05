@@ -475,7 +475,7 @@ pub fn check_profile_candidate_model_consistency(
         }
     }
 
-    let mut errors = Vec::new();
+    let mut errors = routing.unknown_allowed_model_kinds();
     for (label, candidate) in candidates {
         let args = match candidate.backend.as_str() {
             "codex" => &profile.codex_args,

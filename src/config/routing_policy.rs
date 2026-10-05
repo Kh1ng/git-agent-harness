@@ -153,9 +153,53 @@ pub struct RoutingPolicy {
     /// `None` inherits the canonical/defaults policy (resolved to `Auto`).
     #[serde(default)]
     pub merge_policy: Option<MergePolicy>,
+    /// Strict per-job-kind allow-list, keyed by `JobKind::as_str()` (for
+    /// example `review`). A kind with a non-empty list may only ever run on
+    /// one of its entries: the list replaces that kind's candidate pool and
+    /// task routing rules for auto routing, and an explicit route or review
+    /// escalation outside it is refused. When no entry is available the job
+    /// waits; it never falls back to another model. Kinds without an entry
+    /// keep the ordinary pools. Profile entries replace same-key defaults.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub allowed_models: HashMap<String, Vec<CandidateConfig>>,
 }
 
 impl RoutingPolicy {
+    /// The allow-list restricting `mode`, or `None` when that job kind is
+    /// open. An empty list counts as open.
+    pub fn allowed_models_for(&self, mode: &str) -> Option<&[CandidateConfig]> {
+        let kind = JobKind::parse(mode).ok()?;
+        self.allowed_models
+            .get(kind.as_str())
+            .map(Vec::as_slice)
+            .filter(|list| !list.is_empty())
+    }
+
+    /// True when `mode` is open or `backend`/`model` is on its allow-list.
+    /// An entry without a model allows every model of that backend.
+    pub fn allows_model(&self, mode: &str, backend: &str, model: Option<&str>) -> bool {
+        self.allowed_models_for(mode).is_none_or(|list| {
+            list.iter().any(|entry| {
+                entry.backend == backend
+                    && (entry.model.is_none() || entry.model.as_deref() == model)
+            })
+        })
+    }
+
+    /// Config errors for `allowed_models` keys that name no job kind.
+    pub(crate) fn unknown_allowed_model_kinds(&self) -> Vec<String> {
+        let mut unknown: Vec<&String> = self
+            .allowed_models
+            .keys()
+            .filter(|kind| JobKind::parse(kind).is_err())
+            .collect();
+        unknown.sort();
+        unknown
+            .into_iter()
+            .map(|kind| format!("routing.allowed_models: unknown job kind '{kind}'"))
+            .collect()
+    }
+
     pub fn merged_with_defaults(&self, defaults: &RoutingPolicy) -> RoutingPolicy {
         merge_routing_policy(defaults.clone(), self.clone())
     }
@@ -426,5 +470,8 @@ pub(super) fn merge_routing_policy(
     capabilities.extend(repo.review_required_capabilities);
     repo.review_required_capabilities = capabilities;
     repo.merge_policy = repo.merge_policy.or(canonical.merge_policy);
+    let mut allowed_models = canonical.allowed_models;
+    allowed_models.extend(repo.allowed_models);
+    repo.allowed_models = allowed_models;
     repo
 }
