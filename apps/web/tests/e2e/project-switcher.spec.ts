@@ -34,6 +34,10 @@ test('the switcher changes the project for every page and keeps it in the URL', 
 
 test('the GitHub dropdown opens the repository pages', async ({ page }) => {
   await page.goto('/?page=overview');
+  // Navbar order: Project, then Overview … Fleet, then GitHub.
+  const left = async (name: string | RegExp) => (await page.getByRole('banner').getByRole('button', { name, exact: typeof name === 'string' }).first().boundingBox())!.x;
+  expect(await left(/^Project:/)).toBeLessThan(await left('Overview'));
+  expect(await left('Fleet')).toBeLessThan(await left('GitHub'));
   await page.getByRole('button', { name: 'GitHub', exact: true }).click();
   const menu = page.getByRole('menu', { name: 'GitHub pages' });
   await expect(menu.getByRole('menuitem', { name: 'Issues' })).toHaveAttribute('href', /\/issues$/);

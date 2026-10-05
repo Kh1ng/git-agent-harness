@@ -14,7 +14,8 @@ import {
   Orbit,
   FolderGit2,
   FolderCog,
-  CircleDot
+  CircleDot,
+  Bot
 } from 'lucide-react';
 import { ProjectSwitcher } from './ProjectSwitcher.js';
 import { RepoLinksMenu } from './RepoLinksMenu.js';
@@ -94,6 +95,7 @@ const chatItem: NavItem<MainPage> = { id: 'chat', label: 'Chat', icon: MessageSq
 const sideItems: NavItem<SideView>[] = [
   { id: 'events', label: 'Activity', icon: Radio },
   { id: 'issues', label: 'Git issues', icon: CircleDot },
+  { id: 'agents', label: 'Running agents', icon: Bot },
   { id: 'profile', label: 'Profile', icon: FolderCog },
   { id: 'settings', label: 'Settings', icon: Settings }
 ];
@@ -169,8 +171,7 @@ export function Navbar({ currentPage, sideView, onPageChange, activityUnreadCoun
       <header className="mobile-app-header z-30 flex shrink-0 items-center gap-2 border-b border-subtle bg-card px-4 lg:min-h-0 lg:gap-4 lg:px-3">
         <h1 className="sr-only">Git Agent Harness</h1>
         <ProjectSwitcher onImport={onImportProject} onCreate={onCreateProject} />
-        <RepoLinksMenu />
-        <nav className="hidden min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto lg:flex" aria-label="Primary">
+        <nav className="hidden min-w-0 shrink items-stretch gap-0.5 overflow-x-auto lg:flex" aria-label="Primary">
           {items.map((item) => {
             const Icon = item.icon;
             const active = groupOf(currentPage) === item;
@@ -188,6 +189,8 @@ export function Navbar({ currentPage, sideView, onPageChange, activityUnreadCoun
             );
           })}
         </nav>
+        {/* After Fleet: the repository's pages on the provider. */}
+        <RepoLinksMenu />
         <div className="ml-auto flex shrink-0 items-center gap-1">
           <button type="button" onClick={onChatToggle} aria-pressed={chatOpen}
             className={`top-nav-link hidden rounded-md !border-b-0 !py-2 lg:flex ${chatOpen ? 'nav-link-active' : ''}`}>

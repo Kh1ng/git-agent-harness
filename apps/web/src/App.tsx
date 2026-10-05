@@ -27,7 +27,7 @@ const ManagerChatPage = lazy(() => import('./pages/ManagerChatPage.js').then((mo
 const GitPage = lazy(() => import('./pages/GitPage.js').then((module) => ({ default: module.GitPage })));
 const NodesPage = lazy(() => import('./pages/NodesPage.js').then((module) => ({ default: module.NodesPage })));
 const PlanningPage = lazy(() => import('./pages/PlanningPage.js').then((module) => ({ default: module.PlanningPage })));
-const AgentLiveView = lazy(() => import('./components/AgentLiveView.js').then((module) => ({ default: module.AgentLiveView })));
+const RunningAgentsPanel = lazy(() => import('./pages/RunningAgentsPanel.js').then((module) => ({ default: module.RunningAgentsPanel })));
 const IssuesPanel = lazy(() => import('./pages/IssuesPanel.js').then((module) => ({ default: module.IssuesPanel })));
 const ProfilePanel = lazy(() => import('./pages/ProfilePanel.js').then((module) => ({ default: module.ProfilePanel })));
 
@@ -37,7 +37,7 @@ export type { Page } from './lib/navigationState.js';
  * sidebar view takes the whole content area. */
 const SPLIT_LAYOUT = '(min-width: 1280px)';
 
-const SIDE_VIEW_LABELS: Record<SideView, string> = { events: 'Activity', issues: 'Git issues', profile: 'Profile', settings: 'Settings' };
+const SIDE_VIEW_LABELS: Record<SideView, string> = { events: 'Activity', issues: 'Git issues', agents: 'Running agents', profile: 'Profile', settings: 'Settings' };
 
 /** The navbar's subscription rings follow the quota snapshot at this cadence. */
 const QUOTA_REFRESH_MS = 60 * 1000;
@@ -56,11 +56,11 @@ export function App() {
   const [sideDetailOpen, setSideDetailOpen] = useState(false);
   const [sideWorkId, setSideWorkId] = useState<string | null>(null);
   // A factory job being watched live takes the same sidebar.
-  const [sideRun, setSideRun] = useState<{ runId: string; title: string; subtitle: string | null } | null>(null);
-  const [sideRuns, setSideRuns] = useState<{ runId: string; title: string; subtitle: string | null }[]>([]);
-  useEffect(() => { if (sideView !== 'issues') { setSideWorkId(null); setSideRun(null); } }, [sideView]);
-  const openWorkInSidebar = (workId: string) => { setSideRun(null); setSideWorkId(workId); setSideView('issues'); };
-  const watchRun = (run: { runId: string; title: string; subtitle: string | null }, running: { runId: string; title: string; subtitle: string | null }[] = []) => { setSideRun(run); setSideRuns(running); setSideView('issues'); };
+  // The Running agents sidebar shows the job picked here, or the first one running.
+  const [sideRunId, setSideRunId] = useState<string | null>(null);
+  useEffect(() => { if (sideView !== 'issues') setSideWorkId(null); if (sideView !== 'agents') setSideRunId(null); }, [sideView]);
+  const openWorkInSidebar = (workId: string) => { setSideWorkId(workId); setSideView('issues'); };
+  const watchRun = (run: { runId: string }) => { setSideRunId(run.runId); setSideView('agents'); };
   // A push or feed link names the notification it opened; opening it reads it.
   const [openedActivityId] = useState(takeActivityDeepLink);
   useEffect(() => {
@@ -180,10 +180,10 @@ export function App() {
         <ActivityBar sideView={sideView} onToggle={(view) => setSideView(sideView === view ? null : view)} />
 
         {sideView && (
-          <aside id="side-panel" aria-label={sideView === 'issues' && sideRun ? 'Live view' : SIDE_VIEW_LABELS[sideView]}
-            className={`side-panel min-w-0 flex-1 overflow-y-auto px-4 py-4 xl:flex-none xl:border-r xl:border-subtle ${sideDetailOpen || sideRun ? 'xl:w-[clamp(28rem,40vw,44rem)]' : 'xl:w-[clamp(20rem,25vw,30rem)]'}`}>
+          <aside id="side-panel" aria-label={SIDE_VIEW_LABELS[sideView]}
+            className={`side-panel min-w-0 flex-1 overflow-y-auto px-4 py-4 xl:flex-none xl:border-r xl:border-subtle ${sideDetailOpen || sideView === 'agents' ? 'xl:w-[clamp(28rem,40vw,44rem)]' : 'xl:w-[clamp(20rem,25vw,30rem)]'}`}>
             <Suspense fallback={<LoadingState label="Loading…" />}>
-              {sideView === 'settings' ? <SettingsPage /> : sideView === 'profile' ? <ProfilePanel /> : sideView === 'issues' && sideRun ? <AgentLiveView runId={sideRun.runId} title={sideRun.title} subtitle={sideRun.subtitle} onBack={() => setSideRun(null)} runs={sideRuns} onSelectRun={setSideRun} /> : sideView === 'issues' ? <IssuesPanel renderDetail={(workId, onBack) => workDetail(workId, onBack, true)} detailWorkId={sideWorkId} onSelectWork={setSideWorkId} onDetailChange={setSideDetailOpen} onOpenChat={() => navigate('chat')} /> : <EventsPage openedEventId={openedActivityId} />}
+              {sideView === 'settings' ? <SettingsPage /> : sideView === 'profile' ? <ProfilePanel /> : sideView === 'agents' ? <RunningAgentsPanel profile={profileOverride ?? profile ?? null} sessions={sessions} controllerRuns={controllerActivity} factoryAgents={deviceAgents.data?.factory_agents} selectedRunId={sideRunId} onSelect={setSideRunId} /> : sideView === 'issues' ? <IssuesPanel renderDetail={(workId, onBack) => workDetail(workId, onBack, true)} detailWorkId={sideWorkId} onSelectWork={setSideWorkId} onDetailChange={setSideDetailOpen} onOpenChat={() => navigate('chat')} /> : <EventsPage openedEventId={openedActivityId} />}
             </Suspense>
           </aside>
         )}

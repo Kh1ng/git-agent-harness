@@ -54,11 +54,13 @@ function EventRow({ event }: { event: FactoryRunEvent }) {
  * the job's backend output log by polling; nothing here can steer or stop
  * the job. Sticks to the newest step unless the reader has scrolled up.
  */
-export function AgentLiveView({ runId, title, subtitle, onBack, runs = [], onSelectRun }: {
+export function AgentLiveView({ runId, title, subtitle, onBack, runs = [], onSelectRun, alwaysListRuns = false }: {
   runId: string; title: string; subtitle?: string | null; onBack: () => void;
   /** Every factory agent running now, to switch between without leaving the view. */
   runs?: WatchableRun[];
   onSelectRun?: (run: WatchableRun) => void;
+  /** Show the agent list even with a single agent (the Running agents sidebar). */
+  alwaysListRuns?: boolean;
 }) {
   const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied' | 'failed'>('idle');
   /** Copy the job's whole output: read the log from its start, not just what is on screen. */
@@ -138,7 +140,7 @@ export function AgentLiveView({ runId, title, subtitle, onBack, runs = [], onSel
           <button type="button" onClick={onBack} className="btn-secondary min-h-11 min-w-11 p-2" aria-label="Close live view"><ArrowLeft size={18} aria-hidden="true" /></button>
         </div>
       </header>
-      {runs.length > 1 && onSelectRun && (
+      {(runs.length > 1 || (alwaysListRuns && runs.length > 0)) && onSelectRun && (
         <nav aria-label="Running factory agents" className="flex gap-1 overflow-x-auto">
           {runs.map((run) => {
             const active = run.runId === runId;
