@@ -195,8 +195,10 @@ pub fn run(args: UpdateArgs) -> Result<()> {
                 println!("Installed watchdog unit: {}", unit.display());
             }
             println!(
-                "Watchdog timer is installed but not enabled; opt in explicitly with \
-                 `systemctl --user enable --now gah-watchdog.timer` once an alert command is configured."
+                "Watchdog timer is installed but not enabled; the packaged check writes \
+                 alerts to the journal. Opt in with `systemctl --user enable --now \
+                 gah-watchdog.timer`, then forward alerts by configuring ExecStart in a \
+                 `systemctl --user edit gah-watchdog.service` drop-in."
             );
         }
         None => println!("systemd not available on this host: skipping watchdog unit install."),
