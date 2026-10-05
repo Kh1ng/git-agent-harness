@@ -15,6 +15,7 @@ fn main() {
             "open_external_url",
             "desktop_open_context",
             "open_local_checkout",
+            "repository_tools",
             "setup_check",
             "open_setup_terminal",
             "mistral_login_start",

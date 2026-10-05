@@ -41,7 +41,8 @@ export function startQuotaRefreshScheduler(deps: {
     timeout = setTimeout(() => { void kill(); }, deps.timeoutMs ?? 300_000);
     timeout.unref?.();
   };
-  const timer = setInterval(tick, deps.intervalMs ?? 30 * 60_000);
+  // Matches the systemd timer; the native 14-minute throttle makes every tick useful (#1331).
+  const timer = setInterval(tick, deps.intervalMs ?? 15 * 60_000);
   timer.unref?.();
   tick();
   return async () => {

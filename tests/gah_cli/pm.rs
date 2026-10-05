@@ -78,7 +78,7 @@ esac
         .join("pm-plan-v1.json.publication-v1.json")
         .exists());
     // Remote clients select the same artifact by ID; JSON must contain no CLI log preamble.
-    let configured = git_agent_harness::config::load(Some(cfg.to_str().unwrap())).unwrap();
+    let configured = support::load_config(Some(cfg.to_str().unwrap())).unwrap();
     let session =
         std::path::Path::new(&configured.profiles["real"].artifact_root).join("sessions/api-plan");
     fs::create_dir_all(&session).unwrap();
