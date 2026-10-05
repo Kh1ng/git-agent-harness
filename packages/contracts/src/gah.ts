@@ -985,6 +985,18 @@ export interface NodeCapacitySettings {
   memory_floor_mib: number;
 }
 
+/** Issue #1380: smallest accepted value for both node-capacity settings, in
+ * MiB. The Rust side enforces the same bound; the Settings form reads it
+ * from here so the limits are not restated per screen. */
+export const NODE_CAPACITY_MIN_MIB = 512;
+
+/** Issue #1380: default node-capacity settings. A `memory_floor_mib` of 0
+ * keeps the adaptive floor of max(2048 MiB, total memory / 6). */
+export const NODE_CAPACITY_DEFAULTS: NodeCapacitySettings = {
+  worker_memory_mib: 4096,
+  memory_floor_mib: 0,
+};
+
 /** Issue #653: notification channel settings projection. */
 export interface NotificationSettingsSummary {
   channel: 'none' | 'telegram' | 'discord';

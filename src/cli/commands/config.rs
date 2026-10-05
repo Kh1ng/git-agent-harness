@@ -88,13 +88,26 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                     cfg.defaults.telegram_chat_id = Some(trimmed.to_string());
                 }
             }
+            // Node-capacity values (issue #1380): lower-bound validation
+            // runs once, inside config::save. Review of #1383: also
+            // reject values this node can never admit -- but only when
+            // this command is what set them, so a pre-existing value
+            // (e.g. written for a larger machine) cannot lock up every
+            // unrelated `config set` repair.
+            let previous_capacity = cfg.defaults.node_capacity;
             if let Some(value) = worker_memory_mib {
                 cfg.defaults.node_capacity.worker_memory_mib = value;
             }
             if let Some(value) = memory_floor_mib {
                 cfg.defaults.node_capacity.memory_floor_mib = value;
             }
-            cfg.defaults.node_capacity.validate()?;
+            if cfg.defaults.node_capacity != previous_capacity {
+                if let Some(total) = crate::controller::node_total_memory_bytes() {
+                    cfg.defaults
+                        .node_capacity
+                        .validate_against_node_total(total)?;
+                }
+            }
             crate::node_role::NodeRoleStatus::with_override(&cfg.defaults, None)?;
             config::save(&cfg, config_path.as_deref())?;
             println!("Updated global config");

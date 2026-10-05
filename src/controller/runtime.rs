@@ -191,6 +191,44 @@ fn wait_interruptibly(delay: Duration, shutdown_requested: impl Fn() -> bool) ->
     }
 }
 
+/// Total memory of this node when the platform exposes it. `gah config
+/// set` uses it to reject node-capacity values this node could never
+/// admit (review of #1383); callers skip the check when it is `None`, so
+/// configs written for other machines still load and save.
+pub fn node_total_memory_bytes() -> Option<u64> {
+    node_capacity::sample()
+        .ok()
+        .map(|pressure| pressure.memory_total_bytes)
+}
+
+/// Announce node-capacity settings when they change, not on every ~30s
+/// iteration -- an unattended loop would otherwise repeat the same line
+/// about 2,880 times a day (review of #1383). A fresh process (`--once`,
+/// loop restart) always logs once. Also warns when the settings can
+/// never be satisfied on this node, instead of leaving that fact buried
+/// in per-deferral logs.
+fn log_node_capacity_settings(settings: crate::config::NodeCapacitySettings) {
+    static LAST_LOGGED: std::sync::Mutex<Option<crate::config::NodeCapacitySettings>> =
+        std::sync::Mutex::new(None);
+    let Ok(mut last) = LAST_LOGGED.lock() else {
+        return;
+    };
+    if last.as_ref() == Some(&settings) {
+        return;
+    }
+    *last = Some(settings);
+    eprintln!(
+        "gah loop: node capacity worker reservation {} MiB, memory floor {}",
+        settings.worker_memory_mib,
+        settings.floor_description(),
+    );
+    if let Some(total) = node_total_memory_bytes() {
+        if let Err(error) = settings.validate_against_node_total(total) {
+            eprintln!("gah loop: WARNING {error:#}");
+        }
+    }
+}
+
 pub fn run_once(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
@@ -199,12 +237,7 @@ pub fn run_once(
     skip_validation_gate: bool,
     run_periodic_probes: bool,
 ) -> Result<()> {
-    let node_capacity_settings = cfg.defaults.node_capacity;
-    eprintln!(
-        "gah loop: node capacity worker reservation {} MiB, memory floor {}",
-        node_capacity_settings.worker_memory_mib,
-        node_capacity_settings.floor_description(),
-    );
+    log_node_capacity_settings(cfg.defaults.node_capacity);
     let mut ledger_entries = crate::ledger::read_entries(cfg)?;
     reconcile_abandoned_dispatches(cfg, profile_name, &mut ledger_entries)?;
     let profile = crate::config::get_profile(cfg, profile_name)?;

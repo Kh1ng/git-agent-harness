@@ -1775,6 +1775,14 @@ export function createServer(
 
   app.post('/api/config', requireOwner, async (req, res) => {
     try {
+      // Node-capacity values go straight into argv; a non-integer would
+      // surface as a CLI failure (502) instead of the caller's mistake.
+      for (const field of ['worker_memory_mib', 'memory_floor_mib'] as const) {
+        const value = req.body?.[field];
+        if (value !== undefined && (typeof value !== 'number' || !Number.isSafeInteger(value))) {
+          return res.status(400).json({ error: 'invalid_request', message: `${field} must be an integer.` });
+        }
+      }
       const options: ConfigSetOptions = {
         current_manager: req.body.current_manager,
         worker_memory_mib: req.body.worker_memory_mib,

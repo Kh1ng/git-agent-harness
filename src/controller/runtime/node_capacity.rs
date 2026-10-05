@@ -4,7 +4,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const GIB: u64 = 1024 * 1024 * 1024;
-const MIN_MEMORY_RESERVE: u64 = 2 * GIB;
 const MIN_CRITICAL_MEMORY: u64 = 512 * 1024 * 1024;
 
 /// A cheap, point-in-time view of pressure on the node running GAH.
@@ -121,11 +120,9 @@ pub(crate) fn admission_for_settings(
     settings: crate::config::NodeCapacitySettings,
 ) -> Admission {
     let requested = reservation_for(action, settings);
-    let memory_reserve = if settings.memory_floor_mib == 0 {
-        MIN_MEMORY_RESERVE.max(pressure.memory_total_bytes / 6)
-    } else {
-        settings.memory_floor_mib * 1024 * 1024
-    };
+    // One formula for the free-memory floor, shared with the CLI and the
+    // Settings page (review of #1383): NodeCapacitySettings owns it.
+    let memory_reserve = settings.memory_reserve_bytes(pressure.memory_total_bytes);
     let critical_memory = MIN_CRITICAL_MEMORY.max(pressure.memory_total_bytes / 32);
 
     if pressure.memory_available_bytes <= critical_memory {
@@ -146,11 +143,16 @@ pub(crate) fn admission_for_settings(
     let effective_available = pressure.memory_available_bytes.min(uncommitted_capacity);
     let projected_available = effective_available.saturating_sub(requested.memory_bytes);
     if projected_available < memory_reserve {
+        // The settings context rides only on the memory-reserve deferral:
+        // attaching it to CPU and PSI deferrals pointed operators at the
+        // memory knobs when CPU was the actual blocker (review of #1383).
         return Admission::Defer(format!(
-            "node memory reserve would be crossed ({} MiB available, {} MiB reserved for active/new workers, {} MiB safety floor)",
+            "node memory reserve would be crossed ({} MiB available, {} MiB reserved for active/new workers, {} MiB safety floor; node_capacity: worker reservation {} MiB, memory floor {})",
             pressure.memory_available_bytes / (1024 * 1024),
             committed.memory_bytes.saturating_add(requested.memory_bytes) / (1024 * 1024),
-            memory_reserve / (1024 * 1024)
+            memory_reserve / (1024 * 1024),
+            settings.worker_memory_mib,
+            settings.floor_description(),
         ));
     }
 
@@ -258,17 +260,10 @@ fn acquire_in_dir(
         settings,
     ) {
         Admission::Admit(reservation) => reservation,
-        Admission::Defer(reason) => {
-            return Ok(LiveAdmission::Defer(format!(
-                "{reason} (worker reservation {} MiB, memory floor {} MiB)",
-                settings.worker_memory_mib,
-                if settings.memory_floor_mib == 0 {
-                    MIN_MEMORY_RESERVE.max(pressure.memory_total_bytes / 6) / (1024 * 1024)
-                } else {
-                    settings.memory_floor_mib
-                }
-            )))
-        }
+        // The reason already carries the settings context where it is
+        // relevant (see admission_for_settings); no extra suffix here, so
+        // CPU and PSI deferrals do not point at the memory knobs.
+        Admission::Defer(reason) => return Ok(LiveAdmission::Defer(reason)),
     };
 
     let lease_path = dir.join(format!("{}.lease", uuid::Uuid::new_v4()));

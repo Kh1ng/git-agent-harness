@@ -716,24 +716,3 @@ mod enabled_flag_tests {
         );
     }
 }
-
-/// Canonicalizes `--backend` aliases that execute the same backend but were
-/// being recorded under their literal alias string, producing duplicate
-/// cards for one backend on the quota page (e.g. "openhands" and
-/// "cloud-coder" both run OpenHands via `runner::backend_command_name`, but
-/// only "openhands" was ever normalized there -- the raw CLI string was
-/// still what got written to `requested_backend`/`effective_backend` and
-/// from there into the ledger). Applied both where new dispatches are
-/// routed (dispatch.rs) and when grouping the ledger for the quota page
-/// (ledger/mod.rs), so it also merges pre-existing historical entries recorded
-/// under the old alias rather than only preventing new duplicates.
-/// Deliberately does NOT touch "auto": that backend's *effective* backend
-/// is resolved dynamically per-attempt by `routing::decide`, not a fixed
-/// alias, so it must pass through unchanged.
-pub fn canonical_backend_name(name: &str) -> &str {
-    if name == "cloud-coder" {
-        "openhands"
-    } else {
-        name
-    }
-}

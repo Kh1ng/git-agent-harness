@@ -36,8 +36,22 @@ memory_floor_mib = 0
 `memory_floor_mib = 0` (or an omitted value) keeps the adaptive floor. An
 explicit floor must be at least 512 MiB; the worker reservation must also be
 at least 512 MiB. Lowering either value raises the risk of running out of
-memory. The loop reloads these settings each iteration; `gah status` reports
-them. CPU, review, and PM reservations are unchanged.
+memory. The loop reloads these settings each iteration and announces them
+when they change; `gah status` reports them. CPU, review, and PM reservations
+are unchanged.
+
+Validation is layered so a bad value can never lock you out of the config:
+
+- Saving (`gah config set`, Settings page) rejects values below 512 MiB, and
+  rejects values this node can never admit -- a worker reservation plus the
+  memory floor larger than total node memory defers every implementation
+  worker forever. The node check is skipped when total memory cannot be
+  read (e.g. the config is written for another machine).
+- Loading never fails on invalid values: they are ignored with a warning and
+  the defaults apply until the config is fixed, so every repair path
+  (`gah config set`, `gah status`, Settings) keeps working.
+- The loop logs a warning at startup when the settings can never be admitted
+  on this node, instead of leaving the fact buried in deferral logs.
 
 ### Deterministic CLI/control-plane update
 

@@ -371,6 +371,27 @@ fn normalize_repo_path(repo: &str) -> String {
     }
 }
 
+/// Canonicalizes `--backend` aliases that execute the same backend but were
+/// being recorded under their literal alias string, producing duplicate
+/// cards for one backend on the quota page (e.g. "openhands" and
+/// "cloud-coder" both run OpenHands via `runner::backend_command_name`, but
+/// only "openhands" was ever normalized there -- the raw CLI string was
+/// still what got written to `requested_backend`/`effective_backend` and
+/// from there into the ledger). Applied both where new dispatches are
+/// routed (dispatch.rs) and when grouping the ledger for the quota page
+/// (ledger/mod.rs), so it also merges pre-existing historical entries recorded
+/// under the old alias rather than only preventing new duplicates.
+/// Deliberately does NOT touch "auto": that backend's *effective* backend
+/// is resolved dynamically per-attempt by `routing::decide`, not a fixed
+/// alias, so it must pass through unchanged.
+pub fn canonical_backend_name(name: &str) -> &str {
+    if name == "cloud-coder" {
+        "openhands"
+    } else {
+        name
+    }
+}
+
 pub fn default_config_dir() -> PathBuf {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     home.map_or_else(|| PathBuf::from("/root"), PathBuf::from)
@@ -500,7 +521,9 @@ pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let mut cfg: GahConfig =
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    cfg.defaults.node_capacity.validate()?;
+    // Invalid values must not lock the operator out of the config; the
+    // rationale lives on NodeCapacitySettings::sanitized.
+    cfg.defaults.node_capacity = cfg.defaults.node_capacity.sanitized();
     if let Some(canonical_routing) = load_canonical_routing()? {
         cfg.defaults.routing = merge_routing_policy(canonical_routing, cfg.defaults.routing);
     }
@@ -1362,16 +1385,9 @@ improve_backend = "agy"
         assert!(effective.allow_review_fallback);
     }
 
-    #[test]
-    fn canonical_backend_name_merges_cloud_coder_alias_into_openhands() {
-        // Live-observed: --backend openhands and --backend cloud-coder both
-        // run the identical OpenHands executable (runner::backend_command_name),
-        // but nothing canonicalized the raw CLI string before it reached the
-        // ledger/quota page, producing two separate cards for one backend.
-        assert_eq!(canonical_backend_name("cloud-coder"), "openhands");
-        assert_eq!(canonical_backend_name("openhands"), "openhands");
-    }
-
+    // The cloud-coder → openhands merge is asserted against the same
+    // public function in tests/execution_identity.rs; only the
+    // pass-through cases are unit-tested here.
     #[test]
     fn canonical_backend_name_leaves_other_backends_and_auto_untouched() {
         // "auto" must NOT be rewritten here: its effective backend is
