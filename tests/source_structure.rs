@@ -1179,6 +1179,92 @@ fn extract_marked_block<'a>(script: &'a str, marker: &str, script_path: &str) ->
     &script[start..end]
 }
 
+#[test]
+fn standalone_service_restart_and_start_failures_report_journal() {
+    let script_path = "scripts/install-linux.sh";
+    let script =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(script_path)).unwrap();
+    let block = extract_marked_block(&script, "server-service-start", script_path);
+    for (role, failure) in [
+        ("standalone", "none"),
+        ("central", "none"),
+        ("standalone", "enable"),
+        ("standalone", "restart"),
+        ("standalone", "inactive"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("systemctl.log");
+        let harness = format!(
+            "set -euo pipefail\nrole={role}\nfail={failure}\nlog={}\nsudo() {{\n  printf '%s\\n' \"$*\" >> \"$log\"\n  case \"$*\" in\n    'systemctl enable --now gah-server.service') [ \"$fail\" != enable ] ;;\n    'systemctl restart gah-server.service') [ \"$fail\" != restart ] ;;\n    'systemctl is-active --quiet gah-server.service') [ \"$fail\" != inactive ] ;;\n  esac\n}}\n{block}\n",
+            log.display()
+        );
+        let result = Command::new("bash")
+            .arg("-c")
+            .arg(harness)
+            .output()
+            .unwrap();
+        let calls = fs::read_to_string(log).unwrap();
+        assert_eq!(
+            result.status.success(),
+            failure == "none",
+            "{role} {failure}"
+        );
+        assert_eq!(
+            calls.contains("systemctl restart gah-server.service"),
+            role == "standalone" && failure != "enable"
+        );
+        if failure != "none" {
+            assert!(
+                calls.contains("journalctl -u gah-server.service -n 50 --no-pager"),
+                "{role} {failure}: {calls}"
+            );
+        }
+    }
+}
+
+#[test]
+fn standalone_rebinds_an_existing_server_env() {
+    let script_path = "scripts/install-linux.sh";
+    let script =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(script_path)).unwrap();
+    let block = extract_marked_block(&script, "server-env-config", script_path);
+    for (role, override_host, expected_host) in [
+        ("standalone", None, "127.0.0.1"),
+        ("standalone", Some("10.0.0.5"), "10.0.0.5"),
+        ("central", None, "100.118.97.79"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let env_file = temp.path().join("server.env");
+        fs::write(&env_file, "HOST=100.118.97.79\nPORT=3773\n").unwrap();
+        let block = block.replace("/etc/gah/server.env", env_file.to_str().unwrap());
+        let harness = format!(
+            "set -euo pipefail\nrole={role}\nHOME={}\nGAH={}\nsudo() {{ if [[ \"$1\" == */gah ]]; then shift; \"$GAH\" \"$@\"; else \"$@\"; fi; }}\n{block}\n",
+            temp.path().display(),
+            env!("CARGO_BIN_EXE_gah")
+        );
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(harness);
+        if let Some(host) = override_host {
+            command.env("GAH_SERVER_HOST", host);
+        } else {
+            command.env_remove("GAH_SERVER_HOST");
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let contents = fs::read_to_string(&env_file).unwrap();
+        assert!(
+            contents.contains(&format!("HOST={expected_host}"))
+                || contents.contains(&format!("HOST=\"{expected_host}\"")),
+            "{contents}"
+        );
+        assert!(contents.contains("PORT=3773"), "{contents}");
+    }
+}
+
 /// Extracts the `gateway-url-default:start`/`:end` block from each install
 /// script and evaluates it under bash with a worker-local Tailscale address
 /// that differs from the configured central node. Regression test for issue

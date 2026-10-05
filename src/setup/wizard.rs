@@ -4,7 +4,7 @@
 //! `scripts/install.sh`, adds the first project, and ends with what was set
 //! up and how to add the rest later.
 
-use super::host::{self, Host};
+use super::host::{self, Host, Os};
 use super::project;
 use super::requirements::{
     self, Action, ActionKind, Agent, MemoryMode, Provider, Requirement, Role, Selection, Status,
@@ -129,11 +129,15 @@ impl<'a> Setup<'a> {
                         .to_string(),
                     "A worker that runs jobs for a central node I already have".to_string(),
                     "Just the command line, no server".to_string(),
+                    "A local dashboard and worker on this machine (standalone)".to_string(),
                 ];
-                [Role::Central, Role::Worker, Role::CliOnly]
+                [Role::Central, Role::Worker, Role::CliOnly, Role::Standalone]
                     [self.ask_choice("What is this machine for?", &options, 0)?]
             }
         };
+        if role == Role::Standalone && self.host.os() != Os::Linux {
+            bail!("Standalone setup requires Linux.");
+        }
 
         // 2. A repository to work on names its provider.
         // A worker's projects come from the central dashboard (Chat → import).
@@ -192,7 +196,7 @@ impl<'a> Setup<'a> {
         let mut memory = MemoryMode::Off;
         match role {
             Role::Worker => self.worker_settings(&mut env)?,
-            Role::Central => memory = self.memory_settings(&mut env)?,
+            Role::Central | Role::Standalone => memory = self.memory_settings(&mut env)?,
             Role::CliOnly => {}
         }
         let selection = Selection {
@@ -488,7 +492,7 @@ impl<'a> Setup<'a> {
                 "cargo install --path . --force".to_string(),
                 "Build and install the gah command",
             ),
-            Role::Central | Role::Worker => (
+            Role::Central | Role::Standalone | Role::Worker => (
                 "scripts/install.sh".to_string(),
                 "Build GAH and install its background service",
             ),
@@ -508,6 +512,7 @@ impl<'a> Setup<'a> {
             "GAH_NODE_ROLE",
             match selection.role {
                 Role::Worker => "worker",
+                Role::Standalone => "standalone",
                 _ => "central",
             }
             .to_string(),
@@ -543,7 +548,9 @@ impl<'a> Setup<'a> {
                 self.prompter
                     .say(&format!("  · {}: {how}", requirement.label));
             }
-            if selection.role == Role::Central && selection.memory == MemoryMode::Off {
+            if matches!(selection.role, Role::Central | Role::Standalone)
+                && selection.memory == MemoryMode::Off
+            {
                 self.prompter
                     .say("  · Shared memory: gah setup --memory colocated (or --memory remote)");
             }
@@ -557,6 +564,9 @@ impl<'a> Setup<'a> {
                 self.prompter
                     .say("  · Add a worker from Settings → Add a Node.");
             }
+            Role::Standalone => self
+                .prompter
+                .say("  · Open the dashboard at http://127.0.0.1:3773."),
             Role::Worker => self
                 .prompter
                 .say("  · This worker appears under Nodes on the central dashboard."),
@@ -761,6 +771,40 @@ mod tests {
                 .any(|line| line.contains("Shared memory: gah setup --memory")),
             "skipped memory says how to add it"
         );
+    }
+
+    #[test]
+    fn standalone_setup_installs_the_local_control_plane() {
+        let host = ready_host();
+        let mut prompter = Script {
+            answers: [""].map(String::from).into(),
+            ..Default::default()
+        };
+        let mut effects = Recorder::default();
+        Setup {
+            host: &host,
+            prompter: &mut prompter,
+            effects: &mut effects,
+            options: Options {
+                role: Some(Role::Standalone),
+                agent: Some(Agent::Claude),
+                provider: Some(Provider::Github),
+                memory: Some(MemoryMode::Off),
+                source: PathBuf::from("/src"),
+                yes: true,
+                ..Default::default()
+            },
+        }
+        .run()
+        .unwrap();
+        assert_eq!(effects.commands[0].0, "scripts/install.sh");
+        assert!(effects.commands[0]
+            .1
+            .contains(&("GAH_NODE_ROLE".into(), "standalone".into())));
+        assert!(prompter
+            .said
+            .iter()
+            .any(|line| line.contains("http://127.0.0.1:3773")));
     }
 
     #[test]

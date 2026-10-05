@@ -17,7 +17,7 @@
 # The commands GAH's own Settings page generates pass their choices as
 # environment variables on the `bash` side of the pipe; they become
 # `gah setup` flags below, so setup asks only what they left open:
-#   GAH_NODE_ROLE=central|worker   GAH_CENTRAL_URL=<url>
+#   GAH_NODE_ROLE=central|standalone|worker   GAH_CENTRAL_URL=<url>
 #   GAH_GATEWAY_MODE=remote|colocated GAH_GATEWAY_URL=<url> GAH_GATEWAY_MEMORYCORE_PATH=<dir>
 # Secrets (COORDINATOR_TOKEN, GAH_GATEWAY_API_KEY, GAH_GATEWAY_LLM_API_KEY) stay
 # in the environment; setup reads them there and never takes them as flags.
@@ -101,9 +101,9 @@ cargo build --release --bin gah
 
 args=(setup --source "$install_dir")
 case "${GAH_NODE_ROLE:-}" in
-  central|worker) args+=(--role "$GAH_NODE_ROLE") ;;
+  central|standalone|worker) args+=(--role "$GAH_NODE_ROLE") ;;
   "") ;;
-  *) echo "ERROR: GAH_NODE_ROLE must be central or worker." >&2; exit 1 ;;
+  *) echo "ERROR: GAH_NODE_ROLE must be central, standalone, or worker." >&2; exit 1 ;;
 esac
 [ -z "${GAH_CENTRAL_URL:-}" ] || args+=(--central-url "$GAH_CENTRAL_URL")
 case "${GAH_GATEWAY_MODE:-}" in

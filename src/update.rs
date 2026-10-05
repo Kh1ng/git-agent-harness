@@ -24,7 +24,7 @@ pub struct UpdateArgs {
 
 pub fn run(args: UpdateArgs) -> Result<()> {
     if args.role == HostRole::Worker && args.restart_server {
-        bail!("--restart-server requires --role central; a worker never runs gah-server.service");
+        bail!("--restart-server requires --role central or standalone; a worker never runs gah-server.service");
     }
 
     let repo = resolve_repo(args.repo.as_deref())?;
@@ -72,7 +72,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         )?;
     }
 
-    if args.role == HostRole::Central {
+    if matches!(args.role, HostRole::Central | HostRole::Standalone) {
         // The control-plane server is part of the MVP; web/desktop/mobile
         // clients intentionally have independent release workflows. A
         // worker node dispatches jobs only and never serves this.
@@ -235,7 +235,9 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             &["is-active", "--quiet", &args.server_service],
         )?;
         println!("Restarted service: {}", args.server_service);
-    } else if args.role == HostRole::Central && !cfg!(target_os = "macos") {
+    } else if matches!(args.role, HostRole::Central | HostRole::Standalone)
+        && !cfg!(target_os = "macos")
+    {
         println!(
             "Server not restarted; pass --restart-server when this host serves the control plane."
         );

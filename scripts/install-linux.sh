@@ -44,10 +44,12 @@ fi
 # tailscale-dns-guard:end
 
 # Persistent server bind-host override (issue #643). Created only on first
-# install; every later run of this script, and every `gah update
-# --restart-server`, leaves an existing file untouched so an operator's HOST
-# choice survives reinstall/update. Set GAH_SERVER_HOST to override the fresh-
-# install default: this node's tailnet IPv4 when available, otherwise loopback.
+# central install; later central installs and `gah update --restart-server`
+# leave it untouched. Standalone reasserts loopback on
+# every install, including a switch from an existing networked server. Set
+# GAH_SERVER_HOST to explicitly choose another bind address.
+# server-env-config:start -- exercised by
+# tests/source_structure.rs::standalone_rebinds_an_existing_server_env.
 server_env_file=/etc/gah/server.env
 if [ "$role" = "central" ] || [ "$role" = "standalone" ]; then
   if [ ! -f "$server_env_file" ]; then
@@ -68,9 +70,16 @@ if [ "$role" = "central" ] || [ "$role" = "standalone" ]; then
     sudo chmod 0644 "$server_env_file"
     echo "Created $server_env_file (set HOST= there to change the bind address without editing the unit)"
   else
-    echo "Preserving existing $server_env_file"
+    if [ "$role" = "standalone" ]; then
+      server_host="${GAH_SERVER_HOST:-127.0.0.1}"
+      printf '%s' "$server_host" | sudo "$(command -v gah || echo "$HOME/.cargo/bin/gah")" installer env-set --file "$server_env_file" HOST
+      echo "Set HOST=$server_host in $server_env_file for standalone mode"
+    else
+      echo "Preserving existing $server_env_file"
+    fi
   fi
 fi
+# server-env-config:end
 
 # Memory gateway placement (issue #880). Opt-in: GAH_GATEWAY_MODE unset (the
 # default) skips this whole section, so a plain `scripts/install.sh` run
@@ -226,11 +235,19 @@ case "${GAH_GATEWAY_MODE:-}" in
     ;;
 esac
 
+# server-service-start:start -- tested with stubbed systemctl by
+# tests/source_structure.rs::standalone_service_restart_and_start_failures_report_journal.
 if [ "$role" = "central" ] || [ "$role" = "standalone" ]; then
   sudo install -m 0644 packaging/systemd/gah-server.service /etc/systemd/system/gah-server.service
   sudo systemctl daemon-reload
-  sudo systemctl enable --now gah-server.service
-  if ! sudo systemctl is-active --quiet gah-server.service; then
+  server_start_failed=0
+  sudo systemctl enable --now gah-server.service || server_start_failed=1
+  if [ "$server_start_failed" = 0 ] && [ "$role" = "standalone" ]; then
+    # enable --now does not restart a service that was already running with
+    # the former network bind address.
+    sudo systemctl restart gah-server.service || server_start_failed=1
+  fi
+  if [ "$server_start_failed" != 0 ] || ! sudo systemctl is-active --quiet gah-server.service; then
     echo "ERROR: gah-server.service failed to start. Recent logs:" >&2
     sudo journalctl -u gah-server.service -n 50 --no-pager >&2
     exit 1
@@ -238,6 +255,7 @@ if [ "$role" = "central" ] || [ "$role" = "standalone" ]; then
 else
   echo "Role is 'worker': skipping gah-server.service (this host doesn't serve the control plane)."
 fi
+# server-service-start:end
 
 # Existing-project context import (opt-in, issue seen 2026-08-08). Reuses
 # whatever gateway this host is now wired to (colocated above, remote above,

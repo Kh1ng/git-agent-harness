@@ -37,6 +37,7 @@ impl Feature {
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Central,
+    Standalone,
     Worker,
     CliOnly,
 }
@@ -124,12 +125,12 @@ impl Selection {
     pub fn features(&self) -> Vec<Feature> {
         let mut features = vec![Feature::Core];
         match self.role {
-            Role::Central => features.push(Feature::Dashboard),
+            Role::Central | Role::Standalone => features.push(Feature::Dashboard),
             Role::Worker => features.push(Feature::Worker),
             Role::CliOnly => {}
         }
         // A worker's memory goes through its central node's relay.
-        if self.memory != MemoryMode::Off && self.role == Role::Central {
+        if self.memory != MemoryMode::Off && matches!(self.role, Role::Central | Role::Standalone) {
             features.push(Feature::Memory);
         }
         features
