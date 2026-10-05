@@ -23,7 +23,10 @@ use time::OffsetDateTime;
 mod identity;
 mod instances;
 pub(crate) use identity::current_source_records;
-pub use identity::{latest_windows_for_identity, latest_windows_for_identity_and_credential};
+pub use identity::{
+    latest_windows_for_backend, latest_windows_for_identity,
+    latest_windows_for_identity_and_credential,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaObservationRecord {
@@ -282,32 +285,6 @@ pub fn append(state_path: &Path, rec: &QuotaObservationRecord) -> Result<()> {
     Ok(())
 }
 
-/// Most-recent observation for a (backend, model) scope that actually carries
-/// quota data (used/remaining percent, window, or reset). `model` of `None`
-/// matches account-level records that have no model qualifier.
-pub fn latest_for<'a>(
-    records: &'a [QuotaObservationRecord],
-    backend: &str,
-    model: Option<&'a str>,
-) -> Option<&'a QuotaObservationRecord> {
-    records
-        .iter()
-        .filter(|r| {
-            r.backend == backend
-                && r.model.as_deref() == model
-                && r.backend_instance.is_none()
-                && r.quota_pool.is_none()
-        })
-        .max_by_key(|record| {
-            record
-                .checked_at
-                .as_deref()
-                .or(record.observed_at.as_deref())
-                .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
-        })
-        .filter(|record| record.check_error.is_none() && has_quota_data(record))
-}
-
 /// Most-recent observation for an exact execution identity, with a
 /// deterministic fallback to legacy instance-unknown rows. A row for a
 /// different explicit instance never matches, even when backend/model agree.
@@ -427,21 +404,9 @@ pub(crate) fn refresh_vibe_admin_record(
         return Ok(None);
     };
     let rec = QuotaObservationRecord {
-        backend: obs.backend,
-        backend_instance: None,
-        model: obs.model,
-        quota_pool: None,
-        quota_window: obs.quota_window,
-        quota_used_percent: obs.quota_used_percent,
-        quota_remaining_percent: obs.quota_remaining_percent,
-        quota_reset_at: obs.quota_reset_at,
-        observed_at: obs.observed_at,
         checked_at: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
-        check_error: None,
-        usage_source: obs.usage_source,
         mistral_admin: admin_refresh,
-        account_usage: None,
-        credential_id: None,
+        ..obs
     };
     Ok(Some(rec))
 }
@@ -1157,64 +1122,6 @@ mod tests {
         assert_eq!(records[0].quota_remaining_percent, Some(75.0));
     }
 
-    #[test]
-    fn latest_for_picks_newest_and_scopes_by_model() {
-        let (_dir, path) = tmp_store();
-        for (ts, pct) in [
-            ("2026-04-28T10:00:00Z", 10.0),
-            ("2026-04-29T10:00:00Z", 40.0),
-        ] {
-            append(
-                &path,
-                &QuotaObservationRecord {
-                    backend: "codex".into(),
-                    backend_instance: None,
-                    model: None,
-                    quota_pool: None,
-                    quota_window: Some("300m".into()),
-                    quota_used_percent: Some(pct),
-                    quota_remaining_percent: Some(100.0 - pct),
-                    quota_reset_at: None,
-                    observed_at: Some(ts.into()),
-                    checked_at: None,
-                    check_error: None,
-                    usage_source: Some("codex_status_json".into()),
-                    mistral_admin: None,
-                    account_usage: None,
-                    credential_id: None,
-                },
-            )
-            .unwrap();
-        }
-        // A different backend must not be selected.
-        append(
-            &path,
-            &QuotaObservationRecord {
-                backend: "agy".into(),
-                backend_instance: None,
-                model: None,
-                quota_pool: None,
-                quota_window: Some("AGY individual quota".into()),
-                quota_used_percent: None,
-                quota_remaining_percent: None,
-                quota_reset_at: Some("in 16m44s".into()),
-                observed_at: Some("2026-04-29T11:00:00Z".into()),
-                checked_at: None,
-                check_error: None,
-                usage_source: Some("agy_cli_log_delta".into()),
-                mistral_admin: None,
-                account_usage: None,
-                credential_id: None,
-            },
-        )
-        .unwrap();
-
-        let records = load(&path).unwrap();
-        let latest = latest_for(&records, "codex", None).unwrap();
-        assert_eq!(latest.observed_at.as_deref(), Some("2026-04-29T10:00:00Z"));
-        assert_eq!(latest.quota_used_percent, Some(40.0));
-    }
-
     // Issue #206: a single malformed JSONL line must be skipped, not cause the
     // whole store (every valid record before/after it) to be discarded.
     #[test]
@@ -1260,33 +1167,6 @@ mod tests {
         );
         assert_eq!(records[0].quota_used_percent, Some(10.0));
         assert_eq!(records[1].quota_used_percent, Some(20.0));
-    }
-
-    #[test]
-    fn latest_for_ignores_data_less_records() {
-        let (_dir, path) = tmp_store();
-        append(
-            &path,
-            &QuotaObservationRecord {
-                backend: "codex".into(),
-                backend_instance: None,
-                model: None,
-                quota_pool: None,
-                quota_window: None,
-                quota_used_percent: None,
-                quota_remaining_percent: None,
-                quota_reset_at: None,
-                observed_at: Some("2026-04-29T10:00:00Z".into()),
-                checked_at: None,
-                check_error: None,
-                usage_source: Some("codex_status_json".into()),
-                mistral_admin: None,
-                account_usage: None,
-                credential_id: None,
-            },
-        )
-        .unwrap();
-        assert!(latest_for(&load(&path).unwrap(), "codex", None).is_none());
     }
 
     fn scoped_record(
@@ -1339,6 +1219,21 @@ mod tests {
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].quota_used_percent, Some(90.0));
         assert_eq!(windows[1].quota_used_percent, Some(20.0));
+    }
+
+    /// #1384 review: a newer account-wide reading must not hide an exhausted
+    /// model-scoped reading of the same window from routing.
+    #[test]
+    fn latest_windows_keep_model_scoped_reading_beside_account_reading() {
+        let mut account = scoped_record(Some("account-a"), 50.0, "2026-07-20T11:00:00Z");
+        account.model = None;
+        let exhausted = scoped_record(Some("account-a"), 100.0, "2026-07-20T10:00:00Z");
+        let records = [account, exhausted];
+        let windows = latest_windows_for_identity(&records, &identity("account-a"));
+        assert_eq!(windows.len(), 2);
+        assert!(windows
+            .iter()
+            .any(|record| record.model.is_some() && record.quota_used_percent == Some(100.0)));
     }
 
     #[test]
@@ -1409,9 +1304,101 @@ mod tests {
         assert_eq!(first.quota_used_percent, Some(10.0));
         assert_eq!(second.quota_used_percent, Some(70.0));
         assert!(
-            latest_for(&records, "opencode", Some("shared-model")).is_none(),
+            latest_for_identity(&records, &identity("account-c")).is_none(),
             "legacy aggregation must not erase explicit instance identity"
         );
+    }
+
+    /// #1339 acceptance: a backend-scoped view surfaces every source
+    /// identity's latest windows — instance-scoped rows and router rows
+    /// alike — instead of only legacy unscoped rows.
+    #[test]
+    fn latest_windows_for_backend_returns_every_identity() {
+        let claude_five_hour = QuotaObservationRecord {
+            backend: "claude".into(),
+            backend_instance: Some("claude".into()),
+            model: None,
+            quota_pool: None,
+            quota_window: Some("5h".into()),
+            quota_used_percent: None,
+            quota_remaining_percent: Some(40.0),
+            quota_reset_at: None,
+            observed_at: Some("2026-10-04T08:00:00Z".into()),
+            checked_at: Some("2026-10-04T08:00:00Z".into()),
+            check_error: None,
+            usage_source: Some("claude_native".into()),
+            mistral_admin: None,
+            account_usage: None,
+            credential_id: None,
+        };
+        let mut claude_weekly = claude_five_hour.clone();
+        claude_weekly.quota_window = Some("weekly".into());
+        claude_weekly.quota_remaining_percent = Some(90.0);
+        let router = QuotaObservationRecord {
+            backend: "agy".into(),
+            backend_instance: Some("agy-primary".into()),
+            model: None,
+            quota_pool: Some("agy:external".into()),
+            quota_window: Some("weekly".into()),
+            quota_used_percent: None,
+            quota_remaining_percent: Some(63.0),
+            quota_reset_at: Some("in 16m44s".into()),
+            observed_at: Some("2026-10-04T08:30:00Z".into()),
+            checked_at: Some("2026-10-04T08:30:00Z".into()),
+            check_error: None,
+            usage_source: Some("cli_router".into()),
+            mistral_admin: None,
+            account_usage: None,
+            credential_id: None,
+        };
+        let records = vec![claude_five_hour, claude_weekly, router];
+
+        let claude = latest_windows_for_backend(&records, "claude");
+        assert_eq!(claude.len(), 2, "both Claude windows, newest per window");
+        assert!(claude
+            .iter()
+            .all(|r| r.backend_instance.as_deref() == Some("claude")));
+
+        let agy = latest_windows_for_backend(&records, "agy");
+        assert_eq!(agy.len(), 1);
+        assert_eq!(agy[0].usage_source.as_deref(), Some("cli_router"));
+
+        assert!(latest_windows_for_backend(&records, "codex").is_empty());
+    }
+
+    /// #1339: a newer failed check invalidates only its own source's
+    /// windows in the backend-scoped view, never a sibling account's.
+    #[test]
+    fn latest_windows_for_backend_failed_check_scopes_to_its_source() {
+        let good = QuotaObservationRecord {
+            backend: "claude".into(),
+            backend_instance: Some("claude".into()),
+            model: None,
+            quota_pool: None,
+            quota_window: Some("5h".into()),
+            quota_used_percent: None,
+            quota_remaining_percent: Some(40.0),
+            quota_reset_at: None,
+            observed_at: Some("2026-10-04T08:00:00Z".into()),
+            checked_at: Some("2026-10-04T08:00:00Z".into()),
+            check_error: None,
+            usage_source: Some("claude_native".into()),
+            mistral_admin: None,
+            account_usage: None,
+            credential_id: None,
+        };
+        let mut failed_check = good.clone();
+        failed_check.backend_instance = Some("claude-work".into());
+        failed_check.quota_window = None;
+        failed_check.quota_remaining_percent = None;
+        failed_check.checked_at = Some("2026-10-04T09:00:00Z".into());
+        failed_check.check_error = Some("auth_required: login expired".into());
+        let records = vec![good, failed_check];
+
+        let windows = latest_windows_for_backend(&records, "claude");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].backend_instance.as_deref(), Some("claude"));
+        assert_eq!(windows[0].quota_remaining_percent, Some(40.0));
     }
 
     #[test]
