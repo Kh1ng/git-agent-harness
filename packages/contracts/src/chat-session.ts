@@ -412,7 +412,10 @@ export interface ChatReclaimResult {
 
 /** A node offered by the new-chat flow's node step. Chat runs on the
  * central node today; workers are listed for visibility but not yet
- * chat-capable (fleet chat is future work). */
+ * chat-capable (fleet chat is future work). The local control-plane node --
+ * including a `standalone` host -- is reported as `central`, so this wire
+ * surface never carries the host-local `standalone` role and every consumer
+ * (old or new) sees the same values. */
 export interface ChatNodeInfo {
   nodeId: string;
   displayName: string;
