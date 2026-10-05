@@ -130,6 +130,7 @@ fn empty_clean_profile_snapshot() {
 fn light_snapshot_never_calls_the_provider() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _exec_guard = ExecGuard::new();
     struct ProviderPathGuard;
     impl Drop for ProviderPathGuard {
         fn drop(&mut self) {
@@ -147,10 +148,17 @@ fn light_snapshot_never_calls_the_provider() {
     let gh = bin.join("gh");
     fs::write(
         &gh,
-        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
     )
     .unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    let status = std::process::Command::new("gh")
+        .env("PATH", &bin)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(1));
+    assert!(marker.exists(), "mock gh must record its invocation");
+    fs::remove_file(&marker).unwrap();
     crate::provider::set_test_provider_path(bin.to_str().unwrap());
     let _path = ProviderPathGuard;
 
