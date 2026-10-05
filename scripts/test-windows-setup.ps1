@@ -12,6 +12,7 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 $oldProfile = $env:USERPROFILE
 $oldSetup = $env:GAH_SETUP
 $oldWslEnv = $env:WSLENV
+$oldScript = $env:GAH_SCRIPT
 $env:USERPROFILE = $stage
 $script:calls = @()
 $script:installed = $false
@@ -64,7 +65,7 @@ try {
     if ($saved.command -cne $command) { throw 'Saved command quoting changed.' }
 
     Invoke-GahWindowsSetup 'ignored' 'ignored' '' $true
-    if (-not $script:installed -or $env:GAH_SETUP -cne $command -or $env:WSLENV -notmatch 'GAH_SETUP/u') { throw 'Resume did not install for the caller and forward the literal command.' }
+    if (-not $script:installed -or $env:GAH_SCRIPT -cne $command -or $env:WSLENV -notmatch 'GAH_SCRIPT/u') { throw 'Resume did not install for the caller and forward the literal command.' }
     if (Test-Path $pending) { throw 'Successful resume retained pending setup.' }
     if ($script:resumeRegistered) { throw 'Successful setup retained RunOnce.' }
     $userLaunch = $script:calls | Where-Object { $_.Count -eq 2 -and $_[0] -eq '--distribution' }
@@ -94,10 +95,24 @@ try {
     $script:answer = 'n'
     Invoke-GahWindowsSetup 'Ubuntu' $command '' $false
     if (Test-Path $pending) { throw 'Declining WSL wrote pending setup.' }
-    Write-Host 'WSL setup checks passed: feature elevation, restart/resume, Linux user initialization, literal command, retry, WSL1/root/IPv6/outage rejection, cancellation.'
+
+    # Mocks cannot see native argument quoting. Under Windows PowerShell, pass
+    # the real invocation to a compiled argv echo named wsl.exe.
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        Add-Type -OutputType ConsoleApplication -OutputAssembly (Join-Path $stage 'wsl.exe') -TypeDefinition 'public static class P { public static void Main(string[] a) { foreach (var x in a) System.Console.WriteLine(x); } }'
+        Remove-Item Function:\wsl.exe
+        $oldPath = $env:PATH
+        $env:PATH = "$stage;$env:PATH"
+        try { $argv = @(Invoke-GahWslScript 'Ubuntu' "a`r`nb") } finally { $env:PATH = $oldPath }
+        if (($argv -join '|') -cne '--distribution|Ubuntu|--exec|bash|-lc|eval "$GAH_SCRIPT"') { throw "Native argv changed: $($argv -join '|')" }
+        if ($env:GAH_SCRIPT -cne "a`nb") { throw 'Script kept carriage returns.' }
+        if (([regex]::Matches($env:WSLENV, 'GAH_SCRIPT/u')).Count -ne 1) { throw 'WSLENV repeated GAH_SCRIPT.' }
+    }
+    Write-Host 'WSL setup checks passed: feature elevation, restart/resume, Linux user initialization, literal command, native quoting, retry, WSL1/root/IPv6/outage rejection, cancellation.'
 } finally {
     $env:USERPROFILE = $oldProfile
     $env:GAH_SETUP = $oldSetup
     $env:WSLENV = $oldWslEnv
+    $env:GAH_SCRIPT = $oldScript
     Remove-Item -LiteralPath $stage -Recurse -Force
 }

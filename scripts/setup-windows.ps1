@@ -20,6 +20,17 @@ function Assert-WslSuccess([string]$Action) {
     if ($LASTEXITCODE -ne 0) { throw "$Action failed (exit $LASTEXITCODE)." }
 }
 
+# Windows PowerShell 5.1 does not escape quotes in native arguments, so a
+# script travels in the environment and the one quoted argument is escaped here.
+function Invoke-GahWslScript([string]$Name, [string]$Script) {
+    $PSNativeCommandArgumentPassing = 'Legacy'
+    $env:GAH_SCRIPT = $Script -replace "`r", ''
+    if ($env:WSLENV -notmatch '(^|:)GAH_SCRIPT/u(:|$)') {
+        $env:WSLENV = if ($env:WSLENV) { "$($env:WSLENV):GAH_SCRIPT/u" } else { 'GAH_SCRIPT/u' }
+    }
+    & wsl.exe --distribution $Name --exec bash -lc 'eval \"$GAH_SCRIPT\"'
+}
+
 function Get-GahWslDistributions {
     if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { return @() }
     $listed = (& wsl.exe --list --quiet 2>$null | Out-String).Replace([string][char]0, '')
@@ -65,7 +76,7 @@ awk '\''
 cat "$tmp" > "$config"
 '
 '@
-    & wsl.exe --distribution $Name --exec bash -lc $enable
+    Invoke-GahWslScript $Name $enable
     Assert-WslSuccess 'Systemd configuration'
     & wsl.exe --terminate $Name
     Assert-WslSuccess 'WSL restart'
@@ -121,9 +132,7 @@ function Invoke-GahWindowsSetup([string]$Name, [string]$Command, [string]$Addres
     }
     Assert-GahWslReady $Name $Address
     Enable-GahWslSystemd $Name
-    $env:GAH_SETUP = $Command
-    $env:WSLENV = if ($env:WSLENV) { "$($env:WSLENV):GAH_SETUP/u" } else { 'GAH_SETUP/u' }
-    & wsl.exe --distribution $Name --exec bash -lc 'eval "$GAH_SETUP"'
+    Invoke-GahWslScript $Name $Command
     Assert-WslSuccess 'GAH setup'
     Remove-Item -LiteralPath $pending -Force -ErrorAction SilentlyContinue
     Remove-ItemProperty -Path $runOnce -Name '!GAHSetup' -ErrorAction SilentlyContinue
