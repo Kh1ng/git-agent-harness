@@ -1328,7 +1328,7 @@ mod tests {
             shim(
                 bin.path(),
                 name,
-                &format!("echo \"$@\" >> '{}'\nexit {exit}\n", log.display()),
+                &format!("printf '%s\\n' \"$*\" >> '{}'\nexit {exit}\n", log.display()),
             );
         }
         bin
