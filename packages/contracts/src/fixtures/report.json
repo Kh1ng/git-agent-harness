@@ -21,6 +21,7 @@
       "quota_observations": [
         {
           "backend": "openhands",
+          "backend_instance": "codex",
           "model": "gpt-5.4-mini",
           "quota_remaining_percent": 75.0,
           "quota_reset_at": "2026-07-20T00:00:00Z",

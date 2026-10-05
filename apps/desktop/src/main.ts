@@ -1,3 +1,4 @@
+import { bindRepositoryTools } from './repositoryTools.js';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { bindMistralLogin, type MistralLoginResult } from './mistralLogin.js';
@@ -7,6 +8,7 @@ type Presence = { dock: boolean; launch_window: boolean; tray: boolean };
 type Settings = { central_url: string; wsl_distribution: string; presence: Presence };
 type WorkerStatus = { running: boolean; note: string; tools: { name: string; environment: string; installed: boolean }[] };
 type RoleStatus = { role: 'central' | 'worker'; running: boolean; supported: boolean };
+bindRepositoryTools(document.querySelector<HTMLElement>('#repository-tools')!, invoke);
 const central = document.querySelector<HTMLInputElement>('#central-url')!;
 const distribution = document.querySelector<HTMLInputElement>('#wsl-distribution')!;
 const error = document.querySelector<HTMLElement>('#error')!;

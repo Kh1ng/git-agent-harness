@@ -74,11 +74,31 @@ password. **Check again** refreshes the list afterwards. With a GitHub
 login in `gh`, the app's paste line also works while the repository is
 private.
 
+### macOS release signing
+
+Release builds require these repository secrets:
+
+- `APPLE_CERTIFICATE`: base64-encoded Developer ID Application certificate exported as a `.p12` file.
+- `APPLE_CERTIFICATE_PASSWORD`: password for that export.
+- `APPLE_SIGNING_IDENTITY`: complete `Developer ID Application: ...` identity.
+- `APPLE_ID`: Apple account used for notarization.
+- `APPLE_PASSWORD`: app-specific password for that account.
+- `APPLE_TEAM_ID`: Apple Developer team identifier.
+
+The release workflow verifies the app signature and notarization ticket. It also notarizes and staples the DMG before publishing.
+Missing credentials or failed verification stop the release. Unsigned development artifacts from the Desktop workflow remain available for testing.
+See [Tauri's signing instructions](https://v2.tauri.app/distribute/sign/macos/) for certificate export and notarization credentials.
+
 ### Windows
 
-The desktop app and its WSL worker install from the releases page; see the
-[Windows tester guide](WINDOWS_TESTER_GUIDE.md). The worker runs inside WSL,
-so its setup happens there rather than in the app's checklist.
+Install the desktop app from the releases page. In **Set up this computer**, select the terminal setup button.
+The app opens a PowerShell console and offers to enable WSL2 and install Ubuntu.
+Approve the Windows elevation prompt. If requested, restart Windows and sign in. The setup console reopens automatically.
+Create your Linux user when prompted, then type `exit`. GAH setup continues inside WSL as that user.
+If setup fails, select the terminal setup button again. Existing WSL1 distributions require conversion to WSL2 before setup.
+
+For a worker connected to another central node, use the [Windows tester guide](WINDOWS_TESTER_GUIDE.md).
+That installer also configures the Windows forwarding port and worker startup task.
 
 ## What each choice needs
 
@@ -97,9 +117,12 @@ code, so it cannot fall out of date.
 | `gh` or `glab` login | Everything | Lets GAH read issues and push branches as you. |
 | curl | Dashboard, Worker | The installer uses it to check that services came up. |
 | systemd (Linux) or launchd (macOS) | Dashboard, Worker | Keeps the GAH server running and restarts it after a reboot. |
+| user lingering | Dashboard, Worker (recommended) | Keeps the user's systemd manager and timers running after they log out. |
 | Tailscale | Dashboard, Worker (recommended) | Reach the dashboard from your phone and other machines over HTTPS, privately. |
 | openssl | Shared memory | Generates the memory gateway's access key. |
 <!-- requirements:end -->
+
+For the standalone desktop app, open **Settings > This computer > Repository tools**. Select GitHub or GitLab. If its CLI package is missing, open the official installation guide, install the package, and select **Check installation**. GitHub uses [GitHub CLI](https://cli.github.com/); GitLab uses [GitLab CLI](https://gitlab.com/gitlab-org/cli#installation). Sign-in starts only after the CLI is available. Standalone runs the local workflow without Tailscale or another GAH node.
 
 ### Shared memory
 

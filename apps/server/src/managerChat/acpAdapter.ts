@@ -535,15 +535,38 @@ export function createAcpBackend(
       state.stderrTail = appendStderrTail(state.stderrTail, chunk);
       process.stderr.write(chunk);
     });
-    state.ready = (async () => {
-      const initialized = await connection.initialize({
-        protocolVersion: acp.PROTOCOL_VERSION,
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } }
+    // A command that cannot be started (not installed, not executable) is
+    // reported as an 'error' event with no 'exit'. Without a listener Node
+    // rethrows it and takes the whole server down, so turn it into a failed
+    // connection for this backend instead.
+    const spawnFailed = new Promise<never>((_, reject) => {
+      child.on('error', (error: NodeJS.ErrnoException) => {
+        if (connections.get(gahProfile) === state) {
+          connections.delete(gahProfile);
+        }
+        reject(new Error(
+          error.code === 'ENOENT'
+            ? `${label} is not installed on this machine: the "${spec.command}" command was not found.`
+            : `${label} could not be started: ${error.message}`
+        ));
       });
-      const steering = initialized._meta?.steering as { supported?: unknown } | undefined;
-      state.steeringSupported = steering?.supported === true;
-      await startSession(state);
-    })();
+    });
+    spawnFailed.catch(() => undefined);
+    // The pipes of a child that never started fail on first use.
+    child.stdin.on('error', () => undefined);
+    state.ready = Promise.race([
+      (async () => {
+        const initialized = await connection.initialize({
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } }
+        });
+        const steering = initialized._meta?.steering as { supported?: unknown } | undefined;
+        state.steeringSupported = steering?.supported === true;
+        await startSession(state);
+      })(),
+      spawnFailed
+    ]);
+    state.ready.catch(() => undefined);
 
     child.on('exit', (code, signal) => {
       state.exit = { code, signal };

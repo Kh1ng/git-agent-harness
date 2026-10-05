@@ -380,8 +380,16 @@ export interface PmParentStatus {
   reconciled: boolean;
 }
 
+/** Host role reported by `gah status --role --json`. Contract compatibility
+ * policy (CONTRIBUTING.md "Cross-surface changes"): the union is append-only.
+ * `standalone` (added in #1318) is a loopback-only deployment shape of the
+ * central control plane; consumers must accept it and treat it as
+ * central-equivalent, never as a worker. A role value a consumer does not
+ * recognize must fail closed with an upgrade instruction -- never silently
+ * default to `central`. The field is optional on the wire ("absent on older
+ * CLIs"), and the role is host-local: it never crosses fleet wire formats. */
 export interface NodeRoleStatus {
-  role: 'central' | 'worker';
+  role: 'central' | 'standalone' | 'worker';
   central_url: string | null;
 }
 
@@ -582,6 +590,8 @@ export interface QuotaObservation {
   quota_remaining_percent?: number | null;
   quota_reset_at?: string | null;
   observed_at?: string | null;
+  /** When the check ran, on store-derived report rows (#1339). */
+  checked_at?: string | null;
   usage_source?: string | null;
   account_usage?: AccountUsageObservation | null;
 }

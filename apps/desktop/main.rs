@@ -16,6 +16,7 @@ mod credentials;
 mod mistral_login;
 mod open_project;
 mod setup_check;
+mod repository_tools;
 
 const OWNER_CREDENTIAL_SERVICE: &str = "com.kh1ng.gah.owner";
 const OWNER_TOKEN_STORAGE_KEY: &str = "gah.coordinatorToken";
@@ -902,6 +903,7 @@ fn main() {
             open_external_url,
             open_project::desktop_open_context,
             open_project::open_local_checkout,
+            repository_tools::repository_tools,
             setup_check::setup_check,
             setup_check::open_setup_terminal,
             mistral_login::mistral_login_start,

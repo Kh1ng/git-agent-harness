@@ -11,7 +11,7 @@ mod quota;
 pub use quota::{CredentialCommands, QuotaCommands};
 
 #[derive(Parser)]
-#[command(name = "gah", about = "git agent harness")]
+#[command(name = "gah", version, about = "git agent harness")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

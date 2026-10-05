@@ -56,7 +56,7 @@ function Logins({ revision }: { revision: string }) {
       {problems.map((row) => <li key={`${row.node_id}|${row.backend}|${row.provider ?? ''}`} className="py-3 space-y-1">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <span className="font-semibold text-critical">{[row.node_name, row.backend, row.provider].filter(Boolean).join(' · ')}</span>
-          <span className="text-sm text-critical">{LOGIN_PROBLEM[row.state]} · detected {age(row.since)}</span>
+          <span className="text-sm text-critical">{row.installed === false ? 'CLI not installed' : LOGIN_PROBLEM[row.state]} · detected {age(row.since)}</span>
         </div>
         {row.detail && <p className="text-sm text-secondary">{row.detail}</p>}
         <LoginRepairPanel login={row} />

@@ -27,7 +27,7 @@ cd "$repo_root"
 # --bin gah is required: Cargo.toml declares a second [[bin]]
 # (generate-cli-capabilities) with no default-run set, so a bare `cargo run`
 # is ambiguous and errors instead of picking one. The first call builds gah.
-gah_cli=(cargo run -q --bin gah --)
+gah_cli=(cargo run --locked -q --bin gah --)
 
 if [ "$role" = central ]; then
   case "${GAH_GATEWAY_MODE:-}" in
@@ -67,7 +67,7 @@ elif [ -n "${GAH_GATEWAY_MODE:-}" ]; then
 fi
 
 bash "$repo_root/scripts/configure-node-role.sh" "$role" "${gah_cli[@]}"
-cargo run --bin gah -- update --repo "$repo_root" --role "$role"
+cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role"
 
 if [ "$role" = central ] && [ "${GAH_GATEWAY_MODE:-}" = colocated ]; then
   gateway_ready=0

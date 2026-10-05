@@ -1,6 +1,8 @@
 //! Owner-selected dashboard session. No browser credential extraction or routing
 //! account association: this is a read-only current-login billing observation.
+mod login;
 mod parse;
+pub(crate) use login::sign_in;
 #[cfg(test)]
 mod tests;
 
