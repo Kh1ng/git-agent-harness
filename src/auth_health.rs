@@ -107,7 +107,11 @@ fn said_logged_out(lower: &str) -> bool {
 }
 
 /// Classifies a text `login status`-style command (codex, hermes, gh, glab).
-/// Expiry is checked first: gh reports a dead token next to its account line.
+/// Credential rejection is checked first and stays authoritative: gh 2.45.0
+/// reports a dead token on a command that still exits 0, sometimes next to
+/// another host's `✓ Logged in` line. A login line is only authoritative on
+/// a successful probe, so an unrelated "not logged in" message (a host the
+/// account never signed in to) cannot mask it.
 pub fn classify_status_output(success: bool, stdout: &[u8], stderr: &[u8]) -> AuthHealth {
     let lower = format!(
         "{}\n{}",
@@ -115,11 +119,11 @@ pub fn classify_status_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Au
         String::from_utf8_lossy(stderr)
     )
     .to_lowercase();
-    if success && said_logged_in(&lower) {
-        return AuthHealth::new(AuthState::Ok, None);
-    }
     if said_expired(&lower) {
         return AuthHealth::new(AuthState::Expired, Some("The saved login has expired."));
+    }
+    if success && said_logged_in(&lower) {
+        return AuthHealth::new(AuthState::Ok, None);
     }
     if said_logged_out(&lower) {
         return AuthHealth::new(AuthState::Missing, Some("Not logged in."));
@@ -453,6 +457,10 @@ mod tests {
         classify_status_output(success, stdout.as_bytes(), b"").state
     }
 
+    fn full(success: bool, stdout: &str, stderr: &str) -> AuthState {
+        classify_status_output(success, stdout.as_bytes(), stderr.as_bytes()).state
+    }
+
     #[test]
     fn codex_login_status_output() {
         assert_eq!(text(true, "Logged in using ChatGPT\n"), AuthState::Ok);
@@ -480,8 +488,9 @@ mod tests {
             AuthState::Expired
         );
         assert_eq!(
-            text(
+            full(
                 false,
+                "",
                 "You are not logged into any GitHub hosts. To log in, run: gh auth login\n"
             ),
             AuthState::Missing
@@ -492,6 +501,54 @@ mod tests {
                 "github.com\n  ✓ Logged in to github.com account octo (keyring)\n\nYou are not logged into any GitHub Enterprise Server hosts.\n"
             ),
             AuthState::Ok
+        );
+    }
+
+    /// Issue #1324: gh 2.45.0 account states, reproduced with the real
+    /// binary. A dead token is printed on stdout by a command that still
+    /// exits 0; "not logged in" is a failed command whose message goes to
+    /// stderr only; a validation timeout is neither Ok nor a rejection.
+    #[test]
+    fn gh_245_auth_status_account_states() {
+        assert_eq!(
+            full(
+                true,
+                "github.com\n  ✓ Logged in to github.com account octo (keyring)\n  - Active account: true\n  - Git operations protocol: https\n  - Token: gho_************\n  - Token scopes: 'gist', 'read:org', 'repo'\n",
+                ""
+            ),
+            AuthState::Ok
+        );
+        assert_eq!(
+            full(
+                true,
+                "github.com\n  X Failed to log in to github.com account octo (keyring)\n  - Active account: true\n  - The token in keyring is invalid.\n  - To re-authenticate, run: gh auth login -h github.com\n  - To forget about this account, run: gh auth logout -h github.com -u octo\n",
+                ""
+            ),
+            AuthState::Expired
+        );
+        assert_eq!(
+            full(
+                true,
+                "github.com\n  X Timeout trying to log in to github.com account octo (keyring)\n  - Active account: true\n",
+                ""
+            ),
+            AuthState::Unknown
+        );
+        assert_eq!(full(false, "", ""), AuthState::Error);
+    }
+
+    /// Issue #1324: gh 2.45.0 still exits 0 when one host is logged in and
+    /// another host's token is dead; the credential failure, not the login
+    /// line, decides the state.
+    #[test]
+    fn gh_login_line_does_not_mask_a_credential_failure() {
+        assert_eq!(
+            full(
+                true,
+                "github.com\n  ✓ Logged in to github.com account octo (keyring)\n  - Active account: true\n  - Git operations protocol: https\n  - Token: gho_************\n  - Token scopes: 'gist', 'read:org', 'repo'\n\nghe.example.com\n  X Failed to log in to ghe.example.com account octo (keyring)\n  - Active account: true\n  - The token in keyring is invalid.\n",
+                ""
+            ),
+            AuthState::Expired
         );
     }
 

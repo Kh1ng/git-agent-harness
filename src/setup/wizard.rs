@@ -577,7 +577,10 @@ fn line(requirement: &Requirement) -> String {
             "missing".into(),
         ),
         Status::Outdated { found } => ("✗", format!("too old ({found})")),
-        Status::NotLoggedIn { reason } => ("✗", reason.clone()),
+        Status::NotLoggedIn { reason }
+        | Status::CredentialsRejected { reason }
+        | Status::StatusUnknown { reason }
+        | Status::StatusFailed { reason } => ("✗", reason.clone()),
         Status::Unsupported { reason } => ("✗", reason.clone()),
     };
     let optional = if requirement.optional {

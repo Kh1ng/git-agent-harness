@@ -146,7 +146,21 @@ pub enum Status {
     Outdated {
         found: String,
     },
+    /// No saved login: the provider CLI says there is no account.
     NotLoggedIn {
+        reason: String,
+    },
+    /// A saved login exists, but the provider rejected its credential.
+    CredentialsRejected {
+        reason: String,
+    },
+    /// The provider CLI answered, but its status could not be recognized.
+    StatusUnknown {
+        reason: String,
+    },
+    /// The status check itself failed or did not finish, so the login state
+    /// is unknown; the user may well be logged in (#1324).
+    StatusFailed {
         reason: String,
     },
     /// Cannot be provided on this machine (e.g. no systemd).
@@ -261,9 +275,15 @@ fn command_status(
     }
 }
 
+/// A hung login check says nothing about the login (#1324): the 20-second
+/// probe budget can kill `gh auth status` mid-validation on a slow network.
+const LOGIN_CHECK_UNFINISHED: &str = "The login status check did not finish.";
+
 fn login_status(host: &dyn Host, program: &str, args: &[&str]) -> Status {
     let Some(probe) = host.probe(program, args) else {
-        return Status::Missing;
+        return Status::StatusFailed {
+            reason: LOGIN_CHECK_UNFINISHED.to_string(),
+        };
     };
     let health = if program == "claude" {
         auth_health::classify_claude_status(probe.success, probe.stdout.as_bytes())
@@ -274,12 +294,26 @@ fn login_status(host: &dyn Host, program: &str, args: &[&str]) -> Status {
             probe.stderr.as_bytes(),
         )
     };
-    if health.state == AuthState::Ok {
-        Status::Ok { found: None }
-    } else {
-        Status::NotLoggedIn {
-            reason: health.detail.unwrap_or_else(|| "not logged in".to_string()),
-        }
+    let reason = |fallback: &str| {
+        health
+            .detail
+            .clone()
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    match health.state {
+        AuthState::Ok => Status::Ok { found: None },
+        AuthState::Missing => Status::NotLoggedIn {
+            reason: reason("Not logged in."),
+        },
+        AuthState::Expired => Status::CredentialsRejected {
+            reason: reason("The saved login has expired."),
+        },
+        AuthState::Unknown => Status::StatusUnknown {
+            reason: reason("The login status was not recognized."),
+        },
+        AuthState::Error => Status::StatusFailed {
+            reason: reason("The login status command failed."),
+        },
     }
 }
 
@@ -375,8 +409,11 @@ pub fn requirements(selection: &Selection, host: &dyn Host) -> Vec<Requirement> 
                 Agent::Codex => login_status(host, "codex", &["login", "status"]),
                 Agent::Opencode => match host.probe("opencode", &["auth", "list"]) {
                     Some(probe) if probe.stdout.contains('●') => Status::Ok { found: None },
-                    _ => Status::NotLoggedIn {
-                        reason: "not logged in".to_string(),
+                    Some(_) => Status::NotLoggedIn {
+                        reason: "Not logged in.".to_string(),
+                    },
+                    None => Status::StatusFailed {
+                        reason: LOGIN_CHECK_UNFINISHED.to_string(),
                     },
                 },
             }
@@ -648,13 +685,22 @@ pub(crate) mod tests {
                 programs: HashMap::new(),
             }
         }
-        pub(crate) fn with(mut self, invocation: &str, success: bool, stdout: &str) -> Self {
+        pub(crate) fn with(self, invocation: &str, success: bool, stdout: &str) -> Self {
+            self.with_streams(invocation, success, stdout, "")
+        }
+        pub(crate) fn with_streams(
+            mut self,
+            invocation: &str,
+            success: bool,
+            stdout: &str,
+            stderr: &str,
+        ) -> Self {
             self.programs.insert(
                 invocation.into(),
                 Probe {
                     success,
                     stdout: stdout.into(),
-                    stderr: String::new(),
+                    stderr: stderr.into(),
                 },
             );
             self
@@ -767,8 +813,124 @@ pub(crate) mod tests {
                 found: "v18.19.0".into()
             }
         );
-        assert!(matches!(status("agent_login"), Status::NotLoggedIn { .. }));
+        assert_eq!(
+            status("agent_login"),
+            Status::NotLoggedIn {
+                reason: "Not logged in.".into()
+            }
+        );
         assert!(status("provider_login").is_ok());
+    }
+
+    /// Issue #1324: setup detection with the tester's gh (2.45.0) and its
+    /// account-state shapes, captured from the real binary. Every state
+    /// stays distinct instead of collapsing into "not logged in", and a
+    /// probe that cannot run is never reported as a missing login.
+    #[test]
+    fn gh_245_login_states_stay_distinct() {
+        let with_gh = |success: bool, stdout: &str, stderr: &str| {
+            FakeHost::new(Os::Linux, Some(PackageManager::Apt))
+                .with("gh --version", true, "gh version 2.45.0")
+                .with_streams("gh auth status", success, stdout, stderr)
+        };
+        let provider_login = |host: &FakeHost| {
+            requirements(&selection(Role::CliOnly), host)
+                .iter()
+                .find(|requirement| requirement.id == "provider_login")
+                .unwrap()
+                .status
+                .clone()
+        };
+        assert_eq!(
+            provider_login(&with_gh(
+                true,
+                "github.com\n  ✓ Logged in to github.com account octo (keyring)\n  - Active account: true\n  - Git operations protocol: https\n  - Token: gho_************\n  - Token scopes: 'gist', 'read:org', 'repo'\n",
+                ""
+            )),
+            Status::Ok { found: None }
+        );
+        assert_eq!(
+            provider_login(&with_gh(
+                true,
+                "github.com\n  X Failed to log in to github.com account octo (keyring)\n  - Active account: true\n  - The token in keyring is invalid.\n  - To re-authenticate, run: gh auth login -h github.com\n",
+                ""
+            )),
+            Status::CredentialsRejected {
+                reason: "The saved login has expired.".into()
+            }
+        );
+        assert_eq!(
+            provider_login(&with_gh(
+                true,
+                "github.com\n  X Timeout trying to log in to github.com account octo (keyring)\n  - Active account: true\n",
+                ""
+            )),
+            Status::StatusUnknown {
+                reason: "The login status was not recognized.".into()
+            }
+        );
+        assert_eq!(
+            provider_login(&with_gh(
+                false,
+                "",
+                "You are not logged into any GitHub hosts. To log in, run: gh auth login\n"
+            )),
+            Status::NotLoggedIn {
+                reason: "Not logged in.".into()
+            }
+        );
+        assert_eq!(
+            provider_login(&with_gh(false, "", "")),
+            Status::StatusFailed {
+                reason: "The login status command failed.".into()
+            }
+        );
+        let hung = FakeHost::new(Os::Linux, Some(PackageManager::Apt)).with(
+            "gh --version",
+            true,
+            "gh version 2.45.0",
+        );
+        assert_eq!(
+            provider_login(&hung),
+            Status::StatusFailed {
+                reason: "The login status check did not finish.".into()
+            }
+        );
+    }
+
+    /// Issue #1324: the states must stay distinct in the machine-readable
+    /// report the desktop app reads, not only in memory.
+    #[test]
+    fn login_states_serialize_distinctly() {
+        let states = [
+            (
+                Status::NotLoggedIn {
+                    reason: "Not logged in.".into(),
+                },
+                "not_logged_in",
+            ),
+            (
+                Status::CredentialsRejected {
+                    reason: "The saved login has expired.".into(),
+                },
+                "credentials_rejected",
+            ),
+            (
+                Status::StatusUnknown {
+                    reason: "The login status was not recognized.".into(),
+                },
+                "status_unknown",
+            ),
+            (
+                Status::StatusFailed {
+                    reason: "The login status command failed.".into(),
+                },
+                "status_failed",
+            ),
+        ];
+        for (status, state) in states {
+            assert_eq!(serde_json::to_value(&status).unwrap()["state"], state);
+        }
     }
 
     #[test]
