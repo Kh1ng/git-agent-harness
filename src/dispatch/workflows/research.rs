@@ -140,6 +140,7 @@ pub(crate) fn research(
         env_path,
         ledger.work_id.as_deref(),
         None,
+        crate::runner::WriteIntent::ReadOnly,
     )?;
     println!(
         "Backend finished: exit={} duration={:.0}s log={}",

@@ -7,7 +7,7 @@ use crate::runner::backends::write_refusal;
 use crate::runner::output;
 use crate::runner::process::{spawn_with_idle_watch, write_redacted_task};
 use crate::runner::resolve::{codex_model_args, filtered_codex_args};
-use crate::runner::RunResult;
+use crate::runner::{RunResult, WriteIntent};
 
 /// Run Codex non-interactively via `codex exec`.
 /// extra_args come from profile.codex_args, but stale model flags are
@@ -22,6 +22,7 @@ pub(crate) fn run_with_executable(
     extra_args: &[String],
     env_vars: &[(String, String)],
     idle_timeout_seconds: u64,
+    write_intent: WriteIntent,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     write_redacted_task(session_dir, task)?;
@@ -33,6 +34,9 @@ pub(crate) fn run_with_executable(
 
     // Issue #1367: an implementation run must be able to write the worktree
     // and the build cache. Profile codex_args that choose a sandbox win.
+    // Read-only job kinds run in the operator's real checkout and keep the
+    // CLI's own sandbox default.
+    let implementation = write_intent == WriteIntent::Implementation;
     let filtered_extra = filtered_codex_args(extra_args);
     let profile_sets_sandbox = filtered_extra.iter().any(|arg| {
         matches!(
@@ -40,12 +44,12 @@ pub(crate) fn run_with_executable(
             "-s" | "--sandbox" | "--full-auto" | "--dangerously-bypass-approvals-and-sandbox"
         ) || arg.starts_with("--sandbox=")
     });
-    if !profile_sets_sandbox {
+    if implementation && !profile_sets_sandbox {
         cmd.arg("--sandbox").arg("workspace-write");
     }
     if let Some(target) = env_vars
         .iter()
-        .find(|(k, _)| k == "CARGO_TARGET_DIR")
+        .find(|(k, _)| implementation && k == "CARGO_TARGET_DIR")
         .map(|(_, v)| v)
     {
         if let Some(cache_root) = Path::new(target).parent().and_then(|p| p.parent()) {
@@ -78,7 +82,8 @@ pub(crate) fn run_with_executable(
     // Issue #1367: a run whose writes the sandbox rejected and that left the
     // worktree untouched cannot succeed on retry. Runs GAH killed (negative
     // exit) keep their own classification.
-    let exit_code = if exit_code >= 0
+    let exit_code = if implementation
+        && exit_code >= 0
         && write_refusal::codex_refused_writes(&output_text)
         && !write_refusal::worktree_changed_since(worktree_before.as_deref(), worktree)
     {
@@ -132,6 +137,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -157,6 +163,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -179,6 +186,7 @@ mod tests {
             &["-c".to_string(), "model=gpt".to_string()],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -214,6 +222,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -250,6 +259,7 @@ mod tests {
                 &extra,
                 &envs,
                 300,
+                WriteIntent::Implementation,
             )
             .unwrap();
 
@@ -260,6 +270,68 @@ mod tests {
             );
             assert!(argv.contains(&profile_args[0].to_string()));
         }
+    }
+
+    #[test]
+    fn run_codex_read_only_dispatch_keeps_the_cli_sandbox_default() {
+        // research/audit/estimate/pm run in the operator's real checkout.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
+        let envs = vec![
+            ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
+            (
+                "CARGO_TARGET_DIR".to_string(),
+                f.worktree
+                    .join("build-cache/attempt-1/target")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ];
+
+        run_with_executable(
+            Path::new("codex"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &["-c".to_string(), "model=gpt".to_string()],
+            &envs,
+            300,
+            WriteIntent::ReadOnly,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert!(!argv.contains(&"--sandbox".to_string()), "got {argv:?}");
+        assert!(!argv.contains(&"workspace-write".to_string()));
+        assert!(!argv.contains(&"--add-dir".to_string()));
+        assert!(argv.contains(&"model=gpt".to_string()));
+    }
+
+    #[test]
+    fn run_codex_read_only_dispatch_does_not_report_rejected_writes() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        let envs = make_event_bin(&f, &[PATCH_FAILED], false);
+
+        let result = run_with_executable(
+            Path::new("codex"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+            WriteIntent::ReadOnly,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(write_refusal::refusal_detail(&log).is_none());
     }
 
     const PATCH_FAILED: &str = r#"{"type":"item.completed","item":{"id":"i1","type":"file_change","changes":[{"path":"progress.txt","kind":"update"}],"status":"failed"}}"#;
@@ -306,6 +378,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -332,6 +405,7 @@ mod tests {
             &["--sandbox".to_string(), "read-only".to_string()],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -360,6 +434,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -390,6 +465,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -418,6 +494,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -439,6 +516,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap_err();
 
@@ -475,6 +553,7 @@ mod tests {
             &[],
             &envs,
             3,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -510,6 +589,7 @@ mod tests {
             ],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 

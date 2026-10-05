@@ -9,7 +9,7 @@ use crate::runner::backends::write_refusal;
 use crate::runner::output;
 use crate::runner::process::{spawn_with_idle_watch, write_redacted_task};
 use crate::runner::resolve::filtered_backend_args;
-use crate::runner::RunResult;
+use crate::runner::{RunResult, WriteIntent};
 
 const DEFAULT_PERMISSION_MODE: &str = "acceptEdits";
 const DEFAULT_ALLOWED_TOOLS: &str = "Edit,Write,MultiEdit,NotebookEdit,Bash";
@@ -26,6 +26,7 @@ pub(crate) fn run_with_executable(
     extra_args: &[String],
     env_vars: &[(String, String)],
     idle_timeout_seconds: u64,
+    write_intent: WriteIntent,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     write_redacted_task(session_dir, task)?;
@@ -57,6 +58,9 @@ pub(crate) fn run_with_executable(
     }
     // Issue #1367: an implementation run must be able to edit the worktree
     // and run commands. Profile claude_args that set either flag win.
+    // Read-only job kinds run in the operator's real checkout and keep the
+    // CLI's own permission defaults.
+    let implementation = write_intent == WriteIntent::Implementation;
     let filtered_extra = filtered_backend_args("claude", extra_args);
     let has_flag = |names: &[&str]| {
         filtered_extra.iter().any(|arg| {
@@ -68,10 +72,10 @@ pub(crate) fn run_with_executable(
     let profile_sets_permission_mode =
         has_flag(&["--permission-mode", "--dangerously-skip-permissions"]);
     let profile_sets_allowed_tools = has_flag(&["--allowedTools", "--allowed-tools"]);
-    if !profile_sets_permission_mode {
+    if implementation && !profile_sets_permission_mode {
         cmd.args(["--permission-mode", DEFAULT_PERMISSION_MODE]);
     }
-    if !profile_sets_allowed_tools {
+    if implementation && !profile_sets_allowed_tools {
         cmd.args(["--allowedTools", DEFAULT_ALLOWED_TOOLS]);
     }
     cmd.args(filtered_extra);
@@ -106,7 +110,8 @@ pub(crate) fn run_with_executable(
         .as_deref()
         .map(write_refusal::claude_refused_write_tools)
         .unwrap_or_default();
-    let exit_code = if exit_code >= 0
+    let exit_code = if implementation
+        && exit_code >= 0
         && !refused_tools.is_empty()
         && !write_refusal::worktree_changed_since(worktree_before.as_deref(), worktree)
     {
@@ -166,6 +171,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -191,6 +197,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -213,6 +220,7 @@ mod tests {
             &["--allowedTools".to_string(), "Edit,Bash".to_string()],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -239,6 +247,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -271,6 +280,7 @@ mod tests {
             ],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -281,6 +291,62 @@ mod tests {
         assert!(argv.contains(&"--allowed-tools=Read".to_string()));
         assert!(!argv.contains(&"acceptEdits".to_string()));
         assert!(!argv.contains(&"--allowedTools".to_string()));
+    }
+
+    #[test]
+    fn run_claude_read_only_dispatch_keeps_the_cli_permission_defaults() {
+        // research/audit/estimate/pm run in the operator's real checkout.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        run_with_executable(
+            Path::new("claude"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &["--add-dir".to_string(), "/docs".to_string()],
+            &envs,
+            300,
+            WriteIntent::ReadOnly,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert!(
+            !argv.contains(&"--permission-mode".to_string()),
+            "got {argv:?}"
+        );
+        assert!(!argv.contains(&"acceptEdits".to_string()));
+        assert!(!argv.contains(&"--allowedTools".to_string()));
+        assert!(argv.contains(&"/docs".to_string()));
+    }
+
+    #[test]
+    fn run_claude_read_only_dispatch_does_not_report_denied_writes() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        make_transcript_bin(&f, "Edit", EDIT_DENIED, false);
+
+        let result = run_with_executable(
+            Path::new("claude"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &transcript_envs(&f),
+            300,
+            WriteIntent::ReadOnly,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(write_refusal::refusal_detail(&log).is_none());
     }
 
     /// A fake `claude` that prints refusal-sounding prose, optionally edits
@@ -352,6 +418,7 @@ mod tests {
             &[],
             &transcript_envs(&f),
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -379,6 +446,7 @@ mod tests {
             &["--permission-mode".to_string(), "plan".to_string()],
             &transcript_envs(&f),
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -407,6 +475,7 @@ mod tests {
             &[],
             &transcript_envs(&f),
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -433,6 +502,7 @@ mod tests {
             &[],
             &transcript_envs(&f),
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -458,6 +528,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -488,6 +559,7 @@ mod tests {
             ],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -519,6 +591,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -540,6 +613,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap_err();
 
@@ -578,6 +652,7 @@ mod tests {
             &[],
             &envs,
             3,
+            WriteIntent::Implementation,
         )
         .unwrap();
 

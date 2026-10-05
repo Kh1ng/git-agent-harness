@@ -142,6 +142,7 @@ pub(crate) fn experiment(
         env_path,
         ledger.work_id.as_deref(),
         None,
+        runner::WriteIntent::Implementation,
     ) {
         Ok(r) => r,
         Err(e) => {

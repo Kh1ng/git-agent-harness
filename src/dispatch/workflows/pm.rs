@@ -174,6 +174,7 @@ pub(crate) fn pm(
                     ledger.work_id.as_deref(),
                     true,
                     Some(remaining.as_secs().max(1)),
+                    crate::runner::WriteIntent::ReadOnly,
                 )
             },
         ) {

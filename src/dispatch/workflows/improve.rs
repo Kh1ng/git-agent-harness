@@ -460,6 +460,7 @@ pub(crate) fn improve(
             ledger.work_id.as_deref(),
             true,
             None,
+            crate::runner::WriteIntent::Implementation,
         );
         drop(admission_guard);
         let result = match result {
