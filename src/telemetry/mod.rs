@@ -1037,8 +1037,7 @@ fn export_once(cfg: &GahConfig, repo_path: &std::path::Path) -> Result<(usize, O
     })?;
     exporter.load_exported_ids()?;
     exporter.export_from_entries(&entries)?;
-    // #1341: account quota readings come from the durable quota store, not
-    // the ledger.
+    // #1341: account quota readings come from the quota store, not the ledger.
     exporter.export_store_quota_observations(&crate::quota_store::load_account_observations())?;
     Ok((exporter.records_exported(), watermark))
 }
@@ -1079,15 +1078,9 @@ pub fn export_telemetry_from_config(
     // Load already exported IDs to avoid duplicates
     exporter.load_exported_ids()?;
 
-    // Export telemetry records
-    let _exported_at = time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| time::OffsetDateTime::now_utc().unix_timestamp().to_string());
-
     // #1341: quota observations come from the durable quota store even when
     // the ledger has no entries in this window.
     exporter.export_store_quota_observations(&crate::quota_store::load_account_observations())?;
-
     if !entries.is_empty() {
         exporter.export_from_entries(&entries)?;
     }
@@ -1173,6 +1166,9 @@ fn determine_telemetry_repo_path(telemetry_repo_path: Option<&str>) -> std::path
 /// Tests for telemetry functionality
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+pub(crate) mod quota_export_tests;
 
 /// Issue #119: provenance-aware per-attempt behavior metrics tests
 #[cfg(test)]
