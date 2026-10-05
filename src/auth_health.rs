@@ -370,21 +370,24 @@ fn dispatch_failures(now: time::OffsetDateTime) -> Vec<AuthProbe> {
     else {
         return Vec::new();
     };
+    dispatch_failures_for_scopes(scopes)
+}
+
+fn dispatch_failures_for_scopes(scopes: Vec<crate::availability::ScopeStatus>) -> Vec<AuthProbe> {
     let mut failures: Vec<AuthProbe> = Vec::new();
     for scope in scopes {
         if scope.eligible || scope.reason != Some(crate::availability::Reason::AuthenticationError)
         {
             continue;
         }
-        if failures
-            .iter()
-            .any(|failure| failure.backend == scope.backend)
-        {
+        if failures.iter().any(|failure| {
+            failure.backend == scope.backend && failure.backend_instance == scope.backend_instance
+        }) {
             continue;
         }
         failures.push(AuthProbe {
             backend: scope.backend,
-            backend_instance: None,
+            backend_instance: scope.backend_instance,
             provider: None,
             health: AuthHealth::new(
                 AuthState::Expired,
@@ -542,6 +545,69 @@ pub fn probe_node() -> AuthHealthReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_failures_preserve_login_identity() {
+        let scope = |backend: &str, instance: Option<&str>, model: Option<&str>| {
+            crate::availability::ScopeStatus {
+                backend: backend.into(),
+                backend_instance: instance.map(str::to_string),
+                model: model.map(str::to_string),
+                quota_pool: None,
+                eligible: false,
+                reason: Some(crate::availability::Reason::AuthenticationError),
+                unavailable_until: None,
+                scope: None,
+                source: None,
+                last_error_summary: None,
+                observed_at: None,
+            }
+        };
+        let mut eligible = scope("claude", Some("healthy"), None);
+        eligible.eligible = true;
+        let mut quota_failure = scope("claude", Some("quota-limited"), None);
+        quota_failure.reason = Some(crate::availability::Reason::RateLimited);
+        let failures = dispatch_failures_for_scopes(vec![
+            scope("claude", Some("token-a"), None),
+            scope("claude", Some("token-a"), Some("sonnet")),
+            scope("claude", Some("token-b"), None),
+            scope("claude", None, None),
+            scope("claude", None, Some("sonnet")),
+            scope("codex", Some("token-a"), None),
+            eligible,
+            quota_failure,
+        ]);
+        let identities: Vec<_> = failures
+            .iter()
+            .map(|failure| {
+                (
+                    failure.backend.as_str(),
+                    failure.backend_instance.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            identities,
+            vec![
+                ("claude", Some("token-a")),
+                ("claude", Some("token-b")),
+                ("claude", None),
+                ("codex", Some("token-a")),
+            ]
+        );
+        for failure in failures {
+            assert_eq!(failure.health.state, AuthState::Expired);
+            assert_eq!(failure.source, AuthSource::Dispatch);
+            assert_eq!(failure.provider, None);
+        }
+        let instance_only =
+            dispatch_failures_for_scopes(vec![scope("claude", Some("rejected-token"), None)]);
+        assert_eq!(instance_only.len(), 1);
+        assert_eq!(
+            instance_only[0].backend_instance.as_deref(),
+            Some("rejected-token")
+        );
+    }
 
     #[test]
     fn claude_instance_probes_report_each_instance_without_ambient_mixing() {
