@@ -20,8 +20,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+mod agy;
 mod identity;
 mod instances;
+pub use agy::refresh_and_store as refresh_agy_and_store;
 pub(crate) use identity::current_source_records;
 pub use identity::{latest_windows_for_identity, latest_windows_for_identity_and_credential};
 
@@ -456,20 +458,6 @@ pub fn refresh_claude_and_store(state_path: &Path) -> Result<Option<QuotaObserva
     Ok(records.into_iter().next())
 }
 
-/// Capture the native Antigravity account's independent model pools and windows.
-pub fn refresh_agy_and_store(
-    executable: &str,
-    backend: &str,
-    home: Option<&Path>,
-    state_path: &Path,
-) -> Result<Option<QuotaObservationRecord>> {
-    let records = crate::usage::agy::refresh(executable, backend, home)?;
-    for record in &records {
-        append(state_path, record)?;
-    }
-    Ok(records.into_iter().next())
-}
-
 /// Issue #761: nothing refreshed this store periodically -- only a human
 /// running `gah quota refresh` by hand did, so account-level quota data
 /// went stale for days even while dispatch itself was active. Called by
@@ -787,26 +775,6 @@ mod tests {
                 return false;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    }
-
-    #[test]
-    fn agy_pool_readings_throttle_the_account_probe() {
-        let (_dir, path) = tmp_store();
-        let now = OffsetDateTime::now_utc();
-        for backend in ["agy", "agy-second"] {
-            let record: QuotaObservationRecord = serde_json::from_value(serde_json::json!({
-                "backend": backend,
-                "backend_instance": format!("{backend}:google-native"),
-                "quota_pool": format!("{backend}:google-native"),
-                "quota_window": "weekly",
-                "quota_remaining_percent": 80.0,
-                "checked_at": now.format(&Rfc3339).unwrap(),
-                "observed_at": now.format(&Rfc3339).unwrap()
-            }))
-            .unwrap();
-            append(&path, &record).unwrap();
-            assert!(maybe_refresh_backend(&path, backend, now, || panic!("not due")).is_none());
         }
     }
 
