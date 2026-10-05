@@ -16,10 +16,13 @@ pub(super) struct UnitValues {
 }
 
 impl UnitValues {
-    /// Reject sudo invocation rather than deploy root-owned user state or a
-    /// service that runs under an identity different from the invoking account.
+    /// Refuse to render or deploy for root: the units must describe the
+    /// invoking account, and root's HOME/config reproduce the #1322 failure.
+    /// `SUDO_USER` survives `sudo -iu <account>`, so the check is the
+    /// effective uid, not sudo's environment.
     pub(super) fn ensure_installing_account() -> Result<()> {
-        if env::var_os("SUDO_USER").is_some() {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
             bail!(
                 "run gah update without sudo; GAH requests sudo only for system unit installation"
             );
@@ -279,5 +282,47 @@ mod tests {
         assert!(error.to_string().contains("Node.js 22"));
         // Templates without Node still render on hosts without it.
         assert!(render("Environment=\"PATH=@PATH@\"", &unsafe_values).is_ok());
+    }
+
+    // `sudo -iu <account> gah update` runs as that account while keeping
+    // SUDO_USER set, so the guard must key on the effective uid instead.
+    static SUDO_USER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct SudoUserEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl SudoUserEnvGuard {
+        fn set(value: &str) -> Self {
+            let _lock = SUDO_USER_LOCK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let original = env::var_os("SUDO_USER");
+            env::set_var("SUDO_USER", value);
+            Self { _lock, original }
+        }
+    }
+
+    impl Drop for SudoUserEnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => env::set_var("SUDO_USER", value),
+                None => env::remove_var("SUDO_USER"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolves_for_a_non_root_account_with_sudo_user_set() {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            // A root test run cannot prove the non-root path this guards.
+            return;
+        }
+        let _sudo_user = SudoUserEnvGuard::set("provisioning-admin");
+        let _exec = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        assert!(UnitValues::resolve(dir.path()).is_ok());
     }
 }
