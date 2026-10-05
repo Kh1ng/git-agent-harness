@@ -44,6 +44,22 @@ fn provider_publication_bodies_remove_a_home_without_a_standard_root_prefix() {
 }
 
 #[test]
+fn provider_publication_bodies_do_not_redact_sibling_prefixes_of_home() {
+    let _guard = HomeOverride::set("/srv/gah-operator".to_string());
+    let body =
+        "tools /srv/gah-operator-tools/config.toml; home /srv/gah-operator, end /srv/gah-operator";
+
+    let published = crate::provider::publication_body(body);
+
+    assert!(published.contains("/srv/gah-operator-tools/config.toml"));
+    assert_eq!(
+        published.matches("[local path removed]").count(),
+        2,
+        "{published}"
+    );
+}
+
+#[test]
 fn provider_publication_bodies_preserve_web_urls_with_home_like_paths() {
     let _guard = HomeOverride::set("/srv/gah-operator".to_string());
     for url in [

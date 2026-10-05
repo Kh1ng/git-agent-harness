@@ -52,7 +52,15 @@ fn configured_home_path_re(home: &str) -> Option<regex::Regex> {
     if home.is_empty() {
         return None;
     }
-    regex::Regex::new(&format!(r#"{}(?:/[^\s`"'<>]*)?"#, regex::escape(home))).ok()
+    // Match the home itself or descendants only: the home must be followed by
+    // a `/` or a character that cannot continue a path component, so a sibling
+    // such as /srv/gah-operator-tools is left alone. The trailing character is
+    // captured (regex has no lookahead) and restored by the replacer.
+    regex::Regex::new(&format!(
+        r#"{}(?:/[^\s`"'<>]*|(?P<end>[\s`"'<>,;:)\]!?]|$))"#,
+        regex::escape(home)
+    ))
+    .ok()
 }
 
 /// Keep machine-local home paths out of provider-visible text, including
@@ -70,7 +78,12 @@ pub(super) fn publication_body(body: &str) -> String {
     let home_re = operator_home().as_deref().and_then(configured_home_path_re);
     let redact_paths = |text: &str| {
         let text = match &home_re {
-            Some(re) => re.replace_all(text, "[local path removed]"),
+            Some(re) => re.replace_all(text, |caps: &regex::Captures| {
+                format!(
+                    "[local path removed]{}",
+                    caps.name("end").map_or("", |m| m.as_str())
+                )
+            }),
             None => std::borrow::Cow::Borrowed(text),
         };
         standard_home_path_re()
