@@ -1164,14 +1164,15 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, light: bool) -> Resu
             }
         }
 
-        if snapshot.blockers.is_empty() {
+        if snapshot.blockers.is_empty() && snapshot.blocked_work_items.is_empty() {
             println!("Blockers: None");
         } else {
             println!("Blockers:");
-            for b in &snapshot.blockers {
+            for b in snapshot.blockers.iter().chain(&snapshot.blocked_work_items) {
                 println!(
-                    "  - {}: {}",
+                    "  - {} [{}]: {}",
                     b.kind,
+                    b.reason_code.as_deref().unwrap_or("unknown"),
                     b.message
                         .as_deref()
                         .unwrap_or(b.reason.as_deref().unwrap_or("unknown"))

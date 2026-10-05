@@ -219,6 +219,7 @@ pub fn run_once(
         format!("profile={profile_name}"),
     )?;
     let history = crate::events::read_events(cfg)?;
+    report_new_fix_cap_blocks(cfg, profile_name, &snapshot, &history)?;
     let capacity_deferred_work_ids = suppress_recent_capacity_deferrals(
         cfg,
         &mut snapshot,
@@ -241,7 +242,7 @@ pub fn run_once(
         )?;
     } else {
         // Original single action behavior
-        let original_action = decide_next_action(&snapshot);
+        let original_action = quiet_fix_cap_action(decide_next_action(&snapshot));
         let original_review_generation = action_review_generation(&snapshot, &original_action);
         let mut action = original_action.clone();
         let reset_after = original_action.work_id().and_then(|work_id| {
@@ -407,6 +408,87 @@ pub fn run_once(
     Ok(())
 }
 
+/// The status projection is the durable source of cap blocks. Emit the
+/// operator handoff once per work item even while other actions keep flowing.
+fn report_new_fix_cap_blocks(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    snapshot: &crate::status::StatusSnapshot,
+    history: &[crate::events::ControllerEvent],
+) -> Result<()> {
+    let profile = crate::config::get_profile(cfg, profile_name)?;
+    for blocker in &snapshot.blocked_work_items {
+        if blocker.reason_code.as_deref() != Some(HumanRequiredReason::FixRetryCapExceeded.as_str())
+        {
+            continue;
+        }
+        let Some(branch) = blocker.source_reference.as_deref() else {
+            continue;
+        };
+        let Some(mr) = snapshot
+            .merge_requests
+            .iter()
+            .find(|mr| mr.branch == branch)
+        else {
+            continue;
+        };
+        let work_id = mr.work_id.as_deref().unwrap_or(branch);
+        if history.iter().any(|event| {
+            event.profile.as_deref() == Some(profile_name)
+                && event.work_id.as_deref() == Some(work_id)
+                && event.reason_code.as_deref()
+                    == Some(HumanRequiredReason::FixRetryCapExceeded.as_str())
+                && event.event_type == crate::events::EventType::HumanRequired.as_str()
+        }) {
+            continue;
+        }
+        let reason = blocker
+            .message
+            .as_deref()
+            .unwrap_or("fix retry cap exceeded");
+        crate::events::record_with_reason_code(
+            cfg,
+            crate::events::EventType::HumanRequired,
+            Some(profile_name),
+            Some(work_id),
+            reason,
+            Some(HumanRequiredReason::FixRetryCapExceeded.as_str()),
+        )?;
+        crate::notifications::notify_event(
+            cfg,
+            profile,
+            crate::notifications::NotifyEvent::HumanRequired {
+                reason,
+                reference: mr.url.as_deref(),
+                reason_code: Some(HumanRequiredReason::FixRetryCapExceeded.as_str()),
+                failure_class: "retry_cap_exceeded",
+                failure_stage: Some("fix"),
+                error_summary: None,
+                attempt_count: snapshot
+                    .fix_attempt_counts
+                    .get(branch)
+                    .copied()
+                    .map(|n| n as u32),
+                mr_url: mr.url.as_deref(),
+            },
+        );
+    }
+    Ok(())
+}
+
+fn quiet_fix_cap_action(action: NextAction) -> NextAction {
+    match action {
+        NextAction::HumanRequired {
+            reason,
+            reason_code: Some(code),
+            ..
+        } if code == HumanRequiredReason::FixRetryCapExceeded.as_str() => NextAction::NoOp {
+            reason: format!("blocked item: {reason}; no other work admitted"),
+        },
+        other => other,
+    }
+}
+
 /// TICKET-096: Parallel execution for multiple actions
 fn run_parallel_once(
     cfg: &crate::config::GahConfig,
@@ -500,7 +582,7 @@ fn run_parallel_once(
                     &crate::config::get_profile(cfg, profile_name)?.repo_id,
                 );
 
-                let original_action = decide_next_action(&fresh_snapshot);
+                let original_action = quiet_fix_cap_action(decide_next_action(&fresh_snapshot));
                 let original_review_generation =
                     action_review_generation(&fresh_snapshot, &original_action);
                 let mut action = original_action.clone();
@@ -619,6 +701,16 @@ fn run_parallel_once(
                                     );
                                     if active > 0 {
                                         node_capacity_reprobe.schedule(action.clone());
+                                    } else {
+                                        pending_terminal = Some((
+                                            original_action,
+                                            NextAction::NoOp {
+                                                reason: format!(
+                                                    "node capacity at {active}/{effective_parallel_limit} workers: {reason}"
+                                                ),
+                                            },
+                                            original_review_generation,
+                                        ));
                                     }
                                     break;
                                 }

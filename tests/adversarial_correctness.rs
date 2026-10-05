@@ -308,6 +308,47 @@ fn two_tickets_independent_progress() {
         .any(|m| m["branch"] == "gah/fix-b" && m["classification"] == "NEEDS_FIX"));
 }
 
+#[test]
+fn capped_pr_is_visible_and_reported_once_across_loop_ticks() {
+    let ledger = TestLedger::new()
+        .with_entry(ledger_fix(
+            "gah/fix-a",
+            "TICKET-001",
+            "post_review_repair",
+            "2026-07-01T00:00:00Z",
+        ))
+        .with_entry(ledger_fix(
+            "gah/fix-a",
+            "TICKET-001",
+            "post_review_repair",
+            "2026-07-01T01:00:00Z",
+        ));
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    install_active_prs(&gh, &[current_pr("gah/fix-a", "TICKET-001", 1)]);
+    let mut harness = ScenarioHarness::new("github")
+        .github_scenario("empty")
+        .with_ledger(ledger);
+    harness.install_custom_gh(&gh);
+    harness.create_remote_branch("gah/fix-a");
+
+    let status = harness.run_status_text().expect("status");
+    assert!(status.contains("fix_retry_cap_exceeded"), "{status}");
+    let first = harness.run_one_loop().expect("first loop");
+    assert!(first.action_details.contains("blocked item"));
+    let second = harness.run_one_loop().expect("second loop");
+    assert!(second.action_details.contains("blocked item"));
+    let reports = second
+        .events
+        .iter()
+        .filter(|event| {
+            event["event_type"] == "human_required"
+                && event["reason_code"] == "fix_retry_cap_exceeded"
+        })
+        .count();
+    assert_eq!(reports, 1, "cap block must be reported once");
+}
+
 // ── terminal merge (detects MUT5) ────────────────────────────────────
 
 #[test]

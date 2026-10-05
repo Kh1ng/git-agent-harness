@@ -770,6 +770,29 @@ fn exhausted_mr_does_not_block_others() {
     }
 }
 
+#[test]
+fn capped_mr_without_current_review_dispatches_unrelated_ticket() {
+    let mut snapshot = empty_snapshot();
+    snapshot.profile.max_fix_attempts_per_mr = 4;
+    snapshot.fix_attempt_counts.insert("gah/stuck-1".into(), 4);
+    let mut stuck = mr("gah/stuck-1", "CI_FAILED");
+    stuck.review_generation = None;
+    snapshot.merge_requests.push(stuck);
+    snapshot.available_tickets.push(ticket(
+        "docs/tickets/TICKET-NEXT.md",
+        Some("TICKET-NEXT"),
+        0,
+        None,
+        false,
+        false,
+    ));
+
+    assert!(matches!(
+        decide_next_action(&snapshot),
+        NextAction::DispatchTicket { work_id: Some(ref id), .. } if id == "TICKET-NEXT"
+    ));
+}
+
 // A profile with ONLY an exhausted MR reports the exact gate instead of
 // pretending the controller is idle.
 #[test]
@@ -1305,7 +1328,7 @@ fn idle_profile_with_unrelated_known_reset_is_noop() {
     });
     let action = decide_next_action(&snapshot);
     assert_eq!(action.kind(), "no_op");
-    assert!(action.reason().contains("nothing actionable"));
+    assert!(action.reason().contains("empty queue"));
 }
 
 #[test]

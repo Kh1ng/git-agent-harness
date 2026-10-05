@@ -488,6 +488,24 @@ impl ScenarioHarness {
         serde_json::from_str(&stdout[start..]).map_err(|e| format!("parse status json: {e}"))
     }
 
+    pub fn run_status_text(&mut self) -> Result<String, String> {
+        self.setup_env();
+        self.install_fakes();
+        let out = self
+            .gah_command()
+            .args(["status", "--profile", &self.profile_name])
+            .output()
+            .map_err(|e| format!("status spawn failed: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "status exit {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
     pub fn run_quota_list_json(&mut self) -> Result<serde_json::Value, String> {
         self.setup_env();
         self.install_fakes();

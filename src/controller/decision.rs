@@ -238,9 +238,6 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
 
         match mr.classification.as_str() {
             "NEEDS_REVIEW" => review_candidates.push(mr),
-            "CI_FAILED" | "NEEDS_FIX" if !has_current_repair_review(mr) => {
-                review_candidates.push(mr)
-            }
             "CI_FAILED" | "NEEDS_FIX" => {
                 let fix_attempts = snapshot
                     .fix_attempt_counts
@@ -250,6 +247,8 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
                 if fix_attempts >= snapshot.profile.max_fix_attempts_per_mr as usize {
                     // Exhausted fix attempts -> work-item block, not a profile freeze.
                     human_blocked_mrs.push((mr, HumanRequiredReason::FixRetryCapExceeded));
+                } else if !has_current_repair_review(mr) {
+                    review_candidates.push(mr);
                 } else {
                     fix_candidates.push(mr);
                 }
@@ -717,7 +716,10 @@ pub fn decide_next_action(snapshot: &StatusSnapshot) -> NextAction {
     }
 
     NextAction::NoOp {
-        reason: "nothing actionable".into(),
+        reason: format!(
+            "empty queue: no eligible tickets or lifecycle actions ({} blocked work item(s))",
+            snapshot.blocked_work_items.len()
+        ),
     }
 }
 
