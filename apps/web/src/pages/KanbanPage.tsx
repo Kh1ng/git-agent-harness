@@ -1,0 +1,282 @@
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { ArrowLeft, Check, KanbanSquare, X } from 'lucide-react';
+import type { DeviceAgentsSnapshot } from '@git-agent-harness/contracts';
+import { useWebSocket } from '../ws/WebSocketContext.js';
+import { useUiStore } from '../store/uiStore.js';
+import { useGahStore } from '../store/gahStore.js';
+import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
+import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
+import { PageHeader } from '../components/ui/PageHeader.js';
+import { EmptyState, ErrorState, LoadingState } from '../components/ui/EmptyState.js';
+import { StatusBadge, type StatusTone } from '../components/ui/StatusBadge.js';
+import { ExternalAnchor } from '../components/ExternalAnchor.js';
+import { formatAge, formatDuration } from '../lib/format.js';
+import { usageTone } from '../lib/subscriptionUsage.js';
+import { KANBAN_COLUMNS, buildKanban, whyNotRunning, type KanbanAgent, type KanbanBoard, type KanbanCard, type KanbanGate } from '../lib/kanbanBoard.js';
+
+const KANBAN_REFRESH_MS = 15 * 1000;
+/** Done only ever grows; the board shows the most recent few. */
+const DONE_SHOWN = 8;
+
+const CARD_EDGE: Record<KanbanCard['tone'], string> = { good: 'border-l-good', warning: 'border-l-warning', critical: 'border-l-critical', unknown: 'border-l-subtle' };
+const BAR_FILL: Record<ReturnType<typeof usageTone>, string> = { good: 'bg-good', warning: 'bg-warning', critical: 'bg-critical', unknown: 'bg-unknown' };
+const AGENT_STATE: Record<KanbanAgent['state'], { tone: StatusTone; label: string }> = {
+  working: { tone: 'good', label: 'Working' },
+  idle: { tone: 'unknown', label: 'Idle' },
+  unavailable: { tone: 'critical', label: 'Unavailable' }
+};
+
+function elapsed(card: KanbanCard, now: number): string | null {
+  if (!card.since) return null;
+  if (card.working) return `working ${formatDuration(Math.max(0, (now - Date.parse(card.since)) / 1000))}`;
+  const age = formatAge(card.since, new Date(now));
+  return age && (card.column === 'done' ? `merged ${age}` : `last activity ${age}`);
+}
+
+function CardLinks({ card, onOpenWork }: { card: KanbanCard; onOpenWork: (workId: string) => void }) {
+  if (!card.pullRequest?.url && !card.workId) return null;
+  return (
+    <div className="mt-2 flex gap-3 text-xs">
+      {card.pullRequest?.url && <ExternalAnchor href={card.pullRequest.url} className="text-accent hover:underline">Pull request</ExternalAnchor>}
+      {card.workId && <button type="button" onClick={() => onOpenWork(card.workId!)} className="text-accent hover:underline">History</button>}
+    </div>
+  );
+}
+
+function JobCard({ card, now, selected, onSelect, onOpenWork }: { card: KanbanCard; now: number; selected: boolean; onSelect: (key: string) => void; onOpenWork: (workId: string) => void }) {
+  const facts = [
+    card.agent && (card.agentRole === 'working' ? card.agent : `built by ${card.agent}`),
+    card.attempts > 0 && `attempt ${card.attempts}`,
+    card.fix && card.fix.used > 0 && `fix ${card.fix.used} of ${card.fix.max}`,
+    elapsed(card, now),
+    card.held && 'hold on'
+  ].filter((fact): fact is string => !!fact);
+  return (
+    <li>
+      <article className={`card border-l-2 p-2.5 ${CARD_EDGE[card.tone]} ${selected ? 'ring-1 ring-accent' : ''}`}>
+        <button type="button" onClick={() => onSelect(card.key)} aria-pressed={selected} className="block w-full text-left"
+          title={card.working ? 'Show what is running it' : "Show why this isn't running"}>
+          <span className="flex items-center gap-1.5 text-xs text-muted">
+            {card.working && <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-good" aria-label="Running now" role="img" />}
+            <span className="font-mono">{card.workId ?? 'No issue'}</span>
+            {card.pullRequest?.id && <span>PR {card.pullRequest.id}{card.pullRequest.draft ? ' (draft)' : ''}</span>}
+          </span>
+          <span className="mt-1 line-clamp-2 block text-sm font-medium text-primary">{card.title}</span>
+          <span className="mt-1 block text-xs text-secondary">{card.reason}</span>
+        </button>
+        {facts.length > 0 && <p className="mt-1.5 text-[11px] leading-snug text-muted">{facts.join(' · ')}</p>}
+        <CardLinks card={card} onOpenWork={onOpenWork} />
+      </article>
+    </li>
+  );
+}
+
+function Gates({ gates }: { gates: KanbanGate[] }) {
+  return (
+    <ul aria-label="Factory-wide limits" className="mb-4 flex flex-wrap gap-2">
+      {gates.map((gate) => (
+        <li key={`${gate.label}-${gate.detail}`}>
+          <StatusBadge tone={gate.ok === null ? 'unknown' : gate.ok ? 'good' : 'warning'} label={`${gate.label}: ${gate.detail}`} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function AgentsPanel({ agents, onSelectCard }: { agents: KanbanAgent[]; onSelectCard: (key: string) => void }) {
+  return (
+    <section aria-label="Agents">
+      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Agents</h3>
+      {agents.length === 0 && <p className="card p-3 text-xs text-muted">No agent subscriptions reported yet.</p>}
+      <ul className="space-y-2">
+        {agents.map((agent) => {
+          const state = AGENT_STATE[agent.state];
+          const job = agent.jobs.find((item) => item.cardKey);
+          return (
+            <li key={agent.id} className="card p-3">
+              <div className="flex items-start justify-between gap-2">
+                <p className="min-w-0 break-words text-sm font-semibold text-primary">{agent.name}</p>
+                <StatusBadge tone={state.tone} label={state.label} />
+              </div>
+              <p className="mt-0.5 text-[11px] text-muted">
+                {agent.subscription}{agent.modes.length > 0 && ` · does ${agent.modes.join(', ')}`} · {agent.jobs.length} running
+              </p>
+              <p className="mt-1.5 text-xs text-secondary">
+                {job ? <button type="button" onClick={() => onSelectCard(job.cardKey!)} className="text-left hover:underline">{agent.reason}</button> : agent.reason}
+              </p>
+              {agent.usedPercent !== null ? (
+                <div className="mt-2">
+                  <div className="h-1.5 overflow-hidden rounded bg-raised" role="img" aria-label={`${Math.round(agent.usedPercent)}% of ${agent.usageLabel ?? 'allowance'} used`}>
+                    <div className={`h-full ${BAR_FILL[usageTone(agent.usedPercent)]}`} style={{ width: `${agent.usedPercent}%` }} />
+                  </div>
+                  <p className="mt-1 text-[11px] text-muted">
+                    {agent.usageLabel}: {Math.round(agent.usedPercent)}% used{agent.resetsIn && `, resets in ${agent.resetsIn}`}
+                  </p>
+                </div>
+              ) : <p className="mt-2 text-[11px] text-muted">No allowance reading</p>}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+function Verdict({ ok, children }: { ok: boolean | null; children: ReactNode }) {
+  const Icon = ok ? Check : X;
+  return (
+    <li className="flex items-start gap-2 text-xs text-secondary">
+      <Icon size={13} className={`mt-0.5 shrink-0 ${ok ? 'text-good' : ok === null ? 'text-muted' : 'text-warning'}`} aria-label={ok ? 'Fine' : ok === null ? 'Unknown' : 'In the way'} />
+      <span className="min-w-0 break-words">{children}</span>
+    </li>
+  );
+}
+
+function WhyPanel({ board, card, now, onClose, onOpenWork }: { board: KanbanBoard; card: KanbanCard; now: number; onClose: () => void; onOpenWork: (workId: string) => void }) {
+  const name = card.workId ?? card.title;
+  const settled = card.working || card.column === 'done';
+  const heading = card.working ? `${name} is running` : card.column === 'done' ? `${name} is done` : `Why isn't ${name} running?`;
+  return (
+    <section aria-label={heading}>
+      <button type="button" onClick={onClose} className="mb-2 inline-flex items-center gap-1 text-xs text-secondary hover:text-primary">
+        <ArrowLeft size={13} aria-hidden="true" />
+        All agents
+      </button>
+      <div className="card p-3">
+        <h3 className="text-sm font-semibold text-primary">{heading}</h3>
+        <p className="mt-0.5 text-xs text-muted">{card.title}</p>
+        <p className="mt-2 text-xs text-secondary">{card.reason}</p>
+        {card.working && <p className="mt-1 text-xs text-secondary">{[card.agent ?? 'The agent process is not visible yet', elapsed(card, now)].filter(Boolean).join(' · ')}</p>}
+        <CardLinks card={card} onOpenWork={onOpenWork} />
+
+        {card.blocks.length > 0 && (
+          <>
+            <h4 className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-muted">This job</h4>
+            <ul className="mt-1 space-y-1">{card.blocks.map((block) => <Verdict key={block} ok={false}>{block}</Verdict>)}</ul>
+          </>
+        )}
+        {!settled && (
+          <>
+            <h4 className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-muted">Factory-wide</h4>
+            <ul className="mt-1 space-y-1">{board.gates.map((gate) => <Verdict key={`${gate.label}-${gate.detail}`} ok={gate.ok}>{gate.label}: {gate.detail}</Verdict>)}</ul>
+            <h4 className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-muted">Each agent</h4>
+            {card.job === 'merge' || card.column === 'needs_you'
+              ? <p className="mt-1 text-xs text-secondary">No agent can move this one: it waits for a person.</p>
+              : <ul className="mt-1 space-y-1">{whyNotRunning(board, card).map(({ agent, ok, verdict }) => <Verdict key={agent.id} ok={ok}><span className="text-primary">{agent.name}</span>: {verdict}</Verdict>)}</ul>}
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/** The board and its side panel, from an already derived board: no fetching here. */
+export function KanbanView({ board, now, onOpenWork }: { board: KanbanBoard; now: number; onOpenWork: (workId: string) => void }) {
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const side = useRef<HTMLElement>(null);
+  const selected = board.cards.find((card) => card.key === selectedKey) ?? null;
+  const select = (key: string) => {
+    setSelectedKey(key === selectedKey ? null : key);
+    // Below the board on a narrow screen: bring the answer into view.
+    if (key !== selectedKey) side.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  };
+  return (
+    <>
+      <Gates gates={board.gates} />
+      <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
+        <div className="flex items-start gap-3 overflow-x-auto pb-2" role="group" aria-label="Job board">
+          {KANBAN_COLUMNS.map((column) => {
+            const cards = board.cards.filter((card) => card.column === column.key);
+            const shown = column.key === 'done' ? cards.slice(0, DONE_SHOWN) : cards;
+            return (
+              <section key={column.key} aria-label={`${column.label}, ${cards.length} ${cards.length === 1 ? 'job' : 'jobs'}`}
+                className={`shrink-0 rounded-lg border border-subtle bg-card/40 ${cards.length ? 'w-60' : 'w-28'}`}>
+                <h3 className="flex items-baseline justify-between gap-2 border-b border-subtle px-2.5 py-2 text-xs font-semibold text-primary" title={column.hint}>
+                  {column.label}
+                  <span className="font-normal text-muted">{cards.length}</span>
+                </h3>
+                {cards.length === 0
+                  ? <p className="px-2.5 py-3 text-[11px] text-muted">Nothing here</p>
+                  : (
+                    <ul className="space-y-2 p-2">
+                      {shown.map((card) => <JobCard key={card.key} card={card} now={now} selected={card.key === selectedKey} onSelect={select} onOpenWork={onOpenWork} />)}
+                      {cards.length > shown.length && <li className="px-1 text-[11px] text-muted">and {cards.length - shown.length} older</li>}
+                    </ul>
+                  )}
+              </section>
+            );
+          })}
+        </div>
+        <aside ref={side} className="min-w-0 xl:sticky xl:top-0">
+          {selected
+            ? <WhyPanel board={board} card={selected} now={now} onClose={() => setSelectedKey(null)} onOpenWork={onOpenWork} />
+            : <AgentsPanel agents={board.agents} onSelectCard={select} />}
+        </aside>
+      </div>
+      {board.notPickedUp.length > 0 && (
+        <details className="card mt-4 p-3">
+          <summary className="cursor-pointer text-xs font-semibold text-primary">Not picked up ({board.notPickedUp.length})</summary>
+          <ul className="mt-2 space-y-1.5">
+            {board.notPickedUp.map((item) => (
+              <li key={`${item.workId}-${item.title}`} className="text-xs text-secondary">
+                <span className="font-mono text-muted">{item.workId}</span> {item.title}
+                <span className="block text-[11px] text-muted">{item.reason}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </>
+  );
+}
+
+type KanbanPageProps = {
+  /** The device's agent processes, polled by the app shell. */
+  deviceAgents: { data: DeviceAgentsSnapshot | null; error: string | null };
+  onOpenWork: (workId: string) => void;
+};
+
+/** One page for "what is running, what is not, and why": a job board beside the agents that could do the jobs. */
+export function KanbanPage({ deviceAgents, onOpenWork }: KanbanPageProps) {
+  const { profile: wsProfile, controllerActivity } = useWebSocket();
+  const profileOverride = useUiStore((state) => state.profileOverride);
+  const profile = profileOverride ?? wsProfile ?? undefined;
+  const status = useGahStore((state) => state.status);
+  const quota = useGahStore((state) => state.quota);
+  const loopStatus = useGahStore((state) => state.loopStatus);
+  const fetchStatus = useGahStore((state) => state.fetchStatus);
+  const fetchQuota = useGahStore((state) => state.fetchQuota);
+  const fetchLoopStatus = useGahStore((state) => state.fetchLoopStatus);
+  const [now, setNow] = useState(Date.now);
+
+  const refresh = (force = true) => {
+    setNow(Date.now());
+    void fetchStatus(profile, { force });
+    // The app shell keeps this same quota snapshot fresh for the navbar.
+    void fetchQuota({ profile, since: '7d' });
+    if (profile) void fetchLoopStatus(profile, { force });
+  };
+  useEffect(() => { refresh(false); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [profile]);
+  useAutoRefresh(refresh, KANBAN_REFRESH_MS);
+  useWsReconnectRefresh(refresh);
+
+  const snapshot = status.key === (profile ?? '') ? status.data : null;
+  const board = useMemo(() => buildKanban({
+    status: snapshot,
+    quota: quota.data,
+    controllerRuns: controllerActivity.filter((run) => !profile || !run.profile || run.profile === profile),
+    factoryAgents: deviceAgents.data?.factory_agents ?? [],
+    loopRunning: loopStatus.data?.running ?? null,
+    now
+  }), [snapshot, quota.data, controllerActivity, deviceAgents.data, loopStatus.data, profile, now]);
+
+  return (
+    <div>
+      <PageHeader title="Kanban" description="What is running, what is not, and why." onRefresh={() => refresh()} refreshing={status.loading} lastUpdated={status.fetchedAt} />
+      {!snapshot && status.error ? <ErrorState message={status.error} endpoint="/api/status" onRetry={() => refresh()} />
+        : !snapshot ? <LoadingState label="Loading the board…" />
+          : board.cards.length === 0 && board.agents.length === 0 ? <EmptyState icon={KanbanSquare} title="No jobs yet" description="Issues the factory accepts show up here as soon as it sees them." />
+            : <KanbanView board={board} now={now} onOpenWork={onOpenWork} />}
+    </div>
+  );
+}
