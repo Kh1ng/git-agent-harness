@@ -168,6 +168,20 @@ test('archiveSession saves dirty work and restoreSession rematerializes it idemp
   assert.equal((await restoreSession('p', session.id, env.profileInfo)).worktreePath, restored.worktreePath);
 }));
 
+test('restoreSession degrades to checkout mode when the branch never existed', withEnv(async (env) => {
+  const session = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'hermes' });
+  await archiveSession('p', session.id, env.profileInfo);
+  // A session restored after its branch disappeared (pre-worktree-era
+  // session, or a pruned branch) must not fail on `git worktree add` for a
+  // branch that does not exist.
+  execFileSync('git', ['branch', '-D', session.branch], { cwd: env.checkout });
+
+  const restored = await restoreSession('p', session.id, env.profileInfo);
+  assert.equal(restored.outcome, 'live');
+  assert.equal(restored.archivedAt, null);
+  assert.equal(restored.worktreePath, null, 'no worktree for a missing branch');
+}));
+
 test('settled archive keeps the same patch and branch safety while recording a distinct outcome', withEnv(async (env) => {
   const session = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'codex' });
   writeFileSync(join(session.worktreePath!, 'delivered-but-local.txt'), 'recovery work\n');

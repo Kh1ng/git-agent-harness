@@ -152,16 +152,101 @@ fn selected_profiles<'a>(
 /// Default-level check that runs once per doctor invocation, outside the
 /// per-profile loop, so an unusable worktree base is reported even when the
 /// config has no profiles (issue #1366).
+///
+/// An empty value is tolerated: work GAH itself plans resolves the default
+/// at the point of use (`config::effective_worktree_base`), the stored value
+/// is never rewritten on the operator's behalf, and chat sessions keep
+/// checkout mode for unconfigured profiles. Doctor reports where the work
+/// will go instead of failing.
 fn check_worktree_base(defaults: &Defaults) -> bool {
     if defaults.worktree_base.trim().is_empty() {
+        let resolved = config::effective_worktree_base(defaults);
+        return match worktree_base_probe(&resolved) {
+            Ok(()) => {
+                print_check(
+                    CheckStatus::Pass,
+                    "worktree_base",
+                    &format!("empty; worktrees resolve to {}", resolved.display()),
+                );
+                true
+            }
+            Err(reason) => {
+                print_check(
+                    CheckStatus::Fail,
+                    "worktree_base",
+                    &format!(
+                        "default {} not writable: {}; set defaults.worktree_base to a writable absolute directory",
+                        resolved.display(),
+                        reason
+                    ),
+                );
+                false
+            }
+        };
+    }
+    let configured = Path::new(defaults.worktree_base.trim());
+    if !configured.is_absolute() {
+        // A relative or `~` path resolves against a different cwd during
+        // dispatch than during doctor; require an absolute path so the
+        // planned base is unambiguous.
         print_check(
             CheckStatus::Fail,
             "worktree_base",
-            "empty; set defaults.worktree_base to a writable directory",
+            &format!(
+                "not an absolute path: {}; set defaults.worktree_base to an absolute directory",
+                configured.display()
+            ),
         );
         return false;
     }
-    check_writable_path("worktree_base", Path::new(&defaults.worktree_base))
+    match worktree_base_probe(configured) {
+        Ok(()) => {
+            print_check(
+                CheckStatus::Pass,
+                "worktree_base",
+                &configured.display().to_string(),
+            );
+            true
+        }
+        Err(reason) => {
+            print_check(
+                CheckStatus::Fail,
+                "worktree_base",
+                &format!("not writable {}: {}", configured.display(), reason),
+            );
+            false
+        }
+    }
+}
+
+/// Probes that GAH could write under `path` without creating any directory
+/// itself: the probe lands inside `path` when it exists, otherwise inside
+/// the nearest existing ancestor. A polled `doctor --json` must not grow
+/// directories under `$HOME` (or `/root` when `HOME` is unset) on every
+/// run, so this never `create_dir_all`s the configured base.
+fn worktree_base_probe(path: &Path) -> Result<(), String> {
+    let probe_dir = if path.exists() {
+        // The configured base must be a directory: a regular file here is a
+        // hard failure, never something the ancestor probe papers over.
+        if !path.is_dir() {
+            return Err(format!("{} exists and is not a directory", path.display()));
+        }
+        path.to_path_buf()
+    } else {
+        path.ancestors()
+            .skip(1)
+            .find(|ancestor| ancestor.is_dir())
+            .map(std::path::Path::to_path_buf)
+            .ok_or_else(|| format!("no existing ancestor for {}", path.display()))?
+    };
+    let probe = probe_dir.join(".gah-write-test");
+    match fs::write(&probe, b"ok") {
+        Ok(()) => {
+            let _ = fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(err) => Err(format!("{err}")),
+    }
 }
 
 fn check_profile(defaults: &Defaults, profile: &Profile) -> bool {
@@ -1051,12 +1136,15 @@ mod tests {
     }
 
     // Issue #1366: the worktree base is a defaults-level concern, so doctor
-    // must fail for an empty or unwritable base even with no profiles.
+    // must validate it even with no profiles. An empty value is tolerated
+    // (work GAH plans resolves the default at the point of use) and must
+    // resolve instead of failing; doctor must still reject an unwritable,
+    // non-absolute, or file-valued base, and must never create the base.
     #[test]
-    fn doctor_worktree_base_check_fails_when_empty() {
+    fn doctor_worktree_base_check_resolves_empty_to_default() {
         let defaults = crate::config::Defaults::default();
 
-        assert!(!super::check_worktree_base(&defaults));
+        assert!(super::check_worktree_base(&defaults));
     }
 
     #[test]
@@ -1070,6 +1158,37 @@ mod tests {
         };
 
         assert!(!super::check_worktree_base(&defaults));
+    }
+
+    #[test]
+    fn doctor_worktree_base_check_fails_when_relative() {
+        let defaults = crate::config::Defaults {
+            worktree_base: "worktrees/relative".to_string(),
+            ..Default::default()
+        };
+
+        assert!(!super::check_worktree_base(&defaults));
+        let tilde = crate::config::Defaults {
+            worktree_base: "~/worktrees".to_string(),
+            ..Default::default()
+        };
+        assert!(!super::check_worktree_base(&tilde));
+    }
+
+    #[test]
+    fn doctor_worktree_base_probe_creates_no_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("a/b/c");
+        let defaults = crate::config::Defaults {
+            worktree_base: base.display().to_string(),
+            ..Default::default()
+        };
+
+        assert!(super::check_worktree_base(&defaults));
+        // The probe must verify writability without materializing the base:
+        // a polled doctor would otherwise grow directories on every run.
+        assert!(!base.exists());
+        assert!(!tmp.path().join("a").exists());
     }
 
     #[test]

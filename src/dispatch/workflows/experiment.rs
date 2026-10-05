@@ -20,7 +20,7 @@ use crate::routing::RouteRequest;
 use crate::{provider, runner, worktree};
 use anyhow::Result;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 pub(crate) fn experiment(
@@ -72,7 +72,7 @@ pub(crate) fn experiment(
 
     let ts = timestamp();
     let branch = format!("gah/exp-{}-{}", profile.repo_id, ts);
-    let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
+    let worktree_base = crate::config::effective_worktree_base(&cfg.defaults);
     let repo = Path::new(&profile.local_path);
 
     println!(

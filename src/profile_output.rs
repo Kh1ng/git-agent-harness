@@ -14,10 +14,13 @@ struct ProfileSummary<'a> {
     /// that materialize worktrees MUST use this rather than deriving from
     /// `repo`, or prune's prefix matching silently misses their worktrees.
     repo_id: &'a str,
-    /// Effective worktree root (defaults.worktree_base). Chat sessions (and
+    /// Reported verbatim from `defaults.worktree_base`: chat sessions (and
     /// any other client that materializes worktrees) create theirs here so
     /// `gah prune` sees them under the same base with the same naming
     /// conventions -- chat worktrees use the `gah-chat-<repo_id>-` prefix.
+    /// An empty value means "unset": clients must keep their pre-#1366
+    /// behavior (chat runs in the checkout) and must NOT resolve a default
+    /// here -- that would silently flip chat sessions into worktree mode.
     worktree_base: &'a str,
     web_url: Option<String>,
     max_parallel_workers: Option<u32>,

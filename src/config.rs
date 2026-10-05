@@ -23,7 +23,7 @@ mod routing_policy;
 use routing_policy::merge_routing_policy;
 pub use routing_policy::{CandidateConfig, RoutingPolicy, TaskRoutingRule};
 mod default_paths;
-pub use default_paths::default_config_dir;
+pub use default_paths::{default_config_dir, default_data_root, effective_worktree_base};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GahConfig {
@@ -517,7 +517,6 @@ pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
     if let Some(canonical_routing) = load_canonical_routing()? {
         cfg.defaults.routing = merge_routing_policy(canonical_routing, cfg.defaults.routing);
     }
-    default_paths::resolve_empty_worktree_base(&mut cfg);
 
     // Lint candidate model consistency
     for (name, profile) in &cfg.profiles {
