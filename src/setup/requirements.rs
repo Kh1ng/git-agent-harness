@@ -8,6 +8,7 @@
 use super::host::{self, Host, Os, PackageManager};
 use crate::auth_health::{self, AuthState};
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -481,6 +482,9 @@ pub fn requirements(selection: &Selection, host: &dyn Host) -> Vec<Requirement> 
             action: None,
             help: None,
         });
+        if os == Os::Linux {
+            list.push(user_lingering(host, feature));
+        }
         list.push(Requirement {
             id: "tailscale",
             label: "Tailscale".into(),
@@ -518,6 +522,59 @@ pub fn requirements(selection: &Selection, host: &dyn Host) -> Vec<Requirement> 
         });
     }
     list
+}
+
+/// Set while systemd is PID 1 (`sd_booted()`). `systemctl --version` alone
+/// also succeeds in WSL or containers where systemd is not running.
+pub(crate) const SYSTEMD_RUNNING: &str = "/run/systemd/system";
+
+/// logind's record of a lingering account. Read as a file so an account with
+/// no session still reads correctly.
+pub(crate) fn linger_path(user: &str) -> PathBuf {
+    Path::new("/var/lib/systemd/linger").join(user)
+}
+
+/// Issue #1347: without lingering, the user units stop at reboot until
+/// someone logs in. Optional, like `gah update`'s attempt: a host without
+/// sudo still finishes setup, and the gap stays visible here. No systemd or
+/// no usable account name means Unsupported with no action, never a command
+/// that cannot work.
+fn user_lingering(host: &dyn Host, feature: Feature) -> Requirement {
+    let user = if host.exists(Path::new(SYSTEMD_RUNNING)) {
+        host.probe("id", &["-un"])
+            .filter(|p| p.success)
+            .map(|p| p.stdout.trim().to_string())
+            .filter(|user| {
+                !user.is_empty()
+                    && user
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+            })
+            // Same charset units::render accepts for the service user.
+            .ok_or("id -un named no account GAH can run its units as.")
+    } else {
+        Err("Lingering needs systemd running.")
+    };
+    Requirement {
+        id: "user_lingering",
+        label: "user lingering".into(),
+        why: "Keeps the user's systemd manager and timers running after they log out.",
+        feature,
+        optional: true,
+        status: match &user {
+            Err(reason) => Status::Unsupported {
+                reason: (*reason).into(),
+            },
+            Ok(user) if host.exists(&linger_path(user)) => Status::Ok { found: None },
+            Ok(_) => Status::Missing,
+        },
+        action: user.ok().map(|user| Action {
+            kind: ActionKind::Install,
+            command: format!("sudo loginctl enable-linger {user}"),
+            sudo: true,
+        }),
+        help: None,
+    }
 }
 
 /// A machine with nothing installed, for describing requirements without
@@ -621,13 +678,14 @@ pub(crate) mod tests {
     use super::*;
     use crate::setup::host::Probe;
     use std::collections::HashMap;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     /// A machine described by the programs it has and what they print.
     pub(crate) struct FakeHost {
         pub os: Os,
         pub manager: Option<PackageManager>,
         pub programs: HashMap<String, Probe>,
+        pub paths: Vec<PathBuf>,
     }
 
     impl FakeHost {
@@ -636,6 +694,7 @@ pub(crate) mod tests {
                 os,
                 manager,
                 programs: HashMap::new(),
+                paths: Vec::new(),
             }
         }
         pub(crate) fn with(mut self, invocation: &str, success: bool, stdout: &str) -> Self {
@@ -647,6 +706,10 @@ pub(crate) mod tests {
                     stderr: String::new(),
                 },
             );
+            self
+        }
+        pub(crate) fn with_path(mut self, path: impl Into<PathBuf>) -> Self {
+            self.paths.push(path.into());
             self
         }
     }
@@ -663,8 +726,8 @@ pub(crate) mod tests {
                 .get(&format!("{program} {}", args.join(" ")))
                 .cloned()
         }
-        fn exists(&self, _path: &Path) -> bool {
-            false
+        fn exists(&self, path: &Path) -> bool {
+            self.paths.iter().any(|known| known == path)
         }
         fn env(&self, _key: &str) -> Option<String> {
             None
@@ -710,7 +773,7 @@ pub(crate) mod tests {
             &selection(Role::Central),
             &FakeHost::new(Os::Linux, Some(PackageManager::Apt)),
         );
-        assert!(ids(&list).ends_with(&["curl", "service_manager", "tailscale"]));
+        assert!(ids(&list).ends_with(&["curl", "service_manager", "user_lingering", "tailscale"]));
         let tailscale = list.iter().find(|r| r.id == "tailscale").unwrap();
         assert!(tailscale.optional && !tailscale.blocking());
         let systemd = list.iter().find(|r| r.id == "service_manager").unwrap();
@@ -718,6 +781,46 @@ pub(crate) mod tests {
             matches!(systemd.status, Status::Unsupported { .. }),
             "no systemctl means no service"
         );
+    }
+
+    /// Issue #1347: lingering never blocks setup, and only offers a command
+    /// when systemd is running and the account has a shell-safe name.
+    #[test]
+    fn user_lingering_needs_systemd_running_and_never_blocks() {
+        let host =
+            || FakeHost::new(Os::Linux, Some(PackageManager::Apt)).with("id -un", true, "testuser");
+        let lingering = |host: FakeHost| {
+            requirements(&selection(Role::Worker), &host)
+                .into_iter()
+                .find(|r| r.id == "user_lingering")
+                .unwrap()
+        };
+
+        let missing = lingering(host().with_path(SYSTEMD_RUNNING));
+        assert_eq!(missing.status, Status::Missing);
+        assert!(!missing.blocking());
+        assert_eq!(
+            missing.action.unwrap().command,
+            "sudo loginctl enable-linger testuser"
+        );
+
+        let on = lingering(
+            host()
+                .with_path(SYSTEMD_RUNNING)
+                .with_path(linger_path("testuser")),
+        );
+        assert!(on.status.is_ok());
+
+        for unsupported in [
+            host(),
+            FakeHost::new(Os::Linux, None)
+                .with_path(SYSTEMD_RUNNING)
+                .with("id -un", true, "DOMAIN\\khing"),
+        ] {
+            let lingering = lingering(unsupported);
+            assert!(matches!(lingering.status, Status::Unsupported { .. }));
+            assert!(lingering.action.is_none() && !lingering.blocking());
+        }
     }
 
     #[test]

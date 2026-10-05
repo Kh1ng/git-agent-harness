@@ -729,6 +729,9 @@ mod tests {
             )
             .with("curl --version", true, "curl 8.5.0")
             .with("systemctl --version", true, "systemd 255")
+            .with("id -un", true, "testuser")
+            .with_path(crate::setup::requirements::SYSTEMD_RUNNING)
+            .with_path(crate::setup::requirements::linger_path("testuser"))
             .with("tailscale version", true, "1.76.0")
     }
 
