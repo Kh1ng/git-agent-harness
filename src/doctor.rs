@@ -621,12 +621,17 @@ fn check_manager_memory(defaults: &Defaults, profile: &Profile) -> bool {
         );
         true
     } else {
+        // The file is the manager's optional standing notes. Dispatch, review
+        // and the loop run without it, so a new profile must not fail here.
         print_check(
-            CheckStatus::Fail,
+            CheckStatus::Warn,
             "manager memory",
-            &format!("missing {}", path.display()),
+            &format!(
+                "missing {} (optional: the manager starts without standing project notes)",
+                path.display()
+            ),
         );
-        false
+        true
     }
 }
 

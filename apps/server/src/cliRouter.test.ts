@@ -925,7 +925,7 @@ test('server lifecycle tolerates timer jitter, throttles inventory and stops on 
   try {
     await observer.refresh();
     assert.equal(records.length, 1, 'no dashboard or HTTP request was made');
-    assert.equal(records[0].quota_window, 'seven_day');
+    assert.equal(records[0].quota_window, 'weekly');
     await Promise.all([observer.refresh(), observer.refresh()]);
     assert.equal(rec.calls.length, 2, 'inventory and usage are both throttled');
     now += 15 * 60_000 - 5; // Timer and wall clocks can differ by a few milliseconds.
@@ -938,6 +938,34 @@ test('server lifecycle tolerates timer jitter, throttles inventory and stops on 
     await observer.refresh();
     assert.equal(records.length, 2, 'shutdown prevents future refresh');
   } finally { stop(); }
+});
+
+test('persisted router windows use routing names and skip per-model Claude buckets', async () => {
+  // #1332: raw keys (primary_window, seven_day_opus) either never earned reset
+  // pressure or could exhaust the whole account from one model's bucket.
+  const bodies: Record<string, unknown> = {
+    claude: { five_hour: { utilization: 30 }, seven_day: { utilization: 20 }, seven_day_opus: { utilization: 100 } },
+    codex: { rate_limit: {
+      primary_window: { used_percent: 40, limit_window_seconds: 18_000 },
+      secondary_window: { used_percent: 10, limit_window_seconds: 604_800 },
+      code_review_window: { used_percent: 5 },
+    } },
+  };
+  for (const [provider, expected] of [
+    ['claude', [['5-hour', 70], ['weekly', 80]]],
+    ['codex', [['300m', 60], ['10080m', 90], ['code_review_window', 95]]],
+  ] as const) {
+    const records: Record<string, unknown>[] = [];
+    const observer = createCliRouterQuotaObserver({
+      readSettingsFn: () => ({ url: `https://${provider}.windows.example.com`, apiKey: 'k', managementKey: 'm' }),
+      fetchFn: async url => new Response(JSON.stringify(String(url).endsWith('/auth-files')
+        ? { files: [file({ provider })] }
+        : { status_code: 200, body: bodies[provider] })),
+      recordQuotaFn: async record => { records.push(record); }
+    });
+    await observer.refresh();
+    assert.deepEqual(records.map(r => [r.quota_window, r.quota_remaining_percent]), expected);
+  }
 });
 
 test('shutdown prevents in-flight quota publication', async () => {
@@ -963,4 +991,27 @@ test('shutdown prevents in-flight quota publication', async () => {
   release();
   await refresh;
   assert.deepEqual(records, []);
+});
+
+test('unrecognized Claude windows preserve prior routing readings', async () => {
+  let now = Date.now();
+  let body: unknown = { seven_day: { utilization: 20 } };
+  const records: Record<string, unknown>[] = [];
+  const observer = createCliRouterQuotaObserver({
+    readSettingsFn: () => ({ url: 'https://claude.unknown-windows.example.com', apiKey: 'k', managementKey: 'm' }),
+    now: () => now,
+    fetchFn: async url => new Response(JSON.stringify(String(url).endsWith('/auth-files')
+      ? { files: [file({ provider: 'claude' })] }
+      : { status_code: 200, body })),
+    recordQuotaFn: async record => { records.push(record); }
+  });
+  await observer.refresh();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].quota_window, 'weekly');
+  for (const unrecognized of [{ seven_day_opus: { utilization: 100 } }, { extra_usage: { utilization: 100 } }, {}]) {
+    body = unrecognized;
+    now += 15 * 60_000;
+    await observer.refresh();
+    assert.equal(records.length, 1, 'a response without account windows must not invalidate prior readings');
+  }
 });

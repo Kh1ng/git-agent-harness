@@ -692,7 +692,7 @@ fn live_quota_pacing_inputs(
                     .ok()
                 })
                 .is_some_and(|observed| {
-                    observed <= now && now - observed <= time::Duration::minutes(30)
+                    observed <= now && now - observed <= crate::quota_store::QUOTA_FRESHNESS
                 })
         })
         .filter(|record| {

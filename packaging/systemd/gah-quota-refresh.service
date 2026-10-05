@@ -7,7 +7,7 @@
 # went stale for days even while dispatch itself was active.
 #
 # Runs `gah quota auto-refresh`, which iterates every configured profile's
-# quota-tracked backends, applies the per-backend 30-minute throttle, and
+# quota-tracked backends, applies the per-source 14-minute throttle, and
 # runs each due refresh to completion (bounded by the Codex app-server timeout
 # and curl --max-time) before exiting -- safe for a systemd oneshot unit.
 #

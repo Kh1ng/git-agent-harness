@@ -1,5 +1,5 @@
 use super::*;
-use git_agent_harness::{config, ledger::LedgerEntry};
+use git_agent_harness::ledger::LedgerEntry;
 use sha2::{Digest, Sha256};
 
 fn review_metadata_fingerprint(source_sha: &str, title: &str, body: &str, draft: bool) -> String {
@@ -82,7 +82,7 @@ fn setup_conflicted_repair_with_config(
     git_with_home(&repo, &home, &["commit", "-m", "target version"]);
     git_with_home(&repo, &home, &["push", "origin", "main"]);
 
-    let loaded = config::load(Some(cfg.to_str().unwrap())).unwrap();
+    let loaded = support::load_config(Some(cfg.to_str().unwrap())).unwrap();
     let profile = loaded.profiles.get("real").unwrap();
     let mut review = LedgerEntry::new(
         "real",

@@ -34,7 +34,7 @@ pub fn capacity(
         };
         if record.check_error.is_some()
             || observed > now
-            || now - observed > time::Duration::minutes(30)
+            || now - observed > crate::quota_store::QUOTA_FRESHNESS
         {
             continue;
         }
@@ -217,6 +217,27 @@ pub fn handoff_routes(
 mod tests {
     use super::*;
     #[test]
+    fn codex_weekly_window_drives_pressure_and_an_empty_five_hour_window_exhausts() {
+        // #1334: both app-server windows reach routing independently.
+        let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
+        let identity = ExecutionIdentity::legacy_candidate("codex", None::<String>, None::<String>);
+        let response = |five_hour_used: u32| {
+            serde_json::json!({"rateLimits": {
+                "primary": {"usedPercent": five_hour_used, "windowDurationMins": 300,
+                    "resetsAt": (now + time::Duration::hours(2)).unix_timestamp()},
+                "secondary": {"usedPercent": 10, "windowDurationMins": 10080,
+                    "resetsAt": (now + time::Duration::days(1)).unix_timestamp()}
+            }})
+        };
+        let windows = crate::usage::codex_rate_limit_windows(&response(40), None, now);
+        let open = capacity(&identity, &windows, now);
+        assert!(open.known_capacity && !open.exhausted);
+        assert!(open.reset_pressure.is_some_and(|pressure| pressure > 1.0));
+        let windows = crate::usage::codex_rate_limit_windows(&response(100), None, now);
+        assert!(capacity(&identity, &windows, now).exhausted);
+    }
+
+    #[test]
     fn failed_account_checks_and_retired_credentials_remove_capacity() {
         let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
         let mut identity =
@@ -247,18 +268,21 @@ mod tests {
     #[test]
     fn subscription_pressure_uses_explicit_budget_windows() {
         let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
-        let identity =
-            ExecutionIdentity::legacy_candidate("claude", None::<String>, None::<String>);
-        for (window, expected) in [
-            ("seven_day", Some(504.0)),
-            ("weekly", Some(504.0)),
-            ("vibe-code-included-monthly", Some(2160.0)),
-            ("five_hour", None),
-            ("session", None),
-            ("unknown_weekly_budget", None),
+        for (backend, window, expected) in [
+            ("claude", "seven_day", Some(504.0)),
+            ("claude", "weekly", Some(504.0)),
+            ("codex", "10080m", Some(504.0)),
+            ("codex", "300m", None),
+            ("codex", "code_review_window", None),
+            ("vibe", "vibe-code-included-monthly", Some(2160.0)),
+            ("claude", "five_hour", None),
+            ("claude", "session", None),
+            ("claude", "unknown_weekly_budget", None),
         ] {
+            let identity =
+                ExecutionIdentity::legacy_candidate(backend, None::<String>, None::<String>);
             let reading = serde_json::from_value(serde_json::json!({
-                "backend":"claude", "quota_window":window, "quota_remaining_percent":50,
+                "backend":backend, "quota_window":window, "quota_remaining_percent":50,
                 "observed_at":"2026-10-03T17:59:00Z", "quota_reset_at":"2026-10-03T18:10:00Z"
             }))
             .unwrap();

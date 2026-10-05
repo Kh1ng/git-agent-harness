@@ -352,6 +352,10 @@ async function refreshAntigravityQuota(account: UpstreamAuthFile, deps: QuotaRef
   return quotas;
 }
 
+// Native window names (src/usage/claude.rs). Per-model and extra-usage buckets
+// are shown in the panel but never become an account-wide routing balance.
+const CLAUDE_ACCOUNT_WINDOWS: Record<string, string> = { five_hour: '5-hour', seven_day: 'weekly' };
+
 async function refreshClaudeQuota(account: UpstreamAuthFile, deps: QuotaRefreshDeps): Promise<CliRouterQuota[]> {
   const body = await proxyCall(account, {
     method: 'GET',
@@ -369,7 +373,7 @@ async function refreshClaudeQuota(account: UpstreamAuthFile, deps: QuotaRefreshD
       remainingPercent: typeof w.utilization === 'number' ? percent(100 - w.utilization) : null,
       resetAt: isoOrNull(w.resets_at),
       observedAt,
-      window: key,
+      ...(Object.hasOwn(CLAUDE_ACCOUNT_WINDOWS, key) ? { window: CLAUDE_ACCOUNT_WINDOWS[key] } : {}),
     });
   }
   return quotas;
@@ -387,12 +391,16 @@ async function refreshCodexQuota(account: UpstreamAuthFile, deps: QuotaRefreshDe
   for (const [key, w] of Object.entries(rateLimit)) {
     if (!isObj(w) || !('used_percent' in w) || key.length > 80) continue;
     const resetSec = typeof w.reset_at === 'number' && Number.isFinite(w.reset_at) ? w.reset_at * 1000 : NaN;
+    // Name the window by duration, as the native app-server path does ("10080m"),
+    // so routing recognizes weekly budgets. Unknown durations keep a non-budget name.
+    const seconds = typeof w.limit_window_seconds === 'number' && Number.isFinite(w.limit_window_seconds) && w.limit_window_seconds > 0
+      ? w.limit_window_seconds : NaN;
     quotas.push({
       label: key,
       remainingPercent: typeof w.used_percent === 'number' ? percent(100 - w.used_percent) : null,
       resetAt: Number.isFinite(resetSec) && resetSec > 0 && resetSec < 8.64e15 ? new Date(resetSec).toISOString() : null,
       observedAt,
-      window: key,
+      window: Number.isFinite(seconds) ? `${Math.round(seconds / 60)}m` : key,
     });
   }
   return quotas;
@@ -475,8 +483,12 @@ export function createCliRouterQuotaObserver(deps: CliRouterDeps = {}) {
     const bound = stored.accountBackends?.[account.id];
     const backend = bound ?? logical;
     const opaqueInstance = `cli-router:${createHash('sha256').update(key).digest('hex').slice(0, 24)}`;
-    const hasReading = result.quotas.length > 0 && !result.quotaError;
-    const observations: (Partial<CliRouterQuota> | undefined)[] = hasReading ? result.quotas
+    const routable = provider === 'claude' ? result.quotas.filter(quota => quota.window) : result.quotas;
+    // A shape change or model-only response is not an account-wide check.
+    // Preserve prior windows until their normal freshness limit expires.
+    if (provider === 'claude' && !result.quotaError && routable.length === 0) return result;
+    const hasReading = routable.length > 0 && !result.quotaError;
+    const observations: (Partial<CliRouterQuota> | undefined)[] = hasReading ? routable
       : provider === 'antigravity' ? [{ quotaPool: 'google-native' }, { quotaPool: 'external' }] : [undefined];
     try {
       for (const quota of observations) {

@@ -328,40 +328,38 @@ fn has_quota_data(record: &QuotaObservationRecord) -> bool {
         || record.account_usage.is_some()
 }
 
-/// #166: read Codex app-server account-level quota and append
-/// the result to the durable store. Returns the stored record when Codex
-/// reported quota data and an error when the request fails or has no quota data.
+/// #166: read every Codex app-server account window and append one row per
+/// window. `identity` scopes the rows to an explicit instance and pool;
+/// without it they are ambient account readings. `environment` isolates a
+/// named instance's login. Errors when the request fails or has no quota data.
 pub fn refresh_codex_and_store(
     codex_cmd: &str,
     model: Option<&str>,
+    identity: Option<&crate::execution_identity::ExecutionIdentity>,
+    environment: &[(String, String)],
     state_path: &Path,
 ) -> Result<Option<QuotaObservationRecord>> {
-    let obs = crate::usage::refresh_codex_quota(codex_cmd, model)
-        .map_err(|e| anyhow::anyhow!("Codex app-server quota check failed: {e}"))?;
-    match obs {
-        Some(obs) => {
-            let rec = QuotaObservationRecord {
-                backend: obs.backend.clone(),
-                backend_instance: None,
-                model: obs.model.clone(),
-                quota_pool: None,
-                quota_window: obs.quota_window.clone(),
-                quota_used_percent: obs.quota_used_percent,
-                quota_remaining_percent: obs.quota_remaining_percent,
-                quota_reset_at: obs.quota_reset_at.clone(),
-                observed_at: obs.observed_at.clone(),
-                checked_at: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
-                check_error: None,
-                usage_source: obs.usage_source.clone(),
-                mistral_admin: None,
-                account_usage: None,
-                credential_id: None,
-            };
-            append(state_path, &rec)?;
-            Ok(Some(rec))
+    let records = crate::usage::refresh_codex_quota(codex_cmd, model, environment)
+        .map_err(|error| anyhow::anyhow!("Codex app-server quota check failed: {error}"))?;
+    append_scoped(state_path, records, identity)
+}
+
+/// Append a check's windows, scoped to `identity` when the source belongs to
+/// one explicit instance. Returns the first window for callers that report it.
+pub(crate) fn append_scoped(
+    state_path: &Path,
+    mut records: Vec<QuotaObservationRecord>,
+    identity: Option<&crate::execution_identity::ExecutionIdentity>,
+) -> Result<Option<QuotaObservationRecord>> {
+    for record in &mut records {
+        if let Some(identity) = identity {
+            record.backend = identity.logical_backend.clone();
+            record.backend_instance = Some(identity.backend_instance.clone());
+            record.quota_pool = identity.quota_pool.clone();
         }
-        None => Ok(None),
+        append(state_path, record)?;
     }
+    Ok(records.into_iter().next())
 }
 
 /// #154: refresh account-level Mistral Admin API data (aggregate usage,
@@ -448,46 +446,6 @@ pub(crate) fn refresh_vibe_admin_record(
     Ok(Some(rec))
 }
 
-/// Refresh and persist account quota for one explicit execution identity.
-pub fn refresh_codex_and_store_for_identity(
-    codex_cmd: &str,
-    identity: &crate::execution_identity::ExecutionIdentity,
-    state_path: &Path,
-) -> Result<Option<QuotaObservationRecord>> {
-    let observation =
-        crate::usage::refresh_codex_quota(codex_cmd, identity.effective_model.as_deref())
-            .map_err(|error| anyhow::anyhow!("Codex app-server quota check failed: {error}"))?;
-    let Some(observation) = observation else {
-        return Ok(None);
-    };
-    let record = record_from_codex_observation(observation, identity);
-    append(state_path, &record)?;
-    Ok(Some(record))
-}
-
-fn record_from_codex_observation(
-    observation: crate::ledger::summary::GroupQuotaObservation,
-    identity: &crate::execution_identity::ExecutionIdentity,
-) -> QuotaObservationRecord {
-    QuotaObservationRecord {
-        backend: identity.logical_backend.clone(),
-        backend_instance: Some(identity.backend_instance.clone()),
-        model: identity.effective_model.clone(),
-        quota_pool: identity.quota_pool.clone(),
-        quota_window: observation.quota_window,
-        quota_used_percent: observation.quota_used_percent,
-        quota_remaining_percent: observation.quota_remaining_percent,
-        quota_reset_at: observation.quota_reset_at,
-        observed_at: observation.observed_at,
-        checked_at: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
-        check_error: None,
-        usage_source: observation.usage_source,
-        mistral_admin: None,
-        account_usage: None,
-        credential_id: None,
-    }
-}
-
 /// Persist both native Claude allowance windows under the default account's
 /// explicit instance. Named Claude accounts cannot inherit these readings.
 pub fn refresh_claude_and_store(state_path: &Path) -> Result<Option<QuotaObservationRecord>> {
@@ -500,19 +458,20 @@ pub fn refresh_claude_and_store(state_path: &Path) -> Result<Option<QuotaObserva
 
 /// Issue #761: nothing refreshed this store periodically -- only a human
 /// running `gah quota refresh` by hand did, so account-level quota data
-/// went stale for days even while dispatch itself was active. Called once
-/// per `gah loop` tick (see `controller::runtime::run_once`), throttled to
-/// `QUOTA_REFRESH_INTERVAL_SECONDS` per backend so this can't hammer either
+/// went stale for days even while dispatch itself was active. Called by
+/// `gah quota auto-refresh`, which the systemd timer and the dashboard server's
+/// scheduler both run every 15 minutes (not from `gah loop`; see
+/// `controller::runtime::probe`). Throttled to
+/// `QUOTA_REFRESH_INTERVAL` per source so this can't hammer either
 /// endpoint: Codex's app-server is a local CLI call, but
 /// vibe's is a real network call against the Mistral Admin API with its own
 /// rate limits. Best-effort: a refresh failure (backend not installed, no
-/// `MISTRAL_ADMIN_API_KEY`) must not fail the loop tick, so errors are
-/// swallowed here, not propagated.
+/// `MISTRAL_ADMIN_API_KEY`) must not abort the auto-refresh oneshot run, so errors are
+/// recorded per source rather than propagated.
 ///
 /// Returns the spawned refresh threads (one per backend that was actually
 /// due and not already in flight) so a caller that must outlive them -- the
-/// dedicated `gah quota auto-refresh` oneshot CLI -- can join them; the
-/// fire-and-forget loop-tick caller simply drops the handles.
+/// dedicated `gah quota auto-refresh` oneshot CLI -- can join them.
 pub fn refresh_stale_quota_observations(
     profile: &crate::config::Profile,
     now: OffsetDateTime,
@@ -562,7 +521,7 @@ pub fn refresh_stale_quota_observations(
     if let Some(handle) = maybe_refresh_backend(store_path, "codex", now, {
         let codex_cmd = codex_cmd.clone();
         let path = store_path.to_path_buf();
-        move || refresh_codex_and_store(&codex_cmd, None, &path)
+        move || refresh_codex_and_store(&codex_cmd, None, None, &[], &path)
     }) {
         handles.push(handle);
     }
@@ -632,10 +591,14 @@ pub fn refresh_quota_observations_and_wait(
     count
 }
 
-/// How long a stale reading is trusted before another live check is worth
-/// the API/process cost. Conservative on purpose -- see the module-level
-/// doc comment on `refresh_stale_quota_observations`.
-const QUOTA_REFRESH_INTERVAL_SECONDS: i64 = 30 * 60;
+/// How long routing trusts an account reading (`routing::subscription::capacity`
+/// and live pacing). Older readings count as unknown capacity.
+pub const QUOTA_FRESHNESS: time::Duration = time::Duration::minutes(30);
+
+/// Minimum time between live checks of one source. It must stay below
+/// `QUOTA_FRESHNESS` minus the 15-minute scheduler tick, so every reading is
+/// replaced before routing stops trusting it (#1331).
+const QUOTA_REFRESH_INTERVAL: time::Duration = time::Duration::minutes(14);
 
 /// Refreshes run on detached threads so a provider check never delays a loop
 /// tick. Each provider call is bounded, and `IN_FLIGHT` prevents overlapping
@@ -689,7 +652,7 @@ fn maybe_refresh_source(
         .max();
     let due = match last_checked {
         None => true,
-        Some(last) => now - last > time::Duration::seconds(QUOTA_REFRESH_INTERVAL_SECONDS),
+        Some(last) => now - last > QUOTA_REFRESH_INTERVAL,
     };
     if !due {
         return None;
@@ -823,7 +786,7 @@ mod tests {
             "first call must actually refresh"
         );
 
-        // Ten minutes later, well inside QUOTA_REFRESH_INTERVAL_SECONDS.
+        // Ten minutes later, inside QUOTA_REFRESH_INTERVAL.
         let second = calls.clone();
         maybe_refresh_backend(
             &path,
@@ -865,7 +828,7 @@ mod tests {
         maybe_refresh_backend(
             &path,
             "test-refresh-again",
-            now + time::Duration::seconds(QUOTA_REFRESH_INTERVAL_SECONDS + 60),
+            now + QUOTA_REFRESH_INTERVAL + time::Duration::minutes(1),
             move || {
                 second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(None)
@@ -875,6 +838,52 @@ mod tests {
         .join()
         .unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn every_fifteen_minute_tick_refreshes_before_routing_distrusts_the_reading() {
+        // #1331: a 30-minute throttle against a 30-minute freshness window
+        // skipped every other server tick, leaving routing blind half the hour.
+        let tick = time::Duration::minutes(15);
+        assert!(QUOTA_REFRESH_INTERVAL < tick);
+        assert!(tick < QUOTA_FRESHNESS);
+        let (_dir, path) = tmp_store();
+        let start = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();
+        let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            "test-tick-cadence",
+            None::<String>,
+            None::<String>,
+        );
+        for n in 0..4 {
+            let now = start + tick * n;
+            if n > 0 {
+                assert!(
+                    crate::routing::subscription::capacity(&identity, &load(&path).unwrap(), now)
+                        .known_capacity,
+                    "capacity must stay known before tick {n} refreshes"
+                );
+            }
+            let refresh_path = path.clone();
+            maybe_refresh_backend(&path, "test-tick-cadence", now, move || {
+                let reading: QuotaObservationRecord = serde_json::from_value(serde_json::json!({
+                    "backend": "test-tick-cadence", "quota_window": "weekly",
+                    "quota_remaining_percent": 50, "observed_at": now.format(&Rfc3339).unwrap(),
+                    "checked_at": now.format(&Rfc3339).unwrap(),
+                    "quota_reset_at": (start + time::Duration::days(7)).format(&Rfc3339).unwrap()
+                }))
+                .unwrap();
+                append(&refresh_path, &reading)?;
+                Ok(Some(reading))
+            })
+            .unwrap_or_else(|| panic!("tick {n} was throttled"))
+            .join()
+            .unwrap();
+            assert!(
+                crate::routing::subscription::capacity(&identity, &load(&path).unwrap(), now)
+                    .known_capacity,
+                "capacity must be known after tick {n} refreshes"
+            );
+        }
     }
 
     #[test]
