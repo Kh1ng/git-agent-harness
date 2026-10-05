@@ -1,0 +1,39 @@
+{
+  "release": "v0.1.3",
+  "platform": "linux",
+  "architecture": "x86_64",
+  "container": "ubuntu:24.04",
+  "artifacts": {
+    "GAH_0.1.3_amd64.AppImage": {
+      "sha256": "ca65036522627d39b5690a9f0bf0d38ae6ee6b463a669de9751ae74353cf9151"
+    },
+    "gah-linux-x86_64": {
+      "sha256": "6ca7c831866c975955387545ce37f2a0b7972d290e424e39a27b121216a209da"
+    }
+  },
+  "fresh_container_tools": {
+    "cargo": false,
+    "npm": false,
+    "node": false,
+    "gh": false,
+    "glab": false,
+    "tailscale": false
+  },
+  "cli_version_exit": 2,
+  "appimage_extract_exit": 0,
+  "bundled_local_runtime_file_count": 0,
+  "desktop_process_alive": true,
+  "complete_standalone_workflow_passed": false,
+  "unit_portability": {
+    "service_user_exists": false,
+    "working_directory_exists": false,
+    "node_executable_exists": false
+  },
+  "gui_content_check": {
+    "setup_document_visible": false,
+    "container_software_rendering_visible": false,
+    "native_host_headless_visible": false,
+    "interactive_linux_desktop_tested": false,
+    "tracking_issue": 1326
+  }
+}

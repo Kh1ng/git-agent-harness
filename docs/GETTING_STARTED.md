@@ -121,6 +121,8 @@ code, so it cannot fall out of date.
 | openssl | Shared memory | Generates the memory gateway's access key. |
 <!-- requirements:end -->
 
+For the standalone desktop app, open **Settings > This computer > Repository tools**. Select GitHub or GitLab. If its CLI package is missing, open the official installation guide, install the package, and select **Check installation**. GitHub uses [GitHub CLI](https://cli.github.com/); GitLab uses [GitLab CLI](https://gitlab.com/gitlab-org/cli#installation). Sign-in starts only after the CLI is available. Standalone runs the local workflow without Tailscale or another GAH node.
+
 ### Shared memory
 
 Shared memory lets chats and dispatched work recall a project's earlier
