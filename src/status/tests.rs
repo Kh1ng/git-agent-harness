@@ -140,6 +140,7 @@ fn light_snapshot_never_calls_the_provider() {
 
     let tmp = TempDir::new().unwrap();
     let cfg = make_test_cfg(&tmp);
+    let _claim_guard = ClaimStateEnvGuard::set(tmp.path().join("claims.json"));
     let _availability_guard =
         crate::test_support::AvailabilityEnvGuard::set(tmp.path().join("avail.json"));
     let bin = tmp.path().join("bin");
@@ -152,11 +153,21 @@ fn light_snapshot_never_calls_the_provider() {
     )
     .unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
-    let status = std::process::Command::new("gh")
+    let output = std::process::Command::new("gh")
         .env("PATH", &bin)
-        .status()
+        .output()
         .unwrap();
-    assert_eq!(status.code(), Some(1));
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "mock gh self-check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "mock gh must work with only its own bin directory on PATH: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(marker.exists(), "mock gh must record its invocation");
     fs::remove_file(&marker).unwrap();
     crate::provider::set_test_provider_path(bin.to_str().unwrap());
