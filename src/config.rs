@@ -22,6 +22,8 @@ pub use external_credential_scopes::ExternalCredentialScope;
 mod routing_policy;
 use routing_policy::merge_routing_policy;
 pub use routing_policy::{CandidateConfig, RoutingPolicy, TaskRoutingRule};
+mod default_paths;
+pub use default_paths::default_config_dir;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GahConfig {
@@ -389,20 +391,6 @@ pub fn canonical_backend_name(name: &str) -> &str {
     }
 }
 
-pub fn default_config_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    home.map_or_else(|| PathBuf::from("/root"), PathBuf::from)
-        .join(".config/gah")
-}
-
-/// Worktree root used when `defaults.worktree_base` is empty, so dispatch
-/// never plans worktrees at the filesystem root.
-pub fn default_worktree_base() -> PathBuf {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    home.map_or_else(|| PathBuf::from("/root"), PathBuf::from)
-        .join(".local/share/gah/worktrees")
-}
-
 pub fn default_config_path() -> PathBuf {
     default_config_dir().join("config.toml")
 }
@@ -529,9 +517,7 @@ pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
     if let Some(canonical_routing) = load_canonical_routing()? {
         cfg.defaults.routing = merge_routing_policy(canonical_routing, cfg.defaults.routing);
     }
-    if cfg.defaults.worktree_base.trim().is_empty() {
-        cfg.defaults.worktree_base = default_worktree_base().display().to_string();
-    }
+    default_paths::resolve_empty_worktree_base(&mut cfg);
 
     // Lint candidate model consistency
     for (name, profile) in &cfg.profiles {
@@ -1093,22 +1079,6 @@ pub mod tests {
             cfg.defaults.routing.review_backend.as_deref(),
             Some("claude")
         );
-    }
-
-    #[test]
-    fn load_resolves_empty_worktree_base_to_default() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "[defaults]\nworktree_base = \"\"\n").unwrap();
-        let cfg = load(Some(path.to_str().unwrap())).unwrap();
-        assert_eq!(
-            std::path::PathBuf::from(&cfg.defaults.worktree_base),
-            super::default_worktree_base()
-        );
-        assert!(cfg
-            .defaults
-            .worktree_base
-            .ends_with(".local/share/gah/worktrees"));
     }
 
     #[test]
