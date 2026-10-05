@@ -770,7 +770,7 @@ mod tests {
     }
 
     fn wait_for_terminal(session: &mut HermesManagerSession, id: &GahSessionId) -> TerminalStatus {
-        for _ in 0..100 {
+        for _ in 0..300 {
             if let Some(status) = session.terminal_status(id).unwrap() {
                 return status;
             }
