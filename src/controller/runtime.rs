@@ -793,6 +793,15 @@ fn run_parallel_once(
             };
             admission_coordinator.complete_worker(sequence);
             active -= 1;
+            // A finished item's next step (the review of a new PR, the merge
+            // after a review) may run in this batch rather than wait for the
+            // slowest sibling. Failed and deferred work stays excluded so the
+            // batch cannot spin on it; the stuck-loop gate bounds repeats.
+            if outcome_completed_work(&result.outcome) {
+                if let Some(work_id) = result.action.work_id() {
+                    executed_work_ids.remove(&crate::work_claim::normalize_work_identity(work_id));
+                }
+            }
             if action_creates_managed_mr(&result.action) {
                 if let Some(key) = action_intake_key(&result.action) {
                     active_intake_keys.remove(&key);
@@ -873,6 +882,11 @@ fn update_parallel_refill_budget(
         *fill_attempts_remaining = parallel_limit;
     }
     failed
+}
+
+/// The worker ran its action to the end: no error and no capacity deferral.
+fn outcome_completed_work(outcome: &str) -> bool {
+    !outcome.starts_with("Error:") && !outcome.starts_with("Deferred ")
 }
 
 fn parallel_outcome_is_failure(outcome: &str) -> bool {
