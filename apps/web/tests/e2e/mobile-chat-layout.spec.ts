@@ -118,8 +118,9 @@ for (const width of [320, 390]) {
     // New chat opens the existing creation flow without discarding the
     // current conversation first.
     await page.getByRole('button', { name: 'New chat', exact: true }).click();
-    const launcher = page.getByRole('dialog', { name: 'New chat' });
+    const launcher = page.getByRole('region', { name: 'New chat' });
     await expect(page).toHaveURL(/[?&]chat=mock-session-1/);
+    await launcher.getByText('Extra settings').click();
     const firstProject = launcher.getByRole('button', { name: /Fixture/ });
     await expect(firstProject).toBeVisible();
     expect((await firstProject.boundingBox())!.height).toBeGreaterThanOrEqual(44);
@@ -162,12 +163,14 @@ test('chat keeps the composer inside short and offline viewports', async ({ page
   await expectComposerInsideViewport();
   await page.setViewportSize({ width: 1024, height: 400 });
   await expectComposerInsideViewport();
+  // A short desktop window keeps every page reachable: the top navbar
+  // scrolls sideways instead of wrapping, and the sidebar strip stays in view.
   const primaryNavigation = page.getByRole('navigation', { name: 'Primary' });
-  const sidebar = primaryNavigation.locator('..');
   await expect(primaryNavigation).toBeVisible();
-  expect(await sidebar.evaluate((element) => element.scrollHeight > element.clientHeight
-    && getComputedStyle(element).overflowY === 'auto')).toBe(true);
-  const settings = primaryNavigation.getByRole('button', { name: 'Settings', exact: true });
-  await settings.scrollIntoViewIfNeeded();
-  await expect(settings).toBeInViewport();
+  expect(await primaryNavigation.evaluate((element) => getComputedStyle(element).overflowX)).toBe('auto');
+  // Chat sits at the navbar's right end, outside the scrolling page list.
+  const chat = page.getByRole('button', { name: 'Chat', exact: true });
+  await chat.scrollIntoViewIfNeeded();
+  await expect(chat).toBeInViewport();
+  await expect(page.getByRole('navigation', { name: 'Sidebar' }).getByRole('button', { name: 'Settings', exact: true })).toBeInViewport();
 });

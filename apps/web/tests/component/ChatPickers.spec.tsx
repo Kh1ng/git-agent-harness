@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/experimental-ct-react';
 import React from 'react';
 import type { ChatSessionSummary } from '@git-agent-harness/contracts';
 import { ProjectRail } from '../../src/components/ProjectRail.js';
-import { NewChatModal } from '../../src/components/NewChatModal.js';
+import { NewChatPanel } from '../../src/components/NewChatPanel.js';
 
 const sessions: ChatSessionSummary[] = Array.from({ length: 30 }, (_, index) => ({
   id: String(index + 1), profile: 'gah', title: `Conversation ${index + 1}`,
@@ -91,7 +91,7 @@ for (const mode of ['issue', 'pr'] as const) {
       }
       await route.fulfill({ json: body });
     });
-    const component = await mount(<NewChatModal open currentProfile="gah"
+    const component = await mount(<NewChatPanel currentProfile="gah"
       profiles={[{ name: 'gah', display_name: 'GAH', repo: 'owner/gah', provider: 'github', local_path: '/tmp/gah', repo_id: 'gah', worktree_base: '/tmp/worktrees', web_url: null, max_parallel_workers: null, max_open_managed_mrs: 1, manager_wake_autonomy: null, validation_timeout_seconds: 300 }]}
       backends={[{ id: 'claude', displayName: 'Claude', implemented: true }]}
       onClose={() => {}} onCreated={(_, id) => { created = id; }} />);
@@ -136,45 +136,26 @@ for (const mode of ['issue', 'pr'] as const) {
 }
 
 
-test('new chat contains keyboard focus and restores it after Escape or backdrop dismissal', async ({ mount, page }, testInfo) => {
+test('new chat is an inline panel: Close and Cancel dismiss it and the extras stay folded', async ({ mount, page }) => {
   let closed = 0;
-  await page.route('**/api/**', (route) => route.fulfill({ json: { nodes: [], profileOverrides: {}, defaultBackend: '' } }));
-  const render = (open: boolean) => <div>
-    <button type="button">Open chat</button>
-    <NewChatModal open={open} currentProfile="gah" profiles={[]} backends={[]}
-      onClose={() => { closed += 1; }} onCreated={() => {}} />
-  </div>;
-  const component = await mount(render(false));
-  const trigger = component.getByRole('button', { name: 'Open chat', exact: true });
-  await trigger.focus();
-  await component.update(render(true));
-  const dialog = component.getByRole('dialog', { name: 'New chat' });
-  await expect(dialog).toBeVisible();
-  const close = dialog.getByRole('button', { name: 'Close', exact: true });
-  const cancel = dialog.getByRole('button', { name: 'Cancel', exact: true });
-  await expect(close).toBeFocused();
-  await cancel.focus();
-  // Background controls are inert, even when focus is requested directly.
-  await trigger.evaluate((button: HTMLButtonElement) => button.focus());
-  await expect(cancel).toBeFocused();
-  await page.keyboard.press('Tab');
-  await expect(trigger).not.toBeFocused();
-  // Chromium may visit browser chrome between the last and first modal control.
-  if (!(await close.evaluate((button) => button === document.activeElement))) await page.keyboard.press('Tab');
-  await expect(close).toBeFocused();
-  await page.keyboard.press('Shift+Tab');
-  await expect(trigger).not.toBeFocused();
-  if (!(await cancel.evaluate((button) => button === document.activeElement))) await page.keyboard.press('Shift+Tab');
-  await expect(cancel).toBeFocused();
-  await page.keyboard.press('Escape');
-  await expect(dialog).not.toBeVisible();
+  await page.route('**/api/**', (route) => route.fulfill({ json: { nodes: [{ nodeId: 'central', displayName: 'Mac', role: 'central', chatCapable: true, eligible: true, lastSeenAt: null }], profileOverrides: {}, defaultBackend: 'claude', models: [], currentModelId: null } }));
+  const component = await mount(<NewChatPanel currentProfile="gah"
+    profiles={[{ name: 'gah', display_name: 'GAH', repo: 'owner/gah', provider: 'github', local_path: '/tmp/gah', repo_id: 'gah', worktree_base: '/tmp/worktrees', web_url: null, max_parallel_workers: null, max_open_managed_mrs: 1, manager_wake_autonomy: null, validation_timeout_seconds: 300 }]}
+    backends={[{ id: 'claude', displayName: 'Claude', implemented: true }]}
+    onClose={() => { closed += 1; }} onCreated={() => {}} />);
+  const panel = page.getByRole('region', { name: 'New chat' });
+  await expect(panel).toBeVisible();
+  await expect(component.getByRole('dialog')).toHaveCount(0);
+  // The disclosure summarises the choice it hides.
+  const summary = panel.locator('summary');
+  await expect(summary).toContainText('Extra settings');
+  await expect(summary).toContainText('GAH');
+  await expect(summary).toContainText('Mac');
+  await expect(panel.getByRole('combobox', { name: 'Run on node' })).toBeHidden();
+  await summary.click();
+  await expect(panel.getByRole('combobox', { name: 'Run on node' })).toBeVisible();
+  await panel.getByRole('button', { name: 'Close', exact: true }).click();
   await expect.poll(() => closed).toBe(1);
-  await expect(trigger).toBeFocused();
-  await component.update(render(false));
-  await component.update(render(true));
-  await expect(dialog).toBeVisible();
-  await page.mouse.click(2, 2);
-  await expect(dialog).not.toBeVisible();
+  await panel.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect.poll(() => closed).toBe(2);
-  await expect(trigger).toBeFocused();
 });

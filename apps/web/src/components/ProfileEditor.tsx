@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Plus, Pencil, Trash2, Check, X, AlertCircle, Info } from 'lucide-react';
 import { useGahStore } from '../store/gahStore.js';
+import { useUiStore } from '../store/uiStore.js';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
 import type { ProfileAddData, ProfileUpdateData } from '../api/client.js';
 
@@ -17,6 +18,13 @@ export function ProfileEditor() {
 
   const [editingProfile, setEditingProfile] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
+  const pendingAction = useUiStore((state) => state.pendingAction);
+  const requestAction = useUiStore((state) => state.requestAction);
+  useEffect(() => {
+    if (pendingAction !== 'create') return;
+    setShowAddForm(true);
+    requestAction(null);
+  }, [pendingAction, requestAction]);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
   
   const [formData, setFormData] = useState<Omit<ProfileAddData, 'name'> & { name?: string }>({
