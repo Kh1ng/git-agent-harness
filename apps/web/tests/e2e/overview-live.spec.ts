@@ -274,10 +274,20 @@ test('the Running agents icon opens the first running agent, or says nothing is 
   running = true;
   await page.reload();
   await icon.click();
-  // No row to click first: the panel opens on the running agent and lists it.
+  // The panel opens on the list of running agents; picking one shows its output.
+  const list = panel.getByRole('list', { name: 'Running factory agents' }).getByRole('listitem');
+  await expect(list).toHaveCount(1);
+  await expect(list.first()).toContainText(/gpt-6-sol on #1381/);
+  await expect(list.first()).toContainText(/running for \d+m? ?\d*s?/);
+  await expect(panel).not.toContainText('Tracing the loop.');
+  await list.first().getByRole('button').click();
   await expect(panel).toContainText('Tracing the loop.');
   await expect(panel.getByRole('navigation', { name: 'Running factory agents' }).getByRole('button')).toHaveCount(1);
   // View only: no message box, no pause or kill.
   await expect(panel.getByRole('textbox')).toHaveCount(0);
   await expect(panel.getByRole('button', { name: /kill|pause|stop|send/i })).toHaveCount(0);
+  // Back returns to the list.
+  await panel.getByRole('button', { name: 'Close live view' }).click();
+  await expect(panel.getByRole('heading', { name: 'Running agents', exact: true })).toBeVisible();
+  await expect(list).toHaveCount(1);
 });
