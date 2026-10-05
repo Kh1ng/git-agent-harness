@@ -23,7 +23,7 @@ function Arc({ r, percent, className }: { r: number; percent: number | null; cla
  * (the session), the inner ring the next one (the week), with the provider's
  * initial in the middle. Colour follows how close the tightest window is.
  */
-export function UsageRing({ usage, size = 26 }: { usage: SubscriptionUsage; size?: number }) {
+export function UsageRing({ usage, size = 26, working = false }: { usage: SubscriptionUsage; size?: number; /** A job is running on this subscription: the letter shimmers green. */ working?: boolean }) {
   const [outer, inner] = usage.windows.filter((window) => window.usedPercent !== null);
   const tone = usageTone(usage.tightest?.usedPercent ?? null);
   return (
@@ -32,7 +32,7 @@ export function UsageRing({ usage, size = 26 }: { usage: SubscriptionUsage; size
         <Arc r={11} percent={outer?.usedPercent ?? null} className={TONE_CLASS[tone]} />
         <Arc r={7.5} percent={inner?.usedPercent ?? null} className={TONE_CLASS[usageTone(inner?.usedPercent ?? null)]} />
       </svg>
-      <span className="text-[9px] font-semibold uppercase leading-none text-primary">{usage.providerLabel.charAt(0)}</span>
+      <span className={`text-[9px] font-semibold uppercase leading-none ${working ? 'usage-letter-working' : 'text-primary'}`} data-working={working || undefined}>{usage.providerLabel.charAt(0)}</span>
     </span>
   );
 }

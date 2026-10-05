@@ -3,6 +3,9 @@ import { expect, test } from '@playwright/test';
 // The Git issues icon on the left strip lists the project's open issues;
 // an issue opens the same work detail drawer Needs attention uses.
 
+// Routes that fetch from the fixture server must not outlive the test.
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); });
+
 test('the Git issues sidebar lists open issues and opens the work drawer', async ({ page }) => {
   await page.route('**/api/manager-chat/issues**', (route) => route.fulfill({ json: { issues: [
     { number: 946, title: 'Retry loop never stops', url: 'https://github.com/Kh1ng/git-agent-harness/issues/946', labels: ['bug'], updatedAt: '2026-10-04T20:00:00Z' },

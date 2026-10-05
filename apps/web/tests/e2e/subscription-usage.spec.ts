@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { formatUntil, parseWindow, projectedPercent, subscriptionUsage } from '../../src/lib/subscriptionUsage.js';
+import { busySubscriptionIds, formatUntil, parseWindow, projectedPercent, subscriptionUsage } from '../../src/lib/subscriptionUsage.js';
 
 // Subscription usage, in the style of Claude's usage popover and Poracode's
 // provider cards: a ring per subscription in the navbar, a popover with
@@ -44,6 +44,13 @@ test('windows are named and sized from the provider names, and projected to rese
   expect(formatUntil('2026-10-04T23:20:00Z', NOW)).toBe('20 min');
   expect(formatUntil('2026-10-07T13:00:00Z', NOW)).toBe('2d 14h');
   expect(formatUntil('2026-10-04T22:00:00Z', NOW)).toBe('now');
+
+  // A running session names its backend; a loop job is credited through the latest dispatch.
+  const subscriptions = [claude, codex, vibe];
+  expect([...busySubscriptionIds({ subscriptions, sessions: [{ id: 's', providerKind: 'github', instanceId: 'claude', status: 'running', backend: 'claude' }] as never, controllerRuns: [], claims: [], recentLedger: null })]).toEqual(['claude']);
+  expect([...busySubscriptionIds({ subscriptions, sessions: [], controllerRuns: [{ run_id: 'r', profile: 'gah', work_id: '#1', started_at: '', finished_at: null, action: 'fix', status: 'running', outcome: null }],
+    claims: [], recentLedger: { most_recent_work_id: '#1', most_recent_effective_backend: 'codex' } as never })]).toEqual(['codex']);
+  expect(busySubscriptionIds({ subscriptions, sessions: [], controllerRuns: [], claims: [], recentLedger: { most_recent_work_id: '#1', most_recent_effective_backend: 'codex' } as never }).size).toBe(0);
 });
 
 test('the navbar shows a ring per subscription and opens its windows; Quota lists collapsible cards', async ({ page }) => {
@@ -54,10 +61,21 @@ test('the navbar shows a ring per subscription and opens its windows; Quota list
     snapshot.candidates = candidates.map((candidate) => ({ ...candidate, quota_observations: candidate.quota_observations?.map((o) => ({ ...o, quota_reset_at: o.quota_window === '5-hour' ? soon : week })) }));
     await route.fulfill({ json: snapshot });
   });
+  await page.routeWebSocket('**/ws**', (ws) => {
+    ws.send(JSON.stringify({
+      type: 'server.welcome', serverVersion: '0.0.0-test', serverProviderCatalog: { providers: [] }, providers: {},
+      sessions: [{ id: 's1', providerKind: 'github', instanceId: 'codex', status: 'running', backend: 'codex', target: '#946', mode: 'improve', startedAt: new Date().toISOString() }]
+    }));
+    ws.send(JSON.stringify({ type: 'activity.replay', events: [] }));
+  });
   await page.goto('/?page=overview&profile=fixture');
   const chips = page.getByRole('group', { name: 'Subscription usage' });
   await expect(chips.getByRole('button')).toHaveCount(3);
+  // The card is the label: no tooltip duplicates it. A working subscription's letter shimmers.
   const claude = chips.getByRole('button', { name: /Anthropic usage: 66% of session \(5h\) used/ });
+  await expect(claude).not.toHaveAttribute('title', /.+/);
+  await expect(chips.getByRole('button', { name: /OpenAI usage/ }).locator('[data-working]')).toHaveText('O');
+  await expect(claude.locator('[data-working]')).toHaveCount(0);
   await claude.hover();
   const popover = page.getByRole('dialog', { name: 'Anthropic usage' });
   await expect(popover).toContainText('66% of session (5h) used. Resets in 20 min.');

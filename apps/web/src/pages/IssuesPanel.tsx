@@ -15,9 +15,12 @@ import { formatAge } from '../lib/format.js';
  * The Git issues sidebar: the current project's open issues, newest first,
  * each opening the work detail drawer that Needs attention uses.
  */
-export function IssuesPanel({ renderDetail, onDetailChange, onOpenChat }: {
+export function IssuesPanel({ renderDetail, detailWorkId, onSelectWork, onDetailChange, onOpenChat }: {
   /** The work detail for an issue, rendered inside this sidebar; `onBack` returns to the list. */
   renderDetail: (workId: string, onBack: () => void) => ReactNode;
+  /** The work shown in detail; pages open their work here too. */
+  detailWorkId: string | null;
+  onSelectWork: (workId: string | null) => void;
   /** Lets the shell widen the sidebar while a detail is open. */
   onDetailChange?: (open: boolean) => void;
   /** Opens the chat once an issue's conversation has been started. */
@@ -26,7 +29,6 @@ export function IssuesPanel({ renderDetail, onDetailChange, onOpenChat }: {
   const setProfileOverride = useUiStore((state) => state.setProfileOverride);
   const [starting, setStarting] = useState<number | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
-  const [detailWorkId, setDetailWorkId] = useState<string | null>(null);
   useEffect(() => { onDetailChange?.(detailWorkId !== null); return () => onDetailChange?.(false); }, [detailWorkId, onDetailChange]);
   const { profile: wsProfile, reconnectSeq } = useWebSocket();
   const profileOverride = useUiStore((state) => state.profileOverride);
@@ -75,7 +77,7 @@ export function IssuesPanel({ renderDetail, onDetailChange, onOpenChat }: {
     .filter((issue) => !terms || `#${issue.number} ${issue.title} ${issue.labels.join(' ')}`.toLowerCase().includes(terms))
     .sort((a, b) => Date.parse(b.updatedAt ?? '') - Date.parse(a.updatedAt ?? '') || b.number - a.number);
 
-  if (detailWorkId) return <div className="space-y-4">{renderDetail(detailWorkId, () => setDetailWorkId(null))}</div>;
+  if (detailWorkId) return <div className="space-y-4">{renderDetail(detailWorkId, () => onSelectWork(null))}</div>;
 
   return (
     <div className="space-y-4">
@@ -93,7 +95,7 @@ export function IssuesPanel({ renderDetail, onDetailChange, onOpenChat }: {
         <ul className="card divide-y divide-subtle" aria-label="Open issues">
           {visible.map((issue) => (
             <li key={issue.number} className="flex items-start gap-2 px-3 py-2">
-              <button type="button" onClick={() => setDetailWorkId(`#${issue.number}`)} className="min-w-0 flex-1 text-left hover:bg-white/5 rounded-md -mx-1 px-1 py-0.5">
+              <button type="button" onClick={() => onSelectWork(`#${issue.number}`)} className="min-w-0 flex-1 text-left hover:bg-white/5 rounded-md -mx-1 px-1 py-0.5">
                 <span className="flex items-baseline gap-2">
                   <span className="shrink-0 font-mono text-xs text-accent">#{issue.number}</span>
                   <span className="truncate text-sm text-primary" title={issue.title}>{issue.title}</span>

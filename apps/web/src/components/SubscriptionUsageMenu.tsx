@@ -69,7 +69,7 @@ export function SubscriptionDetail({ usage, now }: { usage: SubscriptionUsage; n
  * that fills as its limits are used. Hovering or clicking one opens that
  * subscription's windows; the ring's colour says how close it is.
  */
-export function SubscriptionUsageMenu({ subscriptions, onOpenQuota }: { subscriptions: SubscriptionUsage[]; onOpenQuota: () => void }) {
+export function SubscriptionUsageMenu({ subscriptions, busy, onOpenQuota }: { subscriptions: SubscriptionUsage[]; /** Subscriptions with a job running now. */ busy?: Set<string>; onOpenQuota: () => void }) {
   const [openId, setOpenId] = useState<string | null>(null);
   const [pinned, setPinned] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -100,11 +100,11 @@ export function SubscriptionUsageMenu({ subscriptions, onOpenQuota }: { subscrip
           const tight = usage.tightest;
           const label = `${usage.providerLabel} usage${tight && tight.usedPercent !== null ? `: ${Math.round(tight.usedPercent)}% of ${tight.label.toLowerCase()} used` : ''}`;
           return (
-            <button key={usage.id} type="button" aria-label={label} title={label} aria-expanded={openId === usage.id} aria-haspopup="true"
+            <button key={usage.id} type="button" aria-label={label} aria-expanded={openId === usage.id} aria-haspopup="true"
               onMouseEnter={() => { if (!pinned) { setOpenId(usage.id); setNow(Date.now()); } }}
               onClick={() => { setPinned(openId !== usage.id || !pinned); setOpenId(usage.id); setNow(Date.now()); }}
               className={`flex h-9 w-9 items-center justify-center rounded-md hover:bg-white/5 ${openId === usage.id ? 'bg-white/5' : ''}`}>
-              <UsageRing usage={usage} />
+              <UsageRing usage={usage} working={busy?.has(usage.id) ?? false} />
             </button>
           );
         })}

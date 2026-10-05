@@ -10,7 +10,7 @@ import { isSideView, readNavigation, takeActivityDeepLink, updateNavigation, typ
 import { activityApi } from './api/client.js';
 import { NotificationsMenu } from './components/NotificationsMenu.js';
 import { SubscriptionUsageMenu } from './components/SubscriptionUsageMenu.js';
-import { subscriptionUsage } from './lib/subscriptionUsage.js';
+import { busySubscriptionIds, subscriptionUsage } from './lib/subscriptionUsage.js';
 import { useGahStore } from './store/gahStore.js';
 import { Maximize2, PanelRight, X } from 'lucide-react';
 import { WorkDetailDrawer } from './components/WorkDetailDrawer.js';
@@ -49,8 +49,11 @@ export function App() {
   useEffect(() => updateNavigation({ page: currentPage, side: sideView, dock: chatDocked && currentPage !== 'chat' ? 'chat' : null }), [currentPage, sideView, chatDocked]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
-  // The Git issues sidebar grows while it shows an issue's detail.
+  // The Git issues sidebar grows while it shows an issue's detail; Overview opens its work there.
   const [sideDetailOpen, setSideDetailOpen] = useState(false);
+  const [sideWorkId, setSideWorkId] = useState<string | null>(null);
+  useEffect(() => { if (sideView !== 'issues') setSideWorkId(null); }, [sideView]);
+  const openWorkInSidebar = (workId: string) => { setSideWorkId(workId); setSideView('issues'); };
   // A push or feed link names the notification it opened; opening it reads it.
   const [openedActivityId] = useState(takeActivityDeepLink);
   useEffect(() => {
@@ -59,7 +62,7 @@ export function App() {
   const profileOverride = useUiStore((state) => state.profileOverride);
   const requestAction = useUiStore((state) => state.requestAction);
   const notificationPopups = useUiStore((state) => state.notificationPopups);
-  const { isConnected, isConnecting, sessions, liveActivity, activityUnreadCount, profile, sendMessage, activityRevision, reconnectSeq } = useWebSocket();
+  const { isConnected, isConnecting, sessions, liveActivity, activityUnreadCount, profile, sendMessage, activityRevision, reconnectSeq, controllerActivity } = useWebSocket();
   // The quota snapshot feeds the navbar's subscription rings on every page.
   const quota = useGahStore((state) => state.quota);
   const fetchQuota = useGahStore((state) => state.fetchQuota);
@@ -70,6 +73,9 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [activeProfile, fetchQuota, reconnectSeq]);
   const subscriptions = useMemo(() => subscriptionUsage(quota.data), [quota.data]);
+  const statusSnapshot = useGahStore((state) => state.status.data);
+  const busySubscriptions = useMemo(() => busySubscriptionIds({ subscriptions, sessions, controllerRuns: controllerActivity, claims: statusSnapshot?.active_claims ?? [], recentLedger: statusSnapshot?.recent_ledger }),
+    [subscriptions, sessions, controllerActivity, statusSnapshot]);
 
   /** Pages link to each other by name; a sidebar view opens in the sidebar. */
   const navigate = (page: Page) => {
@@ -132,7 +138,7 @@ export function App() {
           <OverviewPage
             sessions={sessions}
             onNavigate={navigate}
-            onOpenWork={setSelectedWorkId}
+            onOpenWork={openWorkInSidebar}
           />
         );
     }
@@ -147,7 +153,7 @@ export function App() {
       <Navbar currentPage={currentPage} sideView={sideView} onPageChange={navigate} activityUnreadCount={activityUnreadCount}
         chatOpen={isChatPage || chatDocked} onChatToggle={toggleChat}
         onImportProject={() => { requestAction('import'); expandChat(true); }} onCreateProject={() => { requestAction('create'); setSideView('profile'); }}
-        actions={<><SubscriptionUsageMenu subscriptions={subscriptions} onOpenQuota={() => navigate('quota')} /><NotificationsMenu liveActivity={sideView === 'events' ? null : liveActivity} unreadCount={activityUnreadCount} revision={activityRevision} autoPopup={notificationPopups} /></>} />
+        actions={<><SubscriptionUsageMenu subscriptions={subscriptions} busy={busySubscriptions} onOpenQuota={() => navigate('quota')} /><NotificationsMenu liveActivity={sideView === 'events' ? null : liveActivity} unreadCount={activityUnreadCount} revision={activityRevision} autoPopup={notificationPopups} /></>} />
 
       {/* Left to right: icon strip, sidebar view, main panel, chat sidebar. */}
       <div className="flex min-h-0 flex-1">
@@ -157,7 +163,7 @@ export function App() {
           <aside id="side-panel" aria-label={SIDE_VIEW_LABELS[sideView]}
             className={`side-panel min-w-0 flex-1 overflow-y-auto px-4 py-4 xl:flex-none xl:border-r xl:border-subtle ${sideDetailOpen ? 'xl:w-[clamp(28rem,40vw,44rem)]' : 'xl:w-[clamp(20rem,25vw,30rem)]'}`}>
             <Suspense fallback={<LoadingState label="Loading…" />}>
-              {sideView === 'settings' ? <SettingsPage /> : sideView === 'profile' ? <ProfilePanel /> : sideView === 'issues' ? <IssuesPanel renderDetail={(workId, onBack) => workDetail(workId, onBack, true)} onDetailChange={setSideDetailOpen} onOpenChat={() => navigate('chat')} /> : <EventsPage openedEventId={openedActivityId} />}
+              {sideView === 'settings' ? <SettingsPage /> : sideView === 'profile' ? <ProfilePanel /> : sideView === 'issues' ? <IssuesPanel renderDetail={(workId, onBack) => workDetail(workId, onBack, true)} detailWorkId={sideWorkId} onSelectWork={setSideWorkId} onDetailChange={setSideDetailOpen} onOpenChat={() => navigate('chat')} /> : <EventsPage openedEventId={openedActivityId} />}
             </Suspense>
           </aside>
         )}

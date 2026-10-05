@@ -1,4 +1,4 @@
-import type { QuotaCandidateStatus, QuotaObservation, QuotaSnapshot } from '@git-agent-harness/contracts';
+import type { ActiveClaim, ControllerActivity, QuotaCandidateStatus, QuotaObservation, QuotaSnapshot, RecentLedgerSummary, Session } from '@git-agent-harness/contracts';
 
 /** One rate-limit window of a subscription, as the provider reports it. */
 export interface UsageWindow {
@@ -120,6 +120,36 @@ export function subscriptionUsage(snapshot: Pick<QuotaSnapshot, 'candidates'> | 
     if (existing.windows.length === 0 && usage.windows.length > 0) seen.set(usage.id, { ...usage, model: existing.model });
   }
   return [...seen.values()];
+}
+
+/**
+ * The subscriptions with a job running now: a live dashboard session names
+ * its backend; a running controller run or an active claim is credited to
+ * the backend of the most recent dispatch when it is that same work item.
+ */
+export function busySubscriptionIds(input: {
+  subscriptions: SubscriptionUsage[];
+  sessions: Session[];
+  controllerRuns: ControllerActivity[];
+  claims: ActiveClaim[];
+  recentLedger: RecentLedgerSummary | null | undefined;
+}): Set<string> {
+  const byBackend = (backend: string | null | undefined, instance?: string | null) =>
+    input.subscriptions.find((usage) => instance && usage.id === instance) ?? input.subscriptions.find((usage) => usage.backend === backend);
+  const busy = new Set<string>();
+  for (const session of input.sessions) {
+    if (!['starting', 'running', 'stopping'].includes(session.status)) continue;
+    const match = byBackend(session.backend ?? session.providerKind, session.instanceId);
+    if (match) busy.add(match.id);
+  }
+  const recent = input.recentLedger;
+  if (recent?.most_recent_work_id) {
+    const inFlight = input.controllerRuns.some((run) => run.status === 'running' && run.work_id === recent.most_recent_work_id)
+      || input.claims.some((claim) => claim.work_id === recent.most_recent_work_id);
+    const match = inFlight ? byBackend(recent.most_recent_effective_backend) : null;
+    if (match) busy.add(match.id);
+  }
+  return busy;
 }
 
 /** Where the window will be at reset if use keeps its pace so far: used%

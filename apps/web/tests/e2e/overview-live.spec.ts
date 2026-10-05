@@ -11,6 +11,9 @@ const instance = (id: string, backend: string, extra: Record<string, unknown> = 
   isolated_state_configured: true, ...extra
 });
 
+// Routes that fetch from the fixture server must not outlive the test.
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); });
+
 test('rows derive their state from sessions, runs, claims, instance health and quota', () => {
   const now = Date.parse('2026-10-04T12:00:00Z');
   const candidate = (backend: string, extra: Record<string, unknown> = {}) => ({ backend, backend_instance: backend, model: 'm', modes: ['improve'], configured: true, eligible_now: true, usage: {} as never, ...extra });

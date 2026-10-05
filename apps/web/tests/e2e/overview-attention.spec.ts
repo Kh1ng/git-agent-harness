@@ -4,6 +4,9 @@ import { attentionRows } from '../../src/components/AttentionTable.js';
 // Overview's Needs attention is one table, ten rows a page, sortable by
 // kind, work id or summary; a blocked work item opens to its plan.
 
+// Routes that fetch from the fixture server must not outlive the test.
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); });
+
 test('attention rows unify profile blockers, blocked work, dependencies and review holds', () => {
   const rows = attentionRows({
     blockers: [{ kind: 'sync_failed', message: 'git fetch failed' }],
@@ -52,4 +55,11 @@ test('Needs attention pages ten rows at a time and sorts by column', async ({ pa
   await rows.first().click();
   await expect(table.getByText('Clear attempts on #110')).toBeVisible();
   await expect(table.getByRole('button', { name: 'Clear attempts & retry' })).toBeVisible();
+  // The work id opens its detail in the left sidebar, not a drawer over the page.
+  await rows.first().getByRole('button', { name: '#110' }).click();
+  const sidebar = page.getByRole('complementary', { name: 'Git issues' });
+  await expect(sidebar.getByRole('button', { name: 'Back to the list' })).toBeVisible();
+  await expect(sidebar).toContainText('#110');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(new URL(page.url()).searchParams.get('side')).toBe('issues');
 });
