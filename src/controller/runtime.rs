@@ -949,7 +949,7 @@ fn action_admitted_work(action: &NextAction, outcome: &str) -> bool {
         action,
         NextAction::WaitUntil { .. } | NextAction::HumanRequired { .. } | NextAction::NoOp { .. }
     ) && !outcome.starts_with("Skipped ")
-        && !(outcome.starts_with("Deferred ") && outcome.contains("no backend launched"))
+        && (!outcome.starts_with("Deferred ") || !outcome.contains("no backend launched"))
 }
 
 fn update_parallel_refill_budget(
