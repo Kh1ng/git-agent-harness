@@ -1,9 +1,10 @@
 use super::decision::decide_next_action;
 use super::human_required_reason::HumanRequiredReason;
 use super::recovery::{
-    defer_if_branch_attached, detect_stuck_loop, latest_clear_attempts_timestamp,
-    recently_capacity_deferred_work_ids, reconcile_abandoned_dispatches, record_action_events,
-    remediation_plan_for_action, retain_snapshot_candidates,
+    defer_if_branch_attached, detect_stuck_loop, human_required_already_reported,
+    latest_clear_attempts_timestamp, no_admission_diagnostics, recently_capacity_deferred_work_ids,
+    reconcile_abandoned_dispatches, record_action_events, remediation_plan_for_action,
+    retain_snapshot_candidates,
 };
 use super::NextAction;
 use anyhow::Result;
@@ -374,7 +375,16 @@ pub fn run_once(
             NextAction::HumanRequired { .. } => crate::events::EventType::HumanRequired,
             _ => crate::events::EventType::LoopStopped,
         };
-        if matches!(action, NextAction::HumanRequired { .. }) {
+        let admission_note = matches!(
+            action,
+            NextAction::WaitUntil { .. }
+                | NextAction::HumanRequired { .. }
+                | NextAction::NoOp { .. }
+        )
+        .then(|| no_admission_diagnostics(&snapshot, 0, 1, None));
+        if human_required_already_reported(&history, profile_name, &action) {
+            // Issue #1381: a blocked PR is reported once, not on every tick.
+        } else if matches!(action, NextAction::HumanRequired { .. }) {
             crate::events::record_with_reason_code_and_plan(
                 cfg,
                 stop_event_type,
@@ -402,6 +412,9 @@ pub fn run_once(
         } else {
             println!("Decided: {} -- {}", action.kind(), action.reason());
             println!("{outcome}");
+            if let Some(note) = admission_note {
+                println!("{note}");
+            }
         }
     }
     Ok(())
@@ -435,6 +448,8 @@ fn run_parallel_once(
     let effective_parallel_limit = max_parallel;
 
     let mut results: Vec<(usize, LoopOnceResult)> = Vec::new();
+    // Issue #1381: why the most recent fill attempt admitted nothing.
+    let mut no_admission_note: Option<String> = None;
 
     fn observe_snapshot(
         cfg: &crate::config::GahConfig,
@@ -582,6 +597,12 @@ fn run_parallel_once(
                     | NextAction::HumanRequired { .. }
                     | NextAction::NoOp { .. } => {
                         if !saw_real_work {
+                            no_admission_note = Some(no_admission_diagnostics(
+                                &fresh_snapshot,
+                                active,
+                                effective_parallel_limit,
+                                None,
+                            ));
                             pending_terminal =
                                 Some((original_action, action, original_review_generation));
                             if active == 0 {
@@ -617,6 +638,12 @@ fn run_parallel_once(
                                     eprintln!(
                                         "gah loop: deferring additional worker at {active}/{effective_parallel_limit}: {reason}"
                                     );
+                                    no_admission_note = Some(no_admission_diagnostics(
+                                        &fresh_snapshot,
+                                        active,
+                                        effective_parallel_limit,
+                                        Some(&reason),
+                                    ));
                                     if active > 0 {
                                         node_capacity_reprobe.schedule(action.clone());
                                     }
@@ -751,13 +778,16 @@ fn run_parallel_once(
                             NextAction::NoOp { .. } => crate::events::EventType::LoopStopped,
                             _ => unreachable!(),
                         };
-                        crate::events::record(
-                            cfg,
-                            stop_event_type,
-                            Some(profile_name),
-                            action.work_id(),
-                            outcome.clone(),
-                        )?;
+                        let history = crate::events::read_events(cfg)?;
+                        if !human_required_already_reported(&history, profile_name, &action) {
+                            crate::events::record(
+                                cfg,
+                                stop_event_type,
+                                Some(profile_name),
+                                action.work_id(),
+                                outcome.clone(),
+                            )?;
+                        }
 
                         results.push((next_sequence, LoopOnceResult { action, outcome }));
                     }
@@ -831,6 +861,17 @@ fn run_parallel_once(
         }
         if results.is_empty() {
             println!("No actions executed (parallel limit reached or no eligible work)");
+        }
+        let admitted_work = results.iter().any(|result| {
+            !matches!(
+                result.action,
+                NextAction::WaitUntil { .. }
+                    | NextAction::HumanRequired { .. }
+                    | NextAction::NoOp { .. }
+            )
+        });
+        if let Some(note) = no_admission_note.as_deref().filter(|_| !admitted_work) {
+            println!("{note}");
         }
     }
 
@@ -984,8 +1025,9 @@ mod capacity_tests;
 mod tests {
     use super::profile_lock::{acquire_profile_lock, loop_lock_path, reload_config_for_profile};
     use super::{
-        append_stuck_loop_gate_if_transition, is_validation_gate_failure, loop_parallel_argument,
-        wait_interruptibly,
+        append_stuck_loop_gate_if_transition, human_required_already_reported,
+        is_validation_gate_failure, loop_parallel_argument, no_admission_diagnostics,
+        wait_interruptibly, NextAction,
     };
 
     #[test]
@@ -1277,6 +1319,70 @@ default_target_branch = "main"
             export_health: Default::default(),
             skill_inventory: Vec::new(),
         }
+    }
+
+    fn capped_pr_blocker() -> crate::status::Blocker {
+        crate::status::Blocker {
+            kind: "human_required".into(),
+            reason: Some("fix_retry_cap_exceeded".into()),
+            message: Some("cap exceeded".into()),
+            backend: None,
+            model: None,
+            quota_pool: None,
+            until: None,
+            source_reference: Some("branch-A".into()),
+            reason_code: Some("fix_retry_cap_exceeded".into()),
+            remediation_plan: None,
+        }
+    }
+
+    #[test]
+    fn no_admission_diagnostics_names_blocked_items_capacity_and_empty_queue() {
+        let mut snapshot = empty_snapshot();
+        let quiet = no_admission_diagnostics(&snapshot, 0, 2, None);
+        assert!(quiet.contains("blocked items: none"), "{quiet}");
+        assert!(
+            quiet.contains("0/2 workers active, no node deferral"),
+            "{quiet}"
+        );
+        assert!(quiet.contains("queue: empty"), "{quiet}");
+
+        snapshot.blocked_work_items.push(capped_pr_blocker());
+        let deferred = no_admission_diagnostics(&snapshot, 1, 2, Some("node memory is critical"));
+        assert!(
+            deferred.contains("branch-A [fix_retry_cap_exceeded]"),
+            "{deferred}"
+        );
+        assert!(
+            deferred.contains("1/2 workers active, admission deferred (node memory is critical)"),
+            "{deferred}"
+        );
+    }
+
+    #[test]
+    fn blocked_pr_human_required_is_reported_once() {
+        let action = NextAction::HumanRequired {
+            work_id: Some("TICKET-A".into()),
+            reason: "fix cap exceeded".into(),
+            reference: Some("branch-A".into()),
+            reason_code: Some("fix_retry_cap_exceeded".into()),
+        };
+        let mut history = Vec::new();
+        assert!(!human_required_already_reported(&history, "real", &action));
+        history.push(crate::events::ControllerEvent {
+            timestamp: "2026-07-05T00:00:00Z".into(),
+            event_type: "human_required".into(),
+            profile: Some("real".into()),
+            work_id: Some("TICKET-A".into()),
+            run_id: None,
+            details: "Human required: fix cap exceeded (branch-A) [code=fix_retry_cap_exceeded]"
+                .into(),
+            reason_code: Some("fix_retry_cap_exceeded".into()),
+            review_contract_version: None,
+            remediation_plan: None,
+        });
+        assert!(human_required_already_reported(&history, "real", &action));
+        assert!(!human_required_already_reported(&history, "other", &action));
     }
 
     #[test]

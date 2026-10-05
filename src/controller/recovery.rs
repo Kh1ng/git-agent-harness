@@ -525,6 +525,87 @@ pub(super) fn defer_if_branch_attached(
     )
 }
 
+/// Issue #1381: explain why an iteration admitted no new work. Names every
+/// blocked work item with its reason code, reports node capacity (active
+/// workers against the limit, plus the live deferral reason when node
+/// pressure refused admission), and says so when the queue is empty, so a
+/// quiet iteration is never indistinguishable from a frozen loop.
+pub(super) fn no_admission_diagnostics(
+    snapshot: &crate::status::StatusSnapshot,
+    active_workers: usize,
+    worker_limit: usize,
+    node_deferral: Option<&str>,
+) -> String {
+    let mut parts = Vec::new();
+    if snapshot.blocked_work_items.is_empty() {
+        parts.push("blocked items: none".to_string());
+    } else {
+        let blocked = snapshot
+            .blocked_work_items
+            .iter()
+            .map(|blocker| {
+                format!(
+                    "{} [{}]",
+                    blocker.source_reference.as_deref().unwrap_or("unknown"),
+                    blocker
+                        .reason_code
+                        .as_deref()
+                        .or(blocker.reason.as_deref())
+                        .unwrap_or(blocker.kind.as_str())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!(
+            "blocked items ({}): {blocked}",
+            snapshot.blocked_work_items.len()
+        ));
+    }
+    parts.push(match node_deferral {
+        Some(reason) => format!(
+            "node capacity: {active_workers}/{worker_limit} workers active, admission deferred ({reason})"
+        ),
+        None => format!(
+            "node capacity: {active_workers}/{worker_limit} workers active, no node deferral"
+        ),
+    });
+    if snapshot.merge_requests.is_empty() && snapshot.available_tickets.is_empty() {
+        parts.push("queue: empty (no open MRs or eligible tickets)".to_string());
+    } else {
+        parts.push(format!(
+            "queue: {} open MR(s), {} ticket(s) considered",
+            snapshot.merge_requests.len(),
+            snapshot.available_tickets.len()
+        ));
+    }
+    format!("No work admitted -- {}", parts.join("; "))
+}
+
+/// Issue #1381: a human-required stop for the same work item and reason code
+/// as the newest human_required event for this profile has already been
+/// reported; repeating it every tick only floods the event stream.
+pub(super) fn human_required_already_reported(
+    history: &[crate::events::ControllerEvent],
+    profile_name: &str,
+    action: &NextAction,
+) -> bool {
+    if !matches!(action, NextAction::HumanRequired { .. }) {
+        return false;
+    }
+    history
+        .iter()
+        .rev()
+        .find(|event| {
+            event.event_type == "human_required"
+                && event.profile.as_deref() == Some(profile_name)
+                && event.work_id.as_deref() == action.work_id()
+        })
+        .is_some_and(|event| {
+            event.reason_code.as_deref() == action.human_required_reason_code()
+                && event.details.contains(action.reason())
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
