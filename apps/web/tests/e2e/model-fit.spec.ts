@@ -1,0 +1,74 @@
+import { expect, test } from '@playwright/test';
+import { openUsage } from './helpers/navigation.js';
+
+// Telemetry opens with "Model fit by role": per job kind, how each model
+// did, and a best-fit pick per role with a confidence from the sample size.
+
+const cell = (role: string, backend: string, model: string, attempts: number, delivered: number, extra: Record<string, unknown> = {}) => ({
+  role, backend, backend_instance: null, model, attempts, harness_errors: 0, delivered, delivered_rate: attempts ? delivered / attempts : null,
+  delivered_rate_low: attempts ? Math.max(0, delivered / attempts - 0.2) : null, validation_ran: 0, validation_passed: 0, validation_pass_rate: null,
+  reviewed: 0, approved_first_review: 0, first_review_acceptance: null, measured: attempts, total_tokens: attempts * 1_000_000, tokens_per_attempt: 1_000_000,
+  tokens_per_delivered: delivered ? (attempts * 1_000_000) / delivered : null, total_cost_usd: null, cost_per_delivered_usd: null, median_duration_seconds: 600,
+  api_equivalent_usd: null, api_equivalent_per_delivered_usd: null, priced: 0, priced_as: null,
+  review_verdicts: [], blocking_findings_per_review: null, verdicts_vindicated: 0, verdicts_overturned: 0,
+  confidence: attempts >= 40 ? 'high' : attempts >= 15 ? 'medium' : attempts >= 5 ? 'low' : 'none', ...extra
+});
+
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); });
+
+test('Telemetry leads with model fit by role and a best-fit pick with confidence', async ({ page }) => {
+  await page.route('**/api/report/roles**', (route) => route.fulfill({ json: { since: '7d', profile: 'fixture', entries: 60, skipped: 2, harness_errors: 20, cells: [
+    cell('fix', 'codex', 'gpt-6-sol', 20, 12, { api_equivalent_usd: 38.4, api_equivalent_per_delivered_usd: 3.2, priced: 20, priced_as: 'gpt-6-sol', harness_errors: 18, validation_ran: 10, validation_passed: 8, validation_pass_rate: 0.8, reviewed: 10, approved_first_review: 7, first_review_acceptance: 0.7 }),
+    cell('fix', 'agy', 'Gemini 3.1 Pro (High)', 2, 2),
+    cell('review', 'codex', 'gpt-6-sol', 8, 8, { review_verdicts: [['NEEDS_FIX', 6], ['APPROVE', 2]], blocking_findings_per_review: 1.5, verdicts_vindicated: 4, verdicts_overturned: 1 }),
+    cell('improve', 'claude', 'sonnet', 3, 1)
+  ], best_fit: [
+    { role: 'fix', ranking: [{ backend: 'codex', backend_instance: null, model: 'gpt-6-sol', score: 0.4, attempts: 20, confidence: 'medium' }, { backend: 'agy', backend_instance: null, model: 'Gemini 3.1 Pro (High)', score: 0.34, attempts: 2, confidence: 'none' }] },
+    { role: 'improve', ranking: [{ backend: 'claude', backend_instance: null, model: 'sonnet', score: 0.06, attempts: 3, confidence: 'none' }] },
+    { role: 'review', ranking: [{ backend: 'codex', backend_instance: null, model: 'gpt-6-sol', score: 0.68, attempts: 8, confidence: 'low' }] }
+  ], model_aliases: [] } }));
+  const book = (models: number) => ({ checked_at: new Date(Date.now() - 3_600_000).toISOString(),
+    sources: [{ provider: 'openai', url: 'https://o', checked_at: null, ok: true, method: 'table', rows: models, error: null }, { provider: 'anthropic', url: 'https://a', checked_at: null, ok: false, method: null, rows: 0, error: 'HTTP 503' }],
+    prices: Array.from({ length: models }, (_, index) => ({ provider: 'openai', model: `m${index}`, input: 2, output: 10, cached_input: 0.2, cache_write: null, source_url: 'https://o', changed_at: '' })),
+    history: [{ at: new Date(Date.now() - 86_400_000).toISOString(), provider: 'openai', model: 'gpt-6-sol', field: 'input', from: 2.5, to: 2 }] });
+  await page.route('**/api/model-prices', (route) => route.fulfill({ json: book(2) }));
+  await page.route('**/api/model-prices/refresh', (route) => route.fulfill({ json: book(3) }));
+  await page.goto('/');
+  await openUsage(page, 'Telemetry');
+  const card = page.getByRole('region', { name: /Model fit by role/ });
+  // It is the first card on the page.
+  const firstCard = page.getByRole('main').locator('section').first();
+  await expect(firstCard).toContainText('Model fit by role');
+  await expect(card).toContainText('60 ledger entries · 20 harness errors · 2 not attempts');
+
+  // Where the prices came from, when, and what changed; Check now re-reads the pages.
+  const priceLine = card.getByLabel('Model prices');
+  await expect(priceLine).toContainText('Prices: 2 models, checked');
+  await expect(priceLine).toContainText('openai');
+  await expect(priceLine).toContainText('anthropic failed');
+  await priceLine.getByText('1 price change recorded').click();
+  await expect(priceLine.getByRole('list', { name: 'Price changes' })).toContainText('gpt-6-sol input $2.5 → $2');
+  await priceLine.getByRole('button', { name: 'Check now' }).click();
+  await expect(priceLine).toContainText('Prices: 3 models');
+
+  const best = card.getByRole('list', { name: 'Best fit by role' }).getByRole('listitem');
+  await expect(best.filter({ hasText: 'Fix' })).toContainText('Codex Gpt-6-sol');
+  await expect(best.filter({ hasText: 'Fix' })).toContainText('at least 40% delivered · 20 attempts · medium confidence');
+  await expect(best.filter({ hasText: 'Implement' })).toContainText('Too few attempts to say');
+  await expect(best.filter({ hasText: 'Implement' })).toContainText('Claude Sonnet leads on 3; 5 attempts needed');
+
+  const fix = card.locator('tr[data-role="fix"][data-model="Codex Gpt-6-sol"]');
+  await expect(fix).toContainText('20+18 harness');
+  await expect(fix).toContainText('60% (12/20)');
+  await expect(fix).toContainText('80% (8/10)');
+  await expect(fix).toContainText('70% (7/10)');
+  // Dollars at the published API price, beside the tokens.
+  await expect(fix).toContainText('$3.20');
+  await expect(fix).toContainText('1.7M');
+  await expect(fix).toContainText('10 min');
+  await expect(fix).toContainText('medium confidence');
+  const review = card.locator('tr[data-role="review"]');
+  await expect(review).toContainText('needs fix 6 · approve 2');
+  await expect(review).toContainText('4 right · 1 overturned');
+  await expect(card.locator('tr[data-role="fix"][data-model="Antigravity Gemini 3.1 Pro (High)"]')).toContainText('too few to judge');
+});

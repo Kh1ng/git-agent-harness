@@ -36,7 +36,7 @@ pub(crate) enum AdmissionMessage {
 pub struct RouteNodeAdmission {
     sequence: usize,
     action: NextAction,
-    requests: Sender<AdmissionMessage>,
+    requests: Option<Sender<AdmissionMessage>>,
 }
 
 impl RouteNodeAdmission {
@@ -48,7 +48,17 @@ impl RouteNodeAdmission {
         Self {
             sequence,
             action,
-            requests,
+            requests: Some(requests),
+        }
+    }
+
+    /// Single-worker loops reserve node capacity after reserving their route,
+    /// without a supervisor channel or another controller thread.
+    pub(crate) fn single_worker(action: NextAction) -> Self {
+        Self {
+            sequence: 0,
+            action,
+            requests: None,
         }
     }
 
@@ -56,8 +66,24 @@ impl RouteNodeAdmission {
         if crate::runner::shutdown_requested() {
             bail!("shutdown requested before node admission");
         }
+        let Some(requests) = &self.requests else {
+            return match super::node_capacity::try_acquire(&self.action, 0) {
+                Ok(super::node_capacity::LiveAdmission::Admit(lease)) => Ok(WorkerNodeLease {
+                    _lease: lease,
+                    sequence: self.sequence,
+                    requests: None,
+                }),
+                Ok(super::node_capacity::LiveAdmission::Defer(reason)) => {
+                    Err(NodeAdmissionDeferred(reason).into())
+                }
+                Err(error) => Err(NodeAdmissionDeferred(format!(
+                    "node pressure could not be verified: {error}"
+                ))
+                .into()),
+            };
+        };
         let (response, responses) = channel();
-        self.requests
+        requests
             .send(AdmissionMessage::Request(RouteAdmissionRequest {
                 sequence: self.sequence,
                 action: self.action.clone(),
@@ -121,14 +147,14 @@ impl RouteNodeAdmission {
 pub(crate) struct WorkerNodeLease {
     _lease: super::node_capacity::NodeCapacityLease,
     sequence: usize,
-    requests: Sender<AdmissionMessage>,
+    requests: Option<Sender<AdmissionMessage>>,
 }
 
 impl Drop for WorkerNodeLease {
     fn drop(&mut self) {
-        let _ = self
-            .requests
-            .send(AdmissionMessage::Released(self.sequence));
+        if let Some(requests) = &self.requests {
+            let _ = requests.send(AdmissionMessage::Released(self.sequence));
+        }
     }
 }
 
