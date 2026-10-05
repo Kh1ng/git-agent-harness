@@ -63,9 +63,9 @@ export function AgentLimitsSection({ selectedName, selected, agents }: {
     setSaved(false);
     await updateProfile(selectedName, {
       ...(count(total) !== undefined ? { max_parallel_workers: count(total) } : {}),
-      // The command clears first, then sets, so the saved caps are exactly these.
-      clear: ['max_concurrent_per_model'],
-      max_concurrent: keys.filter((key) => count(limits[key] ?? '') !== undefined).map((key) => `${key}=${count(limits[key])}`),
+      // A blank agent sends 0, which removes its cap. Nothing is cleared wholesale, so a
+      // server that does not know this field yet leaves the saved caps alone.
+      max_concurrent: keys.filter((key) => count(limits[key] ?? '') !== undefined || key in caps).map((key) => `${key}=${count(limits[key] ?? '') ?? 0}`),
     });
     await fetchStatus(selectedName, { force: true });
     setSaved(true);

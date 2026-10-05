@@ -2126,7 +2126,10 @@ function mockModelCaps(current: Record<string, number> | undefined, caps: unknow
   const next = clear.includes('max_concurrent_per_model') ? {} : { ...current };
   for (const cap of Array.isArray(caps) ? caps : []) {
     const at = typeof cap === 'string' ? cap.lastIndexOf('=') : -1;
-    if (at > 0) next[(cap as string).slice(0, at)] = Number((cap as string).slice(at + 1));
+    if (at <= 0) continue;
+    const [model, count] = [(cap as string).slice(0, at), Number((cap as string).slice(at + 1))];
+    if (count > 0) next[model] = count;
+    else delete next[model];
   }
   return next;
 }

@@ -424,7 +424,11 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             }
             for cap in &max_concurrent {
                 let (model, count) = parse_model_cap(cap)?;
-                existing.max_concurrent_per_model.insert(model, count);
+                if count == 0 {
+                    existing.max_concurrent_per_model.remove(&model);
+                } else {
+                    existing.max_concurrent_per_model.insert(model, count);
+                }
             }
 
             let scaling = &mut existing.worker_scaling;
@@ -494,21 +498,16 @@ fn boost_expiry(hours: f64) -> Result<String> {
         .format(&time::format_description::well_known::Rfc3339)?)
 }
 
-/// `backend/model=count`. The model may itself contain `=` or spaces, so the
-/// count is whatever follows the last `=`.
+/// `backend/model=count`, where a count of 0 removes that model's cap. The
+/// model may itself contain `=` or spaces, so the count is whatever follows
+/// the last `=`.
 fn parse_model_cap(value: &str) -> Result<(String, u32)> {
     let parsed = value.rsplit_once('=').and_then(|(model, count)| {
-        let count = count
-            .trim()
-            .parse::<u32>()
-            .ok()
-            .filter(|count| *count >= 1)?;
+        let count = count.trim().parse::<u32>().ok()?;
         let model = model.trim();
         (model.contains('/') && !model.starts_with('/')).then(|| (model.to_string(), count))
     });
     parsed.ok_or_else(|| {
-        anyhow::anyhow!(
-            "invalid max_concurrent '{value}' (expected backend/model=count, count at least 1)"
-        )
+        anyhow::anyhow!("invalid max_concurrent '{value}' (expected backend/model=count)")
     })
 }

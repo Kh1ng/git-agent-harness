@@ -104,7 +104,12 @@ fn profile_cli_sets_scaling_and_a_boost_then_clears_the_boost() {
         serde_json::json!({ "codex/gpt-5": 1, "agy/Gemini 3.1 Pro (High)": 2 })
     );
     profile_set(&cfg_path, &["--max-concurrent", "codex=2"]).failure();
-    profile_set(&cfg_path, &["--max-concurrent", "codex/gpt-5=0"]).failure();
+    profile_set(&cfg_path, &["--max-concurrent", "codex/gpt-5=none"]).failure();
+    profile_set(&cfg_path, &["--max-concurrent", "codex/gpt-5=0"]).success();
+    assert_eq!(
+        profile(&cfg_path)["max_concurrent_per_model"],
+        serde_json::json!({ "agy/Gemini 3.1 Pro (High)": 2 })
+    );
     profile_set(&cfg_path, &["--clear", "max_concurrent_per_model"]).success();
     assert_eq!(
         profile(&cfg_path)["max_concurrent_per_model"],
