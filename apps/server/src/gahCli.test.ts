@@ -226,6 +226,13 @@ test('profile set emits validation timeout clear exactly once', () => {
   );
 });
 
+test('profile set passes the contract-change hold setting, including off', () => {
+  assert.deepEqual(
+    buildProfileSetArgs({ name: 'api-worker', hold_contract_changes: false }),
+    ['profile', 'set', 'api-worker', '--hold-contract-changes', 'false'],
+  );
+});
+
 test('loop lifecycle uses systemd enablement as the durable boot policy', () => {
   assert.deepEqual(loopSystemctlArgs(true, 'sportsball'), [
     '--user', 'enable', '--now', 'gah-loop@sportsball.service', '--no-pager'

@@ -1036,6 +1036,10 @@ pub enum ProfileCommands {
         /// Delivery mode for work results: pr | handoff.
         #[arg(long)]
         delivery_mode: Option<String>,
+        /// Hold approved schema/API contract changes for human review.
+        /// Exposed in the dashboard Settings UI.
+        #[arg(long)]
+        hold_contract_changes: Option<bool>,
         /// Clear the specified field(s) - for fields that support it
         #[arg(long, value_delimiter = ',')]
         clear: Vec<String>,
