@@ -23,7 +23,7 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { formatPercent, formatAge, formatLocalTime, isStale, formatTokens, formatCount, oldestFetchedAt } from '../lib/format.js';
 import { AttentionTable, attentionRows } from '../components/AttentionTable.js';
-import { LiveAgentsCard, agentDisplayName } from '../components/LiveAgentsCard.js';
+import { LiveAgentsCard, liveRowTitle } from '../components/LiveAgentsCard.js';
 import type { WatchableRun } from '../components/AgentLiveView.js';
 import { NonFactoryAgentsCard } from '../components/NonFactoryAgentsCard.js';
 
@@ -175,7 +175,7 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, onWa
       <LiveAgentsCard profile={profile ?? null} sessions={sessions} controllerRuns={controllerActivity}
         claims={snapshot?.active_claims ?? []} candidates={quotaSnapshot?.candidates ?? []} factoryAgents={deviceAgents.data?.factory_agents}
         onWatch={onWatchRun ? (row, watchable) => {
-          const asRun = (item: typeof row): WatchableRun => ({ runId: item.runId!, title: `${agentDisplayName(item.name)}${item.model ? ` ${item.model}` : ''} on ${item.job ?? 'a job'}`, subtitle: item.mode });
+          const asRun = (item: typeof row): WatchableRun => ({ runId: item.runId!, title: liveRowTitle(item), subtitle: item.mode });
           if (row.runId) onWatchRun(asRun(row), watchable.map(asRun));
         } : undefined} />
 

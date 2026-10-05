@@ -1036,6 +1036,10 @@ pub enum ProfileCommands {
         /// Delivery mode for work results: pr | handoff.
         #[arg(long)]
         delivery_mode: Option<String>,
+        /// Cap one model's concurrent runs: `backend/model=count`. Repeat for
+        /// several models; `--clear max_concurrent_per_model` removes every cap.
+        #[arg(long)]
+        max_concurrent: Vec<String>,
         /// Automatic worker scaling from quota headroom: on | off. See
         /// `WorkerScaling` for the rule the remaining flags tune.
         #[arg(long)]

@@ -2498,6 +2498,13 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
           "description": "Manager wake autonomy level.",
           "type": "string"
         },
+        "max_concurrent": {
+          "description": "Per-model concurrency caps, each backend/model=count.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "max_parallel_workers": {
           "description": "Maximum concurrent workers.",
           "type": "number"

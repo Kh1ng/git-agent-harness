@@ -14,6 +14,10 @@ fn profile_set(cfg_path: &Path, args: &[&str]) -> assert_cmd::assert::Assert {
 }
 
 fn worker_scaling(cfg_path: &Path) -> serde_json::Value {
+    profile(cfg_path)["worker_scaling"].clone()
+}
+
+fn profile(cfg_path: &Path) -> serde_json::Value {
     let output = bin()
         .args(["profile", "list", "--json", "--config"])
         .arg(cfg_path)
@@ -21,7 +25,7 @@ fn worker_scaling(cfg_path: &Path) -> serde_json::Value {
         .unwrap();
     assert!(output.status.success());
     let profiles: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    profiles[0]["worker_scaling"].clone()
+    profiles[0].clone()
 }
 
 #[test]
@@ -83,6 +87,29 @@ fn profile_cli_sets_scaling_and_a_boost_then_clears_the_boost() {
     for cleared in ["max_workers", "boost_workers", "boost_model", "boost_until"] {
         assert!(scaling.get(cleared).is_none(), "{cleared} was not cleared");
     }
+
+    profile_set(
+        &cfg_path,
+        &[
+            "--max-concurrent",
+            "codex/gpt-5=3",
+            "--max-concurrent",
+            "agy/Gemini 3.1 Pro (High)=2",
+        ],
+    )
+    .success();
+    profile_set(&cfg_path, &["--max-concurrent", "codex/gpt-5=1"]).success();
+    assert_eq!(
+        profile(&cfg_path)["max_concurrent_per_model"],
+        serde_json::json!({ "codex/gpt-5": 1, "agy/Gemini 3.1 Pro (High)": 2 })
+    );
+    profile_set(&cfg_path, &["--max-concurrent", "codex=2"]).failure();
+    profile_set(&cfg_path, &["--max-concurrent", "codex/gpt-5=0"]).failure();
+    profile_set(&cfg_path, &["--clear", "max_concurrent_per_model"]).success();
+    assert_eq!(
+        profile(&cfg_path)["max_concurrent_per_model"],
+        serde_json::json!({})
+    );
 
     profile_set(&cfg_path, &["--worker-scaling", "maybe"]).failure();
     profile_set(

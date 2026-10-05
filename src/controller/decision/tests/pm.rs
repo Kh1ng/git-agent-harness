@@ -78,6 +78,7 @@ fn active_claim_prevents_parallel_decomposition() {
             hostname: "host".into(),
             claimed_at: "2026-07-19T00:00:00Z".into(),
             age_seconds: 1,
+            route: None,
         });
     assert!(matches!(
         decide_next_action(&snapshot),

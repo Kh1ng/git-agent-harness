@@ -234,6 +234,8 @@ export interface ProfileUpdateData {
   validation_timeout_seconds?: number | null;
   max_parallel_workers?: number;
   manager_wake_autonomy?: WakeAutonomyValue;
+  /** Per-model concurrency caps, each `backend/model=count`. */
+  max_concurrent?: string[];
   /** Automatic worker scaling: 'on' | 'off'. */
   worker_scaling?: 'on' | 'off';
   worker_scaling_max_workers?: number;

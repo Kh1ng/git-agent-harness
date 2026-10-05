@@ -18,6 +18,7 @@ import { WorkDetailDrawer } from './components/WorkDetailDrawer.js';
 import { generateProviderInstanceId } from '@git-agent-harness/shared';
 import { useUiStore } from './store/uiStore.js';
 
+const AgentsPage = lazy(() => import('./pages/AgentsPage.js').then((module) => ({ default: module.AgentsPage })));
 const WorkPage = lazy(() => import('./pages/WorkPage.js').then((module) => ({ default: module.WorkPage })));
 const TelemetryPage = lazy(() => import('./pages/TelemetryPage.js').then((module) => ({ default: module.TelemetryPage })));
 const QuotaPage = lazy(() => import('./pages/QuotaPage.js').then((module) => ({ default: module.QuotaPage })));
@@ -153,6 +154,8 @@ export function App() {
         return <GitPage />;
       case 'planning':
         return <PlanningPage onNavigate={navigate} />;
+      case 'agentpool':
+        return <AgentsPage sessions={sessions} deviceAgents={deviceAgents} onNavigate={navigate} onWatchRun={watchRun} />;
       case 'overview':
       default:
         return (

@@ -2,10 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { Loader2, Save, Zap, X } from 'lucide-react';
 import { useGahStore } from '../store/gahStore.js';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
+import { agentLabel } from './AgentLimitsSection.js';
 
 interface WorkerScalingSectionProps {
   selectedName: string;
   selected: Pick<ProfileSummary, 'max_parallel_workers' | 'worker_scaling'>;
+  /** Every `backend/model` in the profile's routing; the boost offers them as a list. */
+  agents?: string[];
 }
 
 const INPUT_CLASS = 'w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary';
@@ -22,7 +25,7 @@ function wholeNumber(text: string, min: number): number | undefined {
  * subscription has quota headroom, and a manual boost. Both are saved to the
  * profile and picked up by the loop on its next iteration.
  */
-export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSectionProps) {
+export function WorkerScalingSection({ selectedName, selected, agents }: WorkerScalingSectionProps) {
   const updateProfile = useGahStore((s) => s.updateProfile);
   const saving = useGahStore((s) => s.profileCrud.updating);
   const saveError = useGahStore((s) => s.profileCrud.updateError);
@@ -57,7 +60,7 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
 
   if (!scaling) {
     return (
-      <section className="card-padded max-w-md">
+      <section className="card-padded">
         <h3 className="text-sm font-semibold text-primary mb-1">Worker scaling</h3>
         <p className="text-xs text-muted">This node's <code>gah</code> does not support worker scaling yet. Update it to use these settings.</p>
       </section>
@@ -105,7 +108,7 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
   const boostActive = (scaling.boost_workers ?? 0) > 0;
 
   return (
-    <section className="card-padded max-w-md">
+    <section className="card-padded">
       <h3 className="text-sm font-semibold text-primary mb-1">Worker scaling</h3>
       <p className="text-xs text-muted mb-3">
         Workers beyond the baseline of <span className="font-mono text-secondary">{baseline}</span> for{' '}
@@ -162,7 +165,7 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
       {boostActive ? (
         <div className="flex items-center justify-between gap-2 rounded-md border border-subtle bg-raised px-3 py-2">
           <p className="text-sm text-primary">
-            +{scaling.boost_workers} for {scaling.boost_model ?? 'every capped agent'}
+            +{scaling.boost_workers} for {scaling.boost_model ? agentLabel(scaling.boost_model) : 'every capped agent'}
             <span className="block text-xs text-muted">
               {scaling.boost_until ? `Until ${new Date(scaling.boost_until).toLocaleString()}` : 'Until you end it'}
             </span>
@@ -186,11 +189,15 @@ export function WorkerScalingSection({ selectedName, selected }: WorkerScalingSe
           </div>
           <div className="mt-3">
             <label htmlFor="worker-boost-model" className="block text-xs font-medium text-secondary mb-1">Agent</label>
-            <input id="worker-boost-model" type="text" value={boostModel} onChange={(e) => setBoostModel(e.target.value)} placeholder="Every capped agent" className={INPUT_CLASS} />
-            <p className="text-xs text-muted mt-1">
-              Written as <code>backend/model</code>, for example <code>codex/gpt-5</code>. A boost is not
-              limited by the scaled maximum above.
-            </p>
+            {agents?.length ? (
+              <select id="worker-boost-model" value={boostModel} onChange={(e) => setBoostModel(e.target.value)} className={INPUT_CLASS}>
+                <option value="">Every capped agent</option>
+                {agents.map((agent) => <option key={agent} value={agent}>{agentLabel(agent)}</option>)}
+              </select>
+            ) : (
+              <input id="worker-boost-model" type="text" value={boostModel} onChange={(e) => setBoostModel(e.target.value)} placeholder="Every capped agent" className={INPUT_CLASS} />
+            )}
+            <p className="text-xs text-muted mt-1">A boost is not limited by the scaled maximum above.</p>
           </div>
           {boostError && <p role="alert" className="mt-3 text-xs text-critical">{boostError}</p>}
           <button onClick={startBoost} disabled={saving || boostError != null} className={`mt-3 bg-accent text-white hover:bg-accent/90 ${BUTTON_CLASS}`}>

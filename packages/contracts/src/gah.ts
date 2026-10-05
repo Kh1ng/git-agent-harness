@@ -368,6 +368,9 @@ export interface ActiveClaim {
   hostname: string;
   claimed_at: string;
   age_seconds: number;
+  /** The agent running the job, once routing has picked one. A running
+   * attempt has no ledger entry yet, so this is what names its agent. */
+  route?: { backend: string; backend_instance: string; model?: string };
 }
 
 export interface PmParentStatus {
@@ -803,6 +806,9 @@ export interface ProfileSummary {
   max_parallel_workers: number | null;
   /** Effective maximum open managed PRs/MRs for the profile. */
   max_open_managed_mrs: number;
+  /** Concurrent-run caps keyed by `backend/model`; a model without an
+   * entry is unlimited. Absent on CLIs that do not report them. */
+  max_concurrent_per_model?: Record<string, number>;
   /** Absent on CLIs without worker scaling. */
   worker_scaling?: WorkerScalingSettings;
   /** Manager-wake autonomy for this profile (null = unset -> off). */

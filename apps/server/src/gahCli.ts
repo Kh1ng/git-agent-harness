@@ -962,6 +962,8 @@ export interface ProfileSetOptions {
   manager_wake_autonomy?: string | null;
   /** Validation command timeout in seconds. */
   validation_timeout_seconds?: number | null;
+  /** Per-model concurrency caps, each `backend/model=count`. */
+  max_concurrent?: string[];
   /** Automatic worker scaling: 'on' | 'off'. */
   worker_scaling?: string | null;
   worker_scaling_max_workers?: number | null;
@@ -1071,6 +1073,7 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   } else if (options.clear?.includes('manager_wake_autonomy')) {
     args.push('--clear', 'manager_wake_autonomy');
   }
+  for (const cap of options.max_concurrent ?? []) args.push('--max-concurrent', cap);
   const scalingFlags = [
     ['--worker-scaling', options.worker_scaling],
     ['--worker-scaling-max-workers', options.worker_scaling_max_workers],

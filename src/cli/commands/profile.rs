@@ -202,6 +202,7 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             validation_timeout_seconds,
             manager_wake_autonomy,
             delivery_mode,
+            max_concurrent,
             worker_scaling,
             worker_scaling_max_workers,
             worker_scaling_extra_per_model,
@@ -418,6 +419,14 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 existing.delivery_mode = config::DeliveryMode::default();
             }
 
+            if should_clear("max_concurrent_per_model", &clear) {
+                existing.max_concurrent_per_model.clear();
+            }
+            for cap in &max_concurrent {
+                let (model, count) = parse_model_cap(cap)?;
+                existing.max_concurrent_per_model.insert(model, count);
+            }
+
             let scaling = &mut existing.worker_scaling;
             if let Some(v) = &worker_scaling {
                 scaling.enabled = parse_on_off("worker_scaling", v)?;
@@ -483,4 +492,23 @@ fn boost_expiry(hours: f64) -> Result<String> {
     Ok(until
         .replace_nanosecond(0)?
         .format(&time::format_description::well_known::Rfc3339)?)
+}
+
+/// `backend/model=count`. The model may itself contain `=` or spaces, so the
+/// count is whatever follows the last `=`.
+fn parse_model_cap(value: &str) -> Result<(String, u32)> {
+    let parsed = value.rsplit_once('=').and_then(|(model, count)| {
+        let count = count
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|count| *count >= 1)?;
+        let model = model.trim();
+        (model.contains('/') && !model.starts_with('/')).then(|| (model.to_string(), count))
+    });
+    parsed.ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid max_concurrent '{value}' (expected backend/model=count, count at least 1)"
+        )
+    })
 }

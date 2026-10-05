@@ -1397,6 +1397,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       delivery_mode: 'pr',
       validation_timeout_seconds: typeof req.body.validation_timeout_seconds === 'number' ? req.body.validation_timeout_seconds : 300,
       worker_scaling: mockWorkerScaling(undefined, {}, []),
+      max_concurrent_per_model: {},
       chat_session_idle_days: 14
     } satisfies ProfileSummary);
     res.status(201).json({ success: true, message: `Profile '${name}' added` });
@@ -1416,6 +1417,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       ...(typeof req.body?.max_parallel_workers === 'number' ? { max_parallel_workers: req.body.max_parallel_workers } : {}),
       ...(typeof req.body?.manager_wake_autonomy === 'string' ? { manager_wake_autonomy: req.body.manager_wake_autonomy } : {}),
       worker_scaling: mockWorkerScaling(current.worker_scaling, req.body ?? {}, clear),
+      max_concurrent_per_model: mockModelCaps(current.max_concurrent_per_model, req.body?.max_concurrent, clear),
       ...(typeof req.body?.validation_timeout_seconds === 'number'
         ? { validation_timeout_seconds: req.body.validation_timeout_seconds }
         : clear.includes('validation_timeout_seconds') ? { validation_timeout_seconds: 300 } : {})
@@ -2115,6 +2117,16 @@ function mockWorkerScaling(
     next.boost_workers = body.boost_workers;
     if (typeof body.boost_model === 'string') next.boost_model = body.boost_model;
     if (typeof body.boost_hours === 'number') next.boost_until = new Date(Date.now() + body.boost_hours * 3_600_000).toISOString();
+  }
+  return next;
+}
+
+/** Mirrors `gah profile set --max-concurrent backend/model=count`. */
+function mockModelCaps(current: Record<string, number> | undefined, caps: unknown, clear: string[]): Record<string, number> {
+  const next = clear.includes('max_concurrent_per_model') ? {} : { ...current };
+  for (const cap of Array.isArray(caps) ? caps : []) {
+    const at = typeof cap === 'string' ? cap.lastIndexOf('=') : -1;
+    if (at > 0) next[(cap as string).slice(0, at)] = Number((cap as string).slice(at + 1));
   }
   return next;
 }
