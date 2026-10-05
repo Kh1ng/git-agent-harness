@@ -720,8 +720,9 @@ fn capped_pr_harness(limit: u32) -> ScenarioHarness {
         .worker_scenario("failure")
         .with_ledger(ledger);
     let config = format!(
-        "max_open_managed_mrs = {limit}\nvalidation_commands = [\"true\"]\ncodex_path = \"{}\"\n[profiles.test.routing]\nimprove_backend = \"codex\"\n",
-        harness.bin_dir.join("codex").display()
+        "max_open_managed_mrs = {limit}\nvalidation_commands = [\"true\"]\ncodex_path = \"{}\"\nnotify_command = \"cat >> '{}'\"\n[profiles.test.routing]\nimprove_backend = \"codex\"\n",
+        harness.bin_dir.join("codex").display(),
+        harness.artifacts_dir.join("notifications.txt").display()
     );
     harness = harness.with_config_append(&config);
     harness.install_custom_gh(&gh);
@@ -835,6 +836,35 @@ fn capped_pr_dispatches_another_ticket_in_same_runtime_iteration() {
         })
         .unwrap();
     assert_eq!(report["remediation_plan"], expected_plan);
+
+    // Rebuild the real loop snapshot on later ticks after the independent
+    // ticket was admitted. The persistent capped PR must stay reported once,
+    // even as the other ticket's ledger and admission state change.
+    for tick in 1..3 {
+        let result = harness.run_one_loop().unwrap();
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| event["event_type"] == "human_required"
+                    && event["work_id"] == "TICKET-001"
+                    && event["reason_code"] == "fix_retry_cap_exceeded")
+                .count(),
+            1,
+            "tick {tick}: {result:?}"
+        );
+        let notifications =
+            std::fs::read_to_string(harness.artifacts_dir.join("notifications.txt")).unwrap();
+        assert_eq!(
+            notifications
+                .lines()
+                .filter(|line| line.contains("fix_retry_cap_exceeded")
+                    && line.contains("gah/fix-a"))
+                .count(),
+            1,
+            "tick {tick}: {notifications}"
+        );
+    }
 }
 
 #[test]
