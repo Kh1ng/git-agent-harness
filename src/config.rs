@@ -6,8 +6,10 @@ use std::{collections::HashMap, path::PathBuf};
 
 mod backend_instances;
 mod merge_policy;
+mod node_capacity;
 pub use backend_instances::*;
 pub use merge_policy::MergePolicy;
+pub use node_capacity::NodeCapacitySettings;
 mod backend_paths;
 mod issue_intake;
 pub use issue_intake::IssueIntakeMode;
@@ -70,98 +72,6 @@ pub struct Defaults {
     /// Telegram chat to deliver to when the channel is `telegram`.
     #[serde(default)]
     pub telegram_chat_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
-#[serde(default)]
-pub struct NodeCapacitySettings {
-    pub worker_memory_mib: u64,
-    /// Zero retains the adaptive floor of max(2048 MiB, total memory / 6).
-    pub memory_floor_mib: u64,
-}
-
-impl Default for NodeCapacitySettings {
-    fn default() -> Self {
-        Self {
-            worker_memory_mib: 4096,
-            memory_floor_mib: 0,
-        }
-    }
-}
-
-impl NodeCapacitySettings {
-    pub fn floor_description(self) -> String {
-        if self.memory_floor_mib == 0 {
-            "max(2048 MiB, total / 6)".into()
-        } else {
-            format!("{} MiB", self.memory_floor_mib)
-        }
-    }
-
-    pub fn validate(self) -> Result<()> {
-        anyhow::ensure!(
-            self.worker_memory_mib >= 512,
-            "node_capacity.worker_memory_mib must be at least 512"
-        );
-        anyhow::ensure!(
-            self.memory_floor_mib == 0 || self.memory_floor_mib >= 512,
-            "node_capacity.memory_floor_mib must be zero or at least 512"
-        );
-        anyhow::ensure!(
-            self.worker_memory_mib <= u64::MAX / (1024 * 1024)
-                && self.memory_floor_mib <= u64::MAX / (1024 * 1024),
-            "node_capacity memory value is too large"
-        );
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod node_capacity_settings_tests {
-    use super::*;
-
-    #[test]
-    fn defaults_and_validation() {
-        let defaults = NodeCapacitySettings::default();
-        assert_eq!(defaults.worker_memory_mib, 4096);
-        assert_eq!(defaults.memory_floor_mib, 0);
-        assert!(defaults.validate().is_ok());
-        for settings in [
-            NodeCapacitySettings {
-                worker_memory_mib: 511,
-                ..defaults
-            },
-            NodeCapacitySettings {
-                memory_floor_mib: 511,
-                ..defaults
-            },
-        ] {
-            assert!(settings.validate().is_err());
-        }
-    }
-
-    #[test]
-    fn toml_round_trip() {
-        let settings: NodeCapacitySettings =
-            toml::from_str("worker_memory_mib = 1536\nmemory_floor_mib = 768").unwrap();
-        settings.validate().unwrap();
-        let encoded = toml::to_string(&settings).unwrap();
-        let restored: NodeCapacitySettings = toml::from_str(&encoded).unwrap();
-        assert_eq!(restored.worker_memory_mib, 1536);
-        assert_eq!(restored.memory_floor_mib, 768);
-    }
-
-    #[test]
-    fn load_rejects_below_minimum_values() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        for body in [
-            "[defaults.node_capacity]\nworker_memory_mib = 511\n",
-            "[defaults.node_capacity]\nmemory_floor_mib = 511\n",
-        ] {
-            std::fs::write(file.path(), body).unwrap();
-            assert!(load(file.path().to_str()).is_err());
-        }
-    }
 }
 
 impl Defaults {
@@ -458,27 +368,6 @@ fn normalize_repo_path(repo: &str) -> String {
         repo.to_string()
     } else {
         format!("{}.git", repo)
-    }
-}
-
-/// Canonicalizes `--backend` aliases that execute the same backend but were
-/// being recorded under their literal alias string, producing duplicate
-/// cards for one backend on the quota page (e.g. "openhands" and
-/// "cloud-coder" both run OpenHands via `runner::backend_command_name`, but
-/// only "openhands" was ever normalized there -- the raw CLI string was
-/// still what got written to `requested_backend`/`effective_backend` and
-/// from there into the ledger). Applied both where new dispatches are
-/// routed (dispatch.rs) and when grouping the ledger for the quota page
-/// (ledger/mod.rs), so it also merges pre-existing historical entries recorded
-/// under the old alias rather than only preventing new duplicates.
-/// Deliberately does NOT touch "auto": that backend's *effective* backend
-/// is resolved dynamically per-attempt by `routing::decide`, not a fixed
-/// alias, so it must pass through unchanged.
-pub fn canonical_backend_name(name: &str) -> &str {
-    if name == "cloud-coder" {
-        "openhands"
-    } else {
-        name
     }
 }
 
