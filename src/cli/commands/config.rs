@@ -40,6 +40,7 @@ pub fn run(command: ConfigCommands) -> Result<()> {
         ConfigCommands::Set {
             config_path,
             current_manager,
+            factory_enabled,
             node_role,
             registry_central_url,
             clear,
@@ -87,7 +88,15 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                 }
             }
             crate::node_role::NodeRoleStatus::with_override(&cfg.defaults, None)?;
+            if let Some(enabled) = factory_enabled {
+                cfg.defaults.factory_enabled = Some(enabled);
+            }
             config::save(&cfg, config_path.as_deref())?;
+            if let Some(enabled) = factory_enabled {
+                // Persist the guard first so concurrent/restarting loops cannot dispatch
+                // while service control is stopping the previously enumerated instances.
+                crate::factory::apply_services(enabled)?;
+            }
             println!("Updated global config");
         }
         ConfigCommands::RoutingCandidate { command } => {

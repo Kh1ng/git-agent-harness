@@ -568,6 +568,9 @@ pub enum ConfigCommands {
         /// across all profiles/projects (the manager-wake "who's on call").
         #[arg(long)]
         current_manager: Option<String>,
+        /// Enable factory automation; disabling stops factory loops and watchdog services.
+        #[arg(long, action = clap::ArgAction::Set)]
+        factory_enabled: Option<bool>,
         /// Persist this host's role. Restart an existing execution/control service to apply it.
         #[arg(long, value_enum)]
         node_role: Option<crate::node_role::NodeRole>,

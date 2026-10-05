@@ -25,5 +25,11 @@ if [ "$role" = worker ]; then
   fi
 fi
 args=(config set --node-role "$role")
+# Existing configs retain legacy factory behavior. Fresh standalone apps opt out.
+factory="${GAH_FACTORY_ENABLED:-}"
+if [ -z "$factory" ] && [ "$role" = standalone ] && [ ! -f "${GAH_CONFIG:-$HOME/.config/gah/config.toml}" ]; then
+  factory=false
+fi
+if [ -n "$factory" ]; then args+=(--factory-enabled "$factory"); fi
 if [ -n "${GAH_CENTRAL_URL:-}" ]; then args+=(--registry-central-url "$GAH_CENTRAL_URL"); fi
 "$@" "${args[@]}"

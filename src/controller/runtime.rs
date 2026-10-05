@@ -125,6 +125,11 @@ pub fn run_loop(
             }
         };
 
+        if cfg.defaults.factory_enabled == Some(false) {
+            eprintln!("gah loop: factory module disabled; stopping before another iteration");
+            return shutdown_gracefully();
+        }
+
         // The explicit `--parallel` flag (parallel_arg > 0) wins; otherwise
         // derive the worker pool size from the freshly-reloaded profile.
         let parallel = if parallel_arg == 0 {

@@ -660,6 +660,10 @@ pub fn markdown_table() -> String {
 /// The machine-readable check the desktop installers read (`gah setup --check --json`).
 #[derive(Debug, Serialize)]
 pub struct Report {
+    /// Local application prerequisites are independent of factory module activation.
+    pub application_ready: bool,
+    pub factory_enabled: bool,
+    pub factory_ready: bool,
     pub os: Os,
     pub package_manager: Option<PackageManager>,
     pub selection: Selection,
@@ -672,6 +676,9 @@ pub struct Report {
 pub fn report(selection: Selection, host: &dyn Host) -> Report {
     let requirements = requirements(&selection, host);
     Report {
+        application_ready: !requirements.iter().any(Requirement::blocking),
+        factory_enabled: false,
+        factory_ready: false,
         os: host.os(),
         package_manager: host.package_manager(),
         features: selection.features(),

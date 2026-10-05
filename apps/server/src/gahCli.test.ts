@@ -267,6 +267,7 @@ printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
  * regression this branch exists to fix. The fake systemctl reports prior
  * enablement via FAKE_IS_ENABLED and always fails the enable --now activation. */
 async function assertStartRollbackBehavior(wasEnabled: string, expectDisableInLog: boolean) {
+  const restoreGah = pinFakeGah(`echo '{"factory_enabled":true}'`);
   const dir = mkdtempSync(join(tmpdir(), 'gah-start-loop-'));
   const log = join(dir, 'systemctl.log');
   const originalPath = process.env.PATH;
@@ -312,6 +313,7 @@ esac
     else process.env.PATH = originalPath;
     delete process.env.SYSTEMCTL_LOG;
     delete process.env.FAKE_IS_ENABLED;
+    restoreGah();
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -554,6 +556,28 @@ test('cancel() is idempotent: concurrent callers settle on one shared result', a
   } finally {
     if (original === undefined) delete process.env.GAH_BINARY;
     else process.env.GAH_BINARY = original;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('factory module disabled rejects loop starts before touching systemd', async () => {
+  const restore = pinFakeGah(`echo '{"factory_enabled":false}'`);
+  const dir = mkdtempSync(join(tmpdir(), 'gah-disabled-factory-'));
+  const marker = join(dir, 'systemctl-called');
+  const originalPath = process.env.PATH;
+  writeFileSync(join(dir, 'systemctl'), `#!/bin/sh\ntouch '${marker}'\n`);
+  chmodSync(join(dir, 'systemctl'), 0o755);
+  process.env.PATH = `${dir}:${originalPath ?? ''}`;
+  try {
+    assert.deepEqual(await startLoop('fixture'), {
+      started: false,
+      error: 'Factory automation is disabled. Enable it in this computer’s Settings.',
+    });
+    assert.equal(existsSync(marker), false, 'disabled module must not enable or probe a loop unit');
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    restore();
     rmSync(dir, { recursive: true, force: true });
   }
 });

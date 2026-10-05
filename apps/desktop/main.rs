@@ -906,6 +906,7 @@ fn main() {
             repository_tools::repository_tools,
             setup_check::setup_check,
             setup_check::open_setup_terminal,
+            setup_check::set_factory_enabled,
             mistral_login::mistral_login_start,
             mistral_login::mistral_login_finish,
             credentials::credential_list,

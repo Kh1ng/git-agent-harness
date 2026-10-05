@@ -242,6 +242,7 @@ pub struct ConfigShowSummary {
 
 #[derive(serde::Serialize)]
 pub struct ConfigShowFull {
+    pub factory_enabled: bool,
     pub node: crate::node_role::NodeRoleStatus,
     pub schema_version: u32,
     pub config_path: String,
@@ -488,6 +489,7 @@ pub fn config_show_full(
     }
 
     Ok(ConfigShowFull {
+        factory_enabled: cfg.defaults.factory_enabled.unwrap_or(true),
         node: crate::node_role::NodeRoleStatus::resolve(&cfg.defaults)?,
         schema_version: CONFIG_SHOW_SCHEMA_VERSION,
         config_path: config_path.to_string_lossy().into_owned(),

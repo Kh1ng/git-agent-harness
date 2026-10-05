@@ -16,6 +16,8 @@ try {
   await page.addInitScript(() => {
     window.calls = [];
     window.repositoryInstalled = false;
+    window.factoryEnabled = false;
+    window.setupInstalled = false;
     window.__TAURI_INTERNALS__ = { invoke: async (command, args) => {
       window.calls.push([command, args]);
       if (command === 'repository_tools') return [{ program: 'gh', installed: window.repositoryInstalled }, { program: 'glab', installed: false }];
@@ -23,6 +25,10 @@ try {
         central_url: 'http://central.test', wsl_distribution: '',
         presence: { dock: false, tray: true, launch_window: true },
       };
+      if (command === 'open_setup_terminal') { window.setupInstalled = true; window.factoryEnabled = args.factoryEnabled; return 'http://127.0.0.1:3773'; }
+      if (command === 'setup_check' && !window.setupInstalled) return { installed: false, report: null, terminal: true };
+      if (command === 'setup_check') return { installed: true, report: { ready: true, application_ready: true, factory_enabled: window.factoryEnabled, factory_ready: window.factoryEnabled, requirements: [] }, terminal: true };
+      if (command === 'set_factory_enabled') { window.factoryEnabled = args.enabled; return; }
       if (command === 'node_role_status') return { role: 'worker', running: false, supported: true };
       if (command === 'set_node_role') return { role: args.role, running: true, supported: true };
       if (command === 'save_presence') return args.presence;
@@ -43,6 +49,18 @@ try {
   await page.getByLabel('Repository host').selectOption('glab');
   await page.getByText('GitLab CLI (glab) is required', { exact: false }).waitFor();
   assert.equal(await page.getByRole('link', { name: 'Install GitLab CLI' }).getAttribute('href'), 'https://gitlab.com/gitlab-org/cli#installation');
+  assert.equal(await page.getByLabel('Enable factory automation').isChecked(), false);
+  await page.getByRole('button', { name: 'Set up standalone' }).click();
+  assert.deepEqual(await page.evaluate(() => window.calls.at(-1)), ['open_setup_terminal', { standalone: true, factoryEnabled: false }]);
+  await page.getByRole('button', { name: 'Check again', exact: true }).click();
+  await page.getByText('Factory module disabled · local application remains available.').waitFor();
+  assert.equal(await page.getByLabel('Enable factory automation').isChecked(), false);
+  for (const enabled of [true, false, true, false]) {
+    await page.getByLabel('Enable factory automation').setChecked(enabled);
+    await page.getByRole('button', { name: 'Save factory module' }).click();
+    await page.getByText(enabled ? 'Factory module enabled · prerequisites ready.' : 'Factory module disabled · local application remains available.', { exact: false }).waitFor();
+    assert.equal(await page.evaluate(() => window.factoryEnabled), enabled);
+  }
   await page.getByRole('button', { name: 'Back to Settings' }).click();
   assert.equal(await page.evaluate(() => window.calls.at(-1)[0]), 'open_central_settings');
   await page.getByLabel('Central node address').fill('http://another-central.test');

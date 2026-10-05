@@ -93,6 +93,12 @@ central service uses port 3774 by default so it can coexist with T3 Code on
 Each macOS update also replaces `~/Applications/GAH.app` after a successful
 native build. A failed replacement restores the previous app.
 
+Factory automation is optional in desktop onboarding and **Settings → This
+computer**. Fresh standalone installs default to off; upgrades preserve existing
+configuration. Disabling factory loops and their watchdog leaves the dashboard,
+chats, agents, repository workflows, and shared maintenance available. See
+[factory module defaults, migration, and verification](docs/verification/1317-factory-module.md).
+
 For a roaming worker using `GAH_GATEWAY_MODE=remote`, the gateway URL must
 name the central/gateway node by its tailnet IP or MagicDNS name, never a LAN
 IP or the worker's own `tailscale ip -4`. If `GAH_GATEWAY_URL` is omitted, the

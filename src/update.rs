@@ -187,6 +187,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         println!("Installed macOS LaunchAgent: {}", agent.display());
     }
 
+    let factory_enabled = crate::factory::enabled(None)?;
     match install_loop_unit_template(&repo)? {
         Some(loop_unit) => println!("Installed loop unit: {}", loop_unit.display()),
         None if cfg!(target_os = "macos") => {
@@ -211,6 +212,10 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             );
         }
         None => println!("systemd not available on this host: skipping watchdog unit install."),
+    }
+    if !factory_enabled {
+        crate::factory::apply_services(false)?;
+        println!("Factory automation disabled: loop and watchdog services remain inactive.");
     }
     match install_quota_refresh_unit_template(&repo)? {
         Some(quota_refresh_units) => {

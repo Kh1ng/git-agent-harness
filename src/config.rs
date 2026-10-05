@@ -36,18 +36,18 @@ pub struct GahConfig {
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct Defaults {
+    /// None retains factory behavior for configurations predating module selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub factory_enabled: Option<bool>,
     pub artifact_root: String,
     pub worktree_base: String,
     pub llm_base_url: String,
     pub llm_model_local: String,
     pub llm_model_cloud: String,
     pub routing: RoutingPolicy,
-    /// Which agent CLI ("claude" | "codex" | "hermes") is currently acting
-    /// as the operator's manager across all profiles/projects. Read by the
-    /// manager-wake feature (`Profile::manager_wake_autonomy`) to decide
-    /// who to invoke when a notify-worthy event fires. Global, not per-profile:
-    /// "who's on call" is a cross-project fact. `None`/unrecognized means no wake
-    /// even if a profile has autonomy enabled.
+    /// Global manager CLI ("claude" | "codex" | "hermes") across all projects.
+    /// `Profile::manager_wake_autonomy` uses it for notify-worthy events;
+    /// `None`/unrecognized means no wake, even when profile autonomy is enabled.
     pub current_manager: Option<String>,
     /// See `crate::network_exposure` module docs (issue #879).
     pub network_exposure: crate::network_exposure::NetworkExposureLevel,
