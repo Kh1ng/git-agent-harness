@@ -315,6 +315,16 @@ impl ScenarioHarness {
             .output();
     }
 
+    fn gah_command(&self) -> Command {
+        let mut command = Command::new(&self.gah_bin);
+        fs::create_dir_all(self._temp.path().join("home")).unwrap();
+        command.env("HOME", self._temp.path().join("home")).env(
+            "GAH_CANONICAL_CONFIG",
+            self._temp.path().join("canonical.toml"),
+        );
+        command
+    }
+
     fn setup_env(&mut self) {
         // Reject partial fixtures that would silently disappear in
         // production deserialization before any side-effects (config
@@ -356,7 +366,8 @@ impl ScenarioHarness {
         // Ensure fake gh/glab scripts are in the bin_dir
         self.install_fakes();
 
-        let out = Command::new(&self.gah_bin)
+        let out = self
+            .gah_command()
             .args([
                 "loop",
                 "--once",
@@ -439,7 +450,8 @@ impl ScenarioHarness {
     pub fn run_status_json(&mut self) -> Result<serde_json::Value, String> {
         self.setup_env();
         self.install_fakes();
-        let out = Command::new(&self.gah_bin)
+        let out = self
+            .gah_command()
             .args(["status", "--profile", &self.profile_name, "--json"])
             .env(
                 "XDG_STATE_HOME",
@@ -488,7 +500,8 @@ impl ScenarioHarness {
             ),
         )
         .map_err(|e| format!("write quota fixture store: {e}"))?;
-        let out = Command::new(&self.gah_bin)
+        let out = self
+            .gah_command()
             .args([
                 "quota",
                 "list",
@@ -537,7 +550,7 @@ impl ScenarioHarness {
             .temp_dir_override
             .clone()
             .unwrap_or_else(std::env::temp_dir);
-        let mut cmd = Command::new(&self.gah_bin);
+        let mut cmd = self.gah_command();
         cmd.args(["dispatch", "--profile", &self.profile_name]);
         cmd.args(args);
         let out = cmd
@@ -580,7 +593,7 @@ impl ScenarioHarness {
     ) -> Result<serde_json::Value, String> {
         self.setup_env();
         self.install_fakes();
-        let mut cmd = Command::new(&self.gah_bin);
+        let mut cmd = self.gah_command();
         cmd.args(["ledger", "reconcile", "--profile", profile_name, "--json"]);
         if dry_run {
             cmd.arg("--dry-run");
@@ -622,10 +635,27 @@ impl ScenarioHarness {
         text.lines().filter(|l| !l.trim().is_empty()).count()
     }
 
+    /// Path of the durable quota store under this harness's isolated
+    /// `XDG_STATE_HOME`, matching `quota_store::store_path()`'s default.
+    /// Tests write JSONL rows here to exercise store-backed surfaces.
+    pub fn quota_store_path(&self) -> std::path::PathBuf {
+        let path = self
+            ._temp
+            .path()
+            .join("xdg-state")
+            .join("gah")
+            .join("quota_observations.jsonl");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        path
+    }
+
     pub fn run_report_json(&mut self, group_by: &str) -> Result<serde_json::Value, String> {
         self.setup_env();
         self.install_fakes();
-        let out = Command::new(&self.gah_bin)
+        let out = self
+            .gah_command()
             .args([
                 "report",
                 "--json",
@@ -664,7 +694,8 @@ impl ScenarioHarness {
     pub fn run_sync_json(&mut self) -> Result<serde_json::Value, String> {
         self.setup_env();
         self.install_fakes();
-        let out = Command::new(&self.gah_bin)
+        let out = self
+            .gah_command()
             .args(["sync", "--profile", &self.profile_name, "--json"])
             .env("GAH_CONFIG", &self.config_path)
             .env("GAH_LEDGER_PATH", &self.ledger_path)

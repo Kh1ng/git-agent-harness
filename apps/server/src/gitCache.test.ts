@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test, describe } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { commitGitChanges, getGitReviewState, getGitStatusCached, getReviewChangesForHelper, getReviewHelperPatch, getSelectedChangesForHelper, getSelectedChangesPatch } from './gitCache.js';
+import { commitGitChanges, getGitReviewState, getGitStatusCached, getGitWorktreesCached, getReviewChangesForHelper, getReviewHelperPatch, getSelectedChangesForHelper, getSelectedChangesPatch, parseWorktreeList } from './gitCache.js';
 
 // AsyncTtlCache's own TTL/coalescing/isolation/failure behavior is covered
 // by asyncTtlCache.test.ts. These tests focus on gitCache's own wrapper
@@ -22,6 +22,38 @@ function initRepo(): string {
   execFileSync('git', ['-C', dir, 'commit', '--allow-empty', '-m', 'initial']);
   return dir;
 }
+
+describe('git worktrees', () => {
+  test('parses branches, detached heads and skips a bare entry', () => {
+    const parsed = parseWorktreeList([
+      'worktree /repo', 'HEAD aaa', 'branch refs/heads/main', '',
+      'worktree /trees/gah-gah-1', 'HEAD bbb', 'branch refs/heads/gah/gah-1', '',
+      'worktree /trees/detached', 'HEAD ccc', 'detached', '',
+      'worktree /bare.git', 'bare', ''
+    ].join('\n'));
+    assert.deepEqual(parsed, [
+      { path: '/repo', branch: 'main', head: 'aaa' },
+      { path: '/trees/gah-gah-1', branch: 'gah/gah-1', head: 'bbb' },
+      { path: '/trees/detached', branch: null, head: 'ccc' }
+    ]);
+  });
+
+  test('lists linked worktrees with their own changed-file counts', async () => {
+    const dir = realpathSync(initRepo());
+    const linked = join(realpathSync(mkdtempSync(join(tmpdir(), 'gah-gitcache-trees-'))), 'gah-test-1');
+    execFileSync('git', ['-C', dir, 'worktree', 'add', '-b', 'gah/test-1', linked]);
+    writeFileSync(join(linked, 'new.txt'), 'x');
+
+    const { worktrees } = await getGitWorktreesCached('gitcache-test-worktrees', dir);
+    assert.deepEqual(
+      worktrees.map(({ path, branch, main, changedFiles }) => ({ path, branch, main, changedFiles })),
+      [
+        { path: dir, branch: 'main', main: true, changedFiles: 0 },
+        { path: linked, branch: 'gah/test-1', main: false, changedFiles: 1 }
+      ]
+    );
+  });
+});
 
 describe('getGitStatusCached', () => {
   test('strips the upstream tracking suffix from the branch name', async () => {

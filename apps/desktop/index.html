@@ -23,6 +23,9 @@
       table { width: 100%; border-collapse: collapse; font-size: .875rem; font-variant-numeric: tabular-nums; } th, td { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid #232936; }
       #error { color: #ffb4b4; } #status:empty, #error:empty { display: none; } [hidden] { display: none !important; }
       .actions { display: flex; gap: .75rem; flex-wrap: wrap; }
+      #repository-tools .actions { align-items: flex-end; }
+      #repository-tool-guide { color: #8ab4ff; display: inline-flex; align-items: center; min-height: 2.75rem; }
+      #repository-tool-guide:hover { color: #b6d0ff; }
       .checklist { list-style: none; padding: 0; margin: .5rem 0 0; } .checklist li { padding: .35rem 0; border-bottom: 1px solid #232936; }
       .checklist .mark { display: inline-block; width: 1.5rem; } .checklist .ok { color: #9be09b; } .checklist .missing { color: #ffb4b4; } .checklist .optional { color: #b4bdcc; }
       .checklist p { overflow-wrap: anywhere; }
@@ -35,6 +38,17 @@
       <button id="back" type="button">← Back to Settings</button>
       <h1>Settings · This computer</h1>
       <p>Change this computer’s connection, app presence, and worker. Pair devices and manage central from the dashboard’s Settings page.</p>
+      <section id="repository-tools">
+        <h2>Repository tools</h2>
+        <p>The full local workflow needs a repository CLI package and a login. Standalone mode does not require Tailscale or another GAH node.</p>
+        <label for="repository-provider">Repository host</label>
+        <select id="repository-provider"><option value="gh">GitHub</option><option value="glab">GitLab</option></select>
+        <p id="repository-tool-status" role="status"></p>
+        <div class="actions">
+          <a id="repository-tool-guide" href="https://cli.github.com/">Install GitHub CLI</a>
+          <button type="button" id="repository-tool-check">Check installation</button>
+        </div>
+      </section>
       <section id="mistral-section" aria-labelledby="mistral-heading">
         <h2 id="mistral-heading">Mistral account usage</h2>
         <p>Sign in to Mistral in the app window, then check the connection. GAH saves the connection on this computer. A registered worker shares usage readings with central.</p>

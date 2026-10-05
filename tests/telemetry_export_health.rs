@@ -284,9 +284,7 @@ fn concurrent_terminal_attempts_produce_one_coherent_export() {
     // the in-process library calls below resolve the same paths.
     harness.run_status_json().unwrap();
 
-    let cfg = Arc::new(
-        git_agent_harness::config::load(Some(harness.config_path.to_str().unwrap())).unwrap(),
-    );
+    let cfg = Arc::new(support::load_config(Some(harness.config_path.to_str().unwrap())).unwrap());
 
     let barrier = Arc::new(Barrier::new(2));
     let handles: Vec<_> = (0..2)

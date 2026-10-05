@@ -152,7 +152,7 @@ pub fn run(command: QuotaCommands) -> Result<()> {
             // Issue #761: periodic, unattended account-level quota refresh.
             // Iterate every configured profile so per-profile codex_path
             // overrides are honored, and let refresh_quota_observations_and_wait
-            // apply the per-backend 30-min throttle + bounded supervision.
+            // apply the per-source 14-min throttle + bounded supervision.
             // The store is shared across profiles, so one store path feeds all.
             let path = store_arg
                 .map(std::path::PathBuf::from)

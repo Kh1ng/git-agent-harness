@@ -175,6 +175,7 @@ impl RoutingPolicy {
             quota_pool,
         );
         let Some(instance_name) = candidate.instance.as_deref() else {
+            identity.quota_source = self.quota_source(&identity);
             return identity;
         };
 
@@ -205,7 +206,17 @@ impl RoutingPolicy {
                 .or_else(|| instance.quota_pool.clone())
                 .or(identity.quota_pool);
         }
+        identity.quota_source = self.quota_source(&identity);
         identity
+    }
+
+    fn quota_source(
+        &self,
+        identity: &crate::execution_identity::ExecutionIdentity,
+    ) -> Option<String> {
+        self.quota_sources
+            .get(identity.quota_pool.as_deref()?)
+            .cloned()
     }
 }
 

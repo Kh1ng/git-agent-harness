@@ -14,6 +14,9 @@ mod tests;
 pub enum CredentialKind {
     ApiKey,
     MistralDashboard,
+    /// Mistral console email and password (`{"email","password"}`). Central
+    /// signs in headlessly whenever the cached dashboard session expires.
+    MistralLogin,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +36,30 @@ struct StoredCredential {
     secret: String,
     #[serde(default)]
     revision: String,
+    /// Session cookie derived from a `MistralLogin` secret. Rotating the
+    /// secret drops it; it never enters execution or public output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
+    /// Fixed-text `auth_required` reason Mistral gave for this revision's
+    /// login. Set, it stops repeat sign-ins until the login is saved again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    login_rejected: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MistralLogin {
+    pub email: String,
+    pub password: String,
+}
+
+pub(crate) fn mistral_login(secret: &str) -> Result<MistralLogin> {
+    let login: MistralLogin = serde_json::from_str(secret)
+        .map_err(|_| anyhow::anyhow!("Mistral login must be JSON with email and password"))?;
+    if !login.email.contains('@') || login.email.len() > 254 || login.password.is_empty() {
+        bail!("Mistral login must be JSON with email and password");
+    }
+    Ok(login)
 }
 
 /// Canonical provider vocabulary shared with execution's harness bindings.
@@ -78,9 +105,9 @@ fn validate(info: &CredentialInfo) -> Result<()> {
         bail!("invalid credential account label");
     }
     match info.kind {
-        CredentialKind::MistralDashboard
+        CredentialKind::MistralDashboard | CredentialKind::MistralLogin
             if info.provider == "mistral" && info.env_var.is_none() => {}
-        CredentialKind::MistralDashboard => {
+        CredentialKind::MistralDashboard | CredentialKind::MistralLogin => {
             bail!("dashboard credentials require Mistral without an execution environment variable")
         }
         CredentialKind::ApiKey => {
@@ -113,6 +140,9 @@ fn validate_value(info: &CredentialInfo, secret: &str) -> Result<()> {
     } else {
         8192
     };
+    if info.kind == CredentialKind::MistralLogin {
+        mistral_login(secret)?;
+    }
     if secret.is_empty()
         || secret.len() > limit
         || !secret.is_ascii()
@@ -308,7 +338,6 @@ fn save_with_quota_at(
     secret: &str,
     quota_path: Option<&Path>,
 ) -> Result<CredentialInfo> {
-    use std::io::Write;
     info.provider = canonical_provider(&info.provider).into();
     if info.kind == CredentialKind::ApiKey && info.env_var.is_none() {
         info.env_var = default_env(&info.provider).map(str::to_owned);
@@ -317,22 +346,16 @@ fn save_with_quota_at(
     validate_value(&info, secret)?;
     validate_metadata_value(&info, secret)?;
     private_directory(root, true)?;
-    let mut file =
-        tempfile::NamedTempFile::new_in(root).context("cannot save private credential")?;
-    // tempfile creates an owner-only regular file. Never follow the destination.
-    serde_json::to_writer(
-        &mut file,
+    let file = write_private(
+        root,
         &StoredCredential {
             info: info.clone(),
             secret: secret.to_owned(),
             revision: uuid::Uuid::new_v4().to_string(),
+            session: None,
+            login_rejected: None,
         },
-    )
-    .map_err(|_| anyhow::anyhow!("cannot encode private credential"))?;
-    file.flush().context("cannot save private credential")?;
-    file.as_file()
-        .sync_all()
-        .context("cannot save private credential")?;
+    )?;
     let _guard = source_lock(root, &info.id)?;
     let destination = root.join(format!("{}.json", info.id));
     if std::fs::symlink_metadata(&destination).is_ok() {
@@ -343,6 +366,56 @@ fn save_with_quota_at(
     file.persist(destination)
         .map_err(|_| anyhow::anyhow!("cannot save private credential"))?;
     Ok(info)
+}
+
+/// Owner-only temp file holding `stored`, ready to persist over the record.
+fn write_private(root: &Path, stored: &StoredCredential) -> Result<tempfile::NamedTempFile> {
+    use std::io::Write;
+    let mut file =
+        tempfile::NamedTempFile::new_in(root).context("cannot save private credential")?;
+    // tempfile creates an owner-only regular file. Never follow the destination.
+    serde_json::to_writer(&mut file, stored)
+        .map_err(|_| anyhow::anyhow!("cannot encode private credential"))?;
+    file.flush().context("cannot save private credential")?;
+    file.as_file()
+        .sync_all()
+        .context("cannot save private credential")?;
+    Ok(file)
+}
+
+/// Cache a freshly signed-in session without changing the source revision.
+/// A rotation or removal since `revision` was read discards the session.
+pub(crate) fn cache_session_at(root: &Path, id: &str, revision: &str, session: &str) -> Result<()> {
+    update_revision_at(root, id, revision, |stored| {
+        stored.session = Some(session.to_owned())
+    })
+}
+
+/// Remember that Mistral refused this revision's login, so refreshes stop
+/// signing in until a new login is saved (which starts a new revision).
+pub(crate) fn reject_login_at(root: &Path, id: &str, revision: &str, reason: &str) -> Result<()> {
+    update_revision_at(root, id, revision, |stored| {
+        stored.session = None;
+        stored.login_rejected = Some(reason.to_owned());
+    })
+}
+
+fn update_revision_at(
+    root: &Path,
+    id: &str,
+    revision: &str,
+    change: impl FnOnce(&mut StoredCredential),
+) -> Result<()> {
+    let _guard = source_lock(root, id)?;
+    let mut stored = read_at(root, id)?;
+    if stored.revision != revision {
+        bail!("credential changed during quota check");
+    }
+    change(&mut stored);
+    write_private(root, &stored)?
+        .persist(root.join(format!("{id}.json")))
+        .map_err(|_| anyhow::anyhow!("cannot save private credential"))?;
+    Ok(())
 }
 
 pub fn list() -> Result<Vec<CredentialInfo>> {

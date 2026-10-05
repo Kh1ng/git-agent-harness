@@ -582,6 +582,8 @@ export interface QuotaObservation {
   quota_remaining_percent?: number | null;
   quota_reset_at?: string | null;
   observed_at?: string | null;
+  /** When the check ran, on store-derived report rows (#1339). */
+  checked_at?: string | null;
   usage_source?: string | null;
   account_usage?: AccountUsageObservation | null;
 }

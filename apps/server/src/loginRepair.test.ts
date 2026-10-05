@@ -136,6 +136,26 @@ test('an unreadable opencode auth.json is never overwritten', async () => {
   } finally { box.done(); }
 });
 
+test('missing repository CLIs stop before authorization and link to official installation', async () => {
+  const box = sandbox();
+  box.env.PATH = join(box.root, 'empty');
+  try {
+    let requests = 0;
+    const repairs = new LoginRepairs({ env: box.env, fetch: async () => { requests++; throw new Error('unexpected OAuth request'); } });
+    for (const [backend, provider, guide] of [
+      ['gh', 'github', 'https://cli.github.com/'],
+      ['glab', 'gitlab', 'https://gitlab.com/gitlab-org/cli#installation'],
+    ]) {
+      const { id } = repairs.start({ backend, provider });
+      const view = await until(() => repairs.view(id), 'install_required');
+      assert.equal(view.status === 'install_required' && view.install_url, guide);
+      assert.equal(parseLoginRepairView(view)?.status, 'install_required');
+      assert.equal(parseLoginRepairView({ ...view, install_url: 'https://evil.example/' }), null);
+    }
+    assert.equal(requests, 0);
+  } finally { box.done(); }
+});
+
 test('gh receives the device-flow token on stdin, never argv', async () => {
   const box = sandbox();
   try {
