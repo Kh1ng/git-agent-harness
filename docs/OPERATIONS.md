@@ -143,7 +143,8 @@ of the prebuild gate issue.
   a blocker repair; that incident is exactly what this contract prevents. The
   timer is installed by `gah update`/`scripts/install.sh` alongside the loop
   unit but is never automatically enabled — opt in once you've configured an
-  alert command in `gah-watchdog.service`'s `ExecStart`:
+  alert command in a `systemctl --user edit gah-watchdog.service` drop-in.
+  The packaged check writes to the journal and requires no alert transport:
   ```bash
   systemctl --user enable --now gah-watchdog.timer
   ```
@@ -157,16 +158,22 @@ the systemd unit: its control-group boundary additionally covers SIGKILL, when
 no in-process cleanup handler can run.
 
 The checked-in server template is
-`packaging/systemd/gah-server.service`. Before installing it, edit its `User`,
-`WorkingDirectory`, `GAH_CONFIG_PATH`, Node path, and `PATH` values for the
-host; its explicit toolchain `PATH` is required for dashboard-dispatched work.
-Then install it as a system service:
+`packaging/systemd/gah-server.service`. It contains placeholders, not host
+values. `gah update --role central` renders it for the account that runs the
+update: its user, checkout, config path, the `node` found on `PATH`, and a
+toolchain `PATH` that dispatched work needs. Then it installs the result as a
+system service. The user units (`gah-loop@`, `gah-prune`,
+`gah-quota-refresh`) are rendered the same way. Do not copy a template
+verbatim. Then enable the service:
 
 ```bash
-sudo install -m 0644 packaging/systemd/gah-server.service /etc/systemd/system/gah-server.service
-sudo systemctl daemon-reload
+gah update --role central
 sudo systemctl enable --now gah-server
 ```
+
+Run `gah update` again after you move the checkout or change the Node install.
+Keep local customization in `systemctl edit` drop-ins, because every update
+replaces the base unit.
 
 #### Server bind host (issue #643)
 
@@ -1014,6 +1021,42 @@ and the current login's Vibe monthly allowance. Automatic checks run at most
 every 30 minutes and skip an empty default file. Reconnect in Settings when the
 session expires. Account readings stay separate from Vibe execution instances
 and task usage; missing allowance or price data remains unknown.
+
+#### Headless sign-in on central
+
+A node without a desktop session, such as central, can sign in to Mistral
+itself. Save the console email and password as a `mistral_login` connection.
+Type them on that node; they are read from stdin and never appear in argv.
+The JSON is built from the environment so quotes and backslashes in the
+password survive:
+
+```sh
+read -r MISTRAL_EMAIL; read -rs MISTRAL_PASSWORD; export MISTRAL_EMAIL MISTRAL_PASSWORD
+python3 -c 'import json, os; print(json.dumps({"email": os.environ["MISTRAL_EMAIL"], "password": os.environ["MISTRAL_PASSWORD"]}))' |
+  gah credentials save --id mistral-console --provider mistral \
+    --kind mistral_login --account-label "Mistral console"
+unset MISTRAL_EMAIL MISTRAL_PASSWORD
+```
+
+The connection is stored in the owner-only credential directory and is never
+passed to a runner. GAH keeps the resulting dashboard session in the same
+private record. It signs in again only when Mistral rejects that session. A
+wrong password or a second-factor prompt is reported as `auth_required`, and
+GAH stops signing in with that login until it is saved again, so a bad
+password is not retried on every refresh. GAH
+stores only the email and password, so an account with an authenticator app
+needs a reconnect through the desktop window instead.
+
+To let routing use the allowance, bind the Vibe quota pool to the connection:
+
+```toml
+[defaults.routing.quota_sources]
+vibe-monthly = "mistral-console"
+```
+
+Vibe candidates in that pool then see the account's monthly allowance, become
+exhausted at 0% remaining, and gain reset pressure. Unbound pools never inherit
+another connection's readings.
 
 ### Provider login health
 

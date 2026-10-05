@@ -620,7 +620,11 @@ fn aggregate_observations(
     // aggregates have no source identity and cannot describe this account.
     // Unbound candidates retain backend, instance, pool and model scoping.
     out.retain(|observation| {
-        if let Some(id) = identity.credential_id.as_deref() {
+        if let Some(id) = identity
+            .quota_source
+            .as_deref()
+            .or(identity.credential_id.as_deref())
+        {
             return observation.credential_id.as_deref() == Some(id);
         }
         config::canonical_backend_name(&observation.backend) == identity.logical_backend

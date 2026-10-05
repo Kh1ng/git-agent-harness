@@ -37,6 +37,7 @@ export function parseNodeAuthHealth(value: unknown): NodeAuthHealth | null {
       state: probe.state as AuthState,
       ...(text(probe.detail, 200) ? { detail: probe.detail as string } : {}),
       source: probe.source as AuthProbe['source'],
+      ...(typeof probe.installed === 'boolean' ? { installed: probe.installed } : {}),
       ...(text(probe.since, 64) ? { since: probe.since as string } : {})
     }];
   });

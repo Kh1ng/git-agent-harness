@@ -24,7 +24,12 @@ pub fn latest_windows_for_identity<'a>(
     records: &'a [QuotaObservationRecord],
     identity: &crate::execution_identity::ExecutionIdentity,
 ) -> Vec<&'a QuotaObservationRecord> {
-    latest_windows_for_identity_and_credential(records, identity, identity.credential_id.as_deref())
+    let source = identity.quota_source.as_deref();
+    latest_windows_for_identity_and_credential(
+        records,
+        identity,
+        source.or(identity.credential_id.as_deref()),
+    )
 }
 
 /// An explicit credential binding cannot inherit ambient or sibling source
