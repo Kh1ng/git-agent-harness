@@ -207,6 +207,10 @@ test('Watch live opens a read-only view of a running job in the left sidebar and
   await expect(steps.nth(1)).toContainText('test result: FAILED');
   await expect(steps.nth(2)).toContainText('update src/controller/decision.rs');
   await expect(view.getByRole('status')).toContainText('Following · 3 steps');
+  // The header stays in view however far the output is scrolled.
+  await view.evaluate((panel) => { const filler = document.createElement('div'); filler.style.height = '3000px'; panel.querySelector('ol')!.after(filler); panel.scrollTop = panel.scrollHeight; });
+  await expect(view.getByRole('button', { name: 'Copy all output' })).toBeInViewport();
+  await expect(view.getByRole('button', { name: 'Close live view' })).toBeInViewport();
   // View only: nothing in it sends input or stops the job. Its buttons are Copy all and Close.
   await expect(view.getByRole('textbox')).toHaveCount(0);
   await expect(view.getByRole('button')).toHaveCount(2);

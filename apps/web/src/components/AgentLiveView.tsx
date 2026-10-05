@@ -122,7 +122,9 @@ export function AgentLiveView({ runId, title, subtitle, onBack, runs = [], onSel
 
   return (
     <section aria-label={`Live view of ${title}`} className="flex min-w-0 flex-col gap-3">
-      <header className="flex items-start justify-between gap-3 border-b border-subtle pb-3">
+      {/* Pinned while the output scrolls: title, Copy all, the agent switcher and the follow toggle. */}
+      <div className="sticky -top-4 z-10 -mx-4 flex flex-col gap-3 border-b border-subtle bg-page px-4 pb-2 pt-4" data-testid="live-view-header">
+      <header className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-muted">Live view · read only</p>
           <h2 className="mt-0.5 break-words text-base font-semibold text-primary">{title}</h2>
@@ -137,7 +139,7 @@ export function AgentLiveView({ runId, title, subtitle, onBack, runs = [], onSel
         </div>
       </header>
       {runs.length > 1 && onSelectRun && (
-        <nav aria-label="Running factory agents" className="flex gap-1 overflow-x-auto border-b border-subtle pb-2">
+        <nav aria-label="Running factory agents" className="flex gap-1 overflow-x-auto">
           {runs.map((run) => {
             const active = run.runId === runId;
             return (
@@ -161,6 +163,7 @@ export function AgentLiveView({ runId, title, subtitle, onBack, runs = [], onSel
           <input type="checkbox" checked={follow} onChange={(event) => setFollow(event.target.checked)} />
           Follow newest
         </label>
+      </div>
       </div>
       {truncated && <p className="text-[11px] text-muted">Earlier output is not shown; this view starts near the end of a long log.</p>}
       <ol className="space-y-2" aria-label="Agent output">
