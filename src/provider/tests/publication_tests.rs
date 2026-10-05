@@ -153,6 +153,8 @@ fn gitlab_mr_error_json_response_fails_closed() {
     const RAW_SECRET: &str = "glpat-abcdefghijklmnopqrstuvwxyz";
     const REDACTED_MARKER: &str = "[REDACTED:GITLAB_TOKEN]";
 
+    assert_ne!(RAW_SECRET, REDACTED_MARKER);
+
     let _exec_guard = crate::test_support::ExecGuard::new();
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
