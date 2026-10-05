@@ -211,16 +211,14 @@ pub fn build_snapshot(
         })
         .collect::<HashMap<_, _>>();
 
-    let backend_groups = ledger::summary::build_grouped_summary_with_account_quota(
+    let backend_groups = ledger::summary::build_grouped_summary(
         &entries,
         |entry| config::canonical_backend_name(&entry.effective_backend).to_string(),
         |observed| config::canonical_backend_name(observed.backend).to_string(),
         |backend, _model, _difficulty| config::canonical_backend_name(backend).to_string(),
-        true,
-        &account_quota,
     )
     .unwrap_or_default();
-    let candidate_groups = ledger::summary::build_grouped_summary_with_account_quota(
+    let candidate_groups = ledger::summary::build_grouped_summary(
         &entries,
         |entry| {
             candidate_usage_key(
@@ -237,8 +235,6 @@ pub fn build_snapshot(
         |backend, model, _difficulty| {
             candidate_usage_key(config::canonical_backend_name(backend), model)
         },
-        false,
-        &account_quota,
     )
     .unwrap_or_default();
 
@@ -664,7 +660,12 @@ fn aggregate_observations(
     out
 }
 
-fn convert_group_observation(obs: &ledger::summary::GroupQuotaObservation) -> QuotaObservation {
+/// #1339: group observations carry the shared store-record shape. For the
+/// snapshot's display projection they stay deliberately unscoped (instance,
+/// pool and credential are `None`) exactly as the former ledger summary
+/// type did: a broad ledger aggregate has no verified source identity and
+/// must not present itself as one account's balance.
+fn convert_group_observation(obs: &crate::quota_store::QuotaObservationRecord) -> QuotaObservation {
     QuotaObservation {
         backend: obs.backend.clone(),
         backend_instance: None,
