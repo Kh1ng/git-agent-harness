@@ -32,6 +32,19 @@ fn provider_publication_bodies_remove_a_configured_home_outside_the_standard_roo
 }
 
 #[test]
+fn provider_publication_bodies_remove_configured_windows_home_paths() {
+    for home in [r"C:\Users\operator", r"C:\Users\operator\"] {
+        let _guard = HomeOverride::set(home.to_string());
+        let body = r"artifacts `C:\Users\operator\AppData\Local\gah\artifacts\sessions\session-123`; mixed `C:\Users\operator/AppData/Local/gah`; home C:\Users\operator, sibling C:\Users\operator-tools\config.toml";
+
+        assert_eq!(
+            crate::provider::publication_body(body),
+            r"artifacts `[local path removed]`; mixed `[local path removed]`; home [local path removed], sibling C:\Users\operator-tools\config.toml"
+        );
+    }
+}
+
+#[test]
 fn provider_publication_bodies_remove_a_home_without_a_standard_root_prefix() {
     let _guard = HomeOverride::set("/srv/gah-operator".to_string());
     let body = "state /srv/gah-operator/state/gah/run.log; other /srv/unrelated/tool.log";

@@ -44,20 +44,20 @@ fn standard_home_path_re() -> &'static regex::Regex {
     })
 }
 
-/// Redact the configured home directory and anything beneath it. A
-/// trailing-slash home (or a bare `/`) matches nothing rather than every
-/// absolute path in the text.
+/// Redact the configured home directory and anything beneath it.
+/// Trailing separators are stripped; a bare separator matches nothing rather
+/// than every absolute path in the text.
 fn configured_home_path_re(home: &str) -> Option<regex::Regex> {
-    let home = home.trim_end_matches('/');
+    let home = home.trim_end_matches(['/', '\\']);
     if home.is_empty() {
         return None;
     }
     // Match the home itself or descendants only: the home must be followed by
-    // a `/` or a character that cannot continue a path component, so a sibling
-    // such as /srv/gah-operator-tools is left alone. The trailing character is
+    // a `/`, a `\`, or a character that cannot continue a path component, so
+    // a sibling such as /srv/gah-operator-tools is left alone. The trailing character is
     // captured (regex has no lookahead) and restored by the replacer.
     regex::Regex::new(&format!(
-        r#"{}(?:/[^\s`"'<>]*|(?P<end>[\s`"'<>,;:)\]!?]|$))"#,
+        r#"{}(?:[/\\][^\s`"'<>]*|(?P<end>[\s`"'<>,;:)\]!?]|$))"#,
         regex::escape(home)
     ))
     .ok()
