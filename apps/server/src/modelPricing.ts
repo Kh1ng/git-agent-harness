@@ -44,7 +44,7 @@ function writePriceBook(book: ModelPriceBook, path: string): void {
 
 /** `$2.50 / MTok`, `$0.125`, `-` → a number, or null for a blank cell. */
 function dollars(cell: string): number | null | undefined {
-  const text = cell.replace(/<[^>]+>/g, '').trim();
+  const text = cell.replace(/[<>]/g, '').trim();
   if (!text || /^[-–—]$|^n\/a$/i.test(text)) return null;
   const match = /\$\s*([0-9]+(?:\.[0-9]+)?)/.exec(text);
   if (!match) return undefined;
@@ -74,7 +74,7 @@ export function parsePriceTables(markdown: string): PriceRow[] {
   const lines = markdown.split('\n');
   for (let index = 0; index < lines.length; index++) {
     if (!lines[index].trim().startsWith('|') || !/^\s*\|[\s:|-]+\|\s*$/.test(lines[index + 1] ?? '')) continue;
-    const header = lines[index].split('|').slice(1, -1).map((cell) => cell.replace(/<[^>]+>/g, '').trim().toLowerCase());
+    const header = lines[index].split('|').slice(1, -1).map((cell) => cell.replace(/[<>]/g, '').trim().toLowerCase());
     const model = header.findIndex((cell) => /^model/.test(cell));
     const column = (test: (cell: string) => boolean) => header.findIndex(test);
     const input = column((cell) => /input/.test(cell) && !/cach/.test(cell));

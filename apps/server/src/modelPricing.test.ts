@@ -63,6 +63,17 @@ test('rows are validated whoever produced them', () => {
   assert.equal(pricePageDigest('intro\n| a | b |\nplain\ncosts $5\n').split('\n').length, 2);
 });
 
+test('tag fragments that never close leave no angle brackets and do not corrupt a row', () => {
+  const rows = parsePriceTables(`| Model<script>alert(1) | Input | Output |
+| --- | --- | --- |
+| gpt-6-sol | $2.00<script>alert(1) | $10.00 |
+| gpt-6-luna<script>alert(1) | $0.10 | $0.50 |
+`);
+  // The fragment in the price cell does not change the price; the one in a model name keeps the row out.
+  assert.deepEqual(rows, [{ model: 'gpt-6-sol', input: 2, output: 10, cached_input: null, cache_write: null }]);
+  assert.ok(rows.every((row) => !/[<>]/.test(row.model)));
+});
+
 test('ledger model names find their price row; aliases take the newest of the family', () => {
   const prices = [price('openai', 'gpt-6-sol', 2, 10), price('anthropic', 'Claude Sonnet 5.5', 2, 10), price('anthropic', 'Claude Sonnet 4.6', 3, 15), price('anthropic', 'Claude Opus 5.5', 4, 20)];
   assert.equal(priceFor('gpt-6-sol', prices)?.model, 'gpt-6-sol');
