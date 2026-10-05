@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { openUsage } from './helpers/navigation.js';
 
 const now = new Date().toISOString();
 const resetAt = new Date(Date.now() + 3_600_000).toISOString();
@@ -42,8 +43,7 @@ test('quota windows compare exact percentages and distinguish missing, stale, an
   }));
 
   await page.goto('/');
-  await page.getByRole('button', { name: 'Usage', exact: true }).click();
-  await page.getByRole('navigation', { name: 'Page tabs' }).getByRole('button', { name: 'Quota', exact: true }).click();
+  await openUsage(page, 'Quota');
 
   const codex = page.getByTestId('quota-candidate-codex-0');
   const claude = page.getByTestId('quota-candidate-claude-0');

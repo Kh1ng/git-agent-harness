@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { openUsage } from './helpers/navigation.js';
 
 /**
  * Smoke coverage for the frontend productization pass. Not exhaustive --
@@ -20,12 +21,12 @@ const VIEWPORTS = [
 ];
 
 /** A navbar entry, and for a grouped page the tab that shows it. */
-const ROUTES: { label: string; tab?: string; heading: string }[] = [
+const ROUTES: { label: string; tab?: string; usage?: 'Telemetry' | 'Quota'; heading: string }[] = [
   { label: 'Overview', heading: 'Overview' },
   { label: 'Fleet', heading: 'Fleet' },
   { label: 'Factory', heading: 'Factory' },
-  { label: 'Usage', heading: 'Telemetry' },
-  { label: 'Usage', tab: 'Quota', heading: 'Quota management' },
+  { label: 'Usage', usage: 'Telemetry', heading: 'Telemetry' },
+  { label: 'Usage', usage: 'Quota', heading: 'Quota management' },
   { label: 'Projects', heading: 'Git' },
   { label: 'Projects', tab: 'Planning', heading: 'Planning' },
   { label: 'Activity', heading: 'Activity' },
@@ -58,7 +59,8 @@ for (const viewport of VIEWPORTS) {
       const isMobile = viewport.width < 1024;
 
       for (const route of ROUTES) {
-        await navigateTo(page, route.label, isMobile, route.tab);
+        if (route.usage) await openUsage(page, route.usage);
+        else await navigateTo(page, route.label, isMobile, route.tab);
         await expect(page.getByRole('heading', { name: route.heading, exact: true })).toBeVisible();
 
         const { scrollWidth, clientWidth } = await page.evaluate(() => ({
@@ -98,27 +100,34 @@ test.describe('desktop content', () => {
     expect(share).toBeGreaterThan(0.2);
     expect(share).toBeLessThan(0.35);
     expect(new URL(page.url()).searchParams.get('side')).toBe('settings');
-    await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Usage', exact: true }).click();
+    await openUsage(page, 'Quota');
     await expect(panel).toBeVisible();
     await settings.click();
     await expect(panel).toHaveCount(0);
     expect(new URL(page.url()).searchParams.get('side')).toBeNull();
   });
 
-  test('a navbar group shows its pages as tabs and keeps the open tab', async ({ page }) => {
+  test('Projects shows its pages as tabs; Usage opens Telemetry and Quota from a dropdown', async ({ page }) => {
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: 'Primary' });
     await expect(page.getByRole('navigation', { name: 'Page tabs' })).toHaveCount(0);
     await nav.getByRole('button', { name: 'Usage', exact: true }).click();
-    const tabs = page.getByRole('navigation', { name: 'Page tabs' });
-    await expect(page.getByRole('heading', { name: 'Telemetry', exact: true })).toBeVisible();
-    await tabs.getByRole('button', { name: 'Quota', exact: true }).click();
+    const menu = page.getByRole('menu', { name: 'Usage' });
+    await expect(menu.getByRole('menuitem')).toHaveText(['Telemetry', 'Quota']);
+    await menu.getByRole('menuitem', { name: 'Quota' }).click();
+    await expect(menu).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Quota management', exact: true })).toBeVisible();
     expect(new URL(page.url()).searchParams.get('page')).toBe('quota');
-    // The group button is a no-op while one of its tabs is open.
-    await nav.getByRole('button', { name: 'Usage', exact: true }).click();
-    await expect(page.getByRole('heading', { name: 'Quota management', exact: true })).toBeVisible();
+    // A dropdown group has no tabs above the page; its entry is the current one.
+    await expect(page.getByRole('navigation', { name: 'Page tabs' })).toHaveCount(0);
     await expect(nav.getByRole('button', { name: 'Usage', exact: true })).toHaveAttribute('aria-current', 'page');
+    await nav.getByRole('button', { name: 'Usage', exact: true }).click();
+    await expect(menu.getByRole('menuitem', { name: 'Quota' })).toHaveAttribute('aria-current', 'page');
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    // Projects still shows Git and Planning as tabs.
+    await nav.getByRole('button', { name: 'Projects', exact: true }).click();
+    await expect(page.getByRole('navigation', { name: 'Page tabs' }).getByRole('button')).toHaveText(['Git', 'Planning']);
     // Fleet is always listed: it is where a standalone install adds its first node.
     await nav.getByRole('button', { name: 'Fleet', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Fleet', exact: true })).toBeVisible();
@@ -136,7 +145,7 @@ test.describe('desktop content', () => {
 
   test('quota page never shows a bare 0% for an unknown observation', async ({ page }) => {
     await page.goto('/');
-    await navigateTo(page, 'Usage', false, 'Quota');
+    await openUsage(page, 'Quota');
     // The page's own title always renders (even mid-load or on a total
     // data-fetch failure -- see PageHeader placement in QuotaPage.tsx), and
     // whatever the data state, the literal string "0%" must never appear:

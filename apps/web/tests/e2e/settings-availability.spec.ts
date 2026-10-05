@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { openUsage } from './helpers/navigation.js';
 import { readFileSync } from 'node:fs';
 import type { QuotaSnapshot } from '@git-agent-harness/contracts';
 
@@ -44,8 +45,7 @@ test('Settings and Quota share candidate eligibility, timestamps, refresh failur
   await page.getByRole('button', { name: /GitHub test/ }).click();
   await expect.poll(() => scmRefreshes).toBe(1);
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('button', { name: 'Usage', exact: true }).click();
-  await page.getByRole('navigation', { name: 'Page tabs' }).getByRole('button', { name: 'Quota', exact: true }).click();
+  await openUsage(page, 'Quota');
   const quotaCandidate = page.getByTestId('quota-candidate-agy-0');
   await expect(quotaCandidate.getByText('Unavailable', { exact: true })).toBeVisible();
   await expect(quotaCandidate.getByText(/^Account quota exhausted ·/)).toBeVisible();
@@ -88,8 +88,7 @@ test('a late quota response cannot replace availability after a profile switch',
   await (await lateResponse).finished();
   await expect(backends).toContainText('second-backend');
   await expect(backends).not.toContainText('old-backend');
-  await page.getByRole('button', { name: 'Usage', exact: true }).click();
-  await page.getByRole('navigation', { name: 'Page tabs' }).getByRole('button', { name: 'Quota', exact: true }).click();
+  await openUsage(page, 'Quota');
   await expect(page.getByText(/^second-backend \//)).toBeVisible();
   await expect(page.getByText(/^old-backend \//)).toHaveCount(0);
 });

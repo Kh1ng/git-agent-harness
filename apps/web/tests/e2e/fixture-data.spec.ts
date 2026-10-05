@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { openUsage } from './helpers/navigation.js';
 
 /**
  * Issue #636 AC3: with the fixture-backed server running (see
@@ -27,7 +28,7 @@ test('Overview renders fixture profile + status data from the hermetic server', 
 
 test('Quota page renders the fixture quota snapshot observations', async ({ page }) => {
   await page.goto('/');
-  await navigateTo(page, 'Usage', 'Quota');
+  await openUsage(page, 'Quota');
   // responses/quota.json carries codex/claude candidate ledger rows with quota windows.
   await expect(page.getByText('codex', { exact: false }).first()).toBeVisible();
   await expect(page.getByText('claude', { exact: false }).first()).toBeVisible();
@@ -45,7 +46,7 @@ test('Quota page renders the fixture quota snapshot observations', async ({ page
 
 test('Telemetry page renders a backend row from the fixture report', async ({ page }) => {
   await page.goto('/');
-  await navigateTo(page, 'Usage');
+  await openUsage(page, 'Telemetry');
   // responses/report.json carries codex + claude comparison rows.
   await expect(page.getByText('codex', { exact: false }).first()).toBeVisible();
   await expect(page.getByText('claude', { exact: false }).first()).toBeVisible();

@@ -1,11 +1,12 @@
 import { expect, test } from '@playwright/test';
+import { openUsage } from './helpers/navigation.js';
 
 for (const scenario of [
   { pageName: 'Settings', section: 'General', paths: ['/api/manager-chat/settings', '/api/admin/update'] },
   { pageName: 'Settings', section: 'Skill bank', paths: ['/api/skills'] },
   { pageName: 'Settings', section: 'TDAI / memory', paths: ['/api/settings/gateway'] },
   { pageName: 'Projects', tab: 'Git', section: '', paths: ['/api/git/status', '/api/git/log', '/api/git/prs'] },
-  { pageName: 'Usage', section: '', paths: ['/api/usage/rollup'] }
+  { pageName: 'Usage', usage: 'Telemetry' as const, section: '', paths: ['/api/usage/rollup'] }
 ]) {
   test(`${[scenario.pageName, scenario.section].filter(Boolean).join(" ")} recovers protected reads after the first token without navigation`, async ({ page }) => {
     const rejected = new Set<string>();
@@ -39,7 +40,8 @@ for (const scenario of [
       const button = page.getByRole('button', { name: new RegExp(`^${scenario.section}`) });
       if (await button.getAttribute('aria-expanded') !== 'true') await button.click();
     } else {
-      await page.getByRole('button', { name: scenario.pageName, exact: true }).click();
+      if ('usage' in scenario && scenario.usage) await openUsage(page, scenario.usage);
+      else await page.getByRole('button', { name: scenario.pageName, exact: true }).click();
       if ('tab' in scenario && scenario.tab) await page.getByRole('navigation', { name: 'Page tabs' }).getByRole('button', { name: scenario.tab, exact: true }).click();
     }
     await expect.poll(() => [...rejected].sort()).toEqual([...scenario.paths].sort());

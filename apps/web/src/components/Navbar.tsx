@@ -15,7 +15,8 @@ import {
   FolderGit2,
   FolderCog,
   CircleDot,
-  Bot
+  Bot,
+  ChevronDown
 } from 'lucide-react';
 import { ProjectSwitcher } from './ProjectSwitcher.js';
 import { RepoLinksMenu } from './RepoLinksMenu.js';
@@ -23,7 +24,7 @@ import type { MainPage, Page, SideView } from '../lib/navigationState.js';
 
 type NavItem<Id extends Page> = { id: Id; label: string; icon: typeof LayoutDashboard };
 /** A navbar entry: its own page, plus the pages shown as tabs under it. */
-type NavGroup = NavItem<MainPage> & { tabs?: NavItem<MainPage>[] };
+type NavGroup = NavItem<MainPage> & { tabs?: NavItem<MainPage>[]; /** Show the pages in a dropdown under the navbar entry instead of as tabs above the page. */ menu?: boolean };
 
 type NavbarProps = {
   currentPage: MainPage;
@@ -52,7 +53,7 @@ const mainItems: NavGroup[] = [
     { id: 'git', label: 'Git', icon: GitBranch },
     { id: 'planning', label: 'Planning', icon: Orbit }
   ] },
-  { id: 'telemetry', label: 'Usage', icon: BarChart3, tabs: [
+  { id: 'telemetry', label: 'Usage', icon: BarChart3, menu: true, tabs: [
     { id: 'telemetry', label: 'Telemetry', icon: BarChart3 },
     { id: 'quota', label: 'Quota', icon: Gauge }
   ] },
@@ -63,7 +64,8 @@ const groupOf = (page: MainPage) => mainItems.find((group) => group.id === page 
 
 /** The tabs shown above a page that belongs to a navbar group; none for a page on its own. */
 export function pageTabs(page: MainPage): NavItem<MainPage>[] | null {
-  return groupOf(page)?.tabs ?? null;
+  const group = groupOf(page);
+  return group?.menu ? null : group?.tabs ?? null;
 }
 
 /** Tabs above the main panel for the pages a navbar group holds. */
@@ -84,6 +86,54 @@ export function PageTabs({ currentPage, onPageChange }: { currentPage: MainPage;
         );
       })}
     </nav>
+  );
+}
+
+/** A navbar entry whose pages open from a dropdown. The menu is positioned
+ * from the button's place on screen because the navbar scrolls sideways and
+ * would clip anything hanging below it. */
+function NavMenu({ group, currentPage, onSelect }: { group: NavGroup; currentPage: MainPage; onSelect: (page: MainPage) => void }) {
+  const [at, setAt] = useState<{ left: number; top: number } | null>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!at) return;
+    const close = (event: MouseEvent | KeyboardEvent | Event) => {
+      if (event instanceof KeyboardEvent ? event.key === 'Escape' : !(event.target instanceof Node && (menu.current?.contains(event.target) || button.current?.contains(event.target)))) setAt(null);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', close);
+    window.addEventListener('resize', close);
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', close); window.removeEventListener('resize', close); };
+  }, [at]);
+  const Icon = group.icon;
+  const active = groupOf(currentPage) === group;
+  return (
+    <>
+      <button ref={button} type="button" aria-haspopup="menu" aria-expanded={at !== null} aria-current={active ? 'page' : undefined}
+        onClick={() => { const box = button.current!.getBoundingClientRect(); setAt(at ? null : { left: box.left, top: box.bottom + 4 }); }}
+        className={`top-nav-link ${active ? 'top-nav-link-active' : ''}`}>
+        <Icon size={16} aria-hidden="true" />
+        {group.label}
+        <ChevronDown size={13} className="text-muted" aria-hidden="true" />
+      </button>
+      {at && (
+        <div ref={menu} role="menu" aria-label={group.label} style={{ left: at.left, top: at.top }}
+          className="fixed z-40 w-48 rounded-lg border border-subtle bg-raised py-1 shadow-xl">
+          {group.tabs!.map((tab) => {
+            const TabIcon = tab.icon;
+            const current = currentPage === tab.id;
+            return (
+              <button key={tab.id} type="button" role="menuitem" aria-current={current ? 'page' : undefined} onClick={() => { setAt(null); onSelect(tab.id); }}
+                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-white/5 ${current ? 'text-primary' : 'text-secondary'}`}>
+                <TabIcon size={14} className={current ? 'text-accent' : 'text-muted'} aria-hidden="true" />
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -175,6 +225,7 @@ export function Navbar({ currentPage, sideView, onPageChange, activityUnreadCoun
           {items.map((item) => {
             const Icon = item.icon;
             const active = groupOf(currentPage) === item;
+            if (item.menu) return <NavMenu key={item.id} group={item} currentPage={currentPage} onSelect={handleSelect} />;
             return (
               <button
                 key={item.id}
@@ -239,10 +290,10 @@ export function Navbar({ currentPage, sideView, onPageChange, activityUnreadCoun
           </button>
         </div>
         <nav className="flex flex-col gap-0.5" aria-label="Primary">
-          {[...items, chatItem, ...sideItems].map((item: NavItem<Page>) => {
+          {[...items.flatMap((item): NavItem<Page>[] => (item.menu ? item.tabs! : [item])), chatItem, ...sideItems].map((item: NavItem<Page>) => {
             const Icon = item.icon;
             const group = items.find((candidate) => candidate.id === item.id);
-            const active = sideView ? sideView === item.id : (groupOf(currentPage) ?? { id: currentPage }).id === item.id;
+            const active = sideView ? sideView === item.id : currentPage === item.id || (groupOf(currentPage) ?? { id: currentPage }).id === item.id;
             return (
               <button
                 key={item.id}
