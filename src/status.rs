@@ -1179,6 +1179,23 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, light: bool) -> Resu
             }
         }
 
+        if !snapshot.blocked_work_items.is_empty() {
+            println!("Blocked work items:");
+            for b in &snapshot.blocked_work_items {
+                let code = b
+                    .reason_code
+                    .as_deref()
+                    .or(b.reason.as_deref())
+                    .unwrap_or("unknown");
+                println!(
+                    "  - {} [{}]: {}",
+                    b.source_reference.as_deref().unwrap_or("-"),
+                    code,
+                    b.message.as_deref().unwrap_or(&b.kind)
+                );
+            }
+        }
+
         if !snapshot.constraints.is_empty() {
             println!("Constraints:");
             for c in &snapshot.constraints {
