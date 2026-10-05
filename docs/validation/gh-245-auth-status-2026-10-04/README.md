@@ -38,8 +38,9 @@ github.com
 **Two hosts, both with dead tokens**: still exit 0. A multi-host status
 therefore reaches the classifier as a *successful* probe that can carry
 both a `✓ Logged in` account line (valid host) and a credential failure
-(another host) — the shape the classifier must resolve in favor of the
-credential failure.
+(another host). Setup checks github.com only, and only its active
+account decides, so another host's or an inactive account's dead token
+no longer hides a valid login.
 
 **Logged in, valid token** (this machine, gh 2.102.0, account name
 withheld): exit 0, stdout `✓ Logged in to github.com account … (keyring)`
@@ -92,19 +93,22 @@ timeout tests verify recovery semantics only; they do not close this criterion.
 - The `You are not logged into any GitHub Enterprise Server hosts.`
   line used by one defensive regression: no gh between 2.45.0 and
   2.102.0 prints it in `auth status` (checked the tag's `status.go`); it
-  is kept so an unrelated "not logged in" message can never mask a
-  login line.
+  is kept as a defensive regression. The gh classifier reads only the
+  github.com section, so the line cannot mask a login.
 - The desktop rows: typechecked (`tsc --noEmit`), not exercised in a
   running app.
 
 ## Where the regressions live
 
 - `src/auth_health.rs`: `gh_245_auth_status_account_states`,
-  `gh_login_line_does_not_mask_a_credential_failure`.
+  `gh_inactive_dead_account_does_not_hide_the_active_login`,
+  `gh_other_host_failure_does_not_hide_the_login`,
+  `a_logged_out_line_beats_a_login_line_outside_gh`,
+  `glab_401_is_a_rejected_credential`.
 - `src/setup/requirements.rs`: `gh_245_login_states_stay_distinct`,
   `login_states_serialize_distinctly`.
 - `src/setup/wizard.rs`: `a_failed_login_stops_setup_and_says_what_to_do`,
-  `an_unconfirmed_login_is_rechecked_not_logged_in_again`.
+  `an_unconfirmed_login_warns_and_continues`.
 
 ## The failed `gh auth login` inside setup
 
@@ -119,5 +123,6 @@ suspects are an interrupt or a terminal quirk on the tester's side.
 
 Either way, setup no longer continues after a failed login. It stops,
 names the command to run by hand, and says how to resume. A status check
-that fails or is not recognized no longer offers a login at all; setup
-says the login may still be valid and to re-run it to re-check.
+that fails or is not recognized is retried once. If it is still
+unsettled, setup offers no login and does not refuse to build: it warns
+that the login may still be valid and how to re-check it.

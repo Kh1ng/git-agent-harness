@@ -220,7 +220,9 @@ pub struct Requirement {
 
 impl Requirement {
     pub fn blocking(&self) -> bool {
-        !self.optional && !self.status.is_ok()
+        // An unconfirmed login may well be valid (#1324): setup warns about
+        // it instead of refusing to build.
+        !self.optional && !self.status.is_ok() && !self.status.is_unresolved()
     }
 
     /// The requirement that must be in place before this one can be
@@ -286,45 +288,38 @@ fn command_status(
     }
 }
 
-/// A hung login check says nothing about the login (#1324): the 20-second
-/// probe budget can kill `gh auth status` mid-validation on a slow network.
-const LOGIN_CHECK_UNFINISHED: &str = "The login status check did not finish.";
+/// A login check that did not finish says nothing about the login (#1324).
+/// The program already answered `--version`, so `None` means the check
+/// hung past the probe budget or could not start.
+fn unfinished() -> Status {
+    Status::StatusFailed {
+        reason: auth_health::timed_out().detail.unwrap_or_default(),
+    }
+}
 
 fn login_status(host: &dyn Host, program: &str, args: &[&str]) -> Status {
-    let Some(probe) = host.probe(program, args) else {
-        return Status::StatusFailed {
-            reason: LOGIN_CHECK_UNFINISHED.to_string(),
-        };
+    // gh validates its token over the network, which can outlast the
+    // 20-second probe budget on a slow link (#1324), so retry once.
+    let Some(probe) = host
+        .probe(program, args)
+        .or_else(|| host.probe(program, args))
+    else {
+        return unfinished();
     };
-    let health = if program == "claude" {
-        auth_health::classify_claude_status(probe.success, probe.stdout.as_bytes())
-    } else {
-        auth_health::classify_status_output(
-            probe.success,
-            probe.stdout.as_bytes(),
-            probe.stderr.as_bytes(),
-        )
+    let (stdout, stderr) = (probe.stdout.as_bytes(), probe.stderr.as_bytes());
+    let health = match program {
+        "claude" => auth_health::classify_claude_status(probe.success, stdout),
+        "gh" => auth_health::classify_gh_status("github.com", probe.success, stdout, stderr),
+        _ => auth_health::classify_status_output(probe.success, stdout, stderr),
     };
-    let reason = |fallback: &str| {
-        health
-            .detail
-            .clone()
-            .unwrap_or_else(|| fallback.to_string())
-    };
+    // Every classifier explains a state that is not Ok.
+    let reason = health.detail.unwrap_or_default();
     match health.state {
         AuthState::Ok => Status::Ok { found: None },
-        AuthState::Missing => Status::NotLoggedIn {
-            reason: reason("Not logged in."),
-        },
-        AuthState::Expired => Status::CredentialsRejected {
-            reason: reason("The saved login has expired."),
-        },
-        AuthState::Unknown => Status::StatusUnknown {
-            reason: reason("The login status was not recognized."),
-        },
-        AuthState::Error => Status::StatusFailed {
-            reason: reason("The login status command failed."),
-        },
+        AuthState::Missing => Status::NotLoggedIn { reason },
+        AuthState::Expired => Status::CredentialsRejected { reason },
+        AuthState::Unknown => Status::StatusUnknown { reason },
+        AuthState::Error => Status::StatusFailed { reason },
     }
 }
 
@@ -423,9 +418,7 @@ pub fn requirements(selection: &Selection, host: &dyn Host) -> Vec<Requirement> 
                     Some(_) => Status::NotLoggedIn {
                         reason: "Not logged in.".to_string(),
                     },
-                    None => Status::StatusFailed {
-                        reason: LOGIN_CHECK_UNFINISHED.to_string(),
-                    },
+                    None => unfinished(),
                 },
             }
         },
@@ -1018,6 +1011,15 @@ pub(crate) mod tests {
                 reason: "The login status command failed.".into()
             }
         );
+        // A fresh login listed next to an old account whose token is dead.
+        assert_eq!(
+            provider_login(&with_gh(
+                true,
+                "github.com\n  X Failed to log in to github.com account old (keyring)\n  - Active account: false\n  - The token in keyring is invalid.\n\n  ✓ Logged in to github.com account octo (keyring)\n  - Active account: true\n",
+                ""
+            )),
+            Status::Ok { found: None }
+        );
         let hung = FakeHost::new(Os::Linux, Some(PackageManager::Apt)).with(
             "gh --version",
             true,
@@ -1026,7 +1028,7 @@ pub(crate) mod tests {
         assert_eq!(
             provider_login(&hung),
             Status::StatusFailed {
-                reason: "The login status check did not finish.".into()
+                reason: "The login check did not finish.".into()
             }
         );
     }

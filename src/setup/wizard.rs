@@ -485,6 +485,17 @@ impl<'a> Setup<'a> {
             }
         }
         let list = requirements::requirements(selection, self.host);
+        for requirement in list.iter().filter(|r| r.status.is_unresolved()) {
+            if let Status::StatusUnknown { reason } | Status::StatusFailed { reason } =
+                &requirement.status
+            {
+                self.prompter.say(&format!(
+                    "! {}: {reason} The login may still be valid, so setup continues. If GAH later reports a login error, run `{}` again to re-check it.",
+                    requirement.label,
+                    self.again()
+                ));
+            }
+        }
         let blocking: Vec<&Requirement> = list
             .iter()
             .filter(|requirement| requirement.blocking())
@@ -497,22 +508,10 @@ impl<'a> Setup<'a> {
         self.prompter
             .say("Still missing, so nothing was built yet:");
         for requirement in &blocking {
-            let how = match &requirement.status {
-                Status::StatusUnknown { reason } | Status::StatusFailed { reason } => {
-                    Some(format!(
-                        "{reason} The login may still be valid; run `{}` again to re-check it",
-                        self.again()
-                    ))
-                }
-                _ => None,
-            };
-            let how = how
-                .or_else(|| {
-                    requirement
-                        .action
-                        .as_ref()
-                        .map(|action| format!("run `{}`", action.command))
-                })
+            let how = requirement
+                .action
+                .as_ref()
+                .map(|action| format!("run `{}`", action.command))
                 .or_else(|| requirement.help.map(|url| format!("see {url}")))
                 .unwrap_or_else(|| match &requirement.status {
                     Status::Unsupported { reason } => reason.clone(),
@@ -1119,20 +1118,20 @@ mod tests {
         );
     }
 
-    /// Issue #1324: a status check that did not finish says nothing about
-    /// the login, so setup never sends the user through `gh auth login`.
+    /// Issue #1324: a status check that did not settle the login says
+    /// nothing about it, so setup never sends the user through `gh auth
+    /// login` and does not refuse to build; it warns and continues.
     #[test]
-    fn an_unconfirmed_login_is_rechecked_not_logged_in_again() {
+    fn an_unconfirmed_login_warns_and_continues() {
         for gh_status in [None, Some((true, "unrecognized output"))] {
             let (result, prompter, effects) = cli_setup(gh_status, false);
-            let error = result.unwrap_err().to_string();
-            assert!(error.contains("run `/src/target/release/gah setup` again"));
+            result.unwrap();
             assert!(
                 !prompter.asked.iter().any(|q| q.contains("auth login")),
                 "{:?}",
                 prompter.asked
             );
-            assert!(effects.commands.is_empty());
+            assert_eq!(effects.commands.len(), 1, "the build still runs");
             assert!(prompter
                 .said
                 .iter()

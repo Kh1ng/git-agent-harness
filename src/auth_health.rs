@@ -92,6 +92,8 @@ fn said_expired(lower: &str) -> bool {
         "re-authenticate",
         "reauthenticate",
         "failed to log in",
+        "401 unauthorized",
+        "bad credentials",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
@@ -110,11 +112,7 @@ fn said_logged_out(lower: &str) -> bool {
 }
 
 /// Classifies a text `login status`-style command (codex, hermes, gh, glab).
-/// Credential rejection is checked first and stays authoritative: gh 2.45.0
-/// reports a dead token on a command that still exits 0, sometimes next to
-/// another host's `✓ Logged in` line. A login line is only authoritative on
-/// a successful probe, so an unrelated "not logged in" message (a host the
-/// account never signed in to) cannot mask it.
+/// Expiry is checked first: gh reports a dead token next to its account line.
 pub fn classify_status_output(success: bool, stdout: &[u8], stderr: &[u8]) -> AuthHealth {
     let lower = format!(
         "{}\n{}",
@@ -125,11 +123,11 @@ pub fn classify_status_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Au
     if said_expired(&lower) {
         return AuthHealth::new(AuthState::Expired, Some("The saved login has expired."));
     }
-    if success && said_logged_in(&lower) {
-        return AuthHealth::new(AuthState::Ok, None);
-    }
     if said_logged_out(&lower) {
         return AuthHealth::new(AuthState::Missing, Some("Not logged in."));
+    }
+    if success && said_logged_in(&lower) {
+        return AuthHealth::new(AuthState::Ok, None);
     }
     if success {
         AuthHealth::new(
@@ -138,6 +136,55 @@ pub fn classify_status_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Au
         )
     } else {
         AuthHealth::new(AuthState::Error, Some("The login status command failed."))
+    }
+}
+
+/// Classifies `gh auth status` for one host. gh lists every saved account
+/// of every host, so only the host's active account decides (#1324): a
+/// dead token on an inactive account or another host must not hide a
+/// fresh login. Output without that host falls back to the whole text.
+pub fn classify_gh_status(host: &str, success: bool, stdout: &[u8], stderr: &[u8]) -> AuthHealth {
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    // Host headers are unindented; account entries are indented lines
+    // starting with a ✓, X or ! mark, followed by their `- ` details.
+    let mut section: Option<Vec<&str>> = None;
+    let mut entries: Vec<Vec<&str>> = Vec::new();
+    let mut current_host = "";
+    for line in text.lines() {
+        if !line.is_empty() && !line.starts_with(char::is_whitespace) {
+            current_host = line.trim();
+            continue;
+        }
+        if current_host != host {
+            continue;
+        }
+        section.get_or_insert_with(Vec::new).push(line);
+        let trimmed = line.trim_start();
+        if ["✓ ", "X ", "! "]
+            .iter()
+            .any(|mark| trimmed.starts_with(mark))
+        {
+            entries.push(vec![line]);
+        } else if let Some(entry) = entries.last_mut() {
+            entry.push(line);
+        }
+    }
+    let active = entries.iter().find(|entry| {
+        entry
+            .iter()
+            .any(|line| line.trim().eq_ignore_ascii_case("- active account: true"))
+    });
+    match (active, section) {
+        // The entry's own mark decides; the exit code covers every account.
+        (Some(entry), _) => classify_status_output(true, entry.join("\n").as_bytes(), b""),
+        (None, Some(section)) => {
+            classify_status_output(success, section.join("\n").as_bytes(), b"")
+        }
+        (None, None) => classify_status_output(success, stdout, stderr),
     }
 }
 
@@ -244,7 +291,7 @@ fn run(executable: &Path, args: &[&str], env: &[(&str, &Path)]) -> Option<std::p
     crate::runner::process::run_bounded(command, PROBE_TIMEOUT)
 }
 
-fn timed_out() -> AuthHealth {
+pub(crate) fn timed_out() -> AuthHealth {
     AuthHealth::new(AuthState::Error, Some("The login check did not finish."))
 }
 
@@ -294,7 +341,16 @@ fn repository_probe(cli: &str, provider: &str, executable: Option<&Path>) -> Aut
     let health = match executable {
         Some(executable) => run(executable, &["auth", "status"], &[])
             .map(|output| {
-                classify_status_output(output.status.success(), &output.stdout, &output.stderr)
+                if cli == "gh" {
+                    classify_gh_status(
+                        "github.com",
+                        output.status.success(),
+                        &output.stdout,
+                        &output.stderr,
+                    )
+                } else {
+                    classify_status_output(output.status.success(), &output.stdout, &output.stderr)
+                }
             })
             .unwrap_or_else(timed_out),
         None => AuthHealth::new(
@@ -485,9 +541,11 @@ mod tests {
         classify_status_output(success, stdout.as_bytes(), b"").state
     }
 
-    fn full(success: bool, stdout: &str, stderr: &str) -> AuthState {
-        classify_status_output(success, stdout.as_bytes(), stderr.as_bytes()).state
+    fn gh(success: bool, stdout: &str, stderr: &str) -> AuthState {
+        classify_gh_status("github.com", success, stdout.as_bytes(), stderr.as_bytes()).state
     }
+
+    const GH_OK: &str = "  ✓ Logged in to github.com account octo (keyring)\n  - Active account: true\n  - Git operations protocol: https\n  - Token: gho_************\n  - Token scopes: 'gist', 'read:org', 'repo'\n";
 
     #[test]
     fn missing_repository_package_is_not_a_login_failure() {
@@ -514,21 +572,41 @@ mod tests {
         assert_eq!(text(false, ""), AuthState::Error);
     }
 
+    /// The shared classifier keeps "logged out" ahead of a login line, so a
+    /// listing with one logged-out provider never reads as logged in.
     #[test]
-    fn gh_auth_status_output() {
+    fn a_logged_out_line_beats_a_login_line_outside_gh() {
         assert_eq!(
-            text(true, "github.com\n  ✓ Logged in to github.com account octo (keyring)\n  - Active account: true\n"),
-            AuthState::Ok
+            text(true, "openai: ✓ logged in\nanthropic: not logged in\n"),
+            AuthState::Missing
         );
+    }
+
+    /// glab reports a revoked token as an API 401 on a failed command.
+    #[test]
+    fn glab_401_is_a_rejected_credential() {
         assert_eq!(
             text(
                 false,
-                "github.com\n  X Failed to log in to github.com account octo (default)\n  - The token in default is invalid.\n"
+                "gitlab.com\n  x gitlab.com: api call failed: GET https://gitlab.com/api/v4/user: 401 {message: 401 Unauthorized}\n"
+            ),
+            AuthState::Expired
+        );
+    }
+
+    #[test]
+    fn gh_auth_status_output() {
+        assert_eq!(gh(true, &format!("github.com\n{GH_OK}"), ""), AuthState::Ok);
+        assert_eq!(
+            gh(
+                false,
+                "github.com\n  X Failed to log in to github.com account octo (default)\n  - The token in default is invalid.\n",
+                ""
             ),
             AuthState::Expired
         );
         assert_eq!(
-            full(
+            gh(
                 false,
                 "",
                 "You are not logged into any GitHub hosts. To log in, run: gh auth login\n"
@@ -536,9 +614,10 @@ mod tests {
             AuthState::Missing
         );
         assert_eq!(
-            text(
+            gh(
                 true,
-                "github.com\n  ✓ Logged in to github.com account octo (keyring)\n\nYou are not logged into any GitHub Enterprise Server hosts.\n"
+                &format!("github.com\n{GH_OK}\nYou are not logged into any GitHub Enterprise Server hosts.\n"),
+                ""
             ),
             AuthState::Ok
         );
@@ -550,16 +629,9 @@ mod tests {
     /// stderr only; a validation timeout is neither Ok nor a rejection.
     #[test]
     fn gh_245_auth_status_account_states() {
+        assert_eq!(gh(true, &format!("github.com\n{GH_OK}"), ""), AuthState::Ok);
         assert_eq!(
-            full(
-                true,
-                "github.com\n  ✓ Logged in to github.com account octo (keyring)\n  - Active account: true\n  - Git operations protocol: https\n  - Token: gho_************\n  - Token scopes: 'gist', 'read:org', 'repo'\n",
-                ""
-            ),
-            AuthState::Ok
-        );
-        assert_eq!(
-            full(
+            gh(
                 true,
                 "github.com\n  X Failed to log in to github.com account octo (keyring)\n  - Active account: true\n  - The token in keyring is invalid.\n  - To re-authenticate, run: gh auth login -h github.com\n  - To forget about this account, run: gh auth logout -h github.com -u octo\n",
                 ""
@@ -567,28 +639,51 @@ mod tests {
             AuthState::Expired
         );
         assert_eq!(
-            full(
+            gh(
                 true,
                 "github.com\n  X Timeout trying to log in to github.com account octo (keyring)\n  - Active account: true\n",
                 ""
             ),
             AuthState::Unknown
         );
-        assert_eq!(full(false, "", ""), AuthState::Error);
+        assert_eq!(gh(false, "", ""), AuthState::Error);
     }
 
-    /// Issue #1324: gh 2.45.0 still exits 0 when one host is logged in and
-    /// another host's token is dead; the credential failure, not the login
-    /// line, decides the state.
+    /// Issue #1324: a fresh login next to an old account whose token is
+    /// dead. Only the active account decides, in either order.
     #[test]
-    fn gh_login_line_does_not_mask_a_credential_failure() {
+    fn gh_inactive_dead_account_does_not_hide_the_active_login() {
+        let dead = "  X Failed to log in to github.com account old (keyring)\n  - Active account: false\n  - The token in keyring is invalid.\n  - To re-authenticate, run: gh auth login -h github.com\n";
         assert_eq!(
-            full(
+            gh(true, &format!("github.com\n{GH_OK}\n{dead}"), ""),
+            AuthState::Ok
+        );
+        assert_eq!(
+            gh(false, &format!("github.com\n{dead}\n{GH_OK}"), ""),
+            AuthState::Ok
+        );
+        let dead_active = dead.replace("Active account: false", "Active account: true");
+        let ok_inactive = GH_OK.replace("Active account: true", "Active account: false");
+        assert_eq!(
+            gh(
                 true,
-                "github.com\n  ✓ Logged in to github.com account octo (keyring)\n  - Active account: true\n  - Git operations protocol: https\n  - Token: gho_************\n  - Token scopes: 'gist', 'read:org', 'repo'\n\nghe.example.com\n  X Failed to log in to ghe.example.com account octo (keyring)\n  - Active account: true\n  - The token in keyring is invalid.\n",
+                &format!("github.com\n{ok_inactive}\n{dead_active}"),
                 ""
             ),
             AuthState::Expired
+        );
+    }
+
+    /// Another host's dead token says nothing about github.com.
+    #[test]
+    fn gh_other_host_failure_does_not_hide_the_login() {
+        assert_eq!(
+            gh(
+                true,
+                &format!("github.com\n{GH_OK}\nghe.example.com\n  X Failed to log in to ghe.example.com account octo (keyring)\n  - Active account: true\n  - The token in keyring is invalid.\n"),
+                ""
+            ),
+            AuthState::Ok
         );
     }
 
