@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use std::collections::HashSet;
 use std::env;
+use std::io::{self, IsTerminal, Write};
 use std::ffi::OsString;
 use std::fs::{copy, create_dir_all, read_dir, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
@@ -15,8 +16,46 @@ use std::process::Command;
 
 pub use crate::node_role::NodeRole as HostRole;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum UpdateAgent {
+    Claude,
+    Codex,
+    Opencode,
+    Vibe,
+}
+
+impl UpdateAgent {
+    fn installs_opencode(self) -> bool { self == Self::Opencode }
+    fn needs_quota_timer(self) -> bool { matches!(self, Self::Codex | Self::Vibe) }
+}
+
+fn update_changes(args: &UpdateArgs, repo: &Path) -> Vec<String> {
+    let mut changes = Vec::new();
+    if args.pull { changes.push(format!("Fetch and fast-forward the checkout at {}", repo.display())); }
+    changes.push("Install the gah executable in the Cargo bin directory".into());
+    if args.agent.is_some_and(UpdateAgent::installs_opencode) {
+        changes.push("Install OpenCode agent files in ~/.config/opencode/agents".into());
+    }
+    if args.agent.is_some_and(UpdateAgent::needs_quota_timer) {
+        changes.push("Install and enable the Codex/Vibe quota refresh timer in user systemd".into());
+    }
+    if args.role == HostRole::Central {
+        changes.extend([
+            "Install npm dependencies and build the server, MCP server, and dashboard".into(),
+            "Use sudo to install the server unit in /etc/systemd/system; install and enable the user prune timer".into(),
+            "Use sudo to deploy the dashboard to GAH_WEB_DEPLOY_ROOT (default /var/www/gah)".into(),
+        ]);
+    }
+    changes.push("Install the dispatch loop and watchdog user units".into());
+    if args.restart_server { changes.push(format!("Use sudo to restart {}", args.server_service)); }
+    changes
+}
+
 pub struct UpdateArgs {
     pub repo: Option<PathBuf>,
+    pub pull: bool,
+    pub agent: Option<UpdateAgent>,
+    pub yes: bool,
     pub role: HostRole,
     pub restart_server: bool,
     pub server_service: String,
@@ -35,13 +74,29 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         ensure_no_running_loop_before_server_restart()?;
     }
 
-    println!("Updating GAH CLI/control plane from {}", repo.display());
-    run_command(&repo, "git", &["fetch", "origin", "--prune"])?;
-    run_command(&repo, "git", &["pull", "--ff-only"])?;
+    let changes = update_changes(&args, &repo);
+    println!("Updating GAH from {}. Changes:", repo.display());
+    for change in &changes { println!("  - {change}"); }
+    if !args.yes {
+        if !io::stdin().is_terminal() {
+            bail!("gah update needs confirmation in a terminal, or pass --yes after reviewing the listed changes");
+        }
+        print!("Apply these changes? [y/N] ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            bail!("Update cancelled");
+        }
+    }
+    if args.pull {
+        run_command(&repo, "git", &["fetch", "origin", "--prune"])?;
+        run_command(&repo, "git", &["pull", "--ff-only"])?;
+    }
 
     // This is the authoritative CLI deployment step. It replaces the Cargo
     // executable selected by PATH, unlike a target/release-only build.
-    run_command(&repo, "cargo", &["install", "--path", ".", "--force"])?;
+    run_command(&repo, "cargo", &["install", "--path", ".", "--bin", "gah", "--force"])?;
 
     let binary = installed_binary_path()?;
     if !binary.is_file() {
@@ -53,8 +108,10 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     run_command(&repo, binary.to_string_lossy().as_ref(), &["--help"])?;
     println!("Installed CLI: {}", binary.display());
 
-    for agent in copy_opencode_agent_configs(&repo, &user_config_home()?)? {
-        println!("Installed OpenCode agent: {}", agent.display());
+    if args.agent.is_some_and(UpdateAgent::installs_opencode) {
+        for agent in copy_opencode_agent_configs(&repo, &user_config_home()?)? {
+            println!("Installed OpenCode agent: {}", agent.display());
+        }
     }
 
     if cfg!(target_os = "macos") && args.role == HostRole::Worker {
@@ -198,7 +255,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         }
         None => println!("systemd not available on this host: skipping watchdog unit install."),
     }
-    match install_quota_refresh_unit_template(&repo)? {
+    if args.agent.is_some_and(UpdateAgent::needs_quota_timer) { match install_quota_refresh_unit_template(&repo)? {
         Some(quota_refresh_units) => {
             for unit in &quota_refresh_units {
                 println!("Installed quota refresh unit: {}", unit.display());
@@ -212,7 +269,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         None => {
             println!("systemd not available on this host: skipping quota refresh unit install.")
         }
-    }
+    } }
 
     if args.restart_server && cfg!(target_os = "macos") {
         let script = repo.join("scripts/macos-launchd.sh");
@@ -821,7 +878,8 @@ mod tests {
         copy_opencode_agent_configs, ensure_clean, ensure_default_branch_checkout,
         install_prune_unit_template, install_quota_refresh_unit_template,
         install_server_unit_template, install_watchdog_unit_template, installed_binary_path,
-        resolve_web_deploy_root, run, stale_asset_names, HostRole, UpdateArgs, WEB_BUILD_ARGS,
+        resolve_web_deploy_root, run, stale_asset_names, update_changes, HostRole, UpdateAgent,
+        UpdateArgs, WEB_BUILD_ARGS,
     };
     use crate::test_support::PathGuard;
     use std::collections::HashSet;
@@ -1100,12 +1158,36 @@ mod tests {
     fn worker_role_rejects_restart_server_flag() {
         let err = run(UpdateArgs {
             repo: None,
+            pull: false,
+            agent: None,
+            yes: true,
             role: HostRole::Worker,
             restart_server: true,
             server_service: "gah-server.service".into(),
         })
         .unwrap_err();
         assert!(err.to_string().contains("--role central"));
+    }
+
+    #[test]
+    fn claude_only_update_excludes_other_agents_and_checkout_changes() {
+        let args = UpdateArgs {
+            repo: None,
+            pull: false,
+            agent: Some(UpdateAgent::Claude),
+            yes: true,
+            role: HostRole::Central,
+            restart_server: false,
+            server_service: "gah-server.service".into(),
+        };
+        let changes = update_changes(&args, Path::new("/checkout")).join("\n");
+        assert!(!changes.contains("Fetch"));
+        assert!(!changes.contains("OpenCode"));
+        assert!(!changes.contains("quota refresh"));
+        assert!(!args.agent.is_some_and(UpdateAgent::installs_opencode));
+        assert!(!args.agent.is_some_and(UpdateAgent::needs_quota_timer));
+        assert!(changes.contains("/etc/systemd/system"));
+        assert!(changes.contains("/var/www/gah"));
     }
 
     /// Issue #894: `gah update` (central role) reinstalls the system-level

@@ -485,7 +485,7 @@ impl<'a> Setup<'a> {
         let source = self.options.source.clone();
         let (command, what) = match selection.role {
             Role::CliOnly => (
-                "cargo install --path . --force".to_string(),
+                "cargo install --path . --bin gah --force".to_string(),
                 "Build and install the gah command",
             ),
             Role::Central | Role::Worker => (
@@ -494,6 +494,24 @@ impl<'a> Setup<'a> {
             ),
         };
         self.prompter.say("");
+        self.prompter.say("The install will make these changes:");
+        self.prompter.say("  - Install the gah command in the Cargo bin directory; leave the source checkout unchanged.");
+        if selection.role != Role::CliOnly {
+            self.prompter.say("  - Install dispatch loop and watchdog user service units.");
+            if selection.role == Role::Central {
+                self.prompter.say("  - Install npm dependencies and build the server, MCP server, and dashboard.");
+                self.prompter.say("  - Use sudo to write /etc/gah/server.env and /etc/systemd/system/gah-server.service, then enable the server and prune timer.");
+                self.prompter.say("  - Use sudo to deploy the dashboard to GAH_WEB_DEPLOY_ROOT (default /var/www/gah).");
+            }
+            match selection.agent {
+                Agent::Opencode => self.prompter.say("  - Install OpenCode files in ~/.config/opencode/agents."),
+                Agent::Codex => self.prompter.say("  - Install and enable the Codex quota refresh timer."),
+                Agent::Claude => {}
+            }
+            if selection.memory != MemoryMode::Off {
+                self.prompter.say("  - Configure the selected memory gateway and its service or credentials.");
+            }
+        }
         if !self.ask_confirm(
             &format!("{what} now? The first build takes several minutes."),
             true,
@@ -512,6 +530,7 @@ impl<'a> Setup<'a> {
             }
             .to_string(),
         ));
+        variables.push(("GAH_SELECTED_AGENT", selection.agent.command().to_string()));
         if !self.effects.run(&command, Some(&source), &variables) {
             bail!("The install did not finish. Its output above says why; fix that and run `{}` again.", self.again());
         }
@@ -754,6 +773,9 @@ mod tests {
         let (command, env) = &effects.commands[0];
         assert_eq!(command, "scripts/install.sh");
         assert!(env.contains(&("GAH_NODE_ROLE".into(), "central".into())));
+        assert!(env.contains(&("GAH_SELECTED_AGENT".into(), "claude".into())));
+        assert!(prompter.said.iter().any(|line| line.contains("/var/www/gah")));
+        assert!(prompter.said.iter().any(|line| line.contains("/etc/systemd/system")));
         assert!(
             prompter
                 .said

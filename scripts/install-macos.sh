@@ -67,7 +67,7 @@ elif [ -n "${GAH_GATEWAY_MODE:-}" ]; then
 fi
 
 bash "$repo_root/scripts/configure-node-role.sh" "$role" "${gah_cli[@]}"
-cargo run --bin gah -- update --repo "$repo_root" --role "$role"
+cargo run --bin gah -- update --repo "$repo_root" --role "$role" --agent "${GAH_SELECTED_AGENT:-claude}" --yes
 
 if [ "$role" = central ] && [ "${GAH_GATEWAY_MODE:-}" = colocated ]; then
   gateway_ready=0
@@ -81,11 +81,7 @@ if [ "$role" = central ] && [ "${GAH_GATEWAY_MODE:-}" = colocated ]; then
   [ "$gateway_ready" = 1 ] || { echo 'ERROR: the macOS memory-gateway LaunchAgent did not become healthy. Read ~/.local/state/gah/memory-gateway.log.' >&2; exit 1; }
 fi
 
-if command -v tailscale >/dev/null 2>&1; then
-  tailscale set --accept-dns=true
-else
-  echo 'WARNING: Tailscale is not installed; join the tailnet, then enable Use Tailscale DNS settings.' >&2
-fi
+echo 'To use tailnet DNS, run: tailscale set --accept-dns=true'
 
 gateway_env_file="$HOME/.config/gah/gah-loop.env"
 

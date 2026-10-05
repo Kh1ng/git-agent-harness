@@ -1298,13 +1298,15 @@ fn install_linux_prefers_the_tailnet_bind_host() {
 }
 
 #[test]
-fn installers_enable_tailscale_dns_when_available() {
+fn installers_leave_tailscale_dns_to_the_user() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for script_path in ["scripts/install-linux.sh", "scripts/install-macos.sh"] {
         let script = fs::read_to_string(repo_root.join(script_path)).unwrap();
         assert!(
             script.contains("tailscale set --accept-dns=true"),
-            "{script_path} must enable the per-device MagicDNS preference"
+            "{script_path} must explain the optional per-device MagicDNS preference"
         );
+        assert!(!script.contains("\n  tailscale set --accept-dns=true"));
+        assert!(!script.contains("\n  sudo tailscale set --accept-dns=true"));
     }
 }

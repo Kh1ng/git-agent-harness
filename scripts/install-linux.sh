@@ -27,15 +27,11 @@ esac
 # (generate-cli-capabilities) with no default-run set, so a bare
 # `cargo run` is ambiguous and errors instead of picking one.
 bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --bin gah --
-cargo run --bin gah -- update --repo "$repo_root" --role "$role"
+cargo run --bin gah -- update --repo "$repo_root" --role "$role" --agent "${GAH_SELECTED_AGENT:-claude}" --yes
 
 # MagicDNS is useful only when this client accepts the tailnet DNS settings.
 # The tailnet-wide toggle still belongs to the Tailscale admin console.
-if command -v tailscale >/dev/null 2>&1; then
-  sudo tailscale set --accept-dns=true
-else
-  echo 'WARNING: Tailscale is not installed; join the tailnet, then run tailscale set --accept-dns=true.' >&2
-fi
+echo 'To use tailnet DNS, run: sudo tailscale set --accept-dns=true'
 
 # Persistent server bind-host override (issue #643). Created only on first
 # install; every later run of this script, and every `gah update

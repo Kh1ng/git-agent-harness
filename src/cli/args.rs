@@ -190,6 +190,15 @@ pub enum Commands {
         /// Repository checkout to update (defaults to the current checkout).
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Fetch and fast-forward the checkout before building (opt in).
+        #[arg(long, default_value_t = false)]
+        pull: bool,
+        /// Install files for this agent; omit to leave agent-specific files alone.
+        #[arg(long, value_enum)]
+        agent: Option<crate::update::UpdateAgent>,
+        /// Accept the listed update changes without an interactive prompt.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
         /// "central" (builds/serves the control plane, default) or "worker"
         /// (CLI + dispatch loop only -- never builds apps/server or touches
         /// gah-server.service).
