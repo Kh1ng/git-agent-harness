@@ -173,6 +173,15 @@ impl Status {
     pub fn is_ok(&self) -> bool {
         matches!(self, Status::Ok { .. })
     }
+
+    /// The login check did not settle the login either way (#1324), so the
+    /// fix is to check again, not to log in again.
+    pub fn is_unresolved(&self) -> bool {
+        matches!(
+            self,
+            Status::StatusUnknown { .. } | Status::StatusFailed { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

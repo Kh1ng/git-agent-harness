@@ -77,3 +77,21 @@ existing login instead of reporting it missing.
   `gh_login_line_does_not_mask_a_credential_failure`.
 - `src/setup/requirements.rs`: `gh_245_login_states_stay_distinct`,
   `login_states_serialize_distinctly`.
+- `src/setup/wizard.rs`: `a_failed_login_stops_setup_and_says_what_to_do`,
+  `an_unconfirmed_login_is_rechecked_not_logged_in_again`.
+
+## The failed `gh auth login` inside setup
+
+The transcript shows setup's own `gh auth login` printing its first menu,
+then failing with no visible keypress. The cause was not reproduced. gh
+2.45.0 was run the way `SystemEffects::run` runs it: `sh -c` with
+inherited stdio, under a pseudo-terminal, right after a line-buffered
+`[Y/n]` answer. The menu waited for input. An extra buffered newline or
+CR/LF only accepted the defaults, and `GH_TOKEN` in the environment did
+not fail the menu either. Without the raw transcript, the remaining
+suspects are an interrupt or a terminal quirk on the tester's side.
+
+Either way, setup no longer continues after a failed login. It stops,
+names the command to run by hand, and says how to resume. A status check
+that fails or is not recognized no longer offers a login at all; setup
+says the login may still be valid and to re-run it to re-check.
