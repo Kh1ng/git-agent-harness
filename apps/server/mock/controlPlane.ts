@@ -46,6 +46,7 @@ import type {
   ManagerCommandInfo,
   ManagerModelsSummary,
   ProfileSummary,
+  WorkerScalingSettings,
   ProjectImportResult,
   QuotaSnapshot,
   ReportData,
@@ -1395,6 +1396,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       manager_wake_autonomy: req.body.manager_wake_autonomy ?? 'off',
       delivery_mode: 'pr',
       validation_timeout_seconds: typeof req.body.validation_timeout_seconds === 'number' ? req.body.validation_timeout_seconds : 300,
+      worker_scaling: mockWorkerScaling(undefined, {}, []),
       chat_session_idle_days: 14
     } satisfies ProfileSummary);
     res.status(201).json({ success: true, message: `Profile '${name}' added` });
@@ -1413,6 +1415,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       ...(bodyString(req.body?.local_path) ? { local_path: req.body.local_path as string } : {}),
       ...(typeof req.body?.max_parallel_workers === 'number' ? { max_parallel_workers: req.body.max_parallel_workers } : {}),
       ...(typeof req.body?.manager_wake_autonomy === 'string' ? { manager_wake_autonomy: req.body.manager_wake_autonomy } : {}),
+      worker_scaling: mockWorkerScaling(current.worker_scaling, req.body ?? {}, clear),
       ...(typeof req.body?.validation_timeout_seconds === 'number'
         ? { validation_timeout_seconds: req.body.validation_timeout_seconds }
         : clear.includes('validation_timeout_seconds') ? { validation_timeout_seconds: 300 } : {})
@@ -2084,4 +2087,29 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       };
     }
   };
+}
+
+/** Mirrors `gah profile set`'s worker scaling and boost flags. */
+function mockWorkerScaling(
+  current: WorkerScalingSettings | undefined,
+  body: Record<string, unknown>,
+  clear: string[],
+): WorkerScalingSettings {
+  const next: WorkerScalingSettings = { enabled: false, extra_per_model: 1, min_remaining_percent: 50, ...current };
+  if (typeof body.worker_scaling === 'string') next.enabled = body.worker_scaling === 'on';
+  if (typeof body.worker_scaling_max_workers === 'number') next.max_workers = body.worker_scaling_max_workers;
+  else if (clear.includes('worker_scaling_max_workers')) delete next.max_workers;
+  if (typeof body.worker_scaling_extra_per_model === 'number') next.extra_per_model = body.worker_scaling_extra_per_model;
+  if (typeof body.worker_scaling_min_remaining_percent === 'number') next.min_remaining_percent = body.worker_scaling_min_remaining_percent;
+  if (typeof body.boost_workers === 'number' || clear.includes('worker_boost')) {
+    delete next.boost_workers;
+    delete next.boost_model;
+    delete next.boost_until;
+  }
+  if (typeof body.boost_workers === 'number') {
+    next.boost_workers = body.boost_workers;
+    if (typeof body.boost_model === 'string') next.boost_model = body.boost_model;
+    if (typeof body.boost_hours === 'number') next.boost_until = new Date(Date.now() + body.boost_hours * 3_600_000).toISOString();
+  }
+  return next;
 }

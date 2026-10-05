@@ -132,6 +132,7 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 hermes_idle_timeout_seconds: None,
                 max_parallel_workers,
                 max_open_managed_mrs,
+                worker_scaling: Default::default(),
                 notify_command,
                 manager_wake_autonomy: match &manager_wake_autonomy {
                     Some(v) => parse_wake_autonomy(v)?,
@@ -201,6 +202,13 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             validation_timeout_seconds,
             manager_wake_autonomy,
             delivery_mode,
+            worker_scaling,
+            worker_scaling_max_workers,
+            worker_scaling_extra_per_model,
+            worker_scaling_min_remaining_percent,
+            boost_workers,
+            boost_model,
+            boost_hours,
             clear,
         } => {
             let mut cfg = config::load(config_path.as_deref())?;
@@ -410,6 +418,32 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 existing.delivery_mode = config::DeliveryMode::default();
             }
 
+            let scaling = &mut existing.worker_scaling;
+            if let Some(v) = &worker_scaling {
+                scaling.enabled = parse_on_off("worker_scaling", v)?;
+            }
+            if let Some(v) = worker_scaling_max_workers {
+                scaling.max_workers = Some(v);
+            } else if should_clear("worker_scaling_max_workers", &clear) {
+                scaling.max_workers = None;
+            }
+            if let Some(v) = worker_scaling_extra_per_model {
+                scaling.extra_per_model = v;
+            }
+            if let Some(v) = worker_scaling_min_remaining_percent {
+                if !(0.0..=100.0).contains(&v) {
+                    anyhow::bail!("worker_scaling_min_remaining_percent must be between 0 and 100");
+                }
+                scaling.min_remaining_percent = v;
+            }
+            if let Some(workers) = boost_workers {
+                scaling.boost_workers = workers;
+                scaling.boost_model = boost_model;
+                scaling.boost_until = boost_hours.map(boost_expiry).transpose()?;
+            } else if should_clear("worker_boost", &clear) {
+                scaling.clear_boost();
+            }
+
             config::save(&cfg, config_path.as_deref())?;
             println!("Updated profile '{}'", name);
         }
@@ -430,4 +464,23 @@ pub fn run(command: ProfileCommands) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn parse_on_off(field: &str, value: &str) -> Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "on" | "true" => Ok(true),
+        "off" | "false" => Ok(false),
+        other => anyhow::bail!("invalid {field} '{other}' (expected on | off)"),
+    }
+}
+
+/// RFC 3339 time `hours` from now, the `WorkerScaling::boost_until` spelling.
+fn boost_expiry(hours: f64) -> Result<String> {
+    if !hours.is_finite() || hours <= 0.0 {
+        anyhow::bail!("boost_hours must be greater than zero");
+    }
+    let until = time::OffsetDateTime::now_utc() + time::Duration::seconds_f64(hours * 3600.0);
+    Ok(until
+        .replace_nanosecond(0)?
+        .format(&time::format_description::well_known::Rfc3339)?)
 }

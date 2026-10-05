@@ -12,6 +12,7 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState } from '../components/ui/EmptyState.js';
 import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
 import { ProfileEditor } from '../components/ProfileEditor.js';
+import { WorkerScalingSection } from '../components/WorkerScalingSection.js';
 import { SkillBankSettingsSection } from '../components/SkillBankSettingsSection.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
@@ -316,6 +317,7 @@ export function SettingsPage() {
             profileLoading={profiles.loading}
             profileError={profiles.error}
           />
+          {selected && <WorkerScalingSection selectedName={selectedName} selected={selected} />}
           <ProfileConfigViewerSection
             selectedName={selectedName}
             profileConfig={profileConfig}

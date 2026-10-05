@@ -1280,6 +1280,7 @@ mod tests {
             hermes_idle_timeout_seconds: None,
             max_parallel_workers: None,
             max_open_managed_mrs: None,
+            worker_scaling: Default::default(),
             notify_command: None,
             policy_path: None,
             env_file: None,

@@ -962,6 +962,15 @@ export interface ProfileSetOptions {
   manager_wake_autonomy?: string | null;
   /** Validation command timeout in seconds. */
   validation_timeout_seconds?: number | null;
+  /** Automatic worker scaling: 'on' | 'off'. */
+  worker_scaling?: string | null;
+  worker_scaling_max_workers?: number | null;
+  worker_scaling_extra_per_model?: number | null;
+  worker_scaling_min_remaining_percent?: number | null;
+  /** Replaces any earlier boost; `clear: ['worker_boost']` ends it. */
+  boost_workers?: number | null;
+  boost_model?: string | null;
+  boost_hours?: number | null;
   clear?: string[];
   config?: string;
 }
@@ -1061,6 +1070,18 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
     args.push('--manager-wake-autonomy', options.manager_wake_autonomy);
   } else if (options.clear?.includes('manager_wake_autonomy')) {
     args.push('--clear', 'manager_wake_autonomy');
+  }
+  const scalingFlags = [
+    ['--worker-scaling', options.worker_scaling],
+    ['--worker-scaling-max-workers', options.worker_scaling_max_workers],
+    ['--worker-scaling-extra-per-model', options.worker_scaling_extra_per_model],
+    ['--worker-scaling-min-remaining-percent', options.worker_scaling_min_remaining_percent],
+    ['--boost-workers', options.boost_workers],
+    ['--boost-model', options.boost_model],
+    ['--boost-hours', options.boost_hours],
+  ] as const;
+  for (const [flag, value] of scalingFlags) {
+    if (value !== undefined && value !== null && value !== '') args.push(flag, String(value));
   }
   appendClearArgs(
     args,
