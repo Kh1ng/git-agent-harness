@@ -113,3 +113,54 @@ fn private_record_cannot_return_its_value_as_display_metadata() {
     let error = list_at(&root).unwrap_err();
     assert!(!format!("{error:#}").contains("synthetic-value"));
 }
+
+fn mistral_login_info(id: &str) -> CredentialInfo {
+    CredentialInfo {
+        id: id.into(),
+        provider: "mistral".into(),
+        kind: CredentialKind::MistralLogin,
+        account_label: "Mistral console".into(),
+        env_var: None,
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn mistral_login_session_is_cached_per_revision_and_never_executes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("credentials");
+    let login = r#"{"email":"owner@example.com","password":"synthetic-pass"}"#;
+    for invalid in [
+        "synthetic-pass",
+        r#"{"email":"owner@example.com"}"#,
+        r#"{"email":"not-an-email","password":"x"}"#,
+        r#"{"email":"owner@example.com","password":"x","extra":1}"#,
+    ] {
+        assert!(
+            save_at(&root, mistral_login_info("console"), invalid).is_err(),
+            "{invalid}"
+        );
+    }
+    let mut with_env = mistral_login_info("console");
+    with_env.env_var = Some("MISTRAL_API_KEY".into());
+    assert!(save_at(&root, with_env, login).is_err());
+
+    save_at(&root, mistral_login_info("console"), login).unwrap();
+    let first = read_at(&root, "console").unwrap();
+    cache_session_at(&root, "console", &first.revision, "ory_session_a=1").unwrap();
+    let cached = read_at(&root, "console").unwrap();
+    assert_eq!(cached.revision, first.revision, "caching is not a rotation");
+    assert_eq!(cached.session.as_deref(), Some("ory_session_a=1"));
+    assert!(!serde_json::to_string(&list_at(&root).unwrap())
+        .unwrap()
+        .contains("synthetic"));
+
+    // A new password drops the old session and rejects a stale publication.
+    save_at(&root, mistral_login_info("console"), login).unwrap();
+    assert_eq!(read_at(&root, "console").unwrap().session, None);
+    assert!(cache_session_at(&root, "console", &first.revision, "ory_session_b=2").is_err());
+    assert_eq!(read_at(&root, "console").unwrap().session, None);
+
+    assert!(execution_env_with(mistral_login_info("console"), login.into(), "mistral").is_err());
+    assert!(execution_env_with(mistral_login_info("console"), login.into(), "vibe").is_err());
+}

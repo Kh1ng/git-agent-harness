@@ -51,9 +51,18 @@ jobs:
         working-directory: apps/desktop
         run: npx vite build
 
-      - name: Build DMG
-        working-directory: apps/desktop
-        run: npx tauri build --bundles dmg
+      - name: Test release signing gate
+        run: node --test scripts/build-signed-macos.test.mjs
+
+      - name: Build and verify signed, notarized DMG
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash scripts/build-signed-macos.sh
 
       - name: Publish GitHub Release
         env:
@@ -69,7 +78,7 @@ jobs:
           fi
           gh release create "$tag" "$dmg" \
             --title "GAH Worker — $tag" \
-            --notes "macOS DMG (unsigned — right-click → Open to bypass Gatekeeper on first launch). Built from ${{ github.ref }}." \
+            --notes "macOS DMG signed with Developer ID and notarized by Apple. Built from ${{ github.ref }}." \
             --repo "${{ github.repository }}" || \
           gh release upload "$tag" "$dmg" --clobber \
             --repo "${{ github.repository }}"

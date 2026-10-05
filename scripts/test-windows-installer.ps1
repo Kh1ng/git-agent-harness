@@ -140,3 +140,5 @@ try {
     Remove-Item Function:\Invoke-WebRequest
 } finally { Remove-Item -LiteralPath $bundle -Recurse -Force }
 Write-Host 'Artifact checks passed: matching revisions, checksums, malformed bundles, local copies, unchanged online downloads.'
+
+& (Join-Path $PSScriptRoot 'test-windows-setup.ps1')
