@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import { ArrowUpDown, FlaskConical } from 'lucide-react';
-import type { BackendModelComparison, ExportHealth, HelperUsageRecord, ReportGroupBy, UsageRollupSummary } from '@git-agent-harness/contracts';
+import type { BackendModelComparison, ExportHealth, HelperUsageRecord, QuotaSnapshot, ReportGroupBy, UsageRollupSummary } from '@git-agent-harness/contracts';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -8,6 +8,7 @@ import { gahApi } from '../api/client.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
+import { ModelFitCard } from '../components/ModelFitCard.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { StatusBadge, type StatusTone } from '../components/ui/StatusBadge.js';
 import { TrendChart } from '../components/TrendChart.js';
@@ -335,19 +336,53 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
   );
 }
 
-/** The most recently observed quota_used_percent for a comparison row, or
- * null if the backend/model has never reported one. A row can carry
- * multiple quota_observations (different windows, e.g. "5-hour" vs
- * "weekly") -- most recent by observed_at wins, matching how QuotaPage
- * already resolves the same ambiguity per scope. Subscription backends
- * (agy, codex/claude CLI) have no real per-token $ cost, so this is the
- * metric that actually means something for them -- cost columns stay for
- * backends that do have one (e.g. metered API usage). */
-function latestQuotaUsedPercent(row: BackendModelComparison): { percent: number; window: string | null } | null {
-  const withPercent = (row.quota_observations ?? []).filter((q) => q.quota_used_percent !== null && q.quota_used_percent !== undefined);
-  if (withPercent.length === 0) return null;
-  const latest = withPercent.reduce((a, b) => ((b.observed_at ?? '') > (a.observed_at ?? '') ? b : a));
-  return { percent: latest.quota_used_percent as number, window: latest.quota_window ?? null };
+/** #1339: resolve one account quota reading for a comparison row from the
+ * quota snapshot's checks. Each check is the latest reading of one source
+ * identity (Claude, Codex, named instances, Nous, the Mistral dashboard,
+ * router accounts), so this surfaces every configured account instead of
+ * only legacy unscoped rows. A remaining-only reading (CLI router) renders
+ * as 100 - remaining. Account quota is only ever taken from the snapshot;
+ * it is never re-derived from ledger groups. */
+function latestRowQuotaPercent(
+  checks: QuotaSnapshot['quota_checks'] | undefined,
+  row: BackendModelComparison,
+): { percent: number; window: string | null } | null {
+  const resolve = (used: number | null | undefined, remaining: number | null | undefined) =>
+    typeof used === 'number' && Number.isFinite(used)
+      ? used
+      : typeof remaining === 'number' && Number.isFinite(remaining)
+        ? 100 - remaining
+        : null;
+
+  // Backend rows map to a source identity; model rows have none.
+  if (!row.is_model) {
+    let snapshot: { percent: number; window: string | null; at: string } | null = null;
+    for (const check of checks ?? []) {
+      if (check.status !== 'data' || check.backend !== row.backend_or_model) continue;
+      const at = check.checked_at ?? '';
+      for (const observation of check.quota_observations ?? []) {
+        const percent = resolve(observation.quota_used_percent, observation.quota_remaining_percent);
+        if (percent === null || percent < 0 || percent > 100) continue;
+        if (!snapshot || at >= snapshot.at) {
+          snapshot = { percent, window: observation.quota_window ?? null, at };
+        }
+      }
+    }
+    if (snapshot) return { percent: snapshot.percent, window: snapshot.window };
+  }
+
+  // Attempt-derived readings attached to the report row itself (e.g. AGY's
+  // per-attempt allowance), used when the snapshot has no account reading
+  // for this row.
+  const rowReadings = (row.quota_observations ?? [])
+    .map((q) => {
+      const percent = resolve(q.quota_used_percent, q.quota_remaining_percent);
+      return percent === null ? null : { percent, window: q.quota_window ?? null, at: q.observed_at ?? '' };
+    })
+    .filter((q): q is { percent: number; window: string | null; at: string } => q !== null);
+  if (rowReadings.length === 0) return null;
+  const latest = rowReadings.reduce((a, b) => (b.at > a.at ? b : a));
+  return { percent: latest.percent, window: latest.window };
 }
 
 function SortHeader({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
@@ -403,6 +438,8 @@ export function TelemetryPage() {
   const fetchReport = useGahStore((s) => s.fetchReport);
   const reportSeries = useGahStore((s) => s.reportSeries);
   const fetchReportSeries = useGahStore((s) => s.fetchReportSeries);
+  const quota = useGahStore((s) => s.quota);
+  const fetchQuota = useGahStore((s) => s.fetchQuota);
   const status = useGahStore((s) => s.status);
   const fetchStatus = useGahStore((s) => s.fetchStatus);
   const trend = reportSeries.data?.series ?? [];
@@ -419,6 +456,7 @@ export function TelemetryPage() {
   useEffect(() => {
     fetchReport({ profile: profile ?? undefined, since: '7d', groupBy }, { force: true });
     fetchReportSeries({ profile: profile ?? undefined, since: '14d', bucket: 'daily' }, { force: true });
+    fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
     fetchStatus(profile ?? undefined, { force: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupBy, profile]);
@@ -426,11 +464,12 @@ export function TelemetryPage() {
   const refreshAll = () => {
     fetchReport({ profile: profile ?? undefined, since: '7d', groupBy }, { force: true });
     fetchReportSeries({ profile: profile ?? undefined, since: '14d', bucket: 'daily' }, { force: true });
+    fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
     fetchStatus(profile ?? undefined, { force: true });
   };
   useAutoRefresh(refreshAll, TELEMETRY_REFRESH_MS);
   useWsReconnectRefresh(refreshAll);
-  const lastUpdated = oldestFetchedAt(report.fetchedAt, reportSeries.fetchedAt);
+  const lastUpdated = oldestFetchedAt(report.fetchedAt, reportSeries.fetchedAt, quota.fetchedAt);
 
   const sorted = useMemo(() => {
     const rows = [...(report.data?.comparisons ?? [])];
@@ -455,6 +494,7 @@ export function TelemetryPage() {
   };
 
   const activeTrend = trendOptions.find((t) => t.id === trendMetric)!;
+  const snapshot = quota.data ?? undefined;
 
   const cacheHitRatio = (row: BackendModelComparison): number | null => {
     if (row.cache_read_tokens === null || row.cache_write_tokens === null) return null;
@@ -484,6 +524,85 @@ export function TelemetryPage() {
           </div>
         }
       />
+
+      <ModelFitCard profile={profile ?? null} since="7d" />
+
+      <section>
+        <h3 className="text-sm font-semibold text-primary mb-3">
+          Dispatch ledger {groupBy === 'model' ? 'model' : 'backend'} performance (7d)
+        </h3>
+        {report.loading && !report.data ? (
+          <LoadingState label="Loading report…" />
+        ) : report.error ? (
+          <ErrorState
+            message={report.error}
+            endpoint="/api/report"
+            onRetry={() => fetchReport({ profile: profile ?? undefined, since: '7d', groupBy }, { force: true })}
+          />
+        ) : sorted.length === 0 ? (
+          <EmptyState icon={FlaskConical} title="No dispatch-ledger data" description="No dispatch runs were recorded in this window. Manager-chat usage above is unaffected." />
+        ) : (
+          <div className="card overflow-x-auto">
+            <table className="table-base min-w-[980px]">
+              <thead>
+                <tr>
+                  <th>{groupBy === 'model' ? 'Model' : 'Backend'}</th>
+                  <SortHeader label="Tasks" active={sortKey === 'entries'} onClick={() => toggleSort('entries')} />
+                  <SortHeader label="Success rate" active={sortKey === 'success_rate'} onClick={() => toggleSort('success_rate')} />
+                  <SortHeader label="Avg duration" active={sortKey === 'average_duration_seconds'} onClick={() => toggleSort('average_duration_seconds')} />
+                  <SortHeader label="Total tokens" active={sortKey === 'total_tokens'} onClick={() => toggleSort('total_tokens')} />
+                  <SortHeader label="Memory records captured" active={sortKey === 'memory_gateway_capture_l0_recorded'} onClick={() => toggleSort('memory_gateway_capture_l0_recorded')} />
+                  <th>Cache read tokens</th>
+                  <th>Cache write tokens</th>
+                  <th>Cache-hit ratio</th>
+                  <SortHeader label="Actual cost" active={sortKey === 'actual_cost_usd'} onClick={() => toggleSort('actual_cost_usd')} />
+                  <SortHeader label="Est. cost" active={sortKey === 'estimated_cost_usd'} onClick={() => toggleSort('estimated_cost_usd')} />
+                  <th>Cost / success</th>
+                  <th>Quota used</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map((row) => {
+                  const costPerSuccess =
+                    row.validation_pass > 0 && (row.actual_cost_usd !== null || row.estimated_cost_usd !== null)
+                      ? (row.actual_cost_usd ?? row.estimated_cost_usd ?? 0) / row.validation_pass
+                      : null;
+                  const quota = latestRowQuotaPercent(snapshot?.quota_checks, row);
+                  return (
+                    <tr key={row.backend_or_model}>
+                      <td className="text-primary font-medium">{row.backend_or_model}</td>
+                      <td>
+                        {formatCount(row.entries)}
+                        <span className="text-muted"> ({formatCount(row.attempts)} attempts)</span>
+                      </td>
+                      <td>{formatPercent(row.success_rate)}</td>
+                      <td>{formatDuration(row.average_duration_seconds)}</td>
+                      <td>{formatTokens(row.total_tokens)}</td>
+                      <td>{formatCount(row.memory_gateway_capture_l0_recorded)}</td>
+                      <td>{formatTokens(row.cache_read_tokens)}</td>
+                      <td>{formatTokens(row.cache_write_tokens)}</td>
+                      <td>{formatPercent(cacheHitRatio(row))}</td>
+                      <td>{formatCost(row.actual_cost_usd)}</td>
+                      <td>{formatCost(row.estimated_cost_usd)}</td>
+                      <td>{costPerSuccess !== null ? formatCost(costPerSuccess) : 'Unknown'}</td>
+                      <td>
+                        {quota ? (
+                          <>
+                            {formatPercent(quota.percent / 100)}
+                            {quota.window && <span className="text-muted"> ({quota.window})</span>}
+                          </>
+                        ) : (
+                          <span className="text-muted">Unknown</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       <ExportHealthCard health={status.data?.export_health} />
 
@@ -526,83 +645,6 @@ export function TelemetryPage() {
           <EmptyState icon={FlaskConical} title="No dispatch-ledger trend" description="No dispatch runs were recorded in this window. Manager-chat usage above is unaffected." />
         ) : (
           <TrendChart data={activeTrend.data} valueLabel={activeTrend.label} formatValue={activeTrend.format as (v: number) => string} />
-        )}
-      </section>
-
-      <section>
-        <h3 className="text-sm font-semibold text-primary mb-3">
-          Dispatch ledger {groupBy === 'model' ? 'model' : 'backend'} performance (7d)
-        </h3>
-        {report.loading && !report.data ? (
-          <LoadingState label="Loading report…" />
-        ) : report.error ? (
-          <ErrorState
-            message={report.error}
-            endpoint="/api/report"
-            onRetry={() => fetchReport({ profile: profile ?? undefined, since: '7d', groupBy }, { force: true })}
-          />
-        ) : sorted.length === 0 ? (
-          <EmptyState icon={FlaskConical} title="No dispatch-ledger data" description="No dispatch runs were recorded in this window. Manager-chat usage above is unaffected." />
-        ) : (
-          <div className="card overflow-x-auto">
-            <table className="table-base min-w-[980px]">
-              <thead>
-                <tr>
-                  <th>{groupBy === 'model' ? 'Model' : 'Backend'}</th>
-                  <SortHeader label="Tasks" active={sortKey === 'entries'} onClick={() => toggleSort('entries')} />
-                  <SortHeader label="Success rate" active={sortKey === 'success_rate'} onClick={() => toggleSort('success_rate')} />
-                  <SortHeader label="Avg duration" active={sortKey === 'average_duration_seconds'} onClick={() => toggleSort('average_duration_seconds')} />
-                  <SortHeader label="Total tokens" active={sortKey === 'total_tokens'} onClick={() => toggleSort('total_tokens')} />
-                  <SortHeader label="Memory records captured" active={sortKey === 'memory_gateway_capture_l0_recorded'} onClick={() => toggleSort('memory_gateway_capture_l0_recorded')} />
-                  <th>Cache read tokens</th>
-                  <th>Cache write tokens</th>
-                  <th>Cache-hit ratio</th>
-                  <SortHeader label="Actual cost" active={sortKey === 'actual_cost_usd'} onClick={() => toggleSort('actual_cost_usd')} />
-                  <SortHeader label="Est. cost" active={sortKey === 'estimated_cost_usd'} onClick={() => toggleSort('estimated_cost_usd')} />
-                  <th>Cost / success</th>
-                  <th>Quota used</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sorted.map((row) => {
-                  const costPerSuccess =
-                    row.validation_pass > 0 && (row.actual_cost_usd !== null || row.estimated_cost_usd !== null)
-                      ? (row.actual_cost_usd ?? row.estimated_cost_usd ?? 0) / row.validation_pass
-                      : null;
-                  const quota = latestQuotaUsedPercent(row);
-                  return (
-                    <tr key={row.backend_or_model}>
-                      <td className="text-primary font-medium">{row.backend_or_model}</td>
-                      <td>
-                        {formatCount(row.entries)}
-                        <span className="text-muted"> ({formatCount(row.attempts)} attempts)</span>
-                      </td>
-                      <td>{formatPercent(row.success_rate)}</td>
-                      <td>{formatDuration(row.average_duration_seconds)}</td>
-                      <td>{formatTokens(row.total_tokens)}</td>
-                      <td>{formatCount(row.memory_gateway_capture_l0_recorded)}</td>
-                      <td>{formatTokens(row.cache_read_tokens)}</td>
-                      <td>{formatTokens(row.cache_write_tokens)}</td>
-                      <td>{formatPercent(cacheHitRatio(row))}</td>
-                      <td>{formatCost(row.actual_cost_usd)}</td>
-                      <td>{formatCost(row.estimated_cost_usd)}</td>
-                      <td>{costPerSuccess !== null ? formatCost(costPerSuccess) : 'Unknown'}</td>
-                      <td>
-                        {quota ? (
-                          <>
-                            {formatPercent(quota.percent / 100)}
-                            {quota.window && <span className="text-muted"> ({quota.window})</span>}
-                          </>
-                        ) : (
-                          <span className="text-muted">Unknown</span>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
         )}
       </section>
     </div>

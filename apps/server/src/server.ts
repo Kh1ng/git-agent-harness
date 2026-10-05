@@ -67,6 +67,11 @@ import type {
 import { getFleetDispatch, sessionStore } from './wsServer.js';
 import { ActivityFeed, validateNotificationPreferences } from './activityFeed.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
+import { deviceAgentsSnapshot } from './deviceAgents.js';
+import { factoryRunOutput } from './factoryRunOutput.js';
+import { readLedger, roleMetrics } from './roleMetrics.js';
+import { readPriceBook, refreshModelPrices } from './modelPricing.js';
+import { helperPriceExtractor } from './modelPriceHelper.js';
 import { deriveControllerActivity } from './controllerActivity.js';
 import { authMiddleware, coordinatorTokenMatches, isLocalAddress, requireOwner } from './authMiddleware.js';
 import { DeviceAccess } from './deviceAccess.js';
@@ -1284,6 +1289,33 @@ export function createServer(
     }
   });
 
+  // Per role and model, what the ledger says: delivered rate with its
+  // confidence, validation, first-review acceptance, tokens per delivered PR.
+  // Published API prices per model, checked daily, so token counts can be read as dollars.
+  app.get('/api/model-prices', (_req, res) => {
+    res.json(readPriceBook());
+  });
+  app.post('/api/model-prices/refresh', requireOwner, async (_req, res) => {
+    try {
+      res.json(await refreshModelPrices({ extract: helperPriceExtractor(DEFAULT_PROFILE) }));
+    } catch (error) {
+      res.status(502).json({ error: 'Failed to check model prices', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get('/api/report/roles', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const since = typeof req.query.since === 'string' ? req.query.since : '7d';
+    try {
+      // Only ledger_path is used; roleMetrics applies `since` itself. `gah report`
+      // accepts only Nd/Nh, so ask for the cheapest valid window.
+      const report = await runReport({ profile, since: '1d' });
+      res.json(roleMetrics(readLedger(report.ledger_path), { since, profile: profile ?? null, prices: readPriceBook().prices }));
+    } catch (error) {
+      res.status(502).json({ error: 'Failed to compute role metrics', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   app.get('/api/report/series', async (req, res) => {
     const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
     const since = typeof req.query.since === 'string' ? req.query.since : undefined;
@@ -2332,6 +2364,27 @@ export function createServer(
         error: 'Failed to load gah events',
         message: error instanceof Error ? error.message : String(error)
       });
+    }
+  });
+
+  // Agent CLIs on this device the factory did not start (claude, codex, …),
+  // so the dashboard can show what else is using the subscriptions.
+  app.get('/api/device-agents', async (_req, res) => {
+    try {
+      const profiles = await listProfiles();
+      res.json(deviceAgentsSnapshot(profiles.map((profile) => profile.worktree_base).filter((root): root is string => !!root)));
+    } catch (error) {
+      res.status(502).json({ error: 'Failed to list device agents', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  // Read-only view of a running factory job's agent output, for debugging.
+  app.get('/api/factory-runs/:runId/output', (req, res) => {
+    try {
+      const since = typeof req.query.log === 'string' ? req.query.log : null;
+      res.json(factoryRunOutput(req.params.runId, Number(req.query.after ?? 0), undefined, req.query.full === '1', since));
+    } catch (error) {
+      res.status(502).json({ error: 'Failed to read run output', message: error instanceof Error ? error.message : String(error) });
     }
   });
 

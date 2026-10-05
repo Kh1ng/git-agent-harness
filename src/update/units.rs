@@ -34,13 +34,7 @@ impl UnitValues {
     /// environment that just built the server.
     pub(super) fn resolve(repo: &Path) -> Result<Self> {
         Self::ensure_installing_account()?;
-        let user = Command::new("id")
-            .arg("-un")
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|user| user.trim().to_string());
+        let user = installing_user();
         let home = PathBuf::from(env::var_os("HOME").context("HOME is required")?);
         let gah = super::installed_binary_path()?;
         let node = find_on_path("node");
@@ -83,6 +77,19 @@ impl UnitValues {
             path: path.join(":"),
         })
     }
+}
+
+/// The account `gah update` runs as (`id -un`); the units and user lingering
+/// both name it.
+pub(super) fn installing_user() -> Option<String> {
+    Command::new("id")
+        .arg("-un")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|user| user.trim().to_string())
+        .filter(|user| !user.is_empty())
 }
 
 fn find_on_path(program: &str) -> Option<PathBuf> {

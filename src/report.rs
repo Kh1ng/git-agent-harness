@@ -81,7 +81,11 @@ struct BackendModelComparison {
     /// Issue #116: measured-only resource aggregates for this group.
     total_cpu_time_seconds: Option<f64>,
     peak_rss_bytes: Option<f64>,
-    quota_observations: Vec<crate::ledger::summary::GroupQuotaObservation>,
+    /// #1339: account quota for this row, selected from the durable quota
+    /// store with the same selector the quota snapshot uses, plus this
+    /// group's attempt-derived readings. Never re-derived from ledger
+    /// groups.
+    quota_observations: Vec<crate::quota_store::QuotaObservationRecord>,
     review_verdict_distribution: Vec<(String, usize)>,
 }
 
@@ -311,6 +315,14 @@ fn transform_to_report_format(
 
     let mut comparisons = Vec::new();
 
+    // #1339: select account quota once for the whole report from the
+    // durable store. Backend rows merge the windows of every source
+    // identity whose logical backend matches (Claude, Codex, named
+    // instances, Nous, the Mistral dashboard, router accounts); model rows
+    // have no store identity to match, so they keep only their
+    // attempt-derived observations.
+    let account_quota = crate::quota_store::load_account_observations();
+
     if let Some(groups) = grouped_data {
         for group in groups {
             let success_rate = group.success_rate.unwrap_or(0.0);
@@ -320,6 +332,32 @@ fn transform_to_report_format(
                 .iter()
                 .map(|(v, c)| (v.clone(), *c))
                 .collect();
+
+            // Newest valid reading first, then attempt-derived readings, so
+            // a backend row shows the store's account windows alongside what
+            // the ledger observed. Duplicates (identical identity, window
+            // and values) are dropped.
+            let mut quota_observations = if is_model {
+                group.quota_observations.clone()
+            } else {
+                let mut merged = crate::quota_store::latest_windows_for_backend(
+                    &account_quota,
+                    &group.group_key,
+                )
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
+                merged.extend(group.quota_observations.iter().cloned());
+                merged
+            };
+            quota_observations.sort_by(|a, b| {
+                b.observed_at
+                    .as_deref()
+                    .unwrap_or_default()
+                    .cmp(a.observed_at.as_deref().unwrap_or_default())
+            });
+            let mut seen = std::collections::HashSet::new();
+            quota_observations.retain(|record| seen.insert(observation_key(record)));
 
             comparisons.push(BackendModelComparison {
                 backend_or_model: group.group_key.clone(),
@@ -348,7 +386,7 @@ fn transform_to_report_format(
                 predicted_difficulty_match_rate: group.predicted_difficulty_match_rate,
                 total_cpu_time_seconds: group.total_cpu_time_seconds,
                 peak_rss_bytes: group.peak_rss_bytes,
-                quota_observations: group.quota_observations.clone(),
+                quota_observations,
                 review_verdict_distribution: review_verdicts,
             });
         }
@@ -433,6 +471,36 @@ fn build_trend(
         add_optional(&mut point.estimated_cost_usd, estimated);
     }
     Ok(points.into_values().collect())
+}
+
+/// #1339: identity+reading key used to deduplicate merged quota
+/// observations on a report row.
+type QuotaObservationKey = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<u64>,
+    Option<u64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn observation_key(record: &crate::quota_store::QuotaObservationRecord) -> QuotaObservationKey {
+    (
+        record.backend.clone(),
+        record.backend_instance.clone(),
+        record.credential_id.clone(),
+        record.quota_pool.clone(),
+        record.quota_window.clone(),
+        record.quota_used_percent.map(f64::to_bits),
+        record.quota_remaining_percent.map(f64::to_bits),
+        record.quota_reset_at.clone(),
+        record.observed_at.clone(),
+        record.usage_source.clone(),
+    )
 }
 
 fn add_optional(total: &mut Option<f64>, value: Option<f64>) {

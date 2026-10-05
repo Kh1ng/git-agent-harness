@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { openUsage } from './helpers/navigation.js';
 import { readFileSync } from 'node:fs';
 
 const quotaFixture = JSON.parse(readFileSync(new URL('../../../server/tests/fixtures/gah/responses/quota.json', import.meta.url), 'utf8'));
@@ -104,20 +105,21 @@ test.describe('last-updated indicator', () => {
   });
 
   for (const route of [
-    { label: 'Overview', heading: 'Overview' },
-    { label: 'Quota', heading: 'Quota management' },
-    { label: 'Telemetry', heading: 'Telemetry' },
-    { label: 'Factory', heading: 'Factory' },
-    { label: 'Activity', heading: 'Activity' },
-    { label: 'Settings', heading: 'Settings' },
+    { label: 'Overview', heading: 'Overview', panel: '#main-content' },
+    { label: 'Usage', usage: 'Quota' as const, heading: 'Quota management', panel: '#main-content' },
+    { label: 'Usage', usage: 'Telemetry' as const, heading: 'Telemetry', panel: '#main-content' },
+    { label: 'Factory', heading: 'Factory', panel: '#main-content' },
+    { label: 'Activity', heading: 'Activity', panel: '#side-panel' },
+    { label: 'Settings', heading: 'Settings', panel: '#side-panel' },
   ]) {
-    test(`${route.label} shows a live "Updated ... ago" readout once data loads`, async ({ page }) => {
+    test(`${route.heading} shows a live "Updated ... ago" readout once data loads`, async ({ page }) => {
       await page.goto('/');
-      await page.getByRole('button', { name: route.label, exact: true }).click();
+      if ('usage' in route && route.usage) await openUsage(page, route.usage);
+      else await page.getByRole('button', { name: route.label, exact: true }).click();
       await expect(page.getByRole('heading', { name: route.heading, exact: true })).toBeVisible({
         timeout: 15000,
       });
-      await expect(page.getByText(/^Updated (just now|\d+[smhd] ago)$/)).toBeVisible({ timeout: 15000 });
+      await expect(page.locator(route.panel).getByText(/^Updated (just now|\d+[smhd] ago)$/)).toBeVisible({ timeout: 15000 });
     });
   }
 });
@@ -147,7 +149,7 @@ test.describe('WS reconnect re-triggers REST refetch', () => {
     });
 
     await page.goto('/');
-    await page.getByRole('button', { name: 'Telemetry', exact: true }).click();
+    await openUsage(page, 'Telemetry');
     await expect(page.getByRole('heading', { name: 'Telemetry', exact: true })).toBeVisible();
 
     await expect.poll(() => callCounts['/api/report'] ?? 0).toBeGreaterThanOrEqual(1);

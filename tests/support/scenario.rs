@@ -19,6 +19,7 @@ use super::{ExecGuard, FakeBackend, Scenario};
 /// Result of a single subprocess invocation.
 #[derive(Debug)]
 pub struct LoopResult {
+    pub stdout: String,
     pub action_kind: String,
     pub action_details: String,
     pub exit_code: Option<i32>,
@@ -52,6 +53,7 @@ pub struct ScenarioHarness {
     pub provider: String,
     worktree_base_override: Option<PathBuf>,
     temp_dir_override: Option<PathBuf>,
+    pub node_pressure_fixture: Option<PathBuf>,
     fake_gh: Option<FakeBackend>,
     fake_glab: Option<FakeBackend>,
     fake_workers: HashMap<String, FakeBackend>,
@@ -156,6 +158,7 @@ impl ScenarioHarness {
             provider: provider.to_string(),
             worktree_base_override: None,
             temp_dir_override: None,
+            node_pressure_fixture: None,
             fake_gh: None,
             fake_glab: None,
             fake_workers: HashMap::new(),
@@ -361,21 +364,31 @@ impl ScenarioHarness {
 
     /// Run one loop iteration by spawning the `gah` binary.
     pub fn run_one_loop(&mut self) -> Result<LoopResult, String> {
+        self.run_one_loop_with_json(true)
+    }
+
+    pub fn run_one_loop_with_json(&mut self, json: bool) -> Result<LoopResult, String> {
         self.setup_env();
 
         // Ensure fake gh/glab scripts are in the bin_dir
         self.install_fakes();
 
-        let out = self
-            .gah_command()
-            .args([
-                "loop",
-                "--once",
-                "--profile",
-                &self.profile_name,
-                "--json",
-                "--skip-validation-gate",
-            ])
+        let mut command = self.gah_command();
+        command.args([
+            "loop",
+            "--once",
+            "--profile",
+            &self.profile_name,
+            "--skip-validation-gate",
+        ]);
+        if json {
+            command.arg("--json");
+        }
+        if let Some(path) = &self.node_pressure_fixture {
+            command.env("GAH_TEST_NODE_PRESSURE_FILE", path);
+        }
+        let out = command
+            .env("XDG_RUNTIME_DIR", self._temp.path().join("runtime"))
             .env(
                 "XDG_STATE_HOME",
                 self._temp.path().join("xdg-state").to_str().unwrap(),
@@ -425,6 +438,7 @@ impl ScenarioHarness {
         let events = read_jsonl_lines(&self.events_path).unwrap_or_default();
 
         Ok(LoopResult {
+            stdout: stdout.into_owned(),
             action_kind,
             action_details,
             exit_code,
@@ -633,6 +647,22 @@ impl ScenarioHarness {
         }
         let text = std::fs::read_to_string(&path).unwrap();
         text.lines().filter(|l| !l.trim().is_empty()).count()
+    }
+
+    /// Path of the durable quota store under this harness's isolated
+    /// `XDG_STATE_HOME`, matching `quota_store::store_path()`'s default.
+    /// Tests write JSONL rows here to exercise store-backed surfaces.
+    pub fn quota_store_path(&self) -> std::path::PathBuf {
+        let path = self
+            ._temp
+            .path()
+            .join("xdg-state")
+            .join("gah")
+            .join("quota_observations.jsonl");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        path
     }
 
     pub fn run_report_json(&mut self, group_by: &str) -> Result<serde_json::Value, String> {

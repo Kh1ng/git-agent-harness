@@ -417,7 +417,6 @@ fn build_grouped_summary_by_backend() {
         |entry| entry.effective_backend.clone(),
         |observed| observed.backend.to_string(),
         |backend, _model, _difficulty| backend.to_string(),
-        true,
     );
 
     assert!(grouped.is_some());
@@ -497,7 +496,6 @@ fn build_grouped_summary_aggregates_measured_resources_only() {
         |entry| entry.effective_backend.clone(),
         |observed| observed.backend.to_string(),
         |backend, _model, _difficulty| backend.to_string(),
-        true,
     )
     .unwrap();
 
@@ -530,7 +528,6 @@ fn build_grouped_summary_aggregates_measured_resources_only() {
         |entry| entry.effective_backend.clone(),
         |observed| observed.backend.to_string(),
         |backend, _model, _difficulty| backend.to_string(),
-        true,
     )
     .unwrap();
     let none_group = grouped_none
@@ -563,7 +560,6 @@ fn build_grouped_summary_aggregates_memory_gateway_capture_l0_recorded() {
         |entry| entry.effective_backend.clone(),
         |observed| observed.backend.to_string(),
         |backend, _model, _difficulty| backend.to_string(),
-        true,
     )
     .unwrap();
 
@@ -612,7 +608,6 @@ fn model_grouping_labels_missing_model_instead_of_collapsing_to_empty_string() {
                 .map(str::to_string)
                 .unwrap_or_else(|| super::UNKNOWN_MODEL_LABEL.to_string())
         },
-        false,
     )
     .unwrap();
 
@@ -653,7 +648,6 @@ fn build_grouped_summary_by_model() {
         |entry| entry.effective_model.clone().unwrap_or_default(),
         |observed| observed.model.unwrap_or_default().to_string(),
         |_backend, model, _difficulty| model.unwrap_or_default().to_string(),
-        false,
     );
 
     assert!(grouped.is_some());
@@ -710,7 +704,6 @@ fn build_grouped_summary_by_difficulty() {
         |entry| super::canonical_difficulty_label(entry.difficulty.as_deref()),
         |observed| super::canonical_difficulty_label(observed.difficulty),
         |_backend, _model, difficulty| super::canonical_difficulty_label(difficulty),
-        false,
     )
     .unwrap();
 
@@ -748,7 +741,6 @@ fn build_grouped_summary_by_backend_difficulty() {
                 difficulty,
             )
         },
-        false,
     )
     .unwrap();
 
@@ -775,7 +767,6 @@ fn build_grouped_summary_difficulty_success_rate_excludes_auto_routing_failure_n
         |entry| super::canonical_difficulty_label(entry.difficulty.as_deref()),
         |observed| super::canonical_difficulty_label(observed.difficulty),
         |_backend, _model, difficulty| super::canonical_difficulty_label(difficulty),
-        false,
     )
     .unwrap();
 
@@ -823,7 +814,6 @@ fn cost_per_approve_strong_keys_on_reviewer_tier_not_verdict_text() {
         |entry| entry.effective_model.clone().unwrap_or_default(),
         |observed| observed.model.unwrap_or_default().to_string(),
         |_backend, model, _difficulty| model.unwrap_or_default().to_string(),
-        false,
     )
     .unwrap();
 
@@ -838,79 +828,29 @@ fn cost_per_approve_strong_keys_on_reviewer_tier_not_verdict_text() {
     assert!((gpt4.cost_per_approve_strong.unwrap() - 14.0).abs() < f64::EPSILON);
 }
 
-// Issue #206: an account-level quota observation (backend-scoped,
-// model = None) must surface in the backend-grouped view, and must NOT
-// leak into the model-grouped view where the group key is a model name.
+// Issue #1339: group summaries carry only attempt-derived readings.
+// Account-level quota comes from the durable store via
+// `latest_windows_for_identity`/`latest_windows_for_backend` at the report
+// and snapshot boundaries; it is never merged into ledger groups.
 #[test]
-fn account_quota_merges_into_backend_group_only() {
+fn groups_carry_only_attempt_derived_quota_observations() {
     let (_tmp, _cfg) = test_config();
     let mut entry = LedgerEntry::new("test", &profile(), "codex", "improve", "test1", None, None);
     entry.effective_backend = "codex".to_string();
     entry.effective_model = Some("gpt-5".to_string());
     let entries = vec![entry];
 
-    let account = crate::quota_store::QuotaObservationRecord {
-        backend: "codex".to_string(),
-        backend_instance: None,
-        model: None,
-        quota_pool: None,
-        quota_window: Some("weekly".to_string()),
-        quota_used_percent: Some(42.0),
-        quota_remaining_percent: Some(58.0),
-        quota_reset_at: Some("2026-07-12T00:00:00Z".to_string()),
-        observed_at: Some("2026-07-10T00:00:00Z".to_string()),
-        checked_at: None,
-        check_error: None,
-        usage_source: Some("codex_app_server".to_string()),
-        mistral_admin: None,
-        account_usage: None,
-        credential_id: None,
-    };
-    let observations = vec![account];
-
-    // Backend-grouped: the account observation must appear on the codex row.
-    let backend_grouped = super::build_grouped_summary_with_account_quota(
+    let grouped = super::build_grouped_summary(
         &entries,
         |entry| entry.effective_backend.clone(),
         |observed| observed.backend.to_string(),
         |backend, _model, _difficulty| backend.to_string(),
-        true,
-        &observations,
     )
     .unwrap();
-    let codex_group = backend_grouped
-        .iter()
-        .find(|g| g.group_key == "codex")
-        .unwrap();
+    let codex_group = grouped.iter().find(|g| g.group_key == "codex").unwrap();
     assert!(
-        codex_group
-            .quota_observations
-            .iter()
-            .any(|q| q.quota_used_percent == Some(42.0)),
-        "backend-grouped view should surface the account quota observation"
-    );
-
-    // Model-grouped: the account observation must NOT show up (the group
-    // key "gpt-5" is a model name, not a backend).
-    let model_grouped = super::build_grouped_summary_with_account_quota(
-        &entries,
-        |entry| entry.effective_model.clone().unwrap_or_default(),
-        |observed| observed.model.unwrap_or_default().to_string(),
-        |_backend, model, _difficulty| model.unwrap_or_default().to_string(),
-        false,
-        &observations,
-    )
-    .unwrap();
-    let gpt5_group = model_grouped
-        .iter()
-        .find(|g| g.group_key == "gpt-5")
-        .unwrap();
-    assert!(
-        !gpt5_group
-            .quota_observations
-            .iter()
-            .any(|q| q.quota_used_percent == Some(42.0)),
-        "model-grouped view must not leak the backend-scoped account quota observation"
+        codex_group.quota_observations.is_empty(),
+        "groups must not absorb store records: no attempt carried quota here"
     );
 }
 
@@ -922,7 +862,6 @@ fn build_grouped_summary_empty_entries() {
         |entry| entry.effective_backend.clone(),
         |observed| observed.backend.to_string(),
         |backend, _model, _difficulty| backend.to_string(),
-        true,
     );
     assert!(grouped.is_none());
 }
@@ -980,7 +919,6 @@ fn legacy_fixture_grouped_summary_separates_unknown() {
         |entry| entry.effective_backend.clone(),
         |observed| observed.backend.to_string(),
         |backend, _model, _difficulty| backend.to_string(),
-        true,
     )
     .unwrap();
     let group = grouped.iter().find(|g| g.group_key == "codex").unwrap();
