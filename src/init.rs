@@ -127,41 +127,56 @@ fn print_secret_hint(provider: &str) {
     }
 }
 
-/// True when `existing` already carries a usable `worktree_base` value inside
-/// its `[defaults]` section.
-fn has_worktree_base_value(existing: &str) -> bool {
-    let mut in_defaults = false;
-    for line in existing.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_defaults = trimmed == "[defaults]";
-            continue;
-        }
-        if !in_defaults {
-            continue;
-        }
-        if let Some(value) = trimmed.strip_prefix("worktree_base") {
-            let value = value.trim_start();
-            if let Some(value) = value.strip_prefix('=') {
-                if !value.trim().trim_matches('"').is_empty() {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+/// The `defaults.worktree_base` value TOML actually sees in `text`: `None`
+/// when the text does not parse, an empty string when the key is absent.
+fn parsed_worktree_base(text: &str) -> Option<String> {
+    let table = text.parse::<toml::Table>().ok()?;
+    Some(
+        table
+            .get("defaults")
+            .and_then(|defaults| defaults.get("worktree_base"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+
+/// True for a `[defaults]` table header line, tolerating inner whitespace and
+/// a trailing comment (`[ defaults ] # shared settings`).
+fn is_defaults_header(line: &str) -> bool {
+    let header = line.split('#').next().unwrap_or_default().trim();
+    header
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .is_some_and(|name| name.trim() == "defaults")
 }
 
 /// Fill `default_base` into the existing config's `[defaults]` section when
-/// `worktree_base` is missing or empty. Line-based so unrelated keys,
-/// comments, and formatting survive untouched.
+/// `worktree_base` is missing or empty. The edit is line-based so unrelated
+/// keys, comments, and formatting survive untouched, but TOML decides both
+/// whether a value is already set and whether the edit is kept: a patch that
+/// does not parse back to `default_base` is discarded, so init can never
+/// turn a loadable config into an unparseable one.
 fn ensure_worktree_base_default(existing: &str, default_base: &str) -> String {
-    if has_worktree_base_value(existing) {
-        return existing.to_string();
+    match parsed_worktree_base(existing) {
+        Some(value) if value.trim().is_empty() => {}
+        // Already configured, or not parseable to begin with: leave it alone.
+        _ => return existing.to_string(),
     }
+    let patched = patch_worktree_base_line(existing, default_base);
+    if parsed_worktree_base(&patched).as_deref() == Some(default_base) {
+        patched
+    } else {
+        // Dispatch resolves an empty value to the default at the point of
+        // use, so keeping the original text is safe.
+        existing.to_string()
+    }
+}
+
+fn patch_worktree_base_line(existing: &str, default_base: &str) -> String {
     let key_line = format!("worktree_base = \"{}\"", default_base);
     let lines: Vec<&str> = existing.lines().collect();
-    let defaults_header = lines.iter().position(|line| line.trim() == "[defaults]");
+    let defaults_header = lines.iter().position(|line| is_defaults_header(line));
     let Some(header) = defaults_header else {
         // No `[defaults]` table at all: append one; TOML allows tables in any
         // order, so a trailing `[defaults]` stays valid.
@@ -201,7 +216,7 @@ fn ensure_worktree_base_default(existing: &str, default_base: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_worktree_base_default, render_profile, InitArgs};
+    use super::{ensure_worktree_base_default, parsed_worktree_base, render_profile, InitArgs};
 
     #[test]
     fn render_profile_includes_optional_gitlab_fields() {
@@ -291,5 +306,63 @@ mod tests {
         let patched = ensure_worktree_base_default(existing, DEFAULT_BASE);
         let cfg: crate::config::GahConfig = toml::from_str(&patched).unwrap();
         assert_eq!(cfg.defaults.worktree_base, DEFAULT_BASE);
+    }
+
+    #[test]
+    fn append_recognises_commented_and_spaced_defaults_headers() {
+        // A valid header that is not literally `[defaults]` must not gain a
+        // second `[defaults]` table: TOML rejects a redefined table and every
+        // later `gah` command would fail at config load.
+        for header in ["[defaults] # shared settings", "[ defaults ]"] {
+            let set = format!("{header}\nworktree_base = \"/custom/base\"\n\n[profiles]\n");
+            assert_eq!(ensure_worktree_base_default(&set, DEFAULT_BASE), set);
+
+            let unset = format!("{header}\nartifact_root = \"/srv/gah\"\n\n[profiles]\n");
+            let patched = ensure_worktree_base_default(&unset, DEFAULT_BASE);
+            assert_eq!(patched.matches("defaults").count(), 1, "{patched}");
+            assert!(patched.contains(header));
+            let cfg: crate::config::GahConfig = toml::from_str(&patched).unwrap();
+            assert_eq!(cfg.defaults.worktree_base, DEFAULT_BASE);
+        }
+    }
+
+    #[test]
+    fn append_fills_values_toml_reads_as_empty() {
+        for line in ["worktree_base = \"\" # unset", "worktree_base = ''"] {
+            let existing = format!("[defaults]\n{line}\n");
+            let patched = ensure_worktree_base_default(&existing, DEFAULT_BASE);
+            assert_eq!(
+                parsed_worktree_base(&patched).as_deref(),
+                Some(DEFAULT_BASE)
+            );
+        }
+    }
+
+    #[test]
+    fn append_keeps_original_when_patch_would_not_parse() {
+        // Shapes the line-based edit cannot place a key into: a multi-line
+        // array hiding an empty key from the section scan, and `defaults`
+        // written as an inline or dotted table. The patch would duplicate a
+        // key or table, so the original (still loadable) text is kept.
+        for existing in [
+            "[defaults]\nextra = [\n[1],\n]\nworktree_base = \"\"\n",
+            "defaults = { artifact_root = \"/srv/gah\" }\n",
+            "defaults.artifact_root = \"/srv/gah\"\n",
+        ] {
+            assert!(parsed_worktree_base(existing).is_some(), "{existing}");
+            assert_eq!(
+                ensure_worktree_base_default(existing, DEFAULT_BASE),
+                existing
+            );
+        }
+    }
+
+    #[test]
+    fn append_leaves_unparseable_config_untouched() {
+        let existing = "[defaults\nartifact_root = \n";
+        assert_eq!(
+            ensure_worktree_base_default(existing, DEFAULT_BASE),
+            existing
+        );
     }
 }
