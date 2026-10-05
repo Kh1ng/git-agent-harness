@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { LoadingState } from './components/ui/EmptyState.js';
 import { useWebSocket } from './ws/WebSocketContext.js';
 import { OverviewPage } from './pages/OverviewPage.js';
@@ -9,6 +9,9 @@ import type { Session } from '@git-agent-harness/contracts';
 import { isSideView, readNavigation, takeActivityDeepLink, updateNavigation, type MainPage, type Page, type SideView } from './lib/navigationState.js';
 import { activityApi } from './api/client.js';
 import { NotificationsMenu } from './components/NotificationsMenu.js';
+import { SubscriptionUsageMenu } from './components/SubscriptionUsageMenu.js';
+import { subscriptionUsage } from './lib/subscriptionUsage.js';
+import { useGahStore } from './store/gahStore.js';
 import { Maximize2, PanelRight, X } from 'lucide-react';
 import { WorkDetailDrawer } from './components/WorkDetailDrawer.js';
 import { generateProviderInstanceId } from '@git-agent-harness/shared';
@@ -24,6 +27,7 @@ const GitPage = lazy(() => import('./pages/GitPage.js').then((module) => ({ defa
 const NodesPage = lazy(() => import('./pages/NodesPage.js').then((module) => ({ default: module.NodesPage })));
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage.js').then((module) => ({ default: module.ProjectsPage })));
 const PlanningPage = lazy(() => import('./pages/PlanningPage.js').then((module) => ({ default: module.PlanningPage })));
+const IssuesPanel = lazy(() => import('./pages/IssuesPanel.js').then((module) => ({ default: module.IssuesPanel })));
 const ProfilePanel = lazy(() => import('./pages/ProfilePanel.js').then((module) => ({ default: module.ProfilePanel })));
 
 export type { Page } from './lib/navigationState.js';
@@ -32,7 +36,10 @@ export type { Page } from './lib/navigationState.js';
  * sidebar view takes the whole content area. */
 const SPLIT_LAYOUT = '(min-width: 1280px)';
 
-const SIDE_VIEW_LABELS: Record<SideView, string> = { events: 'Activity', profile: 'Profile', settings: 'Settings' };
+const SIDE_VIEW_LABELS: Record<SideView, string> = { events: 'Activity', issues: 'Git issues', profile: 'Profile', settings: 'Settings' };
+
+/** The navbar's subscription rings follow the quota snapshot at this cadence. */
+const QUOTA_REFRESH_MS = 5 * 60 * 1000;
 
 export function App() {
   const [currentPage, setCurrentPage] = useState<MainPage>(() => readNavigation().page);
@@ -43,14 +50,27 @@ export function App() {
   useEffect(() => updateNavigation({ page: currentPage, side: sideView, dock: chatDocked && currentPage !== 'chat' ? 'chat' : null }), [currentPage, sideView, chatDocked]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [selectedWorkId, setSelectedWorkId] = useState<string | null>(null);
+  // The Git issues sidebar grows while it shows an issue's detail.
+  const [sideDetailOpen, setSideDetailOpen] = useState(false);
   // A push or feed link names the notification it opened; opening it reads it.
   const [openedActivityId] = useState(takeActivityDeepLink);
   useEffect(() => {
     if (openedActivityId) void activityApi.markRead([openedActivityId]).catch(() => { /* It stays unread and visible. */ });
   }, [openedActivityId]);
   const profileOverride = useUiStore((state) => state.profileOverride);
+  const requestAction = useUiStore((state) => state.requestAction);
   const notificationPopups = useUiStore((state) => state.notificationPopups);
-  const { isConnected, isConnecting, sessions, liveActivity, activityUnreadCount, profile, sendMessage, activityRevision } = useWebSocket();
+  const { isConnected, isConnecting, sessions, liveActivity, activityUnreadCount, profile, sendMessage, activityRevision, reconnectSeq } = useWebSocket();
+  // The quota snapshot feeds the navbar's subscription rings on every page.
+  const quota = useGahStore((state) => state.quota);
+  const fetchQuota = useGahStore((state) => state.fetchQuota);
+  const activeProfile = profileOverride ?? profile ?? undefined;
+  useEffect(() => {
+    fetchQuota({ profile: activeProfile, since: '7d' });
+    const timer = window.setInterval(() => fetchQuota({ profile: activeProfile, since: '7d' }, { force: true }), QUOTA_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [activeProfile, fetchQuota, reconnectSeq]);
+  const subscriptions = useMemo(() => subscriptionUsage(quota.data), [quota.data]);
 
   /** Pages link to each other by name; a sidebar view opens in the sidebar. */
   const navigate = (page: Page) => {
@@ -72,6 +92,21 @@ export function App() {
     setCurrentPage(expanded ? 'chat' : pageBehindChat);
     setChatDocked(!expanded);
   };
+  const redispatch = ({ profile, repo, workId, backend }: { profile: string; repo: string; workId: string; backend: Parameters<typeof generateProviderInstanceId>[0] }) => sendMessage({
+    type: 'session.start',
+    requestId: `redispatch_${Date.now()}`,
+    profile,
+    providerKind: backend,
+    instanceId: generateProviderInstanceId(backend, 0),
+    repo,
+    mode: 'fix',
+    backend,
+    target: workId,
+  });
+  const workDetail = (workId: string, onClose: () => void, inline = false) => (
+    <WorkDetailDrawer workId={workId} profile={profileOverride ?? profile ?? 'gah'} connected={isConnected} sessions={sessions}
+      onClose={onClose} onRedispatch={redispatch} inline={inline} />
+  );
   const chat = (docked: boolean) => (
     <ManagerChatPage docked={docked} onNavigate={navigate} onOpenWork={setSelectedWorkId} />
   );
@@ -114,17 +149,18 @@ export function App() {
       <PwaStatusBars />
       <Navbar currentPage={currentPage} sideView={sideView} onPageChange={navigate} activityUnreadCount={activityUnreadCount}
         chatOpen={isChatPage || chatDocked} onChatToggle={toggleChat}
-        actions={<NotificationsMenu liveActivity={sideView === 'events' ? null : liveActivity} unreadCount={activityUnreadCount} revision={activityRevision} autoPopup={notificationPopups} onViewAll={() => setSideView('events')} />} />
+        onImportProject={() => { requestAction('import'); navigate('projects'); }} onCreateProject={() => { requestAction('create'); setSideView('profile'); }}
+        actions={<><SubscriptionUsageMenu subscriptions={subscriptions} onOpenQuota={() => navigate('quota')} /><NotificationsMenu liveActivity={sideView === 'events' ? null : liveActivity} unreadCount={activityUnreadCount} revision={activityRevision} autoPopup={notificationPopups} /></>} />
 
       {/* Left to right: icon strip, sidebar view, main panel, chat sidebar. */}
       <div className="flex min-h-0 flex-1">
-        <ActivityBar sideView={sideView} onToggle={(view) => setSideView(sideView === view ? null : view)} activityUnreadCount={activityUnreadCount} />
+        <ActivityBar sideView={sideView} onToggle={(view) => setSideView(sideView === view ? null : view)} />
 
         {sideView && (
           <aside id="side-panel" aria-label={SIDE_VIEW_LABELS[sideView]}
-            className="side-panel min-w-0 flex-1 overflow-y-auto px-4 py-4 xl:w-[clamp(20rem,25vw,30rem)] xl:flex-none xl:border-r xl:border-subtle">
+            className={`side-panel min-w-0 flex-1 overflow-y-auto px-4 py-4 xl:flex-none xl:border-r xl:border-subtle ${sideDetailOpen ? 'xl:w-[clamp(28rem,40vw,44rem)]' : 'xl:w-[clamp(20rem,25vw,30rem)]'}`}>
             <Suspense fallback={<LoadingState label="Loading…" />}>
-              {sideView === 'settings' ? <SettingsPage /> : sideView === 'profile' ? <ProfilePanel /> : <EventsPage openedEventId={openedActivityId} />}
+              {sideView === 'settings' ? <SettingsPage /> : sideView === 'profile' ? <ProfilePanel /> : sideView === 'issues' ? <IssuesPanel renderDetail={(workId, onBack) => workDetail(workId, onBack, true)} onDetailChange={setSideDetailOpen} /> : <EventsPage openedEventId={openedActivityId} />}
             </Suspense>
           </aside>
         )}
@@ -165,26 +201,7 @@ export function App() {
       {selectedSession && (
         <SessionDetailModal session={selectedSession} onClose={() => setSelectedSession(null)} />
       )}
-      {selectedWorkId && (
-        <WorkDetailDrawer
-          workId={selectedWorkId}
-          profile={profileOverride ?? profile ?? 'gah'}
-          connected={isConnected}
-          sessions={sessions}
-          onClose={() => setSelectedWorkId(null)}
-          onRedispatch={({ profile, repo, workId, backend }) => sendMessage({
-            type: 'session.start',
-            requestId: `redispatch_${Date.now()}`,
-            profile,
-            providerKind: backend,
-            instanceId: generateProviderInstanceId(backend, 0),
-            repo,
-            mode: 'fix',
-            backend,
-            target: workId,
-          })}
-        />
-      )}
+      {selectedWorkId && workDetail(selectedWorkId, () => setSelectedWorkId(null))}
     </div>
   );
 }

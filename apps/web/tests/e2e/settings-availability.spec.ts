@@ -4,6 +4,9 @@ import type { QuotaSnapshot } from '@git-agent-harness/contracts';
 
 const fixture: QuotaSnapshot = JSON.parse(readFileSync(new URL('../../../server/tests/fixtures/gah/responses/quota.json', import.meta.url), 'utf8'));
 
+// Routes that fetch from the fixture server must not outlive the test.
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); });
+
 test('Settings and Quota share candidate eligibility, timestamps, refresh failures, and SCM refresh', async ({ page }) => {
   const snapshot = structuredClone(fixture);
   snapshot.candidates = [{ ...snapshot.candidates[0], backend: 'agy', model: 'test-model', quota_pool: 'weekly', eligible_now: false, reason: 'Account quota exhausted', observed_at: '2026-08-01T10:00:00Z' }];
@@ -76,10 +79,9 @@ test('a late quota response cannot replace availability after a profile switch',
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect.poll(() => firstRequested).toBe(true);
   const backends = page.getByRole('region', { name: /Agent backends/ });
-  // The profile is chosen in the Profile sidebar; Settings follows it.
-  await page.getByRole('button', { name: 'Profile', exact: true }).click();
-  await page.locator('section').filter({ hasText: 'Which configured GAH repo' }).getByRole('combobox').selectOption('second');
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  // The project is chosen in the navbar; Settings follows it.
+  await page.getByRole('button', { name: /^Project:/ }).click();
+  await page.getByRole('menuitemradio', { name: /^Second/ }).click();
   await expect(backends).toContainText('second-backend');
   const lateResponse = page.waitForResponse((response) => response.url().includes('/api/quota?') && new URL(response.url()).searchParams.get('profile') === 'fixture');
   releaseFirst();

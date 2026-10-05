@@ -30,13 +30,12 @@ function NotificationCard({ event, onClear, clearLabel }: { event: ActivityEvent
 
 /** The bell at the right of the top navbar. A new notification pops open
  * under it for a few seconds; it then waits in the menu until it is cleared. */
-export function NotificationsMenu({ liveActivity, unreadCount, revision, autoPopup, onViewAll }: {
+export function NotificationsMenu({ liveActivity, unreadCount, revision, autoPopup }: {
   liveActivity: ActivityEvent | null;
   unreadCount: number;
   /** Changes whenever the server's notification list does. */
   revision: number;
   autoPopup: boolean;
-  onViewAll: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [popup, setPopup] = useState<ActivityEvent | null>(null);
@@ -110,9 +109,6 @@ export function NotificationsMenu({ liveActivity, unreadCount, revision, autoPop
               <li key={event.id}><NotificationCard event={event} onClear={() => void clear([event.id])} clearLabel={`Clear ${event.title}`} /></li>
             ))}
           </ul>
-          <button type="button" className="border-t border-subtle px-3 py-2 text-left text-xs font-medium text-accent hover:underline" onClick={() => { setOpen(false); onViewAll(); }}>
-            View all activity
-          </button>
         </div>
       )}
     </div>

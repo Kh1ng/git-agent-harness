@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ExternalLink, GitPullRequest, Hammer, Pause, Play, RefreshCw, X } from 'lucide-react';
+import { ArrowLeft, ExternalLink, GitPullRequest, Hammer, Pause, Play, RefreshCw, X } from 'lucide-react';
 import type { ProviderKind, Session } from '@git-agent-harness/contracts';
 import { gahApi, GahApiError } from '../api/client.js';
 import { workKey } from '../lib/workKey.js';
@@ -31,9 +31,11 @@ type WorkDetailDrawerProps = {
   sessions: Session[];
   onClose: () => void;
   onRedispatch: Redispatch;
+  /** Inside a sidebar instead of over the page: no dialog, and Close goes back to the list. */
+  inline?: boolean;
 };
 
-export function WorkDetailDrawer({ workId, profile, connected, sessions, onClose, onRedispatch }: WorkDetailDrawerProps) {
+export function WorkDetailDrawer({ workId, profile, connected, sessions, onClose, onRedispatch, inline = false }: WorkDetailDrawerProps) {
   const closeButton = useRef<HTMLButtonElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const status = useGahStore((state) => state.status);
@@ -56,10 +58,10 @@ export function WorkDetailDrawer({ workId, profile, connected, sessions, onClose
 
   useEffect(() => {
     void Promise.all([fetchWorkTimeline(workId), fetchProfiles()]);
-    dialog.current?.showModal();
+    if (!inline) dialog.current?.showModal();
     closeButton.current?.focus();
     return () => dialog.current?.close();
-  }, [workId, fetchProfiles, fetchWorkTimeline]);
+  }, [workId, inline, fetchProfiles, fetchWorkTimeline]);
 
   useAutoRefresh(() => { void refresh(); }, REFRESH_MS);
   useWsReconnectRefresh(() => { void refresh(); });
@@ -127,29 +129,19 @@ export function WorkDetailDrawer({ workId, profile, connected, sessions, onClose
   const reviewTone = mergeRequest ? classificationTone(mergeRequest.classification) : { tone: 'unknown' as const, label: 'No review' };
   const ci = ciLabelFor(mergeRequest);
 
-  return (
+  const body = (
     <>
-    <dialog
-      ref={dialog}
-      aria-labelledby="work-detail-title"
-      onCancel={onClose}
-      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
-      className="fixed inset-0 z-50 m-0 h-dvh max-h-none w-full max-w-none overflow-hidden border-0 bg-transparent p-0 backdrop:bg-black/35"
-    >
-      <aside
-        className="ml-auto flex h-full w-full min-w-0 flex-col overflow-hidden border-l border-subtle bg-page shadow-2xl sm:max-w-2xl"
-      >
-        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-subtle px-4 py-4 sm:px-6">
+        <header className={`flex shrink-0 items-start justify-between gap-4 border-b border-subtle ${inline ? 'pb-3' : 'px-4 py-4 sm:px-6'}`}>
           <div className="min-w-0">
             <p className="font-mono text-xs text-muted">{workId}</p>
             <h2 id="work-detail-title" className="mt-1 break-words text-lg font-semibold text-primary">{title}</h2>
           </div>
-          <button ref={closeButton} type="button" onClick={onClose} className="btn-secondary min-h-11 min-w-11 p-2" aria-label="Close work details">
-            <X size={18} aria-hidden="true" />
+          <button ref={closeButton} type="button" onClick={onClose} className="btn-secondary min-h-11 min-w-11 p-2" aria-label={inline ? 'Back to the list' : 'Close work details'}>
+            {inline ? <ArrowLeft size={18} aria-hidden="true" /> : <X size={18} aria-hidden="true" />}
           </button>
         </header>
 
-        <div className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-5 sm:px-6">
+        <div className={`min-w-0 flex-1 overflow-x-hidden ${inline ? 'py-4' : 'overflow-y-auto px-4 py-5 sm:px-6'}`}>
           <section aria-labelledby="work-status-heading" className="card-padded mb-5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 id="work-status-heading" className="text-sm font-semibold text-primary">Current state</h3>
@@ -216,6 +208,31 @@ export function WorkDetailDrawer({ workId, profile, connected, sessions, onClose
             )}
           </section>
         </div>
+    </>
+  );
+
+  if (inline) {
+    return (
+      <>
+      <section aria-labelledby="work-detail-title" className="flex min-w-0 flex-col">{body}</section>
+      {reviewOpen && <CommitPrDialog profile={profile} sessionId={session?.id} nodeId={session?.nodeId} mergeRequest={mergeRequest} onClose={() => setReviewOpen(false)} onChanged={() => void refresh()} />}
+      </>
+    );
+  }
+
+  return (
+    <>
+    <dialog
+      ref={dialog}
+      aria-labelledby="work-detail-title"
+      onCancel={onClose}
+      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
+      className="fixed inset-0 z-50 m-0 h-dvh max-h-none w-full max-w-none overflow-hidden border-0 bg-transparent p-0 backdrop:bg-black/35"
+    >
+      <aside
+        className="ml-auto flex h-full w-full min-w-0 flex-col overflow-hidden border-l border-subtle bg-page shadow-2xl sm:max-w-2xl"
+      >
+        {body}
       </aside>
     </dialog>
     {reviewOpen && <CommitPrDialog profile={profile} sessionId={session?.id} nodeId={session?.nodeId} mergeRequest={mergeRequest} onClose={() => setReviewOpen(false)} onChanged={() => void refresh()} />}

@@ -17,11 +17,8 @@ test('the Profile sidebar exposes validation timeout and persists profile update
     .getByText('Validation command timeout (seconds)')
     .locator('..')
     .locator('input');
-  const profileSelect = page
-    .locator('section')
-    .filter({ hasText: 'Which configured GAH repo' })
-    .getByRole('combobox');
-  await profileSelect.selectOption('fixture');
+  await page.getByRole('button', { name: /^Project:/ }).click();
+  await page.getByRole('menuitemradio', { name: /^Fixture/ }).click();
   await expect(page.getByText(/Per-profile loop behavior for/)).toBeVisible();
 
   await expect(validationTimeoutInput).toBeVisible();

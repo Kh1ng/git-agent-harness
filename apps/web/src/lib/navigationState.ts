@@ -1,9 +1,9 @@
-const pages = ['overview', 'work', 'telemetry', 'quota', 'events', 'profile', 'settings', 'chat', 'projects', 'git', 'nodes', 'planning'] as const;
+const pages = ['overview', 'work', 'telemetry', 'quota', 'events', 'issues', 'profile', 'settings', 'chat', 'projects', 'git', 'nodes', 'planning'] as const;
 export type Page = typeof pages[number];
 export const DEFAULT_CONVERSATION_ID = 'default';
 
 /** Pages that open in the collapsible left sidebar; every other page fills the main panel. */
-const sideViews = ['events', 'profile', 'settings'] as const;
+const sideViews = ['events', 'issues', 'profile', 'settings'] as const;
 export type SideView = typeof sideViews[number];
 export type MainPage = Exclude<Page, SideView>;
 export const isSideView = (page: Page): page is SideView => sideViews.some(view => view === page);

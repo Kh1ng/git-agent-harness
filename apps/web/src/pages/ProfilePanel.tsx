@@ -28,7 +28,7 @@ const WAKE_AUTONOMY_OPTIONS: { value: WakeAutonomyValue; label: string }[] = [
  */
 export function ProfilePanel() {
   const { providers, providerStatuses, sendMessage, isConnected, profile } = useWebSocket();
-  const { profileOverride, setProfileOverride } = useUiStore();
+  const { profileOverride } = useUiStore();
   const profiles = useGahStore((s) => s.profiles);
   const fetchProfiles = useGahStore((s) => s.fetchProfiles);
   const profileConfig = useGahStore((s) => s.profileConfig);
@@ -70,30 +70,18 @@ export function ProfilePanel() {
         lastUpdated={lastUpdated}
       />
 
-      <section className="card-padded max-w-4xl">
-        <h3 className="text-sm font-semibold text-primary mb-2">Profile context</h3>
-        <p className="text-xs text-muted mb-3">
-          Which configured GAH repo every page reads from.
-        </p>
+      <section className="card-padded max-w-4xl" aria-labelledby="current-project-title">
+        <h3 id="current-project-title" className="text-sm font-semibold text-primary mb-2">Current project</h3>
+        <p className="text-xs text-muted mb-3">Switch projects from the navbar; every page and this sidebar follow it.</p>
         <div className="max-w-md">
           {profiles.loading && !profiles.data ? (
             <p className="text-xs text-muted">Loading configured profiles…</p>
           ) : profiles.error ? (
             <p className="text-xs text-critical">Failed to load profiles: {profiles.error}</p>
-          ) : configuredProfiles.length === 0 ? (
-            <p className="text-xs text-muted">No profiles found in the GAH config.</p>
+          ) : !selected ? (
+            <p className="text-xs text-muted">{configuredProfiles.length === 0 ? 'No profiles found in the GAH config.' : 'No project selected.'}</p>
           ) : (
-            <select
-              value={selectedName}
-              onChange={(e) => setProfileOverride(e.target.value || null)}
-              className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
-            >
-              {configuredProfiles.map((p) => (
-                <option key={p.name} value={p.name}>
-                  {p.display_name} ({p.name})
-                </option>
-              ))}
-            </select>
+            <p className="text-sm text-primary">{selected.display_name} <span className="text-xs text-muted">({selected.name})</span></p>
           )}
           {selected?.web_url && (
             <ExternalAnchor

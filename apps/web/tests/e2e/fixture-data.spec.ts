@@ -32,7 +32,7 @@ test('Quota page renders the fixture quota snapshot observations', async ({ page
   await expect(page.getByText('codex', { exact: false }).first()).toBeVisible();
   await expect(page.getByText('claude', { exact: false }).first()).toBeVisible();
   await expect(page.getByTestId('quota-candidate-codex-0').getByRole('progressbar', { name: 'weekly · codex-mini: 34.2% used, 65.8% remaining', exact: true })).toBeVisible();
-  await expect(page.getByText('weekly', { exact: false })).toBeVisible();
+  await expect(page.getByText('weekly', { exact: false }).first()).toBeVisible();
   await expect(page.getByText('65.8% remaining', { exact: true })).toBeVisible();
   await page.getByText('Usage and data freshness', { exact: true }).click();
   await expect(page.getByText('Account quota check', { exact: true })).toBeVisible();
@@ -56,14 +56,10 @@ test('Telemetry page renders a backend row from the fixture report', async ({ pa
   await expect(chatUsage.getByText(/\$0\.0500 API equivalent/)).toBeVisible();
 });
 
-test('the Profile sidebar lists the fixture profile', async ({ page }) => {
+test('the project switcher lists the fixture profile', async ({ page }) => {
   await page.goto('/');
-  await navigateTo(page, 'Profile');
-  // responses/profile-list.json contains the synthetic 'fixture' profile,
-  // rendered as "Fixture (fixture)" in the profile selector.
-  const profileSelect = page
-    .locator('section')
-    .filter({ hasText: 'Which configured GAH repo' })
-    .getByRole('combobox');
-  await expect(profileSelect).toContainText('Fixture');
+  // responses/profile-list.json contains the synthetic 'fixture' profile.
+  await expect(page.getByRole('button', { name: /^Project: Fixture/ })).toBeVisible();
+  await page.getByRole('button', { name: /^Project:/ }).click();
+  await expect(page.getByRole('menu', { name: 'Projects' }).getByRole('menuitemradio', { name: /^Fixture/ })).toHaveAttribute('aria-checked', 'true');
 });

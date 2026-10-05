@@ -32,8 +32,8 @@ for (const scenario of [
       };
     });
     await page.goto('/');
-    await page.getByRole('button', { name: 'Profile', exact: true }).click();
-    await page.locator('section').filter({ hasText: 'Which configured GAH repo' }).getByRole('combobox').selectOption('fixture');
+    await page.getByRole('button', { name: /^Project:/ }).click();
+    await page.getByRole('menuitemradio', { name: /^Fixture/ }).click();
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     if (scenario.pageName === 'Settings') {
       const button = page.getByRole('button', { name: new RegExp(`^${scenario.section}`) });

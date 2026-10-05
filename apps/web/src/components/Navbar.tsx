@@ -13,8 +13,10 @@ import {
   Server,
   Orbit,
   FolderGit2,
-  FolderCog
+  FolderCog,
+  CircleDot
 } from 'lucide-react';
+import { ProjectSwitcher } from './ProjectSwitcher.js';
 import type { MainPage, Page, SideView } from '../lib/navigationState.js';
 
 type NavItem<Id extends Page> = { id: Id; label: string; icon: typeof LayoutDashboard };
@@ -32,6 +34,9 @@ type NavbarProps = {
   onChatToggle: () => void;
   /** Right-aligned controls shared by the desktop and phone bars. */
   actions?: ReactNode;
+  /** The project switcher's Import from Git and Create new. */
+  onImportProject: () => void;
+  onCreateProject: () => void;
 };
 
 export const FRONTEND_BUILD = `v${__GAH_VERSION__} (${__GAH_COMMIT__})`;
@@ -88,6 +93,7 @@ const chatItem: NavItem<MainPage> = { id: 'chat', label: 'Chat', icon: MessageSq
 /** The left sidebar: each entry opens beside the main panel. */
 const sideItems: NavItem<SideView>[] = [
   { id: 'events', label: 'Activity', icon: Radio },
+  { id: 'issues', label: 'Git issues', icon: CircleDot },
   { id: 'profile', label: 'Profile', icon: FolderCog },
   { id: 'settings', label: 'Settings', icon: Settings }
 ];
@@ -103,10 +109,9 @@ function UnreadBadge({ count, className = '' }: { count: number; className?: str
 
 /** Desktop: the collapsed sidebar is a thin strip of icons. An icon opens its
  * view beside the main panel; the same icon closes it again. */
-export function ActivityBar({ sideView, onToggle, activityUnreadCount = 0 }: {
+export function ActivityBar({ sideView, onToggle }: {
   sideView: SideView | null;
   onToggle: (view: SideView) => void;
-  activityUnreadCount?: number;
 }) {
   return (
     <nav aria-label="Sidebar" className="hidden w-12 shrink-0 flex-col items-center gap-1 overflow-y-auto border-r border-subtle bg-card py-2 lg:flex">
@@ -125,7 +130,6 @@ export function ActivityBar({ sideView, onToggle, activityUnreadCount = 0 }: {
             title={item.label}
           >
             <Icon size={20} aria-hidden="true" />
-            {item.id === 'events' && <UnreadBadge count={activityUnreadCount} className="absolute right-0 top-0" />}
           </button>
         );
       })}
@@ -135,7 +139,7 @@ export function ActivityBar({ sideView, onToggle, activityUnreadCount = 0 }: {
 
 /** Desktop: a top navbar for the main panel. Mobile (<1024px): the same bar
  * with a hamburger that opens a slide-in drawer listing every page. */
-export function Navbar({ currentPage, sideView, onPageChange, activityUnreadCount = 0, chatOpen, onChatToggle, actions }: NavbarProps) {
+export function Navbar({ currentPage, sideView, onPageChange, activityUnreadCount = 0, chatOpen, onChatToggle, actions, onImportProject, onCreateProject }: NavbarProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const drawer = useRef<HTMLDialogElement>(null);
 
@@ -163,7 +167,8 @@ export function Navbar({ currentPage, sideView, onPageChange, activityUnreadCoun
   return (
     <>
       <header className="mobile-app-header z-30 flex shrink-0 items-center gap-2 border-b border-subtle bg-card px-4 lg:min-h-0 lg:gap-4 lg:px-3">
-        <h1 className="shrink-0 text-sm font-semibold tracking-tight text-primary">Git Agent Harness</h1>
+        <h1 className="sr-only">Git Agent Harness</h1>
+        <ProjectSwitcher onImport={onImportProject} onCreate={onCreateProject} />
         <nav className="hidden min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto lg:flex" aria-label="Primary">
           {items.map((item) => {
             const Icon = item.icon;

@@ -18,6 +18,9 @@ interface UiStoreState {
   setNotificationPopups: (enabled: boolean) => void;
   setTheme: (theme: Theme) => void;
   setProfileOverride: (profile: string | null) => void;
+  /** The project switcher asked for a form another view owns: the Projects page's import, or the Profile sidebar's add. */
+  pendingAction: 'import' | 'create' | null;
+  requestAction: (action: 'import' | 'create' | null) => void;
 }
 
 function initialTheme(): Theme {
@@ -44,5 +47,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
     }
     set({ theme });
   },
-  setProfileOverride: (profile) => set({ profileOverride: profile })
+  setProfileOverride: (profile) => set({ profileOverride: profile }),
+  pendingAction: null,
+  requestAction: (pendingAction) => set({ pendingAction })
 }));

@@ -10,7 +10,7 @@ test('mobile navigation contains focus, closes with Escape, selection, backdrop,
   await page.emulateMedia({ colorScheme: 'dark', reducedMotion: 'reduce' });
   await page.setViewportSize({ width: 390, height: 844 });
   const selected: string[] = [];
-  await mount(<Navbar currentPage="overview" sideView={null} chatOpen={false} onChatToggle={() => {}} onPageChange={(value) => selected.push(value)} />);
+  await mount(<WebSocketProvider><Navbar currentPage="overview" sideView={null} chatOpen={false} onChatToggle={() => {}} onPageChange={(value) => selected.push(value)} onImportProject={() => {}} onCreateProject={() => {}} /></WebSocketProvider>);
   const opener = page.getByRole('button', { name: 'Open navigation menu' });
   const dialog = page.getByRole('dialog', { name: 'Navigation menu' });
   await opener.focus();
