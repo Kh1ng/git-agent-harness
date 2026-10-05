@@ -34,6 +34,10 @@ pub struct ExecutionIdentity {
     /// This binding never enters durable route or usage records.
     #[serde(skip, default)]
     pub credential_id: Option<String>,
+    /// Named credential whose account readings measure `quota_pool`
+    /// (`routing.quota_sources`). Selects readings only; never executes.
+    #[serde(skip, default)]
+    pub quota_source: Option<String>,
     /// Whether `backend_instance` came from an explicit instance declaration
     /// rather than the legacy backend/quota compatibility projection.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -98,6 +102,7 @@ impl ExecutionIdentity {
             executable: None,
             state_root: None,
             credential_id: None,
+            quota_source: None,
             explicit_instance: false,
             requested_backend,
             logical_backend,
