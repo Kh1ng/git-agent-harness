@@ -202,3 +202,44 @@ fn mistral_login_session_is_cached_per_revision_and_never_executes() {
     assert!(execution_env_with(mistral_login_info("console"), login.into(), "mistral").is_err());
     assert!(execution_env_with(mistral_login_info("console"), login.into(), "vibe").is_err());
 }
+
+#[test]
+fn replacing_api_key_with_subscription_reclassifies_existing_paid_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("credentials");
+    let mut source = info("account");
+    source.provider = "anthropic".into();
+    source.env_var = Some("ANTHROPIC_API_KEY".into());
+    save_at(&root, source.clone(), "synthetic-api-key").unwrap();
+    let mut stored = crate::config::RoutingPolicy::default();
+    stored.backend_instances.insert(
+        "claude-account".into(),
+        crate::config::BackendInstanceConfig {
+            runner_kind: "claude".into(),
+            credential_id: Some("account".into()),
+            ..Default::default()
+        },
+    );
+    stored.improve_candidates = Some(vec![crate::config::CandidateConfig {
+        backend: "claude".into(),
+        instance: Some("claude-account".into()),
+        requires_approval: true,
+        marginal_cost_usd: Some(0.5),
+        ..Default::default()
+    }]);
+    let resolve = || {
+        let mut routing = stored.clone();
+        routing.normalize_subscription_candidates(|id| {
+            read_at(&root, id).unwrap().info.kind == CredentialKind::ClaudeSubscription
+        });
+        routing.improve_candidates.unwrap().remove(0)
+    };
+    assert!(resolve().requires_approval);
+    source.kind = CredentialKind::ClaudeSubscription;
+    source.env_var = None;
+    save_at(&root, source, "synthetic-subscription-token").unwrap();
+    let candidate = resolve();
+    assert!(candidate.included_in_quota);
+    assert!(!candidate.requires_approval);
+    assert_eq!(candidate.marginal_cost_usd, None);
+}

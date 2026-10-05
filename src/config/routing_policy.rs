@@ -157,7 +157,13 @@ pub struct RoutingPolicy {
 
 impl RoutingPolicy {
     pub fn merged_with_defaults(&self, defaults: &RoutingPolicy) -> RoutingPolicy {
-        merge_routing_policy(defaults.clone(), self.clone())
+        let mut routing = merge_routing_policy(defaults.clone(), self.clone());
+        routing.normalize_subscription_candidates(|id| {
+            crate::credentials::get(id).is_ok_and(|info| {
+                info.kind == crate::credentials::CredentialKind::ClaudeSubscription
+            })
+        });
+        routing
     }
 
     /// `canonical` quota sources overridden by this policy's same-key entries.

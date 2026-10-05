@@ -397,47 +397,61 @@ fn dispatch_failures(now: time::OffsetDateTime) -> Vec<AuthProbe> {
     failures
 }
 
+fn subscription_probes(config: &crate::config::GahConfig) -> Vec<AuthProbe> {
+    subscription_probes_with(config, |instance| {
+        let info = crate::credentials::get(instance.credential_id.as_deref()?).ok()?;
+        (info.kind == crate::credentials::CredentialKind::ClaudeSubscription)
+            .then(|| crate::config::backend_instance_auth_ready(instance).unwrap_or(false))
+    })
+}
+
+fn subscription_probes_with(
+    config: &crate::config::GahConfig,
+    mut readiness: impl FnMut(&crate::config::BackendInstanceConfig) -> Option<bool>,
+) -> Vec<AuthProbe> {
+    let mut probes = Vec::new();
+
+    for profile in config.profiles.values() {
+        for (id, instance) in &profile
+            .effective_routing(&config.defaults)
+            .backend_instances
+        {
+            if instance.runner_kind != "claude" || !instance.enabled() {
+                continue;
+            }
+            let Some(ready) = readiness(instance) else {
+                continue;
+            };
+            let mut result = probe(
+                "claude",
+                None,
+                AuthHealth::new(
+                    if ready {
+                        AuthState::Ok
+                    } else {
+                        AuthState::Missing
+                    },
+                    Some(if ready {
+                        "Claude subscription token is configured."
+                    } else {
+                        "Claude subscription instance is unavailable."
+                    }),
+                ),
+            );
+            result.backend_instance = Some(id.clone());
+            probes.push(result);
+        }
+    }
+    probes
+}
+
 /// Every login this node can check, plus logins dispatch found dead.
 /// Backends whose CLI is not installed are skipped, not reported missing.
 pub fn probe_node() -> AuthHealthReport {
     let now = time::OffsetDateTime::now_utc();
     let mut probes = Vec::new();
     if let Ok(config) = crate::config::load(None) {
-        for profile in config.profiles.values() {
-            for (id, instance) in &profile.routing.backend_instances {
-                if instance.runner_kind != "claude" || !instance.enabled() {
-                    continue;
-                }
-                let Some(credential_id) = instance.credential_id.as_deref() else {
-                    continue;
-                };
-                let Ok(info) = crate::credentials::get(credential_id) else {
-                    continue;
-                };
-                if info.kind != crate::credentials::CredentialKind::ClaudeSubscription {
-                    continue;
-                }
-                let ready = crate::config::backend_instance_auth_ready(instance).unwrap_or(false);
-                let mut result = probe(
-                    "claude",
-                    None,
-                    AuthHealth::new(
-                        if ready {
-                            AuthState::Ok
-                        } else {
-                            AuthState::Missing
-                        },
-                        Some(if ready {
-                            "Claude subscription token is configured."
-                        } else {
-                            "Claude subscription instance is unavailable."
-                        }),
-                    ),
-                );
-                result.backend_instance = Some(id.clone());
-                probes.push(result);
-            }
-        }
+        probes.extend(subscription_probes(&config));
     }
     if let Some(claude) = resolve("claude") {
         probes.push(probe(
@@ -517,6 +531,54 @@ pub fn probe_node() -> AuthHealthReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subscription_health_uses_inherited_instances_and_runner_kind() {
+        let mut config = crate::config::GahConfig {
+            defaults: Default::default(),
+            profiles: Default::default(),
+            context: Default::default(),
+        };
+        let mut profile = crate::config::tests::test_profile_for_notifications();
+        for id in ["global", "overridden", "disabled"] {
+            config.defaults.routing.backend_instances.insert(
+                id.into(),
+                crate::config::BackendInstanceConfig {
+                    runner_kind: "claude".into(),
+                    credential_id: Some("global-token".into()),
+                    ..Default::default()
+                },
+            );
+        }
+        profile.routing.backend_instances.insert(
+            "overridden".into(),
+            crate::config::BackendInstanceConfig {
+                credential_id: Some("profile-token".into()),
+                ..Default::default()
+            },
+        );
+        profile.routing.backend_instances.insert(
+            "disabled".into(),
+            crate::config::BackendInstanceConfig {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        );
+        config.profiles.insert("test".into(), profile);
+        let probes = subscription_probes_with(&config, |instance| {
+            assert_eq!(instance.runner_kind, "claude");
+            Some(instance.credential_id.as_deref() == Some("global-token"))
+        });
+        assert_eq!(probes.len(), 2);
+        assert!(probes
+            .iter()
+            .any(|probe| probe.backend_instance.as_deref() == Some("global")
+                && probe.health.state == AuthState::Ok));
+        assert!(probes.iter().any(
+            |probe| probe.backend_instance.as_deref() == Some("overridden")
+                && probe.health.state == AuthState::Missing
+        ));
+    }
 
     fn text(success: bool, stdout: &str) -> AuthState {
         classify_status_output(success, stdout.as_bytes(), b"").state
