@@ -113,7 +113,7 @@
     outline-offset: 2px;
   }
 
-  /* A subscription with a job running: a bold green letter inside a glowing green halo. */
+  /* A subscription with a job running: a bold green letter inside a steady green glow. */
   .usage-letter-working {
     color: rgb(var(--status-good));
     font-weight: 800;
@@ -121,21 +121,13 @@
   }
   .usage-chip-working {
     border-radius: 9999px;
-    box-shadow: 0 0 0 1.5px rgb(var(--status-good) / 0.9), 0 0 10px 2px rgb(var(--status-good) / 0.55);
-    animation: usage-glow 8s ease-in-out infinite;
-  }
-  @keyframes usage-glow {
-    0%, 100% { box-shadow: 0 0 0 1.5px rgb(var(--status-good) / 0.9), 0 0 6px 1px rgb(var(--status-good) / 0.35); }
-    50% { box-shadow: 0 0 0 1.5px rgb(var(--status-good)), 0 0 14px 4px rgb(var(--status-good) / 0.7); }
+    box-shadow: 0 0 0 1.5px rgb(var(--status-good)), 0 0 10px 3px rgb(var(--status-good) / 0.6);
   }
 
   @media (prefers-reduced-motion: reduce) {
     /* Keep loading labels and status changes visible without spinning or pulsing. */
     .animate-spin,
     .animate-pulse {
-      animation: none !important;
-    }
-    .usage-chip-working {
       animation: none !important;
     }
     html:focus-within {
