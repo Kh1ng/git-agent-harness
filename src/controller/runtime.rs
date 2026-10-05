@@ -199,6 +199,12 @@ pub fn run_once(
     skip_validation_gate: bool,
     run_periodic_probes: bool,
 ) -> Result<()> {
+    let node_capacity_settings = cfg.defaults.node_capacity;
+    eprintln!(
+        "gah loop: node capacity worker reservation {} MiB, memory floor {}",
+        node_capacity_settings.worker_memory_mib,
+        node_capacity_settings.floor_description(),
+    );
     let mut ledger_entries = crate::ledger::read_entries(cfg)?;
     reconcile_abandoned_dispatches(cfg, profile_name, &mut ledger_entries)?;
     let profile = crate::config::get_profile(cfg, profile_name)?;
@@ -460,7 +466,8 @@ fn run_parallel_once(
         let mut node_alternative_attempts_remaining = effective_parallel_limit;
         let (done_tx, done_rx) = sync_channel::<(usize, LoopOnceResult)>(effective_parallel_limit);
         let (route_admission_tx, route_admission_rx) = admission::request_channel();
-        let mut admission_coordinator = admission::Coordinator::new(route_admission_rx);
+        let mut admission_coordinator =
+            admission::Coordinator::new(route_admission_rx, cfg.defaults.node_capacity);
 
         'scheduler: loop {
             if admission::service_pending_request(
@@ -600,6 +607,7 @@ fn run_parallel_once(
                             let admission = match node_capacity::try_acquire(
                                 &action,
                                 admission_coordinator.active_node_workers(),
+                                cfg.defaults.node_capacity,
                             ) {
                                 Ok(admission) => admission,
                                 Err(error) => {
@@ -770,6 +778,7 @@ fn run_parallel_once(
                     &done_rx,
                     admission_coordinator.active_node_workers(),
                     effective_parallel_limit,
+                    cfg.defaults.node_capacity,
                 )? {
                     ReprobeWaitOutcome::WorkerCompleted(result) => result,
                     ReprobeWaitOutcome::RetryFill => {

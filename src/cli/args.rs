@@ -585,6 +585,10 @@ pub enum ConfigCommands {
         /// Telegram chat id for the telegram channel (non-secret).
         #[arg(long)]
         telegram_chat_id: Option<String>,
+        #[arg(long)]
+        worker_memory_mib: Option<u64>,
+        #[arg(long)]
+        memory_floor_mib: Option<u64>,
     },
     /// Issue #149: ordered routing-candidate editing for a profile. The
     /// lists are `pm` / `improve` / `review` / `escalatory`. Every mutation

@@ -20,6 +20,25 @@ a summary.
 
 ## 1. Deployment
 
+### Node memory admission
+
+`gah loop` reserves 4096 MiB for each implementation, fix, retry, or escalation
+worker and keeps a free-memory floor of `max(2048 MiB, total memory / 6)`.
+The critical-memory and memory PSI checks always apply. Operators can set
+these global defaults in Settings → Node memory capacity or in TOML:
+
+```toml
+[defaults.node_capacity]
+worker_memory_mib = 4096
+memory_floor_mib = 0
+```
+
+`memory_floor_mib = 0` (or an omitted value) keeps the adaptive floor. An
+explicit floor must be at least 512 MiB; the worker reservation must also be
+at least 512 MiB. Lowering either value raises the risk of running out of
+memory. The loop reloads these settings each iteration; `gah status` reports
+them. CPU, review, and PM reservations are unchanged.
+
 ### Deterministic CLI/control-plane update
 
 Do not assume a `cargo build --release` updates the `gah` command on PATH. A

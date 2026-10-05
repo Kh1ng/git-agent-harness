@@ -270,6 +270,8 @@ export function SettingsPage() {
         clearConfigErrors={clearConfigErrors}
       />
 
+      <NodeCapacitySection config={config} setConfig={setConfig} />
+
       <NotificationChannelSection
         config={config}
         setConfig={setConfig}
@@ -546,6 +548,7 @@ interface GlobalManagerSectionProps {
   config: {
     data: {
       current_manager: string | null;
+      node_capacity?: { worker_memory_mib: number; memory_floor_mib: number };
       notifications?: NotificationSettingsSummary;
     } | null;
     loading: boolean;
@@ -553,6 +556,33 @@ interface GlobalManagerSectionProps {
   };
   setConfig: (data: ConfigSetData) => Promise<void>;
   clearConfigErrors: () => void;
+}
+
+function NodeCapacitySection({ config, setConfig }: Pick<GlobalManagerSectionProps, 'config' | 'setConfig'>) {
+  const [worker, setWorker] = useState('4096');
+  const [floor, setFloor] = useState('0');
+  useEffect(() => {
+    setWorker(String(config.data?.node_capacity?.worker_memory_mib ?? 4096));
+    setFloor(String(config.data?.node_capacity?.memory_floor_mib ?? 0));
+  }, [config.data?.node_capacity?.worker_memory_mib, config.data?.node_capacity?.memory_floor_mib]);
+  const workerValue = Number(worker);
+  const floorValue = Number(floor);
+  const valid = Number.isSafeInteger(workerValue) && workerValue >= 512 && Number.isSafeInteger(floorValue) && (floorValue === 0 || floorValue >= 512);
+  return (
+    <section className="card-padded max-w-md">
+      <h3 className="text-sm font-semibold text-primary mb-1">Node memory capacity</h3>
+      <p className="text-xs text-muted mb-3">Lowering these values raises the risk of the node running out of memory.</p>
+      <label className="block text-xs font-medium text-secondary mb-1" htmlFor="worker-memory-mib">Implementation worker reservation (MiB)</label>
+      <input id="worker-memory-mib" type="number" min={512} step={1} value={worker} onChange={(event) => setWorker(event.target.value)} className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary" />
+      <p className="text-xs text-muted mt-1 mb-3">Default: 4096 MiB per implementation, fix, retry, or escalation worker.</p>
+      <label className="block text-xs font-medium text-secondary mb-1" htmlFor="memory-floor-mib">Free memory floor (MiB)</label>
+      <input id="memory-floor-mib" type="number" min={0} step={1} value={floor} onChange={(event) => setFloor(event.target.value)} className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary" />
+      <p className="text-xs text-muted mt-1">Default: 0 uses max(2048 MiB, total memory / 6). An explicit floor must be at least 512 MiB.</p>
+      {!valid && <p role="alert" className="text-xs text-critical mt-2">Enter whole MiB values: worker at least 512; floor 0 or at least 512.</p>}
+      {config.error && <p role="alert" className="text-xs text-critical mt-2">Error: {config.error}</p>}
+      <button onClick={() => setConfig({ worker_memory_mib: workerValue, memory_floor_mib: floorValue })} disabled={!valid || config.loading} className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed">Save node capacity</button>
+    </section>
+  );
 }
 
 interface ProfileConfigViewerSectionProps {

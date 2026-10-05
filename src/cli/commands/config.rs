@@ -45,6 +45,8 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             clear,
             notification_channel,
             telegram_chat_id,
+            worker_memory_mib,
+            memory_floor_mib,
         } => {
             let mut cfg = if config::resolve_config_path(config_path.as_deref()).exists() {
                 config::load(config_path.as_deref())?
@@ -86,6 +88,13 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                     cfg.defaults.telegram_chat_id = Some(trimmed.to_string());
                 }
             }
+            if let Some(value) = worker_memory_mib {
+                cfg.defaults.node_capacity.worker_memory_mib = value;
+            }
+            if let Some(value) = memory_floor_mib {
+                cfg.defaults.node_capacity.memory_floor_mib = value;
+            }
+            cfg.defaults.node_capacity.validate()?;
             crate::node_role::NodeRoleStatus::with_override(&cfg.defaults, None)?;
             config::save(&cfg, config_path.as_deref())?;
             println!("Updated global config");

@@ -159,13 +159,18 @@ pub(crate) enum PollOutcome {
 pub(crate) struct Coordinator {
     requests: Receiver<AdmissionMessage>,
     node_admitted_sequences: HashSet<usize>,
+    settings: crate::config::NodeCapacitySettings,
 }
 
 impl Coordinator {
-    pub(crate) fn new(requests: Receiver<AdmissionMessage>) -> Self {
+    pub(crate) fn new(
+        requests: Receiver<AdmissionMessage>,
+        settings: crate::config::NodeCapacitySettings,
+    ) -> Self {
         Self {
             requests,
             node_admitted_sequences: HashSet::new(),
+            settings,
         }
     }
 
@@ -200,7 +205,8 @@ impl Coordinator {
             return PollOutcome::Shutdown;
         }
 
-        match super::node_capacity::try_acquire(&action, self.active_node_workers()) {
+        match super::node_capacity::try_acquire(&action, self.active_node_workers(), self.settings)
+        {
             Ok(super::node_capacity::LiveAdmission::Admit(lease)) => {
                 self.node_admitted_sequences.insert(sequence);
                 if request

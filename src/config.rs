@@ -41,6 +41,7 @@ pub struct Defaults {
     pub llm_model_local: String,
     pub llm_model_cloud: String,
     pub routing: RoutingPolicy,
+    pub node_capacity: NodeCapacitySettings,
     /// Which agent CLI ("claude" | "codex" | "hermes") is currently acting
     /// as the operator's manager across all profiles/projects. Read by the
     /// manager-wake feature (`Profile::manager_wake_autonomy`) to decide
@@ -68,6 +69,98 @@ pub struct Defaults {
     /// Telegram chat to deliver to when the channel is `telegram`.
     #[serde(default)]
     pub telegram_chat_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+#[serde(default)]
+pub struct NodeCapacitySettings {
+    pub worker_memory_mib: u64,
+    /// Zero retains the adaptive floor of max(2048 MiB, total memory / 6).
+    pub memory_floor_mib: u64,
+}
+
+impl Default for NodeCapacitySettings {
+    fn default() -> Self {
+        Self {
+            worker_memory_mib: 4096,
+            memory_floor_mib: 0,
+        }
+    }
+}
+
+impl NodeCapacitySettings {
+    pub fn floor_description(self) -> String {
+        if self.memory_floor_mib == 0 {
+            "max(2048 MiB, total / 6)".into()
+        } else {
+            format!("{} MiB", self.memory_floor_mib)
+        }
+    }
+
+    pub fn validate(self) -> Result<()> {
+        anyhow::ensure!(
+            self.worker_memory_mib >= 512,
+            "node_capacity.worker_memory_mib must be at least 512"
+        );
+        anyhow::ensure!(
+            self.memory_floor_mib == 0 || self.memory_floor_mib >= 512,
+            "node_capacity.memory_floor_mib must be zero or at least 512"
+        );
+        anyhow::ensure!(
+            self.worker_memory_mib <= u64::MAX / (1024 * 1024)
+                && self.memory_floor_mib <= u64::MAX / (1024 * 1024),
+            "node_capacity memory value is too large"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod node_capacity_settings_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_and_validation() {
+        let defaults = NodeCapacitySettings::default();
+        assert_eq!(defaults.worker_memory_mib, 4096);
+        assert_eq!(defaults.memory_floor_mib, 0);
+        assert!(defaults.validate().is_ok());
+        for settings in [
+            NodeCapacitySettings {
+                worker_memory_mib: 511,
+                ..defaults
+            },
+            NodeCapacitySettings {
+                memory_floor_mib: 511,
+                ..defaults
+            },
+        ] {
+            assert!(settings.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn toml_round_trip() {
+        let settings: NodeCapacitySettings =
+            toml::from_str("worker_memory_mib = 1536\nmemory_floor_mib = 768").unwrap();
+        settings.validate().unwrap();
+        let encoded = toml::to_string(&settings).unwrap();
+        let restored: NodeCapacitySettings = toml::from_str(&encoded).unwrap();
+        assert_eq!(restored.worker_memory_mib, 1536);
+        assert_eq!(restored.memory_floor_mib, 768);
+    }
+
+    #[test]
+    fn load_rejects_below_minimum_values() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        for body in [
+            "[defaults.node_capacity]\nworker_memory_mib = 511\n",
+            "[defaults.node_capacity]\nmemory_floor_mib = 511\n",
+        ] {
+            std::fs::write(file.path(), body).unwrap();
+            assert!(load(file.path().to_str()).is_err());
+        }
+    }
 }
 
 impl Defaults {
@@ -592,6 +685,7 @@ pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let mut cfg: GahConfig =
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    cfg.defaults.node_capacity.validate()?;
     if let Some(canonical_routing) = load_canonical_routing()? {
         cfg.defaults.routing = merge_routing_policy(canonical_routing, cfg.defaults.routing);
     }
@@ -622,6 +716,7 @@ pub fn get_profile<'a>(config: &'a GahConfig, name: &str) -> Result<&'a Profile>
 
 /// Save the config back to the TOML file
 pub fn save(config: &GahConfig, path: Option<&str>) -> Result<()> {
+    config.defaults.node_capacity.validate()?;
     let target_path = resolve_config_path(path);
 
     // Ensure parent directory exists

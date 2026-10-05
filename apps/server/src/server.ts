@@ -1777,6 +1777,8 @@ export function createServer(
     try {
       const options: ConfigSetOptions = {
         current_manager: req.body.current_manager,
+        worker_memory_mib: req.body.worker_memory_mib,
+        memory_floor_mib: req.body.memory_floor_mib,
         notification_channel: req.body.notification_channel,
         telegram_chat_id: req.body.telegram_chat_id,
         clear: req.body.clear,
