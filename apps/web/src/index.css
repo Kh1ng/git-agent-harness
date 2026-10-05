@@ -113,18 +113,20 @@
     outline-offset: 2px;
   }
 
-  /* A subscription with a job running: its letter shimmers green. */
+  /* A subscription with a job running: a bold green letter inside a glowing green halo. */
   .usage-letter-working {
-    background-image: linear-gradient(90deg, rgb(var(--status-good)) 0%, rgb(var(--status-good) / 0.35) 50%, rgb(var(--status-good)) 100%);
-    background-size: 200% 100%;
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    animation: usage-shimmer 1.6s linear infinite;
+    color: rgb(var(--status-good));
+    font-weight: 800;
+    text-shadow: 0 0 6px rgb(var(--status-good) / 0.9);
   }
-  @keyframes usage-shimmer {
-    from { background-position: 200% 0; }
-    to { background-position: 0 0; }
+  .usage-chip-working {
+    border-radius: 9999px;
+    box-shadow: 0 0 0 1.5px rgb(var(--status-good) / 0.9), 0 0 10px 2px rgb(var(--status-good) / 0.55);
+    animation: usage-glow 1.6s ease-in-out infinite;
+  }
+  @keyframes usage-glow {
+    0%, 100% { box-shadow: 0 0 0 1.5px rgb(var(--status-good) / 0.9), 0 0 6px 1px rgb(var(--status-good) / 0.35); }
+    50% { box-shadow: 0 0 0 1.5px rgb(var(--status-good)), 0 0 14px 4px rgb(var(--status-good) / 0.7); }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -133,10 +135,8 @@
     .animate-pulse {
       animation: none !important;
     }
-    .usage-letter-working {
+    .usage-chip-working {
       animation: none !important;
-      background-image: none;
-      color: rgb(var(--status-good));
     }
     html:focus-within {
       scroll-behavior: auto;

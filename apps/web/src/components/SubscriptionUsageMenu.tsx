@@ -98,13 +98,14 @@ export function SubscriptionUsageMenu({ subscriptions, busy, onOpenQuota }: { su
       <div className="flex items-center gap-0.5" role="group" aria-label="Subscription usage">
         {subscriptions.map((usage) => {
           const tight = usage.tightest;
-          const label = `${usage.providerLabel} usage${tight && tight.usedPercent !== null ? `: ${Math.round(tight.usedPercent)}% of ${tight.label.toLowerCase()} used` : ''}`;
+          const working = busy?.has(usage.id) ?? false;
+          const label = `${usage.providerLabel} usage${tight && tight.usedPercent !== null ? `: ${Math.round(tight.usedPercent)}% of ${tight.label.toLowerCase()} used` : ''}${working ? ', working now' : ''}`;
           return (
             <button key={usage.id} type="button" aria-label={label} aria-expanded={openId === usage.id} aria-haspopup="true"
               onMouseEnter={() => { if (!pinned) { setOpenId(usage.id); setNow(Date.now()); } }}
               onClick={() => { setPinned(openId !== usage.id || !pinned); setOpenId(usage.id); setNow(Date.now()); }}
               className={`flex h-9 w-9 items-center justify-center rounded-md hover:bg-white/5 ${openId === usage.id ? 'bg-white/5' : ''}`}>
-              <UsageRing usage={usage} working={busy?.has(usage.id) ?? false} />
+              <UsageRing usage={usage} working={working} />
             </button>
           );
         })}
