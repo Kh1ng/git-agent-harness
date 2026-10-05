@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <title>GAH shared workspace</title>
+  <script type="module" crossorigin src="./assets/index-OJ5deIDr.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-CIPm8Dpm.css">
+</head>
+<body>
+  <main>
+    <header><a href="./" class="brand">GAH</a><span>Shared workspace</span><button id="sign-out" hidden>Sign out</button></header>
+    <section class="intro">
+      <h1>Your machines.<br>A shared workspace.</h1>
+      <p>Choose who can use each node, and who can manage it while you're away.</p>
+    </section>
+    <p id="notice" role="status" aria-live="polite"></p>
+    <section id="connect-section">
+      <h2>Connect to your workspace</h2>
+      <p>Use the connection details from your operator or your own Supabase project. Access requires an invited account.</p>
+      <form id="connect-form">
+        <label>Supabase URL<input id="url" type="url" placeholder="https://your-project.example.com" required autocomplete="off" /></label>
+        <label>Publishable or anon key<input id="key" type="password" required autocomplete="off" /></label>
+        <label>Email address<input id="email" type="email" required autocomplete="email" /></label>
+        <button type="submit">Send sign-in link</button>
+      </form>
+    </section>
+    <section id="workspace-section" hidden>
+      <div class="section-heading"><div><h2>Nodes</h2><p id="workspace-status">Loading your workspace...</p></div><button id="refresh">Refresh</button></div>
+      <label class="workspace-picker" id="demo-persona" hidden>Preview as<select id="persona"></select></label>
+      <label class="workspace-picker">Workspace<select id="workspace"></select></label>
+      <div id="nodes"></div>
+      <div id="jobs"></div>
+    </section>
+    <footer><p>Workers accept only configured profiles. Compute and inference access are granted separately. Revocation stops running work at the next worker check.</p><p id="deployment-note">Testing pilot. Access requires an invited account and workspace permissions.</p></footer>
+  </main>
+</body>
+</html>
