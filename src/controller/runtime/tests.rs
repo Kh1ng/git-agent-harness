@@ -367,7 +367,10 @@ fn events_test_config() -> (tempfile::TempDir, crate::config::GahConfig) {
             artifact_root: tmp.path().to_string_lossy().into_owned(),
             ..Default::default()
         },
-        profiles: std::collections::HashMap::new(),
+        profiles: std::collections::HashMap::from([(
+            "real".into(),
+            crate::config::tests::test_profile_for_notifications(),
+        )]),
     };
     (tmp, cfg)
 }
@@ -404,7 +407,10 @@ fn stop_event_for_capped_pr_persists_reason_code_and_dedupes_across_ticks() {
 
 #[test]
 fn blocked_pr_is_reported_once_alongside_other_dispatch() {
-    let (_tmp, cfg) = events_test_config();
+    let (tmp, mut cfg) = events_test_config();
+    let delivered = tmp.path().join("notifications.txt");
+    cfg.profiles.get_mut("real").unwrap().notify_command =
+        Some(format!("cat >> '{}'", delivered.display()));
     let mut snapshot = empty_snapshot();
     snapshot.blocked_work_items.push(capped_pr_blocker());
     for _ in 0..3 {
@@ -414,6 +420,10 @@ fn blocked_pr_is_reported_once_alongside_other_dispatch() {
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0].event_type, "human_required");
     assert_eq!(events[0].work_id.as_deref(), Some("branch-A"));
+    let message = std::fs::read_to_string(delivered).unwrap();
+    assert_eq!(message.lines().count(), 1, "{message}");
+    assert!(message.contains("branch-A"), "{message}");
+    assert!(message.contains("fix_retry_cap_exceeded"), "{message}");
     assert_eq!(
         events[0].reason_code.as_deref(),
         Some("fix_retry_cap_exceeded")

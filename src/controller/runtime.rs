@@ -351,7 +351,7 @@ pub fn run_once(
                     &action,
                     &ledger_entries,
                     skip_validation_gate,
-                    None,
+                    Some(RouteNodeAdmission::single_worker(action.clone())),
                 ) {
                     Ok(outcome) => {
                         crate::work_claim::release_work(&claim_scope, &work_id)?;
@@ -370,7 +370,7 @@ pub fn run_once(
                 &action,
                 &ledger_entries,
                 skip_validation_gate,
-                None,
+                Some(RouteNodeAdmission::single_worker(action.clone())),
             )?
         };
 
@@ -379,8 +379,17 @@ pub fn run_once(
             NextAction::HumanRequired { .. } => crate::events::EventType::HumanRequired,
             _ => crate::events::EventType::LoopStopped,
         };
-        let admission_note = (!action_admitted_work(&action, &outcome))
-            .then(|| no_admission_diagnostics(&snapshot, 0, 1, None));
+        let admission_note = (!action_admitted_work(&action, &outcome)).then(|| {
+            let node_deferral = outcome
+                .starts_with("Deferred ")
+                .then(|| {
+                    outcome
+                        .split_once("; admission reason: ")
+                        .map(|(_, reason)| reason)
+                })
+                .flatten();
+            no_admission_diagnostics(&snapshot, 0, 1, node_deferral)
+        });
         let newly_reported = record_stop_event(
             cfg,
             profile_name,

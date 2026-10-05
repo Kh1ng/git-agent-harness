@@ -53,6 +53,7 @@ pub struct ScenarioHarness {
     pub provider: String,
     worktree_base_override: Option<PathBuf>,
     temp_dir_override: Option<PathBuf>,
+    pub node_pressure_fixture: Option<PathBuf>,
     fake_gh: Option<FakeBackend>,
     fake_glab: Option<FakeBackend>,
     fake_workers: HashMap<String, FakeBackend>,
@@ -157,6 +158,7 @@ impl ScenarioHarness {
             provider: provider.to_string(),
             worktree_base_override: None,
             temp_dir_override: None,
+            node_pressure_fixture: None,
             fake_gh: None,
             fake_glab: None,
             fake_workers: HashMap::new(),
@@ -382,7 +384,11 @@ impl ScenarioHarness {
         if json {
             command.arg("--json");
         }
+        if let Some(path) = &self.node_pressure_fixture {
+            command.env("GAH_TEST_NODE_PRESSURE_FILE", path);
+        }
         let out = command
+            .env("XDG_RUNTIME_DIR", self._temp.path().join("runtime"))
             .env(
                 "XDG_STATE_HOME",
                 self._temp.path().join("xdg-state").to_str().unwrap(),

@@ -873,3 +873,44 @@ fn consecutive_single_worker_ticks_print_diagnostics_but_dedupe_capped_pr_notifi
         );
     }
 }
+
+#[test]
+fn single_worker_node_deferral_prints_live_admission_measurements() {
+    let mut harness = capped_pr_harness(2);
+    add_eligible_ticket(&harness);
+    let pressure = harness.artifacts_dir.join("pressure.json");
+    std::fs::write(
+        &pressure,
+        serde_json::json!({
+            "memory_total_bytes": 17179869184_u64,
+            "memory_available_bytes": 3221225472_u64,
+            "logical_cpus": 8,
+            "load_one": 0.0,
+            "memory_full_psi_avg10": 0.0,
+            "cpu_some_psi_avg10": 0.0
+        })
+        .to_string(),
+    )
+    .unwrap();
+    harness.node_pressure_fixture = Some(pressure);
+    let result = harness.run_one_loop_with_json(false).unwrap();
+    assert_eq!(result.exit_code, Some(0), "{result:?}");
+    assert!(
+        result
+            .stdout
+            .contains("node capacity: 0/1 workers active, admission deferred"),
+        "{result:?}"
+    );
+    assert!(
+        result.stdout.contains(
+            "3072 MiB available, 4096 MiB reserved for active/new workers, 2730 MiB safety floor"
+        ),
+        "{result:?}"
+    );
+    assert!(!result.stdout.contains("no node deferral"), "{result:?}");
+    assert_eq!(
+        result.call_counts.get("codex").copied().unwrap_or(0),
+        0,
+        "{result:?}"
+    );
+}

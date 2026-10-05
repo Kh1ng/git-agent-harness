@@ -661,6 +661,30 @@ pub(super) fn report_blocked_work_items_once(
         if already_reported {
             continue;
         }
+        let profile = crate::config::get_profile(cfg, profile_name)?;
+        let reason = blocker
+            .message
+            .as_deref()
+            .or(blocker.reason.as_deref())
+            .unwrap_or("human required");
+        crate::notifications::notify_event(
+            cfg,
+            profile,
+            crate::notifications::NotifyEvent::HumanRequired {
+                reason,
+                reference: Some(identity),
+                reason_code,
+                failure_class: "human_required",
+                failure_stage: None,
+                error_summary: None,
+                attempt_count: None,
+                mr_url: snapshot
+                    .merge_requests
+                    .iter()
+                    .find(|mr| mr.branch == reference || mr.work_id.as_deref() == Some(reference))
+                    .and_then(|mr| mr.url.as_deref()),
+            },
+        );
         crate::events::record_with_reason_code(
             cfg,
             crate::events::EventType::HumanRequired,
