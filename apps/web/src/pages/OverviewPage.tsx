@@ -24,6 +24,7 @@ import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyStat
 import { formatPercent, formatAge, formatLocalTime, isStale, formatTokens, formatCount, oldestFetchedAt } from '../lib/format.js';
 import { AttentionTable, attentionRows } from '../components/AttentionTable.js';
 import { LiveAgentsCard, agentDisplayName } from '../components/LiveAgentsCard.js';
+import type { WatchableRun } from '../components/AgentLiveView.js';
 import { NonFactoryAgentsCard } from '../components/NonFactoryAgentsCard.js';
 import { updateNavigation } from '../lib/navigationState.js';
 
@@ -32,7 +33,7 @@ type OverviewPageProps = {
   onNavigate: (page: Page) => void;
   onOpenWork?: (workId: string) => void;
   /** Opens a running job's read-only live view. */
-  onWatchRun?: (run: { runId: string; title: string; subtitle: string | null }) => void;
+  onWatchRun?: (run: WatchableRun, running: WatchableRun[]) => void;
   /** The device's agent processes; absent in isolation (component tests). */
   deviceAgents?: { data: DeviceAgentsSnapshot | null; error: string | null };
 };
@@ -174,7 +175,10 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, onWa
 
       <LiveAgentsCard profile={profile ?? null} sessions={sessions} controllerRuns={controllerActivity}
         claims={snapshot?.active_claims ?? []} candidates={quotaSnapshot?.candidates ?? []} factoryAgents={deviceAgents.data?.factory_agents}
-        onWatch={onWatchRun ? (row) => row.runId && onWatchRun({ runId: row.runId, title: `${agentDisplayName(row.name)}${row.model ? ` ${row.model}` : ''} on ${row.job ?? 'a job'}`, subtitle: row.mode }) : undefined} />
+        onWatch={onWatchRun ? (row, watchable) => {
+          const asRun = (item: typeof row): WatchableRun => ({ runId: item.runId!, title: `${agentDisplayName(item.name)}${item.model ? ` ${item.model}` : ''} on ${item.job ?? 'a job'}`, subtitle: item.mode });
+          if (row.runId) onWatchRun(asRun(row), watchable.map(asRun));
+        } : undefined} />
 
       <NonFactoryAgentsCard device={deviceAgents.data} deviceError={deviceAgents.error} onOpenChat={(chatProfile, sessionId) => { setProfileOverride(chatProfile); updateNavigation({ profile: chatProfile, chat: sessionId }); onNavigate('chat'); }} />
 

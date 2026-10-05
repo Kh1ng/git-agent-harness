@@ -296,7 +296,7 @@ function LiveRow({ row, now, ledger, onWatch }: { row: LiveAgentRow; now: number
  */
 export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, candidates, factoryAgents, onWatch }: {
   /** Opens a read-only live view of a running job's output. */
-  onWatch?: (row: LiveAgentRow) => void;
+  onWatch?: (row: LiveAgentRow, watchable: LiveAgentRow[]) => void;
   /** Agent processes in factory worktrees, from the device scan. */
   factoryAgents?: DeviceAgent[];
   profile: string | null;
@@ -372,7 +372,7 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
         <>
           {active.length > 0 ? (
             <ul className="divide-y divide-subtle" aria-label="Agents">
-              {active.map((row) => <LiveRow key={row.key} row={row} now={now} ledger={row.job ? ledgers[row.job] : null} onWatch={onWatch} />)}
+              {active.map((row) => <LiveRow key={row.key} row={row} now={now} ledger={row.job ? ledgers[row.job] : null} onWatch={onWatch ? (picked) => onWatch(picked, rows.filter((candidate) => candidate.runId)) : undefined} />)}
             </ul>
           ) : (
             <p className="text-sm text-muted">Nothing is running; every subscription is idle.</p>

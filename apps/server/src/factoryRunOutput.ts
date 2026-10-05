@@ -131,10 +131,11 @@ export function parseRunLine(line: string): FactoryRunEvent[] {
 /** Read a run's log from `after`, whole lines only. The first read of a long
  * log starts near its end. A command's "running" event is dropped when the
  * same read also holds its result. */
-export function readRunOutput(file: string, attempt: number, after: number): FactoryRunOutput {
+export function readRunOutput(file: string, attempt: number, after: number, full = false): FactoryRunOutput {
   const size = statSync(file).size;
   let start = Number.isFinite(after) && after > 0 && after <= size ? Math.floor(after) : 0;
-  const truncated = start === 0 && size > READ_BYTES;
+  // `full` reads from the very start, for copying a job's whole output.
+  const truncated = !full && start === 0 && size > READ_BYTES;
   if (truncated) start = size - READ_BYTES;
   // One line can outgrow the window (a command's whole output is on it):
   // widen the read until it holds a complete line, up to a hard limit.
@@ -174,9 +175,9 @@ export function readRunOutput(file: string, attempt: number, after: number): Fac
 }
 
 /** The output of a run a loop on this node is working on, or has just finished. */
-export function factoryRunOutput(runId: string, after: number, open = openRunLogs()): FactoryRunOutput {
+export function factoryRunOutput(runId: string, after: number, open = openRunLogs(), full = false): FactoryRunOutput {
   if (!RUN_ID.test(runId)) return { found: false, attempt: null, next: 0, truncated: false, events: [] };
   const log = open.logs.get(runId) ?? findRunLogOnDisk(runId, open.roots);
   if (!log) return { found: false, attempt: null, next: 0, truncated: false, events: [] };
-  return readRunOutput(log.file, log.attempt, after);
+  return readRunOutput(log.file, log.attempt, after, full);
 }

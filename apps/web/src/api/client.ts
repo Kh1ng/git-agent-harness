@@ -335,7 +335,7 @@ export interface GahDataSource {
   /** Agent CLIs running on this device outside the factory. */
   getDeviceAgents(): Promise<import('@git-agent-harness/contracts').DeviceAgentsSnapshot>;
   /** A running factory job's agent output from byte offset `after`. Read-only. */
-  getFactoryRunOutput(runId: string, after: number): Promise<import('@git-agent-harness/contracts').FactoryRunOutput>;
+  getFactoryRunOutput(runId: string, after: number, full?: boolean): Promise<import('@git-agent-harness/contracts').FactoryRunOutput>;
   createChatSession(profile: string, backend?: string, model?: string | null, title?: string, nodeId?: string, backendInstance?: string | null): Promise<ChatSessionSummary>;
   updateChatSession(profile: string, sessionId: string, patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string }): Promise<ChatSessionSummary>;
   archiveChatSession(profile: string, sessionId: string): Promise<ChatSessionSummary>;
@@ -717,8 +717,8 @@ export const gahApi: GahDataSource = {
   getAllChatSessions() {
     return getJson<{ projects: ChatSessionProjectGroup[] }>('/api/manager-chat/sessions/all');
   },
-  getFactoryRunOutput(runId, after) {
-    return getJson<import('@git-agent-harness/contracts').FactoryRunOutput>(`/api/factory-runs/${encodeURIComponent(runId)}/output`, { after: String(after) });
+  getFactoryRunOutput(runId, after, full = false) {
+    return getJson<import('@git-agent-harness/contracts').FactoryRunOutput>(`/api/factory-runs/${encodeURIComponent(runId)}/output`, { after: String(after), ...(full ? { full: '1' } : {}) });
   },
   getDeviceAgents() {
     return getJson<import('@git-agent-harness/contracts').DeviceAgentsSnapshot>('/api/device-agents');

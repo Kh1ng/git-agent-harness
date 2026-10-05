@@ -2341,7 +2341,7 @@ export function createServer(
   // Read-only view of a running factory job's agent output, for debugging.
   app.get('/api/factory-runs/:runId/output', (req, res) => {
     try {
-      res.json(factoryRunOutput(req.params.runId, Number(req.query.after ?? 0)));
+      res.json(factoryRunOutput(req.params.runId, Number(req.query.after ?? 0), undefined, req.query.full === '1'));
     } catch (error) {
       res.status(502).json({ error: 'Failed to read run output', message: error instanceof Error ? error.message : String(error) });
     }

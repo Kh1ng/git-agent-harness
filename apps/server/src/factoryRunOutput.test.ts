@@ -82,6 +82,16 @@ test('a line longer than the read window is still read whole', () => {
   }
   // The first read of a long log starts near its end, inside the big line, and resumes after it.
   assert.deepEqual(events.map((event) => event.text), ['After.']);
+  // A full read starts at the beginning however long the log is.
+  const whole: string[] = [];
+  for (let offset = 0, round = 0; round < 10; round++) {
+    const output = readRunOutput(file, 1, offset, true);
+    whole.push(...output.events.map((event) => event.text));
+    assert.equal(output.truncated, false);
+    if (output.next === offset) break;
+    offset = output.next;
+  }
+  assert.deepEqual(whole, ['Before.', 'cargo test', 'After.']);
   // Resuming exactly at the big line widens the window until the whole line fits.
   const atBigLine = Buffer.byteLength(line({ type: 'item.completed', item: { type: 'agent_message', text: 'Before.' } }));
   const big1 = readRunOutput(file, 1, atBigLine);

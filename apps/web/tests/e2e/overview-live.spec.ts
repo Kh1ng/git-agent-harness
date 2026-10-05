@@ -207,10 +207,47 @@ test('Watch live opens a read-only view of a running job in the left sidebar and
   await expect(steps.nth(1)).toContainText('test result: FAILED');
   await expect(steps.nth(2)).toContainText('update src/controller/decision.rs');
   await expect(view.getByRole('status')).toContainText('Following · 3 steps');
-  // View only: nothing in it sends input or stops the job.
+  // View only: nothing in it sends input or stops the job. Its buttons are Copy all and Close.
   await expect(view.getByRole('textbox')).toHaveCount(0);
-  await expect(view.getByRole('button')).toHaveCount(1);
+  await expect(view.getByRole('button')).toHaveCount(2);
+  // Copy all reads the log from its start and puts plain text on the clipboard.
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await view.getByRole('button', { name: 'Copy all output' }).click();
+  await expect(view.getByRole('button', { name: 'Copy all output' })).toHaveText('Copied');
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copied).toContain('Mock-account gpt-6-sol on #1381');
+  expect(copied).toContain('I will trace the loop.');
+  expect(copied).toContain('$ cargo test --lib [failed 101]\ntest result: FAILED');
+  expect(copied).toContain('[files] update src/controller/decision.rs');
   expect(polls).toBeGreaterThan(1);
   await view.getByRole('button', { name: 'Close live view' }).click();
   await expect(page.getByRole('complementary', { name: 'Git issues' })).toBeVisible();
+});
+
+test('the live view lists every running factory agent and switches between them', async ({ page }) => {
+  const A = '8c4013e4-2937-4bac-b258-115ae2b3d7e1';
+  const B = 'ac5f2583-b6cd-4e10-9e89-8c78cf65ba3c';
+  const run = (run_id: string, work_id: string, ago: number) => ({ run_id, profile: 'fixture', work_id, started_at: new Date(Date.now() - ago).toISOString(), finished_at: null, action: `dispatch_ticket: ${work_id}`, status: 'running', outcome: null });
+  await page.route('**/api/controller-activity**', (route) => route.fulfill({ json: [run(A, '#1381', 120_000), run(B, '#1380', 100_000)] }));
+  await page.route('**/api/work/**', (route) => route.fulfill({ json: [] }));
+  await page.route('**/api/device-agents', (route) => route.fulfill({ json: { supported: true, generated_at: new Date().toISOString(), agents: [], factory_agents: [
+    { pid: 1, tool: 'codex', model: 'gpt-6-sol', cwd: '/w/a', started_at: new Date(Date.now() - 110_000).toISOString() },
+    { pid: 2, tool: 'claude', model: 'sonnet', cwd: '/w/b', started_at: new Date(Date.now() - 90_000).toISOString() }
+  ] } }));
+  await page.route('**/api/factory-runs/*/output**', (route) => {
+    const url = new URL(route.request().url());
+    const first = url.pathname.includes(A);
+    return route.fulfill({ json: { found: true, attempt: 1, next: 10, truncated: false, events: Number(url.searchParams.get('after')) === 0 ? [{ kind: 'message', text: first ? 'Output of the first job.' : 'Output of the second job.' }] : [] } });
+  });
+  await page.goto('/?page=overview&profile=fixture');
+  await page.getByRole('region', { name: 'Factory Agents Status' }).getByRole('button', { name: 'Watch #1381 live' }).click();
+  const view = page.getByRole('complementary', { name: 'Live view' });
+  await expect(view).toContainText('Output of the first job.');
+  const agents = view.getByRole('navigation', { name: 'Running factory agents' }).getByRole('button');
+  await expect(agents).toHaveCount(2);
+  await expect(agents.filter({ hasText: '#1381' })).toHaveAttribute('aria-current', 'true');
+  await agents.filter({ hasText: '#1380' }).click();
+  await expect(view).toContainText('Output of the second job.');
+  await expect(view).not.toContainText('Output of the first job.');
+  await expect(view.getByRole('heading', { level: 2 })).toContainText('on #1380');
 });

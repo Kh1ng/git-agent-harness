@@ -1,11 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, FileEdit, Terminal } from 'lucide-react';
+import { ArrowLeft, Check, Copy, FileEdit, Terminal } from 'lucide-react';
 import type { FactoryRunEvent } from '@git-agent-harness/contracts';
 import { gahApi } from '../api/client.js';
 
 const POLL_MS = 2000;
 /** Keep the page light on a long job: older steps fall off the top. */
 const MAX_EVENTS = 400;
+
+/** A watchable job: the run behind a busy Factory Agents row. */
+export interface WatchableRun { runId: string; title: string; subtitle: string | null }
+
+/** A job's steps as plain text, for pasting into an issue or a chat. */
+export function eventsAsText(events: FactoryRunEvent[]): string {
+  return events.map((event) => {
+    if (event.kind === 'command') {
+      const status = event.status === 'failed' ? ` [failed${event.exit_code != null ? ` ${event.exit_code}` : ''}]` : event.status === 'running' ? ' [running]' : '';
+      return `$ ${event.text}${status}${event.output ? `\n${event.output}` : ''}`;
+    }
+    return event.kind === 'file_change' ? `[files] ${event.text}` : event.text;
+  }).join('\n\n');
+}
 
 function EventRow({ event }: { event: FactoryRunEvent }) {
   if (event.kind === 'message') return <li className="whitespace-pre-wrap break-words rounded-md bg-accent/10 px-3 py-2 text-sm text-primary">{event.text}</li>;
@@ -40,7 +54,34 @@ function EventRow({ event }: { event: FactoryRunEvent }) {
  * the job's backend output log by polling; nothing here can steer or stop
  * the job. Sticks to the newest step unless the reader has scrolled up.
  */
-export function AgentLiveView({ runId, title, subtitle, onBack }: { runId: string; title: string; subtitle?: string | null; onBack: () => void }) {
+export function AgentLiveView({ runId, title, subtitle, onBack, runs = [], onSelectRun }: {
+  runId: string; title: string; subtitle?: string | null; onBack: () => void;
+  /** Every factory agent running now, to switch between without leaving the view. */
+  runs?: WatchableRun[];
+  onSelectRun?: (run: WatchableRun) => void;
+}) {
+  const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied' | 'failed'>('idle');
+  /** Copy the job's whole output: read the log from its start, not just what is on screen. */
+  const copyAll = async () => {
+    setCopyState('copying');
+    try {
+      const all: FactoryRunEvent[] = [];
+      for (let offset = 0, round = 0; round < 200; round++) {
+        const output = await gahApi.getFactoryRunOutput(runId, offset, true);
+        if (!output.found) break;
+        const done = new Set(output.events.filter((event) => event.kind === 'command' && event.status !== 'running').map((event) => event.text));
+        for (let index = all.length - 1; index >= 0; index--) if (all[index].kind === 'command' && all[index].status === 'running' && done.has(all[index].text)) all.splice(index, 1);
+        all.push(...output.events);
+        if (output.next === offset) break;
+        offset = output.next;
+      }
+      await navigator.clipboard.writeText(`${title}\n\n${eventsAsText(all.length > 0 ? all : events)}`);
+      setCopyState('copied');
+    } catch {
+      setCopyState('failed');
+    }
+    window.setTimeout(() => setCopyState('idle'), 2000);
+  };
   const [events, setEvents] = useState<FactoryRunEvent[]>([]);
   const [state, setState] = useState<'loading' | 'live' | 'gone' | 'error'>('loading');
   const [error, setError] = useState<string | null>(null);
@@ -87,8 +128,28 @@ export function AgentLiveView({ runId, title, subtitle, onBack }: { runId: strin
           <h2 className="mt-0.5 break-words text-base font-semibold text-primary">{title}</h2>
           {subtitle && <p className="truncate text-xs text-muted">{subtitle}</p>}
         </div>
-        <button type="button" onClick={onBack} className="btn-secondary min-h-11 min-w-11 p-2" aria-label="Close live view"><ArrowLeft size={18} aria-hidden="true" /></button>
+        <div className="flex shrink-0 items-center gap-2">
+          <button type="button" onClick={() => void copyAll()} disabled={copyState === 'copying'} className="btn-secondary min-h-11 text-xs" aria-label="Copy all output">
+            {copyState === 'copied' ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
+            {copyState === 'copied' ? 'Copied' : copyState === 'copying' ? 'Copying…' : copyState === 'failed' ? 'Copy failed' : 'Copy all'}
+          </button>
+          <button type="button" onClick={onBack} className="btn-secondary min-h-11 min-w-11 p-2" aria-label="Close live view"><ArrowLeft size={18} aria-hidden="true" /></button>
+        </div>
       </header>
+      {runs.length > 1 && onSelectRun && (
+        <nav aria-label="Running factory agents" className="flex gap-1 overflow-x-auto border-b border-subtle pb-2">
+          {runs.map((run) => {
+            const active = run.runId === runId;
+            return (
+              <button key={run.runId} type="button" onClick={() => onSelectRun(run)} aria-current={active ? 'true' : undefined}
+                className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-xs ${active ? 'border-accent/50 bg-accent/15 text-primary' : 'border-subtle text-secondary hover:bg-white/5'}`}>
+                <span className="h-1.5 w-1.5 rounded-full bg-good" aria-hidden="true" />
+                {run.title}
+              </button>
+            );
+          })}
+        </nav>
+      )}
       <div className="flex items-center justify-between gap-2 text-xs text-muted">
         <span role="status">
           {state === 'loading' ? 'Connecting to the job…'
