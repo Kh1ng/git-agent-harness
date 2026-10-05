@@ -29,6 +29,9 @@ esac
 bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --bin gah --
 cargo run --bin gah -- update --repo "$repo_root" --role "$role"
 
+# tailscale-dns-guard:start -- extracted verbatim by
+# tests/source_structure.rs::standalone_install_never_touches_tailscale,
+# keep this block self-contained (only $role as input).
 if [ "$role" != "standalone" ]; then
   # MagicDNS is useful only when this client accepts the tailnet DNS settings.
   # The tailnet-wide toggle still belongs to the Tailscale admin console.
@@ -38,6 +41,7 @@ if [ "$role" != "standalone" ]; then
     echo 'WARNING: Tailscale is not installed; join the tailnet, then run tailscale set --accept-dns=true.' >&2
   fi
 fi
+# tailscale-dns-guard:end
 
 # Persistent server bind-host override (issue #643). Created only on first
 # install; every later run of this script, and every `gah update

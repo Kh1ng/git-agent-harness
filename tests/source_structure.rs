@@ -1122,6 +1122,16 @@ fn install_linux_gateway_mapping_writes_both_targets_for_central() {
                 "/tmp/gah-src-test/home/.config/gah/gah-loop.env",
             ],
         ),
+        // #1318: standalone runs the same local control plane (server unit plus
+        // its own dispatch loop), so it must map both gateway targets exactly
+        // like central.
+        (
+            "standalone",
+            vec![
+                "/tmp/gah-src-test/server.env",
+                "/tmp/gah-src-test/home/.config/gah/gah-loop.env",
+            ],
+        ),
         (
             "worker",
             vec!["/tmp/gah-src-test/home/.config/gah/gah-loop.env"],
@@ -1263,14 +1273,14 @@ fn install_linux_prefers_the_tailnet_bind_host() {
         "#!/bin/sh\n[ \"$1\" = tailscale-ip ] && echo 100.118.97.79\n",
     );
 
-    let run = |host: Option<&str>, path: &Path| {
+    let run = |host: Option<&str>, path: &Path, role: &str| {
         let host = host
             .map(|value| format!("GAH_SERVER_HOST={value}"))
             .unwrap_or_else(|| "unset GAH_SERVER_HOST".to_string());
         Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "PATH={}:{}\n{host}\n{block}\nprintf '%s' \"$server_host\"",
+                "PATH={}:{}\n{host}\nrole={role}\n{block}\nprintf '%s' \"$server_host\"",
                 path.display(),
                 std::env::var("PATH").unwrap_or_default()
             ))
@@ -1278,12 +1288,13 @@ fn install_linux_prefers_the_tailnet_bind_host() {
             .unwrap()
     };
 
+    // Networked installs keep the tailnet bind host (issue #643 behavior).
     assert_eq!(
-        String::from_utf8_lossy(&run(None, &tmp).stdout),
+        String::from_utf8_lossy(&run(None, &tmp, "central").stdout),
         "100.118.97.79"
     );
     assert_eq!(
-        String::from_utf8_lossy(&run(Some("10.0.0.5"), &tmp).stdout),
+        String::from_utf8_lossy(&run(Some("10.0.0.5"), &tmp, "central").stdout),
         "10.0.0.5"
     );
     let empty = tmp.join("empty");
@@ -1291,8 +1302,19 @@ fn install_linux_prefers_the_tailnet_bind_host() {
     let unavailable_gah = empty.join("gah");
     support::write_executable(&unavailable_gah, "#!/bin/sh\nexit 1\n");
     assert_eq!(
-        String::from_utf8_lossy(&run(None, &empty).stdout),
+        String::from_utf8_lossy(&run(None, &empty, "central").stdout),
         "127.0.0.1"
+    );
+    // #1318: a standalone install binds loopback even when `gah tailscale-ip`
+    // would answer, so no tailnet or LAN interface is ever exposed.
+    assert_eq!(
+        String::from_utf8_lossy(&run(None, &tmp, "standalone").stdout),
+        "127.0.0.1"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run(Some("10.0.0.5"), &tmp, "standalone").stdout),
+        "10.0.0.5",
+        "an explicit GAH_SERVER_HOST override still wins for standalone"
     );
     fs::remove_dir_all(tmp).unwrap();
 }
@@ -1307,4 +1329,52 @@ fn installers_enable_tailscale_dns_when_available() {
             "{script_path} must enable the per-device MagicDNS preference"
         );
     }
+}
+
+/// #1318: a standalone install must not install, configure, prompt for, or
+/// require Tailscale. The tailscale-dns-guard block in install-linux.sh is
+/// evaluated verbatim under bash for each role with fake `tailscale` and
+/// `sudo` executables on PATH; standalone must invoke neither, while the
+/// networked roles keep the MagicDNS preference (issue #643-era behavior).
+#[test]
+fn standalone_install_never_touches_tailscale() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script_path = "scripts/install-linux.sh";
+    let script = fs::read_to_string(repo_root.join(script_path)).unwrap();
+    let block = extract_marked_block(&script, "tailscale-dns-guard", script_path);
+    let tmp = std::env::temp_dir().join(format!("gah-src-test-tsdns-{}", std::process::id()));
+    fs::create_dir_all(&tmp).unwrap();
+    support::write_executable(&tmp.join("tailscale"), "#!/bin/sh\necho tailscale-called\n");
+    support::write_executable(&tmp.join("sudo"), "#!/bin/sh\necho sudo-called\n");
+
+    let run = |role: &str| {
+        Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "PATH={}:{}\nrole={role}\n{block}\n",
+                tmp.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ))
+            .output()
+            .unwrap()
+    };
+
+    let standalone = run("standalone");
+    assert!(standalone.status.success());
+    assert!(
+        String::from_utf8_lossy(&standalone.stdout)
+            .trim()
+            .is_empty(),
+        "standalone must not invoke tailscale or sudo"
+    );
+    for role in ["central", "worker"] {
+        let networked = run(role);
+        assert!(networked.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&networked.stdout).trim(),
+            "sudo-called",
+            "role={role} must keep the MagicDNS preference"
+        );
+    }
+    fs::remove_dir_all(tmp).unwrap();
 }

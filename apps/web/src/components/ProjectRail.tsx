@@ -49,7 +49,7 @@ export function ProjectRail({
     return gahApi.getChatNodes().then((result) => setNodes(result.nodes)).catch(() => setNodesError(true));
   };
   useEffect(() => { void loadNodes(); }, []);
-  const localNodeId = nodes.find((node) => node.role === 'central' || node.role === 'standalone')?.nodeId || '';
+  const localNodeId = nodes.find((node) => node.role === 'central')?.nodeId || '';
   const nodeName = (id: string) => nodes.find((node) => node.nodeId === id)?.displayName || id || 'This node';
   const [reclone, setReclone] = useState(false);
   const [saving, setSaving] = useState(false);
