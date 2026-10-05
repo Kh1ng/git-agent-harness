@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { agentDisplayName, buildLiveRows, formatDuration, liveAccounts } from '../../src/components/LiveAgentsCard.js';
+import { agentDisplayName, modelDisplayName, buildLiveRows, formatDuration, liveAccounts } from '../../src/components/LiveAgentsCard.js';
 
 // Overview's Live card: one row per agent account, busy rows first, with
 // the job, how long it has run, its claim, and the files its last attempt
@@ -95,6 +95,8 @@ test('rows derive their state from sessions, runs, claims, instance health and q
   expect(agentDisplayName('agy')).toBe('Antigravity');
   expect(agentDisplayName('codex')).toBe('Codex');
   expect(agentDisplayName('agyle')).toBe('Agyle');
+  expect(modelDisplayName('claude', 'claude-sonnet-5-5')).toBe('Sonnet-5-5');
+  expect(modelDisplayName('codex', 'gpt-6-sol')).toBe('Gpt-6-sol');
 });
 
 test('Overview shows each agent account with its job, elapsed time, claim and files changed', async ({ page }) => {
@@ -290,4 +292,18 @@ test('the Running agents icon opens the first running agent, or says nothing is 
   await panel.getByRole('button', { name: 'Close live view' }).click();
   await expect(panel.getByRole('heading', { name: 'Running agents', exact: true })).toBeVisible();
   await expect(list).toHaveCount(1);
+});
+
+test('an idle account configured with an alias shows the model the ledger says it runs', async ({ page }) => {
+  await page.route('**/api/backend-instances**', (route) => route.fulfill({ json: { profile: 'fixture', backend_instances: [] } }));
+  await page.route('**/api/quota?*', async (route) => {
+    const snapshot = await (await route.fetch()).json();
+    snapshot.candidates = [{ backend: 'claude', backend_instance: 'claude', provider: 'anthropic', model: 'sonnet', modes: ['improve'], configured: false, eligible_now: true, usage: {} }];
+    await route.fulfill({ json: snapshot });
+  });
+  await page.route('**/api/report/roles**', (route) => route.fulfill({ json: { since: '30d', profile: 'fixture', entries: 0, skipped: 0, harness_errors: 0, cells: [], best_fit: [],
+    model_aliases: [{ backend: 'claude', alias: 'sonnet', model: 'claude-sonnet-5-5' }] } }));
+  await page.goto('/?page=overview&profile=fixture');
+  await expect(page.getByRole('region', { name: 'Factory Agents Status' })).toContainText('Claude Sonnet-5-5');
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
 });

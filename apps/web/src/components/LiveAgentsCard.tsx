@@ -61,6 +61,12 @@ export function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+/** A model beside its agent's name, without repeating the name: `claude-sonnet-5-5` on Claude reads "Sonnet-5-5". */
+export function modelDisplayName(agent: string, model: string): string {
+  const prefix = `${agent.toLowerCase()}-`;
+  return capitalize(model.toLowerCase().startsWith(prefix) ? model.slice(prefix.length) : model);
+}
+
 /** The name people know an agent by: `agy` and its instances are Antigravity. */
 export function agentDisplayName(name: string): string {
   return /^agy(?:[:\-_]|$)/i.test(name) ? 'Antigravity' : capitalize(name);
@@ -267,7 +273,7 @@ function LiveRow({ row, now, ledger, onWatch }: { row: LiveAgentRow; now: number
       <span className={`mt-1.5 h-2.5 w-2.5 rounded-full ${dot.className} ${dot.pulse ? 'motion-safe:animate-pulse' : ''}`} role="img" aria-label={dot.label} />
       <div className="min-w-0">
         <p className="truncate text-sm font-semibold text-primary" title={[row.name, row.model].filter(Boolean).join(' ')}>
-          {agentDisplayName(row.name)}{row.model && <span className="font-normal text-secondary"> {capitalize(row.model)}</span>}
+          {agentDisplayName(row.name)}{row.model && <span className="font-normal text-secondary"> {modelDisplayName(row.detail ?? row.name, row.model)}</span>}
         </p>
         {row.detail && row.detail !== row.name && <p className="truncate text-[11px] text-muted" title={row.detail}>{row.detail}</p>}
       </div>
@@ -309,6 +315,13 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
   const [instancesError, setInstancesError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [ledgers, setLedgers] = useState<Record<string, LedgerEntry | null>>({});
+  // `sonnet` in the routing config is an alias; the ledger knows which model it ran as.
+  const [aliases, setAliases] = useState<{ backend: string; alias: string; model: string }[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    gahApi.getRoleMetrics(profile ?? undefined, '30d').then((report) => { if (!cancelled) setAliases(report.model_aliases ?? []); }).catch(() => { /* Aliases stay as configured. */ });
+    return () => { cancelled = true; };
+  }, [profile]);
 
   useEffect(() => {
     if (!profile) return;
@@ -319,10 +332,11 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
     return () => { cancelled = true; };
   }, [profile, sessions.length]);
 
-  const accounts = useMemo(() => liveAccounts(instances ?? [], candidates, now),
+  const accounts = useMemo(() => liveAccounts(instances ?? [], candidates, now).map((account) => ({ ...account,
+    model: aliases.find((alias) => alias.backend === account.backend && alias.alias === account.model)?.model ?? account.model })),
     // `now` only sets the paused cut-off; the timer below re-renders the rows anyway.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [instances, candidates]);
+    [instances, candidates, aliases]);
   const rows = useMemo(() => buildLiveRows({ accounts, sessions, controllerRuns, claims, ledgers, factoryAgents }), [accounts, sessions, controllerRuns, claims, ledgers, factoryAgents]);
   const busyJobs = useMemo(() => [...new Set([
     ...sessions.filter((session) => ['starting', 'running', 'stopping'].includes(session.status)).map((session) => session.target),

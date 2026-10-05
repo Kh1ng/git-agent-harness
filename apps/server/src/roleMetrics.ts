@@ -84,13 +84,16 @@ export function roleMetrics(entries: LedgerEntry[], options: { since?: string; p
     const id = entry.work_id ?? entry.target_summary ?? '';
     if (id) byWork.set(id, [...(byWork.get(id) ?? []), entry]);
   }
+  // An alias in the routing config (`sonnet`) is whatever the backend last said it ran for it.
+  const aliases = modelAliases(entries);
+  const resolve = (backend: string, name: string | null) => (name ? aliases.find((alias) => alias.backend === backend && alias.alias === name)?.model ?? name : null);
   const cells = new Map<string, Cell>();
   let skipped = 0;
   let harness = 0;
   const cellFor = (entry: LedgerEntry) => {
     const backend = entry.effective_backend || entry.backend || '';
     const instance = entry.usage?.backend_instance ?? null;
-    const model = modelName(entry.usage?.actual_model) ?? modelName(entry.effective_model);
+    const model = modelName(entry.usage?.actual_model) ?? resolve(backend, modelName(entry.effective_model));
     const k = key(entry.mode, backend, model);
     let cell = cells.get(k);
     if (!cell) { cell = emptyCell(entry.mode, backend, instance, model); cells.set(k, cell); }
@@ -164,8 +167,24 @@ export function roleMetrics(entries: LedgerEntry[], options: { since?: string; p
   }).sort((a, b) => a.role.localeCompare(b.role) || b.attempts - a.attempts);
   return {
     since, profile: options.profile ?? null, entries: inWindow.length, skipped, harness_errors: harness,
-    cells: finished, best_fit: bestFit(finished)
+    cells: finished, best_fit: bestFit(finished), model_aliases: aliases
   };
+}
+
+/** For each backend, the configured names that differ from the model the
+ * backend reported running, newest report winning. */
+export function modelAliases(entries: LedgerEntry[]): RoleMetricsReport['model_aliases'] {
+  const latest = new Map<string, { backend: string; alias: string; model: string; at: number }>();
+  for (const entry of entries) {
+    const backend = entry.effective_backend || entry.backend || '';
+    const alias = modelName(entry.effective_model);
+    const actual = modelName(entry.usage?.actual_model);
+    const at = Date.parse(entry.timestamp);
+    if (!backend || !alias || !actual || alias === actual) continue;
+    const known = latest.get(`${backend}\u0000${alias}`);
+    if (!known || at >= known.at) latest.set(`${backend}\u0000${alias}`, { backend, alias, model: actual, at });
+  }
+  return [...latest.values()].map(({ at: _at, ...alias }) => alias);
 }
 
 /** Per role, models ranked by what their delivered rate is at least (so a

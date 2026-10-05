@@ -120,3 +120,16 @@ test('the window and profile filters apply', () => {
   const report = roleMetrics([old, other, entry({ mode: 'fix', effective_backend: 'codex', mr_created: true })], { since: '7d', profile: 'gah', now: NOW });
   assert.equal(report.entries, 1);
 });
+
+test('a configured alias is reported as the model the backend actually ran', () => {
+  const report = roleMetrics([
+    entry({ mode: 'fix', effective_backend: 'claude', effective_model: 'sonnet', failure_class: 'harness_error' }),
+    entry({ mode: 'fix', effective_backend: 'claude', effective_model: 'sonnet', mr_created: true }),
+    entry({ mode: 'fix', effective_backend: 'claude', effective_model: 'sonnet', mr_created: true, usage: { usage_source: 'x', total_tokens: 5, actual_model: 'claude-sonnet-5-5' } as never }),
+    entry({ mode: 'fix', effective_backend: 'codex', effective_model: 'gpt-6-sol', usage: { usage_source: 'x', total_tokens: 5, actual_model: 'gpt-6-sol' } as never })
+  ], { now: NOW });
+  assert.deepEqual(report.model_aliases, [{ backend: 'claude', alias: 'sonnet', model: 'claude-sonnet-5-5' }]);
+  // One cell for the model, whether an entry named the alias or the real thing.
+  const claude = report.cells.filter((cell) => cell.backend === 'claude');
+  assert.deepEqual(claude.map((cell) => [cell.model, cell.attempts, cell.harness_errors]), [['claude-sonnet-5-5', 2, 1]]);
+});

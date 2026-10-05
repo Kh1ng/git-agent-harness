@@ -1514,7 +1514,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   });
   app.get('/api/model-prices', (_req, res) => res.json({ checked_at: null, sources: [], prices: [], history: [] }));
   app.post('/api/model-prices/refresh', (_req, res) => res.json({ checked_at: new Date(FIXED_NOW).toISOString(), sources: [], prices: [], history: [] }));
-  app.get('/api/report/roles', (req, res) => res.json({ since: String(req.query.since ?? '7d'), profile: 'fixture', entries: 0, skipped: 0, harness_errors: 0, cells: [], best_fit: [] }));
+  app.get('/api/report/roles', (req, res) => res.json({ since: String(req.query.since ?? '7d'), profile: 'fixture', entries: 0, skipped: 0, harness_errors: 0, cells: [], best_fit: [], model_aliases: [] }));
   app.get('/api/report', (_req, res) => res.json(REPORT_FIXTURE));
   app.get('/api/report/series', (_req, res) => {
     res.json({

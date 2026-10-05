@@ -1940,6 +1940,9 @@ export interface RoleMetricsReport {
   harness_errors: number;
   cells: RoleModelMetrics[];
   best_fit: RoleBestFit[];
+  /** Configured model aliases (`sonnet`) and the model the backend last
+   * reported actually running for them, from the whole ledger. */
+  model_aliases: { backend: string; alias: string; model: string }[];
 }
 
 /** A model's published API price in US dollars per million tokens. */

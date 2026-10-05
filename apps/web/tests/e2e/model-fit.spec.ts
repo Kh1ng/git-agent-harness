@@ -26,7 +26,7 @@ test('Telemetry leads with model fit by role and a best-fit pick with confidence
     { role: 'fix', ranking: [{ backend: 'codex', backend_instance: null, model: 'gpt-6-sol', score: 0.4, attempts: 20, confidence: 'medium' }, { backend: 'agy', backend_instance: null, model: 'Gemini 3.1 Pro (High)', score: 0.34, attempts: 2, confidence: 'none' }] },
     { role: 'improve', ranking: [{ backend: 'claude', backend_instance: null, model: 'sonnet', score: 0.06, attempts: 3, confidence: 'none' }] },
     { role: 'review', ranking: [{ backend: 'codex', backend_instance: null, model: 'gpt-6-sol', score: 0.68, attempts: 8, confidence: 'low' }] }
-  ] } }));
+  ], model_aliases: [] } }));
   const book = (models: number) => ({ checked_at: new Date(Date.now() - 3_600_000).toISOString(),
     sources: [{ provider: 'openai', url: 'https://o', checked_at: null, ok: true, method: 'table', rows: models, error: null }, { provider: 'anthropic', url: 'https://a', checked_at: null, ok: false, method: null, rows: 0, error: 'HTTP 503' }],
     prices: Array.from({ length: models }, (_, index) => ({ provider: 'openai', model: `m${index}`, input: 2, output: 10, cached_input: 0.2, cache_write: null, source_url: 'https://o', changed_at: '' })),
@@ -52,12 +52,12 @@ test('Telemetry leads with model fit by role and a best-fit pick with confidence
   await expect(priceLine).toContainText('Prices: 3 models');
 
   const best = card.getByRole('list', { name: 'Best fit by role' }).getByRole('listitem');
-  await expect(best.filter({ hasText: 'Fix' })).toContainText('Codex gpt-6-sol');
+  await expect(best.filter({ hasText: 'Fix' })).toContainText('Codex Gpt-6-sol');
   await expect(best.filter({ hasText: 'Fix' })).toContainText('at least 40% delivered · 20 attempts · medium confidence');
   await expect(best.filter({ hasText: 'Implement' })).toContainText('Too few attempts to say');
-  await expect(best.filter({ hasText: 'Implement' })).toContainText('Claude sonnet leads on 3; 5 attempts needed');
+  await expect(best.filter({ hasText: 'Implement' })).toContainText('Claude Sonnet leads on 3; 5 attempts needed');
 
-  const fix = card.locator('tr[data-role="fix"][data-model="Codex gpt-6-sol"]');
+  const fix = card.locator('tr[data-role="fix"][data-model="Codex Gpt-6-sol"]');
   await expect(fix).toContainText('20+18 harness');
   await expect(fix).toContainText('60% (12/20)');
   await expect(fix).toContainText('80% (8/10)');

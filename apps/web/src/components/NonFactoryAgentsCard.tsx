@@ -4,7 +4,7 @@ import type { ChatSessionProjectGroup, DeviceAgentsSnapshot } from '@git-agent-h
 import { gahApi } from '../api/client.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
-import { agentDisplayName, capitalize, formatDuration } from './LiveAgentsCard.js';
+import { agentDisplayName, formatDuration, modelDisplayName } from './LiveAgentsCard.js';
 
 const REFRESH_MS = 15_000;
 /** A dashboard chat counts as in use for this long after its last turn. */
@@ -70,7 +70,7 @@ export function NonFactoryAgentsCard({ device, deviceError, onOpenChat }: {
                 <span className={`mt-1.5 h-2.5 w-2.5 rounded-full ${working ? 'bg-good motion-safe:animate-pulse' : idleMs === null ? 'bg-good' : 'bg-muted/40'}`} role="img" aria-label={working ? 'working' : idleMs === null ? 'running' : 'idle'} />
                 <div className="min-w-0">
                   <p className="truncate text-sm font-semibold text-primary">
-                    {agentDisplayName(agent.tool)}{agent.model && <span className="font-normal text-secondary"> {capitalize(agent.model)}</span>}
+                    {agentDisplayName(agent.tool)}{agent.model && <span className="font-normal text-secondary"> {modelDisplayName(agent.tool, agent.model)}</span>}
                   </p>
                   <p className="truncate text-[11px] text-muted">{state}</p>
                 </div>
@@ -87,7 +87,7 @@ export function NonFactoryAgentsCard({ device, deviceError, onOpenChat }: {
             <li key={`chat-${session.id}`} className="grid grid-cols-[12px_minmax(5rem,12rem)_minmax(0,1fr)] items-start gap-3 py-2">
               <MessageSquare size={12} className="mt-1 text-good" aria-hidden="true" />
               <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-primary">{agentDisplayName(session.backend)}{session.model && <span className="font-normal text-secondary"> {capitalize(session.model)}</span>}</p>
+                <p className="truncate text-sm font-semibold text-primary">{agentDisplayName(session.backend)}{session.model && <span className="font-normal text-secondary"> {modelDisplayName(session.backend, session.model)}</span>}</p>
                 <p className="truncate text-[11px] text-muted">dashboard chat</p>
               </div>
               <div className="min-w-0">

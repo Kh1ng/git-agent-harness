@@ -5,7 +5,7 @@ import { gahApi } from '../api/client.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { formatAge, formatTokens } from '../lib/format.js';
 import { StatusBadge } from './ui/StatusBadge.js';
-import { agentDisplayName } from './LiveAgentsCard.js';
+import { agentDisplayName, modelDisplayName } from './LiveAgentsCard.js';
 
 const ROLE_LABEL: Record<string, string> = { fix: 'Fix', improve: 'Implement', review: 'Review', pm: 'Plan', experiment: 'Experiment', routine_review: 'Routine review' };
 const CONFIDENCE: Record<RoleModelMetrics['confidence'], { label: string; tone: 'good' | 'warning' | 'critical' | 'unknown' }> = {
@@ -18,7 +18,7 @@ const roleLabel = (role: string) => ROLE_LABEL[role] ?? role.replace(/_/g, ' ');
 /** "Codex gpt-6-sol", with the account only when it is a named one ("Mixed" means attempts spanned accounts). */
 const modelLabel = (cell: { backend: string; model: string | null; backend_instance: string | null }) => {
   const account = cell.backend_instance && cell.backend_instance !== cell.backend && !/^mixed$/i.test(cell.backend_instance) ? ` (${cell.backend_instance})` : '';
-  return `${agentDisplayName(cell.backend)}${cell.model ? ` ${cell.model}` : ''}${account}`;
+  return `${agentDisplayName(cell.backend)}${cell.model ? ` ${modelDisplayName(cell.backend, cell.model)}` : ''}${account}`;
 };
 function duration(seconds: number | null): string {
   if (seconds === null) return '—';
