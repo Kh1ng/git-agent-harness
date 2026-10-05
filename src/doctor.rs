@@ -1064,8 +1064,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let not_a_directory = tmp.path().join("worktree-base-is-a-file");
         std::fs::write(&not_a_directory, "regular file").unwrap();
-        let mut defaults = crate::config::Defaults::default();
-        defaults.worktree_base = not_a_directory.display().to_string();
+        let defaults = crate::config::Defaults {
+            worktree_base: not_a_directory.display().to_string(),
+            ..Default::default()
+        };
 
         assert!(!super::check_worktree_base(&defaults));
     }
