@@ -51,6 +51,11 @@ pub struct RoutingPolicy {
     /// Profile entries replace same-key global/default declarations.
     #[serde(default)]
     pub backend_instances: HashMap<String, BackendInstanceConfig>,
+    /// Quota pool -> named credential whose account readings measure it, for
+    /// example `vibe-monthly = "mistral-console"`. Readings only; the
+    /// credential never enters execution. Profile entries replace same keys.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub quota_sources: HashMap<String, String>,
     #[serde(default)]
     pub default_backend: Option<String>,
     #[serde(default)]
@@ -153,6 +158,17 @@ pub struct RoutingPolicy {
 impl RoutingPolicy {
     pub fn merged_with_defaults(&self, defaults: &RoutingPolicy) -> RoutingPolicy {
         merge_routing_policy(defaults.clone(), self.clone())
+    }
+
+    /// `canonical` quota sources overridden by this policy's same-key entries.
+    pub(crate) fn merged_quota_sources(
+        &self,
+        canonical: HashMap<String, String>,
+    ) -> HashMap<String, String> {
+        canonical
+            .into_iter()
+            .chain(self.quota_sources.clone())
+            .collect()
     }
 
     /// Issue #123: resolve the effective ROUTINE_REVIEWER (STRONG tier).
@@ -332,4 +348,83 @@ impl Profile {
         }
         Ok(format!("{}://oauth2@{}", scheme, host))
     }
+}
+
+/// Field-level merge: `repo`'s own explicit values win; unset fields
+/// inherit from `canonical`. Candidate lists (Vec) replace wholesale when
+/// the repo sets them (not concatenate); the capability map merges by key
+/// so a repo declaring one backend's capabilities doesn't erase another
+/// backend's canonical-declared ones.
+pub(super) fn merge_routing_policy(
+    canonical: RoutingPolicy,
+    mut repo: RoutingPolicy,
+) -> RoutingPolicy {
+    repo.backend_instances =
+        backend_instances::merge_instance_maps(canonical.backend_instances, repo.backend_instances);
+    repo.default_backend = repo.default_backend.or(canonical.default_backend);
+    repo.default_model = repo.default_model.or(canonical.default_model);
+    repo.pm_backend = repo.pm_backend.or(canonical.pm_backend);
+    repo.pm_model = repo.pm_model.or(canonical.pm_model);
+    repo.improve_backend = repo.improve_backend.or(canonical.improve_backend);
+    repo.improve_model = repo.improve_model.or(canonical.improve_model);
+    repo.review_backend = repo.review_backend.or(canonical.review_backend);
+    repo.review_model = repo.review_model.or(canonical.review_model);
+    repo.strong_review_backend = repo
+        .strong_review_backend
+        .or(canonical.strong_review_backend);
+    repo.strong_review_model = repo.strong_review_model.or(canonical.strong_review_model);
+    repo.weak_review_backend = repo.weak_review_backend.or(canonical.weak_review_backend);
+    repo.weak_review_model = repo.weak_review_model.or(canonical.weak_review_model);
+    repo.routine_reviewer = repo.routine_reviewer.or(canonical.routine_reviewer);
+    if repo.escalatory_reviewers.is_empty() {
+        repo.escalatory_reviewers = canonical.escalatory_reviewers.clone();
+    }
+    repo.pm_candidates = repo.pm_candidates.or(canonical.pm_candidates);
+    repo.improve_candidates = repo.improve_candidates.or(canonical.improve_candidates);
+    if repo.pm_guidance_paths.is_empty() {
+        repo.pm_guidance_paths = canonical.pm_guidance_paths;
+    }
+    if repo.task_routing_rules.is_empty() {
+        repo.task_routing_rules = canonical.task_routing_rules.clone();
+    }
+    repo.review_candidates = repo.review_candidates.or(canonical.review_candidates);
+    repo.allow_review_fallback = repo.allow_review_fallback || canonical.allow_review_fallback;
+    repo.allow_implementation_fallback =
+        repo.allow_implementation_fallback || canonical.allow_implementation_fallback;
+    repo.max_runs_per_backend_per_week = repo
+        .max_runs_per_backend_per_week
+        .or(canonical.max_runs_per_backend_per_week);
+    repo.max_runs_per_backend_per_session = repo
+        .max_runs_per_backend_per_session
+        .or(canonical.max_runs_per_backend_per_session);
+    repo.max_total_strong_model_runs_per_week = repo
+        .max_total_strong_model_runs_per_week
+        .or(canonical.max_total_strong_model_runs_per_week);
+    repo.max_total_strong_model_runs_per_session = repo
+        .max_total_strong_model_runs_per_session
+        .or(canonical.max_total_strong_model_runs_per_session);
+    repo.max_known_estimated_cost_per_week = repo
+        .max_known_estimated_cost_per_week
+        .or(canonical.max_known_estimated_cost_per_week);
+    repo.max_known_actual_cost_per_week = repo
+        .max_known_actual_cost_per_week
+        .or(canonical.max_known_actual_cost_per_week);
+    repo.max_review_cycles_per_ticket = repo
+        .max_review_cycles_per_ticket
+        .or(canonical.max_review_cycles_per_ticket);
+    repo.max_fix_attempts_per_mr = repo
+        .max_fix_attempts_per_mr
+        .or(canonical.max_fix_attempts_per_mr);
+    repo.max_paid_reviews_per_ticket = repo
+        .max_paid_reviews_per_ticket
+        .or(canonical.max_paid_reviews_per_ticket);
+    repo.max_implementation_failures_per_ticket = repo
+        .max_implementation_failures_per_ticket
+        .or(canonical.max_implementation_failures_per_ticket);
+    repo.quota_sources = repo.merged_quota_sources(canonical.quota_sources);
+    let mut capabilities = canonical.review_required_capabilities;
+    capabilities.extend(repo.review_required_capabilities);
+    repo.review_required_capabilities = capabilities;
+    repo.merge_policy = repo.merge_policy.or(canonical.merge_policy);
+    repo
 }
