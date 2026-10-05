@@ -97,7 +97,7 @@ fi
 
 cd "$install_dir"
 echo "Building gah. The first build takes a few minutes."
-cargo build --release --bin gah
+cargo build --locked --release --bin gah
 
 args=(setup --source "$install_dir")
 case "${GAH_NODE_ROLE:-}" in

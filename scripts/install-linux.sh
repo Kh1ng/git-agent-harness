@@ -26,8 +26,8 @@ esac
 # --bin gah is required: Cargo.toml declares a second [[bin]]
 # (generate-cli-capabilities) with no default-run set, so a bare
 # `cargo run` is ambiguous and errors instead of picking one.
-bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --bin gah --
-cargo run --bin gah -- update --repo "$repo_root" --role "$role"
+bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --locked --bin gah --
+cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role"
 
 # tailscale-dns-guard:start -- extracted verbatim by
 # tests/source_structure.rs::standalone_install_never_touches_tailscale,

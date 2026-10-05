@@ -102,26 +102,7 @@ pub struct GroupSummary {
     /// value; unknown/unsupported provenance is never treated as zero.
     pub peak_rss_bytes: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub quota_observations: Vec<GroupQuotaObservation>,
-}
-
-#[derive(Debug, Serialize, Clone, PartialEq)]
-pub struct GroupQuotaObservation {
-    pub backend: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_window: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_used_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_remaining_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_reset_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub observed_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage_source: Option<String>,
+    pub quota_observations: Vec<crate::quota_store::QuotaObservationRecord>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -590,7 +571,6 @@ pub fn build_summary(
             |backend, _model, _difficulty| {
                 crate::config::canonical_backend_name(backend).to_string()
             },
-            true,
         )
     } else {
         None
@@ -616,7 +596,6 @@ pub fn build_summary(
                     .map(str::to_string)
                     .unwrap_or_else(|| UNKNOWN_MODEL_LABEL.to_string())
             },
-            false,
         )
     } else {
         None
@@ -628,7 +607,6 @@ pub fn build_summary(
             |entry| canonical_difficulty_label(entry.difficulty.as_deref()),
             |observed| canonical_difficulty_label(observed.difficulty),
             |_backend, _model, difficulty| canonical_difficulty_label(difficulty),
-            false,
         )
     } else {
         None
@@ -655,7 +633,6 @@ pub fn build_summary(
                     difficulty,
                 )
             },
-            false,
         )
     } else {
         None
@@ -700,40 +677,37 @@ pub fn build_summary(
     })
 }
 
-/// TICKET-125: Build grouped summary data for a specific grouping key
+/// TICKET-125: Build grouped summary data for a specific grouping key.
+///
+/// #1339: group summaries carry only what the ledger itself observed
+/// (attempt-derived readings). Account-level quota comes from the durable
+/// quota store and is selected by its own callers via
+/// `quota_store::latest_windows_for_identity` — it is never merged into
+/// ledger groups.
 pub fn build_grouped_summary<F, U, A>(
     entries: &[super::LedgerEntry],
     entry_group_key_fn: F,
     usage_group_key_fn: U,
     attempt_group_key_fn: A,
-    merge_account_quota: bool,
 ) -> Option<Vec<GroupSummary>>
 where
     F: Fn(&super::LedgerEntry) -> String,
     U: Fn(UsageObservation<'_>) -> String,
     A: Fn(&str, Option<&str>, Option<&str>) -> String,
 {
-    build_grouped_summary_with_account_quota(
+    build_grouped_summary_inner(
         entries,
         entry_group_key_fn,
         usage_group_key_fn,
         attempt_group_key_fn,
-        merge_account_quota,
-        &crate::quota_store::load_account_observations(),
     )
 }
-
-/// Like [`build_grouped_summary`] but with the account-level quota
-/// observations injected explicitly (issue #206 regression coverage), so
-/// the merge behaviour can be tested hermetically without touching the
-/// global on-disk quota store.
-pub fn build_grouped_summary_with_account_quota<F, U, A>(
+/// Grouped-summary implementation shared by the public entry point.
+fn build_grouped_summary_inner<F, U, A>(
     entries: &[super::LedgerEntry],
     entry_group_key_fn: F,
     usage_group_key_fn: U,
     attempt_group_key_fn: A,
-    merge_account_quota: bool,
-    account_quota_observations: &[crate::quota_store::QuotaObservationRecord],
 ) -> Option<Vec<GroupSummary>>
 where
     F: Fn(&super::LedgerEntry) -> String,
@@ -769,11 +743,6 @@ where
     }
 
     let mut summaries = Vec::new();
-    // #166 / #151 cross-cutting: durable account-level quota observations
-    // (e.g. from Codex app-server) are kept in a separate store
-    // from per-attempt usage. They are injected by the caller; merging
-    // into each group is scoped so it can never fabricate data where none
-    // exists.
     let all_group_keys: std::collections::BTreeSet<String> = groups
         .keys()
         .chain(usage_groups.keys())
@@ -830,9 +799,13 @@ where
         let mut cache_write_tokens_seen = false;
         let mut total_tokens_seen = false;
         let mut requests_count_seen = false;
+        // #1339: group quota observations carry only what the ledger itself
+        // observed (attempt-derived readings, e.g. AGY's per-attempt
+        // allowance). Account-level quota is selected from the durable
+        // store by the report/snapshot callers, never re-derived here.
         let mut quota_observations: BTreeMap<
-            (String, Option<String>, Option<String>),
-            GroupQuotaObservation,
+            GroupQuotaKey,
+            crate::quota_store::QuotaObservationRecord,
         > = BTreeMap::new();
         let mut entries_for_success_rate = 0usize;
 
@@ -993,58 +966,27 @@ where
             {
                 let key = (
                     observed.backend.to_string(),
+                    observed.usage.backend_instance.clone(),
+                    observed.usage.quota_pool.clone(),
                     observed.model.map(str::to_string),
                     observed.usage.quota_window.clone(),
                 );
-                let candidate = GroupQuotaObservation {
+                let candidate = crate::quota_store::QuotaObservationRecord {
                     backend: observed.backend.to_string(),
+                    backend_instance: observed.usage.backend_instance.clone(),
+                    credential_id: None,
                     model: observed.model.map(str::to_string),
+                    quota_pool: observed.usage.quota_pool.clone(),
                     quota_window: observed.usage.quota_window.clone(),
                     quota_used_percent: observed.usage.quota_used_percent,
                     quota_remaining_percent: observed.usage.quota_remaining_percent,
                     quota_reset_at: observed.usage.quota_reset_at.clone(),
                     observed_at: observed.usage.observed_at.clone(),
+                    checked_at: None,
+                    check_error: None,
                     usage_source: observed.usage.usage_source.clone(),
-                };
-                let replace = is_timestamp_earlier(
-                    &quota_observations
-                        .get(&key)
-                        .and_then(|e| e.observed_at.as_ref()),
-                    &candidate.observed_at.as_ref(),
-                );
-                if replace || !quota_observations.contains_key(&key) {
-                    quota_observations.insert(key, candidate);
-                }
-            }
-        }
-
-        // #166 / #151 cross-cutting: merge in any durable account-level
-        // quota observation (e.g. from Codex app-server) so the
-        // Quota/Telemetry pages show real backend quota data, not just
-        // per-attempt tokens. Account observations are backend-scoped
-        // (model = None), so `group_key` is the record's backend only when
-        // grouping by backend. In the model-grouped view `group_key` is a
-        // model name and would essentially never match a backend-scoped
-        // record, so we skip the merge entirely there (issue #206) rather
-        // than silently no-op against a mismatched key.
-        if merge_account_quota {
-            if let Some(account) =
-                crate::quota_store::latest_for(account_quota_observations, &group_key, None)
-            {
-                let key = (
-                    account.backend.clone(),
-                    account.model.clone(),
-                    account.quota_window.clone(),
-                );
-                let candidate = GroupQuotaObservation {
-                    backend: account.backend.clone(),
-                    model: account.model.clone(),
-                    quota_window: account.quota_window.clone(),
-                    quota_used_percent: account.quota_used_percent,
-                    quota_remaining_percent: account.quota_remaining_percent,
-                    quota_reset_at: account.quota_reset_at.clone(),
-                    observed_at: account.observed_at.clone(),
-                    usage_source: account.usage_source.clone(),
+                    mistral_admin: None,
+                    account_usage: None,
                 };
                 let replace = is_timestamp_earlier(
                     &quota_observations
@@ -1145,6 +1087,16 @@ pub struct UsageObservation<'a> {
     pub difficulty: Option<&'a str>,
     pub usage: &'a LedgerUsage,
 }
+
+/// Dedup key for a group's attempt-derived quota observations: the source
+/// identity (backend, instance, pool, model) plus the window.
+type GroupQuotaKey = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 /// Compare two RFC3339 timestamps, returning true if the first is earlier than the second.
 /// Handles different timezone offsets and missing timestamps properly.

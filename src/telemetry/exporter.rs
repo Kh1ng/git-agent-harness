@@ -256,6 +256,40 @@ impl TelemetryExporter {
         Ok(())
     }
 
+    /// #1341: export account quota observation records straight from the
+    /// durable quota store, with the same dedup-by-record-id contract as the
+    /// ledger-derived record types.
+    pub fn export_store_quota_observations(
+        &mut self,
+        store_records: &[crate::quota_store::QuotaObservationRecord],
+    ) -> Result<()> {
+        let exported_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string());
+
+        let new_records = extract_quota_observation_records(store_records, &exported_at)
+            .into_iter()
+            .map(|record| ExportedTelemetryRecord::QuotaObservation(Box::new(record)))
+            .filter(|record| !self.exported_ids.contains(&record.get_id()))
+            .collect::<Vec<_>>();
+
+        if new_records.is_empty() {
+            log::debug!("No new quota observation records to export");
+            return Ok(());
+        }
+
+        log::info!(
+            "Exporting {} new quota observation records",
+            new_records.len()
+        );
+        self.export_records(&new_records)?;
+        for record in &new_records {
+            self.exported_ids.insert(record.get_id());
+            self.records_exported += 1;
+        }
+        Ok(())
+    }
+
     /// Export a batch of telemetry records
     pub fn export_records(&self, records: &[ExportedTelemetryRecord]) -> Result<()> {
         // Serialize against any other process writing into this same
