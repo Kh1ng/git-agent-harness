@@ -481,27 +481,41 @@ pub fn requirements(selection: &Selection, host: &dyn Host) -> Vec<Requirement> 
             action: None,
             help: None,
         });
+        // Lingering is a systemd concept: no systemd (or no resolvable user)
+        // means Unsupported with no action, never a command that cannot work.
+        // Optional, like `gah update`'s attempt: a sudo-less host still
+        // finishes setup, and the gap stays visible here.
+        let has_systemd = list.last().is_some_and(|r| r.status.is_ok());
         if os == Os::Linux {
             let user = host
                 .probe("id", &["-un"])
                 .map(|p| p.stdout.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "unknown".into());
+                .filter(|s| !s.is_empty() && has_systemd);
             list.push(Requirement {
                 id: "user_lingering",
                 label: "user lingering".into(),
                 why: "Keeps the user's systemd manager and timers running after they log out.",
                 feature,
-                optional: false,
-                status: match host.probe("loginctl", &["show-user", &user, "-p", "Linger"]) {
-                    Some(probe) if probe.stdout.trim() == "Linger=yes" => {
-                        Status::Ok { found: None }
+                optional: true,
+                status: match &user {
+                    None if !has_systemd => Status::Unsupported {
+                        reason: "Lingering needs systemd.".into(),
+                    },
+                    None => Status::Unsupported {
+                        reason: "The current user could not be resolved with id -un.".into(),
+                    },
+                    Some(user) => {
+                        match host.probe("loginctl", &["show-user", user, "-p", "Linger"]) {
+                            Some(probe) if probe.stdout.trim() == "Linger=yes" => {
+                                Status::Ok { found: None }
+                            }
+                            _ => Status::Missing,
+                        }
                     }
-                    _ => Status::Missing,
                 },
-                action: Some(Action {
+                action: user.map(|user| Action {
                     kind: ActionKind::Install,
-                    command: format!("sudo loginctl enable-linger {}", user),
+                    command: format!("sudo loginctl enable-linger {user}"),
                     sudo: true,
                 }),
                 help: None,
@@ -744,6 +758,48 @@ pub(crate) mod tests {
             matches!(systemd.status, Status::Unsupported { .. }),
             "no systemctl means no service"
         );
+    }
+
+    /// Issue #1347: lingering never blocks setup, and only offers a command
+    /// on a systemd host with a real account to name.
+    #[test]
+    fn user_lingering_needs_systemd_and_never_blocks() {
+        let systemd = || {
+            FakeHost::new(Os::Linux, Some(PackageManager::Apt)).with(
+                "systemctl --version",
+                true,
+                "systemd 255",
+            )
+        };
+        let lingering = |host: &FakeHost| {
+            requirements(&selection(Role::Worker), host)
+                .into_iter()
+                .find(|r| r.id == "user_lingering")
+        };
+
+        let missing = lingering(&systemd().with("id -un", true, "testuser").with(
+            "loginctl show-user testuser -p Linger",
+            true,
+            "Linger=no",
+        ))
+        .unwrap();
+        assert_eq!(missing.status, Status::Missing);
+        assert!(!missing.blocking());
+        assert_eq!(
+            missing.action.unwrap().command,
+            "sudo loginctl enable-linger testuser"
+        );
+
+        let no_user = lingering(&systemd()).unwrap();
+        assert!(matches!(no_user.status, Status::Unsupported { .. }));
+        assert!(no_user.action.is_none() && !no_user.blocking());
+
+        let no_systemd = lingering(
+            &FakeHost::new(Os::Linux, Some(PackageManager::Apt)).with("id -un", true, "testuser"),
+        )
+        .unwrap();
+        assert!(matches!(no_systemd.status, Status::Unsupported { .. }));
+        assert!(no_systemd.action.is_none() && !no_systemd.blocking());
     }
 
     #[test]

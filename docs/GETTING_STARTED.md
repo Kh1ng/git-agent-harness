@@ -117,7 +117,7 @@ code, so it cannot fall out of date.
 | `gh` or `glab` login | Everything | Lets GAH read issues and push branches as you. |
 | curl | Dashboard, Worker | The installer uses it to check that services came up. |
 | systemd (Linux) or launchd (macOS) | Dashboard, Worker | Keeps the GAH server running and restarts it after a reboot. |
-| user lingering | Dashboard, Worker | Keeps the user's systemd manager and timers running after they log out. |
+| user lingering | Dashboard, Worker (recommended) | Keeps the user's systemd manager and timers running after they log out. |
 | Tailscale | Dashboard, Worker (recommended) | Reach the dashboard from your phone and other machines over HTTPS, privately. |
 | openssl | Shared memory | Generates the memory gateway's access key. |
 <!-- requirements:end -->

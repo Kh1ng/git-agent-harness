@@ -28,10 +28,9 @@ esac
 # `cargo run` is ambiguous and errors instead of picking one.
 bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --bin gah --
 # The update command also enables user lingering (issue #1347) so the user
-# units it installs survive reboots without a login session. That step is
-# best-effort inside the update, never sudo here: a worker host without
-# root must still install cleanly (tests/installer_scripts.rs forbids
-# sudo in the worker install flow).
+# units it installs survive reboots without a login session. It uses plain
+# `loginctl enable-linger`, never sudo, so a worker host without root still
+# installs cleanly (tests/installer_scripts.rs forbids sudo in that flow).
 cargo run --bin gah -- update --repo "$repo_root" --role "$role"
 
 # MagicDNS is useful only when this client accepts the tailnet DNS settings.
