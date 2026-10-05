@@ -8,6 +8,7 @@ import { gahApi } from '../api/client.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
+import { ModelFitCard } from '../components/ModelFitCard.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { StatusBadge, type StatusTone } from '../components/ui/StatusBadge.js';
 import { TrendChart } from '../components/TrendChart.js';
@@ -524,49 +525,7 @@ export function TelemetryPage() {
         }
       />
 
-      <ExportHealthCard health={status.data?.export_health} />
-
-      {sorted.length > 0 && <UsageSummary rows={sorted} />}
-
-      <ChatUsageRollupCard profile={profile ?? undefined} />
-
-      <HelperUsageCard profile={profile ?? undefined} />
-
-      <section className="card-padded">
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-          <h3 className="text-sm font-semibold text-primary">Dispatch ledger trend</h3>
-          <div className="flex items-center gap-3">
-            <span className="inline-flex items-center gap-1 text-xs text-muted">
-              <FlaskConical size={12} aria-hidden="true" />
-              Dispatch attempts ({reportSeries.data?.bucket ?? 'daily'})
-            </span>
-            <select
-              value={trendMetric}
-              onChange={(e) => setTrendMetric(e.target.value as typeof trendMetric)}
-              className="bg-raised border border-subtle rounded-md px-2 py-1 text-xs text-primary"
-            >
-              {trendOptions.map((opt) => (
-                <option key={opt.id} value={opt.id}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-        {reportSeries.loading && !reportSeries.data ? (
-          <LoadingState label="Loading usage trend…" />
-        ) : reportSeries.error ? (
-          <ErrorState
-            message={reportSeries.error}
-            endpoint="/api/report/series"
-            onRetry={() => fetchReportSeries({ profile: profile ?? undefined, since: '14d', bucket: 'daily' }, { force: true })}
-          />
-        ) : activeTrend.data.length === 0 ? (
-          <EmptyState icon={FlaskConical} title="No dispatch-ledger trend" description="No dispatch runs were recorded in this window. Manager-chat usage above is unaffected." />
-        ) : (
-          <TrendChart data={activeTrend.data} valueLabel={activeTrend.label} formatValue={activeTrend.format as (v: number) => string} />
-        )}
-      </section>
+      <ModelFitCard profile={profile ?? null} since="7d" />
 
       <section>
         <h3 className="text-sm font-semibold text-primary mb-3">
@@ -642,6 +601,50 @@ export function TelemetryPage() {
               </tbody>
             </table>
           </div>
+        )}
+      </section>
+
+      <ExportHealthCard health={status.data?.export_health} />
+
+      {sorted.length > 0 && <UsageSummary rows={sorted} />}
+
+      <ChatUsageRollupCard profile={profile ?? undefined} />
+
+      <HelperUsageCard profile={profile ?? undefined} />
+
+      <section className="card-padded">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <h3 className="text-sm font-semibold text-primary">Dispatch ledger trend</h3>
+          <div className="flex items-center gap-3">
+            <span className="inline-flex items-center gap-1 text-xs text-muted">
+              <FlaskConical size={12} aria-hidden="true" />
+              Dispatch attempts ({reportSeries.data?.bucket ?? 'daily'})
+            </span>
+            <select
+              value={trendMetric}
+              onChange={(e) => setTrendMetric(e.target.value as typeof trendMetric)}
+              className="bg-raised border border-subtle rounded-md px-2 py-1 text-xs text-primary"
+            >
+              {trendOptions.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        {reportSeries.loading && !reportSeries.data ? (
+          <LoadingState label="Loading usage trend…" />
+        ) : reportSeries.error ? (
+          <ErrorState
+            message={reportSeries.error}
+            endpoint="/api/report/series"
+            onRetry={() => fetchReportSeries({ profile: profile ?? undefined, since: '14d', bucket: 'daily' }, { force: true })}
+          />
+        ) : activeTrend.data.length === 0 ? (
+          <EmptyState icon={FlaskConical} title="No dispatch-ledger trend" description="No dispatch runs were recorded in this window. Manager-chat usage above is unaffected." />
+        ) : (
+          <TrendChart data={activeTrend.data} valueLabel={activeTrend.label} formatValue={activeTrend.format as (v: number) => string} />
         )}
       </section>
     </div>

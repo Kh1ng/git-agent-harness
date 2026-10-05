@@ -53,6 +53,7 @@ export function PlanningPage({ onNavigate }: { onNavigate: (page: Page) => void 
   const { isConnected, reconnectSeq, profile: wsProfile } = useWebSocket();
   const profileOverride = useUiStore((s) => s.profileOverride);
   const setProfileOverride = useUiStore((s) => s.setProfileOverride);
+  const openChatSession = useUiStore((s) => s.openChatSession);
   const [profiles] = useChatProfiles(reconnectSeq);
   const local = profiles.filter((candidate) => !candidate.remote);
   const profile = profileOverride ?? wsProfile ?? 'gah';
@@ -118,8 +119,7 @@ export function PlanningPage({ onNavigate }: { onNavigate: (page: Page) => void 
     setStartError(null);
     try {
       const session = await gahApi.startPlanningChat(request);
-      setProfileOverride(profile);
-      updateNavigation({ profile, chat: session.id, epic: null, map: null });
+      openChatSession(profile, session.id);
       onNavigate('chat');
     } catch (error) {
       setStartError(errorText(error));

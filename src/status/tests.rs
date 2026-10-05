@@ -1,4 +1,26 @@
 use super::*;
+
+#[test]
+fn blocked_work_item_lines_show_pr_reference_and_fix_cap_reason() {
+    assert!(blocked_work_item_lines(&[]).is_empty());
+    let blocked = Blocker {
+        kind: "human_required".into(),
+        reason: Some("fix_retry_cap_exceeded".into()),
+        message: Some("MR on branch 'branch-A' exceeded fix retry cap".into()),
+        backend: None,
+        model: None,
+        quota_pool: None,
+        until: None,
+        source_reference: Some("branch-A".into()),
+        reason_code: Some("fix_retry_cap_exceeded".into()),
+        remediation_plan: None,
+    };
+    let lines = blocked_work_item_lines(&[blocked]);
+    assert_eq!(lines[0], "Blocked work items:");
+    assert!(lines[1].contains("branch-A"), "{lines:?}");
+    assert!(lines[1].contains("[fix_retry_cap_exceeded]"), "{lines:?}");
+}
+
 use crate::availability::{AvailabilityRecord, AvailabilityState, Reason, Source, Status};
 use crate::ledger::{LedgerEntry, RoutingCandidateDiagnostic, RoutingDiagnostics};
 use crate::test_support::{ClaimStateEnvGuard, ExecGuard, PathGuard};

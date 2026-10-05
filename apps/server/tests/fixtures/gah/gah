@@ -87,6 +87,12 @@ if (command === 'pm') {
 } else if (command === 'quota' && sub === 'snapshot') {
   respond('quota');
 } else if (command === 'report') {
+  // Mirror parse_since (src/ledger/summary.rs): only Nd / Nh are accepted.
+  const since = args[args.indexOf('--since') + 1];
+  if (args.includes('--since') && !/^\d+[dh]$/.test(since ?? '')) {
+    process.stderr.write(`invalid --since value '${since}'; use forms like 7d or 24h\n`);
+    process.exit(1);
+  }
   respond(args.includes('--series') ? 'report-series' : 'report');
 } else if (command === 'events') {
   respond('events');

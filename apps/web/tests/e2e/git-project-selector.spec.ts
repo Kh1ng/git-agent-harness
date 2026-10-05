@@ -22,7 +22,8 @@ test('switches the Git surface between configured projects', async ({ page }) =>
   });
 
   await page.goto('/');
-  await page.getByRole('button', { name: 'Git', exact: true }).click();
+  await page.getByRole('button', { name: 'Projects', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Page tabs' }).getByRole('button', { name: 'Git', exact: true }).click();
   await expect(page.getByRole('combobox', { name: 'Project' })).toHaveValue('fixture');
 
   await page.getByRole('combobox', { name: 'Project' }).selectOption('second');
