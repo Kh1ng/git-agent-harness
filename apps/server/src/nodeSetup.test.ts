@@ -183,9 +183,11 @@ test('Unix bootstrap commands select supported roles, quote origins, and prompt 
   assert.match(central, /read -rsp/);
   assert.match(central, /GAH_GATEWAY_API_KEY/);
   execFileSync('bash', ['-n', '-c', central]);
-  const standalone = unixSetupCommand('linux', 'central', '');
+  const standalone = unixSetupCommand('linux', 'standalone', '');
+  assert.match(standalone, /GAH_NODE_ROLE=.*standalone/);
   assert.ok(!standalone.includes('read -rsp'));
   assert.ok(!standalone.includes('GAH_GATEWAY'));
+  execFileSync('bash', ['-n', '-c', standalone]);
   for (const args of [
     ['macos', 'central', ''], ['linux', 'both', ''], ['unknown', 'worker', 'https://central.test'],
     ['linux', 'worker', 'http://localhost'], ['linux', 'worker', 'https://central.test', 'https://gateway.test'],

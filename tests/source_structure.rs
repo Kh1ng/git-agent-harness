@@ -1122,6 +1122,16 @@ fn install_linux_gateway_mapping_writes_both_targets_for_central() {
                 "/tmp/gah-src-test/home/.config/gah/gah-loop.env",
             ],
         ),
+        // #1318: standalone runs the same local control plane (server unit plus
+        // its own dispatch loop), so it must map both gateway targets exactly
+        // like central.
+        (
+            "standalone",
+            vec![
+                "/tmp/gah-src-test/server.env",
+                "/tmp/gah-src-test/home/.config/gah/gah-loop.env",
+            ],
+        ),
         (
             "worker",
             vec!["/tmp/gah-src-test/home/.config/gah/gah-loop.env"],
@@ -1167,6 +1177,112 @@ fn extract_marked_block<'a>(script: &'a str, marker: &str, script_path: &str) ->
         .map(|i| end_marker_pos + i)
         .unwrap_or(script.len());
     &script[start..end]
+}
+
+#[test]
+fn standalone_service_restart_and_start_failures_report_journal() {
+    let script_path = "scripts/install-linux.sh";
+    let script =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(script_path)).unwrap();
+    let block = extract_marked_block(&script, "server-service-start", script_path);
+    for (role, failure) in [
+        ("standalone", "none"),
+        ("central", "none"),
+        ("standalone", "enable"),
+        ("standalone", "restart"),
+        ("standalone", "inactive"),
+        // A service that starts but crash-loops (Restart=always) must be a
+        // failure too, with the same journal diagnostics (#1330).
+        ("standalone", "crashloop"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("systemctl.log");
+        let harness = format!(
+            "set -euo pipefail\nrole={role}\nfail={failure}\nlog={}\n\
+systemctl() {{\n  printf '%s\\n' \"$*\" >> \"$log\"\n  case \"$*\" in\n\
+    'show -p NRestarts --value gah-server.service') if [ \"$fail\" = crashloop ]; then printf '1\\n'; else printf '0\\n'; fi ;;\n  esac\n}}\n\
+sudo() {{\n  printf '%s\\n' \"sudo $*\" >> \"$log\"\n  case \"$*\" in\n\
+    'systemctl enable --now gah-server.service') [ \"$fail\" != enable ] ;;\n\
+    'systemctl restart gah-server.service') [ \"$fail\" != restart ] ;;\n\
+    'systemctl is-active --quiet gah-server.service') [ \"$fail\" != inactive ] ;;\n  esac\n}}\n\
+sleep() {{ :; }}\n{block}\n",
+            log.display()
+        );
+        let result = Command::new("bash")
+            .arg("-c")
+            .arg(harness)
+            .output()
+            .unwrap();
+        let calls = fs::read_to_string(log).unwrap();
+        assert_eq!(
+            result.status.success(),
+            failure == "none",
+            "{role} {failure}"
+        );
+        assert_eq!(
+            calls.contains("systemctl restart gah-server.service"),
+            role == "standalone" && failure != "enable",
+            "{role} {failure}: {calls}"
+        );
+        if failure != "none" {
+            assert!(
+                calls.contains("systemctl status --no-pager gah-server.service"),
+                "{role} {failure}: {calls}"
+            );
+            assert!(
+                calls.contains("journalctl -u gah-server.service -n 50 --no-pager"),
+                "{role} {failure}: {calls}"
+            );
+        } else {
+            assert!(
+                !calls.contains("journalctl"),
+                "{role} success must not report diagnostics: {calls}"
+            );
+        }
+    }
+}
+
+#[test]
+fn standalone_rebinds_an_existing_server_env() {
+    let script_path = "scripts/install-linux.sh";
+    let script =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(script_path)).unwrap();
+    let block = extract_marked_block(&script, "server-env-config", script_path);
+    for (role, override_host, expected_host) in [
+        ("standalone", None, "127.0.0.1"),
+        ("standalone", Some("10.0.0.5"), "10.0.0.5"),
+        ("central", None, "100.118.97.79"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let env_file = temp.path().join("server.env");
+        fs::write(&env_file, "HOST=100.118.97.79\nPORT=3773\n").unwrap();
+        let block = block.replace("/etc/gah/server.env", env_file.to_str().unwrap());
+        let harness = format!(
+            "set -euo pipefail\nrole={role}\nHOME={}\nGAH={}\nsudo() {{ if [[ \"$1\" == */gah ]]; then shift; \"$GAH\" \"$@\"; else \"$@\"; fi; }}\n{block}\n",
+            temp.path().display(),
+            env!("CARGO_BIN_EXE_gah")
+        );
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(harness);
+        if let Some(host) = override_host {
+            command.env("GAH_SERVER_HOST", host);
+        } else {
+            command.env_remove("GAH_SERVER_HOST");
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let contents = fs::read_to_string(&env_file).unwrap();
+        assert!(
+            contents.contains(&format!("HOST={expected_host}"))
+                || contents.contains(&format!("HOST=\"{expected_host}\"")),
+            "{contents}"
+        );
+        assert!(contents.contains("PORT=3773"), "{contents}");
+    }
 }
 
 /// Extracts the `gateway-url-default:start`/`:end` block from each install
@@ -1263,14 +1379,14 @@ fn install_linux_prefers_the_tailnet_bind_host() {
         "#!/bin/sh\n[ \"$1\" = tailscale-ip ] && echo 100.118.97.79\n",
     );
 
-    let run = |host: Option<&str>, path: &Path| {
+    let run = |host: Option<&str>, path: &Path, role: &str| {
         let host = host
             .map(|value| format!("GAH_SERVER_HOST={value}"))
             .unwrap_or_else(|| "unset GAH_SERVER_HOST".to_string());
         Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "PATH={}:{}\n{host}\n{block}\nprintf '%s' \"$server_host\"",
+                "PATH={}:{}\n{host}\nrole={role}\n{block}\nprintf '%s' \"$server_host\"",
                 path.display(),
                 std::env::var("PATH").unwrap_or_default()
             ))
@@ -1278,12 +1394,13 @@ fn install_linux_prefers_the_tailnet_bind_host() {
             .unwrap()
     };
 
+    // Networked installs keep the tailnet bind host (issue #643 behavior).
     assert_eq!(
-        String::from_utf8_lossy(&run(None, &tmp).stdout),
+        String::from_utf8_lossy(&run(None, &tmp, "central").stdout),
         "100.118.97.79"
     );
     assert_eq!(
-        String::from_utf8_lossy(&run(Some("10.0.0.5"), &tmp).stdout),
+        String::from_utf8_lossy(&run(Some("10.0.0.5"), &tmp, "central").stdout),
         "10.0.0.5"
     );
     let empty = tmp.join("empty");
@@ -1291,8 +1408,19 @@ fn install_linux_prefers_the_tailnet_bind_host() {
     let unavailable_gah = empty.join("gah");
     support::write_executable(&unavailable_gah, "#!/bin/sh\nexit 1\n");
     assert_eq!(
-        String::from_utf8_lossy(&run(None, &empty).stdout),
+        String::from_utf8_lossy(&run(None, &empty, "central").stdout),
         "127.0.0.1"
+    );
+    // #1318: a standalone install binds loopback even when `gah tailscale-ip`
+    // would answer, so no tailnet or LAN interface is ever exposed.
+    assert_eq!(
+        String::from_utf8_lossy(&run(None, &tmp, "standalone").stdout),
+        "127.0.0.1"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run(Some("10.0.0.5"), &tmp, "standalone").stdout),
+        "10.0.0.5",
+        "an explicit GAH_SERVER_HOST override still wins for standalone"
     );
     fs::remove_dir_all(tmp).unwrap();
 }
@@ -1307,4 +1435,52 @@ fn installers_enable_tailscale_dns_when_available() {
             "{script_path} must enable the per-device MagicDNS preference"
         );
     }
+}
+
+/// #1318: a standalone install must not install, configure, prompt for, or
+/// require Tailscale. The tailscale-dns-guard block in install-linux.sh is
+/// evaluated verbatim under bash for each role with fake `tailscale` and
+/// `sudo` executables on PATH; standalone must invoke neither, while the
+/// networked roles keep the MagicDNS preference (issue #643-era behavior).
+#[test]
+fn standalone_install_never_touches_tailscale() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script_path = "scripts/install-linux.sh";
+    let script = fs::read_to_string(repo_root.join(script_path)).unwrap();
+    let block = extract_marked_block(&script, "tailscale-dns-guard", script_path);
+    let tmp = std::env::temp_dir().join(format!("gah-src-test-tsdns-{}", std::process::id()));
+    fs::create_dir_all(&tmp).unwrap();
+    support::write_executable(&tmp.join("tailscale"), "#!/bin/sh\necho tailscale-called\n");
+    support::write_executable(&tmp.join("sudo"), "#!/bin/sh\necho sudo-called\n");
+
+    let run = |role: &str| {
+        Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "PATH={}:{}\nrole={role}\n{block}\n",
+                tmp.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ))
+            .output()
+            .unwrap()
+    };
+
+    let standalone = run("standalone");
+    assert!(standalone.status.success());
+    assert!(
+        String::from_utf8_lossy(&standalone.stdout)
+            .trim()
+            .is_empty(),
+        "standalone must not invoke tailscale or sudo"
+    );
+    for role in ["central", "worker"] {
+        let networked = run(role);
+        assert!(networked.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&networked.stdout).trim(),
+            "sudo-called",
+            "role={role} must keep the MagicDNS preference"
+        );
+    }
+    fs::remove_dir_all(tmp).unwrap();
 }

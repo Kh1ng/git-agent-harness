@@ -19,9 +19,9 @@
 # HOST/PORT (issue #643): the app defaults HOST to 0.0.0.0 and PORT to 3773.
 # Override either persistently by writing /etc/gah/server.env (not tracked in
 # this repo) rather than editing this unit -- `scripts/install.sh` creates it
-# on first install and never overwrites it afterward, and `gah update
-# --restart-server` never touches it either, so an operator's HOST choice
-# (loopback, one interface, or 0.0.0.0) survives every reinstall/update.
+# on first install. Central reinstalls and `gah update --restart-server`
+# preserve it; a standalone reinstall sets HOST to loopback unless
+# GAH_SERVER_HOST explicitly requests another address.
 # Example /etc/gah/server.env:
 #   HOST=127.0.0.1
 #
