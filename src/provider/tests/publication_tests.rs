@@ -150,6 +150,9 @@ fn github_mr_body_is_redacted_before_it_reaches_provider_cli() {
 
 #[test]
 fn gitlab_mr_error_json_response_fails_closed() {
+    const RAW_SECRET: &str = "glpat-abcdefghijklmnopqrstuvwxyz";
+    const REDACTED_MARKER: &str = "[REDACTED:GITLAB_TOKEN]";
+
     let _exec_guard = crate::test_support::ExecGuard::new();
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
@@ -157,7 +160,9 @@ fn gitlab_mr_error_json_response_fails_closed() {
     make_fake_bin(
         &bin_dir,
         "glab",
-        "#!/bin/sh\nprintf '%s\\n' '{\"message\":\"404 Project Not Found\",\"token\":\"glpat-abcdefghijklmnopqrstuvwxyz\"}'\necho 'glab: API request failed: 404' >&2\nexit 1\n",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' '{{\"message\":\"404 Project Not Found\",\"token\":\"{RAW_SECRET}\"}}'\necho 'glab: API request failed: 404' >&2\nexit 1\n"
+        ),
     );
     let _guard = PathOverride::set(bin_dir.to_str().unwrap().to_string());
 
@@ -166,8 +171,8 @@ fn gitlab_mr_error_json_response_fails_closed() {
     let msg = format!("{:#}", err);
     assert!(msg.contains("glab api gitlab create mr failed"));
     assert!(msg.contains("404 Project Not Found"));
-    assert!(!msg.contains("glpat-abcdefghijklmnopqrstuvwxyz"));
-    assert!(msg.contains("[REDACTED:GITLAB_TOKEN]"));
+    assert!(!msg.contains(RAW_SECRET));
+    assert!(msg.contains(REDACTED_MARKER));
 }
 
 #[test]
