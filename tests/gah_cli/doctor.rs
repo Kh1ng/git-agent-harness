@@ -257,6 +257,40 @@ fn doctor_validate_fails_on_missing_backend_executable_but_plain_doctor_still_pa
         );
 }
 
+/// Issue #1366: the worktree-base check is a defaults-level check that must
+/// run even when the config has no profiles, so an unwritable base fails
+/// doctor instead of reporting an overall "ok".
+#[test]
+fn doctor_json_reports_unwritable_worktree_base_with_no_profiles() {
+    let tmp = test_tempdir();
+    let unwritable = tmp.path().join("worktree-base-is-a-file");
+    fs::write(&unwritable, "regular file, not a directory").unwrap();
+    let cfg = tmp.path().join("gah-config-empty.toml");
+    fs::write(
+        &cfg,
+        format!("[defaults]\nworktree_base = \"{}\"\n", unwritable.display()),
+    )
+    .unwrap();
+
+    let output = bin()
+        .args(["doctor", "--config-path", cfg.to_str().unwrap(), "--json"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let snapshot: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(snapshot["overall_status"], "fail");
+    assert!(snapshot["checks"].as_array().is_some_and(|checks| {
+        checks.iter().any(|check| {
+            check["name"] == "worktree_base"
+                && check["status"] == "fail"
+                && check.get("profile").is_none()
+        })
+    }));
+}
+
 /// TICKET-105: `gah doctor --validate` reuses the exact same
 /// `review_preflight` check as the real review invocation.
 #[test]

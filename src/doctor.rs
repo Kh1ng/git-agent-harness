@@ -79,7 +79,7 @@ pub fn run(
     }
     print_check(CheckStatus::Pass, "config", "loaded successfully");
 
-    let mut failed = false;
+    let mut failed = !check_worktree_base(&cfg.defaults);
     for (name, profile) in profiles {
         if json {
             CHECK_CAPTURE.with(|capture| {
@@ -149,6 +149,21 @@ fn selected_profiles<'a>(
     Ok(profiles)
 }
 
+/// Default-level check that runs once per doctor invocation, outside the
+/// per-profile loop, so an unusable worktree base is reported even when the
+/// config has no profiles (issue #1366).
+fn check_worktree_base(defaults: &Defaults) -> bool {
+    if defaults.worktree_base.trim().is_empty() {
+        print_check(
+            CheckStatus::Fail,
+            "worktree_base",
+            "empty; set defaults.worktree_base to a writable directory",
+        );
+        return false;
+    }
+    check_writable_path("worktree_base", Path::new(&defaults.worktree_base))
+}
+
 fn check_profile(defaults: &Defaults, profile: &Profile) -> bool {
     let mut failed = false;
     failed |= !check_repo(profile);
@@ -156,16 +171,6 @@ fn check_profile(defaults: &Defaults, profile: &Profile) -> bool {
     failed |= !check_provider_auth(profile);
     failed |= !check_push_url(profile);
     failed |= !check_writable_path("artifact_root", Path::new(&profile.artifact_root));
-    if defaults.worktree_base.trim().is_empty() {
-        print_check(
-            CheckStatus::Fail,
-            "worktree_base",
-            "empty; set defaults.worktree_base to a writable directory",
-        );
-        failed = true;
-    } else {
-        failed |= !check_writable_path("worktree_base", Path::new(&defaults.worktree_base));
-    }
     failed |= !check_manager_memory(defaults, profile);
     failed |= !check_candidate_model_consistency(defaults, profile);
     failed |= !check_backend_instance_config(defaults, profile);
@@ -647,7 +652,7 @@ fn check_manager_memory(defaults: &Defaults, profile: &Profile) -> bool {
 /// validation commands and backend executables actually resolve, and
 /// whether declared env files exist. Deliberately does not re-check repo
 /// path, provider CLI/token, push URL, or writable roots -- `check_profile`
-/// already covers those.
+/// and `check_worktree_base` already cover those.
 fn check_validation_commands(profile: &Profile) -> bool {
     if profile.validation_commands.is_empty() {
         print_check(CheckStatus::Warn, "validation commands", "none configured");
@@ -1043,6 +1048,26 @@ mod tests {
         assert!(check_push_url(&gitlab_profile(Some(
             "https://gitlab.example.internal/api/v4"
         ))));
+    }
+
+    // Issue #1366: the worktree base is a defaults-level concern, so doctor
+    // must fail for an empty or unwritable base even with no profiles.
+    #[test]
+    fn doctor_worktree_base_check_fails_when_empty() {
+        let defaults = crate::config::Defaults::default();
+
+        assert!(!super::check_worktree_base(&defaults));
+    }
+
+    #[test]
+    fn doctor_worktree_base_check_fails_when_unwritable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_directory = tmp.path().join("worktree-base-is-a-file");
+        std::fs::write(&not_a_directory, "regular file").unwrap();
+        let mut defaults = crate::config::Defaults::default();
+        defaults.worktree_base = not_a_directory.display().to_string();
+
+        assert!(!super::check_worktree_base(&defaults));
     }
 
     #[test]
