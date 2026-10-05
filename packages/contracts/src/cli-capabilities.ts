@@ -2414,6 +2414,13 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
     },
     "profile.set": {
       "properties": {
+        "agent_model": {
+          "description": "Model switches for a backend's routing candidates, each backend/old=new.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "agy_path": {
           "description": "Agy executable path on the node.",
           "type": "string"

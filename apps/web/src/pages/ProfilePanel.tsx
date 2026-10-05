@@ -845,11 +845,14 @@ function EditableCandidateList({ title, listKey, profile, candidates, onMutate }
     const backend = newBackend.trim();
     if (!backend) return;
     setAdding(false);
+    // Another model on a backend already listed bills the same way that one does.
+    const sibling = candidates.find((candidate) => candidate.backend === backend);
     void runMutation('add', () =>
       routingCandidatesApi.add(profile, {
         list: listKey,
         backend,
         ...(newModel.trim() !== '' ? { model: newModel.trim() } : {}),
+        ...(sibling ? { included_in_quota: sibling.included_in_quota, requires_approval: sibling.requires_approval } : {}),
       }));
     setNewBackend('');
     setNewModel('');
@@ -877,7 +880,7 @@ function EditableCandidateList({ title, listKey, profile, candidates, onMutate }
                   type="button"
                   title="Move up"
                   disabled={pending !== null || index === 0}
-                  onClick={() => runMutation(`up-${index}`, () => routingCandidatesApi.move(profile, index, index - 1))}
+                  onClick={() => runMutation(`up-${index}`, () => routingCandidatesApi.move(profile, listKey, index, index - 1))}
                   className="px-1.5 py-0.5 border border-subtle rounded text-secondary hover:text-primary disabled:opacity-40"
                 >
                   ↑
@@ -886,7 +889,7 @@ function EditableCandidateList({ title, listKey, profile, candidates, onMutate }
                   type="button"
                   title="Move down"
                   disabled={pending !== null || index === candidates.length - 1}
-                  onClick={() => runMutation(`down-${index}`, () => routingCandidatesApi.move(profile, index, index + 1))}
+                  onClick={() => runMutation(`down-${index}`, () => routingCandidatesApi.move(profile, listKey, index, index + 1))}
                   className="px-1.5 py-0.5 border border-subtle rounded text-secondary hover:text-primary disabled:opacity-40"
                 >
                   ↓
@@ -895,7 +898,7 @@ function EditableCandidateList({ title, listKey, profile, candidates, onMutate }
                   type="button"
                   title="Remove"
                   disabled={pending !== null}
-                  onClick={() => runMutation(`rm-${index}`, () => routingCandidatesApi.remove(profile, index))}
+                  onClick={() => runMutation(`rm-${index}`, () => routingCandidatesApi.remove(profile, listKey, index))}
                   className="px-1.5 py-0.5 border border-critical/40 rounded text-critical hover:bg-critical/10 disabled:opacity-40"
                 >
                   ✕

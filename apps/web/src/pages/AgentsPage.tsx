@@ -80,7 +80,7 @@ export function AgentsPage({ sessions, deviceAgents, onNavigate, onWatchRun }: {
         <p className="text-sm text-muted">{profiles.loading ? 'Loading the profile…' : 'Pick a project in the navbar to change its agent settings.'}</p>
       ) : (
         <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-2">
-          <AgentLimitsSection selectedName={profile} selected={selected} agents={agents} />
+          <AgentLimitsSection selectedName={profile} selected={selected} agents={agents} onSaved={() => refresh(true)} />
           <WorkerScalingSection selectedName={profile} selected={selected} agents={agents} />
         </div>
       )}

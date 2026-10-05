@@ -1417,7 +1417,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       ...(typeof req.body?.max_parallel_workers === 'number' ? { max_parallel_workers: req.body.max_parallel_workers } : {}),
       ...(typeof req.body?.manager_wake_autonomy === 'string' ? { manager_wake_autonomy: req.body.manager_wake_autonomy } : {}),
       worker_scaling: mockWorkerScaling(current.worker_scaling, req.body ?? {}, clear),
-      max_concurrent_per_model: mockModelCaps(current.max_concurrent_per_model, req.body?.max_concurrent, clear),
+      max_concurrent_per_model: mockModelCaps(mockSwitchedCaps(current.max_concurrent_per_model, req.body?.agent_model), req.body?.max_concurrent, clear),
       ...(typeof req.body?.validation_timeout_seconds === 'number'
         ? { validation_timeout_seconds: req.body.validation_timeout_seconds }
         : clear.includes('validation_timeout_seconds') ? { validation_timeout_seconds: 300 } : {})
@@ -2130,6 +2130,18 @@ function mockModelCaps(current: Record<string, number> | undefined, caps: unknow
     const [model, count] = [(cap as string).slice(0, at), Number((cap as string).slice(at + 1))];
     if (count > 0) next[model] = count;
     else delete next[model];
+  }
+  return next;
+}
+
+/** Mirrors the cap rename of `gah profile set --agent-model backend/old=new`. */
+function mockSwitchedCaps(current: Record<string, number> | undefined, switches: unknown): Record<string, number> {
+  const next = { ...current };
+  for (const change of Array.isArray(switches) ? switches : []) {
+    const [backend, models] = typeof change === 'string' ? [change.slice(0, change.indexOf('/')), change.slice(change.indexOf('/') + 1)] : ['', ''];
+    const at = models.lastIndexOf('=');
+    const [from, to] = [`${backend}/${models.slice(0, at)}`, `${backend}/${models.slice(at + 1)}`];
+    if (at > 0 && from in next) { next[to] = next[from]; delete next[from]; }
   }
   return next;
 }

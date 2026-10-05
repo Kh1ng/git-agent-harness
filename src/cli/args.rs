@@ -1036,6 +1036,10 @@ pub enum ProfileCommands {
         /// Delivery mode for work results: pr | handoff.
         #[arg(long)]
         delivery_mode: Option<String>,
+        /// Switch a backend's model in every routing list: `backend/old=new`.
+        /// The old model's concurrency cap and boost move with it. Repeatable.
+        #[arg(long)]
+        agent_model: Vec<String>,
         /// Cap one model's concurrent runs: `backend/model=count`, or remove
         /// its cap with a count of 0. Repeat for several models;
         /// `--clear max_concurrent_per_model` removes every cap.

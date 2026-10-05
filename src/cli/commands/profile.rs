@@ -202,6 +202,7 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             validation_timeout_seconds,
             manager_wake_autonomy,
             delivery_mode,
+            agent_model,
             max_concurrent,
             worker_scaling,
             worker_scaling_max_workers,
@@ -213,6 +214,7 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             clear,
         } => {
             let mut cfg = config::load(config_path.as_deref())?;
+            let defaults = cfg.defaults.clone();
             let existing = config::get_profile_mut(&mut cfg, &name)?;
 
             // Helper to clear a field if requested
@@ -419,6 +421,10 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 existing.delivery_mode = config::DeliveryMode::default();
             }
 
+            for switch in &agent_model {
+                let (backend, from, to) = parse_model_switch(switch)?;
+                super::routing_candidates::switch_model(&defaults, existing, backend, from, to)?;
+            }
             if should_clear("max_concurrent_per_model", &clear) {
                 existing.max_concurrent_per_model.clear();
             }
@@ -510,4 +516,16 @@ fn parse_model_cap(value: &str) -> Result<(String, u32)> {
     parsed.ok_or_else(|| {
         anyhow::anyhow!("invalid max_concurrent '{value}' (expected backend/model=count)")
     })
+}
+
+/// `backend/old=new`. The backend ends at the first `/`; a model may itself
+/// contain `/`, so the new model is whatever follows the last `=`.
+fn parse_model_switch(value: &str) -> Result<(&str, &str, &str)> {
+    let parsed = value.split_once('/').and_then(|(backend, models)| {
+        let (from, to) = models.rsplit_once('=')?;
+        let parts = (backend.trim(), from.trim(), to.trim());
+        (!parts.0.is_empty() && !parts.1.is_empty() && !parts.2.is_empty()).then_some(parts)
+    });
+    parsed
+        .ok_or_else(|| anyhow::anyhow!("invalid agent_model '{value}' (expected backend/old=new)"))
 }

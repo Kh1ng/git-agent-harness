@@ -116,6 +116,29 @@ fn profile_cli_sets_scaling_and_a_boost_then_clears_the_boost() {
         serde_json::json!({})
     );
 
+    // Switching a backend's model renames it in every routing list and
+    // carries its cap along.
+    for list in ["improve", "review"] {
+        bin()
+            .args(["config", "routing-candidate", "add", "--profile", "scaled"])
+            .args(["--list", list, "--backend", "claude", "--model", "sonnet"])
+            .arg("--config")
+            .arg(&cfg_path)
+            .assert()
+            .success();
+    }
+    profile_set(&cfg_path, &["--max-concurrent", "claude/sonnet=2"]).success();
+    profile_set(&cfg_path, &["--agent-model", "claude/sonnet=opus"]).success();
+    assert_eq!(
+        profile(&cfg_path)["max_concurrent_per_model"],
+        serde_json::json!({ "claude/opus": 2 })
+    );
+    let saved = fs::read_to_string(&cfg_path).unwrap();
+    assert_eq!(saved.matches("model = \"opus\"").count(), 2);
+    assert!(!saved.contains("model = \"sonnet\""));
+    profile_set(&cfg_path, &["--agent-model", "claude/sonnet=opus"]).failure();
+    profile_set(&cfg_path, &["--agent-model", "claude=opus"]).failure();
+
     profile_set(&cfg_path, &["--worker-scaling", "maybe"]).failure();
     profile_set(
         &cfg_path,
