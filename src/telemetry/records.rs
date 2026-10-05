@@ -25,7 +25,16 @@ use serde::{Deserialize, Serialize};
 /// Version 10 adds per-attempt process-tree resource usage (CPU time, peak
 /// RSS) with explicit provenance (#116). Optional with serde defaults; absence
 /// is unknown, never zero, and never mixed into token/cost accounting.
-pub const SCHEMA_VERSION: u32 = 10;
+/// Version 11 re-sources the quota observation record: it is derived from the
+/// durable account quota store (`quota_observations.jsonl`) instead of
+/// per-attempt ledger usage, which never carried real account readings
+/// (#1341). The record now carries the store's source identity (backend,
+/// instance, quota pool, credential id as a label only), both observed and
+/// checked timestamps, and the redacted check error. The former
+/// ledger-derived fields (profile, repo, work id, effective_* mirrors,
+/// account scope) are gone; a store reading has no ledger entry to borrow
+/// them from. Consumers must read the new field set.
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// Record types for telemetry data (used for enum tags)
 #[allow(dead_code)]
@@ -191,51 +200,50 @@ pub struct AttemptUsageRecord {
     pub test_runs: Option<BehaviorMetric>,
 }
 
-/// Quota observation telemetry record
+/// Quota observation telemetry record (#1341, schema v11): one account quota
+/// reading exported from the durable quota store, not from ledger usage.
+/// Credential ids are labels, never secrets; the check error is already
+/// redacted by the store.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct QuotaObservationRecord {
     #[serde(flatten)]
     pub base: TelemetryRecord,
 
-    /// Profile identifier
-    pub profile: String,
-    /// Repository identifier
-    pub repo_id: String,
-    /// Repository name
-    pub repo: String,
-    /// Provider (github, gitlab, etc.)
-    pub provider: String,
-
-    /// Work identifier (if associated with specific work)
-    pub work_id: Option<String>,
-
-    /// Backend being observed
+    /// Logical backend being observed (canonical name).
     pub backend: String,
-    /// Effective backend
-    pub effective_backend: String,
-    /// Model being observed
-    pub model: Option<String>,
-    /// Effective model
-    pub effective_model: Option<String>,
-
-    /// Account scope (if known)
-    pub account_scope: Option<String>,
-    #[serde(default)]
+    /// Runner instance the reading belongs to, when the source is explicit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
-    #[serde(default)]
-    pub auth_source_label: Option<String>,
+    /// Secret-safe credential/source label. A label only: never a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+    /// Model scope of the reading, when the source is model-qualified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Quota pool identifier (if known)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_pool: Option<String>,
     /// Quota window identifier
-    pub quota_window: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_window: Option<String>,
     /// Quota used percentage
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_used_percent: Option<f64>,
     /// Quota remaining percentage
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_remaining_percent: Option<f64>,
     /// When quota resets
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_reset_at: Option<String>,
+    /// When the provider reported the reading, when it reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<String>,
+    /// Redacted failure reason for a check that produced no data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_error: Option<String>,
     /// Observation source (where this data came from)
-    pub observation_source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_source: Option<String>,
 }
 
 /// Task outcome telemetry record
@@ -531,17 +539,33 @@ pub fn generate_attempt_usage_id(
     )
 }
 
-/// Generate a deterministic record ID for quota observation
-pub fn generate_quota_observation_id(
-    observed_at: &str,
-    backend: &str,
-    model: Option<&str>,
-    quota_window: &str,
+/// Generate a deterministic record ID for a quota observation exported from
+/// the durable quota store (#1341). Every identity and value field takes
+/// part, so a re-export of the same store deduplicates while a new reading
+/// (new timestamp, window or value) gets a fresh id. These ids are only
+/// compared, never parsed.
+pub fn generate_store_quota_observation_id(
+    record: &crate::quota_store::QuotaObservationRecord,
 ) -> String {
-    let model_part = model.map(|m| format!("m:{}", m)).unwrap_or_default();
+    fn part(value: &Option<String>) -> &str {
+        value.as_deref().unwrap_or("")
+    }
+    let percent = |value: Option<f64>| value.map(|value| value.to_string()).unwrap_or_default();
     format!(
-        "quota_obs:{}:{}:{}:{}",
-        observed_at, backend, model_part, quota_window
+        "quota_obs:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        part(&record.observed_at),
+        part(&record.checked_at),
+        record.backend,
+        part(&record.backend_instance),
+        part(&record.credential_id),
+        part(&record.model),
+        part(&record.quota_pool),
+        part(&record.quota_window),
+        percent(record.quota_used_percent),
+        percent(record.quota_remaining_percent),
+        part(&record.quota_reset_at),
+        part(&record.check_error),
+        part(&record.usage_source),
     )
 }
 
