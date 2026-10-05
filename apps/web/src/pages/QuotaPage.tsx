@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { SubscriptionCards } from '../components/SubscriptionCards.js';
+import { subscriptionUsage } from '../lib/subscriptionUsage.js';
 import type { QuotaCheck, QuotaSnapshot, QuotaCandidateStatus, FleetQuotaSnapshot, AccountUsageObservation, AccountUsageModel } from '@git-agent-harness/contracts';
 import { Gauge, ListChecks, CheckCircle2, Coins, Timer } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
@@ -207,11 +209,13 @@ export function QuotaPage() {
     <div className="quota-page space-y-6">
       {header}
 
+      <SubscriptionCards subscriptions={subscriptionUsage(snapshot)} />
+
+      <QuotaCandidateLedger candidates={candidates} quotaChecks={snapshot?.quota_checks ?? []} />
+
       <MistralConnectionPanel />
 
       <CliRouterPanel />
-
-      <QuotaCandidateLedger candidates={candidates} quotaChecks={snapshot?.quota_checks ?? []} />
 
       <FleetQuotaPanel profile={profile} refreshKey={fleetRefresh} />
 

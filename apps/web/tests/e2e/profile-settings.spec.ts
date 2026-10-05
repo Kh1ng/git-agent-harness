@@ -2,27 +2,23 @@ import { expect, test } from '@playwright/test';
 
 const MOCK_BASE_URL = process.env.GAH_MOCK_BASE_URL ?? 'http://127.0.0.1:3774';
 
-test('Settings exposes validation timeout and persists profile updates in the shared mock', async ({ page, request }) => {
+test('the Profile sidebar exposes validation timeout and persists profile updates in the shared mock', async ({ page, request }) => {
   test.setTimeout(120_000);
   await request.post(`${MOCK_BASE_URL}/api/mock/reset`);
 
   await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 60_000 });
   await page.evaluate(() => localStorage.clear());
   await page.reload({ waitUntil: 'domcontentloaded' });
-  const settingsButton = page.getByRole('button', { name: 'Settings' });
-  await expect(settingsButton).toBeVisible({ timeout: 60_000 });
-  await settingsButton.click();
-  await page.getByText('Factory / profile management', { exact: true }).click();
+  const profileButton = page.getByRole('button', { name: 'Profile', exact: true });
+  await expect(profileButton).toBeVisible({ timeout: 60_000 });
+  await profileButton.click();
 
   const validationTimeoutInput = page
     .getByText('Validation command timeout (seconds)')
     .locator('..')
     .locator('input');
-  const profileSelect = page
-    .locator('section')
-    .filter({ hasText: 'Which configured GAH repo' })
-    .getByRole('combobox');
-  await profileSelect.selectOption('fixture');
+  await page.getByRole('button', { name: /^Project:/ }).click();
+  await page.getByRole('menuitemradio', { name: /^Fixture/ }).click();
   await expect(page.getByText(/Per-profile loop behavior for/)).toBeVisible();
 
   await expect(validationTimeoutInput).toBeVisible();
@@ -86,8 +82,8 @@ test('Settings persists sections and saves memory configuration through the shar
     contextPolicies: {}
   });
 
+  // The open sidebar view is part of the URL, so Settings is still open.
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await page.getByRole('button', { name: 'Settings' }).click();
   const reloadedMemorySection = page.getByRole('button', { name: /TDAI \/ memory/ });
   await expect(reloadedMemorySection).toHaveAttribute('aria-expanded', 'true');
 

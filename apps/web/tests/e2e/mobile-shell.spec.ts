@@ -7,7 +7,7 @@ test('mobile pages keep connection setup in Settings', async ({ page }, testInfo
     await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible();
     await expect(page.getByRole('region', { name: 'Device pairing' })).toHaveCount(0);
     await expect(page.getByText('Central access token', { exact: true })).toHaveCount(0);
-    await expect(page.locator('header').getByTestId('frontend-build')).toHaveCount(0);
+    await expect(page.getByRole('banner').getByTestId('frontend-build')).toBeHidden();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath(`overview-${width}.png`) });
     await page.getByRole('button', { name: 'Open navigation menu' }).click();

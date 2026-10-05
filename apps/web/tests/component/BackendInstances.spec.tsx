@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/experimental-ct-react';
-import { BackendInstancesCard } from '../../src/pages/SettingsPage.js';
+import { BackendInstancesCard } from '../../src/pages/ProfilePanel.js';
 
 test('connected-node instance creation supports all runners without exposing local keys', async ({ mount, page }) => {
   let added: unknown;
