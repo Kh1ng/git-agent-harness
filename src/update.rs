@@ -4,6 +4,7 @@
 //! host actually invokes normally lives at `$CARGO_HOME/bin/gah`, so a normal
 //! build can silently leave the control plane on old behavior.
 
+use crate::setup::requirements::{linger_path, SYSTEMD_RUNNING};
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use std::collections::HashSet;
@@ -55,6 +56,9 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     }
     run_command(&repo, binary.to_string_lossy().as_ref(), &["--help"])?;
     println!("Installed CLI: {}", binary.display());
+    // Both roles install user units below; keep them alive past logout. Done
+    // early so a later failed step cannot skip it.
+    enable_user_lingering(&repo);
 
     for agent in copy_opencode_agent_configs(&repo, &user_config_home()?)? {
         println!("Installed OpenCode agent: {}", agent.display());
@@ -218,9 +222,6 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             println!("systemd not available on this host: skipping quota refresh unit install.")
         }
     }
-
-    // Both roles install user units above; keep them alive past logout.
-    enable_user_lingering(&repo);
 
     if args.restart_server && cfg!(target_os = "macos") {
         let script = repo.join("scripts/macos-launchd.sh");
@@ -765,25 +766,37 @@ fn install_quota_refresh_unit_template(repo: &Path) -> Result<Option<[PathBuf; 2
 /// Issue #1347: the user units `gah update` installs (loop, quota refresh,
 /// prune) run under the user's systemd manager, which only exists while the
 /// account has a login session. On a headless node without lingering, every
-/// timer stays idle after each reboot until someone logs in.
-///
-/// Plain `loginctl enable-linger` with no user names the caller, and polkit's
-/// default `set-self-linger` policy lets an account enable its own linger
-/// without sudo. `--no-ask-password` means it never prompts. It is a no-op
-/// for an account that already lingers. Returns nothing on purpose: a failure
-/// is reported, never fatal, and `gah setup --check` keeps the gap visible.
+/// timer stays idle after each reboot until someone logs in. Returns nothing
+/// on purpose: a failure is reported, never fatal, and `gah setup --check`
+/// keeps the gap visible.
 fn enable_user_lingering(repo: &Path) {
-    if !systemd_available() {
+    if !Path::new(SYSTEMD_RUNNING).exists() {
         // launchd hosts and systemd-less machines have no linger concept.
         return;
     }
-    match run_command(repo, "loginctl", &["--no-ask-password", "enable-linger"]) {
-        Ok(()) => println!("User lingering is enabled: user units survive logouts and reboots."),
-        Err(error) => eprintln!(
-            "[gah update] user lingering not enabled ({error}); the user units stay idle \
-             after reboot until someone logs in. Fix with: sudo loginctl enable-linger $USER"
-        ),
+    let Some(user) = units::installing_user() else {
+        eprintln!("[gah update] user lingering skipped: id -un named no account.");
+        return;
+    };
+    if linger_path(&user).exists() {
+        return;
     }
+    if try_enable_linger(repo, &user) {
+        println!("Enabled user lingering for {user}: user units survive logouts and reboots.");
+    } else {
+        eprintln!(
+            "[gah update] user lingering not enabled; the user units stay idle after \
+             reboot until someone logs in. Fix with: sudo loginctl enable-linger {user}"
+        );
+    }
+}
+
+/// Neither attempt can prompt, so a worker without root never waits on a
+/// password: plain loginctl works where polkit allows `set-self-linger`
+/// (not over SSH on Debian 13, for one), `sudo -n` where sudo needs none.
+fn try_enable_linger(repo: &Path, user: &str) -> bool {
+    run_command(repo, "loginctl", &["--no-ask-password", "enable-linger"]).is_ok()
+        || run_command(repo, "sudo", &["-n", "loginctl", "enable-linger", user]).is_ok()
 }
 
 /// Central-node daily storage maintenance. The existing timer owns both the
@@ -862,11 +875,11 @@ fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_opencode_agent_configs, enable_user_lingering, ensure_clean,
-        ensure_default_branch_checkout, install_prune_unit_template,
-        install_quota_refresh_unit_template, install_server_unit_template,
-        install_watchdog_unit_template, installed_binary_path, resolve_web_deploy_root, run,
-        stale_asset_names, HostRole, UpdateArgs, WEB_BUILD_ARGS,
+        copy_opencode_agent_configs, ensure_clean, ensure_default_branch_checkout,
+        install_prune_unit_template, install_quota_refresh_unit_template,
+        install_server_unit_template, install_watchdog_unit_template, installed_binary_path,
+        resolve_web_deploy_root, run, stale_asset_names, try_enable_linger, HostRole, UpdateArgs,
+        WEB_BUILD_ARGS,
     };
     use crate::test_support::{ExecGuard, PathGuard};
     use std::collections::HashSet;
@@ -1296,12 +1309,11 @@ mod tests {
         }
     }
 
-    /// Fakes systemctl, loginctl (exiting `loginctl_exit`) and sudo; each
-    /// logs its argv so a test can see what ran.
-    fn linger_shims(loginctl_exit: u8) -> TempDir {
+    /// Fakes loginctl and sudo, each exiting with the given code and logging
+    /// its argv so a test can see what ran.
+    fn linger_shims(loginctl_exit: u8, sudo_exit: u8) -> TempDir {
         let bin = TempDir::new().unwrap();
-        shim(bin.path(), "systemctl", "echo 'systemd 255'\n");
-        for (name, exit) in [("loginctl", loginctl_exit), ("sudo", 0)] {
+        for (name, exit) in [("loginctl", loginctl_exit), ("sudo", sudo_exit)] {
             let log = bin.path().join(format!("{name}.log"));
             shim(
                 bin.path(),
@@ -1312,39 +1324,38 @@ mod tests {
         bin
     }
 
-    /// Issue #1347: `gah update` enables lingering for the caller through
-    /// loginctl alone. No sudo: a worker without root must never be asked
-    /// for a password.
+    /// Issue #1347: polkit first, then `sudo -n`, and neither can prompt.
     #[test]
-    fn user_lingering_is_enabled_without_sudo() {
+    fn user_lingering_tries_polkit_then_passwordless_sudo() {
         let _exec_guard = ExecGuard::new();
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let bin = linger_shims(0);
+        let log = |bin: &TempDir, name: &str| {
+            std::fs::read_to_string(bin.path().join(format!("{name}.log")))
+                .map(|log| log.trim().to_string())
+                .ok()
+        };
+
+        let bin = linger_shims(0, 0);
         let _path_guard = PathGuard::set(bin.path().to_str().unwrap());
-
-        enable_user_lingering(repo);
-
+        assert!(try_enable_linger(repo, "testuser"));
         assert_eq!(
-            std::fs::read_to_string(bin.path().join("loginctl.log"))
-                .unwrap()
-                .trim(),
-            "--no-ask-password enable-linger"
+            log(&bin, "loginctl").as_deref(),
+            Some("--no-ask-password enable-linger")
         );
-        assert!(!bin.path().join("sudo.log").exists());
-    }
+        assert_eq!(log(&bin, "sudo"), None, "polkit allowed it: no sudo");
+        drop(_path_guard);
 
-    /// A host where polkit refuses still finishes: the step returns `()`, so
-    /// the update cannot `?` it, and it does not fall back to sudo.
-    #[test]
-    fn user_lingering_refusal_does_not_fall_back_to_sudo() {
-        let _exec_guard = ExecGuard::new();
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let bin = linger_shims(1);
+        let bin = linger_shims(1, 0);
         let _path_guard = PathGuard::set(bin.path().to_str().unwrap());
+        assert!(try_enable_linger(repo, "testuser"));
+        assert_eq!(
+            log(&bin, "sudo").as_deref(),
+            Some("-n loginctl enable-linger testuser")
+        );
+        drop(_path_guard);
 
-        let () = enable_user_lingering(repo);
-
-        assert!(bin.path().join("loginctl.log").exists());
-        assert!(!bin.path().join("sudo.log").exists());
+        let bin = linger_shims(1, 1);
+        let _path_guard = PathGuard::set(bin.path().to_str().unwrap());
+        assert!(!try_enable_linger(repo, "testuser"));
     }
 }
