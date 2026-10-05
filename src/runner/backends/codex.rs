@@ -35,17 +35,16 @@ pub(crate) fn run_with_executable(
         .iter()
         .any(|arg| arg.starts_with("--sandbox"))
     {
-        let mut sandbox_arg = "workspace-write".to_string();
+        cmd.arg("--sandbox").arg("workspace-write");
         if let Some(target) = env_vars
             .iter()
             .find(|(k, _)| k == "CARGO_TARGET_DIR")
             .map(|(_, v)| v)
         {
             if let Some(cache_root) = Path::new(target).parent().and_then(|p| p.parent()) {
-                sandbox_arg.push_str(&format!(",allow-write-dir={}", cache_root.display()));
+                cmd.arg("--add-dir").arg(cache_root);
             }
         }
-        cmd.arg("--sandbox").arg(sandbox_arg);
     }
 
     cmd.args(filtered_extra)
@@ -164,6 +163,43 @@ mod tests {
         assert!(argv.contains(&"the codex task".to_string()));
         assert!(argv.contains(&"-c".to_string()));
         assert!(argv.contains(&"model=gpt".to_string()));
+    }
+
+    #[test]
+    fn run_codex_grants_build_cache_with_add_dir() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
+        let cache_root = f.worktree.join("build-cache");
+        let target = cache_root.join("attempt-1/target");
+        let envs = vec![
+            ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
+            (
+                "CARGO_TARGET_DIR".to_string(),
+                target.to_string_lossy().into_owned(),
+            ),
+        ];
+
+        run_with_executable(
+            Path::new("codex"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert!(argv
+            .windows(2)
+            .any(|args| args == ["--sandbox", "workspace-write"]));
+        assert!(argv
+            .windows(2)
+            .any(|args| { args[0] == "--add-dir" && args[1] == cache_root.to_string_lossy() }));
+        assert!(!argv.iter().any(|arg| arg.contains("allow-write-dir")));
     }
 
     #[test]

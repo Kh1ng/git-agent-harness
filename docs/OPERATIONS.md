@@ -741,7 +741,7 @@ Each backend authenticates through its own CLI, not through GAH:
 
 By default, `gah` injects necessary flags so implementation dispatches can make progress, while review dispatches remain read-only:
 
-- **codex** — Implementation dispatches run with `--sandbox workspace-write,allow-write-dir=<GAH_BUILD_CACHE>`.
+- **codex** — Implementation dispatches run with `--sandbox workspace-write --add-dir <GAH_BUILD_CACHE>`.
 - **claude** — Implementation dispatches run with `--permission-mode acceptEdits` and `--allowedTools Edit,Bash,Replace,Write,View,StrReplace`.
 - **Other runners** — Depend on their own CLI defaults.
 
