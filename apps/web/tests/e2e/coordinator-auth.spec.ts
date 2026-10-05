@@ -26,9 +26,11 @@ test('connection settings restore dashboard access after the first valid token',
   await page.goto('/');
   // Pin the profile before authentication so welcome cannot recover the panel
   // merely by changing its profile key. Only the credential refresh can recover it.
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.locator('section').filter({ hasText: 'Which configured GAH repo' }).getByRole('combobox').selectOption('fixture');
-  await page.getByRole('button', { name: 'Overview', exact: true }).click();
+  await page.getByRole('button', { name: /^Project:/ }).click();
+  await page.getByRole('menuitemradio', { name: /^Fixture/ }).click();
+  // A sidebar view stays open beside the main panel until its icon closes it.
+  await page.getByRole('button', { name: 'Profile', exact: true }).click();
+  await page.getByRole('button', { name: 'Profile', exact: true }).click();
   await expect.poll(() => rejectedReads).toBeGreaterThan(0);
   await expect(page.getByRole('alert')).toContainText('Coordinator token required');
   await expect(page.getByLabel('Access token', { exact: true })).toHaveCount(0);
@@ -75,11 +77,10 @@ test('the first token restores mounted Chat projects, provider choices, git, and
   await page.goto('/');
   // Pin through the UI before protecting reads. Welcome cannot repair Chat by
   // changing its profile; every Chat mount request below must fail until login.
-  await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.locator('section').filter({ hasText: 'Which configured GAH repo' }).getByRole('combobox').selectOption('fixture');
+  await page.getByRole('button', { name: /^Project:/ }).click();
+  await page.getByRole('menuitemradio', { name: /^Fixture/ }).click();
   protectReads = true;
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
-  await page.getByRole('dialog', { name: 'New chat' }).getByRole('button', { name: 'Close', exact: true }).click();
   await page.getByRole('button', { name: 'Chat tools', exact: true }).click();
   await page.getByRole('button', { name: 'Storage', exact: true }).click();
   const initialPaths = ['/api/profiles', '/api/projects', '/api/manager-chat/settings', '/api/git/status', '/api/manager-chat/issues', '/api/manager-chat/prs', '/api/manager-chat/storage'];
@@ -91,15 +92,17 @@ test('the first token restores mounted Chat projects, provider choices, git, and
   // an authenticated node readiness result.
   await expect(page.getByLabel('Run on node', { exact: true })).toBeDisabled();
   expect(providerPaths.filter(path => rejected.has(path))).toEqual(['/api/manager-chat/nodes']);
-  // The launcher has nothing to offer while reads are rejected.
-  await page.getByRole('button', { name: 'Chat', exact: true }).click();
-  const launcher = page.getByRole('dialog', { name: 'New chat' });
-  await expect(launcher.getByText('No project is configured yet.')).toBeVisible();
+  // Nothing can start while reads are rejected: New chat waits for the connection.
+  await expect(page.getByRole('button', { name: 'New chat', exact: true })).toBeDisabled();
   // Exercise credential refresh with Chat still mounted; the owner form now lives in Settings.
   await page.evaluate(() => {
     sessionStorage.setItem('gah.coordinatorToken', 'chat-secret');
     window.dispatchEvent(new Event('gah.coordinatorTokenChanged'));
   });
+  await page.getByRole('button', { name: 'New chat', exact: true }).click();
+  const launcher = page.getByRole('region', { name: 'New chat' });
+  const extras = launcher.locator('details');
+  if (!await extras.evaluate((element) => (element as HTMLDetailsElement).open)) await extras.locator('summary').click();
   await expect(launcher.getByRole('button').filter({ hasText: 'Kh1ng/git-agent-harness' })).toBeVisible();
   await launcher.getByRole('button', { name: 'Close', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex');
@@ -116,8 +119,7 @@ test('the first token restores mounted Chat projects, provider choices, git, and
   await expect(page.getByText('Coordinator token required', { exact: true })).toHaveCount(0);
   // The session backend has its own model loader, independent of the default
   // composer; existing chats are reached through Projects.
-  await page.getByRole('button', { name: 'Chat', exact: true }).first().click();
-  await page.getByRole('dialog', { name: 'New chat' }).getByRole('button', { name: 'View all projects' }).click();
+  await page.getByRole('button', { name: 'Expand chat' }).click();
   await page.getByRole('navigation', { name: 'Chats', exact: true }).getByRole('button', { name: /Mock session/ }).click();
   await expect(page.getByRole('button', { name: 'Provider picker' })).toContainText('Codex · GPT-5.3 Codex');
 });

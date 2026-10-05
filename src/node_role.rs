@@ -5,11 +5,28 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
+/// Host role union. Contract compatibility policy (CONTRIBUTING.md "Cross-surface
+/// changes"): role values are append-only, and every consumer fails closed on a
+/// value it does not know -- an unknown role must never silently deserialize to
+/// a default, because a misread role changes what this host is allowed to serve.
+/// Consequences of adding a value (for example `Standalone` in #1318):
+/// - An older binary that reads a newer role from the shared config TOML fails
+///   deserialization with serde's unknown-variant error. That failure is the
+///   designed boundary, not a regression: upgrade a host's `gah` before
+///   persisting a newer `node_role` there (`gah update` upgrades the CLI and
+///   the config reader together, so a host cannot outrun itself).
+/// - `StatusSnapshot.node` is optional ("absent on older CLIs"), so consumers
+///   already tolerate absence; a `role` they do not recognize must be rejected
+///   with an upgrade instruction, not defaulted.
+/// - The role is host-local configuration: it never crosses fleet wire formats
+///   (registry observations carry no role), so mixed-version fleets are
+///   unaffected by a new value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeRole {
     #[default]
     Central,
+    Standalone,
     Worker,
 }
 
@@ -17,8 +34,11 @@ impl NodeRole {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "central" => Ok(Self::Central),
+            "standalone" => Ok(Self::Standalone),
             "worker" => Ok(Self::Worker),
-            other => bail!("invalid node role '{other}' (expected 'central' or 'worker')"),
+            other => {
+                bail!("invalid node role '{other}' (expected 'central', 'standalone', or 'worker')")
+            }
         }
     }
 }
@@ -102,5 +122,35 @@ mod tests {
         let restored: crate::config::Defaults = toml::from_str(&saved).unwrap();
         assert_eq!(restored.node_role, NodeRole::Worker);
         assert_eq!(restored.registry_central_url, defaults.registry_central_url);
+    }
+
+    #[test]
+    fn standalone_resolves_locally_and_unknown_roles_fail_closed() {
+        let defaults = crate::config::Defaults {
+            node_role: NodeRole::Standalone,
+            ..crate::config::Defaults::default()
+        };
+        // Standalone is loopback-only: it neither requires nor consumes a central origin.
+        let standalone = NodeRoleStatus::with_override(&defaults, None).unwrap();
+        assert_eq!(standalone.role, NodeRole::Standalone);
+        assert_eq!(standalone.central_url, None);
+        // An explicit override still wins over the persisted default.
+        assert_eq!(
+            NodeRoleStatus::with_override(&defaults, Some("central"))
+                .unwrap()
+                .role,
+            NodeRole::Central
+        );
+        assert_eq!(NodeRole::parse("standalone").unwrap(), NodeRole::Standalone);
+        // The persisted role round-trips through the shared config TOML.
+        let saved = toml::to_string(&defaults).unwrap();
+        let restored: crate::config::Defaults = toml::from_str(&saved).unwrap();
+        assert_eq!(restored.node_role, NodeRole::Standalone);
+        // Compatibility boundary: a value this binary does not know fails closed
+        // instead of silently defaulting -- the same guarantee an older gah
+        // applies when it reads `standalone` from a newer config.
+        let unknown =
+            toml::from_str::<crate::config::GahConfig>("[defaults]\nnode_role = \"edge\"\n");
+        assert!(unknown.is_err());
     }
 }

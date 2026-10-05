@@ -11,7 +11,7 @@ import { workerMemoryRouter } from './workerMemory.js';
 import { RegistryService } from './registryService.js';
 import { authMiddleware } from './authMiddleware.js';
 import { initializeSkillBank, createServer } from './server.js';
-import type { DoctorSnapshot } from '@git-agent-harness/contracts';
+import type { DoctorSnapshot, NodeRoleStatus } from '@git-agent-harness/contracts';
 
 async function listen(server: Server): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -51,7 +51,37 @@ test('worker role reports central identity and permits execution without hosting
     const statusServer = createHttpServer(probe);
     const statusUrl = await listen(statusServer);
     try { assert.equal((await fetch(`${statusUrl}/api/status`)).status, 200); } finally { await close(statusServer); }
-  } finally { await close(server); }
+  } finally {
+    await close(server);
+  }
+});
+
+test('standalone role boots the local control plane instead of failing closed', async () => {
+  const standalone = { role: 'standalone', central_url: null } as const;
+  // The narrowest common call path accepts the role and normalizes it to central.
+  assert.deepEqual(validateNodeRole(standalone), { role: 'central', central_url: null });
+  // A future role this server does not know still fails closed with an upgrade instruction.
+  assert.throws(() => validateNodeRole({ role: 'edge', central_url: null } as unknown as NodeRoleStatus), /Cannot determine node role/);
+  assert.throws(() => validateNodeRole({ role: 'standalone', central_url: 'https://user:secret@central.test' } as unknown as NodeRoleStatus), /credentials/);
+  const app = createServer({ node: standalone, runDoctor: async () => ({ schema_version: 1, generated_at: '2026-10-04T00:00:00Z', overall_status: 'ok', checks: [] } satisfies DoctorSnapshot) });
+  const server = createHttpServer(app);
+  const url = await listen(server);
+  try {
+    const health = await (await fetch(`${url}/health`)).json() as { node: unknown };
+    assert.deepEqual(health.node, { role: 'central', central_url: null });
+    // Central routes answer through their handlers instead of the worker guard's 409.
+    for (const path of ['/api/settings/nodes/command', '/api/claims/acquire', '/api/registry/nodes', '/api/manager-chat/sessions', '/api/pm/plans']) {
+      assert.notEqual((await fetch(url + path)).status, 409, path);
+    }
+    const probe = express();
+    probe.use(workerRouteGuard(standalone));
+    probe.get('/api/status', (_req, res) => res.sendStatus(200));
+    const statusServer = createHttpServer(probe);
+    const statusUrl = await listen(statusServer);
+    try { assert.equal((await fetch(`${statusUrl}/api/status`)).status, 200); } finally { await close(statusServer); }
+  } finally {
+    await close(server);
+  }
 });
 
 test('central memory relay preserves gateway contracts without forwarding worker credentials or arbitrary destinations', async () => {
