@@ -542,6 +542,7 @@ pub(crate) fn linger_path(user: &str) -> PathBuf {
 fn user_lingering(host: &dyn Host, feature: Feature) -> Requirement {
     let user = if host.exists(Path::new(SYSTEMD_RUNNING)) {
         host.probe("id", &["-un"])
+            .filter(|p| p.success)
             .map(|p| p.stdout.trim().to_string())
             .filter(|user| {
                 !user.is_empty()
@@ -549,7 +550,8 @@ fn user_lingering(host: &dyn Host, feature: Feature) -> Requirement {
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
             })
-            .ok_or("The current account could not be named with id -un.")
+            // Same charset units::render accepts for the service user.
+            .ok_or("id -un named no account GAH can run its units as.")
     } else {
         Err("Lingering needs systemd running.")
     };

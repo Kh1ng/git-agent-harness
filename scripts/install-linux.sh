@@ -28,9 +28,9 @@ esac
 # `cargo run` is ambiguous and errors instead of picking one.
 bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --bin gah --
 # The update command also enables user lingering (issue #1347) so the user
-# units it installs survive reboots without a login session. It never
-# prompts (polkit, then `sudo -n`), so a worker host without root still
-# installs cleanly and only gets a warning.
+# units it installs survive reboots without a login session. Only central,
+# which already needs sudo here, may prompt; a worker host without root uses
+# `sudo -n`, so it still installs cleanly and only gets a warning.
 cargo run --bin gah -- update --repo "$repo_root" --role "$role"
 
 # MagicDNS is useful only when this client accepts the tailnet DNS settings.

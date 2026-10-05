@@ -58,7 +58,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     println!("Installed CLI: {}", binary.display());
     // Both roles install user units below; keep them alive past logout. Done
     // early so a later failed step cannot skip it.
-    enable_user_lingering(&repo);
+    enable_user_lingering(&repo, args.role);
 
     for agent in copy_opencode_agent_configs(&repo, &user_config_home()?)? {
         println!("Installed OpenCode agent: {}", agent.display());
@@ -769,7 +769,7 @@ fn install_quota_refresh_unit_template(repo: &Path) -> Result<Option<[PathBuf; 2
 /// timer stays idle after each reboot until someone logs in. Returns nothing
 /// on purpose: a failure is reported, never fatal, and `gah setup --check`
 /// keeps the gap visible.
-fn enable_user_lingering(repo: &Path) {
+fn enable_user_lingering(repo: &Path, role: HostRole) {
     if !Path::new(SYSTEMD_RUNNING).exists() {
         // launchd hosts and systemd-less machines have no linger concept.
         return;
@@ -781,7 +781,7 @@ fn enable_user_lingering(repo: &Path) {
     if linger_path(&user).exists() {
         return;
     }
-    if try_enable_linger(repo, &user) {
+    if try_enable_linger(repo, &user, role == HostRole::Central) {
         println!("Enabled user lingering for {user}: user units survive logouts and reboots.");
     } else {
         eprintln!(
@@ -791,12 +791,22 @@ fn enable_user_lingering(repo: &Path) {
     }
 }
 
-/// Neither attempt can prompt, so a worker without root never waits on a
-/// password: plain loginctl works where polkit allows `set-self-linger`
-/// (not over SSH on Debian 13, for one), `sudo -n` where sudo needs none.
-fn try_enable_linger(repo: &Path, user: &str) -> bool {
-    run_command(repo, "loginctl", &["--no-ask-password", "enable-linger"]).is_ok()
-        || run_command(repo, "sudo", &["-n", "loginctl", "enable-linger", user]).is_ok()
+/// Plain loginctl works where polkit allows `set-self-linger` (not over SSH
+/// on Debian 13, for one); its expected refusal is kept quiet. Then sudo:
+/// central already asks for the sudo password to install its system unit,
+/// so it may ask here too; a worker uses `sudo -n` and never waits on one.
+fn try_enable_linger(repo: &Path, user: &str, may_prompt: bool) -> bool {
+    let polkit = Command::new("loginctl")
+        .args(["--no-ask-password", "enable-linger"])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    let sudo: &[&str] = if may_prompt {
+        &["loginctl", "enable-linger", user]
+    } else {
+        &["-n", "loginctl", "enable-linger", user]
+    };
+    polkit || run_command(repo, "sudo", sudo).is_ok()
 }
 
 /// Central-node daily storage maintenance. The existing timer owns both the
@@ -1324,7 +1334,7 @@ mod tests {
         bin
     }
 
-    /// Issue #1347: polkit first, then `sudo -n`, and neither can prompt.
+    /// Issue #1347: polkit first, then sudo; only central may prompt.
     #[test]
     fn user_lingering_tries_polkit_then_passwordless_sudo() {
         let _exec_guard = ExecGuard::new();
@@ -1337,7 +1347,7 @@ mod tests {
 
         let bin = linger_shims(0, 0);
         let _path_guard = PathGuard::set(bin.path().to_str().unwrap());
-        assert!(try_enable_linger(repo, "testuser"));
+        assert!(try_enable_linger(repo, "testuser", false));
         assert_eq!(
             log(&bin, "loginctl").as_deref(),
             Some("--no-ask-password enable-linger")
@@ -1347,15 +1357,25 @@ mod tests {
 
         let bin = linger_shims(1, 0);
         let _path_guard = PathGuard::set(bin.path().to_str().unwrap());
-        assert!(try_enable_linger(repo, "testuser"));
+        assert!(try_enable_linger(repo, "testuser", false));
         assert_eq!(
             log(&bin, "sudo").as_deref(),
             Some("-n loginctl enable-linger testuser")
         );
         drop(_path_guard);
 
+        let bin = linger_shims(1, 0);
+        let _path_guard = PathGuard::set(bin.path().to_str().unwrap());
+        assert!(try_enable_linger(repo, "testuser", true));
+        assert_eq!(
+            log(&bin, "sudo").as_deref(),
+            Some("loginctl enable-linger testuser"),
+            "central may prompt for the sudo password"
+        );
+        drop(_path_guard);
+
         let bin = linger_shims(1, 1);
         let _path_guard = PathGuard::set(bin.path().to_str().unwrap());
-        assert!(!try_enable_linger(repo, "testuser"));
+        assert!(!try_enable_linger(repo, "testuser", false));
     }
 }
