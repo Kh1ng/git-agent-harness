@@ -36,7 +36,7 @@ test('the star map shows the epic, its blockers, and the work that can start now
 
   await map.getByRole('button', { name: /#903 Conflict resolution/ }).click();
   await detail.getByRole('button', { name: 'Discuss in chat' }).click();
-  await expect(page).toHaveURL(/page=chat/);
+  await expect(page).toHaveURL(/(page|dock)=chat/);
   await expect(page).toHaveURL(/chat=mock-session-/);
   await expect(page).not.toHaveURL(/epic=/);
 });
@@ -58,7 +58,7 @@ test('grill-me keeps where answers go and opens the planning chat', async ({ pag
   await panel.getByRole('textbox', { name: 'What do you want to plan?' }).fill('Offline sync for the phone');
   await expect(panel.getByRole('checkbox', { name: /Plan within #900 Offline mode/ })).toBeChecked();
   await panel.getByRole('button', { name: 'Start grill-me' }).click();
-  await expect(page).toHaveURL(/page=chat/);
+  await expect(page).toHaveURL(/(page|dock)=chat/);
 
   const saved = await request.get(`${MOCK_BASE_URL}/api/planning/settings?profile=fixture`);
   expect(await saved.json()).toEqual({ answers: 'file', path: 'plans/offline.md' });
@@ -110,6 +110,6 @@ test('a .plan/maps/ map shows its tickets, keeps ruled-out work blocking, and op
   await expect(detail.getByText('.plan/maps/node-handoff/tickets/02-ticket.md')).toBeVisible();
   await expect(detail.getByRole('link', { name: 'Open issue' })).toHaveCount(0);
   await detail.getByRole('button', { name: 'Discuss in chat' }).click();
-  await expect(page).toHaveURL(/page=chat/);
+  await expect(page).toHaveURL(/(page|dock)=chat/);
   await expect(page).not.toHaveURL(/map=/);
 });
