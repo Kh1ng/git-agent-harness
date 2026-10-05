@@ -1191,11 +1191,21 @@ fn standalone_service_restart_and_start_failures_report_journal() {
         ("standalone", "enable"),
         ("standalone", "restart"),
         ("standalone", "inactive"),
+        // A service that starts but crash-loops (Restart=always) must be a
+        // failure too, with the same journal diagnostics (#1330).
+        ("standalone", "crashloop"),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let log = temp.path().join("systemctl.log");
         let harness = format!(
-            "set -euo pipefail\nrole={role}\nfail={failure}\nlog={}\nsudo() {{\n  printf '%s\\n' \"$*\" >> \"$log\"\n  case \"$*\" in\n    'systemctl enable --now gah-server.service') [ \"$fail\" != enable ] ;;\n    'systemctl restart gah-server.service') [ \"$fail\" != restart ] ;;\n    'systemctl is-active --quiet gah-server.service') [ \"$fail\" != inactive ] ;;\n  esac\n}}\n{block}\n",
+            "set -euo pipefail\nrole={role}\nfail={failure}\nlog={}\n\
+systemctl() {{\n  printf '%s\\n' \"$*\" >> \"$log\"\n  case \"$*\" in\n\
+    'show -p NRestarts --value gah-server.service') if [ \"$fail\" = crashloop ]; then printf '1\\n'; else printf '0\\n'; fi ;;\n  esac\n}}\n\
+sudo() {{\n  printf '%s\\n' \"sudo $*\" >> \"$log\"\n  case \"$*\" in\n\
+    'systemctl enable --now gah-server.service') [ \"$fail\" != enable ] ;;\n\
+    'systemctl restart gah-server.service') [ \"$fail\" != restart ] ;;\n\
+    'systemctl is-active --quiet gah-server.service') [ \"$fail\" != inactive ] ;;\n  esac\n}}\n\
+sleep() {{ :; }}\n{block}\n",
             log.display()
         );
         let result = Command::new("bash")
@@ -1211,12 +1221,22 @@ fn standalone_service_restart_and_start_failures_report_journal() {
         );
         assert_eq!(
             calls.contains("systemctl restart gah-server.service"),
-            role == "standalone" && failure != "enable"
+            role == "standalone" && failure != "enable",
+            "{role} {failure}: {calls}"
         );
         if failure != "none" {
             assert!(
+                calls.contains("systemctl status --no-pager gah-server.service"),
+                "{role} {failure}: {calls}"
+            );
+            assert!(
                 calls.contains("journalctl -u gah-server.service -n 50 --no-pager"),
                 "{role} {failure}: {calls}"
+            );
+        } else {
+            assert!(
+                !calls.contains("journalctl"),
+                "{role} success must not report diagnostics: {calls}"
             );
         }
     }

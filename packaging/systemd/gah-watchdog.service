@@ -18,9 +18,8 @@
 # alert command:
 #   systemctl --user enable --now gah-watchdog.timer
 #
-# Swap the `hermes send` line below for whatever alert transport you use;
-# `gah watchdog-check`'s own output is transport-agnostic (plain text, one
-# line per unhealthy profile, empty when everything is healthy).
+# The packaged check writes alerts to the journal. To forward alerts, configure
+# ExecStart in a systemctl --user edit drop-in using your installed transport.
 [Unit]
 Description=GAH loop health check (alert-only, never starts a loop)
 After=network-online.target
@@ -31,10 +30,8 @@ Type=oneshot
 WorkingDirectory=%h
 Environment=HOME=%h
 Environment=GAH_CONFIG=%h/.config/gah/config.toml
-# systemd expands percent specifiers before invoking the shell. Escape the
-# printf placeholder so `%s` reaches /bin/sh instead of becoming the user's
-# login shell path.
-ExecStart=/bin/sh -c 'msg=$$(%h/.cargo/bin/gah watchdog-check); if [ -n "$$msg" ]; then printf "%%s\\n" "$$msg" | /usr/local/bin/hermes send -t telegram -q; fi'
+Environment="PATH=@PATH@"
+ExecStart="@GAH@" watchdog-check
 TimeoutStartSec=90
 StandardOutput=journal
 StandardError=journal

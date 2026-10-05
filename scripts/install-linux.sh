@@ -202,11 +202,24 @@ case "${GAH_GATEWAY_MODE:-}" in
     node_dir="$(dirname "$(command -v node)")"
     gateway_unit_dst="$HOME/.config/systemd/user/tdai-memory-gateway.service"
     install -d -m 0755 "$(dirname "$gateway_unit_dst")"
-    sed \
-      -e "s|%h/workspace/agent-lab/repos/github/Kh1ng/TencentDB-Agent-Memory/MemoryCore|$GAH_GATEWAY_MEMORYCORE_PATH|g" \
-      -e "s|^Environment=PATH=.*|Environment=PATH=$node_dir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|" \
-      -e "s|^ExecStart=npx tsx|ExecStart=$node_dir/npx tsx|" \
-      packaging/systemd/tdai-memory-gateway.service > "$gateway_unit_dst"
+    # gateway-unit-render:start
+    node --input-type=module - "$GAH_GATEWAY_MEMORYCORE_PATH" "$node_dir" "$gateway_unit_dst" <<'JAVASCRIPT'
+import { readFileSync, writeFileSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
+
+let template = readFileSync('packaging/gateway/tdai-memory-gateway.service', 'utf8');
+for (const [placeholder, value] of [['@MEMORYCORE@', process.argv[2]], ['@NODE_DIR@', process.argv[3]]]) {
+  if (!isAbsolute(value) || /["\\$\x00-\x1f\x7f]/.test(value)) {
+    throw new Error('Gateway paths must be absolute and contain no quotes, backslashes, dollar signs, or control characters');
+  }
+  if (placeholder === '@NODE_DIR@' && value.includes(':')) {
+    throw new Error('Gateway Node directory cannot contain a colon');
+  }
+  template = template.replaceAll(placeholder, value.replaceAll('%', '%%'));
+}
+writeFileSync(process.argv[4], template);
+JAVASCRIPT
+    # gateway-unit-render:end
     systemctl --user daemon-reload
     systemctl --user enable --now tdai-memory-gateway.service
 
@@ -238,8 +251,7 @@ esac
 # server-service-start:start -- tested with stubbed systemctl by
 # tests/source_structure.rs::standalone_service_restart_and_start_failures_report_journal.
 if [ "$role" = "central" ] || [ "$role" = "standalone" ]; then
-  sudo install -m 0644 packaging/systemd/gah-server.service /etc/systemd/system/gah-server.service
-  sudo systemctl daemon-reload
+  # `gah update` above rendered and installed the unit for this account (#1322).
   server_start_failed=0
   sudo systemctl enable --now gah-server.service || server_start_failed=1
   if [ "$server_start_failed" = 0 ] && [ "$role" = "standalone" ]; then
@@ -247,9 +259,19 @@ if [ "$role" = "central" ] || [ "$role" = "standalone" ]; then
     # the former network bind address.
     sudo systemctl restart gah-server.service || server_start_failed=1
   fi
-  if [ "$server_start_failed" != 0 ] || ! sudo systemctl is-active --quiet gah-server.service; then
-    echo "ERROR: gah-server.service failed to start. Recent logs:" >&2
-    sudo journalctl -u gah-server.service -n 50 --no-pager >&2
+  # Restart=always hides a crash loop from a single is-active check: require
+  # the service to stay up without restarting, and show why when it does not.
+  if [ "$server_start_failed" = 0 ]; then
+    sleep 5
+    if ! sudo systemctl is-active --quiet gah-server.service \
+      || [ "$(systemctl show -p NRestarts --value gah-server.service)" != "0" ]; then
+      server_start_failed=1
+    fi
+  fi
+  if [ "$server_start_failed" != 0 ]; then
+    echo "ERROR: gah-server.service did not stay running." >&2
+    sudo systemctl status --no-pager gah-server.service >&2 || true
+    sudo journalctl -u gah-server.service -n 50 --no-pager >&2 || true
     exit 1
   fi
 else

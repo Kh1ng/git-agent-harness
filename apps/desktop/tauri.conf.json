@@ -27,6 +27,7 @@
             "allow-set-node-role",
             "allow-worker-status",
             "allow-set-worker-running",
+            "allow-repository-tools",
             "allow-setup-check",
             "allow-open-setup-terminal",
             "allow-mistral-login-start",

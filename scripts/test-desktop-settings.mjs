@@ -15,8 +15,10 @@ try {
   const page = await browser.newPage();
   await page.addInitScript(() => {
     window.calls = [];
+    window.repositoryInstalled = false;
     window.__TAURI_INTERNALS__ = { invoke: async (command, args) => {
       window.calls.push([command, args]);
+      if (command === 'repository_tools') return [{ program: 'gh', installed: window.repositoryInstalled }, { program: 'glab', installed: false }];
       if (command === 'desktop_settings') return {
         central_url: 'http://central.test', wsl_distribution: '',
         presence: { dock: false, tray: true, launch_window: true },
@@ -30,6 +32,17 @@ try {
   });
   await page.goto(server.resolvedUrls.local[0]);
   await page.getByRole('heading', { name: 'Settings · This computer' }).waitFor();
+  await page.getByText('Install it before signing in, then select Check installation.', { exact: false }).waitFor();
+  assert.equal(await page.getByRole('link', { name: 'Install GitHub CLI' }).getAttribute('href'), 'https://cli.github.com/');
+  await page.getByRole('link', { name: 'Install GitHub CLI' }).click();
+  assert.deepEqual(await page.evaluate(() => window.calls.at(-1)), ['open_external_url', { url: 'https://cli.github.com/' }]);
+  await page.evaluate(() => { window.repositoryInstalled = true; });
+  await page.getByRole('button', { name: 'Check installation', exact: true }).click();
+  await page.getByText('GitHub CLI (gh) is installed.', { exact: false }).waitFor();
+  assert(await page.getByRole('link', { name: 'Install GitHub CLI' }).isHidden());
+  await page.getByLabel('Repository host').selectOption('glab');
+  await page.getByText('GitLab CLI (glab) is required', { exact: false }).waitFor();
+  assert.equal(await page.getByRole('link', { name: 'Install GitLab CLI' }).getAttribute('href'), 'https://gitlab.com/gitlab-org/cli#installation');
   await page.getByRole('button', { name: 'Back to Settings' }).click();
   assert.equal(await page.evaluate(() => window.calls.at(-1)[0]), 'open_central_settings');
   await page.getByLabel('Central node address').fill('http://another-central.test');

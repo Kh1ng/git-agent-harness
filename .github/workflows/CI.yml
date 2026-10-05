@@ -109,26 +109,20 @@ jobs:
           git push "$HOME/origin.git" HEAD:refs/heads/main
           git clone "$HOME/origin.git" "$HOME/gah"
 
-      - name: Configure gah-server.service for this runner (documented drop-in)
+      - name: Supply the operator web-root setting (documented drop-in)
         if: steps.scope.outputs.run == 'true'
         run: |
           set -euo pipefail
-          # The shipped unit template names the operator's own user and
-          # toolchain paths ("Adjust the cargo/node paths below to match your
-          # actual toolchain install"). A systemd drop-in is the documented
-          # customization seam, so the checkout stays clean for gah update.
-          node_bin="$(dirname "$(command -v node)")"
+          # `gah update` renders the unit for the installing account (#1322),
+          # so no user/path overrides are needed here. The dashboard root is
+          # the one setting the shipped unit leaves to the operator: gah
+          # update deploys the web bundle to /var/www/gah by default, and the
+          # service reads GAH_WEB_ROOT through this systemd drop-in.
           sudo install -d -m 0755 /etc/systemd/system/gah-server.service.d
           printf '%s\n' \
             '[Service]' \
-            "User=$USER" \
-            "WorkingDirectory=$HOME/gah" \
-            "Environment=GAH_CONFIG_PATH=$HOME/.config/gah/config.toml" \
-            "Environment=PATH=$HOME/.cargo/bin:$node_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
             'Environment=GAH_WEB_ROOT=/var/www/gah' \
-            'ExecStart=' \
-            "ExecStart=$(command -v node) $HOME/gah/apps/server/dist/bin.js" \
-            | sudo tee /etc/systemd/system/gah-server.service.d/ci-runner.conf >/dev/null
+            | sudo tee /etc/systemd/system/gah-server.service.d/ci-web-root.conf >/dev/null
 
       - name: Run the real standalone installer
         if: steps.scope.outputs.run == 'true'

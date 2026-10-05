@@ -62,6 +62,9 @@ pub struct AuthProbe {
     #[serde(flatten)]
     pub health: AuthHealth,
     pub source: AuthSource,
+    /// Repository package presence is independent of its login state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -278,7 +281,26 @@ fn probe(backend: &str, provider: Option<&str>, health: AuthHealth) -> AuthProbe
         provider: provider.map(str::to_string),
         health,
         source: AuthSource::Probe,
+        installed: None,
     }
+}
+
+/// Report missing packages separately from an installed CLI that needs login.
+fn repository_probe(cli: &str, provider: &str, executable: Option<&Path>) -> AuthProbe {
+    let health = match executable {
+        Some(executable) => run(executable, &["auth", "status"], &[])
+            .map(|output| {
+                classify_status_output(output.status.success(), &output.stdout, &output.stderr)
+            })
+            .unwrap_or_else(timed_out),
+        None => AuthHealth::new(
+            AuthState::Missing,
+            Some("Install the repository CLI package before signing in."),
+        ),
+    };
+    let mut result = probe(cli, Some(provider), health);
+    result.installed = Some(executable.is_some());
+    result
 }
 
 /// The HTTP status of one authenticated GET. The key reaches curl through a
@@ -365,6 +387,7 @@ fn dispatch_failures(now: time::OffsetDateTime) -> Vec<AuthProbe> {
                 Some("A dispatch attempt failed to authenticate."),
             ),
             source: AuthSource::Dispatch,
+            installed: None,
         });
     }
     failures
@@ -416,14 +439,19 @@ pub fn probe_node() -> AuthHealthReport {
             )),
         }
     }
+    let configured_providers: std::collections::HashSet<String> = crate::config::load(None)
+        .map(|config| {
+            config
+                .profiles
+                .values()
+                .map(|profile| profile.provider.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     for (cli, provider) in [("gh", "github"), ("glab", "gitlab")] {
-        if let Some(executable) = resolve(cli) {
-            let health = run(&executable, &["auth", "status"], &[])
-                .map(|output| {
-                    classify_status_output(output.status.success(), &output.stdout, &output.stderr)
-                })
-                .unwrap_or_else(timed_out);
-            probes.push(probe(cli, Some(provider), health));
+        let executable = resolve(cli);
+        if executable.is_some() || configured_providers.contains(provider) {
+            probes.push(repository_probe(cli, provider, executable.as_deref()));
         }
     }
     probes.extend(api_key_probe(
@@ -451,6 +479,18 @@ mod tests {
 
     fn text(success: bool, stdout: &str) -> AuthState {
         classify_status_output(success, stdout.as_bytes(), b"").state
+    }
+
+    #[test]
+    fn missing_repository_package_is_not_a_login_failure() {
+        let probe = repository_probe("gh", "github", None);
+        assert_eq!(probe.installed, Some(false));
+        assert_eq!(probe.health.state, AuthState::Missing);
+        assert!(probe
+            .health
+            .detail
+            .unwrap()
+            .contains("package before signing in"));
     }
 
     #[test]
