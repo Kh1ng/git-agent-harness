@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="referrer" content="no-referrer" />
   <title>GAH shared workspace</title>
-  <script type="module" crossorigin src="./assets/index-OJ5deIDr.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/index-CIPm8Dpm.css">
+  <script type="module" crossorigin src="./assets/index-Fwd48frQ.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-cx4DFZhB.css">
 </head>
 <body>
   <main>
@@ -17,13 +17,12 @@
     </section>
     <p id="notice" role="status" aria-live="polite"></p>
     <section id="connect-section">
-      <h2>Connect to your workspace</h2>
-      <p>Use the connection details from your operator or your own Supabase project. Access requires an invited account.</p>
-      <form id="connect-form">
-        <label>Supabase URL<input id="url" type="url" placeholder="https://your-project.example.com" required autocomplete="off" /></label>
-        <label>Publishable or anon key<input id="key" type="password" required autocomplete="off" /></label>
-        <label>Email address<input id="email" type="email" required autocomplete="email" /></label>
-        <button type="submit">Send sign-in link</button>
+      <h2>Sign in to your workspace</h2>
+      <p>Sign in with your invited account to manage shared nodes and work.</p>
+      <form id="sign-in-form">
+        <label>Email address<input id="email" type="email" required autocomplete="username" /></label>
+        <label>Password<input id="password" type="password" required autocomplete="current-password" /></label>
+        <button id="sign-in" type="submit" disabled>Sign in</button>
       </form>
     </section>
     <section id="workspace-section" hidden>
