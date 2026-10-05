@@ -21,8 +21,10 @@ const BOOTSTRAP: &str = "t=\"$(gh auth token 2>/dev/null || true)\"; curl -fsSL 
 #[cfg(not(target_os = "macos"))]
 const STANDALONE_ENV: &str = "GAH_NODE_ROLE=standalone GAH_YES=1 GAH_SERVER_HOST=127.0.0.1";
 
+/// macOS has no standalone role, so GAH_STANDALONE=1 carries the intent to
+/// configure-node-role.sh, which defaults a fresh install's factory module off.
 #[cfg(target_os = "macos")]
-const STANDALONE_ENV: &str = "GAH_NODE_ROLE=central GAH_YES=1 GAH_SERVER_HOST=127.0.0.1";
+const STANDALONE_ENV: &str = "GAH_NODE_ROLE=central GAH_STANDALONE=1 GAH_YES=1 GAH_SERVER_HOST=127.0.0.1";
 
 #[derive(Serialize)]
 pub struct SetupCheck {
@@ -289,6 +291,8 @@ mod tests {
             setup_command(Some("~/.cargo/bin/gah"), true),
             format!("{STANDALONE_ENV} ~/.cargo/bin/gah setup --role {} --yes", if cfg!(target_os = "macos") { "central" } else { "standalone" })
         );
+        // The central role alone would leave a fresh macOS standalone install's factory module on.
+        assert!(STANDALONE_ENV.contains(if cfg!(target_os = "macos") { "GAH_STANDALONE=1" } else { "GAH_NODE_ROLE=standalone" }));
     }
 
     #[test]

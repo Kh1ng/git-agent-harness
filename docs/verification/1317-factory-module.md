@@ -108,3 +108,19 @@ is unverified: in the repair sandbox Chromium cannot start (`libnspr4.so` is
 missing) and the desktop crate cannot build (`gobject-2.0` is missing). Passed
 there: `npm run typecheck`, `npm run --workspace=apps/desktop typecheck`,
 `npm exec --workspace=apps/desktop -- vite build`, and `git diff --check`.
+
+### Review repair (fresh macOS standalone default)
+
+macOS has no standalone role, so the desktop's **Set up standalone** installs
+the central role and an untouched checkbox sends no factory choice. That left a
+fresh macOS standalone install with the module on. The macOS desktop now adds
+`GAH_STANDALONE=1` to the setup command, and `configure-node-role.sh` applies
+the fresh-install default-off for that marker as well as for the `standalone`
+role. An existing configuration file and an explicit `GAH_FACTORY_ENABLED`
+still take precedence; a plain networked central install is unchanged.
+`cargo test --test gah_cli setup::` covers the central-role cases.
+
+Acceptance criterion 5 is still open after this repair: the worker cannot
+install services on a throwaway host or post to the PR, so the installed-host
+procedure above has not been run and no screenshots or `systemctl --user`
+output exist yet.

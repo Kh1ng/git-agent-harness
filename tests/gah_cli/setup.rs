@@ -188,19 +188,52 @@ fn standalone_installer_defaults_off_but_preserves_existing_selection() {
         &cli,
         "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$GAH_FACTORY_TEST_LOG\"\n",
     );
-    for (contents, selection, expected) in [
-        (None, None, "--factory-enabled false"),
+    // The macOS desktop's standalone install is the central role with GAH_STANDALONE=1.
+    for (role, intent, contents, selection, expected) in [
+        ("standalone", None, None, None, "--factory-enabled false"),
         (
+            "standalone",
+            None,
             Some("[defaults]\n"),
             None,
             "config set --node-role standalone",
         ),
         (
+            "standalone",
+            None,
             Some("[defaults]\nfactory_enabled = false\n"),
             None,
             "config set --node-role standalone",
         ),
-        (Some("[defaults]\n"), Some("true"), "--factory-enabled true"),
+        (
+            "standalone",
+            None,
+            Some("[defaults]\n"),
+            Some("true"),
+            "--factory-enabled true",
+        ),
+        ("central", Some("1"), None, None, "--factory-enabled false"),
+        (
+            "central",
+            Some("1"),
+            None,
+            Some("true"),
+            "--factory-enabled true",
+        ),
+        (
+            "central",
+            Some("1"),
+            Some("[defaults]\n"),
+            None,
+            "config set --node-role central",
+        ),
+        (
+            "central",
+            None,
+            None,
+            None,
+            "config set --node-role central",
+        ),
     ] {
         if let Some(contents) = contents {
             fs::write(&config, contents).unwrap();
@@ -210,11 +243,16 @@ fn standalone_installer_defaults_off_but_preserves_existing_selection() {
         let mut command = ProcessCommand::new("bash");
         command
             .arg("scripts/configure-node-role.sh")
-            .arg("standalone")
+            .arg(role)
             .arg(&cli)
             .env("GAH_CONFIG", &config)
             .env("GAH_FACTORY_TEST_LOG", &log)
             .env_remove("GAH_CENTRAL_URL");
+        if let Some(intent) = intent {
+            command.env("GAH_STANDALONE", intent);
+        } else {
+            command.env_remove("GAH_STANDALONE");
+        }
         if let Some(selection) = selection {
             command.env("GAH_FACTORY_ENABLED", selection);
         } else {
