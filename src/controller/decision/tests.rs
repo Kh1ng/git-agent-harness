@@ -1455,3 +1455,27 @@ fn every_human_required_constructor_has_a_reason_code() {
         );
     }
 }
+
+// Issue #1381: a PR past its fix cap blocks only itself.
+#[test]
+fn pr_past_fix_cap_does_not_block_eligible_ticket_dispatch() {
+    let mut snapshot = empty_snapshot();
+    snapshot.fix_attempt_counts.insert("branch-A".into(), 2);
+    snapshot
+        .merge_requests
+        .push(needs_fix_mr("branch-A", "TICKET-A"));
+    snapshot.available_tickets.push(ticket(
+        "docs/tickets/TICKET-B-x.md",
+        Some("TICKET-B"),
+        0,
+        None,
+        false,
+        false,
+    ));
+    match decide_next_action(&snapshot) {
+        NextAction::DispatchTicket { work_id, .. } => {
+            assert_eq!(work_id.as_deref(), Some("TICKET-B"))
+        }
+        other => panic!("expected DispatchTicket for TICKET-B, got {other:?}"),
+    }
+}
