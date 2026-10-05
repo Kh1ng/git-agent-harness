@@ -69,6 +69,7 @@ import { ActivityFeed, validateNotificationPreferences } from './activityFeed.js
 import type { SessionOptions } from './sessions/SessionManager.js';
 import { deviceAgentsSnapshot } from './deviceAgents.js';
 import { factoryRunOutput } from './factoryRunOutput.js';
+import { readLedger, roleMetrics } from './roleMetrics.js';
 import { deriveControllerActivity } from './controllerActivity.js';
 import { authMiddleware, coordinatorTokenMatches, isLocalAddress, requireOwner } from './authMiddleware.js';
 import { DeviceAccess } from './deviceAccess.js';
@@ -1283,6 +1284,19 @@ export function createServer(
         error: 'Failed to load gah report',
         message: error instanceof Error ? error.message : String(error)
       });
+    }
+  });
+
+  // Per role and model, what the ledger says: delivered rate with its
+  // confidence, validation, first-review acceptance, tokens per delivered PR.
+  app.get('/api/report/roles', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : undefined;
+    const since = typeof req.query.since === 'string' ? req.query.since : '7d';
+    try {
+      const report = await runReport({ profile, since: 'all' });
+      res.json(roleMetrics(readLedger(report.ledger_path), { since, profile: profile ?? null }));
+    } catch (error) {
+      res.status(502).json({ error: 'Failed to compute role metrics', message: error instanceof Error ? error.message : String(error) });
     }
   });
 

@@ -333,6 +333,8 @@ export interface GahDataSource {
   getChatSessions(profile: string): Promise<{ sessions: ChatSessionSummary[] }>;
   getAllChatSessions(): Promise<{ projects: ChatSessionProjectGroup[] }>;
   /** Agent CLIs running on this device outside the factory. */
+  /** Per role and model, what the ledger says (delivered rate with confidence, validation, review acceptance, tokens). */
+  getRoleMetrics(profile: string | undefined, since: string): Promise<import('@git-agent-harness/contracts').RoleMetricsReport>;
   getDeviceAgents(): Promise<import('@git-agent-harness/contracts').DeviceAgentsSnapshot>;
   /** A running factory job's agent output from byte offset `after`. Read-only. */
   getFactoryRunOutput(runId: string, after: number, full?: boolean): Promise<import('@git-agent-harness/contracts').FactoryRunOutput>;
@@ -719,6 +721,9 @@ export const gahApi: GahDataSource = {
   },
   getFactoryRunOutput(runId, after, full = false) {
     return getJson<import('@git-agent-harness/contracts').FactoryRunOutput>(`/api/factory-runs/${encodeURIComponent(runId)}/output`, { after: String(after), ...(full ? { full: '1' } : {}) });
+  },
+  getRoleMetrics(profile, since) {
+    return getJson<import('@git-agent-harness/contracts').RoleMetricsReport>('/api/report/roles', { ...(profile ? { profile } : {}), since });
   },
   getDeviceAgents() {
     return getJson<import('@git-agent-harness/contracts').DeviceAgentsSnapshot>('/api/device-agents');

@@ -8,6 +8,7 @@ import { gahApi } from '../api/client.js';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
+import { ModelFitCard } from '../components/ModelFitCard.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { StatusBadge, type StatusTone } from '../components/ui/StatusBadge.js';
 import { TrendChart } from '../components/TrendChart.js';
@@ -484,6 +485,8 @@ export function TelemetryPage() {
           </div>
         }
       />
+
+      <ModelFitCard profile={profile ?? null} since="7d" />
 
       <section>
         <h3 className="text-sm font-semibold text-primary mb-3">

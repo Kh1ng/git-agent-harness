@@ -1875,3 +1875,61 @@ export interface FactoryRunOutput {
   truncated: boolean;
   events: FactoryRunEvent[];
 }
+
+/** One model doing one kind of job, measured from the ledger
+ * (GET /api/report/roles). Rates are fractions 0..1; null means no sample. */
+export interface RoleModelMetrics {
+  role: string;
+  backend: string;
+  backend_instance: string | null;
+  model: string | null;
+  /** Ledger entries for this role and model that were real attempts (harness errors excluded). */
+  attempts: number;
+  /** Entries the harness failed before the model ran (capacity, admission): not the model's doing. */
+  harness_errors: number;
+  /** Attempts that produced a pull request that was not sent back by review. */
+  delivered: number;
+  delivered_rate: number | null;
+  /** Wilson lower bound of delivered_rate at 95%: what the rate is at least, given the sample. */
+  delivered_rate_low: number | null;
+  validation_ran: number;
+  validation_passed: number;
+  validation_pass_rate: number | null;
+  /** Of this model's pull requests that were reviewed, the share approved on first review. */
+  reviewed: number;
+  approved_first_review: number;
+  first_review_acceptance: number | null;
+  /** Attempts with a token count; tokens are the cost measure when dollars are unknown. */
+  measured: number;
+  total_tokens: number | null;
+  tokens_per_attempt: number | null;
+  tokens_per_delivered: number | null;
+  total_cost_usd: number | null;
+  cost_per_delivered_usd: number | null;
+  median_duration_seconds: number | null;
+  /** Reviewers only: verdicts given, blocking findings per review, and how
+   * the verdicts held up (a NEEDS_FIX followed by a passing fix, an APPROVE
+   * whose PR later needed a fix). */
+  review_verdicts: [string, number][];
+  blocking_findings_per_review: number | null;
+  verdicts_vindicated: number;
+  verdicts_overturned: number;
+  confidence: 'none' | 'low' | 'medium' | 'high';
+}
+
+export interface RoleBestFit {
+  role: string;
+  /** Ranked best first by delivered_rate_low, then fewer tokens per delivered PR. */
+  ranking: { backend: string; backend_instance: string | null; model: string | null; score: number; attempts: number; confidence: RoleModelMetrics['confidence'] }[];
+}
+
+export interface RoleMetricsReport {
+  since: string;
+  profile: string | null;
+  entries: number;
+  /** Entries that were not attempts by a model: holds, releases, tombstones. */
+  skipped: number;
+  harness_errors: number;
+  cells: RoleModelMetrics[];
+  best_fit: RoleBestFit[];
+}
