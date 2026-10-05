@@ -1318,7 +1318,7 @@ fn install_linux_defaults_gateway_url_to_central_host() {
 
     let run = |extra: &str| {
         let probe = format!(
-            "PATH={}:$PATH\nHOME={}\n{extra}\n{block}\nprintf '%s' \"$GAH_GATEWAY_URL\"\n",
+            "PATH=\"{}:$PATH\"\nHOME=\"{}\"\n{extra}\n{block}\nprintf '%s' \"$GAH_GATEWAY_URL\"\n",
             tmp.display(),
             home.display()
         );
@@ -1386,7 +1386,7 @@ fn install_linux_prefers_the_tailnet_bind_host() {
         Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "PATH={}:{}\n{host}\nrole={role}\n{block}\nprintf '%s' \"$server_host\"",
+                "PATH=\"{}:{}\"\n{host}\nrole={role}\n{block}\nprintf '%s' \"$server_host\"",
                 path.display(),
                 std::env::var("PATH").unwrap_or_default()
             ))
@@ -1457,7 +1457,7 @@ fn standalone_install_never_touches_tailscale() {
         Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "PATH={}:{}\nrole={role}\n{block}\n",
+                "PATH=\"{}:{}\"\nrole={role}\n{block}\n",
                 tmp.display(),
                 std::env::var("PATH").unwrap_or_default()
             ))
