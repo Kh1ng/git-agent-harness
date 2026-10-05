@@ -134,18 +134,34 @@ jobs:
       - name: Verify service, loopback-only bind, dashboard, and role
         if: steps.scope.outputs.run == 'true'
         run: |
-          set -euo pipefail
+          set -uo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
-          systemctl is-active --quiet gah-server.service
-          grep -q '^HOST=127\.0\.0\.1$' /etc/gah/server.env
-          exposed="$(ss -tln | awk '$4 ~ /:3773$/ && $4 !~ /^127\.0\.0\.1:3773$/')"
-          if [ -n "$exposed" ]; then
-            echo "::error::server is listening on a non-loopback address: $exposed"
+          fail() {
+            echo "::error::$1"
+            echo '--- systemctl status ---'
+            sudo systemctl status --no-pager -l gah-server.service || true
+            echo '--- journal (last 100 lines) ---'
+            sudo journalctl -u gah-server.service -n 100 --no-pager || true
+            echo '--- kernel log tail ---'
+            sudo dmesg | tail -30 || true
+            echo '--- listeners ---'
+            ss -tlnp || true
+            echo '--- /etc/gah/server.env ---'
+            sudo cat /etc/gah/server.env || true
             exit 1
-          fi
-          curl -fsS -o /dev/null http://127.0.0.1:3773/
-          curl -fsS http://127.0.0.1:3773/health | grep -q '"status":"healthy"'
-          gah status --role --json | grep -q '"role":"standalone"'
+          }
+          systemctl is-active --quiet gah-server.service \
+            || fail "gah-server.service is not active: $(systemctl is-active gah-server.service)"
+          grep -q '^HOST=127\.0\.0\.1$' /etc/gah/server.env \
+            || fail "server.env HOST is not loopback: $(sudo cat /etc/gah/server.env)"
+          exposed="$(ss -tln | awk '$4 ~ /:3773$/ && $4 !~ /^127\.0\.0\.1:3773$/')"
+          [ -z "$exposed" ] || fail "server is listening on a non-loopback address: $exposed"
+          curl -fsS -o /dev/null http://127.0.0.1:3773/ \
+            || fail 'dashboard did not answer on loopback'
+          curl -fsS http://127.0.0.1:3773/health | grep -q '"status":"healthy"' \
+            || fail '/health did not report healthy'
+          gah status --role --json | grep -q '"role":"standalone"' \
+            || fail 'gah status does not report the standalone role'
 
   test:
     runs-on: ubuntu-latest
