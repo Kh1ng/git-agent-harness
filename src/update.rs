@@ -214,6 +214,15 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         }
     }
 
+    // Both roles install user units above. Issue #1347: without lingering,
+    // the user's systemd manager dies with the last login session, leaving
+    // every timer idle after a reboot on a headless node. Best-effort: a
+    // sudo-less host still completes its update, and `gah setup --check`
+    // reports the missing linger as a failed requirement.
+    if let Err(error) = enable_user_lingering(&repo) {
+        eprintln!("[gah update] {error}");
+    }
+
     if args.restart_server && cfg!(target_os = "macos") {
         let script = repo.join("scripts/macos-launchd.sh");
         run_command(
@@ -742,6 +751,48 @@ fn install_quota_refresh_unit_template(repo: &Path) -> Result<Option<[PathBuf; 2
     Ok(Some([service, timer]))
 }
 
+/// The user whose manager owns the user units installed above, resolved the
+/// same way as the setup requirement (`id -un`), so `enable-linger` and
+/// `gah setup --check` always name the same account.
+fn current_user() -> Option<String> {
+    let output = Command::new("id").arg("-un").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let user = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!user.is_empty()).then_some(user)
+}
+
+/// Issue #1347: the user units `gah update` installs (loop, quota refresh,
+/// prune) run under the user's systemd manager, which only exists while the
+/// account has a login session. On a headless node without lingering, every
+/// timer stays idle after each reboot until someone logs in. Enable linger
+/// for the installing user: idempotent (`enable-linger` on an already
+/// lingering user is a no-op) and best-effort -- a sudo-less host still
+/// completes its update, and `gah setup --check` reports `Linger=no` as a
+/// failed requirement so the gap stays visible instead of failing here.
+fn enable_user_lingering(repo: &Path) -> Result<()> {
+    if !systemd_available() {
+        // launchd hosts and systemd-less machines have no linger concept.
+        return Ok(());
+    }
+    let user = current_user().context("resolving the current user for user lingering")?;
+    let already_lingering = Command::new("loginctl")
+        .args(["show-user", &user, "-p", "Linger"])
+        .output()
+        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).trim() == "Linger=yes");
+    if already_lingering {
+        println!("User lingering already enabled for {user}.");
+        return Ok(());
+    }
+    run_command(repo, "sudo", &["loginctl", "enable-linger", &user]).context(format!(
+        "user lingering not enabled; the user units stay idle after reboot \
+         until someone logs in. Fix with: sudo loginctl enable-linger {user}"
+    ))?;
+    println!("Enabled user lingering for {user}: user units now survive logouts and reboots.");
+    Ok(())
+}
+
 /// Central-node daily storage maintenance. The existing timer owns both the
 /// Rust prune and server chat sweep; workers never install this control-plane
 /// entrypoint and no second scheduler is introduced.
@@ -818,10 +869,11 @@ fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_opencode_agent_configs, ensure_clean, ensure_default_branch_checkout,
-        install_prune_unit_template, install_quota_refresh_unit_template,
-        install_server_unit_template, install_watchdog_unit_template, installed_binary_path,
-        resolve_web_deploy_root, run, stale_asset_names, HostRole, UpdateArgs, WEB_BUILD_ARGS,
+        copy_opencode_agent_configs, enable_user_lingering, ensure_clean,
+        ensure_default_branch_checkout, install_prune_unit_template,
+        install_quota_refresh_unit_template, install_server_unit_template,
+        install_watchdog_unit_template, installed_binary_path, resolve_web_deploy_root, run,
+        stale_asset_names, HostRole, UpdateArgs, WEB_BUILD_ARGS,
     };
     use crate::test_support::PathGuard;
     use std::collections::HashSet;
@@ -1218,5 +1270,87 @@ mod tests {
         );
         // An empty listing (no assets deployed yet) prunes nothing.
         assert!(stale_asset_names("", &keep).is_empty());
+    }
+
+    /// Executable fake for the user-lingering tests: same shim shape as the
+    /// hand-rolled sudo/systemctl fakes above, factored out because every
+    /// linger test needs four of them (systemctl, id, loginctl, sudo).
+    fn shim(dir: &Path, name: &str, body: &str) {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+    }
+
+    fn linger_shims(linger: &str, sudo_body: &str) -> (TempDir, PathBuf) {
+        let bin_tmp = TempDir::new().unwrap();
+        let sudo_log = bin_tmp.path().join("sudo-argv.log");
+        shim(bin_tmp.path(), "systemctl", "echo 'systemd 255'\n");
+        shim(bin_tmp.path(), "id", "echo testuser\n");
+        shim(
+            bin_tmp.path(),
+            "loginctl",
+            &format!(
+                "echo \"$@\" >> '{}'\n[ \"$1\" = show-user ] && echo '{linger}'\nexit 0\n",
+                bin_tmp.path().join("loginctl-argv.log").display()
+            ),
+        );
+        let sudo_body = sudo_body.replace("{sudo_log}", &sudo_log.display().to_string());
+        shim(bin_tmp.path(), "sudo", &format!("{sudo_body}\n"));
+        (bin_tmp, sudo_log)
+    }
+
+    /// Issue #1347: `gah update` enables user lingering after installing the
+    /// user units, so they keep running after a reboot with no login session.
+    /// The fakes report Linger=no; the sudo shim records the enable-linger
+    /// invocation for the resolved user.
+    #[test]
+    fn user_lingering_is_enabled_when_missing() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (bin_tmp, sudo_log) = linger_shims("Linger=no", "echo \"$@\" >> '{sudo_log}'\nexit 0");
+        let _path_guard = PathGuard::set(bin_tmp.path().to_str().unwrap());
+
+        enable_user_lingering(repo).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&sudo_log).unwrap().trim(),
+            "loginctl enable-linger testuser"
+        );
+    }
+
+    /// Idempotence: an already-lingering user never triggers sudo.
+    #[test]
+    fn user_lingering_is_not_enabled_twice() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (bin_tmp, sudo_log) = linger_shims("Linger=yes", "echo \"$@\" >> '{sudo_log}'\nexit 0");
+        let _path_guard = PathGuard::set(bin_tmp.path().to_str().unwrap());
+
+        enable_user_lingering(repo).unwrap();
+
+        assert!(
+            !sudo_log.exists(),
+            "an already-lingering user must not re-run sudo"
+        );
+    }
+
+    /// A sudo-less host still completes its update: the linger failure is
+    /// reported with the remediation command, not propagated as fatal.
+    #[test]
+    fn user_lingering_failure_is_reported_not_fatal() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (bin_tmp, _sudo_log) = linger_shims("Linger=no", "exit 1\n");
+        let _path_guard = PathGuard::set(bin_tmp.path().to_str().unwrap());
+
+        let error = enable_user_lingering(repo).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("sudo loginctl enable-linger testuser"),
+            "remediation missing: {message}"
+        );
     }
 }
