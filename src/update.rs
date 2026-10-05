@@ -44,7 +44,12 @@ pub fn run(args: UpdateArgs) -> Result<()> {
 
     // This is the authoritative CLI deployment step. It replaces the Cargo
     // executable selected by PATH, unlike a target/release-only build.
-    run_command(&repo, "cargo", &["install", "--path", ".", "--force"])?;
+    ensure_lockfile_current(&repo)?;
+    run_command(
+        &repo,
+        "cargo",
+        &["install", "--path", ".", "--force", "--locked"],
+    )?;
 
     let binary = installed_binary_path()?;
     if !binary.is_file() {
@@ -819,6 +824,25 @@ fn captured(repo: &Path, program: &str, args: &[&str]) -> Result<String> {
         .context("command output was not UTF-8")
 }
 
+/// `cargo install --locked` silently re-resolves a Cargo.lock that no longer
+/// matches Cargo.toml; `cargo metadata --locked` refuses. Check first so an
+/// update never builds a dependency set CI did not test.
+fn ensure_lockfile_current(repo: &Path) -> Result<()> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--locked", "--format-version", "1"])
+        .current_dir(repo)
+        .output()
+        .context("starting cargo metadata --locked")?;
+    if !output.status.success() {
+        bail!(
+            "Cargo.lock in {} does not match Cargo.toml; refusing to install untested dependency versions. Commit an updated Cargo.lock, then run the update again.\n{}",
+            repo.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
     println!("> {} {}", program, args.join(" "));
     let status = Command::new(program)
@@ -836,7 +860,7 @@ fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
 mod tests {
     use super::{
         copy_opencode_agent_configs, ensure_clean, ensure_default_branch_checkout,
-        install_prune_unit_template, install_quota_refresh_unit_template,
+        ensure_lockfile_current, install_prune_unit_template, install_quota_refresh_unit_template,
         install_server_unit_template, install_watchdog_unit_template, installed_binary_path,
         resolve_web_deploy_root, run, stale_asset_names, HostRole, UpdateArgs, WEB_BUILD_ARGS,
     };
@@ -849,6 +873,48 @@ mod tests {
     use tempfile::TempDir;
 
     static XDG_CONFIG_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn a_stale_lockfile_stops_the_update_before_install() {
+        // A path dependency keeps this offline: no registry lookup is needed.
+        let tmp = TempDir::new().unwrap();
+        for (name, deps) in [("dep", ""), ("app", "dep = { path = \"../dep\" }")] {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+            std::fs::write(
+                dir.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\n{deps}"),
+            )
+            .unwrap();
+        }
+        let app = tmp.path().join("app");
+        let lock = |args: &[&str]| {
+            let status = Command::new("cargo")
+                .args(args)
+                .current_dir(&app)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        lock(&["generate-lockfile", "--offline"]);
+        ensure_lockfile_current(&app).unwrap();
+
+        let manifest = app.join("Cargo.toml");
+        let without_dep = std::fs::read_to_string(&manifest)
+            .unwrap()
+            .replace("dep = { path = \"../dep\" }", "");
+        std::fs::write(&manifest, without_dep).unwrap();
+        lock(&["generate-lockfile", "--offline"]);
+        std::fs::write(
+            &manifest,
+            std::fs::read_to_string(&manifest).unwrap() + "dep = { path = \"../dep\" }\n",
+        )
+        .unwrap();
+
+        let error = ensure_lockfile_current(&app).unwrap_err().to_string();
+        assert!(error.contains("does not match Cargo.toml"), "{error}");
+    }
 
     /// Scoped override for `XDG_CONFIG_HOME`, mirroring the other process-env
     /// guards in `crate::test_support` -- must be restored before another

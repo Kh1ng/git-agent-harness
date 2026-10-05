@@ -26,8 +26,8 @@ esac
 # --bin gah is required: Cargo.toml declares a second [[bin]]
 # (generate-cli-capabilities) with no default-run set, so a bare
 # `cargo run` is ambiguous and errors instead of picking one.
-bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --bin gah --
-cargo run --bin gah -- update --repo "$repo_root" --role "$role"
+bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --locked --bin gah --
+cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role"
 
 # MagicDNS is useful only when this client accepts the tailnet DNS settings.
 # The tailnet-wide toggle still belongs to the Tailscale admin console.
