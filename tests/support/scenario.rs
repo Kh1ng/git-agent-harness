@@ -635,6 +635,22 @@ impl ScenarioHarness {
         text.lines().filter(|l| !l.trim().is_empty()).count()
     }
 
+    /// Path of the durable quota store under this harness's isolated
+    /// `XDG_STATE_HOME`, matching `quota_store::store_path()`'s default.
+    /// Tests write JSONL rows here to exercise store-backed surfaces.
+    pub fn quota_store_path(&self) -> std::path::PathBuf {
+        let path = self
+            ._temp
+            .path()
+            .join("xdg-state")
+            .join("gah")
+            .join("quota_observations.jsonl");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        path
+    }
+
     pub fn run_report_json(&mut self, group_by: &str) -> Result<serde_json::Value, String> {
         self.setup_env();
         self.install_fakes();
