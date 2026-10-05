@@ -74,11 +74,31 @@ password. **Check again** refreshes the list afterwards. With a GitHub
 login in `gh`, the app's paste line also works while the repository is
 private.
 
+### macOS release signing
+
+Release builds require these repository secrets:
+
+- `APPLE_CERTIFICATE`: base64-encoded Developer ID Application certificate exported as a `.p12` file.
+- `APPLE_CERTIFICATE_PASSWORD`: password for that export.
+- `APPLE_SIGNING_IDENTITY`: complete `Developer ID Application: ...` identity.
+- `APPLE_ID`: Apple account used for notarization.
+- `APPLE_PASSWORD`: app-specific password for that account.
+- `APPLE_TEAM_ID`: Apple Developer team identifier.
+
+The release workflow verifies the app signature and notarization ticket. It also notarizes and staples the DMG before publishing.
+Missing credentials or failed verification stop the release. Unsigned development artifacts from the Desktop workflow remain available for testing.
+See [Tauri's signing instructions](https://v2.tauri.app/distribute/sign/macos/) for certificate export and notarization credentials.
+
 ### Windows
 
-The desktop app and its WSL worker install from the releases page; see the
-[Windows tester guide](WINDOWS_TESTER_GUIDE.md). The worker runs inside WSL,
-so its setup happens there rather than in the app's checklist.
+Install the desktop app from the releases page. In **Set up this computer**, select the terminal setup button.
+The app opens a PowerShell console and offers to enable WSL2 and install Ubuntu.
+Approve the Windows elevation prompt. If requested, restart Windows and sign in. The setup console reopens automatically.
+Create your Linux user when prompted, then type `exit`. GAH setup continues inside WSL as that user.
+If setup fails, select the terminal setup button again. Existing WSL1 distributions require conversion to WSL2 before setup.
+
+For a worker connected to another central node, use the [Windows tester guide](WINDOWS_TESTER_GUIDE.md).
+That installer also configures the Windows forwarding port and worker startup task.
 
 ## What each choice needs
 
