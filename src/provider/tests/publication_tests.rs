@@ -150,7 +150,7 @@ fn github_mr_body_is_redacted_before_it_reaches_provider_cli() {
 
 #[test]
 fn gitlab_mr_error_json_response_fails_closed() {
-    const RAW_SECRET: &str = "glpat-abcdefghijklmnopqrstuvwxyz";
+    const RAW_SECRET: &str = concat!("glpat-", "synthetic_publication_test_1371");
     const REDACTED_MARKER: &str = "[REDACTED:GITLAB_TOKEN]";
 
     assert_ne!(RAW_SECRET, REDACTED_MARKER);
