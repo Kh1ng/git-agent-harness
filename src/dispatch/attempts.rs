@@ -1380,6 +1380,14 @@ fn mark_backend_unavailable_from_output_for_identity_at(
     if parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded {
         return Ok(Some(parsed));
     }
+    // Output also carries the agent's own work, which can quote login-failure
+    // text from the repository it is editing, and a login block never
+    // expires. The backend's own login check overrules such a match.
+    if parsed.kind == crate::quota_parser::FailureKind::AuthenticationError
+        && crate::auth_health::login_confirmed(identity)
+    {
+        return Ok(None);
+    }
 
     let parsed_unavailable_until = if let Some(reset_at) = parsed.reset_at.as_deref() {
         OffsetDateTime::parse(reset_at, &Rfc3339).ok()
