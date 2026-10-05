@@ -795,9 +795,8 @@ fn run_parallel_once(
             active -= 1;
             // A finished item's next step (the review of a new PR, the merge
             // after a review) may run in this batch rather than wait for the
-            // slowest sibling. Failed and deferred work stays excluded so the
-            // batch cannot spin on it; the stuck-loop gate bounds repeats.
-            if outcome_completed_work(&result.outcome) {
+            // slowest sibling.
+            if has_follow_up_in_batch(&result.action, &result.outcome) {
                 if let Some(work_id) = result.action.work_id() {
                     executed_work_ids.remove(&crate::work_claim::normalize_work_identity(work_id));
                 }
@@ -884,9 +883,21 @@ fn update_parallel_refill_budget(
     failed
 }
 
-/// The worker ran its action to the end: no error and no capacity deferral.
-fn outcome_completed_work(outcome: &str) -> bool {
-    !outcome.starts_with("Error:") && !outcome.starts_with("Deferred ")
+/// Whether a finished worker's item may be selected again in this batch.
+/// Only agent work that ran to the end qualifies: it changes what the item
+/// needs next. A merge or other bookkeeping step has no follow-up, and its
+/// failures are reported in an ordinary outcome, so releasing it would retry
+/// a refused merge at once. Errors and capacity deferrals stay excluded too.
+fn has_follow_up_in_batch(action: &NextAction, outcome: &str) -> bool {
+    matches!(
+        action,
+        NextAction::DispatchTicket { .. }
+            | NextAction::FixMr { .. }
+            | NextAction::Retry { .. }
+            | NextAction::Escalate { .. }
+            | NextAction::ReviewMr { .. }
+    ) && !outcome.starts_with("Error:")
+        && !outcome.starts_with("Deferred ")
 }
 
 fn parallel_outcome_is_failure(outcome: &str) -> bool {

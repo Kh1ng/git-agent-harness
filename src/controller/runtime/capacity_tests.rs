@@ -269,6 +269,40 @@ fn attached_branch_redispatch_skips_work_a_sibling_slot_is_running() {
 }
 
 #[test]
+fn only_finished_agent_work_can_be_picked_again_in_the_same_batch() {
+    let review = super::NextAction::ReviewMr {
+        work_id: Some("#64".into()),
+        branch: "gah/64".into(),
+        mr_url: None,
+        reason: "test".into(),
+    };
+    let merge = super::NextAction::MergeMr {
+        work_id: Some("#64".into()),
+        branch: "gah/64".into(),
+        mr_url: None,
+        review_generation: None,
+        reason: "test".into(),
+    };
+    assert!(super::has_follow_up_in_batch(
+        &review,
+        "Dispatched review for branch 'gah/64'"
+    ));
+    assert!(!super::has_follow_up_in_batch(
+        &review,
+        "Error: review preflight failed"
+    ));
+    assert!(!super::has_follow_up_in_batch(
+        &review,
+        "Deferred review because configured route capacity is busy; no backend launched"
+    ));
+    // A refused merge reports an ordinary outcome; releasing it would retry at once.
+    assert!(!super::has_follow_up_in_batch(
+        &merge,
+        "Merge failed for branch 'gah/64': gh pr merge failed"
+    ));
+}
+
+#[test]
 fn successful_sibling_reopens_refill_after_capacity_deferral() {
     let mut remaining = 0;
     let mut suppressed = false;

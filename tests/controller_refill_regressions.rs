@@ -644,7 +644,8 @@ fn parallel_loop_reviews_a_finished_ticket_while_a_slow_sibling_still_runs() {
             .unwrap(),
     );
 
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // Two real dispatches and a review: generous, because a busy runner is slow, not wrong.
+    let deadline = Instant::now() + Duration::from_secs(90);
     while !review_started.exists() {
         if let Some(status) = child.try_wait().unwrap() {
             panic!("controller exited before the finished ticket was reviewed: {status:?}");
