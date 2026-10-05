@@ -485,7 +485,9 @@ impl<'a> Setup<'a> {
         let source = self.options.source.clone();
         let (command, what) = match selection.role {
             Role::CliOnly => (
-                "cargo install --path . --force --locked".to_string(),
+                // `cargo install --locked` re-resolves a stale Cargo.lock;
+                // `cargo metadata --locked` fails on one, so it runs first.
+                "cargo metadata --locked --format-version 1 >/dev/null && cargo install --path . --force --locked".to_string(),
                 "Build and install the gah command",
             ),
             Role::Central | Role::Worker => (
@@ -787,7 +789,10 @@ mod tests {
         .unwrap();
         assert_eq!(effects.commands.len(), 1);
         let (command, _env) = &effects.commands[0];
-        assert_eq!(command, "cargo install --path . --force --locked");
+        assert_eq!(
+            command,
+            "cargo metadata --locked --format-version 1 >/dev/null && cargo install --path . --force --locked"
+        );
     }
 
     #[test]
