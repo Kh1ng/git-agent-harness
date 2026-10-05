@@ -121,18 +121,38 @@ impl<'a> Setup<'a> {
         say(&mut self, "");
 
         // 1. What is this machine for?
+        // #1318: node networking is opt-in. On Linux -- where the loopback-only
+        // standalone role is supported -- accepting the default sets up the
+        // local machine; a networked role (central or worker) is an explicit
+        // choice. macOS has no standalone support yet, so its default stays
+        // the central role and standalone remains an explicit choice.
         let role = match self.options.role {
             Some(role) => role,
             None => {
-                let options = [
-                    "My main machine: dashboard, chats, and phone control (central node)"
-                        .to_string(),
-                    "A worker that runs jobs for a central node I already have".to_string(),
-                    "Just the command line, no server".to_string(),
-                    "A local dashboard and worker on this machine (standalone)".to_string(),
-                ];
-                [Role::Central, Role::Worker, Role::CliOnly, Role::Standalone]
-                    [self.ask_choice("What is this machine for?", &options, 0)?]
+                let (options, roles) = if self.host.os() == Os::Linux {
+                    (
+                        [
+                            "A local dashboard and worker on this machine (standalone)".to_string(),
+                            "My main machine: dashboard, chats, and phone control (central node)"
+                                .to_string(),
+                            "A worker that runs jobs for a central node I already have".to_string(),
+                            "Just the command line, no server".to_string(),
+                        ],
+                        [Role::Standalone, Role::Central, Role::Worker, Role::CliOnly],
+                    )
+                } else {
+                    (
+                        [
+                            "My main machine: dashboard, chats, and phone control (central node)"
+                                .to_string(),
+                            "A worker that runs jobs for a central node I already have".to_string(),
+                            "Just the command line, no server".to_string(),
+                            "A local dashboard and worker on this machine (standalone)".to_string(),
+                        ],
+                        [Role::Central, Role::Worker, Role::CliOnly, Role::Standalone],
+                    )
+                };
+                roles[self.ask_choice("What is this machine for?", &options, 0)?]
             }
         };
         if role == Role::Standalone && self.host.os() != Os::Linux {
@@ -744,7 +764,7 @@ mod tests {
     fn a_ready_central_machine_asks_three_questions_then_installs() {
         let host = ready_host();
         let mut prompter = Script {
-            answers: ["0", "", "0", "0", "0", "y"].map(String::from).into(),
+            answers: ["1", "", "0", "0", "0", "y"].map(String::from).into(),
             ..Default::default()
         };
         let mut effects = Recorder::default();
@@ -771,6 +791,36 @@ mod tests {
                 .any(|line| line.contains("Shared memory: gah setup --memory")),
             "skipped memory says how to add it"
         );
+    }
+
+    #[test]
+    fn accepting_the_default_role_sets_up_standalone_so_networking_is_opt_in() {
+        let host = ready_host();
+        let mut prompter = Script {
+            answers: ["0", "", "0", "0", "0", "y"].map(String::from).into(),
+            ..Default::default()
+        };
+        let mut effects = Recorder::default();
+        Setup {
+            host: &host,
+            prompter: &mut prompter,
+            effects: &mut effects,
+            options: Options {
+                provider: None,
+                source: PathBuf::from("/src"),
+                ..Default::default()
+            },
+        }
+        .run()
+        .unwrap();
+        assert_eq!(effects.commands[0].0, "scripts/install.sh");
+        assert!(effects.commands[0]
+            .1
+            .contains(&("GAH_NODE_ROLE".into(), "standalone".into())));
+        assert!(prompter
+            .said
+            .iter()
+            .any(|line| line.contains("http://127.0.0.1:3773")));
     }
 
     #[test]
@@ -861,7 +911,7 @@ mod tests {
     fn a_worker_checks_its_central_node_before_building() {
         let host = ready_host();
         let mut prompter = Script {
-            answers: ["1", "0", "0", "https://central.example/", "token-123", "y"]
+            answers: ["2", "0", "0", "https://central.example/", "token-123", "y"]
                 .map(String::from)
                 .into(),
             ..Default::default()
@@ -894,7 +944,7 @@ mod tests {
         assert!(env.contains(&("COORDINATOR_TOKEN".into(), "token-123".into())));
 
         let mut prompter = Script {
-            answers: ["1", "0", "0", "https://central.example", "bad"]
+            answers: ["2", "0", "0", "https://central.example", "bad"]
                 .map(String::from)
                 .into(),
             ..Default::default()
