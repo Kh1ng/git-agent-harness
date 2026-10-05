@@ -36,7 +36,8 @@ impl ExecutionIdentity {
         {
             anyhow::bail!("administrative credentials cannot run inference");
         }
-        let subscription = source.kind == crate::credentials::CredentialKind::ClaudeSubscription;
+        let subscription =
+            source.kind == crate::credentials::CredentialKind::ClaudeSubscriptionToken;
         let mut env = match crate::credentials::execution_env(
             id,
             if subscription {

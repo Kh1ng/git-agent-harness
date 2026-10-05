@@ -160,7 +160,7 @@ impl RoutingPolicy {
         let mut routing = merge_routing_policy(defaults.clone(), self.clone());
         routing.normalize_subscription_candidates(|id| {
             crate::credentials::get(id).is_ok_and(|info| {
-                info.kind == crate::credentials::CredentialKind::ClaudeSubscription
+                info.kind == crate::credentials::CredentialKind::ClaudeSubscriptionToken
             })
         });
         routing

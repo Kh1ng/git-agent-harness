@@ -72,6 +72,24 @@ impl BindingFixture {
             .assert()
             .success();
     }
+    fn save_subscription(&self, id: &str, provider: &str, token: &str) {
+        self.command()
+            .args([
+                "credentials",
+                "save",
+                "--id",
+                id,
+                "--provider",
+                provider,
+                "--kind",
+                "claude_subscription_token",
+                "--account-label",
+                id,
+            ])
+            .write_stdin(token)
+            .assert()
+            .success();
+    }
     fn add(&self, instance: &str, runner: &str, source: &str) {
         self.command()
             .args([
@@ -95,6 +113,22 @@ impl BindingFixture {
     }
     fn exec(&self, instance: &str) -> IsolatedCommand<Command> {
         let mut cmd = self.command();
+        cmd.args([
+            "config",
+            "exec-backend-instance",
+            "--config-path",
+            self.config.to_str().unwrap(),
+            "--profile",
+            "test",
+            "--instance",
+            instance,
+        ]);
+        cmd
+    }
+    fn exec_process(&self, instance: &str) -> IsolatedCommand<ProcessCommand> {
+        let mut cmd = spawn_bin();
+        cmd.env("HOME", self.root.path()).env("PATH", &self.path);
+        cmd.stdout(Stdio::piped());
         cmd.args([
             "config",
             "exec-backend-instance",
@@ -143,6 +177,143 @@ fn two_named_sources_override_ambient_and_keep_account_state_separate() {
             .success()
             .stdout(format!("{key}|{}|unset", f.state(instance).display()));
     }
+}
+
+// Issue #1352: the Claude runner authenticates through a long-lived
+// subscription token under its isolated per-attempt HOME, where the shared
+// interactive OAuth login in the real HOME is invisible.
+#[test]
+fn claude_subscription_token_authenticates_an_isolated_state_root() {
+    let f = BindingFixture::new(
+        "claude",
+        "#!/bin/sh\nprintf '%s|%s|%s' \"$CLAUDE_CODE_OAUTH_TOKEN\" \"$HOME\" \"${ANTHROPIC_API_KEY-unset}\"\n",
+    );
+    f.save_subscription("claude-work", "claude", "synthetic-subscription-token");
+    f.add("claude-one", "claude", "claude-work");
+    f.exec("claude-one")
+        .env("ANTHROPIC_API_KEY", "synthetic-ambient-paid")
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-ambient-token")
+        .assert()
+        .success()
+        .stdout(format!(
+            "synthetic-subscription-token|{}|unset",
+            f.state("claude-one").display()
+        ));
+}
+
+// Two accounts must be usable at the same time: one token per credential,
+// one state root per instance, and neither invocation may observe the
+// sibling's account.
+#[test]
+fn two_claude_subscription_instances_run_concurrently_and_keep_accounts_separate() {
+    let f = BindingFixture::new(
+        "claude",
+        "#!/bin/sh\nsleep 1\nprintf '%s|%s' \"$CLAUDE_CODE_OAUTH_TOKEN\" \"$HOME\"\n",
+    );
+    f.save_subscription("claude-work", "claude", "synthetic-work-token");
+    f.save_subscription("claude-personal", "claude", "synthetic-personal-token");
+    f.add("claude-work", "claude", "claude-work");
+    f.add("claude-personal", "claude", "claude-personal");
+    let mut first = f.exec_process("claude-work");
+    let mut second = f.exec_process("claude-personal");
+    let first_child = first.spawn().unwrap();
+    let second_child = second.spawn().unwrap();
+    let first_output = first_child.wait_with_output().unwrap();
+    let second_output = second_child.wait_with_output().unwrap();
+    assert!(first_output.status.success());
+    assert!(second_output.status.success());
+    let first_text = String::from_utf8(first_output.stdout).unwrap();
+    let second_text = String::from_utf8(second_output.stdout).unwrap();
+    assert_eq!(
+        first_text,
+        format!("synthetic-work-token|{}", f.state("claude-work").display())
+    );
+    assert_eq!(
+        second_text,
+        format!(
+            "synthetic-personal-token|{}",
+            f.state("claude-personal").display()
+        )
+    );
+    assert_ne!(first_text, second_text);
+}
+
+// The subscription token is a Claude-subscription credential: it must never
+// save under another provider or bind to another runner as an API key.
+#[test]
+fn claude_subscription_token_binds_only_the_claude_runner() {
+    let f = BindingFixture::new("claude", "#!/bin/sh\nprintf launched\n");
+    f.command()
+        .args([
+            "credentials",
+            "save",
+            "--id",
+            "claude-sub",
+            "--provider",
+            "openai",
+            "--kind",
+            "claude_subscription_token",
+            "--account-label",
+            "claude-sub",
+        ])
+        .write_stdin("synthetic-subscription-token")
+        .assert()
+        .failure();
+    f.save_subscription("claude-sub", "claude", "synthetic-subscription-token");
+    f.command()
+        .args([
+            "config",
+            "add-backend-instance",
+            "--config-path",
+            f.config.to_str().unwrap(),
+            "--profile",
+            "test",
+            "--instance",
+            "codex-one",
+            "--runner-kind",
+            "codex",
+            "--account-label",
+            "codex-one",
+            "--credential-id",
+            "claude-sub",
+        ])
+        .assert()
+        .failure();
+}
+
+// A saved-but-unverified token reports per instance as unknown — never as a
+// healthy login — and the token value never reaches the report.
+#[test]
+fn auth_health_reports_subscription_instances_without_leaking_the_token() {
+    let f = BindingFixture::new("claude", "#!/bin/sh\nprintf launched\n");
+    f.save_subscription("claude-work", "claude", "synthetic-subscription-token");
+    f.add("claude-one", "claude", "claude-work");
+    let output = f
+        .command()
+        .env("GAH_CONFIG", f.config.to_str().unwrap())
+        .args(["auth-health"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout.clone()).unwrap();
+    let report: Value = serde_json::from_str(&text).unwrap();
+    let instance = report["probes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|probe| probe["backend_instance"].as_str() == Some("claude-one"))
+        .expect("subscription instance probe");
+    assert_eq!(instance["backend"], "claude");
+    assert_eq!(instance["state"], "unknown");
+    assert!(!text.contains("synthetic-subscription-token"));
+    let listed = f
+        .command()
+        .args(["credentials", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8(listed.stdout)
+        .unwrap()
+        .contains("synthetic-subscription-token"));
 }
 
 #[test]

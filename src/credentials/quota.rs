@@ -11,7 +11,7 @@ pub(crate) fn backend(info: &CredentialInfo) -> &str {
         (CredentialKind::MistralDashboard | CredentialKind::MistralLogin, _, _) => {
             "mistral-dashboard"
         }
-        (CredentialKind::ClaudeSubscription, _, _) => "claude",
+        (CredentialKind::ClaudeSubscriptionToken, _, _) => "claude",
         (CredentialKind::ApiKey, "nous", _) => "opencode",
         (CredentialKind::ApiKey, "mistral", Some("MISTRAL_ADMIN_API_KEY")) => "vibe",
         _ => &info.provider,
@@ -32,7 +32,7 @@ fn unknown(info: &CredentialInfo, now: OffsetDateTime) -> QuotaObservationRecord
         observed_at: None,
         checked_at: now.format(&Rfc3339).ok(),
         check_error: None,
-        usage_source: Some(if info.kind == CredentialKind::ClaudeSubscription {
+        usage_source: Some(if info.kind == CredentialKind::ClaudeSubscriptionToken {
             "claude_oauth_usage".into()
         } else {
             format!("credential_api:{}", info.provider)
@@ -44,7 +44,7 @@ fn unknown(info: &CredentialInfo, now: OffsetDateTime) -> QuotaObservationRecord
 
 pub(crate) fn refresh(id: &str, path: &Path) -> Result<QuotaObservationRecord> {
     let root = super::root()?;
-    if super::read_at(&root, id)?.info.kind == CredentialKind::ClaudeSubscription {
+    if super::read_at(&root, id)?.info.kind == CredentialKind::ClaudeSubscriptionToken {
         return refresh_claude_at(&root, id, path);
     }
     refresh_selected_at(&root, id, path, |selected| {
@@ -69,7 +69,7 @@ pub(crate) fn refresh(id: &str, path: &Path) -> Result<QuotaObservationRecord> {
 
 fn refresh_claude_at(root: &Path, id: &str, path: &Path) -> Result<QuotaObservationRecord> {
     let selected = super::read_at(root, id)?;
-    if selected.info.kind != CredentialKind::ClaudeSubscription {
+    if selected.info.kind != CredentialKind::ClaudeSubscriptionToken {
         anyhow::bail!("credential changed during quota check");
     }
     let result = crate::usage::claude::refresh_token(&selected.secret);
@@ -244,7 +244,7 @@ mod tests {
         let source = CredentialInfo {
             id: "claude-sub".into(),
             provider: "anthropic".into(),
-            kind: CredentialKind::ClaudeSubscription,
+            kind: CredentialKind::ClaudeSubscriptionToken,
             account_label: "Subscription".into(),
             env_var: None,
         };

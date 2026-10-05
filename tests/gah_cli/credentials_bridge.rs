@@ -25,7 +25,7 @@ fn native_provider_connection_commands_match_installed_cli() {
         native_args::save(
             "claude-subscription",
             "anthropic",
-            "claude_subscription",
+            "claude_subscription_token",
             "Subscription",
             None,
         ),

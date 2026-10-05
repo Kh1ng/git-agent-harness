@@ -731,7 +731,9 @@ Each backend authenticates through its own CLI, not through GAH:
   `codex doctor` (websocket connect + auth). Account-level quota is subscription,
   not API-metered.
 - **claude** — `claude` CLI login; configured executable path allowed via
-  profile `claude_path`.
+  profile `claude_path`. A saved subscription token (`claude setup-token`,
+  credential kind `claude_subscription_token`) can be bound to an instance
+  instead of a browser login; see "Claude subscription token" below.
 - **agy / agy-main / agy-second** — `agy` and the `agy-main` wrapper share the
   default `HOME` and therefore one authenticated account/quota pool;
   `agy-second` is isolated by `agy_second_home` as a distinct account.
@@ -997,6 +999,30 @@ The CLI supports the same storage through `gah credentials list --json`,
 The save command reads the secret from stdin. Its `--id`, `--provider`,
 `--kind`, and `--account-label` arguments contain metadata only.
 `gah quota refresh --credential NAME` checks only that connection.
+
+### Claude subscription token
+
+GAH runs Claude under isolated per-attempt state, so the interactive OAuth
+login in `~/.claude` is invisible to dispatched runs. `claude setup-token`
+prints one long-lived token for the subscription; save it once per account
+and bind it to a Claude instance (issue #1352). The runner receives it only
+as `CLAUDE_CODE_OAUTH_TOKEN`, never as an API key:
+
+```sh
+claude setup-token            # prints the token; do not paste it into shell history
+read -rs TOKEN; printf '%s' "$TOKEN" | \
+  gah credentials save --id claude-work --provider claude \
+    --kind claude_subscription_token --account-label work
+```
+
+The token counts as subscription quota: candidates on a bound instance are
+`included_in_quota` and never require paid-route approval. `gah auth-health`
+reports each instance independently; a saved token reads as unknown there
+because a login check cannot verify it — `gah quota refresh --credential
+claude-work` (also run by auto-refresh) verifies it against the subscription.
+Save one credential per account and give each instance its own `state_root`,
+so concurrent instances never rewrite shared login state. The token is
+stored owner-only and never appears in argv, logs, ledger, or telemetry.
 
 ### Mistral dashboard usage
 

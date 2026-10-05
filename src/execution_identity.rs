@@ -211,6 +211,13 @@ pub fn runner_kind_for_backend(backend: &str) -> &str {
     }
 }
 
+/// The Claude subscription token injection (#1352). It is subscription
+/// quota, never a work-scoped paid credential, so profile external scopes
+/// cannot gate it behind an approval.
+pub fn is_subscription_injection(name: &str) -> bool {
+    name == "CLAUDE_CODE_OAUTH_TOKEN"
+}
+
 /// A selected key is subject to the same work-scoped external approval as
 /// keys from the profile's environment file. Missing work context fails closed.
 pub fn authorize_credential_env(
@@ -223,13 +230,11 @@ pub fn authorize_credential_env(
     let scoped = env
         .iter()
         .filter(|(name, _)| {
-            if name == "CLAUDE_CODE_OAUTH_TOKEN" {
-                return false;
-            }
-            profile
-                .external_credential_scopes
-                .values()
-                .any(|scope| scope.env_vars.contains(name))
+            !is_subscription_injection(name)
+                && profile
+                    .external_credential_scopes
+                    .values()
+                    .any(|scope| scope.env_vars.contains(name))
         })
         .map(|(name, _)| name)
         .collect::<Vec<_>>();

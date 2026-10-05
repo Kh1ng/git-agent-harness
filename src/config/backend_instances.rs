@@ -476,7 +476,9 @@ fn validate_cost(
         .credential_id
         .as_deref()
         .and_then(|id| crate::credentials::get(id).ok())
-        .is_some_and(|info| info.kind == crate::credentials::CredentialKind::ClaudeSubscription)
+        .is_some_and(|info| {
+            info.kind == crate::credentials::CredentialKind::ClaudeSubscriptionToken
+        })
         && (!candidate.included_in_quota
             || candidate.requires_approval
             || candidate.marginal_cost_usd.is_some())

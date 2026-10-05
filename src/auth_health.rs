@@ -397,47 +397,58 @@ fn dispatch_failures(now: time::OffsetDateTime) -> Vec<AuthProbe> {
     failures
 }
 
-fn subscription_probes(config: &crate::config::GahConfig) -> Vec<AuthProbe> {
-    subscription_probes_with(config, |instance| {
-        let info = crate::credentials::get(instance.credential_id.as_deref()?).ok()?;
-        (info.kind == crate::credentials::CredentialKind::ClaudeSubscription)
-            .then(|| crate::config::backend_instance_auth_ready(instance).unwrap_or(false))
+/// Auth probes for declared Claude instances. The ambient probe below covers
+/// the shared default login; each instance isolates either a native OAuth
+/// login (checked under its own state root) or a saved subscription token.
+/// A saved token is not verifiable through a local login check, so it reads
+/// as unknown rather than healthy (#1352).
+fn claude_instance_probes(config: &crate::config::GahConfig) -> Vec<AuthProbe> {
+    claude_instance_probes_with(config, |instance| {
+        if let Some(credential) = instance.credential_id.as_deref() {
+            return match crate::credentials::get(credential) {
+                Ok(info)
+                    if info.kind == crate::credentials::CredentialKind::ClaudeSubscriptionToken =>
+                {
+                    Some(AuthHealth::new(
+                        AuthState::Unknown,
+                        Some("The saved Claude subscription token was not verified by this check."),
+                    ))
+                }
+                Ok(_) => None,
+                Err(_) => Some(AuthHealth::new(
+                    AuthState::Missing,
+                    Some("The bound Claude subscription token is not saved on this node."),
+                )),
+            };
+        }
+        let root = instance.state_root.as_deref().map(Path::new)?;
+        let crate::runner::ExecutableResolution::Found(executable) =
+            crate::runner::resolve_backend_instance_executable(instance)
+        else {
+            return None;
+        };
+        Some(claude_login(&executable, Some(root)).unwrap_or_else(timed_out))
     })
 }
 
-fn subscription_probes_with(
+fn claude_instance_probes_with(
     config: &crate::config::GahConfig,
-    mut readiness: impl FnMut(&crate::config::BackendInstanceConfig) -> Option<bool>,
+    mut instance_health: impl FnMut(&crate::config::BackendInstanceConfig) -> Option<AuthHealth>,
 ) -> Vec<AuthProbe> {
     let mut probes = Vec::new();
-
+    let mut seen = std::collections::HashSet::new();
     for profile in config.profiles.values() {
         for (id, instance) in &profile
             .effective_routing(&config.defaults)
             .backend_instances
         {
-            if instance.runner_kind != "claude" || !instance.enabled() {
+            if instance.runner_kind != "claude" || !instance.enabled() || !seen.insert(id.clone()) {
                 continue;
             }
-            let Some(ready) = readiness(instance) else {
+            let Some(health) = instance_health(instance) else {
                 continue;
             };
-            let mut result = probe(
-                "claude",
-                None,
-                AuthHealth::new(
-                    if ready {
-                        AuthState::Ok
-                    } else {
-                        AuthState::Missing
-                    },
-                    Some(if ready {
-                        "Claude subscription token is configured."
-                    } else {
-                        "Claude subscription instance is unavailable."
-                    }),
-                ),
-            );
+            let mut result = probe("claude", None, health);
             result.backend_instance = Some(id.clone());
             probes.push(result);
         }
@@ -451,7 +462,7 @@ pub fn probe_node() -> AuthHealthReport {
     let now = time::OffsetDateTime::now_utc();
     let mut probes = Vec::new();
     if let Ok(config) = crate::config::load(None) {
-        probes.extend(subscription_probes(&config));
+        probes.extend(claude_instance_probes(&config));
     }
     if let Some(claude) = resolve("claude") {
         probes.push(probe(
@@ -533,51 +544,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn subscription_health_uses_inherited_instances_and_runner_kind() {
+    fn claude_instance_probes_report_each_instance_without_ambient_mixing() {
         let mut config = crate::config::GahConfig {
             defaults: Default::default(),
             profiles: Default::default(),
             context: Default::default(),
         };
-        let mut profile = crate::config::tests::test_profile_for_notifications();
-        for id in ["global", "overridden", "disabled"] {
+        for (id, credential) in [
+            ("token-saved", Some("saved-token")),
+            ("token-missing", Some("missing-token")),
+            ("api-key", Some("api-key")),
+        ] {
             config.defaults.routing.backend_instances.insert(
                 id.into(),
                 crate::config::BackendInstanceConfig {
                     runner_kind: "claude".into(),
-                    credential_id: Some("global-token".into()),
+                    credential_id: credential.map(str::to_string),
                     ..Default::default()
                 },
             );
         }
+        let mut profile = crate::config::tests::test_profile_for_notifications();
         profile.routing.backend_instances.insert(
-            "overridden".into(),
+            "oauth-instance".into(),
             crate::config::BackendInstanceConfig {
-                credential_id: Some("profile-token".into()),
+                runner_kind: "claude".into(),
+                state_root: Some("/isolated/claude".into()),
                 ..Default::default()
             },
         );
         profile.routing.backend_instances.insert(
             "disabled".into(),
             crate::config::BackendInstanceConfig {
+                runner_kind: "claude".into(),
                 enabled: Some(false),
                 ..Default::default()
             },
         );
         config.profiles.insert("test".into(), profile);
-        let probes = subscription_probes_with(&config, |instance| {
-            assert_eq!(instance.runner_kind, "claude");
-            Some(instance.credential_id.as_deref() == Some("global-token"))
+        // A sibling profile inherits the same default instances; one logical
+        // instance must still report exactly one probe.
+        config.profiles.insert(
+            "second".into(),
+            crate::config::tests::test_profile_for_notifications(),
+        );
+        let probes = claude_instance_probes_with(&config, |instance| {
+            match instance.credential_id.as_deref() {
+                Some("saved-token") => Some(AuthHealth::new(
+                    AuthState::Unknown,
+                    Some("The saved Claude subscription token was not verified by this check."),
+                )),
+                Some("missing-token") => Some(AuthHealth::new(
+                    AuthState::Missing,
+                    Some("The bound Claude subscription token is not saved on this node."),
+                )),
+                Some("api-key") => None,
+                Some(other) => panic!("unexpected credential {other}"),
+                None if instance.state_root.is_some() => Some(AuthHealth::new(AuthState::Ok, None)),
+                None => panic!("state-root instance expected"),
+            }
         });
-        assert_eq!(probes.len(), 2);
-        assert!(probes
-            .iter()
-            .any(|probe| probe.backend_instance.as_deref() == Some("global")
-                && probe.health.state == AuthState::Ok));
-        assert!(probes.iter().any(
-            |probe| probe.backend_instance.as_deref() == Some("overridden")
-                && probe.health.state == AuthState::Missing
-        ));
+        let by_id = |id: &str| {
+            probes
+                .iter()
+                .find(|probe| probe.backend_instance.as_deref() == Some(id))
+        };
+        assert_eq!(
+            probes.len(),
+            3,
+            "api-key, disabled and duplicate instances report no login probe"
+        );
+        let saved = by_id("token-saved").unwrap();
+        assert_eq!(saved.health.state, AuthState::Unknown);
+        assert_eq!(saved.backend, "claude");
+        assert_eq!(
+            by_id("token-missing").unwrap().health.state,
+            AuthState::Missing
+        );
+        assert_eq!(by_id("oauth-instance").unwrap().health.state, AuthState::Ok);
     }
 
     fn text(success: bool, stdout: &str) -> AuthState {

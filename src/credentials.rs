@@ -13,7 +13,10 @@ mod tests;
 #[clap(rename_all = "snake_case")]
 pub enum CredentialKind {
     ApiKey,
-    ClaudeSubscription,
+    /// Long-lived Claude subscription token from `claude setup-token`.
+    /// Injected only for the Claude runner as `CLAUDE_CODE_OAUTH_TOKEN`;
+    /// it is subscription quota, never a paid API route.
+    ClaudeSubscriptionToken,
     MistralDashboard,
     /// Mistral console email and password (`{"email","password"}`). Central
     /// signs in headlessly whenever the cached dashboard session expires.
@@ -106,9 +109,9 @@ fn validate(info: &CredentialInfo) -> Result<()> {
         bail!("invalid credential account label");
     }
     match info.kind {
-        CredentialKind::ClaudeSubscription
+        CredentialKind::ClaudeSubscriptionToken
             if info.provider == "anthropic" && info.env_var.is_none() => {}
-        CredentialKind::ClaudeSubscription => {
+        CredentialKind::ClaudeSubscriptionToken => {
             bail!("Claude subscription credentials require Anthropic without an execution environment variable")
         }
         CredentialKind::MistralDashboard | CredentialKind::MistralLogin
@@ -477,12 +480,12 @@ fn execution_env_with(
     if info.provider != canonical_provider(expected_provider)
         || !matches!(
             info.kind,
-            CredentialKind::ApiKey | CredentialKind::ClaudeSubscription
+            CredentialKind::ApiKey | CredentialKind::ClaudeSubscriptionToken
         )
     {
         bail!("named credential does not match the execution provider");
     }
-    if info.kind == CredentialKind::ClaudeSubscription {
+    if info.kind == CredentialKind::ClaudeSubscriptionToken {
         if expected_provider != "claude" {
             bail!("Claude subscription token requires the Claude runner");
         }

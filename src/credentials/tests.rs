@@ -103,7 +103,7 @@ fn bindings_fail_closed_and_cannot_change_runtime_configuration() {
 fn claude_subscription_is_private_and_only_binds_the_claude_runner() {
     let mut source = info("subscription");
     source.provider = "claude".into();
-    source.kind = CredentialKind::ClaudeSubscription;
+    source.kind = CredentialKind::ClaudeSubscriptionToken;
     source.env_var = None;
     let dir = tempfile::tempdir().unwrap();
     let saved = save_at(
@@ -230,12 +230,12 @@ fn replacing_api_key_with_subscription_reclassifies_existing_paid_route() {
     let resolve = || {
         let mut routing = stored.clone();
         routing.normalize_subscription_candidates(|id| {
-            read_at(&root, id).unwrap().info.kind == CredentialKind::ClaudeSubscription
+            read_at(&root, id).unwrap().info.kind == CredentialKind::ClaudeSubscriptionToken
         });
         routing.improve_candidates.unwrap().remove(0)
     };
     assert!(resolve().requires_approval);
-    source.kind = CredentialKind::ClaudeSubscription;
+    source.kind = CredentialKind::ClaudeSubscriptionToken;
     source.env_var = None;
     save_at(&root, source, "synthetic-subscription-token").unwrap();
     let candidate = resolve();
