@@ -39,6 +39,23 @@ pub(super) fn invalid_model(
     Some(message)
 }
 
+/// Remove the worktree of a run parked for an invalid model, committing any
+/// partial work first so the human who fixes the config does not lose it.
+pub(super) fn discard_preserving_wip(
+    wt: &std::path::Path,
+    profile: &crate::config::Profile,
+    mode: impl std::fmt::Display,
+    attempt_number: u32,
+) -> Result<()> {
+    crate::worktree::preserve_wip(
+        wt,
+        &profile.default_target_branch,
+        &format!("gah: WIP invalid-model {mode} attempt {attempt_number}"),
+    )?;
+    crate::worktree::cleanup(wt, std::path::Path::new(&profile.local_path));
+    Ok(())
+}
+
 /// Classification of a backend that launched but exited nonzero, derived
 /// from its terminal log (extracted from `improve` to keep that function
 /// focused on orchestration).

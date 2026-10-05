@@ -725,17 +725,19 @@ pub(in crate::dispatch) fn review(
                 profile,
                 ledger,
             );
-            if review_outcome_allows_reroute(&attempt.outcome) {
-                let failure_output = review_failure_output(
-                    &attempt.outcome,
-                    &attempt.stdout,
-                    &attempt.stderr,
-                    attempt.idle_timeout_seconds,
-                );
-                if let Some(message) = crate::model_validation::invalid_model_message(
-                    &failure_output,
-                    &route_label(&route.effective_backend, route.effective_model.as_deref()),
-                ) {
+            // Only a reviewer that exited on its own can have rejected the
+            // model. Each stream is checked alone so reviewer stdout cannot
+            // push the runner's stderr diagnostic out of the leading lines.
+            if matches!(
+                attempt.outcome,
+                runner::ReviewProcessOutcome::NonZeroExit(_)
+            ) {
+                let label = route_label(&route.effective_backend, route.effective_model.as_deref());
+                if let Some(message) =
+                    crate::model_validation::invalid_model_message(&attempt.stderr, &label).or_else(
+                        || crate::model_validation::invalid_model_message(&attempt.stdout, &label),
+                    )
+                {
                     ledger.set_failure(
                         crate::ledger::FailureClass::ConfigError,
                         crate::ledger::FailureStage::Review,

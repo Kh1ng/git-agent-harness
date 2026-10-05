@@ -598,7 +598,7 @@ pub(crate) fn improve(
             );
             shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
             if let Some(message) = invalid_model {
-                worktree::cleanup(&wt, repo);
+                stall::discard_preserving_wip(&wt, profile, &args.mode, attempt + 1)?;
                 anyhow::bail!("{message}");
             }
             if stalled {
