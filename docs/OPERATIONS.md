@@ -143,7 +143,8 @@ of the prebuild gate issue.
   a blocker repair; that incident is exactly what this contract prevents. The
   timer is installed by `gah update`/`scripts/install.sh` alongside the loop
   unit but is never automatically enabled — opt in once you've configured an
-  alert command in `gah-watchdog.service`'s `ExecStart`:
+  alert command in a `systemctl --user edit gah-watchdog.service` drop-in.
+  The packaged check writes to the journal and requires no alert transport:
   ```bash
   systemctl --user enable --now gah-watchdog.timer
   ```
@@ -157,16 +158,22 @@ the systemd unit: its control-group boundary additionally covers SIGKILL, when
 no in-process cleanup handler can run.
 
 The checked-in server template is
-`packaging/systemd/gah-server.service`. Before installing it, edit its `User`,
-`WorkingDirectory`, `GAH_CONFIG_PATH`, Node path, and `PATH` values for the
-host; its explicit toolchain `PATH` is required for dashboard-dispatched work.
-Then install it as a system service:
+`packaging/systemd/gah-server.service`. It contains placeholders, not host
+values. `gah update --role central` renders it for the account that runs the
+update: its user, checkout, config path, the `node` found on `PATH`, and a
+toolchain `PATH` that dispatched work needs. Then it installs the result as a
+system service. The user units (`gah-loop@`, `gah-prune`,
+`gah-quota-refresh`) are rendered the same way. Do not copy a template
+verbatim. Then enable the service:
 
 ```bash
-sudo install -m 0644 packaging/systemd/gah-server.service /etc/systemd/system/gah-server.service
-sudo systemctl daemon-reload
+gah update --role central
 sudo systemctl enable --now gah-server
 ```
+
+Run `gah update` again after you move the checkout or change the Node install.
+Keep local customization in `systemctl edit` drop-ins, because every update
+replaces the base unit.
 
 #### Server bind host (issue #643)
 
