@@ -128,6 +128,7 @@ interface DispatchSettingsSectionProps {
     max_parallel_workers: number | null;
     validation_timeout_seconds?: number | null;
     manager_wake_autonomy: WakeAutonomyValue | null;
+    hold_contract_changes?: boolean;
   };
   profileLoading: boolean;
   profileError: string | null;
@@ -145,6 +146,7 @@ function DispatchSettingsSection({
   const [parallel, setParallel] = useState<string>('');
   const [validationTimeout, setValidationTimeout] = useState<string>('');
   const [autonomy, setAutonomy] = useState<WakeAutonomyValue>('off');
+  const [holdContractChanges, setHoldContractChanges] = useState(true);
   // Tracks which profile name the form was last seeded for. We only seed once
   // per profile selection — subsequent data refreshes (e.g. a GET after a
   // PATCH) must not overwrite the user's in-progress edits.
@@ -164,6 +166,7 @@ function DispatchSettingsSection({
     setParallel(selected.max_parallel_workers != null ? String(selected.max_parallel_workers) : '');
     setValidationTimeout(selected.validation_timeout_seconds != null ? String(selected.validation_timeout_seconds) : '');
     setAutonomy(selected.manager_wake_autonomy ?? 'off');
+    setHoldContractChanges(selected.hold_contract_changes ?? true);
   }, [selectedName, selected]);
 
   if (profileLoading && !selected) {
@@ -193,6 +196,7 @@ function DispatchSettingsSection({
     await updateProfile(selectedName, {
       max_parallel_workers: parsed,
       manager_wake_autonomy: autonomy,
+      hold_contract_changes: holdContractChanges,
       ...(hasValidationTimeout
         ? { validation_timeout_seconds: parsedValidationTimeout }
         : { clear: ['validation_timeout_seconds'] }),
@@ -271,6 +275,22 @@ function DispatchSettingsSection({
           </select>
           <p className="text-xs text-muted mt-1">
             What a woken manager agent may do when a notify-worthy event fires.
+          </p>
+        </div>
+
+        <div>
+          <label className="flex items-center gap-2 text-xs font-medium text-secondary">
+            <input
+              type="checkbox"
+              checked={holdContractChanges}
+              onChange={(e) => setHoldContractChanges(e.target.checked)}
+            />
+            Hold schema and API contract changes for my review
+          </label>
+          <p className="text-xs text-muted mt-1">
+            When on, an approved PR that changes the ledger, telemetry, migrations or
+            <code> packages/contracts</code> without compatibility evidence waits for you.
+            Other approved PRs never wait on this check.
           </p>
         </div>
       </div>

@@ -72,7 +72,7 @@ import { factoryRunOutput } from './factoryRunOutput.js';
 import { readLedger, roleMetrics } from './roleMetrics.js';
 import { readPriceBook, refreshModelPrices } from './modelPricing.js';
 import { helperPriceExtractor } from './modelPriceHelper.js';
-import { deriveControllerActivity } from './controllerActivity.js';
+import { deriveControllerActivity, deriveLastDecision } from './controllerActivity.js';
 import { authMiddleware, coordinatorTokenMatches, isLocalAddress, requireOwner } from './authMiddleware.js';
 import { DeviceAccess } from './deviceAccess.js';
 import { mutationSafety } from './mutationSafety.js';
@@ -2375,6 +2375,18 @@ export function createServer(
       res.json(factoryRunOutput(req.params.runId, Number(req.query.after ?? 0), undefined, req.query.full === '1', since));
     } catch (error) {
       res.status(502).json({ error: 'Failed to read run output', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get('/api/loop/last-decision', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    try {
+      res.json(deriveLastDecision(await runEvents(profile, '24h')));
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load the last loop decision',
+        message: error instanceof Error ? error.message : String(error)
+      });
     }
   });
 

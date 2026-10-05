@@ -781,6 +781,9 @@ export interface ProfileSummary {
   manager_wake_autonomy: WakeAutonomyValue | null;
   /** Delivery mode for work results ('pr' | 'handoff'). Defaults to 'pr' if omitted. */
   delivery_mode?: 'pr' | 'handoff';
+  /** Whether an approved change to a persisted or wire contract without
+   * compatibility evidence waits for a human (#1405). Defaults to true. */
+  hold_contract_changes?: boolean;
   /** Effective validation command timeout in seconds for this profile (defaults
    * to 300). If unset in TOML, this is computed and returned as the effective
    * timeout. */
@@ -1230,6 +1233,16 @@ export type HumanRequiredReasonCode =
   | 'unknown';
 
 export type ControllerActivityStatus = 'running' | 'finished' | 'failed';
+
+/** The loop's most recent decision for a profile and why (#1406). */
+export interface LoopDecision {
+  timestamp: string;
+  /** NextAction kind, e.g. `dispatch_ticket`, `human_required`, `no_op`. */
+  kind: string;
+  reason: string;
+  work_id: string | null;
+  reason_code: string | null;
+}
 
 export interface ControllerActivity {
   run_id: string;

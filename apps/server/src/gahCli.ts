@@ -962,6 +962,8 @@ export interface ProfileSetOptions {
   manager_wake_autonomy?: string | null;
   /** Validation command timeout in seconds. */
   validation_timeout_seconds?: number | null;
+  /** Hold approved schema/API contract changes for human review (#1405). */
+  hold_contract_changes?: boolean | null;
   clear?: string[];
   config?: string;
 }
@@ -1062,6 +1064,11 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   } else if (options.clear?.includes('manager_wake_autonomy')) {
     args.push('--clear', 'manager_wake_autonomy');
   }
+  if (typeof options.hold_contract_changes === 'boolean') {
+    args.push('--hold-contract-changes', String(options.hold_contract_changes));
+  } else if (options.clear?.includes('hold_contract_changes')) {
+    args.push('--clear', 'hold_contract_changes');
+  }
   appendClearArgs(
     args,
     options.clear,
@@ -1069,6 +1076,7 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
       'max_parallel_workers',
       'manager_wake_autonomy',
       'validation_timeout_seconds',
+      'hold_contract_changes',
     ])
   );
   

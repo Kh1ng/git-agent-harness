@@ -334,6 +334,7 @@ const ALLOWED_FAILURE_CLASSES: &[&str] = &[
     "harness_error",
     "environment_error",
     "backend_error",
+    "config_error",
     "agent_no_progress",
     "agent_failure",
     "review_output_invalid",
