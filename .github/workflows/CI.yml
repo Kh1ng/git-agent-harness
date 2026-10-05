@@ -52,6 +52,107 @@ jobs:
           done <<< "$(git diff --name-status --diff-filter=A "$base" "$head" | cut -f2)"
           exit "$bad"
 
+  # Issue #1318 acceptance: a standalone install must succeed on Linux with
+  # no Tailscale executable, serve the dashboard, and expose nothing beyond
+  # loopback. This lane runs the real scripts/install-linux.sh end to end --
+  # configure-node-role, gah update (server + web build and deploy), the
+  # /etc/gah/server.env bind-host policy, and gah-server.service under real
+  # systemd -- then probes the live service. The failure-path diagnostics
+  # (journalctl capture) are covered by source-structure tests.
+  standalone-install:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run only when the install path changed
+        id: scope
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          if git diff --name-only "$base" "$head" | grep -qE '^(scripts/(install|configure-node-role|bootstrap)|src/(setup/|installer/|update\.rs|node_role\.rs)|packaging/systemd/|apps/server/src/nodeRole\.ts|\.github/workflows/CI\.yml)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: The runner must not have a Tailscale executable (the #1318 scenario)
+        if: steps.scope.outputs.run == 'true'
+        run: '! command -v tailscale'
+
+      - name: Install Node.js
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Rust
+        if: steps.scope.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Stage an operator-style main checkout of this pull request
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          # `gah update` requires a clean checkout of origin's default branch
+          # and a fast-forwardable pull. Serve this pull request's head from
+          # a local bare "origin" whose main branch is exactly this code, so
+          # the installer sees the same shape an operator's live checkout has.
+          git init --bare "$HOME/origin.git"
+          git -C "$HOME/origin.git" symbolic-ref HEAD refs/heads/main
+          git push "$HOME/origin.git" HEAD:refs/heads/main
+          git clone "$HOME/origin.git" "$HOME/gah"
+
+      - name: Configure gah-server.service for this runner (documented drop-in)
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          # The shipped unit template names the operator's own user and
+          # toolchain paths ("Adjust the cargo/node paths below to match your
+          # actual toolchain install"). A systemd drop-in is the documented
+          # customization seam, so the checkout stays clean for gah update.
+          node_bin="$(dirname "$(command -v node)")"
+          sudo install -d -m 0755 /etc/systemd/system/gah-server.service.d
+          printf '%s\n' \
+            '[Service]' \
+            "User=$USER" \
+            "WorkingDirectory=$HOME/gah" \
+            "Environment=GAH_CONFIG_PATH=$HOME/.config/gah/config.toml" \
+            "Environment=PATH=$HOME/.cargo/bin:$node_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            'Environment=GAH_WEB_ROOT=/var/www/gah' \
+            'ExecStart=' \
+            "ExecStart=$(command -v node) $HOME/gah/apps/server/dist/bin.js" \
+            | sudo tee /etc/systemd/system/gah-server.service.d/ci-runner.conf >/dev/null
+
+      - name: Run the real standalone installer
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          GAH_NODE_ROLE=standalone bash "$HOME/gah/scripts/install-linux.sh"
+
+      - name: Verify service, loopback-only bind, dashboard, and role
+        if: steps.scope.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          systemctl is-active --quiet gah-server.service
+          grep -q '^HOST=127\.0\.0\.1$' /etc/gah/server.env
+          exposed="$(ss -tln | awk '$4 ~ /:3773$/ && $4 !~ /^127\.0\.0\.1:3773$/')"
+          if [ -n "$exposed" ]; then
+            echo "::error::server is listening on a non-loopback address: $exposed"
+            exit 1
+          fi
+          curl -fsS -o /dev/null http://127.0.0.1:3773/
+          curl -fsS http://127.0.0.1:3773/health | grep -q '"status":"healthy"'
+          gah status --role --json | grep -q '"role":"standalone"'
+
   test:
     runs-on: ubuntu-latest
     permissions:

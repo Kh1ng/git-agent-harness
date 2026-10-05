@@ -482,28 +482,35 @@ pub fn requirements(selection: &Selection, host: &dyn Host) -> Vec<Requirement> 
             action: None,
             help: None,
         });
-        list.push(Requirement {
-            id: "tailscale",
-            label: "Tailscale".into(),
-            why: if feature == Feature::Worker {
-                "The simplest private network between this worker and its central node."
-            } else {
-                "Reach the dashboard from your phone and other machines over HTTPS, privately."
-            },
-            feature,
-            optional: true,
-            status: command_status(host, "tailscale", &["version"], None),
-            action: match os {
-                Os::Macos => package(host, &[(PackageManager::Brew, "--cask tailscale")]),
-                Os::Linux => Some(Action {
-                    kind: ActionKind::Install,
-                    command: "curl -fsSL https://tailscale.com/install.sh | sh".into(),
-                    sudo: true,
-                }),
-                Os::Other => None,
-            },
-            help: Some("https://tailscale.com/download"),
-        });
+        // Tailscale is a networked-node concern: worker<->central transport,
+        // or reaching a central dashboard from other machines. A standalone
+        // host is loopback-only by definition (#1318): setup must not install,
+        // configure, prompt for, or require it, so the requirement is absent
+        // rather than optional.
+        if selection.role != Role::Standalone {
+            list.push(Requirement {
+                id: "tailscale",
+                label: "Tailscale".into(),
+                why: if feature == Feature::Worker {
+                    "The simplest private network between this worker and its central node."
+                } else {
+                    "Reach the dashboard from your phone and other machines over HTTPS, privately."
+                },
+                feature,
+                optional: true,
+                status: command_status(host, "tailscale", &["version"], None),
+                action: match os {
+                    Os::Macos => package(host, &[(PackageManager::Brew, "--cask tailscale")]),
+                    Os::Linux => Some(Action {
+                        kind: ActionKind::Install,
+                        command: "curl -fsSL https://tailscale.com/install.sh | sh".into(),
+                        sudo: true,
+                    }),
+                    Os::Other => None,
+                },
+                help: Some("https://tailscale.com/download"),
+            });
+        }
     }
 
     if wants(Feature::Memory) && selection.memory == MemoryMode::Colocated {
@@ -719,6 +726,19 @@ pub(crate) mod tests {
             matches!(systemd.status, Status::Unsupported { .. }),
             "no systemctl means no service"
         );
+    }
+
+    #[test]
+    fn standalone_setup_never_prompts_for_tailscale() {
+        let list = requirements(
+            &selection(Role::Standalone),
+            &FakeHost::new(Os::Linux, Some(PackageManager::Apt)),
+        );
+        assert!(
+            !ids(&list).contains(&"tailscale"),
+            "standalone is loopback-only: setup must not install, configure, prompt for, or require Tailscale (#1318)"
+        );
+        assert!(ids(&list).ends_with(&["curl", "service_manager"]));
     }
 
     #[test]
