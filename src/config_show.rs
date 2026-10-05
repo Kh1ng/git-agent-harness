@@ -489,7 +489,11 @@ pub fn config_show_full(
     }
 
     Ok(ConfigShowFull {
-        factory_enabled: cfg.defaults.factory_enabled.unwrap_or(true),
+        factory_enabled: if !config_path.exists() {
+            false
+        } else {
+            cfg.defaults.factory_enabled.unwrap_or(true)
+        },
         node: crate::node_role::NodeRoleStatus::resolve(&cfg.defaults)?,
         schema_version: CONFIG_SHOW_SCHEMA_VERSION,
         config_path: config_path.to_string_lossy().into_owned(),

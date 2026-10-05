@@ -237,7 +237,7 @@ document.querySelector('#factory-save')!.addEventListener('click', () => {
 });
 document.querySelector('#setup-terminal')!.addEventListener('click', () => {
   void perform(async () => {
-    await invoke('open_setup_terminal', { factoryEnabled: factory.checked });
+    await invoke('open_setup_terminal', {});
     document.querySelector('#setup-state')!.textContent = 'Setup is running in Terminal. Check again when it finishes.';
   });
 });
