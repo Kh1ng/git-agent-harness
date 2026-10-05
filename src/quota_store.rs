@@ -1221,6 +1221,21 @@ mod tests {
         assert_eq!(windows[1].quota_used_percent, Some(20.0));
     }
 
+    /// #1384 review: a newer account-wide reading must not hide an exhausted
+    /// model-scoped reading of the same window from routing.
+    #[test]
+    fn latest_windows_keep_model_scoped_reading_beside_account_reading() {
+        let mut account = scoped_record(Some("account-a"), 50.0, "2026-07-20T11:00:00Z");
+        account.model = None;
+        let exhausted = scoped_record(Some("account-a"), 100.0, "2026-07-20T10:00:00Z");
+        let records = [account, exhausted];
+        let windows = latest_windows_for_identity(&records, &identity("account-a"));
+        assert_eq!(windows.len(), 2);
+        assert!(windows
+            .iter()
+            .any(|record| record.model.is_some() && record.quota_used_percent == Some(100.0)));
+    }
+
     #[test]
     fn newer_failed_or_empty_check_invalidates_only_its_account() {
         let success = scoped_record(Some("account-a"), 20.0, "2026-07-20T10:00:00Z");

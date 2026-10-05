@@ -356,7 +356,8 @@ fn transform_to_report_format(
                     .unwrap_or_default()
                     .cmp(a.observed_at.as_deref().unwrap_or_default())
             });
-            quota_observations.dedup_by(|a, b| observation_key(a) == observation_key(b));
+            let mut seen = std::collections::HashSet::new();
+            quota_observations.retain(|record| seen.insert(observation_key(record)));
 
             comparisons.push(BackendModelComparison {
                 backend_or_model: group.group_key.clone(),
@@ -472,8 +473,6 @@ fn build_trend(
     Ok(points.into_values().collect())
 }
 
-/// #1339: identity+reading key used to deduplicate merged quota
-/// observations on a report row.
 /// #1339: identity+reading key used to deduplicate merged quota
 /// observations on a report row.
 type QuotaObservationKey = (

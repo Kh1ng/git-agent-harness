@@ -53,11 +53,14 @@ pub fn latest_windows_for_identity_and_credential<'a>(
             }
         })
         .collect();
-    // One identity pins its instance, pool and credential, so the source key
-    // is the credential only; window qualifiers are appended by the core.
-    let source_key: fn(&QuotaObservationRecord) -> Vec<Option<&str>> =
-        |record| vec![record.credential_id.as_deref()];
-    select_latest_windows(matching, source_key)
+    // One identity pins its instance and pool: a failed check invalidates per
+    // credential, while readings stay distinct per model so a model-scoped
+    // limit is never hidden by a newer account-wide reading of that window.
+    select_latest_windows(
+        matching,
+        |record| vec![record.credential_id.as_deref()],
+        |record| vec![record.model.as_deref()],
+    )
 }
 
 /// Latest windows for every source identity under one logical backend
@@ -75,7 +78,7 @@ pub fn latest_windows_for_backend<'a>(
         .collect();
     // A backend view spans many accounts, so the source key carries the full
     // identity: a failed check must not wipe a sibling account's windows.
-    let source_key: fn(&QuotaObservationRecord) -> Vec<Option<&str>> = |record| {
+    let source_key = |record: &'a QuotaObservationRecord| {
         vec![
             record.credential_id.as_deref(),
             record.backend_instance.as_deref(),
@@ -83,18 +86,21 @@ pub fn latest_windows_for_backend<'a>(
             record.model.as_deref(),
         ]
     };
-    select_latest_windows(matching, source_key)
+    select_latest_windows(matching, source_key, source_key)
 }
 
 /// Shared freshness selection: a failed or empty check invalidates earlier
-/// data for its source (an account-wide check with no window invalidates all
-/// of that source's windows), and the newest valid reading wins per window.
-fn select_latest_windows<'a, S>(
+/// data for its `source_key` (an account-wide check with no window
+/// invalidates all of that source's windows), and the newest valid reading
+/// wins per `reading_key` and window.
+fn select_latest_windows<'a, S, R>(
     matching: Vec<&'a QuotaObservationRecord>,
     source_key: S,
+    reading_key: R,
 ) -> Vec<&'a QuotaObservationRecord>
 where
     S: Fn(&'a QuotaObservationRecord) -> Vec<Option<&'a str>>,
+    R: Fn(&'a QuotaObservationRecord) -> Vec<Option<&'a str>>,
 {
     let timestamp = |record: &QuotaObservationRecord| {
         record
@@ -139,7 +145,8 @@ where
         {
             continue;
         }
-        let key = with_window(record);
+        let mut key = reading_key(record);
+        key.push(record.quota_window.as_deref());
         if windows
             .get(&key)
             .is_none_or(|current| timestamp(record) >= timestamp(current))
