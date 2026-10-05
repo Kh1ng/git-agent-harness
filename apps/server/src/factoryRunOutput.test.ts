@@ -66,6 +66,18 @@ test('factoryRunOutput serves logs a loop holds open, then the run directory onc
   assert.equal(findRunLogOnDisk('00000000-0000-4000-8000-000000000000', [sessions]), null);
 });
 
+test('a run id that resolves outside its sessions root is not served', () => {
+  const base = mkdtempSync(join(tmpdir(), 'gah-run-output-'));
+  const outside = join(base, 'outside', RUN);
+  mkdirSync(join(outside, 'attempt-1'), { recursive: true });
+  const file = join(outside, 'attempt-1', 'backend-output.log');
+  writeFileSync(file, line({ type: 'item.completed', item: { type: 'agent_message', text: 'Outside.' } }));
+  assert.deepEqual(findRunLogOnDisk(RUN, [join(base, 'outside')]), { file, attempt: 1 });
+  // The `..` puts a real directory with a real log outside the root: containment, not a failed read, is what stops it.
+  assert.equal(findRunLogOnDisk(`../outside/${RUN}`, [join(base, 'sessions')]), null);
+  assert.equal(factoryRunOutput(`../outside/${RUN}`, 0, { logs: new Map(), roots: new Set([join(base, 'sessions')]) }).found, false);
+});
+
 test('a line longer than the read window is still read whole', () => {
   const file = join(mkdtempSync(join(tmpdir(), 'gah-run-output-')), 'backend-output.log');
   const big = 'y'.repeat(600 * 1024);

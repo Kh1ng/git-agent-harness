@@ -1,5 +1,5 @@
 import { closeSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, statSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, join, resolve, sep } from 'node:path';
 import type { FactoryRunEvent, FactoryRunOutput } from '@git-agent-harness/contracts';
 
 /** A run's agent output: an implementation attempt's `backend-output.log`,
@@ -58,7 +58,8 @@ function mtime(file: string): number {
 export function findRunLogOnDisk(runId: string, roots: Iterable<string>): RunLog | null {
   let best: (RunLog & { at: number }) | null = null;
   for (const root of roots) {
-    const directory = join(root, runId);
+    const directory = resolve(join(root, runId));
+    if (!directory.startsWith(root.endsWith(sep) ? root : root + sep)) continue;
     let entries: string[];
     try { entries = readdirSync(directory); } catch { continue; }
     for (const entry of ['', ...entries]) {
