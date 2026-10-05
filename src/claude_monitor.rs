@@ -578,6 +578,9 @@ Total cost:                $0.0123
     #[test]
     fn pty_captures_usage_from_fake_claude() {
         use std::io::Write;
+        // Writes and runs a shim, and needs `script` on PATH: hold the exec
+        // lock so no PATH-swapping or shim-writing test overlaps it.
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let dir = std::env::temp_dir().join(format!("gah_claude_fake_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let fake = dir.join("claude.sh");

@@ -17,8 +17,8 @@ cd "$repo_root"
 # gah-server.service.
 role="${GAH_NODE_ROLE:-central}"
 case "$role" in
-  central|worker) ;;
-  *) echo "ERROR: unknown GAH_NODE_ROLE='$role' (expected 'central' or 'worker')" >&2; exit 1 ;;
+  central|standalone|worker) ;;
+  *) echo "ERROR: unknown GAH_NODE_ROLE='$role' (expected 'central', 'standalone', or 'worker')" >&2; exit 1 ;;
 esac
 
 
@@ -26,41 +26,64 @@ esac
 # --bin gah is required: Cargo.toml declares a second [[bin]]
 # (generate-cli-capabilities) with no default-run set, so a bare
 # `cargo run` is ambiguous and errors instead of picking one.
-bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --bin gah --
-cargo run --bin gah -- update --repo "$repo_root" --role "$role"
+bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --locked --bin gah --
+# The update command also enables user lingering (issue #1347) so the user
+# units it installs survive reboots without a login session. Only central,
+# which already needs sudo here, may prompt; a worker host without root uses
+# `sudo -n`, so it still installs cleanly and only gets a warning.
+cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role"
 
-# MagicDNS is useful only when this client accepts the tailnet DNS settings.
-# The tailnet-wide toggle still belongs to the Tailscale admin console.
-if command -v tailscale >/dev/null 2>&1; then
-  sudo tailscale set --accept-dns=true
-else
-  echo 'WARNING: Tailscale is not installed; join the tailnet, then run tailscale set --accept-dns=true.' >&2
+# tailscale-dns-guard:start -- extracted verbatim by
+# tests/source_structure.rs::standalone_install_never_touches_tailscale,
+# keep this block self-contained (only $role as input).
+if [ "$role" != "standalone" ]; then
+  # MagicDNS is useful only when this client accepts the tailnet DNS settings.
+  # The tailnet-wide toggle still belongs to the Tailscale admin console.
+  if command -v tailscale >/dev/null 2>&1; then
+    sudo tailscale set --accept-dns=true
+  else
+    echo 'WARNING: Tailscale is not installed; join the tailnet, then run tailscale set --accept-dns=true.' >&2
+  fi
 fi
+# tailscale-dns-guard:end
 
 # Persistent server bind-host override (issue #643). Created only on first
-# install; every later run of this script, and every `gah update
-# --restart-server`, leaves an existing file untouched so an operator's HOST
-# choice survives reinstall/update. Set GAH_SERVER_HOST to override the fresh-
-# install default: this node's tailnet IPv4 when available, otherwise loopback.
+# central install; later central installs and `gah update --restart-server`
+# leave it untouched. Standalone reasserts loopback on
+# every install, including a switch from an existing networked server. Set
+# GAH_SERVER_HOST to explicitly choose another bind address.
+# server-env-config:start -- exercised by
+# tests/source_structure.rs::standalone_rebinds_an_existing_server_env.
 server_env_file=/etc/gah/server.env
-if [ "$role" = "central" ]; then
+if [ "$role" = "central" ] || [ "$role" = "standalone" ]; then
   if [ ! -f "$server_env_file" ]; then
     sudo install -d -m 0755 /etc/gah
     # server-host-default:start -- exercised without sudo/file writes by
     # tests/source_structure.rs::install_linux_prefers_the_tailnet_bind_host.
     server_host="${GAH_SERVER_HOST:-}"
     if [ -z "$server_host" ]; then
-      server_host="$(gah tailscale-ip 2>/dev/null || true)"
-      if [ -z "$server_host" ]; then server_host=127.0.0.1; fi
+      if [ "$role" = "standalone" ]; then
+        server_host=127.0.0.1
+      else
+        server_host="$(gah tailscale-ip 2>/dev/null || true)"
+        if [ -z "$server_host" ]; then server_host=127.0.0.1; fi
+      fi
     fi
     # server-host-default:end
     printf 'HOST=%s\n' "$server_host" | sudo tee "$server_env_file" >/dev/null
     sudo chmod 0644 "$server_env_file"
     echo "Created $server_env_file (set HOST= there to change the bind address without editing the unit)"
   else
-    echo "Preserving existing $server_env_file"
+    if [ "$role" = "standalone" ]; then
+      server_host="${GAH_SERVER_HOST:-127.0.0.1}"
+      printf '%s' "$server_host" | sudo "$(command -v gah || echo "$HOME/.cargo/bin/gah")" installer env-set --file "$server_env_file" HOST
+      echo "Set HOST=$server_host in $server_env_file for standalone mode"
+    else
+      echo "Preserving existing $server_env_file"
+    fi
   fi
 fi
+# server-env-config:end
 
 # Memory gateway placement (issue #880). Opt-in: GAH_GATEWAY_MODE unset (the
 # default) skips this whole section, so a plain `scripts/install.sh` run
@@ -77,7 +100,7 @@ fi
 # gateway-target-mapping:start -- extracted verbatim by
 # tests/source_structure.rs::install_linux_gateway_mapping_writes_both_targets_for_central,
 # keep this block self-contained (only $role/$server_env_file/$HOME as inputs).
-if [ "$role" = "central" ]; then
+if [ "$role" = "central" ] || [ "$role" = "standalone" ]; then
   gateway_env_files=("$server_env_file" "$HOME/.config/gah/gah-loop.env")
   gateway_env_sudo=("sudo" "")
 else
@@ -183,11 +206,24 @@ case "${GAH_GATEWAY_MODE:-}" in
     node_dir="$(dirname "$(command -v node)")"
     gateway_unit_dst="$HOME/.config/systemd/user/tdai-memory-gateway.service"
     install -d -m 0755 "$(dirname "$gateway_unit_dst")"
-    sed \
-      -e "s|%h/workspace/agent-lab/repos/github/Kh1ng/TencentDB-Agent-Memory/MemoryCore|$GAH_GATEWAY_MEMORYCORE_PATH|g" \
-      -e "s|^Environment=PATH=.*|Environment=PATH=$node_dir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|" \
-      -e "s|^ExecStart=npx tsx|ExecStart=$node_dir/npx tsx|" \
-      packaging/systemd/tdai-memory-gateway.service > "$gateway_unit_dst"
+    # gateway-unit-render:start
+    node --input-type=module - "$GAH_GATEWAY_MEMORYCORE_PATH" "$node_dir" "$gateway_unit_dst" <<'JAVASCRIPT'
+import { readFileSync, writeFileSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
+
+let template = readFileSync('packaging/gateway/tdai-memory-gateway.service', 'utf8');
+for (const [placeholder, value] of [['@MEMORYCORE@', process.argv[2]], ['@NODE_DIR@', process.argv[3]]]) {
+  if (!isAbsolute(value) || /["\\$\x00-\x1f\x7f]/.test(value)) {
+    throw new Error('Gateway paths must be absolute and contain no quotes, backslashes, dollar signs, or control characters');
+  }
+  if (placeholder === '@NODE_DIR@' && value.includes(':')) {
+    throw new Error('Gateway Node directory cannot contain a colon');
+  }
+  template = template.replaceAll(placeholder, value.replaceAll('%', '%%'));
+}
+writeFileSync(process.argv[4], template);
+JAVASCRIPT
+    # gateway-unit-render:end
     systemctl --user daemon-reload
     systemctl --user enable --now tdai-memory-gateway.service
 
@@ -216,14 +252,36 @@ case "${GAH_GATEWAY_MODE:-}" in
     ;;
 esac
 
-if [ "$role" = "central" ]; then
-  sudo install -m 0644 packaging/systemd/gah-server.service /etc/systemd/system/gah-server.service
-  sudo systemctl daemon-reload
-  sudo systemctl enable --now gah-server.service
-  sudo systemctl is-active --quiet gah-server.service
+# server-service-start:start -- tested with stubbed systemctl by
+# tests/source_structure.rs::standalone_service_restart_and_start_failures_report_journal.
+if [ "$role" = "central" ] || [ "$role" = "standalone" ]; then
+  # `gah update` above rendered and installed the unit for this account (#1322).
+  server_start_failed=0
+  sudo systemctl enable --now gah-server.service || server_start_failed=1
+  if [ "$server_start_failed" = 0 ] && [ "$role" = "standalone" ]; then
+    # enable --now does not restart a service that was already running with
+    # the former network bind address.
+    sudo systemctl restart gah-server.service || server_start_failed=1
+  fi
+  # Restart=always hides a crash loop from a single is-active check: require
+  # the service to stay up without restarting, and show why when it does not.
+  if [ "$server_start_failed" = 0 ]; then
+    sleep 5
+    if ! sudo systemctl is-active --quiet gah-server.service \
+      || [ "$(systemctl show -p NRestarts --value gah-server.service)" != "0" ]; then
+      server_start_failed=1
+    fi
+  fi
+  if [ "$server_start_failed" != 0 ]; then
+    echo "ERROR: gah-server.service did not stay running." >&2
+    sudo systemctl status --no-pager gah-server.service >&2 || true
+    sudo journalctl -u gah-server.service -n 50 --no-pager >&2 || true
+    exit 1
+  fi
 else
   echo "Role is 'worker': skipping gah-server.service (this host doesn't serve the control plane)."
 fi
+# server-service-start:end
 
 # Existing-project context import (opt-in, issue seen 2026-08-08). Reuses
 # whatever gateway this host is now wired to (colocated above, remote above,
@@ -239,8 +297,8 @@ if [ -n "${GAH_IMPORT_REPO:-}" ]; then
     ${GAH_IMPORT_DOCS:+--docs "$GAH_IMPORT_DOCS"}
 fi
 
-if [ "$role" = "central" ]; then
-  echo "GAH installed. Update with: gah update --repo $repo_root --role central --restart-server"
+if [ "$role" = "central" ] || [ "$role" = "standalone" ]; then
+  echo "GAH installed. Update with: gah update --repo $repo_root --role $role --restart-server"
 else
   echo "GAH installed. Update with: gah update --repo $repo_root --role worker"
 fi

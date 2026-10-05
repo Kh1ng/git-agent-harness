@@ -421,3 +421,76 @@ fn successful_agy_execution_captures_quota_telemetry() {
     assert_eq!(top_usage["cache_write_tokens"], 3);
     assert_eq!(top_usage["total_tokens"], 651);
 }
+
+/// Issue #1339 acceptance: a store holding instance-scoped Claude and
+/// router rows shows them in the report's backend rows, via the same
+/// selector the quota snapshot uses — never merged into ledger groups.
+/// A remaining-only reading (no used percent) still surfaces.
+#[test]
+fn report_shows_store_account_quota_for_instance_scoped_and_router_rows() {
+    let mut ledger = TestLedger::new();
+    ledger = ledger.with_entry(usage_entry(
+        "claude",
+        Some("claude-sonnet"),
+        serde_json::json!({}),
+        vec![],
+    ));
+    ledger = ledger.with_entry(usage_entry(
+        "agy",
+        Some("gpt-5.4"),
+        serde_json::json!({}),
+        vec![],
+    ));
+
+    let harness = ScenarioHarness::new("github").with_ledger(ledger);
+    let store_path = harness.quota_store_path();
+    std::fs::write(
+        &store_path,
+        concat!(
+            r#"{"backend":"claude","backend_instance":"claude","quota_window":"5h","quota_remaining_percent":40.0,"observed_at":"2026-10-04T08:00:00Z","checked_at":"2026-10-04T08:00:00Z","usage_source":"claude_native"}"#,
+            "\n",
+            r#"{"backend":"claude","backend_instance":"claude","quota_window":"weekly","quota_used_percent":12.5,"observed_at":"2026-10-04T08:00:00Z","checked_at":"2026-10-04T08:00:00Z","usage_source":"claude_native"}"#,
+            "\n",
+            r#"{"backend":"agy","backend_instance":"agy-primary","quota_pool":"agy:external","quota_window":"weekly","quota_remaining_percent":63.0,"observed_at":"2026-10-04T08:30:00Z","checked_at":"2026-10-04T08:30:00Z","usage_source":"cli_router"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let mut harness = harness;
+    let report = harness.run_report_json("backend").unwrap();
+    let rows = report["comparisons"].as_array().unwrap();
+
+    let claude = rows
+        .iter()
+        .find(|row| row["backend_or_model"] == "claude")
+        .unwrap();
+    let claude_quota = claude["quota_observations"].as_array().unwrap();
+    let claude_windows: Vec<&str> = claude_quota
+        .iter()
+        .filter_map(|q| q["quota_window"].as_str())
+        .collect();
+    assert!(
+        claude_windows.contains(&"5h") && claude_windows.contains(&"weekly"),
+        "instance-scoped Claude windows must surface: {claude_quota:?}"
+    );
+    let weekly = claude_quota
+        .iter()
+        .find(|q| q["quota_window"] == "weekly")
+        .unwrap();
+    assert_eq!(weekly["quota_used_percent"], 12.5);
+    assert_eq!(weekly["backend_instance"], "claude");
+
+    let agy = rows
+        .iter()
+        .find(|row| row["backend_or_model"] == "agy")
+        .unwrap();
+    let agy_quota = agy["quota_observations"].as_array().unwrap();
+    let router = agy_quota
+        .iter()
+        .find(|q| q["usage_source"] == "cli_router")
+        .unwrap();
+    assert_eq!(router["quota_remaining_percent"], 63.0);
+    assert_eq!(router["quota_used_percent"], serde_json::Value::Null);
+    assert_eq!(router["backend_instance"], "agy-primary");
+}

@@ -15,8 +15,8 @@
 //! `reqwest`/`hyper`. The response bodies these parsers were developed
 //! against are captured in `tests/fixtures/mistral-admin/PROVENANCE.md`.
 
-use crate::ledger::summary::GroupQuotaObservation;
 use crate::ledger::LedgerUsage;
+use crate::quota_store::QuotaObservationRecord;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write as _;
@@ -112,7 +112,7 @@ pub struct AdminRefresh {
     pub workspace_usage: LedgerUsage,
     pub billing: LedgerUsage,
     pub rate_limits: AdminRateLimits,
-    pub spend_limit: Option<GroupQuotaObservation>,
+    pub spend_limit: Option<QuotaObservationRecord>,
     pub spend_limit_error: Option<String>,
 }
 
@@ -404,20 +404,23 @@ fn admin_spend_limit_quota_used_percent(
     }
 }
 
-/// Same shape as `usage::codex_rate_limits_to_quota_observation`: turn a raw
-/// Admin API spend-limit response into an account-level
-/// `GroupQuotaObservation`, timestamped with the observation time (the
+/// Turn a raw Admin API spend-limit response into an account-level quota
+/// store record (#1339: the fetcher returns store records, not a
+/// ledger-summary display type), timestamped with the observation time (the
 /// response body carries no observation timestamp of its own).
 pub fn admin_spend_limit_to_quota_observation(
     json: &str,
     backend: &str,
     model: Option<&str>,
-) -> Option<GroupQuotaObservation> {
+) -> Option<QuotaObservationRecord> {
     let usage = parse_admin_spend_limit(json);
     usage.usage_source.as_ref()?;
-    Some(GroupQuotaObservation {
+    Some(QuotaObservationRecord {
         backend: backend.to_string(),
+        backend_instance: None,
+        credential_id: None,
         model: model.map(|m| m.to_string()),
+        quota_pool: None,
         quota_window: Some("monthly".to_string()),
         quota_used_percent: usage.quota_used_percent,
         quota_remaining_percent: usage.quota_remaining_percent,
@@ -425,7 +428,11 @@ pub fn admin_spend_limit_to_quota_observation(
         observed_at: time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
             .ok(),
+        checked_at: None,
+        check_error: None,
         usage_source: usage.usage_source,
+        mistral_admin: None,
+        account_usage: None,
     })
 }
 

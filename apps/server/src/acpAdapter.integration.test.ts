@@ -119,6 +119,20 @@ const emptyTurnInput = {
   onToolResult: () => undefined
 };
 
+test('a missing ACP command rejects the turn instead of crashing the server', async () => {
+  const backend = createAcpBackend('Hermes', () => ({
+    command: join(tmpdir(), 'gah-acp-command-that-does-not-exist'),
+    args: ['acp']
+  }));
+
+  await assert.rejects(
+    backend.runTurn('profile', emptyTurnInput),
+    /Hermes is not installed on this machine: the ".*gah-acp-command-that-does-not-exist" command was not found\./
+  );
+  // The failed connection must not be cached: the next turn tries again.
+  await assert.rejects(backend.runTurn('profile', emptyTurnInput), /Hermes is not installed/);
+});
+
 test('detail-less ACP rejection surfaces code and bounded child diagnostics', async () => {
   const fake = fakeAcpScript();
   try {

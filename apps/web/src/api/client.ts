@@ -268,6 +268,17 @@ export interface StopLoopResult {
   error?: string;
 }
 
+export interface GitWorktreeSummary {
+  path: string;
+  /** Null for a detached HEAD. */
+  branch: string | null;
+  head: string;
+  /** The project's own checkout, as opposed to a job or chat worktree. */
+  main: boolean;
+  /** Null when the directory could not be read. */
+  changedFiles: number | null;
+}
+
 export interface GahDataSource {
   getCoordinatorInfo(): Promise<CoordinatorInfo>;
   getFleetSnapshot(): Promise<FleetSnapshot>;
@@ -305,7 +316,7 @@ export interface GahDataSource {
   setManagerChatBackend(profile: string, backendId: string): Promise<{ success: boolean }>;
   getGatewaySettings(): Promise<GatewaySettingsSummary>;
   revealGatewayBootstrapCommand(): Promise<GatewayBootstrapCommand>;
-  getNodeSetupCommand(data: { os: 'windows' | 'linux' | 'macos'; centralUrl: string; role: 'desktop' | 'worker' | 'both' | 'central'; gatewayUrl?: string }): Promise<{ command: string }>;
+  getNodeSetupCommand(data: { os: 'windows' | 'linux' | 'macos'; centralUrl: string; role: 'desktop' | 'worker' | 'both' | 'central' | 'standalone'; gatewayUrl?: string }): Promise<{ command: string }>;
   updateGatewaySettings(data: GatewaySettingsUpdate): Promise<GatewaySettingsSummary>;
   getSkills(): Promise<{ skills: SkillSummary[] }>;
   getSkill(id: string, version: string): Promise<Skill>;
@@ -321,6 +332,7 @@ export interface GahDataSource {
   getHelperUsage(limit?: number): Promise<{ records: HelperUsageRecord[] }>;
   getGitBranches(profile: string): Promise<{ branches: string[]; current: string }>;
   getGitLog(profile: string, limit?: number): Promise<{ commits: { hash: string; short: string; subject: string; author: string; ago: string }[] }>;
+  getGitWorktrees(profile: string): Promise<{ worktrees: GitWorktreeSummary[] }>;
   getGitPrs(profile: string): Promise<{ prs: ChatPrSummary[]; warning?: string }>;
   createGitPr(profile: string, data: { title: string; body?: string; base?: string; draft?: boolean }): Promise<{ url: string }>;
   createGitCommit(profile: string, message: string, sessionId?: string, files?: string[], nodeId?: string): Promise<{ hash: string }>;
@@ -670,6 +682,9 @@ export const gahApi: GahDataSource = {
   },
   getGitLog(profile, limit) {
     return getJson('/api/git/log', { profile, limit: limit?.toString() });
+  },
+  getGitWorktrees(profile) {
+    return getJson('/api/git/worktrees', { profile });
   },
   getGitPrs(profile) {
     return getJson('/api/git/prs', { profile });

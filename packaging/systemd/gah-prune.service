@@ -9,11 +9,9 @@
 # calling the server package's shared maintenance path. Both commands remain
 # on this one existing daily timer; no chat-specific scheduler is created.
 #
-# Install:
-#   mkdir -p ~/.config/systemd/user
-#   cp gah-prune.service gah-prune.timer ~/.config/systemd/user/
-#   systemctl --user daemon-reload
-#   systemctl --user enable --now gah-prune.timer
+# Install: `gah update` renders the @...@ placeholders for the installing
+# account and enables gah-prune.timer. This is a user unit, so it runs as
+# that account without User=/Group=.
 [Unit]
 Description=GAH prune — remove stale worktrees and sessions for all profiles
 After=network-online.target
@@ -21,19 +19,17 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=khing
-Group=khing
-WorkingDirectory=/home/khing/workspace/agent-lab/repos/github/Kh1ng/git-agent-harness
-Environment=GAH_CONFIG_PATH=/home/khing/.config/gah/config.toml
-Environment=PATH=/home/khing/.cargo/bin:/home/khing/.nvm/versions/node/v22.23.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WorkingDirectory=@REPO@
+Environment="GAH_CONFIG_PATH=@CONFIG@"
+Environment="PATH=@PATH@"
 Environment=PORT=3773
 # The maintenance HTTP request uses HOST/PORT and sends COORDINATOR_TOKEN.
 # Wildcard HOST values use loopback, which needs no token. A specific remote
 # interface requires the token and explicit GAH_ALLOW_INSECURE_HTTP=1 because
 # this command connects directly over HTTP, not through a TLS reverse proxy.
 EnvironmentFile=-/etc/gah/server.env
-ExecStart=/usr/local/bin/gah prune
-ExecStart=/usr/bin/env node apps/server/dist/chatMaintenanceCli.js
+ExecStart="@GAH@" prune
+ExecStart="@NODE@" apps/server/dist/chatMaintenanceCli.js
 TimeoutStartSec=300
 StandardOutput=journal
 StandardError=journal
