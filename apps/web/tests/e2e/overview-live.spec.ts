@@ -66,6 +66,12 @@ test('rows derive their state from sessions, runs, claims, instance health and q
   });
   // The process's own --model wins; otherwise the account's routing model is shown.
   expect(named.map((row) => [row.name, row.state, row.job, row.model])).toEqual([['codex', 'working', '#1380', 'gpt-6-luna'], ['claude', 'working', '#1381', 'm']]);
+  // One process per job: it outranks a ledger entry left by an earlier attempt on another backend.
+  const retried = buildLiveRows({ accounts: idle, sessions: [], claims: [],
+    controllerRuns: [{ run_id: 'a', profile: 'gah', work_id: '#1380', started_at: '2026-10-04T11:54:43Z', finished_at: null, action: 'fix_existing: x', status: 'running', outcome: null }],
+    ledgers: { '#1380': { effective_backend: 'claude', effective_model: 'sonnet', mode: 'fix' } as never },
+    factoryAgents: [{ pid: 1, tool: 'codex', cwd: '/w/a', started_at: '2026-10-04T11:55:13Z', model: 'gpt-6-sol' }] });
+  expect(retried.filter((row) => row.job).map((row) => [row.name, row.model, row.runId])).toEqual([['codex', 'gpt-6-sol', 'a']]);
   expect(rows.map((row) => [row.name, row.state, row.job, row.mode])).toEqual([
     ['Work account', 'working', '#946', 'improve'],
     ['vibe', 'working', '#951', 'fix'],
@@ -162,4 +168,49 @@ test('Non Factory Agents lists device CLIs outside the factory and dashboard cha
   await expect(panel.getByText('Yesterday')).toHaveCount(0);
   await rows.nth(3).getByRole('button', { name: 'Fix the retry loop' }).click();
   await expect(page).toHaveURL(/[?&]chat=chat-1/);
+});
+
+test('Watch live opens a read-only view of a running job in the left sidebar and follows its output', async ({ page }) => {
+  const RUN = '8c4013e4-2937-4bac-b258-115ae2b3d7e1';
+  let polls = 0;
+  await page.route('**/api/controller-activity**', (route) => route.fulfill({ json: [
+    { run_id: RUN, profile: 'fixture', work_id: '#1381', started_at: new Date(Date.now() - 120_000).toISOString(), finished_at: null, action: 'dispatch_ticket: 1381', status: 'running', outcome: null }
+  ] }));
+  await page.route('**/api/device-agents', (route) => route.fulfill({ json: { supported: true, generated_at: new Date().toISOString(), agents: [],
+    factory_agents: [{ pid: 1, tool: 'codex', model: 'gpt-6-sol', cwd: '/w/a', started_at: new Date(Date.now() - 110_000).toISOString() }] } }));
+  await page.route(`**/api/factory-runs/${RUN}/output**`, (route) => {
+    const after = Number(new URL(route.request().url()).searchParams.get('after'));
+    polls++;
+    if (after === 0) return route.fulfill({ json: { found: true, attempt: 1, next: 100, truncated: false, events: [
+      { kind: 'message', text: 'I will trace the loop.' },
+      { kind: 'command', text: 'cargo test --lib', output: null, status: 'running', exit_code: null }
+    ] } });
+    if (after === 100) return route.fulfill({ json: { found: true, attempt: 1, next: 200, truncated: false, events: [
+      { kind: 'command', text: 'cargo test --lib', output: 'test result: FAILED', status: 'failed', exit_code: 101 },
+      { kind: 'file_change', text: 'update src/controller/decision.rs', status: 'completed' }
+    ] } });
+    return route.fulfill({ json: { found: true, attempt: 1, next: 200, truncated: false, events: [] } });
+  });
+  await page.goto('/?page=overview&profile=fixture');
+  const live = page.getByRole('region', { name: 'Factory Agents Status' });
+  // The running job is named by the factory's agent process (its account and model), not "controller".
+  await expect(live).toContainText('Mock-account Gpt-6-sol');
+  await live.getByRole('button', { name: 'Watch #1381 live' }).click();
+  const view = page.getByRole('complementary', { name: 'Live view' });
+  await expect(view.getByRole('heading', { name: 'Mock-account gpt-6-sol on #1381' })).toBeVisible();
+  await expect(view).toContainText('Live view · read only');
+  const steps = view.getByRole('list', { name: 'Agent output' }).getByRole('listitem');
+  await expect(steps.nth(0)).toContainText('I will trace the loop.');
+  // The running command is replaced by its result, then the file change follows.
+  await expect(steps).toHaveCount(3, { timeout: 8000 });
+  await expect(steps.nth(1)).toContainText('failed (101)');
+  await expect(steps.nth(1)).toContainText('test result: FAILED');
+  await expect(steps.nth(2)).toContainText('update src/controller/decision.rs');
+  await expect(view.getByRole('status')).toContainText('Following · 3 steps');
+  // View only: nothing in it sends input or stops the job.
+  await expect(view.getByRole('textbox')).toHaveCount(0);
+  await expect(view.getByRole('button')).toHaveCount(1);
+  expect(polls).toBeGreaterThan(1);
+  await view.getByRole('button', { name: 'Close live view' }).click();
+  await expect(page.getByRole('complementary', { name: 'Git issues' })).toBeVisible();
 });

@@ -23,7 +23,7 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
 import { formatPercent, formatAge, formatLocalTime, isStale, formatTokens, formatCount, oldestFetchedAt } from '../lib/format.js';
 import { AttentionTable, attentionRows } from '../components/AttentionTable.js';
-import { LiveAgentsCard } from '../components/LiveAgentsCard.js';
+import { LiveAgentsCard, agentDisplayName } from '../components/LiveAgentsCard.js';
 import { NonFactoryAgentsCard } from '../components/NonFactoryAgentsCard.js';
 import { updateNavigation } from '../lib/navigationState.js';
 
@@ -31,13 +31,15 @@ type OverviewPageProps = {
   sessions: Session[];
   onNavigate: (page: Page) => void;
   onOpenWork?: (workId: string) => void;
+  /** Opens a running job's read-only live view. */
+  onWatchRun?: (run: { runId: string; title: string; subtitle: string | null }) => void;
   /** The device's agent processes; absent in isolation (component tests). */
   deviceAgents?: { data: DeviceAgentsSnapshot | null; error: string | null };
 };
 
 const OVERVIEW_REFRESH_MS = 5 * 60 * 1000;
 
-export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, deviceAgents = { data: null, error: null } }: OverviewPageProps) {
+export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, onWatchRun, deviceAgents = { data: null, error: null } }: OverviewPageProps) {
   const { status, quota, loopStatus, loopAction } = useGahStore();
   const { profile: wsProfile, controllerActivity } = useWebSocket();
   const profileOverride = useUiStore((s) => s.profileOverride);
@@ -171,7 +173,8 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, devi
       </div>
 
       <LiveAgentsCard profile={profile ?? null} sessions={sessions} controllerRuns={controllerActivity}
-        claims={snapshot?.active_claims ?? []} candidates={quotaSnapshot?.candidates ?? []} factoryAgents={deviceAgents.data?.factory_agents} />
+        claims={snapshot?.active_claims ?? []} candidates={quotaSnapshot?.candidates ?? []} factoryAgents={deviceAgents.data?.factory_agents}
+        onWatch={onWatchRun ? (row) => row.runId && onWatchRun({ runId: row.runId, title: `${agentDisplayName(row.name)}${row.model ? ` ${row.model}` : ''} on ${row.job ?? 'a job'}`, subtitle: row.mode }) : undefined} />
 
       <NonFactoryAgentsCard device={deviceAgents.data} deviceError={deviceAgents.error} onOpenChat={(chatProfile, sessionId) => { setProfileOverride(chatProfile); updateNavigation({ profile: chatProfile, chat: sessionId }); onNavigate('chat'); }} />
 

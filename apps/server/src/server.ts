@@ -68,6 +68,7 @@ import { getFleetDispatch, sessionStore } from './wsServer.js';
 import { ActivityFeed, validateNotificationPreferences } from './activityFeed.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
 import { deviceAgentsSnapshot } from './deviceAgents.js';
+import { factoryRunOutput } from './factoryRunOutput.js';
 import { deriveControllerActivity } from './controllerActivity.js';
 import { authMiddleware, coordinatorTokenMatches, isLocalAddress, requireOwner } from './authMiddleware.js';
 import { DeviceAccess } from './deviceAccess.js';
@@ -2334,6 +2335,15 @@ export function createServer(
       res.json(deviceAgentsSnapshot(profiles.map((profile) => profile.worktree_base).filter((root): root is string => !!root)));
     } catch (error) {
       res.status(502).json({ error: 'Failed to list device agents', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  // Read-only view of a running factory job's agent output, for debugging.
+  app.get('/api/factory-runs/:runId/output', (req, res) => {
+    try {
+      res.json(factoryRunOutput(req.params.runId, Number(req.query.after ?? 0)));
+    } catch (error) {
+      res.status(502).json({ error: 'Failed to read run output', message: error instanceof Error ? error.message : String(error) });
     }
   });
 

@@ -34,6 +34,8 @@ export interface LiveAgentRow {
   state: LiveState;
   /** Work id of a busy row. */
   job: string | null;
+  /** The controller run behind a busy row, when there is one: its output can be watched. */
+  runId: string | null;
   mode: string | null;
   /** ISO time the job started; drives the elapsed timer. */
   since: string | null;
@@ -131,6 +133,7 @@ interface LiveJob {
   instance: string | null;
   model: string | null;
   action: string | null;
+  runId: string | null;
 }
 
 function sessionBackend(session: Session): string | null {
@@ -160,7 +163,7 @@ export function buildLiveRows(input: {
     if (!['starting', 'running', 'stopping'].includes(session.status)) continue;
     if (session.target) covered.add(session.target);
     jobs.push({ key: `session:${session.id}`, workId: session.target ?? null, mode: session.mode ?? null, since: session.startedAt ?? null,
-      backend: sessionBackend(session), instance: session.instanceId || null, model: session.model ?? null, action: null });
+      backend: sessionBackend(session), instance: session.instanceId || null, model: session.model ?? null, action: null, runId: null });
   }
   for (const run of input.controllerRuns) {
     if (run.status !== 'running' || (run.work_id && covered.has(run.work_id))) continue;
@@ -168,20 +171,28 @@ export function buildLiveRows(input: {
     const ledger = run.work_id ? input.ledgers[run.work_id] : null;
     const [mode] = run.action.split(':');
     jobs.push({ key: `run:${run.run_id}`, workId: run.work_id, mode: ledger?.mode ?? (mode && !mode.includes(' ') ? mode : null), since: run.started_at,
-      backend: ledger?.effective_backend ?? ledger?.backend ?? null, instance: null, model: ledger?.effective_model ?? null, action: run.action });
+      backend: ledger?.effective_backend ?? ledger?.backend ?? null, instance: null, model: ledger?.effective_model ?? null, action: run.action, runId: run.run_id });
   }
   for (const claim of input.claims) {
     if (covered.has(claim.work_id)) continue;
     covered.add(claim.work_id);
     const ledger = input.ledgers[claim.work_id];
     jobs.push({ key: `claim:${claim.work_id}`, workId: claim.work_id, mode: ledger?.mode ?? claim.scope, since: claim.claimed_at,
-      backend: ledger?.effective_backend ?? ledger?.backend ?? null, instance: null, model: ledger?.effective_model ?? null, action: null });
+      backend: ledger?.effective_backend ?? ledger?.backend ?? null, instance: null, model: ledger?.effective_model ?? null, action: null, runId: input.controllerRuns.find((run) => run.status === 'running' && run.work_id === claim.work_id)?.run_id ?? null });
   }
-  // Pair each job that names no backend with a factory agent process, oldest
-  // with oldest: the loop starts a job's agent right after it claims the work.
+  // Pair loop jobs with the factory's agent processes, oldest with oldest: the
+  // loop starts a job's agent right after it claims the work. With one process
+  // per job the process is the truth (a ledger entry is from an earlier
+  // attempt); otherwise only jobs that name no backend are filled in.
   const processes = [...(input.factoryAgents ?? [])].sort((a, b) => (a.started_at ?? '').localeCompare(b.started_at ?? ''));
-  const unnamed = jobs.filter((job) => !job.backend).sort((a, b) => (a.since ?? '').localeCompare(b.since ?? ''));
-  unnamed.forEach((job, index) => { job.backend = processes[index]?.tool ?? null; job.model = job.model ?? processes[index]?.model ?? null; });
+  const loopJobs = jobs.filter((job) => !job.key.startsWith('session:')).sort((a, b) => (a.since ?? '').localeCompare(b.since ?? ''));
+  const exact = processes.length === loopJobs.length;
+  (exact ? loopJobs : loopJobs.filter((job) => !job.backend)).forEach((job, index) => {
+    const agent = processes[index];
+    if (!agent) return;
+    job.backend = agent.tool;
+    job.model = agent.model ?? (exact ? null : job.model);
+  });
   const claimAge = (workId: string | null) => (workId ? input.claims.find((claim) => claim.work_id === workId)?.age_seconds ?? null : null);
   const state = (job: LiveJob): LiveState => (job.mode && GATE_MODES.has(job.mode) ? 'gates' : 'working');
 
@@ -199,6 +210,7 @@ export function buildLiveRows(input: {
       model: job?.model ?? account.model,
       state: job ? state(job) : !account.enabled ? 'halted' : account.notReady ? 'down' : account.resumes ? 'paused' : 'idle',
       job: job?.workId ?? null,
+      runId: job?.runId ?? null,
       mode: job?.mode ?? null,
       since: job?.since ?? null,
       claimAgeSeconds: claimAge(job?.workId ?? null),
@@ -218,6 +230,7 @@ export function buildLiveRows(input: {
       model: job.model ?? account?.model ?? null,
       state: state(job),
       job: job.workId,
+      runId: job.runId,
       mode: job.mode,
       since: job.since,
       claimAgeSeconds: claimAge(job.workId),
@@ -231,7 +244,7 @@ export function buildLiveRows(input: {
     .map(({ row }) => row);
 }
 
-function LiveRow({ row, now, ledger }: { row: LiveAgentRow; now: number; ledger: LedgerEntry | null | undefined }) {
+function LiveRow({ row, now, ledger, onWatch }: { row: LiveAgentRow; now: number; ledger: LedgerEntry | null | undefined; onWatch?: (row: LiveAgentRow) => void }) {
   const dot = DOT[row.state];
   const job = row.job ? <span className="font-mono text-primary">{row.job}</span> : 'a job';
   const elapsed = row.since ? <> for {formatDuration(now - Date.parse(row.since))}</> : null;
@@ -265,6 +278,11 @@ function LiveRow({ row, now, ledger }: { row: LiveAgentRow; now: number; ledger:
           {row.provider && edits ? ' ' : ''}
           {edits}
         </p>
+        {row.runId && onWatch && (
+          <button type="button" onClick={() => onWatch(row)} className="mt-0.5 text-xs font-medium text-accent hover:underline" aria-label={`Watch ${row.job ?? 'this job'} live`}>
+            Watch live
+          </button>
+        )}
       </div>
     </li>
   );
@@ -276,7 +294,9 @@ function LiveRow({ row, now, ledger }: { row: LiveAgentRow; now: number; ledger:
  * its backend and the files it changed. The footer is the controller's
  * latest run, so an idle fleet still says why.
  */
-export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, candidates, factoryAgents }: {
+export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, candidates, factoryAgents, onWatch }: {
+  /** Opens a read-only live view of a running job's output. */
+  onWatch?: (row: LiveAgentRow) => void;
   /** Agent processes in factory worktrees, from the device scan. */
   factoryAgents?: DeviceAgent[];
   profile: string | null;
@@ -352,7 +372,7 @@ export function LiveAgentsCard({ profile, sessions, controllerRuns, claims, cand
         <>
           {active.length > 0 ? (
             <ul className="divide-y divide-subtle" aria-label="Agents">
-              {active.map((row) => <LiveRow key={row.key} row={row} now={now} ledger={row.job ? ledgers[row.job] : null} />)}
+              {active.map((row) => <LiveRow key={row.key} row={row} now={now} ledger={row.job ? ledgers[row.job] : null} onWatch={onWatch} />)}
             </ul>
           ) : (
             <p className="text-sm text-muted">Nothing is running; every subscription is idle.</p>

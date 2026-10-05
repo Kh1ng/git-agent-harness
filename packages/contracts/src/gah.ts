@@ -1851,3 +1851,27 @@ export interface DeviceAgentsSnapshot {
    * ledger entry yet, so this is the only place its backend shows. */
   factory_agents: DeviceAgent[];
 }
+
+/** One step of a running factory job, read from its backend output log. */
+export interface FactoryRunEvent {
+  /** message: the agent speaking; command: a shell command or tool call;
+   * file_change: files it edited; raw: a line this view does not understand. */
+  kind: 'message' | 'command' | 'file_change' | 'raw';
+  text: string;
+  /** A command's output so far, tail only. */
+  output?: string | null;
+  status?: 'running' | 'completed' | 'failed' | null;
+  exit_code?: number | null;
+}
+
+/** GET /api/factory-runs/:runId/output. Read-only; poll with `next` as `after`. */
+export interface FactoryRunOutput {
+  /** False when no running loop on this node has that run's log open. */
+  found: boolean;
+  attempt: number | null;
+  /** Byte offset to pass as `after` next time. */
+  next: number;
+  /** True when earlier output was skipped to keep the first read bounded. */
+  truncated: boolean;
+  events: FactoryRunEvent[];
+}
