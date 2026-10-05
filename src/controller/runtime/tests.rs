@@ -548,3 +548,54 @@ fn no_backend_availability_zero_parallelism() {
     );
     assert_eq!(effective_parallel_limit, 0);
 }
+
+#[test]
+fn blocker_and_terminal_reporting_share_identity_in_the_same_tick() {
+    let (_tmp, cfg) = events_test_config();
+    let mut snapshot = empty_snapshot();
+    snapshot.blocked_work_items.push(capped_pr_blocker());
+    let action = NextAction::HumanRequired {
+        work_id: Some("branch-A".into()),
+        reference: Some("branch-A".into()),
+        reason: "fix cap exceeded".into(),
+        reason_code: Some("fix_retry_cap_exceeded".into()),
+    };
+    for _ in 0..3 {
+        let stale_history = crate::events::read_events(&cfg).unwrap();
+        super::report_blocked_work_items_once(&cfg, "real", &snapshot).unwrap();
+        assert!(!super::record_stop_event(
+            &cfg,
+            "real",
+            &stale_history,
+            &action,
+            crate::events::EventType::HumanRequired,
+            "Human required: fix cap exceeded",
+        )
+        .unwrap());
+    }
+    assert_eq!(crate::events::read_events(&cfg).unwrap().len(), 1);
+}
+
+#[test]
+fn admission_excludes_skipped_claims_and_initial_capacity_deferrals() {
+    let action = NextAction::DispatchTicket {
+        ticket_path: "ticket.md".into(),
+        recommended_backend: None,
+        recommended_model: None,
+        work_id: Some("TICKET-A".into()),
+        reason: "test".into(),
+    };
+    for outcome in [
+        "Skipped already-claimed work 'TICKET-A'",
+        "Deferred dispatch_ticket because node capacity is busy; no backend launched",
+        "Deferred dispatch_ticket because configured route capacity is busy; no backend launched",
+    ] {
+        assert!(!super::action_admitted_work(&action, outcome), "{outcome}");
+    }
+    assert!(super::action_admitted_work(
+        &action,
+        "Dispatched ticket 'ticket.md'"
+    ));
+    assert!(super::action_admitted_work(&action,
+        "Deferred dispatch_ticket fallback because node capacity is busy after 1 backend attempt(s); prior backend outcome preserved"));
+}

@@ -581,6 +581,32 @@ pub(super) fn no_admission_diagnostics(
     format!("No work admitted -- {}", parts.join("; "))
 }
 
+/// Prefer the ticket identity, falling back to the PR reference when no
+/// ticket identity is available.
+pub(super) fn human_required_report_identity(action: &NextAction) -> Option<&str> {
+    match action {
+        NextAction::HumanRequired { reference, .. } => action.work_id().or(reference.as_deref()),
+        _ => action.work_id(),
+    }
+}
+
+fn matching_human_required_report(
+    history: &[crate::events::ControllerEvent],
+    profile_name: &str,
+    identity: Option<&str>,
+    reason_code: Option<&str>,
+) -> bool {
+    history
+        .iter()
+        .rev()
+        .find(|event| {
+            event.event_type == "human_required"
+                && event.profile.as_deref() == Some(profile_name)
+                && event.work_id.as_deref() == identity
+        })
+        .is_some_and(|event| event.reason_code.as_deref() == reason_code)
+}
+
 /// Issue #1381: a human-required stop for the same work item and reason code
 /// as the newest human_required event for this profile has already been
 /// reported; repeating it every tick only floods the event stream.
@@ -592,18 +618,12 @@ pub(super) fn human_required_already_reported(
     if !matches!(action, NextAction::HumanRequired { .. }) {
         return false;
     }
-    history
-        .iter()
-        .rev()
-        .find(|event| {
-            event.event_type == "human_required"
-                && event.profile.as_deref() == Some(profile_name)
-                && event.work_id.as_deref() == action.work_id()
-        })
-        .is_some_and(|event| {
-            event.reason_code.as_deref() == action.human_required_reason_code()
-                && event.details.contains(action.reason())
-        })
+    matching_human_required_report(
+        history,
+        profile_name,
+        human_required_report_identity(action),
+        action.human_required_reason_code(),
+    )
 }
 
 /// Issue #1381: report each individually blocked work item (for example a PR
@@ -624,16 +644,20 @@ pub(super) fn report_blocked_work_items_once(
         let Some(reference) = blocker.source_reference.as_deref() else {
             continue;
         };
-        let reason_code = blocker.reason_code.as_deref().or(blocker.reason.as_deref());
-        let already_reported = history
+        let identity = snapshot
+            .merge_requests
             .iter()
-            .rev()
-            .find(|event| {
-                event.event_type == "human_required"
-                    && event.profile.as_deref() == Some(profile_name)
-                    && event.work_id.as_deref() == Some(reference)
+            .find(|mr| mr.branch == reference || mr.work_id.as_deref() == Some(reference))
+            .map(|mr| {
+                mr.work_id
+                    .as_deref()
+                    .or(mr.url.as_deref())
+                    .unwrap_or(&mr.branch)
             })
-            .is_some_and(|event| event.reason_code.as_deref() == reason_code);
+            .unwrap_or(reference);
+        let reason_code = blocker.reason_code.as_deref().or(blocker.reason.as_deref());
+        let already_reported =
+            matching_human_required_report(&history, profile_name, Some(identity), reason_code);
         if already_reported {
             continue;
         }
@@ -641,7 +665,7 @@ pub(super) fn report_blocked_work_items_once(
             cfg,
             crate::events::EventType::HumanRequired,
             Some(profile_name),
-            Some(reference),
+            Some(identity),
             format!(
                 "Blocked work item {reference}: {}",
                 blocker

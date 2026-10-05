@@ -2,9 +2,9 @@ use super::decision::decide_next_action;
 use super::human_required_reason::HumanRequiredReason;
 use super::recovery::{
     defer_if_branch_attached, detect_stuck_loop, human_required_already_reported,
-    latest_clear_attempts_timestamp, no_admission_diagnostics, recently_capacity_deferred_work_ids,
-    reconcile_abandoned_dispatches, record_action_events, remediation_plan_for_action,
-    report_blocked_work_items_once, retain_snapshot_candidates,
+    human_required_report_identity, latest_clear_attempts_timestamp, no_admission_diagnostics,
+    recently_capacity_deferred_work_ids, reconcile_abandoned_dispatches, record_action_events,
+    remediation_plan_for_action, report_blocked_work_items_once, retain_snapshot_candidates,
 };
 use super::NextAction;
 use anyhow::Result;
@@ -379,13 +379,8 @@ pub fn run_once(
             NextAction::HumanRequired { .. } => crate::events::EventType::HumanRequired,
             _ => crate::events::EventType::LoopStopped,
         };
-        let admission_note = matches!(
-            action,
-            NextAction::WaitUntil { .. }
-                | NextAction::HumanRequired { .. }
-                | NextAction::NoOp { .. }
-        )
-        .then(|| no_admission_diagnostics(&snapshot, 0, 1, None));
+        let admission_note = (!action_admitted_work(&action, &outcome))
+            .then(|| no_admission_diagnostics(&snapshot, 0, 1, None));
         let newly_reported = record_stop_event(
             cfg,
             profile_name,
@@ -421,12 +416,13 @@ pub fn run_once(
 fn record_stop_event(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
-    history: &[crate::events::ControllerEvent],
+    _history: &[crate::events::ControllerEvent],
     action: &NextAction,
     stop_event_type: crate::events::EventType,
     outcome: &str,
 ) -> Result<bool> {
-    if human_required_already_reported(history, profile_name, action) {
+    let history = crate::events::read_events(cfg)?;
+    if human_required_already_reported(&history, profile_name, action) {
         return Ok(false);
     }
     if matches!(action, NextAction::HumanRequired { .. }) {
@@ -434,7 +430,7 @@ fn record_stop_event(
             cfg,
             stop_event_type,
             Some(profile_name),
-            action.work_id(),
+            human_required_report_identity(action),
             outcome,
             action.human_required_reason_code(),
             remediation_plan_for_action(cfg, profile_name, action).as_ref(),
@@ -905,16 +901,19 @@ fn run_parallel_once(
         if results.is_empty() {
             println!("No actions executed (parallel limit reached or no eligible work)");
         }
-        let admitted_work = results.iter().any(|result| {
-            !matches!(
-                result.action,
-                NextAction::WaitUntil { .. }
-                    | NextAction::HumanRequired { .. }
-                    | NextAction::NoOp { .. }
-            )
-        });
-        if let Some(note) = no_admission_note.as_deref().filter(|_| !admitted_work) {
-            println!("{note}");
+        let admitted_work = results
+            .iter()
+            .any(|result| action_admitted_work(&result.action, &result.outcome));
+        if !admitted_work {
+            println!(
+                "{}",
+                no_admission_note.unwrap_or_else(|| no_admission_diagnostics(
+                    _snapshot,
+                    0,
+                    effective_parallel_limit,
+                    None
+                ))
+            );
         }
     }
 
@@ -932,6 +931,16 @@ fn run_parallel_once(
     }
 
     Ok(())
+}
+
+/// Capacity fallback after an attempt still represents admitted work; an
+/// initial deferral or a lost claim does not.
+fn action_admitted_work(action: &NextAction, outcome: &str) -> bool {
+    !matches!(
+        action,
+        NextAction::WaitUntil { .. } | NextAction::HumanRequired { .. } | NextAction::NoOp { .. }
+    ) && !outcome.starts_with("Skipped ")
+        && !(outcome.starts_with("Deferred ") && outcome.contains("no backend launched"))
 }
 
 fn update_parallel_refill_budget(

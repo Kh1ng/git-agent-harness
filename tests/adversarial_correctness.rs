@@ -847,9 +847,10 @@ fn consecutive_single_worker_ticks_print_diagnostics_but_dedupe_capped_pr_notifi
                 .contains("queue: 1 open MR(s), 1 ticket(s) considered"),
             "tick {tick}: {result:?}"
         );
-        assert_eq!(
-            result.stdout.contains("Decided: human_required"),
-            tick == 0,
+        // The initial blocker report owns the notification; the terminal
+        // action must not produce a second report in this same iteration.
+        assert!(
+            !result.stdout.contains("Decided: human_required"),
             "{result:?}"
         );
         assert!(
