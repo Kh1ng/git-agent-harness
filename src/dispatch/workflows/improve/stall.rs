@@ -15,6 +15,30 @@ pub(super) fn record_exact_route_unavailability(
     )
 }
 
+/// A runner that rejects the selected model is a configuration fault: park
+/// the work item for a human instead of retrying or rerouting.
+pub(super) fn invalid_model(
+    ledger: &mut crate::ledger::LedgerEntry,
+    log_text: &str,
+    route: &RouteDecision,
+    exit_failure: &mut BackendExitFailure,
+) -> Option<String> {
+    let label = super::super::super::attempts::route_label(
+        &route.effective_backend,
+        route.effective_model.as_deref(),
+    );
+    let message = crate::model_validation::invalid_model_message(log_text, &label)?;
+    exit_failure.failure_class = crate::ledger::FailureClass::ConfigError;
+    ledger.error_summary = Some(message.clone());
+    ledger.human_required = true;
+    ledger.human_required_reason_code = Some(
+        crate::controller::HumanRequiredReason::ConfigurationInfra
+            .as_str()
+            .into(),
+    );
+    Some(message)
+}
+
 /// Classification of a backend that launched but exited nonzero, derived
 /// from its terminal log (extracted from `improve` to keep that function
 /// focused on orchestration).

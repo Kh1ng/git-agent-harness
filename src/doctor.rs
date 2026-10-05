@@ -970,9 +970,24 @@ fn check_candidate_models(defaults: &Defaults, profile: &Profile) -> bool {
             // The executable check reports this separately.
             continue;
         };
-        let models = cache.entry(path.clone()).or_insert_with(|| {
+        // Dispatch launches each instance with its isolated account state, so
+        // the model list must come from that same account.
+        let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            runner_kind,
+            None::<String>,
+            None::<String>,
+        );
+        identity.state_root = instance
+            .and_then(|entry| entry.state_root.as_deref())
+            .filter(|root| !root.is_empty())
+            .map(std::path::PathBuf::from);
+        let mut state_env = Vec::new();
+        identity.apply_instance_state_env(&mut state_env);
+        let cache_key = (path.clone(), identity.state_root.clone());
+        let models = cache.entry(cache_key).or_insert_with(|| {
             Command::new(&path)
                 .arg("models")
+                .envs(state_env)
                 .output()
                 .map(|result| {
                     if !result.status.success() {
@@ -1112,6 +1127,64 @@ mod tests {
         profile.routing.pm_candidates.as_mut().unwrap()[0].model =
             Some("Gemini 3.7 Flash (High)".into());
         assert!(super::check_candidate_models(
+            &crate::config::Defaults::default(),
+            &profile
+        ));
+    }
+
+    #[test]
+    fn agy_model_list_uses_each_instance_state_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("agy");
+        // Each isolated account exposes only the model named in its HOME.
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'id\\t%s\\n' \"$(cat \"$HOME/model\")\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let mut profile = gitlab_profile(None);
+        for (name, model) in [("agy-a", "Model A"), ("agy-b", "Model B")] {
+            let root = temp.path().join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("model"), model).unwrap();
+            profile.routing.backend_instances.insert(
+                name.into(),
+                crate::config::BackendInstanceConfig {
+                    runner_kind: "agy".into(),
+                    enabled: None,
+                    logical_backend: None,
+                    executable: Some(executable.display().to_string()),
+                    resolve_from_path: None,
+                    state_root: Some(root.display().to_string()),
+                    account_label: None,
+                    auth_source_label: None,
+                    credential_id: None,
+                    quota_pool: None,
+                    supported_models: Vec::new(),
+                },
+            );
+        }
+        let candidate = |instance: &str, model: &str| crate::config::CandidateConfig {
+            backend: "agy".into(),
+            instance: Some(instance.into()),
+            model: Some(model.into()),
+            ..Default::default()
+        };
+        profile.routing.pm_candidates = Some(vec![
+            candidate("agy-a", "Model A"),
+            candidate("agy-b", "Model B"),
+        ]);
+        assert!(super::check_candidate_models(
+            &crate::config::Defaults::default(),
+            &profile
+        ));
+        // A model only the other account offers must not be accepted.
+        profile.routing.pm_candidates = Some(vec![candidate("agy-b", "Model A")]);
+        assert!(!super::check_candidate_models(
             &crate::config::Defaults::default(),
             &profile
         ));
