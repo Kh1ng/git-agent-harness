@@ -511,7 +511,7 @@ impl<'a> Setup<'a> {
             Role::CliOnly => (
                 // `cargo install --locked` re-resolves a stale Cargo.lock;
                 // `cargo metadata --locked` fails on one, so it runs first.
-                "cargo metadata --locked --format-version 1 >/dev/null && cargo install --path . --force --locked".to_string(),
+                "cargo metadata --locked --format-version 1 >/dev/null && cargo install --path . --bin gah --force --locked".to_string(),
                 "Build and install the gah command",
             ),
             Role::Central | Role::Standalone | Role::Worker => (
@@ -519,6 +519,22 @@ impl<'a> Setup<'a> {
                 "Build GAH and install its background service",
             ),
         };
+        if selection.role != Role::CliOnly {
+            let role = match selection.role {
+                Role::Worker => crate::update::HostRole::Worker,
+                Role::Standalone => crate::update::HostRole::Standalone,
+                _ => crate::update::HostRole::Central,
+            };
+            for change in
+                crate::update::installation_plan(role, &[selection.agent.command().into()])?
+            {
+                self.prompter.say(&format!("  - {change}"));
+            }
+            if self.host.os() == Os::Linux {
+                self.prompter.say("  - Use sudo to configure /etc/gah/server.env and enable/start the server for central/standalone; configure Tailscale DNS for networked roles");
+            }
+            self.prompter.say("  - Configure the selected node role and selected memory gateway environment/service files");
+        }
         self.prompter.say("");
         if !self.ask_confirm(
             &format!("{what} now? The first build takes several minutes."),
@@ -530,6 +546,13 @@ impl<'a> Setup<'a> {
             );
         }
         let mut variables = env.0;
+        // Do not let inherited installer options expand this setup selection.
+        if !variables.iter().any(|(key, _)| *key == "GAH_GATEWAY_MODE") {
+            variables.push(("GAH_GATEWAY_MODE", String::new()));
+        }
+        variables.push(("GAH_IMPORT_REPO", String::new()));
+        variables.push(("GAH_INSTALL_AGENT", selection.agent.command().into()));
+        variables.push(("GAH_INSTALL_CONFIRMED", "1".into()));
         variables.push((
             "GAH_NODE_ROLE",
             match selection.role {
@@ -821,6 +844,13 @@ mod tests {
         assert_eq!(effects.commands[0].0, "scripts/install.sh");
         assert!(effects.commands[0]
             .1
+            .contains(&("GAH_INSTALL_AGENT".into(), "claude".into())));
+        assert!(!prompter
+            .said
+            .iter()
+            .any(|line| line.contains("opencode/agents") || line.contains("gah-quota-refresh")));
+        assert!(effects.commands[0]
+            .1
             .contains(&("GAH_NODE_ROLE".into(), "standalone".into())));
         assert!(prompter
             .said
@@ -853,6 +883,13 @@ mod tests {
         .run()
         .unwrap();
         assert_eq!(effects.commands[0].0, "scripts/install.sh");
+        assert!(effects.commands[0]
+            .1
+            .contains(&("GAH_INSTALL_AGENT".into(), "claude".into())));
+        assert!(!prompter
+            .said
+            .iter()
+            .any(|line| line.contains("opencode/agents") || line.contains("gah-quota-refresh")));
         assert!(effects.commands[0]
             .1
             .contains(&("GAH_NODE_ROLE".into(), "standalone".into())));
@@ -888,7 +925,7 @@ mod tests {
         let (command, _env) = &effects.commands[0];
         assert_eq!(
             command,
-            "cargo metadata --locked --format-version 1 >/dev/null && cargo install --path . --force --locked"
+            "cargo metadata --locked --format-version 1 >/dev/null && cargo install --path . --bin gah --force --locked"
         );
     }
 

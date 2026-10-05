@@ -67,7 +67,7 @@ elif [ -n "${GAH_GATEWAY_MODE:-}" ]; then
 fi
 
 bash "$repo_root/scripts/configure-node-role.sh" "$role" "${gah_cli[@]}"
-cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role"
+cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role" ${GAH_INSTALL_CONFIRMED:+--yes} ${GAH_INSTALL_AGENT:+--agent "$GAH_INSTALL_AGENT"}
 
 if [ "$role" = central ] && [ "${GAH_GATEWAY_MODE:-}" = colocated ]; then
   gateway_ready=0

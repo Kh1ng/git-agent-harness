@@ -31,7 +31,7 @@ bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --locked --bi
 # units it installs survive reboots without a login session. Only central,
 # which already needs sudo here, may prompt; a worker host without root uses
 # `sudo -n`, so it still installs cleanly and only gets a warning.
-cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role"
+cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role" ${GAH_INSTALL_CONFIRMED:+--yes} ${GAH_INSTALL_AGENT:+--agent "$GAH_INSTALL_AGENT"}
 
 # tailscale-dns-guard:start -- extracted verbatim by
 # tests/source_structure.rs::standalone_install_never_touches_tailscale,
