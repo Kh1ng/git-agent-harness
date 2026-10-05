@@ -778,6 +778,14 @@ fn capped_pr_dispatches_another_ticket_in_same_runtime_iteration() {
         .iter()
         .any(|ticket| ticket["work_id"] == "TICKET-243"));
 
+    let blocker = snapshot["blocked_work_items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|blocker| blocker["reason_code"] == "fix_retry_cap_exceeded")
+        .expect("snapshot must project the capped PR");
+    assert!(blocker["remediation_plan"].is_object(), "{blocker}");
+    let expected_plan = blocker["remediation_plan"].clone();
     let result = harness.run_one_loop().unwrap();
     // The fake worker deliberately fails after admission; dispatch evidence must
     // come from the runtime events and completion ledger, not a selected action.
@@ -818,6 +826,15 @@ fn capped_pr_dispatches_another_ticket_in_same_runtime_iteration() {
         1,
         "{result:?}"
     );
+    let report = result
+        .events
+        .iter()
+        .find(|event| {
+            event["event_type"] == "human_required"
+                && event["reason_code"] == "fix_retry_cap_exceeded"
+        })
+        .unwrap();
+    assert_eq!(report["remediation_plan"], expected_plan);
 }
 
 #[test]
@@ -860,6 +877,14 @@ fn consecutive_single_worker_ticks_print_diagnostics_but_dedupe_capped_pr_notifi
                 .any(|event| event["event_type"] == "dispatch_started"),
             "intake cap must hold: {result:?}"
         );
+        let report = result
+            .events
+            .iter()
+            .find(|event| {
+                event["event_type"] == "human_required" && event["work_id"] == "TICKET-001"
+            })
+            .expect("capped PR report");
+        assert!(report["remediation_plan"].is_object(), "{report}");
         assert_eq!(
             result
                 .events

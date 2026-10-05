@@ -685,7 +685,14 @@ pub(super) fn report_blocked_work_items_once(
                     .and_then(|mr| mr.url.as_deref()),
             },
         );
-        crate::events::record_with_reason_code(
+        let action = NextAction::HumanRequired {
+            work_id: Some(identity.to_owned()),
+            reference: Some(reference.to_owned()),
+            reason: reason.to_owned(),
+            reason_code: reason_code.map(str::to_owned),
+        };
+        let plan = remediation_plan_for_action(cfg, profile_name, &action);
+        crate::events::record_with_reason_code_and_plan(
             cfg,
             crate::events::EventType::HumanRequired,
             Some(profile_name),
@@ -699,6 +706,7 @@ pub(super) fn report_blocked_work_items_once(
                     .unwrap_or("human required")
             ),
             reason_code,
+            blocker.remediation_plan.as_ref().or(plan.as_ref()),
         )?;
     }
     Ok(())

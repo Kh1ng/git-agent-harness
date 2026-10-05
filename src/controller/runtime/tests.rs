@@ -406,7 +406,7 @@ fn stop_event_for_capped_pr_persists_reason_code_and_dedupes_across_ticks() {
 }
 
 #[test]
-fn blocked_pr_is_reported_once_alongside_other_dispatch() {
+fn blocked_pr_notification_is_reported_once() {
     let (tmp, mut cfg) = events_test_config();
     let delivered = tmp.path().join("notifications.txt");
     cfg.profiles.get_mut("real").unwrap().notify_command =
@@ -583,7 +583,13 @@ fn blocker_and_terminal_reporting_share_identity_in_the_same_tick() {
         )
         .unwrap());
     }
-    assert_eq!(crate::events::read_events(&cfg).unwrap().len(), 1);
+    let events = crate::events::read_events(&cfg).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].remediation_plan,
+        super::remediation_plan_for_action(&cfg, "real", &action)
+    );
+    assert!(events[0].remediation_plan.is_some());
 }
 
 #[test]
