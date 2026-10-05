@@ -18,7 +18,7 @@ import crypto from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { loginRepairMethod, type LoginRepairState, type LoginRepairView } from '@git-agent-harness/contracts';
+import { repositoryCli, loginRepairMethod, type LoginRepairState, type LoginRepairView } from '@git-agent-harness/contracts';
 import { nodeHeaders, type RegistryService } from './registryService.js';
 
 const REPAIR_TTL_MS = 10 * 60_000;
@@ -46,7 +46,7 @@ export class LoginRepairError extends Error {
 }
 
 const loginKey = (login: Login) => `${login.backend}|${login.provider ?? ''}`;
-const terminal = (state: LoginRepairState) => ['succeeded', 'failed', 'expired', 'manual'].includes(state.status);
+const terminal = (state: LoginRepairState) => ['succeeded', 'failed', 'expired', 'manual', 'install_required'].includes(state.status);
 const stripAnsi = (text: string) => text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
 
 function verificationUrl(text: string, hosts: readonly string[]): string | null {
@@ -142,13 +142,42 @@ export class LoginRepairs {
       repair.state = { status: 'expired' };
     }, this.deps.ttlMs ?? REPAIR_TTL_MS);
     expiry.unref?.();
+    if (repositoryCli(login.backend)) {
+      void this.checkRepositoryTool(repair);
+    } else {
+      this.beginLogin(repair);
+    }
+    return this.view(repair.id)!;
+  }
+
+  private beginLogin(repair: Repair): void {
+    const login = repair.login;
     const method = loginRepairMethod(login);
     if (method === 'device_cli') this.runCli(repair, 'codex', ['login', '--device-auth'], 'codex');
     else if (method === 'paste_code') this.runCli(repair, 'claude', ['auth', 'login', '--claudeai'], 'claude');
     else if (method === 'github_device') void this.runGithubDevice(repair, login.backend === 'gh' ? 'gh' : 'copilot');
     else if (method === 'api_key') this.awaitApiKey(repair);
     else repair.state = { status: 'manual', instructions: `Open a terminal on this machine and log in with the ${login.backend} CLI${login.backend === 'glab' ? ' (glab auth login)' : ''}.` };
-    return this.view(repair.id)!;
+  }
+
+  /** A repository package must run before any authorization request is sent. */
+  private async checkRepositoryTool(repair: Repair): Promise<void> {
+    const tool = repositoryCli(repair.login.backend)!;
+    try {
+      const available = await new Promise<boolean>((resolve) => {
+        const child = this.spawn(repair.login.backend, ['--version'], { stdio: 'ignore', env: this.env });
+        const timeout = setTimeout(() => { child.kill(); resolve(false); }, 15_000);
+        timeout.unref?.();
+        repair.stop = () => { clearTimeout(timeout); child.kill(); resolve(false); };
+        child.once('error', () => { clearTimeout(timeout); resolve(false); });
+        child.once('close', code => { clearTimeout(timeout); resolve(code === 0); });
+      });
+      if (terminal(repair.state)) return;
+      if (!available) repair.state = { status: 'install_required', install_url: tool.installUrl };
+      else this.beginLogin(repair);
+    } catch {
+      this.fail(repair, 'The repository CLI could not be checked.');
+    }
   }
 
   view(id: string): LoginRepairView | null {
@@ -335,7 +364,7 @@ export class LoginRepairs {
 
 class StoreError extends Error {}
 
-const STATES = new Set(['starting', 'open_url', 'awaiting_input', 'waiting', 'succeeded', 'failed', 'expired', 'manual']);
+const STATES = new Set(['starting', 'open_url', 'awaiting_input', 'waiting', 'succeeded', 'failed', 'expired', 'manual', 'install_required']);
 const short = (value: unknown, max: number) => typeof value === 'string' && value.length > 0 && value.length <= max;
 
 /** Central accepts only the documented view from a worker, with an HTTPS link. */
@@ -347,6 +376,10 @@ export function parseLoginRepairView(value: unknown): LoginRepairView | null {
   const base = { id: view.id as string, node_id: typeof view.node_id === 'string' ? view.node_id : '', backend: view.backend as string, provider: view.provider as string | null, expires_at: view.expires_at as string };
   const https = (url: unknown) => short(url, 2_048) && (url as string).startsWith('https://');
   switch (view.status) {
+    case 'install_required': {
+      const tool = repositoryCli(base.backend);
+      return tool && view.install_url === tool.installUrl ? { ...base, status: 'install_required', install_url: tool.installUrl } : null;
+    }
     case 'open_url':
       if (!https(view.url) || !(view.code === null || (typeof view.code === 'string' && /^[A-Z0-9-]{4,32}$/.test(view.code)))) return null;
       return { ...base, status: 'open_url', url: view.url as string, code: view.code as string | null };

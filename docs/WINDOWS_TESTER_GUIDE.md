@@ -33,6 +33,25 @@ Do not mix files from different workflow runs. The installer rejects mixed revis
 The token gives owner access to the central node. Do not put it in a test report or screenshot.
 GAH does not have account sign-in. Device pairing does not grant update or administration access.
 
+## Test first-run WSL preparation
+
+Use a fresh x64 Windows computer with the desktop app installed and no WSL distribution.
+
+1. Open the app and select the terminal setup button under **Set up this computer**.
+2. Accept WSL preparation and approve the Windows elevation prompt.
+3. Restart Windows and sign in when requested. Make sure that the setup console reopens.
+4. Create a normal Linux user when prompted, then type `exit`.
+5. Complete `gah setup` in the same console. Agent and repository logins occur inside WSL.
+6. Return to the app and select **Check again**.
+7. Repeat setup once to check that it preserves the distribution and existing configuration.
+
+Record the Windows version, distribution, WSL2 kernel, and setup result. Do not include credentials in the report.
+If setup fails, select the setup button again. The pending request remains until setup succeeds.
+The request contains no coordinator token. It stores only the distribution, central address, and literal setup command.
+If systemd is disabled, setup requests your Linux password and permission to restart the selected distribution.
+
+The following procedure installs a worker connected to an existing central node. It also sets up LAN forwarding and logon startup.
+
 ## Prepare Windows
 
 1. Use an x64 Windows computer.

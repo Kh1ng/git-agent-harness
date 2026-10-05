@@ -75,8 +75,8 @@ pub(crate) mod telemetry_tests {
     #[test]
     fn test_schema_version_in_record() {
         assert_eq!(
-            SCHEMA_VERSION, 10,
-            "canonical attempt identity requires telemetry export schema version 10"
+            SCHEMA_VERSION, 11,
+            "#1341 re-sourced quota observation export onto the account quota store"
         );
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
