@@ -147,11 +147,9 @@ export function NodesPage() {
           <p className="font-semibold text-primary">{coordinator.display_name}</p>
           <span className={`text-sm ${isConnected ? 'text-primary' : 'text-warning'}`}>{isConnected ? 'Connected' : 'Disconnected'}</span>
         </div>
-        <dl className="grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
-          <div><dt className="inline text-secondary">Node ID: </dt><dd className="inline break-all text-primary">{coordinator.node_id}</dd></div>
-          <div><dt className="inline text-secondary">Address: </dt><dd className="inline break-all text-primary">{coordinator.advertised_url}</dd></div>
-          <div><dt className="inline text-secondary">Version: </dt><dd className="inline text-primary">{coordinator.version}</dd></div>
-        </dl>
+        {/* The coordinator's own advertised URL is how it sees itself (often
+            loopback), not how this browser reached it, so it is not shown. */}
+        <p className="text-sm text-secondary"><span className="font-mono break-all">{coordinator.node_id}</span> · v{coordinator.version}</p>
       </div>
     </section>}
     <NodeReadinessCard />
@@ -171,7 +169,7 @@ export function NodesPage() {
     {empty && <p className="mb-4 text-secondary">No registered nodes. Install a worker or register an existing worker below.</p>}
     {(showSetup || empty) && <div className="mb-6 space-y-4"><AddNodeSection /><RegisterWorker profile={profile ?? 'gah'} /></div>}
     {fleet && fleet.nodes.length > 0 && <>
-      <p className="mb-3 text-sm text-secondary">Observations refresh through the server every 60 seconds. Results older than 2 minutes are marked stale. Select a node to run a live check.</p>
+      <p className="mb-3 text-sm text-secondary">Observations refresh every 60 seconds; older than 2 minutes is stale. Select a node for its address, resources and a live check.</p>
       <div className="divide-y divide-subtle border-y border-subtle">
         {fleet.nodes.map((node) => {
           const observed = fleet.observations.find((item) => item.node_id === node.node_id);
@@ -182,16 +180,8 @@ export function NodesPage() {
               <button type="button" className="text-base font-semibold text-primary underline underline-offset-4" aria-pressed={selectedId === node.node_id} onClick={() => void check(node.node_id)}>{node.display_name}</button>
               <span className={`text-sm ${tone}`}>{label}</span>
             </div>
-            <dl className="grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
-              <div><dt className="inline text-secondary">Node ID: </dt><dd className="inline break-all text-primary">{node.node_id}</dd></div>
-              <div><dt className="inline text-secondary">Address: </dt><dd className="inline break-all text-primary">{node.advertised_url}</dd></div>
-              <div><dt className="inline text-secondary">Transport: </dt><dd className="inline text-primary">{node.transport_mode}</dd></div>
-              <div><dt className="inline text-secondary">Declared profiles: </dt><dd className="inline text-primary">{node.profiles?.join(', ') || 'None — cannot claim work'}</dd></div>
-              <div><dt className="inline text-secondary">Last seen: </dt><dd className="inline text-primary">{age(observed?.last_seen_at ?? node.last_seen_at)}</dd></div>
-              <div><dt className="inline text-secondary">Observed: </dt><dd className="inline text-primary">{age(observed?.observed_at)}</dd></div>
-            </dl>
+            <p className="text-sm text-secondary"><span className="font-mono break-all">{node.node_id}</span> · seen {age(observed?.last_seen_at ?? node.last_seen_at)}</p>
             {(observed?.error || node.last_error_kind) && <p className="text-sm text-critical">{observed?.error?.kind ?? node.last_error_kind}: {observed?.error?.message ?? node.last_error_message}</p>}
-            <Resources observation={observed} />
           </section>;
         })}
       </div>
@@ -201,6 +191,14 @@ export function NodesPage() {
         <h3 className="text-base font-semibold text-primary">{selected.display_name}: health and work</h3>
         <button type="button" className="btn-secondary" disabled={checking} onClick={() => void check(selected.node_id)}>Check health</button>
       </div>
+      <dl className="grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
+        <div><dt className="inline text-secondary">Node ID: </dt><dd className="inline break-all text-primary">{selected.node_id}</dd></div>
+        <div><dt className="inline text-secondary">Advertised address: </dt><dd className="inline break-all text-primary">{selected.advertised_url}</dd></div>
+        <div><dt className="inline text-secondary">Transport: </dt><dd className="inline text-primary">{selected.transport_mode}</dd></div>
+        <div><dt className="inline text-secondary">Declared profiles: </dt><dd className="inline text-primary">{selected.profiles?.join(', ') || 'None — cannot claim work'}</dd></div>
+        <div><dt className="inline text-secondary">Observed: </dt><dd className="inline text-primary">{age(observation?.observed_at)}</dd></div>
+      </dl>
+      <Resources observation={observation} />
       {checking && <p role="status" className="text-secondary">Checking node health…</p>}
       {healthError && <p role="alert" className="text-critical">Live check failed: {healthError}</p>}
       {health && <div className="space-y-2">

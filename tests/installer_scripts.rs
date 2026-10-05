@@ -720,6 +720,9 @@ fn the_desktop_app_install_replaces_the_old_app_and_cleans_up() {
     let legacy = apps.join("GAH Worker.app");
     std::fs::create_dir_all(&legacy).unwrap();
     std::fs::write(legacy.join("version.txt"), "old").unwrap();
+    let system_apps = temp.path().join("SystemApplications");
+    let system_legacy = system_apps.join("GAH Worker.app");
+    std::fs::create_dir_all(&system_legacy).unwrap();
     let home = temp.path().join("home");
     let output = bash(
         &[
@@ -735,10 +738,15 @@ fn the_desktop_app_install_replaces_the_old_app_and_cleans_up() {
             ("CARGO_TARGET_DIR", "../cargo-target"),
             ("GAH_DESKTOP_APP_DIR", apps.to_str().unwrap()),
             ("GAH_DESKTOP_SKIP_BUILD", "1"),
+            ("GAH_LEGACY_APP_DIR", system_apps.to_str().unwrap()),
         ],
         true,
     );
     assert!(output.status.success(), "{}", text(&output));
+    assert!(
+        !system_legacy.exists(),
+        "a system-wide copy under the old name is removed too"
+    );
     assert_eq!(
         std::fs::read_to_string(apps.join("GAH.app/version.txt")).unwrap(),
         "new"

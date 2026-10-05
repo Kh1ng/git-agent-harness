@@ -14,6 +14,7 @@ use std::fs::{copy, create_dir_all, read_dir, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+mod reexec;
 mod units;
 
 pub use crate::node_role::NodeRole as HostRole;
@@ -32,7 +33,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     }
 
     let repo = resolve_repo(args.repo.as_deref())?;
-    let _update_lock = acquire_update_lock(&repo)?;
+    let update_lock = acquire_update_lock(&repo)?;
     ensure_default_branch_checkout(&repo)?;
     ensure_clean(&repo)?;
     if args.restart_server {
@@ -40,17 +41,21 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     }
 
     println!("Updating GAH CLI/control plane from {}", repo.display());
+    let head_before = captured(&repo, "git", &["rev-parse", "HEAD"])?;
     run_command(&repo, "git", &["fetch", "origin", "--prune"])?;
     run_command(&repo, "git", &["pull", "--ff-only"])?;
+    let resumed = env::var_os(reexec::ENV).is_some();
 
     // This is the authoritative CLI deployment step. It replaces the Cargo
     // executable selected by PATH, unlike a target/release-only build.
-    ensure_lockfile_current(&repo)?;
-    run_command(
-        &repo,
-        "cargo",
-        &["install", "--path", ".", "--force", "--locked"],
-    )?;
+    if !resumed {
+        ensure_lockfile_current(&repo)?;
+        run_command(
+            &repo,
+            "cargo",
+            &["install", "--path", ".", "--force", "--locked"],
+        )?;
+    }
 
     let binary = installed_binary_path()?;
     if !binary.is_file() {
@@ -61,6 +66,14 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     }
     run_command(&repo, binary.to_string_lossy().as_ref(), &["--help"])?;
     println!("Installed CLI: {}", binary.display());
+    // Everything after this point (unit rendering, installers) is code that
+    // the pull may have changed. Finish with the binary just installed, not
+    // this older one: an old binary once installed an unrendered
+    // gah-server.service and the restart failed.
+    if !resumed && captured(&repo, "git", &["rev-parse", "HEAD"])? != head_before {
+        drop(update_lock);
+        return reexec::continue_with(&binary, &args, &repo);
+    }
     // Both roles install user units below; keep them alive past logout. Done
     // early so a later failed step cannot skip it.
     enable_user_lingering(&repo, args.role);
