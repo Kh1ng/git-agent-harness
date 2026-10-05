@@ -156,7 +156,14 @@ fn check_profile(defaults: &Defaults, profile: &Profile) -> bool {
     failed |= !check_provider_auth(profile);
     failed |= !check_push_url(profile);
     failed |= !check_writable_path("artifact_root", Path::new(&profile.artifact_root));
-    if !defaults.worktree_base.trim().is_empty() {
+    if defaults.worktree_base.trim().is_empty() {
+        print_check(
+            CheckStatus::Fail,
+            "worktree_base",
+            "empty; set defaults.worktree_base to a writable directory",
+        );
+        failed = true;
+    } else {
         failed |= !check_writable_path("worktree_base", Path::new(&defaults.worktree_base));
     }
     failed |= !check_manager_memory(defaults, profile);
