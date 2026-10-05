@@ -697,3 +697,178 @@ fn stale_human_required_ledger_entry_does_not_block_unrelated_status() {
         "stale ledger work must not block unrelated status: {blocked:?}"
     );
 }
+
+fn capped_pr_harness(limit: u32) -> ScenarioHarness {
+    let tmp = TempDir::new().unwrap();
+    let gh = FakeBackend::new(tmp.path(), "gh");
+    install_active_prs(&gh, &[current_pr("gah/fix-a", "TICKET-001", 1)]);
+    let ledger = TestLedger::new()
+        .with_entry(ledger_fix(
+            "gah/fix-a",
+            "TICKET-001",
+            "post_review_repair",
+            "2026-07-01T00:00:00Z",
+        ))
+        .with_entry(ledger_fix(
+            "gah/fix-a",
+            "TICKET-001",
+            "post_review_repair",
+            "2026-07-01T01:00:00Z",
+        ));
+    let mut harness = ScenarioHarness::new("github")
+        .github_scenario("empty")
+        .worker_scenario("failure")
+        .with_ledger(ledger);
+    let config = format!(
+        "max_open_managed_mrs = {limit}\nvalidation_commands = [\"true\"]\ncodex_path = \"{}\"\n[profiles.test.routing]\nimprove_backend = \"codex\"\n",
+        harness.bin_dir.join("codex").display()
+    );
+    harness = harness.with_config_append(&config);
+    harness.install_custom_gh(&gh);
+    harness.create_remote_branch("gah/fix-a");
+    let availability = harness
+        .artifacts_dir
+        .parent()
+        .unwrap()
+        .join("xdg-state/gah/availability.json");
+    std::fs::create_dir_all(availability.parent().unwrap()).unwrap();
+    std::fs::write(
+        availability,
+        serde_json::json!({
+            "version": 2,
+            "records": [{"backend": "codex", "status": "available", "reason": "unknown",
+                "observed_at": chrono::Utc::now().to_rfc3339(), "source": "manual"}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    harness
+}
+
+fn add_eligible_ticket(harness: &ScenarioHarness) {
+    let ticket = harness
+        .local_repo_dir
+        .join("docs/tickets/TICKET-243-eligible.md");
+    std::fs::create_dir_all(ticket.parent().unwrap()).unwrap();
+    std::fs::write(ticket, "# TICKET-243: Eligible work\n\nGoal: exercise independent admission.\n\nRecommended backend: codex\n").unwrap();
+    for args in [
+        vec!["add", "docs/tickets/TICKET-243-eligible.md"],
+        vec!["commit", "-m", "add eligible ticket"],
+        vec!["push", "-q", "origin", "main"],
+    ] {
+        let result = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&harness.local_repo_dir)
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+    }
+}
+
+#[test]
+fn capped_pr_dispatches_another_ticket_in_same_runtime_iteration() {
+    let mut harness = capped_pr_harness(2);
+    add_eligible_ticket(&harness);
+    let snapshot = harness.run_status_json().unwrap();
+    assert_eq!(snapshot["fix_attempt_counts"]["gah/fix-a"], 2);
+    assert_eq!(snapshot["implementation_intake_paused"], false);
+    assert!(snapshot["available_tickets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|ticket| ticket["work_id"] == "TICKET-243"));
+
+    let result = harness.run_one_loop().unwrap();
+    // The fake worker deliberately fails after admission; dispatch evidence must
+    // come from the runtime events and completion ledger, not a selected action.
+    assert_eq!(result.exit_code, Some(1), "{result:?}");
+    assert!(
+        result.stderr_tail.contains("backend exited 1"),
+        "{result:?}"
+    );
+    assert!(
+        result
+            .ledger_entries
+            .iter()
+            .any(|entry| entry["work_id"] == "TICKET-243" && entry["mode"] == "fix"),
+        "{result:?}"
+    );
+    assert!(
+        result
+            .call_counts
+            .get("codex")
+            .is_some_and(|calls| *calls > 0),
+        "{result:?}"
+    );
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|event| event["event_type"] == "dispatch_started"
+                && event["work_id"] == "TICKET-243"),
+        "{result:?}"
+    );
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| event["event_type"] == "human_required"
+                && event["reason_code"] == "fix_retry_cap_exceeded")
+            .count(),
+        1,
+        "{result:?}"
+    );
+}
+
+#[test]
+fn consecutive_single_worker_ticks_print_diagnostics_but_dedupe_capped_pr_notification() {
+    let mut harness = capped_pr_harness(1);
+    add_eligible_ticket(&harness);
+    let snapshot = harness.run_status_json().unwrap();
+    assert_eq!(snapshot["implementation_intake_paused"], true);
+    for tick in 0..3 {
+        let result = harness.run_one_loop_with_json(false).unwrap();
+        assert_eq!(result.exit_code, Some(0), "tick {tick}: {result:?}");
+        assert!(
+            result.stdout.contains("No work admitted --"),
+            "tick {tick}: {result:?}"
+        );
+        assert!(
+            result.stdout.contains("gah/fix-a [fix_retry_cap_exceeded]"),
+            "tick {tick}: {result:?}"
+        );
+        assert!(
+            result.stdout.contains("node capacity: 0/1 workers active"),
+            "tick {tick}: {result:?}"
+        );
+        assert!(
+            result
+                .stdout
+                .contains("queue: 1 open MR(s), 1 ticket(s) considered"),
+            "tick {tick}: {result:?}"
+        );
+        assert_eq!(
+            result.stdout.contains("Decided: human_required"),
+            tick == 0,
+            "{result:?}"
+        );
+        assert!(
+            !result
+                .events
+                .iter()
+                .any(|event| event["event_type"] == "dispatch_started"),
+            "intake cap must hold: {result:?}"
+        );
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| event["event_type"] == "human_required"
+                    && event["reason_code"] == "fix_retry_cap_exceeded"
+                    && event["work_id"] == "TICKET-001")
+                .count(),
+            1,
+            "{result:?}"
+        );
+    }
+}

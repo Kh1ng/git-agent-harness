@@ -19,6 +19,7 @@ use super::{ExecGuard, FakeBackend, Scenario};
 /// Result of a single subprocess invocation.
 #[derive(Debug)]
 pub struct LoopResult {
+    pub stdout: String,
     pub action_kind: String,
     pub action_details: String,
     pub exit_code: Option<i32>,
@@ -361,21 +362,27 @@ impl ScenarioHarness {
 
     /// Run one loop iteration by spawning the `gah` binary.
     pub fn run_one_loop(&mut self) -> Result<LoopResult, String> {
+        self.run_one_loop_with_json(true)
+    }
+
+    pub fn run_one_loop_with_json(&mut self, json: bool) -> Result<LoopResult, String> {
         self.setup_env();
 
         // Ensure fake gh/glab scripts are in the bin_dir
         self.install_fakes();
 
-        let out = self
-            .gah_command()
-            .args([
-                "loop",
-                "--once",
-                "--profile",
-                &self.profile_name,
-                "--json",
-                "--skip-validation-gate",
-            ])
+        let mut command = self.gah_command();
+        command.args([
+            "loop",
+            "--once",
+            "--profile",
+            &self.profile_name,
+            "--skip-validation-gate",
+        ]);
+        if json {
+            command.arg("--json");
+        }
+        let out = command
             .env(
                 "XDG_STATE_HOME",
                 self._temp.path().join("xdg-state").to_str().unwrap(),
@@ -425,6 +432,7 @@ impl ScenarioHarness {
         let events = read_jsonl_lines(&self.events_path).unwrap_or_default();
 
         Ok(LoopResult {
+            stdout: stdout.into_owned(),
             action_kind,
             action_details,
             exit_code,
