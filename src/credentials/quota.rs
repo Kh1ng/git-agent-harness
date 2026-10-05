@@ -11,6 +11,7 @@ pub(crate) fn backend(info: &CredentialInfo) -> &str {
         (CredentialKind::MistralDashboard | CredentialKind::MistralLogin, _, _) => {
             "mistral-dashboard"
         }
+        (CredentialKind::ClaudeSubscription, _, _) => "claude",
         (CredentialKind::ApiKey, "nous", _) => "opencode",
         (CredentialKind::ApiKey, "mistral", Some("MISTRAL_ADMIN_API_KEY")) => "vibe",
         _ => &info.provider,
@@ -31,7 +32,11 @@ fn unknown(info: &CredentialInfo, now: OffsetDateTime) -> QuotaObservationRecord
         observed_at: None,
         checked_at: now.format(&Rfc3339).ok(),
         check_error: None,
-        usage_source: Some(format!("credential_api:{}", info.provider)),
+        usage_source: Some(if info.kind == CredentialKind::ClaudeSubscription {
+            "claude_oauth_usage".into()
+        } else {
+            format!("credential_api:{}", info.provider)
+        }),
         mistral_admin: None,
         account_usage: None,
     }
@@ -39,6 +44,9 @@ fn unknown(info: &CredentialInfo, now: OffsetDateTime) -> QuotaObservationRecord
 
 pub(crate) fn refresh(id: &str, path: &Path) -> Result<QuotaObservationRecord> {
     let root = super::root()?;
+    if super::read_at(&root, id)?.info.kind == CredentialKind::ClaudeSubscription {
+        return refresh_claude_at(&root, id, path);
+    }
     refresh_selected_at(&root, id, path, |selected| {
         let (info, secret) = (&selected.info, selected.secret.as_str());
         match (info.kind, info.provider.as_str(), info.env_var.as_deref()) {
@@ -57,6 +65,39 @@ pub(crate) fn refresh(id: &str, path: &Path) -> Result<QuotaObservationRecord> {
             _ => Ok(None),
         }
     })
+}
+
+fn refresh_claude_at(root: &Path, id: &str, path: &Path) -> Result<QuotaObservationRecord> {
+    let selected = super::read_at(root, id)?;
+    if selected.info.kind != CredentialKind::ClaudeSubscription {
+        anyhow::bail!("credential changed during quota check");
+    }
+    let result = crate::usage::claude::refresh_token(&selected.secret);
+    let _guard = super::source_lock(root, id)?;
+    let current = super::read_at(root, id)
+        .map_err(|_| anyhow::anyhow!("credential changed during quota check"))?;
+    if current.revision != selected.revision {
+        anyhow::bail!("credential changed during quota check");
+    }
+    let records = match result {
+        Ok(records) => records,
+        Err(error) => {
+            return refresh_with(&selected.info, path, OffsetDateTime::now_utc(), || {
+                Err(error)
+            })
+        }
+    };
+    let mut first = None;
+    for record in records {
+        let saved = refresh_with(&selected.info, path, OffsetDateTime::now_utc(), || {
+            Ok(Some(record))
+        })?;
+        if first.is_none() {
+            first = Some(saved);
+        }
+    }
+    first
+        .ok_or_else(|| anyhow::anyhow!("Claude usage returned no recognized account quota windows"))
 }
 
 fn refresh_selected_at(
@@ -196,6 +237,38 @@ fn refresh_with(
 mod tests {
     use super::*;
     use crate::execution_identity::ExecutionIdentity;
+    #[test]
+    fn claude_subscription_windows_are_source_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quota.jsonl");
+        let source = CredentialInfo {
+            id: "claude-sub".into(),
+            provider: "anthropic".into(),
+            kind: CredentialKind::ClaudeSubscription,
+            account_label: "Subscription".into(),
+            env_var: None,
+        };
+        let records = crate::usage::claude::parse(
+            br#"{"five_hour":{"utilization":20},"seven_day":{"utilization":40}}"#,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        for record in records {
+            refresh_with(&source, &path, OffsetDateTime::now_utc(), || {
+                Ok(Some(record))
+            })
+            .unwrap();
+        }
+        let stored = quota_store::load(&path).unwrap();
+        let mut identity =
+            ExecutionIdentity::legacy_candidate("claude", None::<String>, None::<String>);
+        identity.credential_id = Some(source.id);
+        let windows = quota_store::latest_windows_for_identity(&stored, &identity);
+        assert_eq!(windows.len(), 2);
+        assert!(windows.iter().all(|record| record.backend == "claude"
+            && record.credential_id.as_deref() == Some("claude-sub")
+            && record.quota_pool.is_none()));
+    }
     fn info(id: &str) -> CredentialInfo {
         CredentialInfo {
             id: id.into(),

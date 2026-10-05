@@ -101,7 +101,7 @@ pub(crate) fn refresh_directory(directory: &Path) -> Result<Vec<QuotaObservation
     refresh_token(&token)
 }
 
-fn refresh_token(token: &str) -> Result<Vec<QuotaObservationRecord>> {
+pub(crate) fn refresh_token(token: &str) -> Result<Vec<QuotaObservationRecord>> {
     let escaped = token.replace('\\', "\\\\").replace('"', "\\\"");
     let mut command = Command::new("curl");
     command

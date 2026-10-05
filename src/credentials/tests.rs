@@ -100,6 +100,44 @@ fn bindings_fail_closed_and_cannot_change_runtime_configuration() {
 }
 
 #[test]
+fn claude_subscription_is_private_and_only_binds_the_claude_runner() {
+    let mut source = info("subscription");
+    source.provider = "claude".into();
+    source.kind = CredentialKind::ClaudeSubscription;
+    source.env_var = None;
+    let dir = tempfile::tempdir().unwrap();
+    let saved = save_at(
+        &dir.path().join("credentials"),
+        source,
+        "synthetic-subscription-token",
+    )
+    .unwrap();
+    assert_eq!(saved.provider, "anthropic");
+    assert_eq!(saved.env_var, None);
+    assert_eq!(
+        execution_env_with(
+            saved.clone(),
+            "synthetic-subscription-token".into(),
+            "claude"
+        )
+        .unwrap(),
+        vec![(
+            "CLAUDE_CODE_OAUTH_TOKEN".into(),
+            "synthetic-subscription-token".into()
+        )]
+    );
+    assert!(execution_env_with(
+        saved.clone(),
+        "synthetic-subscription-token".into(),
+        "anthropic"
+    )
+    .is_err());
+    let mut invalid = saved;
+    invalid.env_var = Some("ANTHROPIC_API_KEY".into());
+    assert!(validate(&invalid).is_err());
+}
+
+#[test]
 #[cfg(unix)]
 fn private_record_cannot_return_its_value_as_display_metadata() {
     let dir = tempfile::tempdir().unwrap();

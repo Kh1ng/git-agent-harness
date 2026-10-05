@@ -13,6 +13,7 @@ mod tests;
 #[clap(rename_all = "snake_case")]
 pub enum CredentialKind {
     ApiKey,
+    ClaudeSubscription,
     MistralDashboard,
     /// Mistral console email and password (`{"email","password"}`). Central
     /// signs in headlessly whenever the cached dashboard session expires.
@@ -105,6 +106,11 @@ fn validate(info: &CredentialInfo) -> Result<()> {
         bail!("invalid credential account label");
     }
     match info.kind {
+        CredentialKind::ClaudeSubscription
+            if info.provider == "anthropic" && info.env_var.is_none() => {}
+        CredentialKind::ClaudeSubscription => {
+            bail!("Claude subscription credentials require Anthropic without an execution environment variable")
+        }
         CredentialKind::MistralDashboard | CredentialKind::MistralLogin
             if info.provider == "mistral" && info.env_var.is_none() => {}
         CredentialKind::MistralDashboard | CredentialKind::MistralLogin => {
@@ -453,7 +459,7 @@ pub(crate) fn selected(id: &str) -> Result<(CredentialInfo, String)> {
     Ok((stored.info, stored.secret))
 }
 
-/// Resolve a single explicitly bound API source. Dashboard cookies never enter
+/// Resolve a single explicitly bound execution source. Dashboard cookies never enter
 /// execution, and a provider mismatch cannot fall back to an ambient key.
 pub fn execution_env(id: &str, expected_provider: &str) -> Result<Vec<(String, String)>> {
     let (info, secret) = match selected(id) {
@@ -468,9 +474,19 @@ fn execution_env_with(
     secret: String,
     expected_provider: &str,
 ) -> Result<Vec<(String, String)>> {
-    if info.kind != CredentialKind::ApiKey || info.provider != canonical_provider(expected_provider)
+    if info.provider != canonical_provider(expected_provider)
+        || !matches!(
+            info.kind,
+            CredentialKind::ApiKey | CredentialKind::ClaudeSubscription
+        )
     {
         bail!("named credential does not match the execution provider");
+    }
+    if info.kind == CredentialKind::ClaudeSubscription {
+        if expected_provider != "claude" {
+            bail!("Claude subscription token requires the Claude runner");
+        }
+        return Ok(vec![("CLAUDE_CODE_OAUTH_TOKEN".into(), secret)]);
     }
     Ok(vec![(
         info.env_var.context("credential environment unavailable")?,

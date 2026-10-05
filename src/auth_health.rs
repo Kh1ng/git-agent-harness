@@ -56,6 +56,8 @@ pub enum AuthSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AuthProbe {
     pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_instance: Option<String>,
     /// The provider behind a multi-provider backend (opencode), or the API
     /// provider for a key-only login. `None` for single-login backends.
     pub provider: Option<String>,
@@ -278,6 +280,7 @@ fn resolve(command: &str) -> Option<PathBuf> {
 fn probe(backend: &str, provider: Option<&str>, health: AuthHealth) -> AuthProbe {
     AuthProbe {
         backend: backend.to_string(),
+        backend_instance: None,
         provider: provider.map(str::to_string),
         health,
         source: AuthSource::Probe,
@@ -381,6 +384,7 @@ fn dispatch_failures(now: time::OffsetDateTime) -> Vec<AuthProbe> {
         }
         failures.push(AuthProbe {
             backend: scope.backend,
+            backend_instance: None,
             provider: None,
             health: AuthHealth::new(
                 AuthState::Expired,
@@ -398,6 +402,43 @@ fn dispatch_failures(now: time::OffsetDateTime) -> Vec<AuthProbe> {
 pub fn probe_node() -> AuthHealthReport {
     let now = time::OffsetDateTime::now_utc();
     let mut probes = Vec::new();
+    if let Ok(config) = crate::config::load(None) {
+        for profile in config.profiles.values() {
+            for (id, instance) in &profile.routing.backend_instances {
+                if instance.runner_kind != "claude" || !instance.enabled() {
+                    continue;
+                }
+                let Some(credential_id) = instance.credential_id.as_deref() else {
+                    continue;
+                };
+                let Ok(info) = crate::credentials::get(credential_id) else {
+                    continue;
+                };
+                if info.kind != crate::credentials::CredentialKind::ClaudeSubscription {
+                    continue;
+                }
+                let ready = crate::config::backend_instance_auth_ready(instance).unwrap_or(false);
+                let mut result = probe(
+                    "claude",
+                    None,
+                    AuthHealth::new(
+                        if ready {
+                            AuthState::Ok
+                        } else {
+                            AuthState::Missing
+                        },
+                        Some(if ready {
+                            "Claude subscription token is configured."
+                        } else {
+                            "Claude subscription instance is unavailable."
+                        }),
+                    ),
+                );
+                result.backend_instance = Some(id.clone());
+                probes.push(result);
+            }
+        }
+    }
     if let Some(claude) = resolve("claude") {
         probes.push(probe(
             "claude",

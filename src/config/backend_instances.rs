@@ -426,6 +426,17 @@ fn validate_cost(
     instance: &BackendInstanceConfig,
     errors: &mut Vec<String>,
 ) {
+    if instance
+        .credential_id
+        .as_deref()
+        .and_then(|id| crate::credentials::get(id).ok())
+        .is_some_and(|info| info.kind == crate::credentials::CredentialKind::ClaudeSubscription)
+        && (!candidate.included_in_quota
+            || candidate.requires_approval
+            || candidate.marginal_cost_usd.is_some())
+    {
+        errors.push(format!("candidate {}/{} with a Claude subscription token must be included_in_quota without paid-route approval or marginal cost", candidate.backend, candidate.model.as_deref().unwrap_or("<default>")));
+    }
     let label = format!(
         "{}/{}",
         candidate.backend,

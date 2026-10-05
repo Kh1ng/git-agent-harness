@@ -223,6 +223,9 @@ pub fn authorize_credential_env(
     let scoped = env
         .iter()
         .filter(|(name, _)| {
+            if name == "CLAUDE_CODE_OAUTH_TOKEN" {
+                return false;
+            }
             profile
                 .external_credential_scopes
                 .values()

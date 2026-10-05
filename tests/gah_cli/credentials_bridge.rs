@@ -22,6 +22,13 @@ fn native_provider_connection_commands_match_installed_cli() {
             "Second account",
             None,
         ),
+        native_args::save(
+            "claude-subscription",
+            "anthropic",
+            "claude_subscription",
+            "Subscription",
+            None,
+        ),
         native_args::remove("nous-personal"),
         native_args::refresh("mistral-second"),
         native_args::instances(),
