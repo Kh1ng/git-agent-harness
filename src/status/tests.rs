@@ -130,7 +130,13 @@ fn empty_clean_profile_snapshot() {
 fn light_snapshot_never_calls_the_provider() {
     use std::os::unix::fs::PermissionsExt;
 
-    let _exec_guard = ExecGuard::new();
+    struct ProviderPathGuard;
+    impl Drop for ProviderPathGuard {
+        fn drop(&mut self) {
+            crate::provider::clear_test_provider_path();
+        }
+    }
+
     let tmp = TempDir::new().unwrap();
     let cfg = make_test_cfg(&tmp);
     let _availability_guard =
@@ -145,14 +151,15 @@ fn light_snapshot_never_calls_the_provider() {
     )
     .unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
-    let _path = PathGuard::set(&bin);
+    crate::provider::set_test_provider_path(bin.to_str().unwrap());
+    let _path = ProviderPathGuard;
 
     let snap = build_snapshot_with(&cfg, "test", OffsetDateTime::now_utc(), false).unwrap();
 
     assert!(!marker.exists(), "light status must not invoke gh");
     assert_eq!(snap.observations.sync.status, "skipped");
     assert!(snap.available_tickets.is_empty());
-    assert!(snap.errors.is_empty());
+    assert!(snap.errors.is_empty(), "{:?}", snap.errors);
 }
 
 #[test]
