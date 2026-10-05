@@ -1,4 +1,4 @@
-import type { ControllerActivity, ControllerEvent } from '@git-agent-harness/contracts';
+import type { ControllerActivity, ControllerEvent, LoopDecision } from '@git-agent-harness/contracts';
 
 /** Whether terminal controller details report a successful dispatch. */
 export function controllerDispatchSucceeded(details: string): boolean {
@@ -35,4 +35,28 @@ export function deriveControllerActivity(events: ControllerEvent[]): ControllerA
   return [...runs.values()]
     .sort((a, b) => b.started_at.localeCompare(a.started_at))
     .slice(0, 100);
+}
+
+/**
+ * The loop's latest decision, from `action_decided` events (details
+ * `kind: reason`) and `action_overridden` events (`from -> kind: reason`),
+ * which replace the decision they follow.
+ */
+export function deriveLastDecision(events: ControllerEvent[]): LoopDecision | null {
+  let latest: LoopDecision | null = null;
+  for (const event of events) {
+    if (event.event_type !== 'action_decided' && event.event_type !== 'action_overridden') continue;
+    if (latest && event.timestamp < latest.timestamp) continue;
+    const details = event.details.replace(/ review_generation=\S+$/, '');
+    const match = /^(?:\S+ -> )?(\w+): ([\s\S]*)$/.exec(details);
+    if (!match) continue;
+    latest = {
+      timestamp: event.timestamp,
+      kind: match[1],
+      reason: match[2],
+      work_id: event.work_id,
+      reason_code: event.reason_code ?? null
+    };
+  }
+  return latest;
 }
