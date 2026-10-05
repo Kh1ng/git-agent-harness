@@ -2,13 +2,17 @@
 
 Date: 2026-10-04.
 
-The setup false "not logged in" report (#1324) was reproduced against the
+The auth-status account-state formats relevant to #1324 were reproduced against the
 tester's CLI version using the real `gh` 2.45.0 binary (official macOS
 arm64 release), never the developer's own credentials: every capture
 below ran with an isolated `GH_CONFIG_DIR` containing synthetic config
 files with bogus tokens (`ghp_0000…`) and the generic account name
 `octo`. The developer's keyring was not read by 2.45.0. No real token or
 account name appears anywhere in this proof.
+
+These captures do **not** reproduce the tester's successful-login/failed-setup
+discrepancy. Acceptance criterion 4 remains unverified: no confirmed cause of
+that discrepancy is established by this proof.
 
 ## Captures
 
@@ -52,9 +56,31 @@ existing login instead of reporting it missing.
   status alone cannot classify the account state.
 - "Not logged in" is a failed command whose text goes to stderr only.
 - A slow or killed status check (the 20-second probe budget in
-  `src/setup/host.rs`) yields no output at all; it must not be reported
-  as "not logged in" or "missing" — that is the leading hypothesis for
-  the tester's false logged-out reading.
+  `src/setup/host.rs`) returns no probe result to setup; even partial child
+  output is discarded. It must not be reported as "not logged in" or
+  "missing". This is a possible failure mode, not evidence that the tester's
+  probe timed out.
+
+## Outstanding diagnosis (review repair, 2026-10-05)
+
+The source issue contract and the Linux audit both say the failing probe's
+raw results were absent. The v0.1.3 implementation of `login_status` maps
+every classified state other than `Ok` to `NotLoggedIn`, and maps an absent
+probe to `Missing`. This confirms loss of diagnostic distinctions in setup;
+it cannot establish which input occurred on the tester's machine. Missing
+authentication, credential rejection, unrecognized output, command failure
+and timeout remain distinct possible explanations. A successful `gh auth
+login` alone does not select among them for a later status check.
+
+To close acceptance criterion 4, capture the failing setup probe and a direct
+`gh auth status` check in the same environment: resolved executable/version,
+exit status or timeout, elapsed time, and sanitized stdout/stderr. Record
+whether credential/config overrides (`GH_CONFIG_DIR`, `GH_HOST`, `GH_TOKEN`,
+`GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`) are present,
+without recording token values. Account names, tokens and identifying paths
+must be redacted before publishing. Use the confirmed difference to add a
+regression and repeat the scenario with the fix. The existing synthetic
+timeout tests verify recovery semantics only; they do not close this criterion.
 
 ## Not verified here
 
