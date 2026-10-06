@@ -544,12 +544,20 @@ pub(super) fn merge_routing_policy(
     repo.merge_policy = repo.merge_policy.or(canonical.merge_policy);
     // A profile list replaces the canonical one for its kind. An empty
     // profile list is not a list: it must not lift a canonical restriction.
+    // Replacement is by kind, so `implement` in defaults yields to `improve`.
+    let repo_lists: HashMap<_, _> = repo
+        .allowed_models
+        .into_iter()
+        .filter(|(_, list)| !list.is_empty())
+        .collect();
+    let repo_kinds: Vec<_> = repo_lists
+        .keys()
+        .filter_map(|key| JobKind::parse(key).ok())
+        .collect();
     let mut allowed_models = canonical.allowed_models;
-    allowed_models.extend(
-        repo.allowed_models
-            .into_iter()
-            .filter(|(_, list)| !list.is_empty()),
-    );
+    allowed_models
+        .retain(|key, _| JobKind::parse(key).map_or(true, |kind| !repo_kinds.contains(&kind)));
+    allowed_models.extend(repo_lists);
     repo.allowed_models = allowed_models;
     repo.hold_contract_changes_for_human_review = repo
         .hold_contract_changes_for_human_review

@@ -355,6 +355,20 @@ fn allowed_models_merge_by_job_kind_with_profile_entries_winning() {
     assert!(merged.allows_model("pm", "agy", None));
     assert!(!merged.allows_model("pm", "claude", None));
     assert!(merged.allows_model("improve", "anything", None));
+
+    // A profile list replaces the defaults list for the same kind under an alias key.
+    let defaults = RoutingPolicy {
+        allowed_models: [("implement".into(), only("codex"))].into(),
+        ..RoutingPolicy::default()
+    };
+    let profile = RoutingPolicy {
+        allowed_models: [("improve".into(), only("claude"))].into(),
+        ..RoutingPolicy::default()
+    };
+    let merged = profile.merged_with_defaults(&defaults);
+    assert!(merged.allowed_model_errors().is_empty());
+    assert!(merged.allows_model("improve", "claude", None));
+    assert!(!merged.allows_model("improve", "codex", None));
 }
 
 #[test]
