@@ -38,12 +38,18 @@ function useBackendModels(profile: string, backends: string[]): Record<string, {
   useEffect(() => {
     let cancelled = false;
     setModels(Object.fromEntries((wanted ? wanted.split(',') : []).map((backend) => [backend, { options: [], loading: true, failed: false }])));
+    const aliases = wanted.split(',').some((backend) => /^claude(?:[:_-]|$)/i.test(backend))
+      ? gahApi.getRoleMetrics(profile, '30d').then((report) => report.model_aliases ?? []).catch(() => [])
+      : Promise.resolve([]);
     for (const backend of wanted ? wanted.split(',') : []) {
-      gahApi.getManagerChatModelsForBackend(profile, backend)
-        .then((summary) => {
+      Promise.all([gahApi.getManagerChatModelsForBackend(profile, backend), aliases])
+        .then(([summary, resolvedAliases]) => {
           const options = summary.models.filter((model) => model.id !== 'default').map((model) => ({
             value: /^agy(?:[:\-_]|$)/i.test(backend) ? model.name : model.id,
-            label: agentModelLabel(backend, model),
+            label: agentModelLabel(backend, model,
+              resolvedAliases.find((alias) => alias.backend === backend
+                && (alias.alias === model.id || alias.alias === model.id.replace(/\[1m\]$/i, ''))
+                && /^claude-(?:opus|sonnet|haiku|fable)-\d/.test(alias.model))?.model),
           }));
           if (!cancelled) setModels((current) => ({ ...current, [backend]: { options, loading: false, failed: false } }));
         })
