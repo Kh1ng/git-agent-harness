@@ -35,7 +35,7 @@ review_backend = "claude"
 # strong_review_*/weak_review_* single-pair fields).
 routine_reviewer = { backend = "claude", model = "sonnet" }
 escalatory_reviewers = [
-    { backend = "codex", model = "default" },
+    { backend = "codex" },
 ]
 allow_review_fallback = true
 

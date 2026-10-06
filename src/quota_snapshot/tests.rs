@@ -22,7 +22,6 @@ fn quota_provider_identifies_the_billed_service_instead_of_the_harness() {
 }
 use crate::availability::{BlockScope, Reason, ScopeStatus, Source};
 use crate::config::tests::test_profile_for_notifications;
-use crate::ledger::summary::GroupQuotaObservation;
 
 /// A `GroupSummary` with every field zeroed/empty, so individual tests
 /// only spell out the fields they actually care about via struct-update
@@ -72,16 +71,23 @@ fn group_obs(
     window: &str,
     remaining_percent: Option<f64>,
     observed_at: &str,
-) -> GroupQuotaObservation {
-    GroupQuotaObservation {
+) -> crate::quota_store::QuotaObservationRecord {
+    crate::quota_store::QuotaObservationRecord {
         backend: backend.to_string(),
+        backend_instance: None,
+        credential_id: None,
         model: model.map(str::to_string),
+        quota_pool: None,
         quota_window: Some(window.to_string()),
         quota_used_percent: None,
         quota_remaining_percent: remaining_percent,
         quota_reset_at: None,
         observed_at: Some(observed_at.to_string()),
+        checked_at: None,
+        check_error: None,
         usage_source: None,
+        mistral_admin: None,
+        account_usage: None,
     }
 }
 

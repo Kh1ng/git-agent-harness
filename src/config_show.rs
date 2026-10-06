@@ -248,6 +248,7 @@ pub struct ConfigShowFull {
     pub schema_version: u32,
     pub config_path: String,
     pub current_manager: Option<String>,
+    pub node_capacity: crate::config::NodeCapacitySettings,
     /// Issue #653: notification channel settings (no secrets — tokens and
     /// webhook URLs live in the environment).
     pub notifications: NotificationSettingsSummary,
@@ -499,6 +500,7 @@ pub fn config_show_full(
         schema_version: CONFIG_SHOW_SCHEMA_VERSION,
         config_path: config_path.to_string_lossy().into_owned(),
         current_manager: cfg.defaults.current_manager.clone(),
+        node_capacity: cfg.defaults.node_capacity,
         notifications: NotificationSettingsSummary::from_defaults(&cfg.defaults),
         profiles,
     })
@@ -879,6 +881,8 @@ mod tests {
         let payload: Value = serde_json::from_str(&raw).expect("json should parse");
 
         assert_eq!(payload["schema_version"], CONFIG_SHOW_SCHEMA_VERSION);
+        assert_eq!(payload["node_capacity"]["worker_memory_mib"], 4096);
+        assert_eq!(payload["node_capacity"]["memory_floor_mib"], 0);
         assert_eq!(payload["config_path"], "/tmp/config.toml");
         assert_eq!(payload["current_manager"], "[REDACTED:API_KEY]");
         assert_eq!(payload["profiles"]["repo"]["profile"], "repo");

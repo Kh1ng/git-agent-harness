@@ -228,6 +228,27 @@ pub(crate) fn pm(
             );
         }
 
+        if let Some(message) = crate::model_validation::invalid_model_message(
+            &log_text,
+            &route_label(
+                &plan_route.effective_backend,
+                plan_route.effective_model.as_deref(),
+            ),
+        ) {
+            ledger.set_failure(
+                crate::ledger::FailureClass::ConfigError,
+                crate::ledger::FailureStage::AgentRun,
+            );
+            ledger.error_summary = Some(message.clone());
+            ledger.human_required = true;
+            ledger.human_required_reason_code = Some(
+                crate::controller::HumanRequiredReason::ConfigurationInfra
+                    .as_str()
+                    .into(),
+            );
+            anyhow::bail!("{message}");
+        }
+
         let route_key = route_identity(
             &plan_route.effective_backend,
             plan_route.effective_model.as_deref(),

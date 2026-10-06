@@ -3,6 +3,7 @@ import type { AuthHealthRow, DoctorSnapshot, FleetSnapshot, NodeHealthCheckResul
 import { authHealthApi, gahApi, pairingApi, type CoordinatorInfo } from '../api/client.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { LoginRepairPanel } from '../components/LoginRepairPanel.js';
+import { NodeReadinessCard } from '../components/NodeReadinessCard.js';
 import { AddNodeSection } from './SettingsPage.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { formatUpdatedAge } from '../lib/format.js';
@@ -133,7 +134,7 @@ export function NodesPage() {
   const empty = fleet?.nodes.length === 0;
 
   return <>
-    <PageHeader title="Nodes" description="Coordinator, controller devices, workers, health, and work ownership."
+    <PageHeader title="Fleet" description="This node, the coordinator, controller devices, workers, health, and work ownership."
       onRefresh={refresh} refreshing={refreshing} lastUpdated={fetchedAt}
       actions={<button type="button" className="btn-secondary" aria-expanded={showSetup || empty} onClick={() => setShowSetup(!showSetup)}>Register a node</button>} />
     {!isConnected && <p role="status" className="mb-4 text-sm text-warning">Live updates disconnected. Showing the last fetched snapshot; reconnect or refresh to update.</p>}
@@ -153,6 +154,7 @@ export function NodesPage() {
         </dl>
       </div>
     </section>}
+    <NodeReadinessCard />
     <Logins revision={`${lastChange}:${reconnectSeq}:${activityRevision}`} />
     {controllers && <section className="mb-6 space-y-3" aria-labelledby="controller-devices-title">
       <h2 id="controller-devices-title" className="text-base font-semibold text-primary">Controller devices</h2>

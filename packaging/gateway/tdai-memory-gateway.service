@@ -1,18 +1,17 @@
 # tdai-memory-gateway.service
 #
+# Optional MemoryCore package template. Ordinary GAH installs do not ship it.
+# The colocated installer renders its paths only when explicitly requested.
+#
 # Runs the TDAI (TencentDB Agent Memory) gateway as a user service: the
 # shared memory backend GAH's apps/server manager-chat harness calls
 # directly (POST /recall before each turn, /capture after), so context
 # survives swapping which manager backend (Hermes/Codex/Claude) is running.
 #
-# Co-located installs (issue #880): `scripts/install.sh
-# GAH_GATEWAY_MODE=colocated` installs and enables this unit, substituting
-# WorkingDirectory/TDAI_GATEWAY_CONFIG below for the MemoryCore checkout it
-# was given and the Node binary it found on PATH. Installing by hand
-# instead, e.g. for a non-standard checkout layout: copy this file to
-# ~/.config/systemd/user/, edit the two paths below, then:
-#   systemctl --user daemon-reload
-#   systemctl --user enable --now tdai-memory-gateway.service
+# GAH_GATEWAY_MODE=colocated makes scripts/install.sh render this template
+# with GAH_GATEWAY_MEMORYCORE_PATH and the Node directory on PATH. Ordinary
+# GAH installs skip it. For local overrides, use:
+#   systemctl --user edit tdai-memory-gateway.service
 #
 # Config: <MemoryCore checkout>/tdai-gateway.local.yaml. A fresh install
 # seeds this from the tracked tdai-gateway.standalone.yaml template
@@ -33,12 +32,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/workspace/agent-lab/repos/github/Kh1ng/TencentDB-Agent-Memory/MemoryCore
+WorkingDirectory=@MEMORYCORE@
 Environment=HOME=%h
-Environment=TDAI_GATEWAY_CONFIG=%h/workspace/agent-lab/repos/github/Kh1ng/TencentDB-Agent-Memory/MemoryCore/tdai-gateway.local.yaml
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment="TDAI_GATEWAY_CONFIG=@MEMORYCORE@/tdai-gateway.local.yaml"
+Environment="PATH=@NODE_DIR@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 EnvironmentFile=%h/.config/gah/tdai-gateway.env
-ExecStart=npx tsx src/gateway/server.ts
+ExecStart="@NODE_DIR@/npx" tsx src/gateway/server.ts
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM

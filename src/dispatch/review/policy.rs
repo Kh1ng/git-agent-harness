@@ -528,6 +528,21 @@ pub(in crate::dispatch) struct ReviewGateContext {
     acceptance_criteria: Vec<String>,
     source_provider: String,
     enforce_grounding: bool,
+    hold_contract_changes: bool,
+}
+
+/// Persisted or wire formats that other components or older nodes read.
+/// Crate-internal `pub` items and server code are not contracts: treating
+/// them as such turned most strong APPROVEs into human handoffs (#1405).
+fn is_contract_path(path: &str) -> bool {
+    [
+        "packages/contracts/",
+        "migrations/",
+        "src/ledger/",
+        "src/telemetry/",
+    ]
+    .iter()
+    .any(|prefix| path.starts_with(prefix))
 }
 
 impl ReviewGateContext {
@@ -543,24 +558,9 @@ impl ReviewGateContext {
             .map(str::to_string)
             .collect();
         let diff_lower = bundle.diff.to_ascii_lowercase();
-        let public_api_change = bundle.diff.lines().any(|line| {
-            let line = line.trim_start_matches(['+', '-']);
-            line.trim_start().starts_with("pub struct ")
-                || line.trim_start().starts_with("pub enum ")
-                || line.trim_start().starts_with("pub type ")
-                || line.trim_start().starts_with("pub fn ")
-        });
         let contract_files: Vec<String> = changed_files
             .iter()
-            .filter(|path| {
-                path.starts_with("packages/contracts/")
-                    || path.starts_with("src/telemetry/")
-                    || path == &"src/ledger/mod.rs"
-                    || path.starts_with("migrations/")
-                    || path.contains("/api/")
-                    || path.starts_with("apps/server/src/")
-                    || (public_api_change && path.starts_with("src/"))
-            })
+            .filter(|path| is_contract_path(path))
             .cloned()
             .collect();
         let mut compatibility_mechanisms = Vec::new();
@@ -587,6 +587,42 @@ impl ReviewGateContext {
             acceptance_criteria: Vec::new(),
             source_provider: String::new(),
             enforce_grounding: true,
+            hold_contract_changes: true,
+        }
+    }
+
+    /// Profile setting `hold_contract_changes_for_human_review`. Off means a
+    /// contract change never turns an APPROVE into a human handoff.
+    pub(in crate::dispatch) fn with_contract_hold(mut self, hold: bool) -> Self {
+        self.hold_contract_changes = hold;
+        self
+    }
+
+    /// Instructions for the one bounded same-reviewer retry, when the gate
+    /// held an APPROVE for a reason the reviewer can fix itself. `None`
+    /// means the hold goes straight to escalation.
+    pub(in crate::dispatch) fn repair_instructions(
+        &self,
+        verdict: &crate::models::ReviewVerdict,
+    ) -> Option<String> {
+        if verdict.verdict != "HUMAN_REVIEW" {
+            return None;
+        }
+        match verdict.safety_gate_reason.as_deref()? {
+            REVIEW_FORMAT_ONLY_VIOLATION_REASON => Some(REVIEW_FORMAT_REPAIR_INSTRUCTIONS.to_string()),
+            CONTRACT_GATE_REASON => Some(format!(
+                "Your APPROVE changed persisted or wire contract files without compatibility evidence: {}. \
+Re-check them. If the change is compatible, keep APPROVE and add compatibility_evidence with file:<one of those paths> \
+and mechanism:<{}> naming a mechanism actually present in the diff. If it is not compatible, return NEEDS_FIX with a \
+concrete actionable finding. Respond with ONLY the inert heading `Review notes` followed by the JSON object.",
+                self.contract_files.join(", "),
+                if self.compatibility_mechanisms.is_empty() {
+                    "none found in the diff".to_string()
+                } else {
+                    self.compatibility_mechanisms.join("|")
+                },
+            )),
+            _ => None,
         }
     }
 
@@ -1053,14 +1089,12 @@ fn finding_text_disclaims_actionability(text: &str) -> bool {
 pub(in crate::dispatch) const REVIEW_FORMAT_ONLY_VIOLATION_REASON: &str =
     "APPROVE included substantive prose; every finding must be represented in the review JSON";
 
-pub(in crate::dispatch) fn is_retryable_format_only_violation(
-    verdict: &crate::models::ReviewVerdict,
-    has_retried_format_only_once: bool,
-) -> bool {
-    !has_retried_format_only_once
-        && verdict.safety_gate_reason.as_deref() == Some(REVIEW_FORMAT_ONLY_VIOLATION_REASON)
-        && verdict.verdict == "HUMAN_REVIEW"
-}
+const REVIEW_FORMAT_REPAIR_INSTRUCTIONS: &str =
+    "Retrying: respond with ONLY the inert heading `Review notes` followed by the JSON object. \
+Include no extra prose before or after the JSON.";
+
+const CONTRACT_GATE_REASON: &str =
+    "APPROVE changed a contract surface without a control-plane-verifiable compatibility mechanism and evidence";
 
 /// A reviewer is advisory; merge safety is deterministic. In particular, an
 /// LLM must not be able to write an apparent APPROVE while its own structured
@@ -1104,14 +1138,12 @@ fn enforce_review_evidence_gate(
             "APPROVE evidence was not grounded in an exact changed file from the control plane"
                 .to_string(),
         )
-    } else if gate_context.has_contract_surface_change()
+    } else if gate_context.hold_contract_changes
+        && gate_context.has_contract_surface_change()
         && (gate_context.compatibility_mechanisms.is_empty()
             || !gate_context.compatibility_is_grounded(&verdict.compatibility_evidence))
     {
-        Some(
-            "APPROVE changed a contract surface without a control-plane-verifiable compatibility mechanism and evidence"
-                .to_string(),
-        )
+        Some(CONTRACT_GATE_REASON.to_string())
     } else {
         None
     };

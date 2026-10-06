@@ -578,6 +578,9 @@ Total cost:                $0.0123
     #[test]
     fn pty_captures_usage_from_fake_claude() {
         use std::io::Write;
+        // Writes and runs a shim, and needs `script` on PATH: hold the exec
+        // lock so no PATH-swapping or shim-writing test overlaps it.
+        let _exec_guard = crate::test_support::ExecGuard::new();
         let dir = std::env::temp_dir().join(format!("gah_claude_fake_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let fake = dir.join("claude.sh");
@@ -598,11 +601,18 @@ printf '\\n> \\n'\n";
             std::fs::set_permissions(&fake, perms).unwrap();
         }
 
+        // Keep the error: this has flaked once in the full parallel suite
+        // and never reproduced on its own.
         let capture = capture_usage_via_pty(
             fake.to_str().unwrap(),
             Some(std::time::Duration::from_secs(10)),
         )
-        .expect("pty capture should succeed against fake claude");
+        .unwrap_or_else(|error| {
+            panic!(
+                "pty capture against fake claude failed: {error} ({:?})",
+                error.raw_os_error()
+            )
+        });
 
         let usage = parse_claude_usage_text(&capture.raw);
         assert_eq!(usage.usage_source.as_deref(), Some("claude_usage_text"));

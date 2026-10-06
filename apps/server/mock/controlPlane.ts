@@ -1512,6 +1512,9 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       fallbackReason: null
     } satisfies HelperUsageRecord] });
   });
+  app.get('/api/model-prices', (_req, res) => res.json({ checked_at: null, sources: [], prices: [], history: [] }));
+  app.post('/api/model-prices/refresh', (_req, res) => res.json({ checked_at: new Date(FIXED_NOW).toISOString(), sources: [], prices: [], history: [] }));
+  app.get('/api/report/roles', (req, res) => res.json({ since: String(req.query.since ?? '7d'), profile: 'fixture', entries: 0, skipped: 0, harness_errors: 0, cells: [], best_fit: [], model_aliases: [] }));
   app.get('/api/report', (_req, res) => res.json(REPORT_FIXTURE));
   app.get('/api/report/series', (_req, res) => {
     res.json({
@@ -1524,6 +1527,9 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   });
   app.get('/api/events', (_req, res) => res.json([]));
   app.get('/api/controller-activity', (_req, res) => res.json([]));
+  app.get('/api/loop/last-decision', (_req, res) => res.json(null));
+  app.get('/api/factory-runs/:runId/output', (_req, res) => res.json({ found: false, attempt: null, log: null, next: 0, truncated: false, events: [] }));
+  app.get('/api/device-agents', (_req, res) => res.json({ supported: true, generated_at: new Date(FIXED_NOW).toISOString(), agents: [], factory_agents: [] }));
   app.get('/api/route-approvals', (_req, res) => res.json([]));
 
   app.get('/api/work/:workId', (req, res) => {

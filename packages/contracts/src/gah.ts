@@ -380,14 +380,23 @@ export interface PmParentStatus {
   reconciled: boolean;
 }
 
+/** Host role reported by `gah status --role --json`. Contract compatibility
+ * policy (CONTRIBUTING.md "Cross-surface changes"): the union is append-only.
+ * `standalone` (added in #1318) is a loopback-only deployment shape of the
+ * central control plane; consumers must accept it and treat it as
+ * central-equivalent, never as a worker. A role value a consumer does not
+ * recognize must fail closed with an upgrade instruction -- never silently
+ * default to `central`. The field is optional on the wire ("absent on older
+ * CLIs"), and the role is host-local: it never crosses fleet wire formats. */
 export interface NodeRoleStatus {
-  role: 'central' | 'worker';
+  role: 'central' | 'standalone' | 'worker';
   central_url: string | null;
 }
 
 export interface StatusSnapshot {
   /** Host role added in #938; absent on older CLIs. */
   node?: NodeRoleStatus;
+  node_capacity?: NodeCapacitySettings;
   schema_version: number;
   review_contract_version: number;
   generated_at: string;
@@ -582,6 +591,8 @@ export interface QuotaObservation {
   quota_remaining_percent?: number | null;
   quota_reset_at?: string | null;
   observed_at?: string | null;
+  /** When the check ran, on store-derived report rows (#1339). */
+  checked_at?: string | null;
   usage_source?: string | null;
   account_usage?: AccountUsageObservation | null;
 }
@@ -771,6 +782,9 @@ export interface ProfileSummary {
   manager_wake_autonomy: WakeAutonomyValue | null;
   /** Delivery mode for work results ('pr' | 'handoff'). Defaults to 'pr' if omitted. */
   delivery_mode?: 'pr' | 'handoff';
+  /** Whether an approved change to a persisted or wire contract without
+   * compatibility evidence waits for a human (#1405). Defaults to true. */
+  hold_contract_changes?: boolean;
   /** Effective validation command timeout in seconds for this profile (defaults
    * to 300). If unset in TOML, this is computed and returned as the effective
    * timeout. */
@@ -972,11 +986,29 @@ export interface ConfigSummary {
   /** Which agent CLI is currently acting as the operator's manager across
    * all profiles/projects (null = unset, so no manager wake happens). */
   current_manager: string | null;
+  node_capacity?: NodeCapacitySettings;
   /** Issue #653: notification channel settings (no secrets — credentials
    * live in the environment). Optional while schema-v1 clients may still
    * be connected to an older server. */
   notifications?: NotificationSettingsSummary;
 }
+
+export interface NodeCapacitySettings {
+  worker_memory_mib: number;
+  memory_floor_mib: number;
+}
+
+/** Issue #1380: smallest accepted value for both node-capacity settings, in
+ * MiB. The Rust side enforces the same bound; the Settings form reads it
+ * from here so the limits are not restated per screen. */
+export const NODE_CAPACITY_MIN_MIB = 512;
+
+/** Issue #1380: default node-capacity settings. A `memory_floor_mib` of 0
+ * keeps the adaptive floor of max(2048 MiB, total memory / 6). */
+export const NODE_CAPACITY_DEFAULTS: NodeCapacitySettings = {
+  worker_memory_mib: 4096,
+  memory_floor_mib: 0,
+};
 
 /** Issue #653: notification channel settings projection. */
 export interface NotificationSettingsSummary {
@@ -1162,6 +1194,7 @@ export interface ConfigShowFull {
   schema_version: number;
   config_path: string;
   current_manager: string | null;
+  node_capacity?: NodeCapacitySettings;
   profiles: Record<string, ConfigProfileSummary>;
 }
 
@@ -1169,6 +1202,8 @@ export interface ConfigShowFull {
  * clears the field. */
 export interface ConfigSetData {
   current_manager?: string | null;
+  worker_memory_mib?: number;
+  memory_floor_mib?: number;
   /** Issue #653: none | telegram | discord. Credentials come from the
    * environment (TELEGRAM_BOT_TOKEN / DISCORD_WEBHOOK_URL), never config. */
   notification_channel?: 'none' | 'telegram' | 'discord';
@@ -1220,6 +1255,16 @@ export type HumanRequiredReasonCode =
   | 'unknown';
 
 export type ControllerActivityStatus = 'running' | 'finished' | 'failed';
+
+/** The loop's most recent decision for a profile and why (#1406). */
+export interface LoopDecision {
+  timestamp: string;
+  /** NextAction kind, e.g. `dispatch_ticket`, `human_required`, `no_op`. */
+  kind: string;
+  reason: string;
+  work_id: string | null;
+  reason_code: string | null;
+}
 
 export interface ControllerActivity {
   run_id: string;
@@ -1544,7 +1589,7 @@ export interface ManagerChatSettingsSummary {
   helperRoutes: HelperRoutePreference[];
 }
 
-export type HelperTaskKind = 'chat_title' | 'commit_message' | 'pr_summary';
+export type HelperTaskKind = 'chat_title' | 'commit_message' | 'pr_summary' | 'price_table';
 
 /** One explicit helper route for one source account. Missing routes use the
  * source account and an advertised Luna model only when the source is Codex. */
@@ -1823,3 +1868,173 @@ export interface PaidRouteApproval {
   requested: boolean;
 }
 export type PaidRouteScope = Pick<PaidRouteApproval, 'profile' | 'work_id' | 'backend' | 'backend_instance' | 'model'>;
+
+/** A coding-agent CLI running on this device outside the factory
+ * (GET /api/device-agents). Only the tool, where it runs and since when:
+ * never its command line, which can carry a prompt. */
+export interface DeviceAgent {
+  pid: number;
+  /** The CLI: claude, codex, gemini, opencode, vibe… */
+  tool: string;
+  /** Working directory, when the process lets us read it. */
+  cwd: string | null;
+  /** ISO start time, when known. */
+  started_at: string | null;
+  /** The model named on its command line (`--model`), when it names one. */
+  model?: string | null;
+  /** The conversation's own title, when the tool records one. Never prompt text. */
+  title?: string | null;
+  /** ISO time the conversation's transcript was last written: recent means working, old means idle. */
+  last_activity_at?: string | null;
+}
+
+export interface DeviceAgentsSnapshot {
+  /** False where this host cannot list processes (anything but Linux for now). */
+  supported: boolean;
+  generated_at: string;
+  /** Agents running outside every factory worktree. */
+  agents: DeviceAgent[];
+  /** Agents the factory started, in its worktrees. A running dispatch has no
+   * ledger entry yet, so this is the only place its backend shows. */
+  factory_agents: DeviceAgent[];
+}
+
+/** One step of a running factory job, read from its backend output log. */
+export interface FactoryRunEvent {
+  /** message: the agent speaking; command: a shell command or tool call;
+   * file_change: files it edited; raw: a line this view does not understand. */
+  kind: 'message' | 'command' | 'file_change' | 'raw';
+  text: string;
+  /** A command's output so far, tail only. */
+  output?: string | null;
+  status?: 'running' | 'completed' | 'failed' | null;
+  exit_code?: number | null;
+}
+
+/** GET /api/factory-runs/:runId/output. Read-only; poll with `next` as `after`. */
+export interface FactoryRunOutput {
+  /** False when no running loop on this node has that run's log open. */
+  found: boolean;
+  attempt: number | null;
+  /** Which of the run's logs `next` is an offset into; pass it back as `log`. */
+  log: string | null;
+  /** Byte offset to pass as `after` next time. */
+  next: number;
+  /** True when earlier output was skipped to keep the first read bounded. */
+  truncated: boolean;
+  events: FactoryRunEvent[];
+}
+
+/** One model doing one kind of job, measured from the ledger
+ * (GET /api/report/roles). Rates are fractions 0..1; null means no sample. */
+export interface RoleModelMetrics {
+  role: string;
+  backend: string;
+  backend_instance: string | null;
+  model: string | null;
+  /** Ledger entries for this role and model that were real attempts (harness errors excluded). */
+  attempts: number;
+  /** Entries the harness failed before the model ran (capacity, admission): not the model's doing. */
+  harness_errors: number;
+  /** Attempts that produced a pull request that was not sent back by review. */
+  delivered: number;
+  delivered_rate: number | null;
+  /** Wilson lower bound of delivered_rate at 95%: what the rate is at least, given the sample. */
+  delivered_rate_low: number | null;
+  validation_ran: number;
+  validation_passed: number;
+  validation_pass_rate: number | null;
+  /** Of this model's pull requests that were reviewed, the share approved on first review. */
+  reviewed: number;
+  approved_first_review: number;
+  first_review_acceptance: number | null;
+  /** Attempts with a token count; tokens are the cost measure when dollars are unknown. */
+  measured: number;
+  total_tokens: number | null;
+  tokens_per_attempt: number | null;
+  tokens_per_delivered: number | null;
+  total_cost_usd: number | null;
+  cost_per_delivered_usd: number | null;
+  /** What the measured tokens would cost at the provider's published API
+   * price: an equivalent, not a bill (subscriptions are flat-rate). Null when
+   * no price is known for the model or no attempt recorded a token breakdown. */
+  api_equivalent_usd: number | null;
+  api_equivalent_per_delivered_usd: number | null;
+  /** Attempts the equivalent covers, and the price row it used. */
+  priced: number;
+  priced_as: string | null;
+  median_duration_seconds: number | null;
+  /** Reviewers only: verdicts given, blocking findings per review, and how
+   * the verdicts held up (a NEEDS_FIX followed by a passing fix, an APPROVE
+   * whose PR later needed a fix). */
+  review_verdicts: [string, number][];
+  blocking_findings_per_review: number | null;
+  verdicts_vindicated: number;
+  verdicts_overturned: number;
+  confidence: 'none' | 'low' | 'medium' | 'high';
+}
+
+export interface RoleBestFit {
+  role: string;
+  /** Ranked best first by delivered_rate_low, then fewer tokens per delivered PR. */
+  ranking: { backend: string; backend_instance: string | null; model: string | null; score: number; attempts: number; confidence: RoleModelMetrics['confidence'] }[];
+}
+
+export interface RoleMetricsReport {
+  since: string;
+  profile: string | null;
+  entries: number;
+  /** Entries that were not attempts by a model: holds, releases, tombstones. */
+  skipped: number;
+  harness_errors: number;
+  cells: RoleModelMetrics[];
+  best_fit: RoleBestFit[];
+  /** Configured model aliases (`sonnet`) and the model the backend last
+   * reported actually running for them, from the whole ledger. */
+  model_aliases: { backend: string; alias: string; model: string }[];
+}
+
+/** A model's published API price in US dollars per million tokens. */
+export interface ModelPrice {
+  provider: string;
+  /** The model as the provider's pricing page names it. */
+  model: string;
+  input: number;
+  output: number;
+  /** Reading a cached prompt prefix; null when the page lists none. */
+  cached_input: number | null;
+  cache_write: number | null;
+  source_url: string;
+  /** When this row last changed (or was first seen). */
+  changed_at: string;
+}
+
+export interface ModelPriceChange {
+  at: string;
+  provider: string;
+  model: string;
+  field: 'input' | 'output' | 'cached_input' | 'cache_write' | 'added' | 'removed';
+  from: number | null;
+  to: number | null;
+}
+
+export interface ModelPriceSourceStatus {
+  provider: string;
+  url: string;
+  checked_at: string | null;
+  ok: boolean;
+  /** table: read from the page's own price table; helper_model: a table was
+   * not found and the low-cost helper model extracted the rows. */
+  method: 'table' | 'helper_model' | null;
+  rows: number;
+  error: string | null;
+}
+
+/** GET /api/model-prices. */
+export interface ModelPriceBook {
+  checked_at: string | null;
+  sources: ModelPriceSourceStatus[];
+  prices: ModelPrice[];
+  /** Newest first, bounded. */
+  history: ModelPriceChange[];
+}

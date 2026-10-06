@@ -20,6 +20,39 @@ a summary.
 
 ## 1. Deployment
 
+### Node memory admission
+
+`gah loop` reserves 4096 MiB for each implementation, fix, retry, or escalation
+worker and keeps a free-memory floor of `max(2048 MiB, total memory / 6)`.
+The critical-memory and memory PSI checks always apply. Operators can set
+these global defaults in Settings → Node memory capacity or in TOML:
+
+```toml
+[defaults.node_capacity]
+worker_memory_mib = 4096
+memory_floor_mib = 0
+```
+
+`memory_floor_mib = 0` (or an omitted value) keeps the adaptive floor. An
+explicit floor must be at least 512 MiB; the worker reservation must also be
+at least 512 MiB. Lowering either value raises the risk of running out of
+memory. The loop reloads these settings each iteration and announces them
+when they change; `gah status` reports them. CPU, review, and PM reservations
+are unchanged.
+
+Validation is layered so a bad value can never lock you out of the config:
+
+- Saving (`gah config set`, Settings page) rejects values below 512 MiB, and
+  rejects values this node can never admit -- a worker reservation plus the
+  memory floor larger than total node memory defers every implementation
+  worker forever. The node check is skipped when total memory cannot be
+  read (e.g. the config is written for another machine).
+- Loading never fails on invalid values: they are ignored with a warning and
+  the defaults apply until the config is fixed, so every repair path
+  (`gah config set`, `gah status`, Settings) keeps working.
+- The loop logs a warning at startup when the settings can never be admitted
+  on this node, instead of leaving the fact buried in deferral logs.
+
 ### Deterministic CLI/control-plane update
 
 Do not assume a `cargo build --release` updates the `gah` command on PATH. A
@@ -143,7 +176,8 @@ of the prebuild gate issue.
   a blocker repair; that incident is exactly what this contract prevents. The
   timer is installed by `gah update`/`scripts/install.sh` alongside the loop
   unit but is never automatically enabled — opt in once you've configured an
-  alert command in `gah-watchdog.service`'s `ExecStart`:
+  alert command in a `systemctl --user edit gah-watchdog.service` drop-in.
+  The packaged check writes to the journal and requires no alert transport:
   ```bash
   systemctl --user enable --now gah-watchdog.timer
   ```
@@ -157,16 +191,22 @@ the systemd unit: its control-group boundary additionally covers SIGKILL, when
 no in-process cleanup handler can run.
 
 The checked-in server template is
-`packaging/systemd/gah-server.service`. Before installing it, edit its `User`,
-`WorkingDirectory`, `GAH_CONFIG_PATH`, Node path, and `PATH` values for the
-host; its explicit toolchain `PATH` is required for dashboard-dispatched work.
-Then install it as a system service:
+`packaging/systemd/gah-server.service`. It contains placeholders, not host
+values. `gah update --role central` renders it for the account that runs the
+update: its user, checkout, config path, the `node` found on `PATH`, and a
+toolchain `PATH` that dispatched work needs. Then it installs the result as a
+system service. The user units (`gah-loop@`, `gah-prune`,
+`gah-quota-refresh`) are rendered the same way. Do not copy a template
+verbatim. Then enable the service:
 
 ```bash
-sudo install -m 0644 packaging/systemd/gah-server.service /etc/systemd/system/gah-server.service
-sudo systemctl daemon-reload
+gah update --role central
 sudo systemctl enable --now gah-server
 ```
+
+Run `gah update` again after you move the checkout or change the Node install.
+Keep local customization in `systemctl edit` drop-ins, because every update
+replaces the base unit.
 
 #### Server bind host (issue #643)
 
@@ -1205,6 +1245,7 @@ and what to do:
 | `harness_error`      | GAH/config bug: a validation command couldn't run, bad config | Stops work. Fix config / validation command; `gah doctor --validate`. Not the model's fault — do not escalate. |
 | `environment_error`  | Baseline already red; failure identical to baseline           | Stops work. Fix the environment (missing tool, broken dep). Do not escalate the model. |
 | `backend_error`      | Backend runtime failure (nonzero exit, empty output, quota/auth) | Reroute, not escalate. Check `gah availability`; if a quota/auth block is stale, `gah availability clear`. Never treat empty output as success. |
+| `config_error`       | The runner itself rejected the configured model before the agent ran | Stops work as human-required; never retried or rerouted. Fix the candidate's model in config and confirm with `gah doctor --validate`. |
 | `agent_no_progress`  | Failure byte-identical across attempts                        | The agent's edits aren't affecting the error — usually env/config, not the model. Investigate before re-dispatching. |
 | `agent_failure`      | Real, changing validation failures                            | Genuine agent-capability miss. This is the only class where capability escalation to a stronger backend is appropriate (`--escalate`, or the loop's Escalate action). |
 | `validation_failure` | Validation never passed after all retries                     | Inspect the session diff/logs; consider `--escalate` or a manual fix. |
