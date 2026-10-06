@@ -10,7 +10,6 @@ const versions = new Map([
   ['Cargo.toml', cargoVersion('Cargo.toml')],
   ['apps/server/package.json', jsonVersion('apps/server/package.json')],
   ['apps/web/package.json', jsonVersion('apps/web/package.json')],
-  ['apps/mcp-server/package.json', jsonVersion('apps/mcp-server/package.json')],
   ['packages/contracts/package.json', jsonVersion('packages/contracts/package.json')],
   ['packages/contracts/src/coordinator-protocol.json', jsonVersion('packages/contracts/src/coordinator-protocol.json')],
   ['packages/shared/package.json', jsonVersion('packages/shared/package.json')],

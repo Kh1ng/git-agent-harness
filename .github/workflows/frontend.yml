@@ -30,16 +30,11 @@ jobs:
       - name: Typecheck frontend
         run: npm run typecheck --workspace=apps/web
 
-      - name: Typecheck server and MCP applications
-        run: |
-          npm run typecheck --workspace=apps/server
-          npm run typecheck --workspace=apps/mcp-server
+      - name: Typecheck server application
+        run: npm run typecheck --workspace=apps/server
 
       - name: Typecheck mock control plane
         run: npm run typecheck:mock --workspace=apps/server
-
-      - name: Test MCP HTTP integration
-        run: npm test --workspace=apps/mcp-server
 
       - name: Build frontend
         run: npm run build:web

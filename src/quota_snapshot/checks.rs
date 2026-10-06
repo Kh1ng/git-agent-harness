@@ -82,6 +82,16 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
         {
             continue;
         }
+        // A successful Antigravity probe marker only throttles the probe; its
+        // readings are listed under their pools. A failed one stays visible.
+        if record
+            .backend_instance
+            .as_deref()
+            .is_some_and(|instance| instance.ends_with(":usage-probe"))
+            && record.check_error.is_none()
+        {
+            continue;
+        }
         let Some(checked_at) = check_timestamp(record) else {
             continue;
         };
@@ -188,6 +198,17 @@ mod tests {
         assert_eq!(checks[0].backend, "mistral-dashboard");
         admin.credential_id = Some("named-admin".into());
         assert_eq!(build_quota_checks(&[dashboard, admin]).len(), 2);
+    }
+
+    #[test]
+    fn only_failed_agy_probe_markers_are_listed() {
+        let now = Some("2026-10-03T04:00:00Z");
+        let mut ok = record("agy", None, now, QuotaCheckStatus::NoData);
+        ok.backend_instance = Some("agy:usage-probe".into());
+        assert!(build_quota_checks(&[ok]).is_empty());
+        let mut failed = record("agy", None, now, QuotaCheckStatus::Failed);
+        failed.backend_instance = Some("agy:usage-probe".into());
+        assert_eq!(build_quota_checks(&[failed]).len(), 1);
     }
 
     fn record(

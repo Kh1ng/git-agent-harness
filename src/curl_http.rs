@@ -46,6 +46,7 @@ pub fn request_with_idempotency_key(
     }
     let mut cmd = Command::new("curl");
     cmd.args([
+        "-q",
         "-sS",
         "--max-time",
         &timeout_secs.to_string(),
@@ -110,7 +111,11 @@ pub fn request_with_idempotency_key(
             .trim()
             .parse()
             .context("parsing HTTP status from curl output")?,
-        body: stdout[..marker].trim_end().as_bytes().to_vec(),
+        body: stdout[..marker]
+            .strip_suffix('\n')
+            .unwrap_or(&stdout[..marker])
+            .as_bytes()
+            .to_vec(),
     })
 }
 

@@ -381,6 +381,20 @@ fn build_candidates(
         );
     }
 
+    let mut allowed: Vec<_> = routing.allowed_models.iter().collect();
+    allowed.sort_by_key(|(kind, _)| kind.as_str());
+    for (kind, list) in allowed {
+        for candidate in list {
+            add_candidate(
+                routing,
+                &mut aggregates,
+                &mut index,
+                kind,
+                candidate.clone(),
+            );
+        }
+    }
+
     if aggregates.is_empty() {
         if let Some(backend) = routing.default_backend.clone() {
             add_candidate(
