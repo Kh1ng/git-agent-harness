@@ -102,11 +102,17 @@ pub fn run() -> Result<()> {
 
         Commands::Update {
             repo,
+            pull,
+            agent,
+            yes,
             role,
             restart_server,
             server_service,
         } => commands::update::run(commands::update::Args {
             repo,
+            pull,
+            agent,
+            yes,
             role,
             restart_server,
             server_service,

@@ -595,6 +595,7 @@ async fn set_node_role(
             &settings.repository_path,
             "--role",
             &role,
+            "--yes",
         ])
         .env("GAH_DESKTOP_SERVER_PORT", settings.server_port.to_string())
         .status();

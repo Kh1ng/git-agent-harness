@@ -210,6 +210,11 @@ pub(crate) fn normalize_attempt_usage(
         usage.requests_count = Some(1);
     }
     if usage.usage_source.is_none() {
+        usage.usage_unknown_reason.get_or_insert(if launched {
+            crate::ledger::UsageUnknownReason::UsageArtifactMissing
+        } else {
+            crate::ledger::UsageUnknownReason::BackendNotInvoked
+        });
         usage.usage_source = Some(if launched {
             "execution_observed".to_string()
         } else {
@@ -271,6 +276,7 @@ pub(crate) fn usage_has_observation(usage: &LedgerUsage) -> bool {
         || usage.requests_count.is_some()
         || usage.estimated_cost_usd.is_some()
         || usage.actual_cost_usd.is_some()
+        || usage.usage_unknown_reason.is_some()
 }
 
 enum AggregatedAttribution {
@@ -315,6 +321,17 @@ pub(crate) fn aggregate_attempt_usage(attempts: &[AttemptRecord]) -> LedgerUsage
         .filter(|attempt| usage_has_observation(&attempt.usage))
         .map(|attempt| &attempt.usage)
         .collect::<Vec<_>>();
+    // A row reason describes absent usage only when no attempt observed usage.
+    // Rollups retain per-attempt reasons, including mixed outcomes.
+    if !observed
+        .iter()
+        .any(|usage| usage.usage_unknown_reason.is_none())
+    {
+        aggregated.usage_unknown_reason = attempts
+            .iter()
+            .filter_map(|attempt| attempt.usage.usage_unknown_reason)
+            .max();
+    }
     if observed.is_empty() {
         return aggregated;
     }
@@ -508,6 +525,54 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_mixed_outcomes_keeps_known_usage_without_row_reason() {
+        for reason in [
+            crate::ledger::UsageUnknownReason::BackendNotInvoked,
+            crate::ledger::UsageUnknownReason::UsageArtifactMissing,
+        ] {
+            let attempts = vec![
+                AttemptRecord {
+                    usage: LedgerUsage {
+                        usage_source: Some("backend_launch_failed".into()),
+                        usage_unknown_reason: Some(reason),
+                        ..LedgerUsage::default()
+                    },
+                    ..AttemptRecord::default()
+                },
+                AttemptRecord {
+                    usage: LedgerUsage {
+                        usage_source: Some("fixture".into()),
+                        total_tokens: Some(42),
+                        ..LedgerUsage::default()
+                    },
+                    ..AttemptRecord::default()
+                },
+            ];
+            let aggregate = aggregate_attempt_usage(&attempts);
+            assert_eq!(aggregate.total_tokens, Some(42));
+            assert_eq!(aggregate.usage_unknown_reason, None);
+            assert_eq!(attempts[0].usage.usage_unknown_reason, Some(reason));
+            let mut entry = crate::ledger::LedgerEntry::new(
+                "test",
+                &crate::ledger::test_util::profile(),
+                "vibe",
+                "fix",
+                "task",
+                None,
+                None,
+            );
+            entry.usage = aggregate;
+            entry.attempts = attempts.clone();
+            let persisted = entry.normalized_for_persistence();
+            assert_eq!(persisted.usage.total_tokens, Some(42));
+            assert_eq!(persisted.usage.usage_unknown_reason, None);
+            let unknown = aggregate_attempt_usage(&attempts[..1]);
+            assert_eq!(unknown.total_tokens, None);
+            assert_eq!(unknown.usage_unknown_reason, Some(reason));
+        }
+    }
+
+    #[test]
     fn aggregate_preserves_agreement_and_labels_mixed_attribution() {
         let matching_usage = LedgerUsage {
             usage_source: Some("fixture".into()),
@@ -615,5 +680,25 @@ mod tests {
             Some("agy-main:google-native")
         );
         assert_eq!(alias.account_label.as_deref(), Some("agy:google-native"));
+    }
+}
+
+#[cfg(test)]
+mod unknown_usage_tests {
+    use super::*;
+
+    #[test]
+    fn failed_launch_records_backend_not_invoked() {
+        let usage = normalize_attempt_usage(
+            LedgerUsage::default(),
+            UsageAttribution::backend(Some("vibe"), None),
+            false,
+        );
+        assert_eq!(
+            usage.usage_unknown_reason,
+            Some(crate::ledger::UsageUnknownReason::BackendNotInvoked)
+        );
+        assert_eq!(usage.requests_count, None);
+        assert_eq!(usage.total_tokens, None);
     }
 }
