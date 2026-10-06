@@ -1,6 +1,5 @@
 use super::{dispatch_policy, merge, pm, run_dispatch_and_record, RouteNodeAdmission};
 use crate::controller::NextAction;
-use crate::dispatch::ClaimOutcome;
 use anyhow::Result;
 
 /// Executes at most one action. `FixMr` dispatches a fix operation reusing an
@@ -46,18 +45,6 @@ pub(crate) fn execute_action(
         run_id: Some(uuid::Uuid::new_v4().to_string()),
         route_admission: route_admission.clone(),
     };
-
-    // An issue this loop is about to implement is claimed on the provider
-    // first, so a loop running under another login does not start the same
-    // work. Losing the claim skips the issue; it is not a failure.
-    if let NextAction::DispatchTicket { ticket_path, .. }
-    | NextAction::Retry { ticket_path, .. }
-    | NextAction::Escalate { ticket_path, .. } = action
-    {
-        if let ClaimOutcome::Lost(reason) = crate::dispatch::claim_issue(profile, ticket_path)? {
-            return Ok(format!("Skipped issue #{ticket_path}: {reason}"));
-        }
-    }
 
     match action {
         NextAction::ReviewMr { branch, .. } => {

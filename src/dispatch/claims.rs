@@ -409,10 +409,11 @@ fn ledger_lookup_for_ticket(
             continue;
         }
         // A sibling worker already owns the only configured backend/model
-        // slot. The dispatch reached no backend and consumed no execution
-        // attempt, so keep it auditable in the ledger without poisoning
-        // ticket attempt counts or retry/stuck-loop policy.
-        if e.validation_result.as_deref() == Some("deferred_capacity") {
+        // slot, or another loop holds the issue. The dispatch reached no
+        // backend and consumed no execution attempt, so keep it auditable in
+        // the ledger without poisoning ticket attempt counts or
+        // retry/stuck-loop policy.
+        if crate::ledger::gates::launched_no_backend(e) {
             continue;
         }
         // Review holds are manager-control records, not execution attempts.

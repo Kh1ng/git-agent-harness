@@ -479,3 +479,68 @@ fn intake_fails_closed_when_the_signed_in_login_is_unknown() {
     assert!(scan.available_tickets.is_empty());
     assert!(scan.provider_error.unwrap().contains("read own login"));
 }
+
+fn ledger_entry(prof: &Profile) -> LedgerEntry {
+    LedgerEntry::new("test", prof, "auto", "fix", "7", None, None)
+}
+
+#[test]
+fn a_dispatch_that_loses_its_claim_ends_as_a_skip_not_a_failure() {
+    let _exec_guard = ExecGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    // Issue 7 is assigned to someone else by hand: no claim comments exist.
+    let gh_path = bin_dir.join("gh");
+    std::fs::write(
+        &gh_path,
+        "#!/bin/sh\ncase \"$*\" in\n  'api user '*) echo me ;;\n  *'/comments'*) ;;\n  *'issues/7 '*) echo someone-else ;;\n  *) exit 2 ;;\nesac\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let _guard = PathGuard::set(&bin_dir);
+    let mut prof = profile(tmp.path());
+    prof.publishing.issue_claim = policy(&[]);
+    let mut ledger = ledger_entry(&prof);
+
+    let error = claim_or_lose(&prof, "7", &mut ledger).unwrap_err();
+
+    assert_eq!(
+        issue_claim_lost(&error).map(ToString::to_string).as_deref(),
+        Some("issue #7: held by someone-else")
+    );
+    assert!(crate::ledger::gates::launched_no_backend(&ledger));
+    assert!(!crate::dispatch::terminal::should_notify_dispatch_failure(
+        &error
+    ));
+}
+
+#[test]
+fn a_lost_claim_does_not_count_as_an_attempt_on_the_issue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ticket_dir = tmp.path().join("docs/tickets");
+    std::fs::create_dir_all(&ticket_dir).unwrap();
+    std::fs::write(
+        ticket_dir.join("TICKET-302-test.md"),
+        "# TICKET-302: Test lost claim\nGoal: remain dispatchable\n",
+    )
+    .unwrap();
+    let mut prof = profile(tmp.path());
+    prof.provider = String::new();
+    let mut lost = ledger_entry(&prof);
+    lost.work_id = Some("TICKET-302".into());
+    lost.validation_result = Some(crate::ledger::gates::CLAIM_LOST.into());
+    lost.failure_class = Some("harness_error".into());
+    let index = crate::ledger::index_entries_by_work_id(&[lost]);
+
+    let scan =
+        crate::dispatch::claims::scan_available_tickets_with_dependencies(&prof, &[], &index);
+
+    assert_eq!(scan.available_tickets.len(), 1);
+    assert_eq!(scan.available_tickets[0].prior_attempt_count, 0);
+    assert_eq!(scan.available_tickets[0].last_failure_class, None);
+}

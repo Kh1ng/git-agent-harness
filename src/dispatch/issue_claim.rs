@@ -21,8 +21,16 @@
 //!
 //! The machine-local claim store still guards against two workers on one
 //! machine; this module only arbitrates between logins.
+//!
+//! A dispatch claims its issue only once it holds a backend and node slot
+//! (see [`admit_attempt`]), so a dispatch that is refused capacity never
+//! announces work it will not do.
 
+use super::attempts::{reserve_backend_attempt, BackendAdmissionGuard};
+use super::DispatchArgs;
 use crate::config::{IssueClaimMode, IssueClaimPolicy, Profile};
+use crate::execution_identity::ExecutionIdentity;
+use crate::ledger::LedgerEntry;
 use crate::provider::provider_command;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
@@ -35,17 +43,69 @@ const CLAIM_MARKER: &str = "<!-- gah-claim ";
 
 /// Result of trying to claim an issue for this loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ClaimOutcome {
+enum ClaimOutcome {
     /// This loop holds the issue and may dispatch it.
     Won,
     /// Someone else holds the issue. The text says who and why.
     Lost(String),
 }
 
-/// Claim `target` on the provider before work starts, waiting out the verify
-/// window. Returns `Won` without touching the provider when the profile keeps
-/// claims local or `target` is not an issue number.
-pub(crate) fn claim_issue(profile: &Profile, target: &str) -> Result<ClaimOutcome> {
+/// A dispatch ended because another login holds its issue. Not a failure:
+/// the controller reports it as a skip and the ledger does not count it as
+/// an attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IssueClaimLost {
+    issue: String,
+    reason: String,
+}
+
+impl std::fmt::Display for IssueClaimLost {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "issue #{}: {}", self.issue, self.reason)
+    }
+}
+
+impl std::error::Error for IssueClaimLost {}
+
+pub(crate) fn issue_claim_lost(error: &anyhow::Error) -> Option<&IssueClaimLost> {
+    error.chain().find_map(|cause| cause.downcast_ref())
+}
+
+/// Reserve the backend and node slot for one attempt and, on a dispatch's
+/// first attempt, claim its issue. A refused slot fails as a capacity
+/// deferral. Another login holding the issue fails with [`IssueClaimLost`];
+/// the slot is released as that error returns.
+pub(super) fn admit_attempt(
+    profile: &Profile,
+    identity: &ExecutionIdentity,
+    args: &DispatchArgs,
+    attempt: u32,
+    ledger: &mut LedgerEntry,
+) -> Result<BackendAdmissionGuard> {
+    let guard = reserve_backend_attempt(profile, identity, args.route_admission.as_ref())
+        .map_err(|error| super::contextualize_capacity_deferral(error, attempt as usize))?;
+    if attempt == 0 {
+        claim_or_lose(profile, &args.target, ledger)?;
+    }
+    Ok(guard)
+}
+
+fn claim_or_lose(profile: &Profile, target: &str, ledger: &mut LedgerEntry) -> Result<()> {
+    if let ClaimOutcome::Lost(reason) = claim_issue(profile, target)? {
+        ledger.validation_result = Some(crate::ledger::gates::CLAIM_LOST.into());
+        return Err(IssueClaimLost {
+            issue: target.to_string(),
+            reason,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Claim `target` on the provider, waiting out the verify window. Returns
+/// `Won` without touching the provider when the profile keeps claims local
+/// or `target` is not an issue number.
+fn claim_issue(profile: &Profile, target: &str) -> Result<ClaimOutcome> {
     let policy = &profile.publishing.issue_claim;
     if policy.mode == IssueClaimMode::Local || !is_issue_number(target) {
         return Ok(ClaimOutcome::Won);

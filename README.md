@@ -524,8 +524,9 @@ verify_seconds = 60
 priority_logins = ["first-choice-login"]
 ```
 
-A loop that selects an issue assigns the login `gh` is signed in as, posts a
-claim comment, waits `verify_seconds`, and re-reads the issue. If another loop
+A dispatch that has been granted a backend and node slot assigns the login
+`gh` is signed in as, posts a claim comment, waits `verify_seconds`, and
+re-reads the issue. A dispatch refused a slot claims nothing. If another loop
 claimed it at the same moment, the first login in `priority_logins` keeps it,
 otherwise the earliest claim comment; the other loop removes its own assignee
 and moves on. Intake leaves alone every issue that another login holds,
@@ -539,8 +540,9 @@ assignee and claim the issue, unless an open pull request for the issue exists.
 Every loop sharing the repository must use the same `ttl_minutes` and
 `priority_logins`, because each one decides a contested claim from its own
 copy. The mode is independent of `issue_intake_mode`: it adds no label
-requirement and removes none. It applies to issues the loop implements, not
-to `gah dispatch` run by hand, planning decomposition, or pull request review.
+requirement and removes none. It applies whenever an issue is dispatched for
+implementation, by the loop or by hand, and not to planning decomposition or
+pull request review.
 
 ### Generated-artifact publication guard
 
