@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { ExternalAnchor } from '../components/ExternalAnchor';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
@@ -9,37 +9,42 @@ import {
   Timer,
   GitMerge,
   AlertTriangle,
-  ShieldAlert,
   Play,
   Square
 } from 'lucide-react';
 import type { Page } from '../App.js';
-import type { Session, DependencyBlocker } from '@git-agent-harness/contracts';
+import type { DeviceAgentsSnapshot, LoopDecision, Session } from '@git-agent-harness/contracts';
+import { gahApi } from '../api/client.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
 import { StatTile } from '../components/ui/StatTile.js';
 import { StatusBadge, classificationTone } from '../components/ui/StatusBadge.js';
-import { BlockedWorkItems } from '../components/BlockedWorkItems.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, LoadingState, ErrorState } from '../components/ui/EmptyState.js';
-import { SessionCard } from '../components/SessionCard.js';
 import { formatPercent, formatAge, formatLocalTime, isStale, formatTokens, formatCount, oldestFetchedAt } from '../lib/format.js';
-import { ControllerActivityCard } from '../components/ControllerActivityCard.js';
+import { AttentionTable, attentionRows } from '../components/AttentionTable.js';
+import { LiveAgentsCard, agentDisplayName } from '../components/LiveAgentsCard.js';
+import type { WatchableRun } from '../components/AgentLiveView.js';
+import { NonFactoryAgentsCard } from '../components/NonFactoryAgentsCard.js';
 
 type OverviewPageProps = {
   sessions: Session[];
-  onSelectSession: (session: Session) => void;
   onNavigate: (page: Page) => void;
   onOpenWork?: (workId: string) => void;
+  /** Opens a running job's read-only live view. */
+  onWatchRun?: (run: WatchableRun, running: WatchableRun[]) => void;
+  /** The device's agent processes; absent in isolation (component tests). */
+  deviceAgents?: { data: DeviceAgentsSnapshot | null; error: string | null };
 };
 
 const OVERVIEW_REFRESH_MS = 5 * 60 * 1000;
 
-export function OverviewPage({ sessions, onSelectSession, onNavigate, onOpenWork = () => {} }: OverviewPageProps) {
+export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, onWatchRun, deviceAgents = { data: null, error: null } }: OverviewPageProps) {
   const { status, quota, loopStatus, loopAction } = useGahStore();
   const { profile: wsProfile, controllerActivity } = useWebSocket();
   const profileOverride = useUiStore((s) => s.profileOverride);
+  const openChatSession = useUiStore((s) => s.openChatSession);
   const profile = profileOverride ?? wsProfile;
   const fetchStatus = useGahStore((s) => s.fetchStatus);
   const fetchQuota = useGahStore((s) => s.fetchQuota);
@@ -47,15 +52,25 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate, onOpenWork
   const startLoop = useGahStore((s) => s.startLoop);
   const stopLoop = useGahStore((s) => s.stopLoop);
 
+  // What the loop last decided and why, so a stalled loop explains itself (#1406).
+  const [lastDecision, setLastDecision] = useState<LoopDecision | null>(null);
+  const fetchLastDecision = () => {
+    if (!profile) return;
+    gahApi.getLoopDecision(profile).then(setLastDecision, () => setLastDecision(null));
+  };
+
   useEffect(() => {
     fetchStatus(profile ?? undefined);
     fetchQuota({ profile: profile ?? undefined, since: '7d' });
     if (profile) fetchLoopStatus(profile);
+    fetchLastDecision();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refetch on profile change only
   }, [profile, fetchStatus, fetchQuota, fetchLoopStatus]);
 
   const refresh = () => {
     fetchStatus(profile ?? undefined, { force: true });
     fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
+    fetchLastDecision();
   };
   useAutoRefresh(refresh, OVERVIEW_REFRESH_MS);
   useWsReconnectRefresh(refresh);
@@ -108,6 +123,7 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate, onOpenWork
   const reviewHeldWorkIds = snapshot?.review_held_work_ids ?? [];
   // Native issue prerequisites that block autonomous intake.
   const dependencyBlockers = snapshot?.dependency_blockers ?? [];
+  const attention = attentionRows({ blockers, dependencyBlockers, blockedWorkItems, reviewHeldWorkIds });
   const needsReviewMrs = (snapshot?.merge_requests ?? []).filter((m) => m.classification === 'NEEDS_REVIEW');
   const recentMerges = (snapshot?.merge_requests ?? []).filter((m) => m.classification === 'MERGED').slice(0, 5);
   const unavailableBackends = (quotaSnapshot?.candidates ?? []).filter((c) => !c.eligible_now);
@@ -143,8 +159,16 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate, onOpenWork
       {loopAction.error && (
         <p className="text-xs text-critical -mt-4">{loopAction.error}</p>
       )}
+      {lastDecision && (
+        <p className="text-xs text-secondary -mt-4 break-words" title={formatLocalTime(lastDecision.timestamp) ?? lastDecision.timestamp}>
+          <span className="text-muted">Loop last decided {formatAge(lastDecision.timestamp)}: </span>
+          <span className="font-mono">{lastDecision.kind.replace(/_/g, ' ')}</span>
+          {lastDecision.work_id && <span className="font-mono"> {lastDecision.work_id}</span>}
+          {' — '}{lastDecision.reason}
+        </p>
+      )}
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         <StatTile label="Tasks (7d)" value={formatCount(usage?.entries)} icon={ListChecks} />
         <StatTile
           label="Success rate"
@@ -159,113 +183,24 @@ export function OverviewPage({ sessions, onSelectSession, onNavigate, onOpenWork
           hint={usage?.requests_count !== null && usage?.requests_count !== undefined ? `${formatCount(usage.requests_count)} requests` : undefined}
         />
         <StatTile label="Active work" value={String(activeWorkCount)} icon={Timer} hint={`${activeSessions.length} dashboard · ${activeControllerRuns.length} controller`} />
+        {/* The full candidate list lives on Usage > Quota; the tile only says whether routing is constrained. */}
+        <button type="button" onClick={() => onNavigate('quota')} className="text-left" aria-label="Backend availability: open Quota">
+          <StatTile label="Backends" icon={CheckCircle2}
+            value={(quotaSnapshot?.candidates.length ?? 0) === 0 ? '—' : unavailableBackends.length === 0 ? 'All eligible' : `${unavailableBackends.length} down`}
+            hint={(quotaSnapshot?.candidates.length ?? 0) === 0 ? 'No quota snapshot' : `${quotaSnapshot!.candidates.length} candidates`} />
+        </button>
       </div>
 
-      {(blockers.length > 0 || blockedWorkItems.length > 0 || reviewHeldWorkIds.length > 0 || dependencyBlockers.length > 0) && (
-        <div className="card-padded border-warning/30">
-          <h3 className="text-sm font-semibold text-primary mb-3 flex items-center gap-2">
-            <ShieldAlert size={16} className="text-warning" aria-hidden="true" />
-            Needs attention
-          </h3>
-          <ul className="space-y-2">
-            {blockers.map((b, i) => (
-              <li key={`blocker-${i}`} className="flex items-start gap-2 text-sm">
-                <StatusBadge tone="critical" label={b.kind.replace(/_/g, ' ')} />
-                <span className="text-secondary">{b.message || b.reason || 'Unknown'} — blocks all work</span>
-              </li>
-            ))}
-            {dependencyBlockers.map((dep, i) => (
-              <li key={`dependency-${i}`} className="flex items-start gap-2 text-sm">
-                <StatusBadge tone="warning" label="Dependency blocked" />
-                <span className="text-secondary">
-                  {dep.work_id}{dep.title ? ` — ${dep.title}` : ''}{dep.reason ? `: ${dep.reason}` : ''}
-                  {dep.dependencies.length > 0 && (
-                    <span className="ml-1 text-xs">
-                      (blocked on: {(dep.dependencies.filter(d => d.normalized_state !== 'closed').length > 0
-                        ? dep.dependencies.filter(d => d.normalized_state !== 'closed')
-                        : dep.dependencies
-                      ).map(d => `${d.identity} [${d.normalized_state}]`).join(', ')})
-                    </span>
-                  )}
-                </span>
-              </li>
-            ))}
-            {blockedWorkItems.length > 0 && (
-              <li>
-                <p className="text-xs font-medium text-secondary mb-2">
-                  Blocked work items — each carries its remediation plan:
-                </p>
-                <BlockedWorkItems blockers={blockedWorkItems} onOpenWork={onOpenWork} />
-              </li>
-            )}
-            {reviewHeldWorkIds.map((workId) => (
-              <li key={`review-hold-${workId}`} className="flex items-start gap-2 text-sm">
-                <StatusBadge tone="warning" label="Review hold" />
-                <span className="text-secondary">Manager review hold active on {workId}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <LiveAgentsCard profile={profile ?? null} sessions={sessions} controllerRuns={controllerActivity}
+        claims={snapshot?.active_claims ?? []} candidates={quotaSnapshot?.candidates ?? []} factoryAgents={deviceAgents.data?.factory_agents}
+        onWatch={onWatchRun ? (row, watchable) => {
+          const asRun = (item: typeof row): WatchableRun => ({ runId: item.runId!, title: `${agentDisplayName(item.name)}${item.model ? ` ${item.model}` : ''} on ${item.job ?? 'a job'}`, subtitle: item.mode });
+          if (row.runId) onWatchRun(asRun(row), watchable.map(asRun));
+        } : undefined} />
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <ControllerActivityCard activity={controllerActivity} />
-      </div>
+      <NonFactoryAgentsCard device={deviceAgents.data} deviceError={deviceAgents.error} onOpenChat={(chatProfile, sessionId) => { openChatSession(chatProfile, sessionId); onNavigate('chat'); }} />
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <section>
-          <h3 className="text-sm font-semibold text-primary mb-3">What's running now</h3>
-          {activeWorkCount === 0 ? (
-            <EmptyState icon={Timer} title="No active sessions" description="Dispatched work will appear here while it runs." />
-          ) : (
-            <div className="space-y-3">
-              {activeControllerRuns.map((run) => (
-                <div key={run.run_id} className="card-padded flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="font-mono text-xs text-primary">{run.work_id ?? 'unassigned'}</p>
-                    <p className="text-xs text-secondary mt-1">{run.action}</p>
-                    <p className="text-[10px] text-muted mt-1 truncate">run {run.run_id}</p>
-                  </div>
-                  <StatusBadge tone="good" label="running" />
-                </div>
-              ))}
-              {activeSessions.slice(0, 4).map((session) => (
-                <SessionCard key={session.id} session={session} onClick={() => onSelectSession(session)} />
-              ))}
-            </div>
-          )}
-          <button onClick={() => onNavigate('work')} className="text-xs text-accent hover:underline mt-2">
-            View all work →
-          </button>
-        </section>
-
-        <section>
-          <h3 className="text-sm font-semibold text-primary mb-3">Backend availability</h3>
-          {unavailableBackends.length === 0 && (quotaSnapshot?.candidates.length ?? 0) === 0 ? (
-            <EmptyState icon={CheckCircle2} title="No quota snapshot recorded" description="Everything is eligible by default until a configured candidate reports otherwise." />
-          ) : unavailableBackends.length === 0 ? (
-            <div className="card-padded flex items-center gap-2 text-sm text-good">
-              <CheckCircle2 size={16} aria-hidden="true" />
-              All configured candidates eligible
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {unavailableBackends.map((a, i) => (
-                <div key={i} className="card-padded flex items-center justify-between text-sm">
-                  <span className="text-primary">
-                    {a.model ? `${a.backend}/${a.model}` : a.backend}
-                    {a.quota_pool ? ` · ${a.quota_pool}` : ''}
-                  </span>
-                  <StatusBadge tone="critical" label={a.reason ?? 'unavailable'} />
-                </div>
-              ))}
-            </div>
-          )}
-          <button onClick={() => onNavigate('quota')} className="text-xs text-accent hover:underline mt-2">
-            View quota detail →
-          </button>
-        </section>
-      </div>
+      {attention.length > 0 && <AttentionTable rows={attention} onOpenWork={onOpenWork} />}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <section>

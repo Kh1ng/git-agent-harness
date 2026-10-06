@@ -410,7 +410,7 @@ fn supported_tool(id: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn which(name: &str) -> Option<String> {
+pub(crate) fn which(name: &str) -> Option<String> {
     let path = command("which")
         .arg(name)
         .output()

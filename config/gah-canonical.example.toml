@@ -38,7 +38,7 @@ routine_reviewer = { backend = "claude", model = "sonnet" }
 # (auto-merge eligible), distinct from the legacy weak tier that forced
 # human_required.
 escalatory_reviewers = [
-    { backend = "codex", model = "default" },
+    { backend = "codex" },
 ]
 
 [routing.review_required_capabilities]

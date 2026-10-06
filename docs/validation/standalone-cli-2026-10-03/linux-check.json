@@ -1,0 +1,16 @@
+{
+  "platform": "linux",
+  "oauthRequests": 0,
+  "results": [
+    {
+      "backend": "gh",
+      "status": "install_required",
+      "install_url": "https://cli.github.com/"
+    },
+    {
+      "backend": "glab",
+      "status": "install_required",
+      "install_url": "https://gitlab.com/gitlab-org/cli#installation"
+    }
+  ]
+}

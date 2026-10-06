@@ -1080,6 +1080,28 @@ fn build_snapshot_inner(
     Ok(snapshot)
 }
 
+/// Text lines for the "Blocked work items" section; empty when none are blocked.
+fn blocked_work_item_lines(blocked: &[Blocker]) -> Vec<String> {
+    if blocked.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec!["Blocked work items:".to_string()];
+    for b in blocked {
+        let code = b
+            .reason_code
+            .as_deref()
+            .or(b.reason.as_deref())
+            .unwrap_or("unknown");
+        lines.push(format!(
+            "  - {} [{}]: {}",
+            b.source_reference.as_deref().unwrap_or("-"),
+            code,
+            b.message.as_deref().unwrap_or(&b.kind)
+        ));
+    }
+    lines
+}
+
 pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, light: bool) -> Result<()> {
     let now = OffsetDateTime::now_utc();
     let snapshot = build_snapshot_with(cfg, profile_name, now, !light)?;
@@ -1088,9 +1110,15 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, light: bool) -> Resu
     if json {
         let mut output = serde_json::to_value(&snapshot)?;
         output["node"] = serde_json::to_value(&node)?;
+        output["node_capacity"] = serde_json::to_value(cfg.defaults.node_capacity)?;
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("Status for Profile: {}", profile_name);
+        println!(
+            "Node capacity: worker reservation {} MiB, memory floor {}",
+            cfg.defaults.node_capacity.worker_memory_mib,
+            cfg.defaults.node_capacity.floor_description(),
+        );
         println!(
             "Role: {:?} | Central URL: {}",
             node.role,
@@ -1165,7 +1193,11 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, light: bool) -> Resu
         }
 
         if snapshot.blockers.is_empty() {
-            println!("Blockers: None");
+            if snapshot.blocked_work_items.is_empty() {
+                println!("Blockers: None");
+            } else {
+                println!("Blockers: None profile-wide (work items below are blocked individually)");
+            }
         } else {
             println!("Blockers:");
             for b in &snapshot.blockers {
@@ -1177,6 +1209,10 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, light: bool) -> Resu
                         .unwrap_or(b.reason.as_deref().unwrap_or("unknown"))
                 );
             }
+        }
+
+        for line in blocked_work_item_lines(&snapshot.blocked_work_items) {
+            println!("{line}");
         }
 
         if !snapshot.constraints.is_empty() {

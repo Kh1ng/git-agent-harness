@@ -58,7 +58,9 @@ test('review holds are visible on Overview and do not hide ticket status in Fact
   }] }));
   await page.goto('/');
 
-  await expect(page.getByText(`Manager review hold active on ${heldWorkId}`)).toBeVisible();
+  const attention = page.getByRole('region', { name: /Needs attention/ });
+  await expect(attention.getByText('Review hold', { exact: true })).toBeVisible();
+  await expect(attention.getByText(heldWorkId, { exact: true })).toBeVisible();
 
   await page.getByRole('button', { name: 'Factory', exact: true }).click();
   const backendPicker = page.getByRole('button', { name: 'Factory backend' });

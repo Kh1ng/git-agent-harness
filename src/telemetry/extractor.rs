@@ -237,136 +237,51 @@ pub fn extract_attempt_usage_records(
     records
 }
 
-/// Extract quota observation records from a ledger entry
+/// #1341: convert durable account quota store records into export records.
+///
+/// The quota store (`quota_observations.jsonl`) is the only source of real
+/// account readings (Codex, Claude, Nous, Mistral dashboard, router). Ledger
+/// usage never reliably carries account quota, so it is no longer consulted.
+/// Record ids are deterministic from store content, so re-exporting the same
+/// store is idempotent. Rows carrying neither `observed_at` nor `checked_at`
+/// cannot be partitioned and are skipped; the store's writers always stamp
+/// one.
 pub fn extract_quota_observation_records(
-    entry: &LedgerEntry,
+    records: &[crate::quota_store::QuotaObservationRecord],
     exported_at: &str,
 ) -> Vec<QuotaObservationRecord> {
-    let mut records = Vec::new();
-
-    // Extract from top-level entry usage if it has quota information
-    if entry.usage.quota_window.is_some()
-        || entry.usage.quota_used_percent.is_some()
-        || entry.usage.quota_remaining_percent.is_some()
-    {
-        let observed_at = entry
-            .usage
-            .observed_at
-            .clone()
-            .unwrap_or_else(|| entry.timestamp.clone());
-
-        let quota_window = entry.usage.quota_window.clone().unwrap_or_default();
-
-        let base = TelemetryRecord {
-            schema_version: SCHEMA_VERSION,
-            record_id: generate_quota_observation_id(
-                &observed_at,
-                &entry.effective_backend,
-                entry.effective_model.as_deref(),
-                &quota_window,
-            ),
-            exported_at: exported_at.to_string(),
-            observed_at: observed_at.clone(),
-        };
-
-        let record = QuotaObservationRecord {
-            base,
-            profile: entry.profile.clone(),
-            repo_id: entry.repo_id.clone(),
-            repo: entry.repo.clone(),
-            provider: entry.provider.clone(),
-            work_id: entry.work_id.clone(),
-            backend: entry.backend.clone(),
-            effective_backend: entry.effective_backend.clone(),
-            model: entry.requested_model.clone(),
-            effective_model: entry.effective_model.clone(),
-            account_scope: entry.usage.account_label.clone(),
-            backend_instance: entry.usage.backend_instance.clone(),
-            auth_source_label: entry.usage.auth_source_label.clone(),
-            quota_pool: entry.usage.quota_pool.clone().or_else(|| {
-                entry
-                    .routing_diagnostics
-                    .as_ref()
-                    .and_then(|diagnostics| diagnostics.selected_quota_pool.clone())
-            }),
-            quota_window: quota_window.clone(),
-            quota_used_percent: entry.usage.quota_used_percent,
-            quota_remaining_percent: entry.usage.quota_remaining_percent,
-            quota_reset_at: entry.usage.quota_reset_at.clone(),
-            observation_source: entry
-                .usage
-                .usage_source
-                .clone()
-                .unwrap_or_else(|| "ledger_entry".to_string()),
-        };
-
-        records.push(record);
-    }
-
-    // Extract from individual attempt usage
-    for attempt in &entry.attempts {
-        if attempt.usage.quota_window.is_some()
-            || attempt.usage.quota_used_percent.is_some()
-            || attempt.usage.quota_remaining_percent.is_some()
-        {
-            let observed_at = attempt
-                .usage
+    records
+        .iter()
+        .filter_map(|record| {
+            let observed_at = record
                 .observed_at
                 .clone()
-                .unwrap_or_else(|| entry.timestamp.clone());
-
-            let quota_window = attempt.usage.quota_window.clone().unwrap_or_default();
+                .or_else(|| record.checked_at.clone())?;
 
             let base = TelemetryRecord {
                 schema_version: SCHEMA_VERSION,
-                record_id: generate_quota_observation_id(
-                    &observed_at,
-                    &attempt.backend,
-                    attempt.effective_model.as_deref(),
-                    &quota_window,
-                ),
+                record_id: generate_store_quota_observation_id(record),
                 exported_at: exported_at.to_string(),
                 observed_at: observed_at.clone(),
             };
 
-            let record = QuotaObservationRecord {
-                backend_instance: attempt.usage.backend_instance.clone(),
-                auth_source_label: attempt.usage.auth_source_label.clone(),
+            Some(QuotaObservationRecord {
                 base,
-                profile: entry.profile.clone(),
-                repo_id: entry.repo_id.clone(),
-                repo: entry.repo.clone(),
-                provider: entry.provider.clone(),
-                work_id: entry.work_id.clone(),
-                backend: attempt.backend.clone(),
-                effective_backend: attempt.backend.clone(),
-                model: attempt.effective_model.clone(),
-                effective_model: attempt.effective_model.clone(),
-                account_scope: attempt
-                    .usage
-                    .account_label
-                    .clone()
-                    .or_else(|| entry.usage.account_label.clone()),
-                quota_pool: entry
-                    .routing_diagnostics
-                    .as_ref()
-                    .and_then(|diagnostics| diagnostics.selected_quota_pool.clone()),
-                quota_window: quota_window.clone(),
-                quota_used_percent: attempt.usage.quota_used_percent,
-                quota_remaining_percent: attempt.usage.quota_remaining_percent,
-                quota_reset_at: attempt.usage.quota_reset_at.clone(),
-                observation_source: attempt
-                    .usage
-                    .usage_source
-                    .clone()
-                    .unwrap_or_else(|| "attempt_usage".to_string()),
-            };
-
-            records.push(record);
-        }
-    }
-
-    records
+                backend: record.backend.clone(),
+                backend_instance: record.backend_instance.clone(),
+                credential_id: record.credential_id.clone(),
+                model: record.model.clone(),
+                quota_pool: record.quota_pool.clone(),
+                quota_window: record.quota_window.clone(),
+                quota_used_percent: record.quota_used_percent,
+                quota_remaining_percent: record.quota_remaining_percent,
+                quota_reset_at: record.quota_reset_at.clone(),
+                checked_at: record.checked_at.clone(),
+                check_error: record.check_error.clone(),
+                usage_source: record.usage_source.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Extract task outcome records from a ledger entry
@@ -527,12 +442,8 @@ pub fn extract_telemetry_records(
         )));
     }
 
-    // Extract quota observation records
-    for quota_record in extract_quota_observation_records(entry, exported_at) {
-        all_records.push(ExportedTelemetryRecord::QuotaObservation(Box::new(
-            quota_record,
-        )));
-    }
+    // #1341: quota observation records come from the durable quota store,
+    // not from ledger usage. See exporter::export_store_quota_observations.
 
     // Extract task outcome records
     for task_record in extract_task_outcome_records(entry, exported_at) {

@@ -32,6 +32,7 @@ import type {
   LedgerEntry,
   ControllerEvent,
   ControllerActivity,
+  LoopDecision,
   ProfileSummary,
   WakeAutonomyValue,
   ConfigSummary,
@@ -234,6 +235,8 @@ export interface ProfileUpdateData {
   validation_timeout_seconds?: number | null;
   max_parallel_workers?: number;
   manager_wake_autonomy?: WakeAutonomyValue;
+  /** Hold approved schema/API contract changes for human review (#1405). */
+  hold_contract_changes?: boolean;
   clear?: string[];
 }
 
@@ -268,6 +271,17 @@ export interface StopLoopResult {
   error?: string;
 }
 
+export interface GitWorktreeSummary {
+  path: string;
+  /** Null for a detached HEAD. */
+  branch: string | null;
+  head: string;
+  /** The project's own checkout, as opposed to a job or chat worktree. */
+  main: boolean;
+  /** Null when the directory could not be read. */
+  changedFiles: number | null;
+}
+
 export interface GahDataSource {
   getCoordinatorInfo(): Promise<CoordinatorInfo>;
   getFleetSnapshot(): Promise<FleetSnapshot>;
@@ -283,6 +297,7 @@ export interface GahDataSource {
   getWorkTimeline(workId: string): Promise<LedgerEntry[]>;
   getEvents(params?: { profile?: string; since?: string }): Promise<ControllerEvent[]>;
   getControllerActivity(params?: { profile?: string; since?: string }): Promise<ControllerActivity[]>;
+  getLoopDecision(profile: string): Promise<LoopDecision | null>;
   getProfiles(): Promise<ProfileSummary[]>;
   getProjects(): Promise<ProjectSummary[]>;
   addProject(profile: string): Promise<ProjectSummary>;
@@ -305,7 +320,7 @@ export interface GahDataSource {
   setManagerChatBackend(profile: string, backendId: string): Promise<{ success: boolean }>;
   getGatewaySettings(): Promise<GatewaySettingsSummary>;
   revealGatewayBootstrapCommand(): Promise<GatewayBootstrapCommand>;
-  getNodeSetupCommand(data: { os: 'windows' | 'linux' | 'macos'; centralUrl: string; role: 'desktop' | 'worker' | 'both' | 'central'; gatewayUrl?: string }): Promise<{ command: string }>;
+  getNodeSetupCommand(data: { os: 'windows' | 'linux' | 'macos'; centralUrl: string; role: 'desktop' | 'worker' | 'both' | 'central' | 'standalone'; gatewayUrl?: string }): Promise<{ command: string }>;
   updateGatewaySettings(data: GatewaySettingsUpdate): Promise<GatewaySettingsSummary>;
   getSkills(): Promise<{ skills: SkillSummary[] }>;
   getSkill(id: string, version: string): Promise<Skill>;
@@ -321,6 +336,7 @@ export interface GahDataSource {
   getHelperUsage(limit?: number): Promise<{ records: HelperUsageRecord[] }>;
   getGitBranches(profile: string): Promise<{ branches: string[]; current: string }>;
   getGitLog(profile: string, limit?: number): Promise<{ commits: { hash: string; short: string; subject: string; author: string; ago: string }[] }>;
+  getGitWorktrees(profile: string): Promise<{ worktrees: GitWorktreeSummary[] }>;
   getGitPrs(profile: string): Promise<{ prs: ChatPrSummary[]; warning?: string }>;
   createGitPr(profile: string, data: { title: string; body?: string; base?: string; draft?: boolean }): Promise<{ url: string }>;
   createGitCommit(profile: string, message: string, sessionId?: string, files?: string[], nodeId?: string): Promise<{ hash: string }>;
@@ -332,6 +348,15 @@ export interface GahDataSource {
   setManagerChatReasoningEffort(profile: string, effortId: string, nodeId?: string): Promise<{ success: boolean }>;
   getChatSessions(profile: string): Promise<{ sessions: ChatSessionSummary[] }>;
   getAllChatSessions(): Promise<{ projects: ChatSessionProjectGroup[] }>;
+  /** Agent CLIs running on this device outside the factory. */
+  /** Per role and model, what the ledger says (delivered rate with confidence, validation, review acceptance, tokens). */
+  getRoleMetrics(profile: string | undefined, since: string): Promise<import('@git-agent-harness/contracts').RoleMetricsReport>;
+  /** Published API prices per model, with what changed and when each source was last checked. */
+  getModelPrices(): Promise<import('@git-agent-harness/contracts').ModelPriceBook>;
+  refreshModelPrices(): Promise<import('@git-agent-harness/contracts').ModelPriceBook>;
+  getDeviceAgents(): Promise<import('@git-agent-harness/contracts').DeviceAgentsSnapshot>;
+  /** A running factory job's agent output from byte offset `after`. Read-only. */
+  getFactoryRunOutput(runId: string, after: number, full?: boolean, log?: string | null): Promise<import('@git-agent-harness/contracts').FactoryRunOutput>;
   createChatSession(profile: string, backend?: string, model?: string | null, title?: string, nodeId?: string, backendInstance?: string | null): Promise<ChatSessionSummary>;
   updateChatSession(profile: string, sessionId: string, patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string }): Promise<ChatSessionSummary>;
   archiveChatSession(profile: string, sessionId: string): Promise<ChatSessionSummary>;
@@ -507,6 +532,9 @@ export const gahApi: GahDataSource = {
       since: params.since
     });
   },
+  getLoopDecision(profile) {
+    return getJson<LoopDecision | null>('/api/loop/last-decision', { profile });
+  },
   getControllerActivity(params = {}) {
     return getJson<ControllerActivity[]>('/api/controller-activity', {
       profile: params.profile,
@@ -671,6 +699,9 @@ export const gahApi: GahDataSource = {
   getGitLog(profile, limit) {
     return getJson('/api/git/log', { profile, limit: limit?.toString() });
   },
+  getGitWorktrees(profile) {
+    return getJson('/api/git/worktrees', { profile });
+  },
   getGitPrs(profile) {
     return getJson('/api/git/prs', { profile });
   },
@@ -712,6 +743,21 @@ export const gahApi: GahDataSource = {
   },
   getAllChatSessions() {
     return getJson<{ projects: ChatSessionProjectGroup[] }>('/api/manager-chat/sessions/all');
+  },
+  getFactoryRunOutput(runId, after, full = false, log = null) {
+    return getJson<import('@git-agent-harness/contracts').FactoryRunOutput>(`/api/factory-runs/${encodeURIComponent(runId)}/output`, { after: String(after), ...(full ? { full: '1' } : {}), ...(log ? { log } : {}) });
+  },
+  getRoleMetrics(profile, since) {
+    return getJson<import('@git-agent-harness/contracts').RoleMetricsReport>('/api/report/roles', { ...(profile ? { profile } : {}), since });
+  },
+  getModelPrices() {
+    return getJson<import('@git-agent-harness/contracts').ModelPriceBook>('/api/model-prices');
+  },
+  refreshModelPrices() {
+    return postJson<import('@git-agent-harness/contracts').ModelPriceBook, Record<string, never>>('/api/model-prices/refresh', {});
+  },
+  getDeviceAgents() {
+    return getJson<import('@git-agent-harness/contracts').DeviceAgentsSnapshot>('/api/device-agents');
   },
   createChatSession(profile, backend, model, title, nodeId, backendInstance) {
     return postJson<ChatSessionSummary, { profile: string; backend?: string; backendInstance?: string; model?: string | null; title?: string; nodeId?: string }>('/api/manager-chat/sessions', {

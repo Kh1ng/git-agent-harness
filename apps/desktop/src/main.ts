@@ -1,3 +1,4 @@
+import { bindRepositoryTools } from './repositoryTools.js';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { bindMistralLogin, type MistralLoginResult } from './mistralLogin.js';
@@ -7,6 +8,7 @@ type Presence = { dock: boolean; launch_window: boolean; tray: boolean };
 type Settings = { central_url: string; wsl_distribution: string; presence: Presence };
 type WorkerStatus = { running: boolean; note: string; tools: { name: string; environment: string; installed: boolean }[] };
 type RoleStatus = { role: 'central' | 'worker'; running: boolean; supported: boolean };
+bindRepositoryTools(document.querySelector<HTMLElement>('#repository-tools')!, invoke);
 const central = document.querySelector<HTMLInputElement>('#central-url')!;
 const distribution = document.querySelector<HTMLInputElement>('#wsl-distribution')!;
 const error = document.querySelector<HTMLElement>('#error')!;
@@ -48,7 +50,7 @@ function showRole(result: RoleStatus) {
 }
 
 
-type SetupStatus = { state: 'ok' | 'missing' | 'outdated' | 'not_logged_in' | 'unsupported'; found?: string; reason?: string };
+type SetupStatus = { state: 'ok' | 'missing' | 'outdated' | 'not_logged_in' | 'credentials_rejected' | 'status_unknown' | 'status_failed' | 'unsupported'; found?: string; reason?: string };
 type SetupRequirement = { id: string; label: string; why: string; optional: boolean; status: SetupStatus; action: { command: string; sudo: boolean } | null };
 type SetupCheck = {
   installed: boolean;
@@ -65,9 +67,17 @@ function statusText(status: SetupStatus): string {
     case 'ok': return status.found ? `found ${status.found}` : 'ready';
     case 'missing': return 'missing';
     case 'outdated': return `too old (found ${status.found})`;
-    case 'not_logged_in': return 'not logged in';
+    case 'not_logged_in': return status.reason ?? 'not logged in';
+    case 'credentials_rejected': return status.reason ?? 'login rejected';
+    case 'status_unknown': return status.reason ?? 'status unrecognized';
+    case 'status_failed': return status.reason ?? 'status check failed';
     case 'unsupported': return status.reason ?? 'not supported here';
   }
+}
+
+/** A failed or unrecognized status check says nothing about the login: the user may already be authenticated. */
+function checkUnresolved(status: SetupStatus): boolean {
+  return status.state === 'status_unknown' || status.state === 'status_failed';
 }
 
 /** `gah setup --check` as a checklist; the work itself happens in Terminal. Resolves to readiness. */
@@ -102,7 +112,11 @@ async function refreshSetup(): Promise<boolean> {
       const why = document.createElement('small');
       why.textContent = item.why;
       row.append(why);
-      if (!ok && item.action) {
+      if (!ok && checkUnresolved(item.status)) {
+        const how = document.createElement('small');
+        how.textContent = 'This login may still be valid. Select Check again to re-check it.';
+        row.append(how);
+      } else if (!ok && item.action) {
         const how = document.createElement('small');
         const code = document.createElement('code');
         code.textContent = item.action.command;

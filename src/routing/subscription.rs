@@ -217,6 +217,46 @@ pub fn handoff_routes(
 mod tests {
     use super::*;
     #[test]
+    fn vibe_pool_uses_only_its_bound_dashboard_source() {
+        // #1333: dashboard readings are stored under `mistral-dashboard`, so a
+        // Vibe candidate needed an explicit binding to ever see its allowance.
+        let now = OffsetDateTime::parse("2026-10-04T18:00:00Z", &Rfc3339).unwrap();
+        let candidate = CandidateConfig {
+            backend: "vibe".into(),
+            model: Some("mistral-medium-3.5".into()),
+            quota_pool: Some("vibe-monthly".into()),
+            ..Default::default()
+        };
+        let mut routing = crate::config::RoutingPolicy::default();
+        let unbound = routing.execution_identity_for_candidate(&candidate);
+        routing
+            .quota_sources
+            .insert("vibe-monthly".into(), "mistral-console".into());
+        let bound = routing.execution_identity_for_candidate(&candidate);
+        let reading = |source: &str, remaining: f64| -> QuotaObservationRecord {
+            serde_json::from_value(serde_json::json!({
+                "backend": "mistral-dashboard", "credential_id": source,
+                "backend_instance": "mistral-dashboard:customer", "quota_pool": "mistral-dashboard:customer",
+                "quota_window": "vibe-code-included-monthly", "quota_remaining_percent": remaining,
+                "observed_at": "2026-10-04T17:55:00Z", "quota_reset_at": "2026-10-11T00:00:00Z"
+            }))
+            .unwrap()
+        };
+        let open = capacity(&bound, &[reading("mistral-console", 60.0)], now);
+        assert!(open.known_capacity && !open.exhausted);
+        assert!(open.reset_pressure.is_some_and(|pressure| pressure > 1.0));
+        assert!(capacity(&bound, &[reading("mistral-console", 0.0)], now).exhausted);
+        assert_eq!(
+            capacity(&unbound, &[reading("mistral-console", 0.0)], now),
+            SubscriptionCapacity::default()
+        );
+        assert_eq!(
+            capacity(&bound, &[reading("other-account", 0.0)], now),
+            SubscriptionCapacity::default()
+        );
+    }
+
+    #[test]
     fn codex_weekly_window_drives_pressure_and_an_empty_five_hour_window_exhausts() {
         // #1334: both app-server windows reach routing independently.
         let now = OffsetDateTime::parse("2026-10-03T18:00:00Z", &Rfc3339).unwrap();

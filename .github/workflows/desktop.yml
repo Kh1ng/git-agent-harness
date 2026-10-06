@@ -7,6 +7,10 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/desktop.yml'
+      - '.github/workflows/release-macos.yml'
+      - 'scripts/build-signed-macos*'
+      - 'scripts/setup-windows.ps1'
+      - 'scripts/test-windows-setup.ps1'
       - 'apps/desktop/**'
       - 'apps/server/src/nodeSetup*'
       - 'apps/server/src/authMiddleware.ts'
@@ -139,6 +143,7 @@ jobs:
       # The installers run on macOS's own bash 3.2 here, against the built gah.
       - name: Check installer scripts
         run: |
+          node --test scripts/build-signed-macos.test.mjs
           bash -n scripts/install-wsl-worker.sh
           cargo test --test installer_scripts
 

@@ -193,3 +193,14 @@ test('POST /api/profiles with all required fields present reaches the CLI (past 
     assert.equal(response.status, 502, 'validation must not reject a fully-populated request');
   });
 });
+
+test('GET /api/report/roles passes the real CLI a --since it accepts', async () => {
+  await withFixtureServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/report/roles?since=30d`);
+    const body = (await response.json()) as { since: string; entries: number };
+
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.since, '30d');
+    assert.equal(body.entries, 0, 'a ledger that does not exist yet is an empty ledger, not an error');
+  });
+});

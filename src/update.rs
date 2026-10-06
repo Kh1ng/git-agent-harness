@@ -4,6 +4,7 @@
 //! host actually invokes normally lives at `$CARGO_HOME/bin/gah`, so a normal
 //! build can silently leave the control plane on old behavior.
 
+use crate::setup::requirements::{linger_path, SYSTEMD_RUNNING};
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use std::collections::HashSet;
@@ -12,6 +13,8 @@ use std::ffi::OsString;
 use std::fs::{copy, create_dir_all, read_dir, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+
+mod units;
 
 pub use crate::node_role::NodeRole as HostRole;
 
@@ -23,8 +26,9 @@ pub struct UpdateArgs {
 }
 
 pub fn run(args: UpdateArgs) -> Result<()> {
+    units::UnitValues::ensure_installing_account()?;
     if args.role == HostRole::Worker && args.restart_server {
-        bail!("--restart-server requires --role central; a worker never runs gah-server.service");
+        bail!("--restart-server requires --role central or standalone; a worker never runs gah-server.service");
     }
 
     let repo = resolve_repo(args.repo.as_deref())?;
@@ -41,7 +45,12 @@ pub fn run(args: UpdateArgs) -> Result<()> {
 
     // This is the authoritative CLI deployment step. It replaces the Cargo
     // executable selected by PATH, unlike a target/release-only build.
-    run_command(&repo, "cargo", &["install", "--path", ".", "--force"])?;
+    ensure_lockfile_current(&repo)?;
+    run_command(
+        &repo,
+        "cargo",
+        &["install", "--path", ".", "--force", "--locked"],
+    )?;
 
     let binary = installed_binary_path()?;
     if !binary.is_file() {
@@ -52,6 +61,9 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     }
     run_command(&repo, binary.to_string_lossy().as_ref(), &["--help"])?;
     println!("Installed CLI: {}", binary.display());
+    // Both roles install user units below; keep them alive past logout. Done
+    // early so a later failed step cannot skip it.
+    enable_user_lingering(&repo, args.role);
 
     for agent in copy_opencode_agent_configs(&repo, &user_config_home()?)? {
         println!("Installed OpenCode agent: {}", agent.display());
@@ -72,7 +84,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         )?;
     }
 
-    if args.role == HostRole::Central {
+    if matches!(args.role, HostRole::Central | HostRole::Standalone) {
         // The control-plane server is part of the MVP; web/desktop/mobile
         // clients intentionally have independent release workflows. A
         // worker node dispatches jobs only and never serves this.
@@ -192,8 +204,10 @@ pub fn run(args: UpdateArgs) -> Result<()> {
                 println!("Installed watchdog unit: {}", unit.display());
             }
             println!(
-                "Watchdog timer is installed but not enabled; opt in explicitly with \
-                 `systemctl --user enable --now gah-watchdog.timer` once an alert command is configured."
+                "Watchdog timer is installed but not enabled; the packaged check writes \
+                 alerts to the journal. Opt in with `systemctl --user enable --now \
+                 gah-watchdog.timer`, then forward alerts by configuring ExecStart in a \
+                 `systemctl --user edit gah-watchdog.service` drop-in."
             );
         }
         None => println!("systemd not available on this host: skipping watchdog unit install."),
@@ -235,7 +249,9 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             &["is-active", "--quiet", &args.server_service],
         )?;
         println!("Restarted service: {}", args.server_service);
-    } else if args.role == HostRole::Central && !cfg!(target_os = "macos") {
+    } else if matches!(args.role, HostRole::Central | HostRole::Standalone)
+        && !cfg!(target_os = "macos")
+    {
         println!(
             "Server not restarted; pass --restart-server when this host serves the control plane."
         );
@@ -267,6 +283,7 @@ fn install_macos_launch_agent(repo: &Path, role: HostRole) -> Result<Option<Path
     };
     let role_name = match role {
         HostRole::Central => "central",
+        HostRole::Standalone => "standalone",
         HostRole::Worker => "worker",
     };
     run_command(
@@ -281,7 +298,7 @@ fn install_macos_launch_agent(repo: &Path, role: HostRole) -> Result<Option<Path
         ],
     )?;
     let label = match role {
-        HostRole::Central => "dev.git-agent-harness.server.plist",
+        HostRole::Central | HostRole::Standalone => "dev.git-agent-harness.server.plist",
         HostRole::Worker => "dev.git-agent-harness.worker.plist",
     };
     let target = env::var_os("HOME")
@@ -444,7 +461,11 @@ fn copy_systemd_unit(repo: &Path, config_home: &Path, unit_file_name: &str) -> R
     let parent = target.parent().expect("systemd unit target has a parent");
     create_dir_all(parent)
         .with_context(|| format!("creating systemd user-unit directory {}", parent.display()))?;
-    copy(&source, &target).with_context(|| {
+    let template = std::fs::read_to_string(&source)
+        .with_context(|| format!("reading systemd unit template {}", source.display()))?;
+    let rendered = units::render(&template, &units::UnitValues::resolve(repo)?)
+        .with_context(|| format!("rendering {unit_file_name}"))?;
+    std::fs::write(&target, rendered).with_context(|| {
         format!(
             "installing systemd unit from {} to {}",
             source.display(),
@@ -478,9 +499,17 @@ fn install_server_unit_template(repo: &Path, server_service: &str) -> Result<Opt
         bail!("systemd unit template is missing: {}", source.display());
     }
     let target = PathBuf::from("/etc/systemd/system").join(server_service);
-    let source = source
+    // #1322: render for this account; the tracked template has placeholders.
+    let template = std::fs::read_to_string(&source)
+        .with_context(|| format!("reading systemd unit template {}", source.display()))?;
+    let rendered = units::render(&template, &units::UnitValues::resolve(repo)?)
+        .context("rendering gah-server.service")?;
+    let staged = tempfile::NamedTempFile::new().context("staging gah-server.service")?;
+    std::fs::write(staged.path(), rendered).context("staging gah-server.service")?;
+    let source = staged
+        .path()
         .to_str()
-        .context("systemd unit template path is not UTF-8")?;
+        .context("staged systemd unit path is not UTF-8")?;
     let target_arg = target
         .to_str()
         .context("systemd unit target path is not UTF-8")?;
@@ -742,6 +771,52 @@ fn install_quota_refresh_unit_template(repo: &Path) -> Result<Option<[PathBuf; 2
     Ok(Some([service, timer]))
 }
 
+/// Issue #1347: the user units `gah update` installs (loop, quota refresh,
+/// prune) run under the user's systemd manager, which only exists while the
+/// account has a login session. On a headless node without lingering, every
+/// timer stays idle after each reboot until someone logs in. Returns nothing
+/// on purpose: a failure is reported, never fatal, and `gah setup --check`
+/// keeps the gap visible.
+fn enable_user_lingering(repo: &Path, role: HostRole) {
+    if !Path::new(SYSTEMD_RUNNING).exists() {
+        // launchd hosts and systemd-less machines have no linger concept.
+        return;
+    }
+    let Some(user) = units::installing_user() else {
+        eprintln!("[gah update] user lingering skipped: id -un named no account.");
+        return;
+    };
+    if linger_path(&user).exists() {
+        return;
+    }
+    if try_enable_linger(repo, &user, role == HostRole::Central) {
+        println!("Enabled user lingering for {user}: user units survive logouts and reboots.");
+    } else {
+        eprintln!(
+            "[gah update] user lingering not enabled; the user units stay idle after \
+             reboot until someone logs in. Fix with: sudo loginctl enable-linger {user}"
+        );
+    }
+}
+
+/// Plain loginctl works where polkit allows `set-self-linger` (not over SSH
+/// on Debian 13, for one); its expected refusal is kept quiet. Then sudo:
+/// central already asks for the sudo password to install its system unit,
+/// so it may ask here too; a worker uses `sudo -n` and never waits on one.
+fn try_enable_linger(repo: &Path, user: &str, may_prompt: bool) -> bool {
+    let polkit = Command::new("loginctl")
+        .args(["--no-ask-password", "enable-linger"])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    let sudo: &[&str] = if may_prompt {
+        &["loginctl", "enable-linger", user]
+    } else {
+        &["-n", "loginctl", "enable-linger", user]
+    };
+    polkit || run_command(repo, "sudo", sudo).is_ok()
+}
+
 /// Central-node daily storage maintenance. The existing timer owns both the
 /// Rust prune and server chat sweep; workers never install this control-plane
 /// entrypoint and no second scheduler is introduced.
@@ -802,6 +877,25 @@ fn captured(repo: &Path, program: &str, args: &[&str]) -> Result<String> {
         .context("command output was not UTF-8")
 }
 
+/// `cargo install --locked` silently re-resolves a Cargo.lock that no longer
+/// matches Cargo.toml; `cargo metadata --locked` refuses. Check first so an
+/// update never builds a dependency set CI did not test.
+fn ensure_lockfile_current(repo: &Path) -> Result<()> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--locked", "--format-version", "1"])
+        .current_dir(repo)
+        .output()
+        .context("starting cargo metadata --locked")?;
+    if !output.status.success() {
+        bail!(
+            "Cargo.lock in {} does not match Cargo.toml; refusing to install untested dependency versions. Commit an updated Cargo.lock, then run the update again.\n{}",
+            repo.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
     println!("> {} {}", program, args.join(" "));
     let status = Command::new(program)
@@ -819,11 +913,12 @@ fn run_command(repo: &Path, program: &str, args: &[&str]) -> Result<()> {
 mod tests {
     use super::{
         copy_opencode_agent_configs, ensure_clean, ensure_default_branch_checkout,
-        install_prune_unit_template, install_quota_refresh_unit_template,
+        ensure_lockfile_current, install_prune_unit_template, install_quota_refresh_unit_template,
         install_server_unit_template, install_watchdog_unit_template, installed_binary_path,
-        resolve_web_deploy_root, run, stale_asset_names, HostRole, UpdateArgs, WEB_BUILD_ARGS,
+        resolve_web_deploy_root, run, stale_asset_names, try_enable_linger, HostRole, UpdateArgs,
+        WEB_BUILD_ARGS,
     };
-    use crate::test_support::PathGuard;
+    use crate::test_support::{ExecGuard, PathGuard};
     use std::collections::HashSet;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -832,6 +927,48 @@ mod tests {
     use tempfile::TempDir;
 
     static XDG_CONFIG_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn a_stale_lockfile_stops_the_update_before_install() {
+        // A path dependency keeps this offline: no registry lookup is needed.
+        let tmp = TempDir::new().unwrap();
+        for (name, deps) in [("dep", ""), ("app", "dep = { path = \"../dep\" }")] {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+            std::fs::write(
+                dir.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\n{deps}"),
+            )
+            .unwrap();
+        }
+        let app = tmp.path().join("app");
+        let lock = |args: &[&str]| {
+            let status = Command::new("cargo")
+                .args(args)
+                .current_dir(&app)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        lock(&["generate-lockfile", "--offline"]);
+        ensure_lockfile_current(&app).unwrap();
+
+        let manifest = app.join("Cargo.toml");
+        let without_dep = std::fs::read_to_string(&manifest)
+            .unwrap()
+            .replace("dep = { path = \"../dep\" }", "");
+        std::fs::write(&manifest, without_dep).unwrap();
+        lock(&["generate-lockfile", "--offline"]);
+        std::fs::write(
+            &manifest,
+            std::fs::read_to_string(&manifest).unwrap() + "dep = { path = \"../dep\" }\n",
+        )
+        .unwrap();
+
+        let error = ensure_lockfile_current(&app).unwrap_err().to_string();
+        assert!(error.contains("does not match Cargo.toml"), "{error}");
+    }
 
     /// Scoped override for `XDG_CONFIG_HOME`, mirroring the other process-env
     /// guards in `crate::test_support` -- must be restored before another
@@ -1118,12 +1255,14 @@ mod tests {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
         let bin_tmp = TempDir::new().unwrap();
         let record_path = bin_tmp.path().join("sudo-argv.log");
+        let unit_path = bin_tmp.path().join("installed.service");
         // Fake `sudo` that just logs its args and forwards to the real
         // `install`/`systemctl` is too fragile; instead log and succeed so
         // the test asserts the *plan* of the update, not the root-owned copy.
         let script = format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"install\" ]; then exit 0; fi\nif [ \"$1\" = \"systemctl\" ] && [ \"$2\" = \"daemon-reload\" ]; then exit 0; fi\nexit 0\n",
-            record_path.display()
+            "#!/bin/sh\necho \"$@\" >> '{}'\nif [ \"$1\" = \"install\" ]; then cp \"$8\" '{}'; exit 0; fi\nif [ \"$1\" = \"systemctl\" ] && [ \"$2\" = \"daemon-reload\" ]; then exit 0; fi\nexit 0\n",
+            record_path.display(),
+            unit_path.display()
         );
         let script_path = bin_tmp.path().join("sudo");
         std::fs::write(&script_path, script).unwrap();
@@ -1159,6 +1298,21 @@ mod tests {
         assert!(record.contains("gah-server.service"), "{record}");
         assert!(record.contains("/etc/systemd/system"), "{record}");
         assert!(record.contains("daemon-reload"), "{record}");
+        // #1322: the installed unit is rendered for this account, not copied.
+        let unit = std::fs::read_to_string(&unit_path).unwrap();
+        for placeholder in ["@USER@", "@REPO@", "@CONFIG@", "@NODE@", "@PATH@"] {
+            assert!(!unit.contains(placeholder), "{placeholder}: {unit}");
+        }
+        let user =
+            String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout).unwrap();
+        assert!(
+            unit.contains(&format!("\nUser={}\n", user.trim())),
+            "{unit}"
+        );
+        assert!(unit.contains(&format!(
+            "\nWorkingDirectory={}\n",
+            repo.canonicalize().unwrap().display()
+        )));
     }
 
     #[test]
@@ -1218,5 +1372,82 @@ mod tests {
         );
         // An empty listing (no assets deployed yet) prunes nothing.
         assert!(stale_asset_names("", &keep).is_empty());
+    }
+
+    /// Executable fake for the user-lingering tests: same shim shape as the
+    /// hand-rolled sudo/systemctl fakes above.
+    fn shim(dir: &Path, name: &str, body: &str) {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+    }
+
+    /// Fakes loginctl and sudo, each exiting with the given code and logging
+    /// its argv so a test can see what ran.
+    fn linger_shims(loginctl_exit: u8, sudo_exit: u8) -> TempDir {
+        let bin = TempDir::new().unwrap();
+        for (name, exit) in [("loginctl", loginctl_exit), ("sudo", sudo_exit)] {
+            let log = bin.path().join(format!("{name}.log"));
+            shim(
+                bin.path(),
+                name,
+                &format!(
+                    "printf '%s\\n' \"$*\" >> '{}'\nexit {exit}\n",
+                    log.display()
+                ),
+            );
+        }
+        bin
+    }
+
+    /// Issue #1347: polkit first, then sudo; only central may prompt.
+    #[test]
+    fn user_lingering_tries_polkit_then_passwordless_sudo() {
+        let _exec_guard = ExecGuard::new();
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let log = |bin: &TempDir, name: &str| {
+            std::fs::read_to_string(bin.path().join(format!("{name}.log")))
+                .map(|log| log.trim().to_string())
+                .ok()
+        };
+
+        let bin = linger_shims(0, 0);
+        let _path_guard = PathGuard::set(bin.path().to_str().unwrap());
+        assert!(try_enable_linger(repo, "testuser", false));
+        assert_eq!(
+            log(&bin, "loginctl").as_deref(),
+            Some("--no-ask-password enable-linger")
+        );
+        assert_eq!(log(&bin, "sudo"), None, "polkit allowed it: no sudo");
+        drop(_path_guard);
+
+        let bin = linger_shims(1, 0);
+        let _path_guard = PathGuard::set(bin.path().to_str().unwrap());
+        assert!(try_enable_linger(repo, "testuser", false));
+        assert_eq!(
+            log(&bin, "sudo").as_deref(),
+            Some("-n loginctl enable-linger testuser")
+        );
+        drop(_path_guard);
+
+        let bin = linger_shims(1, 0);
+        let _path_guard = PathGuard::set(bin.path().to_str().unwrap());
+        assert!(try_enable_linger(repo, "testuser", true));
+        assert_eq!(
+            log(&bin, "sudo").as_deref(),
+            Some("loginctl enable-linger testuser"),
+            "central may prompt for the sudo password"
+        );
+        drop(_path_guard);
+
+        let bin = linger_shims(1, 1);
+        let _path_guard = PathGuard::set(bin.path().to_str().unwrap());
+        assert!(!try_enable_linger(repo, "testuser", false));
     }
 }

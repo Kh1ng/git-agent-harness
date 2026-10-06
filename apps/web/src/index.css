@@ -113,6 +113,17 @@
     outline-offset: 2px;
   }
 
+  /* A subscription with a job running: a bold green letter inside a steady green glow. */
+  .usage-letter-working {
+    color: rgb(var(--status-good));
+    font-weight: 800;
+    text-shadow: 0 0 6px rgb(var(--status-good) / 0.9);
+  }
+  .usage-chip-working {
+    border-radius: 9999px;
+    box-shadow: 0 0 0 1.5px rgb(var(--status-good)), 0 0 10px 3px rgb(var(--status-good) / 0.6);
+  }
+
   @media (prefers-reduced-motion: reduce) {
     /* Keep loading labels and status changes visible without spinning or pulsing. */
     .animate-spin,
@@ -228,6 +239,39 @@
   .nav-link-active {
     @apply text-primary;
     background-color: rgb(var(--accent) / 0.15);
+  }
+
+  .top-nav-link {
+    @apply flex shrink-0 items-center gap-2 border-b-2 border-transparent px-3 py-3 text-sm font-medium text-secondary transition-colors;
+  }
+  .top-nav-link:hover {
+    @apply text-primary bg-white/5;
+  }
+  .top-nav-link-active {
+    @apply text-primary;
+    border-bottom-color: rgb(var(--accent));
+  }
+
+  .activity-bar-button {
+    @apply relative flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-secondary transition-colors;
+  }
+  .activity-bar-button:hover {
+    @apply text-primary bg-white/5;
+  }
+  .activity-bar-button-active {
+    @apply text-primary;
+    background-color: rgb(var(--accent) / 0.15);
+  }
+
+  /* Beside the main panel the sidebar is a narrow column whatever the
+     viewport, so page grids inside it stack. */
+  @media (min-width: 1280px) {
+    .side-panel [class*=':grid-cols-'] {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .side-panel [class*=':col-span-'] {
+      grid-column: auto;
+    }
   }
 
   .stat-tile {
