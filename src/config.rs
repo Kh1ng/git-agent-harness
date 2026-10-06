@@ -14,7 +14,7 @@ mod backend_paths;
 mod issue_intake;
 pub use issue_intake::IssueIntakeMode;
 mod publishing;
-pub use publishing::PublishingPolicy;
+pub use publishing::{IssueClaimMode, IssueClaimPolicy, PublishingPolicy};
 mod delivery;
 pub use delivery::DeliveryMode;
 mod autonomy;

@@ -654,19 +654,25 @@ pub(crate) fn scan_available_tickets_with_dependencies(
         }
     }
 
-    let (issues, issue_intake_rejections, provider_error) = match try_discover_open_issues(profile)
-    {
-        Ok(discovery) => (
-            discovery
-                .allowed
-                .into_iter()
-                .filter(|issue| !issue_is_auto_dispatch_blocked(&issue.labels))
-                .collect::<Vec<_>>(),
-            discovery.rejected,
-            None,
-        ),
-        Err(error) => (Vec::new(), Vec::new(), Some(format!("{error:#}"))),
-    };
+    let (issues, issue_intake_rejections, claimed_elsewhere, provider_error) =
+        match try_discover_open_issues(profile) {
+            Ok(discovery) => (
+                discovery
+                    .allowed
+                    .into_iter()
+                    .filter(|issue| !issue_is_auto_dispatch_blocked(&issue.labels))
+                    .collect::<Vec<_>>(),
+                discovery.rejected,
+                discovery.claimed_elsewhere,
+                None,
+            ),
+            Err(error) => (
+                Vec::new(),
+                Vec::new(),
+                Default::default(),
+                Some(format!("{error:#}")),
+            ),
+        };
     let dependency_blockers = evaluate_issue_dependencies(profile, &issues);
     let dependency_blocked_ids: std::collections::HashSet<&str> = dependency_blockers
         .iter()
@@ -774,7 +780,9 @@ pub(crate) fn scan_available_tickets_with_dependencies(
             has_active_mr,
             human_required,
             human_required_reason_code,
-            has_active_claim,
+            // A claim another login holds on the provider blocks selection
+            // the same way a sibling worker's local claim does.
+            has_active_claim: has_active_claim || claimed_elsewhere.contains(&issue.number),
         });
     }
 

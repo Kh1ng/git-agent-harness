@@ -616,3 +616,38 @@ fn admission_excludes_skipped_claims_and_initial_capacity_deferrals() {
     assert!(super::action_admitted_work(&action,
         "Deferred dispatch_ticket fallback because node capacity is busy after 1 backend attempt(s); prior backend outcome preserved"));
 }
+
+#[test]
+fn an_issue_another_login_holds_is_skipped_without_a_dispatch() {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let (tmp, mut cfg) = events_test_config();
+    let profile = cfg.profiles.get_mut("real").unwrap();
+    profile.provider = "github".into();
+    profile.repo = "owner/repo".into();
+    profile.publishing.issue_claim.mode = crate::config::IssueClaimMode::GithubAssignee;
+    // Issue 7 is assigned to someone else by hand: no claim comments exist.
+    let gh_path = tmp.path().join("gh");
+    std::fs::write(
+        &gh_path,
+        "#!/bin/sh\ncase \"$*\" in\n  'api user '*) echo me ;;\n  *'/comments'*) ;;\n  *'issues/7 '*) echo someone-else ;;\n  *) exit 2 ;;\nesac\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let _path_guard = crate::test_support::PathGuard::set(tmp.path());
+    let action = NextAction::DispatchTicket {
+        ticket_path: "7".into(),
+        recommended_backend: None,
+        recommended_model: None,
+        work_id: Some("#7".into()),
+        reason: "test".into(),
+    };
+
+    let outcome = super::execute_action(&cfg, "real", &action, &[], true, None).unwrap();
+
+    assert_eq!(outcome, "Skipped issue #7: held by someone-else");
+    assert!(!super::action_admitted_work(&action, &outcome));
+}
