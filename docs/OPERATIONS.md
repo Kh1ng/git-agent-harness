@@ -345,6 +345,34 @@ systemctl --user restart gah-loop@gah gah-loop@sportsball
 journalctl --user -u gah-loop@gah -u gah-loop@sportsball -n 100 --no-pager
 ```
 
+### Scaling workers past the baseline
+
+`max_parallel_workers` and `max_concurrent_per_model` are the baseline. A
+profile's `[profiles.<name>.worker_scaling]` section lets the loop grow past
+both, and the dashboard exposes it under Settings, Factory, Worker scaling.
+
+Automatic scaling (`enabled = true`) gives a capped model `extra_per_model`
+more concurrent runs (default 1) while every fresh quota window of its
+subscription, the five-hour one included, has at least
+`min_remaining_percent` left (default 50). A model with no fresh quota
+reading is never scaled, and the highest-priority candidate is scaled first.
+The total stops at `max_workers`, which defaults to twice the baseline.
+
+A manual boost adds workers outright, for one model or for every capped
+model, until an optional expiry:
+
+```bash
+gah profile set gah --worker-scaling on --worker-scaling-max-workers 6
+gah profile set gah --boost-workers 2 --boost-model codex/gpt-5 --boost-hours 3
+gah profile set gah --clear worker_boost
+```
+
+A boost is explicit, so `max_workers` does not limit it. Neither source
+bypasses the pressure gate above: memory and CPU still decide whether an
+extra worker starts. The loop applies changes on its next iteration and logs
+the worker count when it changes; `gah status --json` reports the result and
+the reason for each grant or refusal as `worker_limits`.
+
 Set `max_open_managed_mrs` per profile to bound implementation intake. It
 defaults to `max_parallel_workers`; at the limit GAH keeps reviewing, fixing,
 and merging existing work but does not start another PR-producing dispatch.

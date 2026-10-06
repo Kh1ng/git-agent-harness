@@ -235,6 +235,15 @@ export interface ProfileUpdateData {
   validation_timeout_seconds?: number | null;
   max_parallel_workers?: number;
   manager_wake_autonomy?: WakeAutonomyValue;
+  /** Automatic worker scaling: 'on' | 'off'. */
+  worker_scaling?: 'on' | 'off';
+  worker_scaling_max_workers?: number;
+  worker_scaling_extra_per_model?: number;
+  worker_scaling_min_remaining_percent?: number;
+  /** Replaces any earlier boost; `clear: ['worker_boost']` ends it. */
+  boost_workers?: number;
+  boost_model?: string;
+  boost_hours?: number;
   /** Hold approved schema/API contract changes for human review (#1405). */
   hold_contract_changes?: boolean;
   clear?: string[];
