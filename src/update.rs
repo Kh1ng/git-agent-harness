@@ -14,13 +14,22 @@ use std::fs::{copy, create_dir_all, read_dir, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+mod installation;
+mod macos;
 mod release;
 mod units;
+pub use installation::installation_plan;
+#[cfg(test)]
+use installation::quota_refresh_selected;
+use installation::{agents_to_refresh, install_selected_agent_assets};
 
 pub use crate::node_role::NodeRole as HostRole;
 
 pub struct UpdateArgs {
     pub repo: Option<PathBuf>,
+    pub pull: bool,
+    pub agents: Vec<String>,
+    pub yes: bool,
     pub role: HostRole,
     pub restart_server: bool,
     pub server_service: String,
@@ -40,11 +49,16 @@ pub fn run(args: UpdateArgs) -> Result<()> {
 
     let repo = resolve_repo(args.repo.as_deref())?;
     let _update_lock = acquire_update_lock(&repo)?;
+    let config_home = user_config_home()?;
+    let agents = agents_to_refresh(&config_home, &args.agents);
 
     if args.from_release {
         if args.restart_server {
             ensure_no_running_loop_before_server_restart()?;
         }
+        // Agent integrations and their quota units come from the checkout
+        // on both update paths.
+        install_selected_agent_assets(&repo, &config_home, &agents)?;
         return release::run_release(release::ReleaseArgs {
             repo,
             role: args.role,
@@ -54,15 +68,21 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         });
     }
 
-    ensure_default_branch_checkout(&repo)?;
-    ensure_clean(&repo)?;
+    if args.pull {
+        ensure_default_branch_checkout(&repo)?;
+        ensure_clean(&repo)?;
+    }
+    let plan = installation_plan(args.role, &agents)?;
+    installation::confirm(&plan, &args, &repo)?;
     if args.restart_server {
         ensure_no_running_loop_before_server_restart()?;
     }
 
     println!("Updating GAH CLI/control plane from {}", repo.display());
-    run_command(&repo, "git", &["fetch", "origin", "--prune"])?;
-    run_command(&repo, "git", &["pull", "--ff-only"])?;
+    if args.pull {
+        run_command(&repo, "git", &["fetch", "origin", "--prune"])?;
+        run_command(&repo, "git", &["pull", "--ff-only"])?;
+    }
 
     // This is the authoritative CLI deployment step. It replaces the Cargo
     // executable selected by PATH, unlike a target/release-only build.
@@ -70,7 +90,9 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     run_command(
         &repo,
         "cargo",
-        &["install", "--path", ".", "--force", "--locked"],
+        &[
+            "install", "--path", ".", "--bin", "gah", "--force", "--locked",
+        ],
     )?;
 
     let binary = installed_binary_path()?;
@@ -86,9 +108,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     // early so a later failed step cannot skip it.
     enable_user_lingering(&repo, args.role);
 
-    for agent in copy_opencode_agent_configs(&repo, &user_config_home()?)? {
-        println!("Installed OpenCode agent: {}", agent.display());
-    }
+    install_selected_agent_assets(&repo, &config_home, &agents)?;
 
     if cfg!(target_os = "macos") && args.role == HostRole::Worker {
         run_command(&repo, "npm", NPM_CI_ARGS)?;
@@ -196,7 +216,7 @@ fn finish_update(
         )?;
     }
 
-    if let Some(agent) = install_macos_launch_agent(repo, role)? {
+    if let Some(agent) = macos::install_macos_launch_agent(repo, role)? {
         println!("Installed macOS LaunchAgent: {}", agent.display());
     }
 
@@ -224,21 +244,6 @@ fn finish_update(
             );
         }
         None => println!("systemd not available on this host: skipping watchdog unit install."),
-    }
-    match install_quota_refresh_unit_template(repo)? {
-        Some(quota_refresh_units) => {
-            for unit in &quota_refresh_units {
-                println!("Installed quota refresh unit: {}", unit.display());
-            }
-            println!(
-                "Quota refresh timer is installed and enabled: account-level quota \
-                 (codex/vibe) refreshes every 15 minutes (issue #761). Opt out with \
-                 `systemctl --user disable --now gah-quota-refresh.timer`."
-            );
-        }
-        None => {
-            println!("systemd not available on this host: skipping quota refresh unit install.")
-        }
     }
 
     if restart_server && cfg!(target_os = "macos") {
@@ -275,56 +280,6 @@ const NPM_CI_ARGS: &[&str] = &[
     "--no-audit",
     "--no-fund",
 ];
-
-/// Install the one role-appropriate macOS service definition from the same
-/// updater used by first install and the desktop role control.
-fn install_macos_launch_agent(repo: &Path, role: HostRole) -> Result<Option<PathBuf>> {
-    if !cfg!(target_os = "macos") {
-        return Ok(None);
-    }
-    let script = repo.join("scripts/macos-launchd.sh");
-    if !script.is_file() {
-        bail!("macOS launchd installer is missing: {}", script.display());
-    }
-    let profile = if role == HostRole::Worker {
-        crate::config::load(None)
-            .ok()
-            .and_then(|config| {
-                let mut names: Vec<String> = config.profiles.into_keys().collect();
-                names.sort_unstable();
-                names.into_iter().next()
-            })
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let role_name = match role {
-        HostRole::Central => "central",
-        HostRole::Standalone => "standalone",
-        HostRole::Worker => "worker",
-    };
-    run_command(
-        repo,
-        "bash",
-        &[
-            script.to_string_lossy().as_ref(),
-            "install",
-            role_name,
-            repo.to_string_lossy().as_ref(),
-            &profile,
-        ],
-    )?;
-    let label = match role {
-        HostRole::Central | HostRole::Standalone => "dev.git-agent-harness.server.plist",
-        HostRole::Worker => "dev.git-agent-harness.worker.plist",
-    };
-    let target = env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is required to install a macOS LaunchAgent")?
-        .join("Library/LaunchAgents")
-        .join(label);
-    Ok(target.is_file().then_some(target))
-}
 
 /// Best-effort probe, not a hard dependency check: a missing `systemctl`
 /// (e.g. macOS, containers without systemd) means unit installation is
@@ -958,6 +913,26 @@ mod tests {
     static XDG_CONFIG_HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn claude_only_installs_no_opencode_files_or_quota_units() {
+        let config = TempDir::new().unwrap();
+        let agents = vec!["claude".to_string()];
+        super::install_selected_agent_assets(
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            config.path(),
+            &agents,
+        )
+        .unwrap();
+        assert!(!config.path().join("opencode").exists());
+        assert!(!config.path().join("systemd").exists());
+        let plan = super::installation_plan(HostRole::Worker, &agents).unwrap();
+        assert!(!plan
+            .iter()
+            .any(|line| line.contains("OpenCode") || line.contains("quota-refresh")));
+        assert!(super::quota_refresh_selected(&["codex".into()]));
+        assert!(super::quota_refresh_selected(&["vibe".into()]));
+    }
+
+    #[test]
     fn a_stale_lockfile_stops_the_update_before_install() {
         // A path dependency keeps this offline: no registry lookup is needed.
         let tmp = TempDir::new().unwrap();
@@ -1266,6 +1241,9 @@ mod tests {
     fn worker_role_rejects_restart_server_flag() {
         let err = run(UpdateArgs {
             repo: None,
+            pull: false,
+            agents: vec![],
+            yes: true,
             role: HostRole::Worker,
             restart_server: true,
             server_service: "gah-server.service".into(),

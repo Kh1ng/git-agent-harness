@@ -95,11 +95,26 @@ host can have a stale Cargo-installed binary at `$CARGO_HOME/bin/gah` while
 control plane:
 
 ```bash
-gah update --repo /path/to/git-agent-harness --restart-server
+gah update --pull --repo /path/to/git-agent-harness --restart-server
 ```
 
-It refuses a dirty or non-default-branch checkout, pulls with `--ff-only`,
-replaces the actual Cargo-installed CLI with `cargo install --path . --force`,
+`--pull` fetches and fast-forwards before installation. The command prints an
+installation plan and asks for confirmation; pass `--yes` for unattended
+updates. Omit `--pull` when reinstalling the current checkout, such as after
+changing the node role.
+Without `--pull`, it builds the current branch and working tree, including
+uncommitted changes.
+
+For unattended first installs, run `GAH_INSTALL_CONFIRMED=1 scripts/install.sh`
+with the desired role and configuration environment variables. This accepts
+the installer confirmation before it writes configuration or installs services.
+For unattended updates, use `gah update --pull --yes --repo /path/to/git-agent-harness`.
+Updates refresh existing GAH OpenCode agent files and quota-refresh units even
+when `--agent` is omitted; use `--agent` to install additional integrations.
+
+With `--pull`, it refuses a dirty or non-default-branch checkout and pulls
+with `--ff-only`. It replaces the actual Cargo-installed CLI with
+`cargo install --path . --bin gah --force --locked`,
 installs the lockfile-pinned Node dependencies, builds `apps/server`, and
 installs/reloads the `gah-loop@.service` user-unit template. On a central
 node it also reinstalls the system-level `gah-server.service` unit from the
@@ -138,7 +153,7 @@ scripts/install.sh
 ### Upgrade procedure
 
 ```bash
-gah update --repo /path/to/git-agent-harness --restart-server
+gah update --pull --repo /path/to/git-agent-harness --restart-server
 ```
 
 The updater never starts or restarts a recurring `gah loop`; with
@@ -234,7 +249,7 @@ system service. The user units (`gah-loop@`, `gah-prune`,
 verbatim. Then enable the service:
 
 ```bash
-gah update --role central
+gah update --pull --role central
 sudo systemctl enable --now gah-server
 ```
 
@@ -324,7 +339,7 @@ Start/Stop buttons manage `gah-loop@<profile>` rather than creating a detached
 process:
 
 ```bash
-gah update --repo /path/to/git-agent-harness
+gah update --pull --repo /path/to/git-agent-harness
 systemctl --user start gah-loop@gah
 ```
 
@@ -359,10 +374,38 @@ source checkout alone does not change an already-installed loop service.
 After upgrading, rebuild/install and restart the affected user units:
 
 ```bash
-gah update --repo /path/to/git-agent-harness
+gah update --pull --repo /path/to/git-agent-harness
 systemctl --user restart gah-loop@gah gah-loop@sportsball
 journalctl --user -u gah-loop@gah -u gah-loop@sportsball -n 100 --no-pager
 ```
+
+### Scaling workers past the baseline
+
+`max_parallel_workers` and `max_concurrent_per_model` are the baseline. A
+profile's `[profiles.<name>.worker_scaling]` section lets the loop grow past
+both, and the dashboard exposes it under Settings, Factory, Worker scaling.
+
+Automatic scaling (`enabled = true`) gives a capped model `extra_per_model`
+more concurrent runs (default 1) while every fresh quota window of its
+subscription, the five-hour one included, has at least
+`min_remaining_percent` left (default 50). A model with no fresh quota
+reading is never scaled, and the highest-priority candidate is scaled first.
+The total stops at `max_workers`, which defaults to twice the baseline.
+
+A manual boost adds workers outright, for one model or for every capped
+model, until an optional expiry:
+
+```bash
+gah profile set gah --worker-scaling on --worker-scaling-max-workers 6
+gah profile set gah --boost-workers 2 --boost-model codex/gpt-5 --boost-hours 3
+gah profile set gah --clear worker_boost
+```
+
+A boost is explicit, so `max_workers` does not limit it. Neither source
+bypasses the pressure gate above: memory and CPU still decide whether an
+extra worker starts. The loop applies changes on its next iteration and logs
+the worker count when it changes; `gah status --json` reports the result and
+the reason for each grant or refusal as `worker_limits`.
 
 Set `max_open_managed_mrs` per profile to bound implementation intake. It
 defaults to `max_parallel_workers`; at the limit GAH keeps reviewing, fixing,

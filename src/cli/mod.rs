@@ -100,21 +100,7 @@ pub fn run() -> Result<()> {
             json,
         } => commands::doctor::run(profile.as_deref(), config_path.as_deref(), validate, json)?,
 
-        Commands::Update {
-            repo,
-            role,
-            restart_server,
-            server_service,
-            from_release,
-            release_manifest,
-        } => commands::update::run(commands::update::Args {
-            repo,
-            role,
-            restart_server,
-            server_service,
-            from_release,
-            release_manifest,
-        })?,
+        Commands::Update(args) => commands::update::run(args)?,
 
         Commands::Init {
             profile,

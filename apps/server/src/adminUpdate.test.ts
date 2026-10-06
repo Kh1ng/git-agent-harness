@@ -97,7 +97,7 @@ test('readAdminUpdateState leaves a running state alone while its pid is still a
   });
 });
 
-test('startAdminUpdate launches gah update pinned to this checkout via --repo and records output/exit', () => {
+test('startAdminUpdate pulls and confirms the update with ignored stdin, pins the checkout, and records output/exit', () => {
   withStatePath((statePath) => {
     let capturedBin = '';
     let capturedArgs: string[] = [];
@@ -115,7 +115,8 @@ test('startAdminUpdate launches gah update pinned to this checkout via --repo an
     assert.equal(result.state.status, 'running');
     assert.equal(result.state.pid, 4242);
     assert.ok(capturedBin);
-    assert.deepEqual(capturedArgs, ['update', '--repo', process.cwd(), '--role', 'central', '--restart-server']);
+    assert.deepEqual(capturedOptions?.stdio, ['ignore', 'pipe', 'pipe']);
+    assert.deepEqual(capturedArgs, ['update', '--repo', process.cwd(), '--role', 'central', '--restart-server', '--pull', '--yes']);
     if (process.platform === 'linux' && typeof process.getuid === 'function') {
       const runtimeDir = `/run/user/${process.getuid()}`;
       assert.equal(capturedOptions?.env?.XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR ?? runtimeDir);

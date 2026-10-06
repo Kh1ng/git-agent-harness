@@ -129,7 +129,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
-          GAH_NODE_ROLE=standalone bash "$HOME/gah/scripts/install-linux.sh"
+          GAH_INSTALL_CONFIRMED=1 GAH_NODE_ROLE=standalone bash "$HOME/gah/scripts/install-linux.sh"
 
       - name: Verify service, loopback-only bind, dashboard, and role
         if: steps.scope.outputs.run == 'true'
