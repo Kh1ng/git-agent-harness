@@ -2,6 +2,13 @@ import Foundation
 
 /// Validates controller destinations and keeps pairing codes out of saved addresses.
 struct ServerAddress: Equatable {
+    static let defaultCentralURL = "http://100.118.97.79"
+
+    /// Default only on first launch; a saved destination always takes precedence.
+    static func initial(savedValue: String?) -> ServerAddress? {
+        try? ServerAddress(savedValue ?? defaultCentralURL)
+    }
+
     let url: URL
     let origin: URL
 

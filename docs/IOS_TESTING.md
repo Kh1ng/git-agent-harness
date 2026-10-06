@@ -14,7 +14,7 @@ The owner requested an installable iPhone app. The SwiftUI shell adds a persiste
 2. Sign into Xcode under Settings > Accounts. Select your development team for the GAH target.
 3. Enable Developer Mode under iPhone Settings > Privacy & Security if needed.
 4. Build and run `apps/ios/GAH.xcodeproj` on the iPhone. A dashboard refresh cannot update the native scanner integration.
-5. Turn on Tailscale. Use your configured central HTTPS origin, including its port if required.
+5. Turn on Tailscale. First launch defaults to hermesagent at `http://100.118.97.79`, without a LAN proxy. Use Connection settings to change to your configured central HTTP or HTTPS origin, including its port if required.
 
 ## Repeatable physical navigation check
 

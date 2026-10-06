@@ -111,7 +111,16 @@ final class ControllerTests: XCTestCase {
         XCTAssertNil(server.chatURL(from: URL(string: "https://evil.example/?profile=gah&chat=session-7")!))
     }
 
-    func testFirstLaunchOffersAnEmptyConnectionForm() {
+    func testInitialAddressDefaultsToTailscaleAndPreservesSavedDestination() throws {
+        XCTAssertEqual(ServerAddress.initial(savedValue: nil)?.url.absoluteString, "http://100.118.97.79")
+        let saved = "https://central.example.ts.net:8443/?page=chat&profile=gah&chat=session-7"
+        XCTAssertEqual(ServerAddress.initial(savedValue: saved), try ServerAddress(saved))
+        // An invalid saved value must offer recovery, not silently switch servers.
+        XCTAssertNil(ServerAddress.initial(savedValue: ""))
+        XCTAssertNil(ServerAddress.initial(savedValue: "file:///invalid"))
+    }
+
+    func testUnconfiguredConnectionFormOffersTailscaleDefault() {
         let app = XCUIApplication()
         app.launchArguments = ["-centralURL", ""] // Override restoration with an unconfigured origin.
         app.launch()
@@ -119,7 +128,7 @@ final class ControllerTests: XCTestCase {
         app.buttons["Set up connection"].tap()
         let field = app.descendants(matching: .any).matching(identifier: "serverAddress").firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
-        XCTAssertEqual(field.value as? String, "")
+        XCTAssertEqual(field.value as? String, "http://100.118.97.79")
         let evidence = XCTAttachment(screenshot: app.screenshot())
         evidence.name = "Unconfigured connection form"
         evidence.lifetime = .keepAlways

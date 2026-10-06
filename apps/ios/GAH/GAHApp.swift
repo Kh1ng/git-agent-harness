@@ -62,7 +62,7 @@ final class Controller: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         locationObservation = webView.observe(\.url, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.rememberLocation() }
         }
-        if let saved = UserDefaults.standard.string(forKey: "centralURL"), let restored = try? ServerAddress(saved) {
+        if let restored = ServerAddress.initial(savedValue: UserDefaults.standard.string(forKey: "centralURL")) {
             connect(restored)
         }
         if !notificationsEnabled { removePushRegistration() }
@@ -442,7 +442,7 @@ private struct ControllerView: View {
                 Text("Open \(target.origin.absoluteString)? You will confirm this server before pairing.")
             }
             .sheet(isPresented: $showingConnection) {
-                ConnectionView(initial: proposedAddress ?? controller.address?.origin.absoluteString ?? "") { target in
+                ConnectionView(initial: proposedAddress ?? controller.address?.origin.absoluteString ?? ServerAddress.defaultCentralURL) { target in
                     controller.connect(target)
                     proposedAddress = nil
                     showingConnection = false
