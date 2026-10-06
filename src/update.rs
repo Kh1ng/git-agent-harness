@@ -87,7 +87,15 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         &repo,
         "cargo",
         &[
-            "install", "--path", ".", "--bin", "gah", "--force", "--locked",
+            "install",
+            "--path",
+            ".",
+            "--bin",
+            "gah",
+            "--bin",
+            "gah-mcp-server",
+            "--force",
+            "--locked",
         ],
     )?;
 
