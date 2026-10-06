@@ -697,6 +697,7 @@ pub(super) fn attempt_usage(
                 }
             }
         }
+        return finalize(crate::ledger::LedgerUsage::default());
     }
 
     // OpenCode persists exact per-session model and token counters in its

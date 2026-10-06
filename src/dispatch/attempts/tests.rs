@@ -44,7 +44,7 @@ fn attempt_usage_parses_real_log_file() {
     let usage = attempt_usage(
         path.to_str().unwrap(),
         None,
-        UsageAttribution::backend(Some("vibe"), None),
+        UsageAttribution::backend(Some("hermes"), None),
         None,
         None,
     );
@@ -1443,9 +1443,22 @@ fn vibe_run_with_preexisting_cumulative_session_records_missing_usage() {
         .to_string(),
     )
     .unwrap();
+    let fake_vibe = tmp.path().join("fake-vibe");
+    fs::write(
+        &fake_vibe,
+        "#!/bin/sh\necho \"total_tokens: 999999\"\necho \"input_tokens: 500\"\nexit 0\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&fake_vibe).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_vibe, perms).unwrap();
+    }
     let envs = vec![("VIBE_HOME".to_string(), vibe_home.display().to_string())];
     let run = vibe::run_with_executable(
-        std::path::Path::new("/bin/true"),
+        &fake_vibe,
         &worktree,
         "task",
         &session,
