@@ -13,7 +13,8 @@ import { SkillBankSettingsSection } from '../components/SkillBankSettingsSection
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
 import { gahApi, backendInstancesApi, GahApiError } from '../api/client.js';
-import type { ConfigSetData, NotificationSettingsSummary } from '@git-agent-harness/contracts';
+import type { ConfigSetData, NotificationSettingsSummary, NodeCapacitySettings } from '@git-agent-harness/contracts';
+import { NODE_CAPACITY_MIN_MIB, NODE_CAPACITY_DEFAULTS } from '@git-agent-harness/contracts';
 import type { ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, AdminUpdatePendingInfo, AdminUpdateState, BackendInstanceSummary, HelperRoutePreference, ManagerModelInfo } from '@git-agent-harness/contracts';
 
 const SETTINGS_REFRESH_MS = 60 * 1000;
@@ -29,6 +30,7 @@ const SETTINGS_INDEX: { heading: string; section: SettingsSectionId | null; keyw
   { heading: 'Connection & pairing', section: null, keywords: 'access token device pair qr central server' },
   { heading: 'Appearance', section: 'general', keywords: 'theme dark light notifications popup bell' },
   { heading: 'Global manager', section: 'general', keywords: 'manager wake autonomy' },
+  { heading: 'Node memory capacity', section: 'general', keywords: 'node capacity memory reservation floor admission workers' },
   { heading: 'Notification channel', section: 'general', keywords: 'notifications alerts telegram' },
   { heading: 'Chat', section: 'general', keywords: 'manager chat backend model helper routing' },
   { heading: 'Update GAH', section: 'general', keywords: 'version upgrade release' },
@@ -210,6 +212,8 @@ export function SettingsPage() {
         clearConfigErrors={clearConfigErrors}
       />
 
+      <NodeCapacitySection config={config} setConfig={setConfig} />
+
       <NotificationChannelSection
         config={config}
         setConfig={setConfig}
@@ -297,6 +301,7 @@ interface GlobalManagerSectionProps {
   config: {
     data: {
       current_manager: string | null;
+      node_capacity?: NodeCapacitySettings;
       notifications?: NotificationSettingsSummary;
     } | null;
     loading: boolean;
@@ -306,6 +311,42 @@ interface GlobalManagerSectionProps {
   clearConfigErrors: () => void;
 }
 
+function NodeCapacitySection({ config, setConfig }: Pick<GlobalManagerSectionProps, 'config' | 'setConfig'>) {
+  const nodeCapacity = config.data?.node_capacity;
+  const [worker, setWorker] = useState('');
+  const [floor, setFloor] = useState('');
+  useEffect(() => {
+    setWorker(nodeCapacity ? String(nodeCapacity.worker_memory_mib) : '');
+    setFloor(nodeCapacity ? String(nodeCapacity.memory_floor_mib) : '');
+  }, [nodeCapacity?.worker_memory_mib, nodeCapacity?.memory_floor_mib]);
+  // Number('') is 0, which would silently validate as the adaptive floor;
+  // empty input must stay invalid instead (review of #1383).
+  const workerValue = worker.trim() === '' ? Number.NaN : Number(worker);
+  const floorValue = floor.trim() === '' ? Number.NaN : Number(floor);
+  // Without loaded values (older CLI/server, failed load) the section must
+  // not offer defaults for one-click saving: that would overwrite custom
+  // values with the defaults (review of #1383).
+  const loaded = nodeCapacity !== undefined;
+  const valid = loaded
+    && Number.isSafeInteger(workerValue) && workerValue >= NODE_CAPACITY_MIN_MIB
+    && Number.isSafeInteger(floorValue) && (floorValue === 0 || floorValue >= NODE_CAPACITY_MIN_MIB);
+  return (
+    <section className="card-padded max-w-md">
+      <h3 className="text-sm font-semibold text-primary mb-1">Node memory capacity</h3>
+      <p className="text-xs text-muted mb-3">Lowering these values raises the risk of the node running out of memory.</p>
+      <label className="block text-xs font-medium text-secondary mb-1" htmlFor="worker-memory-mib">Implementation worker reservation (MiB)</label>
+      <input id="worker-memory-mib" type="number" min={NODE_CAPACITY_MIN_MIB} step={1} value={worker} placeholder={String(NODE_CAPACITY_DEFAULTS.worker_memory_mib)} disabled={!loaded} onChange={(event) => setWorker(event.target.value)} className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary" />
+      <p className="text-xs text-muted mt-1 mb-3">Default: {NODE_CAPACITY_DEFAULTS.worker_memory_mib} MiB per implementation, fix, retry, or escalation worker.</p>
+      <label className="block text-xs font-medium text-secondary mb-1" htmlFor="memory-floor-mib">Free memory floor (MiB)</label>
+      <input id="memory-floor-mib" type="number" min={0} step={1} value={floor} placeholder={String(NODE_CAPACITY_DEFAULTS.memory_floor_mib)} disabled={!loaded} onChange={(event) => setFloor(event.target.value)} className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary" />
+      <p className="text-xs text-muted mt-1">Default: 0 uses max(2048 MiB, total memory / 6). An explicit floor must be at least {NODE_CAPACITY_MIN_MIB} MiB.</p>
+      {!loaded && <p role="status" className="text-xs text-muted mt-2">Node capacity settings are unavailable from this server or CLI version; update it to manage them here.</p>}
+      {loaded && !valid && <p role="alert" className="text-xs text-critical mt-2">Enter whole MiB values: worker at least {NODE_CAPACITY_MIN_MIB}; floor 0 or at least {NODE_CAPACITY_MIN_MIB}.</p>}
+      {config.error && <p role="alert" className="text-xs text-critical mt-2">Error: {config.error}</p>}
+      <button onClick={() => setConfig({ worker_memory_mib: workerValue, memory_floor_mib: floorValue })} disabled={!valid || config.loading} className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed">Save node capacity</button>
+    </section>
+  );
+}
 function GlobalManagerSection({ config, setConfig, clearConfigErrors }: GlobalManagerSectionProps) {
   const [manager, setManager] = useState<string>('');
 

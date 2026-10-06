@@ -22,7 +22,7 @@ pub use self::remediation::{
 
 mod ownership;
 mod recovery;
-pub(crate) use self::recovery::reconcile_abandoned_dispatches;
+pub(crate) use self::recovery::{import_requested_changes, reconcile_abandoned_dispatches};
 
 mod runtime;
 pub(crate) use self::runtime::execute_action;
@@ -37,4 +37,4 @@ pub(crate) use self::runtime::{NodeAdmissionDeferred, WorkerNodeLease};
 // reports the re-export as unused in non-binary targets.
 #[allow(unused_imports)]
 pub(crate) use self::runtime::run_dispatch_and_record;
-pub use self::runtime::{acquire_profile_lock, run_loop, run_once};
+pub use self::runtime::{acquire_profile_lock, node_total_memory_bytes, run_loop, run_once};

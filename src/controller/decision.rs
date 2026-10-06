@@ -759,7 +759,7 @@ fn human_required_for_blocked_mr(
                 reason_code.as_str()
             )
         }),
-        reference: mr.url.clone(),
+        reference: mr.url.clone().or_else(|| Some(mr.branch.clone())),
         reason_code: Some(reason_code.as_str().to_string()),
     }
 }

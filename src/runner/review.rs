@@ -583,7 +583,17 @@ mod tests {
             &[],
         );
 
-        assert_eq!(result.outcome, ReviewProcessOutcome::Success);
+        // Name the outcome and output on failure: this has flaked once in
+        // the full parallel suite and never reproduced on its own.
+        assert_eq!(
+            result.outcome,
+            ReviewProcessOutcome::Success,
+            "after {:.2}s, last progress {:?}; stdout tail: {:?}; stderr: {:?}",
+            result.duration_secs,
+            result.last_progress_secs,
+            result.stdout.lines().last(),
+            result.stderr
+        );
         assert!(result.duration_secs >= 1.0);
         assert!(result.last_progress_secs.is_some());
         assert_eq!(result.hard_timeout_seconds, None);

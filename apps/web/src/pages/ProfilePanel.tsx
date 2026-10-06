@@ -128,6 +128,7 @@ interface DispatchSettingsSectionProps {
     max_parallel_workers: number | null;
     validation_timeout_seconds?: number | null;
     manager_wake_autonomy: WakeAutonomyValue | null;
+    hold_contract_changes?: boolean;
   };
   profileLoading: boolean;
   profileError: string | null;
@@ -145,6 +146,7 @@ function DispatchSettingsSection({
   const [parallel, setParallel] = useState<string>('');
   const [validationTimeout, setValidationTimeout] = useState<string>('');
   const [autonomy, setAutonomy] = useState<WakeAutonomyValue>('off');
+  const [holdContractChanges, setHoldContractChanges] = useState(true);
   // Tracks which profile name the form was last seeded for. We only seed once
   // per profile selection — subsequent data refreshes (e.g. a GET after a
   // PATCH) must not overwrite the user's in-progress edits.
@@ -164,6 +166,7 @@ function DispatchSettingsSection({
     setParallel(selected.max_parallel_workers != null ? String(selected.max_parallel_workers) : '');
     setValidationTimeout(selected.validation_timeout_seconds != null ? String(selected.validation_timeout_seconds) : '');
     setAutonomy(selected.manager_wake_autonomy ?? 'off');
+    setHoldContractChanges(selected.hold_contract_changes ?? true);
   }, [selectedName, selected]);
 
   if (profileLoading && !selected) {
@@ -193,6 +196,7 @@ function DispatchSettingsSection({
     await updateProfile(selectedName, {
       max_parallel_workers: parsed,
       manager_wake_autonomy: autonomy,
+      hold_contract_changes: holdContractChanges,
       ...(hasValidationTimeout
         ? { validation_timeout_seconds: parsedValidationTimeout }
         : { clear: ['validation_timeout_seconds'] }),
@@ -206,8 +210,8 @@ function DispatchSettingsSection({
     <section className="card-padded max-w-md">
       <h3 className="text-sm font-semibold text-primary mb-1">Dispatch settings</h3>
       <p className="text-xs text-muted mb-3">
-        Per-profile loop behavior for <span className="font-mono text-secondary">{selectedName}</span>.
-        Changes apply on the next loop iteration — no restart needed.
+        Per-profile factory behavior for <span className="font-mono text-secondary">{selectedName}</span>.
+        Changes apply on the factory's next pass — no restart needed.
       </p>
 
       <div className="space-y-3">
@@ -224,7 +228,7 @@ function DispatchSettingsSection({
             className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
           />
           <p className="text-xs text-muted mt-1">
-            How many tickets <code>gah loop</code> may execute concurrently (default 1).
+            How many tickets the factory may work on at once (default 1).
           </p>
         </div>
 
@@ -271,6 +275,22 @@ function DispatchSettingsSection({
           </select>
           <p className="text-xs text-muted mt-1">
             What a woken manager agent may do when a notify-worthy event fires.
+          </p>
+        </div>
+
+        <div>
+          <label className="flex items-center gap-2 text-xs font-medium text-secondary">
+            <input
+              type="checkbox"
+              checked={holdContractChanges}
+              onChange={(e) => setHoldContractChanges(e.target.checked)}
+            />
+            Hold schema and API contract changes for my review
+          </label>
+          <p className="text-xs text-muted mt-1">
+            When on, an approved PR that changes the ledger, telemetry, migrations or
+            <code> packages/contracts</code> without compatibility evidence waits for you.
+            Other approved PRs never wait on this check.
           </p>
         </div>
       </div>
@@ -342,7 +362,7 @@ export function ProfileConfigViewerSection({ selectedName, profileConfig, onRefr
     <section className="card-padded max-w-3xl">
       <h3 className="text-sm font-semibold text-primary mb-1">Effective profile configuration</h3>
       <p className="text-xs text-muted mb-3">
-        Read-only effective routing and policy for <span className="font-mono text-secondary">{selectedName}</span>.
+        Which accounts and models implement and review work for <span className="font-mono text-secondary">{selectedName}</span>. Higher priority runs first.
       </p>
 
       {profileConfig.error && (
@@ -366,11 +386,7 @@ export function ProfileConfigViewerSection({ selectedName, profileConfig, onRefr
 
         <div className="card-padded border border-subtle">
           <h4 className="text-xs font-semibold text-primary mb-2">Review escalation</h4>
-          <p className="text-xs">
-            Routine reviewer:{' '}
-            {effective.routine_reviewer ? formatCandidateLabel(effective.routine_reviewer) : 'None configured'}
-          </p>
-          <p className="text-xs text-muted mt-1">Escalation chain:</p>
+          <p className="text-xs text-muted">Escalation chain:</p>
           {effective.escalatory_reviewers.length === 0 ? (
             <p className="text-xs text-muted">No configured escalation chain.</p>
           ) : (
@@ -386,9 +402,10 @@ export function ProfileConfigViewerSection({ selectedName, profileConfig, onRefr
       </div>
 
       <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
-        <EditableCandidateList title="PM candidates" listKey="pm" profile={selectedName} candidates={effective.pm_candidates} onMutate={onRefresh} />
-        <EditableCandidateList title="Improve candidates" listKey="improve" profile={selectedName} candidates={effective.improve_candidates} onMutate={onRefresh} />
-        <EditableCandidateList title="Review candidates" listKey="review" profile={selectedName} candidates={effective.review_candidates} onMutate={onRefresh} />
+        <EditableCandidateList title="Implementers" listKey="improve" profile={selectedName} candidates={effective.improve_candidates} effective={effective} onMutate={onRefresh} />
+        <EditableCandidateList title="Routine reviewer" listKey="routine" profile={selectedName} candidates={effective.routine_reviewer ? [effective.routine_reviewer] : []} effective={effective} onMutate={onRefresh} />
+        <EditableCandidateList title="Review candidates" listKey="review" profile={selectedName} candidates={effective.review_candidates} effective={effective} onMutate={onRefresh} />
+        <EditableCandidateList title="PM candidates" listKey="pm" profile={selectedName} candidates={effective.pm_candidates} effective={effective} onMutate={onRefresh} />
       </div>
 
       <div className="mt-3">
@@ -784,25 +801,54 @@ export function BackendInstancesCard({ profileName, effective }: { profileName: 
   );
 }
 
-const ROUTING_LISTS = ['pm', 'improve', 'review', 'escalatory'] as const;
+const ROUTING_LISTS = ['pm', 'improve', 'review', 'escalatory', 'routine'] as const;
 type RoutingListKey = (typeof ROUTING_LISTS)[number];
+
+/** Logins every node can route to without a named account. */
+const DEFAULT_BACKENDS = ['opencode', 'codex', 'claude', 'vibe', 'agy'] as const;
 
 /** Issue #149: ordered routing-candidate editing. Mutations shell out to the
  * fixed `gah config routing-candidate` commands through the owner-gated
  * mutation API; the CLI resolves the effective list, validates, and writes
- * the profile-level list wholesale. On success the caller refetches. */
-function EditableCandidateList({ title, listKey, profile, candidates, onMutate }: {
+ * the profile-level list wholesale. On success the caller refetches. The
+ * `routine` list holds one reviewer: adding replaces it. */
+function EditableCandidateList({ title, listKey, profile, candidates, effective, onMutate }: {
   title: string;
   listKey: RoutingListKey;
   profile: string;
   candidates: RoutingCandidateSummary[];
+  effective: SettingsConfigProfileSummary;
   onMutate: () => void;
 }) {
+  const single = listKey === 'routine';
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const [newBackend, setNewBackend] = useState('');
+  // "instance:<name>" for a named account, "backend:<name>" for a default login.
+  const [runner, setRunner] = useState('');
   const [newModel, setNewModel] = useState('');
+  const [priority, setPriority] = useState('');
+  const [included, setIncluded] = useState(true);
+
+  const instances = effective.backend_instances.filter((instance) => instance.enabled);
+  const selectedInstance = runner.startsWith('instance:')
+    ? instances.find((instance) => instance.backend_instance === runner.slice('instance:'.length))
+    : undefined;
+  const selectedBackend = selectedInstance?.logical_backend ?? (runner.startsWith('backend:') ? runner.slice('backend:'.length) : '');
+  // Suggest models this backend already uses anywhere in the profile.
+  const knownModels = new Set<string>(selectedInstance?.supported_models ?? []);
+  for (const candidate of [
+    ...effective.improve_candidates,
+    ...effective.review_candidates,
+    ...effective.pm_candidates,
+    ...effective.escalatory_reviewers,
+    ...(effective.routine_reviewer ? [effective.routine_reviewer] : []),
+  ]) {
+    const sameAccount = !selectedInstance || candidate.instance === selectedInstance.backend_instance;
+    if (candidate.backend === selectedBackend && sameAccount && candidate.model) knownModels.add(candidate.model);
+  }
+  const topPriority = candidates.reduce((max, candidate) => Math.max(max, candidate.priority), 0) + 10;
+  const datalistId = `models-${listKey}`;
 
   const runMutation = async (key: string, mutation: () => Promise<unknown>) => {
     setPending(key);
@@ -818,30 +864,38 @@ function EditableCandidateList({ title, listKey, profile, candidates, onMutate }
   };
 
   const add = () => {
-    const backend = newBackend.trim();
-    if (!backend) return;
+    if (!selectedBackend) return;
+    const parsedPriority = Number.parseInt(priority, 10);
     setAdding(false);
     void runMutation('add', () =>
       routingCandidatesApi.add(profile, {
         list: listKey,
-        backend,
+        backend: selectedBackend,
+        ...(selectedInstance ? { instance: selectedInstance.backend_instance } : {}),
         ...(newModel.trim() !== '' ? { model: newModel.trim() } : {}),
+        // The routine slot holds one reviewer, so keep its priority stable across changes.
+        priority: single ? (candidates[0]?.priority ?? 100) : Number.isFinite(parsedPriority) ? parsedPriority : topPriority,
+        included_in_quota: included,
       }));
-    setNewBackend('');
+    setRunner('');
     setNewModel('');
+    setPriority('');
+    setIncluded(true);
   };
+
+  const fieldClass = 'w-full bg-raised border border-subtle rounded px-2 py-1 text-xs text-primary';
 
   return (
     <div className="card-padded border border-subtle">
       <h4 className="text-xs font-semibold text-primary mb-2">{title}</h4>
       {error && <p className="text-xs text-critical mb-2">{error}</p>}
       {candidates.length === 0 ? (
-        <p className="text-xs text-muted mb-2">No candidates configured.</p>
+        <p className="text-xs text-muted mb-2">{single ? 'No routine reviewer set.' : 'No candidates configured.'}</p>
       ) : (
         <ul className="space-y-1.5">
           {candidates.map((candidate, index) => (
-            <li key={`${candidate.backend}-${candidate.model ?? 'none'}-${index}`} className="flex items-center justify-between gap-2 text-xs">
-              <span className="text-secondary min-w-0 truncate">
+            <li key={`${candidate.backend}-${candidate.instance ?? ''}-${candidate.model ?? 'none'}-${index}`} className="flex items-center justify-between gap-2 text-xs">
+              <span className="text-secondary min-w-0 break-words">
                 {formatCandidateLabel(candidate)}
                 <span className="text-muted">
                   {' '}· priority {candidate.priority}
@@ -849,29 +903,36 @@ function EditableCandidateList({ title, listKey, profile, candidates, onMutate }
                 </span>
               </span>
               <span className="inline-flex items-center gap-1 shrink-0">
-                <button
-                  type="button"
-                  title="Move up"
-                  disabled={pending !== null || index === 0}
-                  onClick={() => runMutation(`up-${index}`, () => routingCandidatesApi.move(profile, index, index - 1))}
-                  className="px-1.5 py-0.5 border border-subtle rounded text-secondary hover:text-primary disabled:opacity-40"
-                >
-                  ↑
-                </button>
-                <button
-                  type="button"
-                  title="Move down"
-                  disabled={pending !== null || index === candidates.length - 1}
-                  onClick={() => runMutation(`down-${index}`, () => routingCandidatesApi.move(profile, index, index + 1))}
-                  className="px-1.5 py-0.5 border border-subtle rounded text-secondary hover:text-primary disabled:opacity-40"
-                >
-                  ↓
-                </button>
+                {!single && (
+                  <>
+                    <button
+                      type="button"
+                      title="Move up"
+                      aria-label={`Move ${formatCandidateLabel(candidate)} up`}
+                      disabled={pending !== null || index === 0}
+                      onClick={() => runMutation(`up-${index}`, () => routingCandidatesApi.move(profile, listKey, index, index - 1))}
+                      className="px-1.5 py-0.5 border border-subtle rounded text-secondary hover:text-primary disabled:opacity-40"
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      title="Move down"
+                      aria-label={`Move ${formatCandidateLabel(candidate)} down`}
+                      disabled={pending !== null || index === candidates.length - 1}
+                      onClick={() => runMutation(`down-${index}`, () => routingCandidatesApi.move(profile, listKey, index, index + 1))}
+                      className="px-1.5 py-0.5 border border-subtle rounded text-secondary hover:text-primary disabled:opacity-40"
+                    >
+                      ↓
+                    </button>
+                  </>
+                )}
                 <button
                   type="button"
                   title="Remove"
+                  aria-label={`Remove ${formatCandidateLabel(candidate)}`}
                   disabled={pending !== null}
-                  onClick={() => runMutation(`rm-${index}`, () => routingCandidatesApi.remove(profile, index))}
+                  onClick={() => runMutation(`rm-${index}`, () => routingCandidatesApi.remove(profile, listKey, index))}
                   className="px-1.5 py-0.5 border border-critical/40 rounded text-critical hover:bg-critical/10 disabled:opacity-40"
                 >
                   ✕
@@ -883,29 +944,64 @@ function EditableCandidateList({ title, listKey, profile, candidates, onMutate }
       )}
       {adding ? (
         <div className="mt-2 space-y-1.5">
-          <input
-            type="text"
-            autoFocus
-            value={newBackend}
-            onChange={(e) => setNewBackend(e.target.value)}
-            placeholder="backend, e.g. codex"
-            className="w-full bg-raised border border-subtle rounded px-2 py-1 text-xs text-primary"
-          />
-          <input
-            type="text"
-            value={newModel}
-            onChange={(e) => setNewModel(e.target.value)}
-            placeholder="model (optional)"
-            className="w-full bg-raised border border-subtle rounded px-2 py-1 text-xs text-primary"
-          />
+          <label className="block text-xs text-muted">
+            Account
+            <select autoFocus value={runner} onChange={(e) => setRunner(e.target.value)} className={`mt-1 ${fieldClass}`}>
+              <option value="">Choose an account…</option>
+              {instances.length > 0 && (
+                <optgroup label="Named accounts">
+                  {instances.map((instance) => (
+                    <option key={instance.backend_instance} value={`instance:${instance.backend_instance}`}>
+                      {instance.account_label ?? instance.backend_instance} · {instance.logical_backend}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              <optgroup label="This node's default login">
+                {DEFAULT_BACKENDS.map((backend) => (
+                  <option key={backend} value={`backend:${backend}`}>{backend}</option>
+                ))}
+              </optgroup>
+            </select>
+          </label>
+          <label className="block text-xs text-muted">
+            Model
+            <input
+              type="text"
+              list={datalistId}
+              value={newModel}
+              onChange={(e) => setNewModel(e.target.value)}
+              placeholder="blank uses the account's default"
+              className={`mt-1 ${fieldClass}`}
+            />
+            <datalist id={datalistId}>
+              {[...knownModels].map((model) => <option key={model} value={model} />)}
+            </datalist>
+          </label>
+          {!single && (
+            <label className="block text-xs text-muted">
+              Priority (higher runs first)
+              <input
+                type="number"
+                value={priority}
+                onChange={(e) => setPriority(e.target.value)}
+                placeholder={`${topPriority} (top of list)`}
+                className={`mt-1 ${fieldClass}`}
+              />
+            </label>
+          )}
+          <label className="flex items-center gap-2 text-xs text-secondary">
+            <input type="checkbox" checked={included} onChange={(e) => setIncluded(e.target.checked)} />
+            Covered by a subscription or plan (no per-call charge)
+          </label>
           <div className="flex gap-2">
             <button
               type="button"
               onClick={add}
-              disabled={newBackend.trim() === '' || pending !== null}
+              disabled={!selectedBackend || pending !== null}
               className="px-2 py-1 bg-accent text-white rounded text-xs font-medium disabled:opacity-50"
             >
-              Add
+              {single ? 'Set reviewer' : 'Add'}
             </button>
             <button
               type="button"
@@ -923,7 +1019,7 @@ function EditableCandidateList({ title, listKey, profile, candidates, onMutate }
           disabled={pending !== null}
           className="mt-2 px-2 py-1 border border-subtle rounded text-xs text-secondary hover:text-primary disabled:opacity-40"
         >
-          + Add candidate
+          {single ? (candidates.length > 0 ? 'Change reviewer' : 'Set reviewer') : '+ Add candidate'}
         </button>
       )}
     </div>
@@ -931,7 +1027,8 @@ function EditableCandidateList({ title, listKey, profile, candidates, onMutate }
 }
 
 function formatCandidateLabel(candidate: RoutingCandidateSummary): string {
-  return `${candidate.backend}/${candidate.model ?? 'unknown'}`;
+  const runner = candidate.instance ? `${candidate.backend}[${candidate.instance}]` : candidate.backend;
+  return `${runner}/${candidate.model ?? 'default model'}`;
 }
 
 function formatList(values: string[]): string {

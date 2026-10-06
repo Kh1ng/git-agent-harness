@@ -530,13 +530,13 @@ pub(super) fn build_mr_title(
 pub(super) fn render_review_comment(verdict: &ReviewVerdict, session_dir: &Path) -> String {
     let published = &verdict.verdict;
     let mut out = format!(
-        "GAH review verdict: `{}`\n\nConfidence: `{}`\nHuman required: `{}`\nReviewer: `{}` / `{}`\nArtifacts: `{}`\n",
+        "GAH review verdict: `{}`\n\nConfidence: `{}`\nHuman required: `{}`\nReviewer: `{}` / `{}`\nSession: `{}`\n",
         published,
         verdict.confidence,
         verdict.human_required,
         verdict.effective_backend.as_deref().unwrap_or("unknown"),
         verdict.effective_model.as_deref().unwrap_or("unknown"),
-        session_dir.display(),
+        session_dir.file_name().and_then(|name| name.to_str()).unwrap_or("unknown"),
     );
     if !verdict.blocking_findings.is_empty() {
         out.push_str("\nBlocking findings:\n");
@@ -746,6 +746,22 @@ mod tests {
             comment.matches("APPROVE omitted grounded evidence").count(),
             1
         );
+    }
+
+    #[test]
+    fn review_comment_publishes_session_id_without_local_artifacts_path() {
+        let verdict: ReviewVerdict = serde_json::from_str(
+            r#"{"verdict":"APPROVE","confidence":"high","human_required":false}"#,
+        )
+        .unwrap();
+        let comment = render_review_comment(
+            &verdict,
+            Path::new("/home/operator/.local/share/gah/artifacts/profile/sessions/session-123"),
+        );
+
+        assert!(comment.contains("Session: `session-123`"));
+        assert!(!comment.contains("/home/operator/"));
+        assert!(!comment.contains("Artifacts:"));
     }
 
     #[test]
