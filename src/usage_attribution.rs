@@ -198,17 +198,13 @@ pub(crate) fn normalize_attempt_usage(
             None => "neither the route nor backend artifact identified a model".to_string(),
         });
     }
-    if backend_kind_of(attribution.backend) == Some(BackendKind::Agy) {
-        if usage.quota_window.is_none() {
-            usage.quota_window = Some("AGY individual quota".to_string());
-        }
-        if usage.observed_at.is_none() {
-            usage.observed_at = Some(
-                OffsetDateTime::now_utc()
-                    .format(&Rfc3339)
-                    .unwrap_or_default(),
-            );
-        }
+    if backend_kind_of(attribution.backend) == Some(BackendKind::Agy) && usage.observed_at.is_none()
+    {
+        usage.observed_at = Some(
+            OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .unwrap_or_default(),
+        );
     }
     if launched && usage.requests_count.is_none() {
         usage.requests_count = Some(1);
@@ -231,16 +227,6 @@ pub(crate) fn normalize_attempt_usage(
             Some("run-scoped backend artifact did not expose exact token counters".to_string());
     } else {
         usage.token_usage_unknown_reason = None;
-    }
-    if usage.usage_classification.as_deref() == Some("quota_backed")
-        && usage.quota_used_percent.is_none()
-        && usage.quota_remaining_percent.is_none()
-        && usage.quota_reset_at.is_none()
-    {
-        usage.quota_unknown_reason =
-            Some("subscription backend did not expose exact per-execution quota state".to_string());
-    } else {
-        usage.quota_unknown_reason = None;
     }
     // Provider-reported API-equivalent costs from subscription CLIs are not
     // direct spend. Keep quota usage and API dollars separate even when the
@@ -285,10 +271,6 @@ pub(crate) fn usage_has_observation(usage: &LedgerUsage) -> bool {
         || usage.requests_count.is_some()
         || usage.estimated_cost_usd.is_some()
         || usage.actual_cost_usd.is_some()
-        || usage.quota_window.is_some()
-        || usage.quota_used_percent.is_some()
-        || usage.quota_remaining_percent.is_some()
-        || usage.quota_reset_at.is_some()
 }
 
 enum AggregatedAttribution {
@@ -366,10 +348,6 @@ pub(crate) fn aggregate_attempt_usage(attempts: &[AttemptRecord]) -> LedgerUsage
         .max_by_key(|usage| usage.observed_at.as_deref())
     {
         aggregated.observed_at = latest.observed_at.clone();
-        aggregated.quota_window = latest.quota_window.clone();
-        aggregated.quota_used_percent = latest.quota_used_percent;
-        aggregated.quota_remaining_percent = latest.quota_remaining_percent;
-        aggregated.quota_reset_at = latest.quota_reset_at.clone();
     }
 
     aggregated.usage_classification = aggregate_label(
@@ -446,11 +424,6 @@ pub(crate) fn aggregate_attempt_usage(attempts: &[AttemptRecord]) -> LedgerUsage
         observed
             .iter()
             .map(|usage| usage.token_usage_unknown_reason.as_deref()),
-    );
-    aggregated.quota_unknown_reason = aggregate_label(
-        observed
-            .iter()
-            .map(|usage| usage.quota_unknown_reason.as_deref()),
     );
     aggregated.usage_source = Some("attempt_aggregate".to_string());
     aggregated

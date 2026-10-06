@@ -1,5 +1,7 @@
 //! Issue #149: ordered routing-candidate editing for a profile. The lists
-//! are pm / improve / review / escalatory. Every mutation resolves the
+//! are pm / improve / review / escalatory / routine. `routine` holds at most
+//! one candidate: adding replaces the routine reviewer and removing index 0
+//! clears it. Every mutation resolves the
 //! EFFECTIVE list (profile -> repo defaults), applies the change, writes the
 //! full list back into the profile section (candidate lists replace
 //! wholesale — nothing inherited is lost), validates, then saves. The
@@ -16,6 +18,7 @@ pub(crate) enum CandidateList {
     Improve,
     Review,
     Escalatory,
+    Routine,
 }
 
 impl CandidateList {
@@ -25,6 +28,7 @@ impl CandidateList {
             "improve" => Some(Self::Improve),
             "review" => Some(Self::Review),
             "escalatory" => Some(Self::Escalatory),
+            "routine" => Some(Self::Routine),
             _ => None,
         }
     }
@@ -36,6 +40,10 @@ impl CandidateList {
             Self::Review => policy.review_candidates.clone(),
             Self::Escalatory => (!policy.escalatory_reviewers.is_empty())
                 .then(|| policy.escalatory_reviewers.clone()),
+            Self::Routine => policy
+                .routine_reviewer
+                .clone()
+                .map(|candidate| vec![candidate]),
         }
     }
 
@@ -45,6 +53,7 @@ impl CandidateList {
             Self::Improve => policy.improve_candidates = Some(list),
             Self::Review => policy.review_candidates = Some(list),
             Self::Escalatory => policy.escalatory_reviewers = list,
+            Self::Routine => policy.routine_reviewer = list.into_iter().last(),
         }
     }
 }
@@ -104,7 +113,7 @@ pub(crate) fn switch_model(
 
 pub(crate) fn parse_list(raw: &str) -> Result<CandidateList> {
     CandidateList::parse(raw).ok_or_else(|| {
-        anyhow::anyhow!("unrecognized list '{raw}' (expected pm|improve|review|escalatory)")
+        anyhow::anyhow!("unrecognized list '{raw}' (expected pm|improve|review|escalatory|routine)")
     })
 }
 
@@ -240,6 +249,9 @@ pub(crate) fn run(command: RoutingCandidateCommands) -> Result<()> {
                 &profile,
                 list,
                 |candidates: &mut Vec<CandidateConfig>| {
+                    if list == CandidateList::Routine {
+                        candidates.clear();
+                    }
                     candidates.push(candidate);
                     Ok(())
                 },

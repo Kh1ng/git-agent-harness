@@ -203,12 +203,7 @@ pub fn extract_attempt_usage_records(
             requests_count: attempt.usage.requests_count,
             estimated_cost_usd: attempt.usage.estimated_cost_usd,
             actual_cost_usd: attempt.usage.actual_cost_usd,
-            quota_window: attempt.usage.quota_window.clone(),
-            quota_used_percent: attempt.usage.quota_used_percent,
-            quota_remaining_percent: attempt.usage.quota_remaining_percent,
-            quota_reset_at: attempt.usage.quota_reset_at.clone(),
             token_usage_unknown_reason: attempt.usage.token_usage_unknown_reason.clone(),
-            quota_unknown_reason: attempt.usage.quota_unknown_reason.clone(),
             tool_calls: attempt
                 .usage
                 .behavior_metrics

@@ -845,6 +845,26 @@ pub(super) fn extract_markdown_section(body: &str, heading: &str) -> Option<Stri
     }
 }
 
+/// Remove one markdown section so the rest of the document can be delivered
+/// without it. Section boundaries match `extract_markdown_section`: a section
+/// runs from its heading line to just before the next line starting with `#`.
+pub(super) fn strip_markdown_section(body: &str, heading: &str) -> String {
+    let mut stripped = String::new();
+    let mut skipping = false;
+    for raw_line in body.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.starts_with('#') {
+            let normalized = trimmed.trim_start_matches('#').trim();
+            skipping = normalized.eq_ignore_ascii_case(heading);
+        }
+        if !skipping {
+            stripped.push_str(raw_line);
+            stripped.push('\n');
+        }
+    }
+    stripped
+}
+
 /// How a recognized section's items were obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SectionParseMode {
