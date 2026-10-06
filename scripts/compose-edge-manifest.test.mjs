@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -7,12 +7,17 @@ import test from 'node:test';
 
 const script = readFileSync(new URL('./compose-edge-manifest.mjs', import.meta.url), 'utf8');
 
-/** The compose script runs from the downloaded-artifacts directory and reads
- * package.json there; the fixture recreates that layout. */
+/** The workflow runs `node ../scripts/compose-edge-manifest.mjs` from the
+ * downloaded-artifacts directory `edge/`; package.json is in the repository
+ * root, never among the artifacts. The fixture recreates that layout. */
 function fixture(t, { fragments = [] } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'gah-edge-manifest-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(join(dir, 'package.json'), '{"version":"0.1.3"}');
+  const root = mkdtempSync(join(tmpdir(), 'gah-edge-manifest-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, 'package.json'), '{"version":"0.1.3"}');
+  mkdirSync(join(root, 'scripts'));
+  writeFileSync(join(root, 'scripts/compose-edge-manifest.mjs'), script);
+  const dir = join(root, 'edge');
+  mkdirSync(dir);
   for (const name of ['gah-linux-x86_64', 'gah-macos-universal', 'gah-mcp-server-linux-x86_64', 'gah-mcp-server-macos-universal', 'gah-server-bundle.tar.gz']) {
     writeFileSync(join(dir, name), `fixture-bytes-${name}`);
   }
@@ -20,11 +25,10 @@ function fixture(t, { fragments = [] } = {}) {
     writeFileSync(join(dir, name), JSON.stringify(body));
   }
   const run = (headSha = '0123456789abcdef0123456789abcdef01234567') =>
-    spawnSync(process.execPath, [join(dir, 'compose-edge-manifest.mjs'), headSha], {
+    spawnSync(process.execPath, ['../scripts/compose-edge-manifest.mjs', headSha], {
       cwd: dir,
       encoding: 'utf8'
     });
-  writeFileSync(join(dir, 'compose-edge-manifest.mjs'), script);
   return { dir, run };
 }
 

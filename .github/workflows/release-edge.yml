@@ -274,7 +274,9 @@ jobs:
           # client ever caches a stale asset list under the same tag.
           gh release delete edge --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
           version="$(node -e "console.log(JSON.parse(require('fs').readFileSync('../package.json','utf8')).version)")"
+          # Pin the tag to the built commit; main may have moved since.
           gh release create edge "${assets[@]}" \
+            --target "$HEAD_SHA" \
             --prerelease \
             --title "GAH edge — ${version} ($(echo "$HEAD_SHA" | cut -c1-10))" \
             --notes "Automatic edge-channel build of main at $HEAD_SHA.
