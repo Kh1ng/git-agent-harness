@@ -47,14 +47,16 @@ pub(crate) fn run_with_executable(
     if implementation && !profile_sets_sandbox {
         cmd.arg("--sandbox").arg("workspace-write");
     }
+    // The build writes only its own target directory, so that is all the
+    // sandbox is opened for: never an ancestor, whose reach would depend on
+    // how deep an operator-supplied CARGO_TARGET_DIR happens to be.
     if let Some(target) = env_vars
         .iter()
         .find(|(k, _)| implementation && k == "CARGO_TARGET_DIR")
-        .map(|(_, v)| v)
+        .map(|(_, v)| Path::new(v))
+        .filter(|target| target.is_absolute() && target.parent().is_some())
     {
-        if let Some(cache_root) = Path::new(target).parent().and_then(|p| p.parent()) {
-            cmd.arg("--add-dir").arg(cache_root);
-        }
+        cmd.arg("--add-dir").arg(target);
     }
 
     cmd.args(filtered_extra)
@@ -230,10 +232,57 @@ mod tests {
         assert!(argv
             .windows(2)
             .any(|args| args == ["--sandbox", "workspace-write"]));
-        assert!(argv
+        // Only the target directory itself: the cache root holds other
+        // dispatches' targets, and a shallow target's ancestors could be the
+        // home directory or `/`.
+        let added: Vec<_> = argv
             .windows(2)
-            .any(|args| { args[0] == "--add-dir" && args[1] == cache_root.to_string_lossy() }));
+            .filter(|args| args[0] == "--add-dir")
+            .map(|args| args[1].clone())
+            .collect();
+        assert_eq!(added, vec![target.to_string_lossy().into_owned()]);
         assert!(!argv.iter().any(|arg| arg.contains("allow-write-dir")));
+    }
+
+    #[test]
+    fn run_codex_never_opens_the_sandbox_above_the_cargo_target() {
+        for target in ["/target", "/", "target", ""] {
+            let _exec_guard = crate::test_support::ExecGuard::new();
+            let f = fixture();
+            make_recording_bin(&f.bin_dir, "codex", &f.record_dir, 0);
+            let envs = vec![
+                ("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string()),
+                ("CARGO_TARGET_DIR".to_string(), target.to_string()),
+            ];
+
+            run_with_executable(
+                Path::new("codex"),
+                &f.worktree,
+                "task",
+                &f.session_dir,
+                None,
+                &[],
+                &envs,
+                300,
+                WriteIntent::Implementation,
+            )
+            .unwrap();
+
+            let argv = recorded_argv(&f.record_dir);
+            let added: Vec<_> = argv
+                .windows(2)
+                .filter(|args| args[0] == "--add-dir")
+                .map(|args| args[1].as_str())
+                .collect();
+            // An absolute target below the root is granted as itself;
+            // anything else is not granted at all.
+            let expected: &[&str] = if target == "/target" {
+                &["/target"]
+            } else {
+                &[]
+            };
+            assert_eq!(added, expected, "CARGO_TARGET_DIR={target:?}");
+        }
     }
 
     #[test]
