@@ -1308,12 +1308,7 @@ export interface LedgerUsage {
   requests_count: number | null;
   estimated_cost_usd: number | null;
   actual_cost_usd: number | null;
-  quota_window: string | null;
-  quota_used_percent: number | null;
-  quota_remaining_percent: number | null;
-  quota_reset_at: string | null;
   token_usage_unknown_reason?: string | null;
-  quota_unknown_reason?: string | null;
   /**
    * Issue #119: provenance-aware per-attempt behavior metrics (tool calls,
    * shell calls, file edits, test runs). `null`/`undefined` means the backend
