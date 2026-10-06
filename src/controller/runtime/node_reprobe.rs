@@ -59,6 +59,7 @@ impl NodeCapacityReprobe {
         done_rx: &Receiver<T>,
         active_workers: usize,
         parallel_limit: usize,
+        settings: crate::config::NodeCapacitySettings,
     ) -> Result<WaitOutcome<T>> {
         let deadline = self
             .deadline
@@ -87,7 +88,7 @@ impl NodeCapacityReprobe {
                     .action
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("node-capacity re-probe lost its action"))?;
-                match node_capacity::try_acquire(action, active_workers) {
+                match node_capacity::try_acquire(action, active_workers, settings) {
                     Ok(node_capacity::LiveAdmission::Admit(lease)) => {
                         // This is only a readiness probe. Release it before
                         // rebuilding provider state; normal launch admission

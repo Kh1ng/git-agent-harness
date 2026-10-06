@@ -1,3 +1,5 @@
+import plugin from 'tailwindcss/plugin';
+
 /** @type {import('tailwindcss').Config} */
 export default {
   darkMode: ['selector', '[data-theme="dark"]'],
@@ -38,5 +40,13 @@ export default {
       },
     },
   },
-  plugins: [require('@tailwindcss/typography')],
+  plugins: [
+    require('@tailwindcss/typography'),
+    // Chat lays itself out by the room it has, not the window: docked in the
+    // right sidebar (`.chat-docked`) it is narrow however wide the window is.
+    plugin(({ addVariant }) => {
+      addVariant('wide', '@media (min-width: 1280px) { &:not(.chat-docked *) }');
+      addVariant('narrow', ['@media not all and (min-width: 1280px) { & }', '.chat-docked &']);
+    }),
+  ],
 }

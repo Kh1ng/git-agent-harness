@@ -35,8 +35,8 @@ const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")
 /** Generate a Unix bootstrap command without exporting stored gateway or coordinator secrets. */
 export function unixSetupCommand(os: string, role: string, centralUrl: string, gatewayUrl?: string): string {
   if (!['linux', 'macos'].includes(os)) throw new Error('Choose Linux, macOS, or Windows.');
-  if (!['central', 'worker'].includes(role)) throw new Error('Choose central or worker.');
-  if (os === 'macos' && role === 'central') throw new Error('macOS central installation is not available yet. Choose a macOS worker or a Linux central node.');
+  if (!['central', 'standalone', 'worker'].includes(role)) throw new Error('Choose central, standalone, or worker.');
+  if (os === 'macos' && (role === 'central' || role === 'standalone')) throw new Error('macOS central installation is not available yet. Choose a macOS worker or a Linux central node.');
   const settings = [`GAH_NODE_ROLE=${shellQuote(role)}`];
   let credential = '';
   if (role === 'worker') {

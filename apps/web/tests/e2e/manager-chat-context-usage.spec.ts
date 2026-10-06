@@ -65,6 +65,8 @@ test('the chat composer shows and hides context usage based on backend data', as
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Chat', exact: true }).click();
+  // Docked, the chat is compact; expanded, it shows the project heading.
+  await page.getByRole('button', { name: 'Expand chat' }).click();
   await expect(page.getByRole('heading', { name: 'alpha', exact: true })).toBeVisible();
 
   const badge = page.getByLabel('Context usage');

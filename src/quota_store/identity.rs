@@ -53,6 +53,55 @@ pub fn latest_windows_for_identity_and_credential<'a>(
             }
         })
         .collect();
+    // One identity pins its instance and pool: a failed check invalidates per
+    // credential, while readings stay distinct per model so a model-scoped
+    // limit is never hidden by a newer account-wide reading of that window.
+    select_latest_windows(
+        matching,
+        |record| vec![record.credential_id.as_deref()],
+        |record| vec![record.model.as_deref()],
+    )
+}
+
+/// Latest windows for every source identity under one logical backend
+/// (#1339). Unlike [`latest_windows_for_identity`] this is not pinned to one
+/// instance, pool or credential: each distinct source keeps its own windows,
+/// so a backend-scoped view (the report) shows every configured account that
+/// reported, instead of only legacy unscoped rows.
+pub fn latest_windows_for_backend<'a>(
+    records: &'a [QuotaObservationRecord],
+    logical_backend: &str,
+) -> Vec<&'a QuotaObservationRecord> {
+    let matching: Vec<_> = current_source_records(records)
+        .into_iter()
+        .filter(|record| record.backend == logical_backend)
+        .collect();
+    // A backend view spans many accounts, so the source key carries the full
+    // identity: a failed check must not wipe a sibling account's windows.
+    let source_key = |record: &'a QuotaObservationRecord| {
+        vec![
+            record.credential_id.as_deref(),
+            record.backend_instance.as_deref(),
+            record.quota_pool.as_deref(),
+            record.model.as_deref(),
+        ]
+    };
+    select_latest_windows(matching, source_key, source_key)
+}
+
+/// Shared freshness selection: a failed or empty check invalidates earlier
+/// data for its `source_key` (an account-wide check with no window
+/// invalidates all of that source's windows), and the newest valid reading
+/// wins per `reading_key` and window.
+fn select_latest_windows<'a, S, R>(
+    matching: Vec<&'a QuotaObservationRecord>,
+    source_key: S,
+    reading_key: R,
+) -> Vec<&'a QuotaObservationRecord>
+where
+    S: Fn(&'a QuotaObservationRecord) -> Vec<Option<&'a str>>,
+    R: Fn(&'a QuotaObservationRecord) -> Vec<Option<&'a str>>,
+{
     let timestamp = |record: &QuotaObservationRecord| {
         record
             .checked_at
@@ -60,16 +109,20 @@ pub fn latest_windows_for_identity_and_credential<'a>(
             .or(record.observed_at.as_deref())
             .and_then(|value| OffsetDateTime::parse(value, &Rfc3339).ok())
     };
-    let mut windows = std::collections::BTreeMap::<_, &QuotaObservationRecord>::new();
-    let mut invalidated = std::collections::BTreeMap::<_, OffsetDateTime>::new();
+    let with_window = |record: &'a QuotaObservationRecord| {
+        let mut key = (source_key)(record);
+        key.push(record.quota_window.as_deref());
+        key
+    };
+    let mut windows =
+        std::collections::BTreeMap::<Vec<Option<&'a str>>, &QuotaObservationRecord>::new();
+    let mut invalidated = std::collections::BTreeMap::<Vec<Option<&'a str>>, OffsetDateTime>::new();
     for check in matching
         .iter()
         .filter(|check| check.check_error.is_some() || !has_quota_data(check))
     {
         if let Some(checked) = timestamp(check) {
-            let current = invalidated
-                .entry((&check.credential_id, &check.quota_window))
-                .or_insert(checked);
+            let current = invalidated.entry(with_window(check)).or_insert(checked);
             *current = (*current).max(checked);
         }
     }
@@ -80,9 +133,11 @@ pub fn latest_windows_for_identity_and_credential<'a>(
     {
         // A failed or empty check invalidates earlier data for that window.
         // An account-wide check with no window invalidates all its windows.
+        let mut account_wide = source_key(record);
+        account_wide.push(None);
         if [
-            invalidated.get(&(&record.credential_id, &None)),
-            invalidated.get(&(&record.credential_id, &record.quota_window)),
+            invalidated.get(&account_wide),
+            invalidated.get(&with_window(record)),
         ]
         .into_iter()
         .flatten()
@@ -90,7 +145,8 @@ pub fn latest_windows_for_identity_and_credential<'a>(
         {
             continue;
         }
-        let key = (&record.model, &record.quota_window);
+        let mut key = reading_key(record);
+        key.push(record.quota_window.as_deref());
         if windows
             .get(&key)
             .is_none_or(|current| timestamp(record) >= timestamp(current))

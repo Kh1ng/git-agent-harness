@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/experimental-ct-react';
 import type { SettingsConfigProfileSummary } from '@git-agent-harness/contracts';
-import { ProfileConfigViewerSection } from '../../src/pages/SettingsPage.js';
+import { ProfileConfigViewerSection } from '../../src/pages/ProfilePanel.js';
 import React from 'react';
 
 test('environment sources render configured status without rendering their values', async ({ mount }) => {

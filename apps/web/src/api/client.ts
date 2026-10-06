@@ -32,6 +32,7 @@ import type {
   LedgerEntry,
   ControllerEvent,
   ControllerActivity,
+  LoopDecision,
   ProfileSummary,
   WakeAutonomyValue,
   ConfigSummary,
@@ -234,6 +235,8 @@ export interface ProfileUpdateData {
   validation_timeout_seconds?: number | null;
   max_parallel_workers?: number;
   manager_wake_autonomy?: WakeAutonomyValue;
+  /** Hold approved schema/API contract changes for human review (#1405). */
+  hold_contract_changes?: boolean;
   clear?: string[];
 }
 
@@ -294,6 +297,7 @@ export interface GahDataSource {
   getWorkTimeline(workId: string): Promise<LedgerEntry[]>;
   getEvents(params?: { profile?: string; since?: string }): Promise<ControllerEvent[]>;
   getControllerActivity(params?: { profile?: string; since?: string }): Promise<ControllerActivity[]>;
+  getLoopDecision(profile: string): Promise<LoopDecision | null>;
   getProfiles(): Promise<ProfileSummary[]>;
   getProjects(): Promise<ProjectSummary[]>;
   addProject(profile: string): Promise<ProjectSummary>;
@@ -316,7 +320,7 @@ export interface GahDataSource {
   setManagerChatBackend(profile: string, backendId: string): Promise<{ success: boolean }>;
   getGatewaySettings(): Promise<GatewaySettingsSummary>;
   revealGatewayBootstrapCommand(): Promise<GatewayBootstrapCommand>;
-  getNodeSetupCommand(data: { os: 'windows' | 'linux' | 'macos'; centralUrl: string; role: 'desktop' | 'worker' | 'both' | 'central'; gatewayUrl?: string }): Promise<{ command: string }>;
+  getNodeSetupCommand(data: { os: 'windows' | 'linux' | 'macos'; centralUrl: string; role: 'desktop' | 'worker' | 'both' | 'central' | 'standalone'; gatewayUrl?: string }): Promise<{ command: string }>;
   updateGatewaySettings(data: GatewaySettingsUpdate): Promise<GatewaySettingsSummary>;
   getSkills(): Promise<{ skills: SkillSummary[] }>;
   getSkill(id: string, version: string): Promise<Skill>;
@@ -344,6 +348,15 @@ export interface GahDataSource {
   setManagerChatReasoningEffort(profile: string, effortId: string, nodeId?: string): Promise<{ success: boolean }>;
   getChatSessions(profile: string): Promise<{ sessions: ChatSessionSummary[] }>;
   getAllChatSessions(): Promise<{ projects: ChatSessionProjectGroup[] }>;
+  /** Agent CLIs running on this device outside the factory. */
+  /** Per role and model, what the ledger says (delivered rate with confidence, validation, review acceptance, tokens). */
+  getRoleMetrics(profile: string | undefined, since: string): Promise<import('@git-agent-harness/contracts').RoleMetricsReport>;
+  /** Published API prices per model, with what changed and when each source was last checked. */
+  getModelPrices(): Promise<import('@git-agent-harness/contracts').ModelPriceBook>;
+  refreshModelPrices(): Promise<import('@git-agent-harness/contracts').ModelPriceBook>;
+  getDeviceAgents(): Promise<import('@git-agent-harness/contracts').DeviceAgentsSnapshot>;
+  /** A running factory job's agent output from byte offset `after`. Read-only. */
+  getFactoryRunOutput(runId: string, after: number, full?: boolean, log?: string | null): Promise<import('@git-agent-harness/contracts').FactoryRunOutput>;
   createChatSession(profile: string, backend?: string, model?: string | null, title?: string, nodeId?: string, backendInstance?: string | null): Promise<ChatSessionSummary>;
   updateChatSession(profile: string, sessionId: string, patch: { backend?: string; backendInstance?: string | null; model?: string | null; reasoningEffort?: string | null; title?: string }): Promise<ChatSessionSummary>;
   archiveChatSession(profile: string, sessionId: string): Promise<ChatSessionSummary>;
@@ -518,6 +531,9 @@ export const gahApi: GahDataSource = {
       profile: params.profile,
       since: params.since
     });
+  },
+  getLoopDecision(profile) {
+    return getJson<LoopDecision | null>('/api/loop/last-decision', { profile });
   },
   getControllerActivity(params = {}) {
     return getJson<ControllerActivity[]>('/api/controller-activity', {
@@ -728,6 +744,21 @@ export const gahApi: GahDataSource = {
   getAllChatSessions() {
     return getJson<{ projects: ChatSessionProjectGroup[] }>('/api/manager-chat/sessions/all');
   },
+  getFactoryRunOutput(runId, after, full = false, log = null) {
+    return getJson<import('@git-agent-harness/contracts').FactoryRunOutput>(`/api/factory-runs/${encodeURIComponent(runId)}/output`, { after: String(after), ...(full ? { full: '1' } : {}), ...(log ? { log } : {}) });
+  },
+  getRoleMetrics(profile, since) {
+    return getJson<import('@git-agent-harness/contracts').RoleMetricsReport>('/api/report/roles', { ...(profile ? { profile } : {}), since });
+  },
+  getModelPrices() {
+    return getJson<import('@git-agent-harness/contracts').ModelPriceBook>('/api/model-prices');
+  },
+  refreshModelPrices() {
+    return postJson<import('@git-agent-harness/contracts').ModelPriceBook, Record<string, never>>('/api/model-prices/refresh', {});
+  },
+  getDeviceAgents() {
+    return getJson<import('@git-agent-harness/contracts').DeviceAgentsSnapshot>('/api/device-agents');
+  },
   createChatSession(profile, backend, model, title, nodeId, backendInstance) {
     return postJson<ChatSessionSummary, { profile: string; backend?: string; backendInstance?: string; model?: string | null; title?: string; nodeId?: string }>('/api/manager-chat/sessions', {
       profile, backend, model, title, nodeId, ...(backendInstance == null ? {} : { backendInstance })
@@ -821,8 +852,8 @@ export const gahApi: GahDataSource = {
 
 export const routingCandidatesApi = {
   add: (profile: string, body: Record<string, unknown>) => postJson<unknown, Record<string, unknown>>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/add`, body),
-  remove: (profile: string, index: number) => postJson<unknown, { index: number }>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/remove`, { index }),
-  move: (profile: string, from: number, to: number) => postJson<unknown, { from: number; to: number }>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/move`, { from, to }),
+  remove: (profile: string, list: string, index: number) => postJson<unknown, { list: string; index: number }>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/remove`, { list, index }),
+  move: (profile: string, list: string, from: number, to: number) => postJson<unknown, { list: string; from: number; to: number }>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/move`, { list, from, to }),
 };
 
 export const promptPoliciesApi = {
