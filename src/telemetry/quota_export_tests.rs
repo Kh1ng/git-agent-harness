@@ -30,7 +30,6 @@ fn store_record(
         model: None,
         quota_pool: None,
         quota_window: window.map(str::to_string),
-        quota_used_percent: None,
         quota_remaining_percent: remaining_percent,
         quota_reset_at: None,
         observed_at: observed_at.map(str::to_string),
@@ -78,6 +77,10 @@ fn store_quota_observations_export_two_windows_and_reexport_is_idempotent() {
     assert_eq!(ids.len(), 2, "record ids must not collide across windows");
     for record in &records {
         assert_eq!(record.base.schema_version, SCHEMA_VERSION);
+        let payload = serde_json::to_value(record).unwrap();
+        assert_eq!(payload["schema_version"], 12);
+        assert!(payload.get("quota_remaining_percent").is_some());
+        assert!(payload.get("quota_used_percent").is_none());
         assert_eq!(record.backend, "claude");
         assert_eq!(record.backend_instance.as_deref(), Some("claude"));
     }
@@ -198,4 +201,114 @@ fn store_quota_check_error_exports() {
         records[0].check_error.as_deref(),
         Some("auth_required: MISTRAL_ADMIN_API_KEY is not configured")
     );
+}
+
+#[test]
+fn upgrade_preserves_store_quota_deduplication_in_existing_repository() {
+    for (used, remaining, expected_remaining) in [
+        (Some(25.0), None, Some(75.0)),
+        (Some(12.5), Some(80.0), Some(80.0)),
+        (None, Some(87.5), Some(87.5)),
+        (None, None, None),
+    ] {
+        for observed_at in [Some("2026-10-04T08:00:00Z"), None] {
+            let temp = tempdir().unwrap();
+            let config = TelemetryConfig {
+                telemetry_repo_path: temp.path().to_path_buf(),
+                format: ExportFormat::Both,
+                generate_manifests: true,
+                commit_batch_size: None,
+            };
+            let raw = serde_json::json!({
+                "backend": "claude",
+                "backend_instance": "claude-primary",
+                "credential_id": "credential-label",
+                "model": "sonnet",
+                "quota_pool": "claude:subscription",
+                "quota_window": "weekly",
+                "quota_used_percent": used,
+                "quota_remaining_percent": remaining,
+                "observed_at": observed_at,
+                "checked_at": "2026-10-04T08:00:00Z",
+                "quota_reset_at": "2026-10-05T08:00:00Z",
+                "check_error": "source: unavailable",
+                "usage_source": "claude_native"
+            });
+            let store: crate::quota_store::QuotaObservationRecord =
+                serde_json::from_value(raw.clone()).unwrap();
+            let mut legacy =
+                serde_json::to_value(ExportedTelemetryRecord::QuotaObservation(Box::new(
+                    extract_quota_observation_records(
+                        std::slice::from_ref(&store),
+                        "2026-10-04T09:00:00Z",
+                    )
+                    .remove(0),
+                )))
+                .unwrap();
+            let percent = |n: Option<f64>| n.map(|n| n.to_string()).unwrap_or_default();
+            legacy["data"]["record_id"] = serde_json::json!(format!(
+                "quota_obs:{}:2026-10-04T08:00:00Z:claude:claude-primary:credential-label:sonnet:claude:subscription:weekly:{}:{}:2026-10-05T08:00:00Z:source: unavailable:claude_native",
+                observed_at.unwrap_or(""), percent(used), percent(remaining)
+            ));
+            legacy["data"]["quota_used_percent"] = raw["quota_used_percent"].clone();
+            legacy["data"]["schema_version"] = serde_json::json!(11);
+            legacy["data"]["quota_remaining_percent"] = raw["quota_remaining_percent"].clone();
+            if remaining.is_none() {
+                legacy["data"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("quota_remaining_percent");
+            }
+            let partition = temp.path().join("raw/quota/2026/10/2026-10-04.jsonl");
+            std::fs::create_dir_all(partition.parent().unwrap()).unwrap();
+            let original = format!("{}\n", serde_json::to_string(&legacy).unwrap());
+            std::fs::write(&partition, &original).unwrap();
+
+            let mut exporter = TelemetryExporter::new(config.clone()).unwrap();
+            exporter.load_exported_ids().unwrap();
+            let mut historical_records = Vec::new();
+            exporter
+                .walk_telemetry_files(|record| {
+                    historical_records.push(record.clone());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(historical_records.len(), 1);
+            let ExportedTelemetryRecord::QuotaObservation(historical) = &historical_records[0]
+            else {
+                panic!("expected historical quota observation");
+            };
+            assert_eq!(historical.base.schema_version, 11);
+            assert_eq!(
+                historical.quota_remaining_percent, expected_remaining,
+                "historical used-only readings must normalize; explicit remaining wins"
+            );
+            let canonical = serde_json::to_value(historical).unwrap();
+            assert!(canonical.get("quota_used_percent").is_none());
+            exporter
+                .export_store_quota_observations(std::slice::from_ref(&store))
+                .unwrap();
+            assert_eq!(exporter.records_exported(), 0);
+            assert_eq!(std::fs::read_to_string(&partition).unwrap(), original);
+
+            // A distinct account reading must still export, then deduplicate
+            // after another exporter reloads the mixed old/new repository.
+            let mut changed = store.clone();
+            changed.credential_id = Some("another-credential".to_string());
+            exporter
+                .export_store_quota_observations(std::slice::from_ref(&changed))
+                .unwrap();
+            assert_eq!(exporter.records_exported(), 1);
+            let mut reloaded = TelemetryExporter::new(config).unwrap();
+            reloaded.load_exported_ids().unwrap();
+            reloaded
+                .export_store_quota_observations(&[store, changed])
+                .unwrap();
+            assert_eq!(reloaded.records_exported(), 0);
+            assert_eq!(
+                std::fs::read_to_string(&partition).unwrap().lines().count(),
+                2
+            );
+        }
+    }
 }

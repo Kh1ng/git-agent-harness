@@ -1301,7 +1301,7 @@ export async function runClaimsList(
 
 export async function runQuotaList(
   config?: string
-): Promise<import('@git-agent-harness/contracts').QuotaListRecord[]> {
+): Promise<import('@git-agent-harness/contracts').QuotaObservation[]> {
   // No --store from clients: the server reads its own configured store.
   // (`quota list` has no --config flag; the store path resolves from the
   // server's own environment.)

@@ -80,7 +80,6 @@ fn group_obs(
         model: model.map(str::to_string),
         quota_pool: None,
         quota_window: Some(window.to_string()),
-        quota_used_percent: None,
         quota_remaining_percent: remaining_percent,
         quota_reset_at: None,
         observed_at: Some(observed_at.to_string()),
@@ -105,7 +104,6 @@ fn account_record(
         model: model.map(str::to_string),
         quota_pool: None,
         quota_window: Some(window.to_string()),
-        quota_used_percent: None,
         quota_remaining_percent: remaining_percent,
         quota_reset_at: None,
         observed_at: Some(observed_at.to_string()),
@@ -327,6 +325,50 @@ fn aggregate_observations_combines_backend_and_model_group_observations() {
         .iter()
         .any(|o| o.quota_window.as_deref() == Some("weekly")));
     assert!(obs.iter().any(|o| o.quota_window.as_deref() == Some("5h")));
+}
+
+#[test]
+fn aggregate_observations_scrubs_group_identity_but_preserves_account_records() {
+    let mut record = group_obs("codex", None, "weekly", Some(42.0), "2026-07-03T00:00:00Z");
+    record.backend_instance = Some("codex".into());
+    record.quota_pool = Some("account-pool".into());
+    record.credential_id = Some("account-credential".into());
+    record.account_usage = Some(
+        serde_json::from_value(serde_json::json!({
+            "account_id": "account", "workspace_id": null,
+            "period_start": "2026-07-01T00:00:00Z",
+            "period_end": "2026-08-01T00:00:00Z", "currency": "USD", "models": []
+        }))
+        .unwrap(),
+    );
+    let group = ledger::summary::GroupSummary {
+        quota_observations: vec![record.clone()],
+        ..empty_group()
+    };
+    let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        "codex",
+        None::<String>,
+        Some("account-pool"),
+    );
+    let mut account = record.clone();
+    account.backend_instance = Some(identity.backend_instance.clone());
+    for (backend, model) in [(Some(&group), None), (None, Some(&group))] {
+        let observations =
+            aggregate_observations(backend, model, std::slice::from_ref(&account), &identity);
+        assert_eq!(observations.len(), 2);
+        let broad = &observations[0];
+        assert!(broad.backend_instance.is_none());
+        assert!(broad.quota_pool.is_none());
+        assert!(broad.credential_id.is_none());
+        assert!(broad.account_usage.is_none());
+        assert_eq!(broad.quota_remaining_percent, Some(42.0));
+        assert_eq!(broad.observed_at, record.observed_at);
+        assert_eq!(
+            serde_json::to_value(&observations[1]).unwrap(),
+            serde_json::to_value(&account).unwrap()
+        );
+        assert!(group.quota_observations[0].credential_id.is_some());
+    }
 }
 
 #[test]

@@ -10,8 +10,8 @@ const NOW = Date.parse('2026-10-04T23:00:00Z');
 const candidates = [
   { backend: 'claude', backend_instance: 'claude', provider: 'anthropic', model: 'sonnet', modes: ['improve'], configured: false, eligible_now: true, usage: { actual_cost_usd: null },
     quota_observations: [
-      { backend: 'claude', quota_window: 'weekly', quota_used_percent: 14, quota_remaining_percent: 86, quota_reset_at: '2026-10-07T13:00:00Z', observed_at: '2026-10-04T22:58:00Z' },
-      { backend: 'claude', quota_window: '5-hour', quota_used_percent: 66, quota_remaining_percent: 34, quota_reset_at: '2026-10-04T23:20:00Z', observed_at: '2026-10-04T22:58:00Z' }
+      { backend: 'claude', quota_window: 'weekly', quota_remaining_percent: 86, quota_reset_at: '2026-10-07T13:00:00Z', observed_at: '2026-10-04T22:58:00Z' },
+      { backend: 'claude', quota_window: '5-hour', quota_remaining_percent: 34, quota_reset_at: '2026-10-04T23:20:00Z', observed_at: '2026-10-04T22:58:00Z' }
     ] },
   { backend: 'codex', backend_instance: 'codex', provider: 'openai', model: 'gpt-6-sol', modes: ['improve'], configured: false, eligible_now: true, usage: { actual_cost_usd: 8.1 },
     quota_observations: [{ backend: 'codex', quota_window: '10080m', quota_remaining_percent: 94, quota_reset_at: '2026-10-11T08:06:15Z' }] },
