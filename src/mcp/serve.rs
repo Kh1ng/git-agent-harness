@@ -105,9 +105,20 @@ pub async fn run_stdio(config: &McpConfig) -> Result<()> {
 /// the endpoint to loopback names. That list defends an unauthenticated
 /// local server against DNS rebinding; a remote client necessarily arrives
 /// under another host name, and still has to present the token.
-pub fn http_router(config: &McpConfig, token: &str, allow_any_host: bool) -> axum::Router {
+pub fn http_router(
+    config: &McpConfig,
+    token: &str,
+    host: &str,
+    allow_any_host: bool,
+) -> axum::Router {
     let tools = GahTools::new(config);
     let mut http_config = StreamableHttpServerConfig::default();
+    http_config = http_config.with_allowed_hosts(vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "[::1]".to_string(),
+        host.to_string(),
+    ]);
     if allow_any_host {
         http_config = http_config.disable_allowed_hosts();
     }
@@ -189,9 +200,12 @@ pub async fn run_http(config: &McpConfig, host: &str, port: u16) -> Result<()> {
             "gah-mcp-server is reachable beyond loopback on {address}; restrict network access and serve it over TLS or a private network"
         );
     }
-    axum::serve(listener, http_router(config, token, !ip.is_loopback()))
-        .await
-        .context("serving MCP over HTTP")
+    axum::serve(
+        listener,
+        http_router(config, token, host, !ip.is_loopback()),
+    )
+    .await
+    .context("serving MCP over HTTP")
 }
 
 #[cfg(test)]
@@ -311,5 +325,34 @@ mod tests {
             message["result"]["content"][0]["text"],
             "dispatch completed"
         );
+    }
+
+    #[tokio::test]
+    async fn configured_loopback_host_is_accepted() {
+        let config = McpConfig {
+            server_url: String::new(),
+            server_token: None,
+            default_profile: String::new(),
+        };
+        let router = http_router(&config, "test-token", "127.0.0.2", false);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(HTTP_PATH)
+            .header("host", "127.0.0.2:3774")
+            .header("authorization", "Bearer test-token")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .body(Body::from(
+                json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{
+                    "protocolVersion":"2025-06-18", "capabilities":{},
+                    "clientInfo":{"name":"test", "version":"1"}
+                }})
+                .to_string(),
+            ))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
