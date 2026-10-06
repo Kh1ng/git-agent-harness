@@ -36,6 +36,48 @@ pub struct DispatchContext {
     pub mode: String,
 }
 
+// Ownership belongs to the artifact, not the public roster contract. Old records
+// without ownership remain readable. All records expire after a day without activity.
+#[derive(Serialize, Deserialize)]
+struct InvocationRecord {
+    #[serde(flatten)]
+    worker: RunningWorker,
+    #[serde(default)]
+    owner_pid: Option<u32>,
+}
+
+fn owner_is_gone(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = i32::try_from(pid) else {
+            return true;
+        };
+        if pid <= 0 {
+            return true;
+        }
+        // Signal zero probes existence without signalling the dispatch. EPERM
+        // means the process exists; only ESRCH establishes that it is gone.
+        (unsafe { libc::kill(pid, 0) == -1 })
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Renew only when the runner's idle watcher observes actual progress.
+/// Missing or unwritable observation artifacts must never affect execution.
+pub(crate) fn heartbeat(session: &Path) {
+    if let Ok(file) = fs::OpenOptions::new()
+        .write(true)
+        .open(session.join("running-worker.json"))
+    {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+}
+
 pub fn initialize(session: &Path, context: &DispatchContext) {
     if let Ok(bytes) = serde_json::to_vec(context) {
         let _ = fs::write(session.join("dispatch-context.json"), bytes);
@@ -43,7 +85,7 @@ pub fn initialize(session: &Path, context: &DispatchContext) {
 }
 
 /// Observation failures must not change dispatch behavior. On normal completion
-/// Drop removes the record; abrupt death leaves evidence for a stale row.
+/// Drop removes the record; observation excludes records left by dead owners.
 pub struct InvocationGuard(Option<PathBuf>);
 impl InvocationGuard {
     pub fn start(
@@ -91,7 +133,12 @@ impl InvocationGuard {
         };
         let path = session.join("running-worker.json");
         let temporary = path.with_extension("json.tmp");
-        let written = serde_json::to_vec(&worker).ok().and_then(|bytes| {
+        let written = serde_json::to_vec(&InvocationRecord {
+            worker,
+            owner_pid: Some(std::process::id()),
+        })
+        .ok()
+        .and_then(|bytes| {
             fs::write(&temporary, bytes).ok()?;
             fs::rename(&temporary, &path).ok()
         });
@@ -119,14 +166,21 @@ pub fn observe(root: &Path, now: OffsetDateTime) -> Vec<RunningWorker> {
             if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                 visit(&path, now, rows, depth + 1);
             } else if entry.file_name() == "running-worker.json" {
-                let Some(mut row) = fs::read(&path)
+                let Some(record) = fs::read(&path)
                     .ok()
-                    .and_then(|bytes| serde_json::from_slice::<RunningWorker>(&bytes).ok())
+                    .and_then(|bytes| serde_json::from_slice::<InvocationRecord>(&bytes).ok())
                 else {
                     continue;
                 };
+                if record.owner_pid.is_some_and(owner_is_gone) {
+                    continue;
+                }
+                let mut row = record.worker;
                 let mut last = OffsetDateTime::parse(&row.started_at, &Rfc3339).unwrap_or(now);
-                // Only agent output is activity; status reads never renew it.
+                if let Ok(modified) = fs::metadata(&path).and_then(|m| m.modified()) {
+                    last = last.max(OffsetDateTime::from(modified));
+                }
+                // Output and idle-watch heartbeats are activity; reads never renew it.
                 if let Ok(logs) = fs::read_dir(dir) {
                     for log in logs
                         .flatten()
@@ -136,6 +190,11 @@ pub fn observe(root: &Path, now: OffsetDateTime) -> Vec<RunningWorker> {
                             last = last.max(OffsetDateTime::from(modified));
                         }
                     }
+                }
+                // Also bound legacy records, PID reuse after reboot, and platforms
+                // without a PID probe. Healthy workers renew through the idle watch.
+                if (now - last).whole_seconds() >= 86_400 {
+                    continue;
                 }
                 row.last_activity_at = last.format(&Rfc3339).unwrap_or_default();
                 row.state = if (now - last).whole_seconds() >= row.stale_after_seconds as i64 {
@@ -185,8 +244,18 @@ mod tests {
             Some("#1431"),
             900,
         );
+        let record_path = session.join("running-worker.json");
+        let artifact: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+        assert_eq!(artifact["owner_pid"], std::process::id());
+        let modified = fs::metadata(&record_path).unwrap().modified().unwrap();
         let now = OffsetDateTime::now_utc();
         let rows = observe(temp.path(), now);
+        assert_eq!(
+            fs::metadata(&record_path).unwrap().modified().unwrap(),
+            modified
+        );
+        assert!(observe(temp.path(), now + time::Duration::days(2)).is_empty());
         assert_eq!(rows.len(), 1);
         let value = serde_json::to_value(&rows[0]).unwrap();
         for key in [
@@ -208,6 +277,7 @@ mod tests {
         ] {
             assert!(value.get(key).is_some(), "{key}");
         }
+        assert!(value.get("owner_pid").is_none());
         assert_eq!(value["model"], "routed");
         assert_eq!(value["requested_model"], "requested");
         assert!(value["actual_model"].is_null());
@@ -227,7 +297,33 @@ mod tests {
             serde_json::to_vec(&aged).unwrap(),
         )
         .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(session.join("running-worker.json"))
+            .unwrap()
+            .set_modified((now - time::Duration::seconds(901)).into())
+            .unwrap();
         assert_eq!(observe(temp.path(), now)[0].state, "stale");
+        heartbeat(&session);
+        assert_eq!(
+            observe(temp.path(), OffsetDateTime::now_utc())[0].state,
+            "running"
+        );
+        assert!(observe(temp.path(), now + time::Duration::days(2)).is_empty());
+        let mut dead = serde_json::to_value(&aged).unwrap();
+        dead["owner_pid"] = serde_json::json!(i32::MAX);
+        fs::write(
+            session.join("running-worker.json"),
+            serde_json::to_vec(&dead).unwrap(),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        assert!(observe(temp.path(), now).is_empty());
+        fs::write(
+            session.join("running-worker.json"),
+            serde_json::to_vec(&aged).unwrap(),
+        )
+        .unwrap();
         fs::write(session.join("backend-output.log"), "Agent output").unwrap();
         assert_eq!(
             observe(temp.path(), OffsetDateTime::now_utc())[0].state,
