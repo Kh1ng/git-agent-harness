@@ -72,7 +72,7 @@ import { factoryRunOutput } from './factoryRunOutput.js';
 import { readLedger, roleMetrics } from './roleMetrics.js';
 import { readPriceBook, refreshModelPrices } from './modelPricing.js';
 import { helperPriceExtractor } from './modelPriceHelper.js';
-import { deriveControllerActivity } from './controllerActivity.js';
+import { deriveControllerActivity, deriveLastDecision } from './controllerActivity.js';
 import { authMiddleware, coordinatorTokenMatches, isLocalAddress, requireOwner } from './authMiddleware.js';
 import { DeviceAccess } from './deviceAccess.js';
 import { mutationSafety } from './mutationSafety.js';
@@ -1807,8 +1807,18 @@ export function createServer(
 
   app.post('/api/config', requireOwner, async (req, res) => {
     try {
+      // Node-capacity values go straight into argv; a non-integer would
+      // surface as a CLI failure (502) instead of the caller's mistake.
+      for (const field of ['worker_memory_mib', 'memory_floor_mib'] as const) {
+        const value = req.body?.[field];
+        if (value !== undefined && (typeof value !== 'number' || !Number.isSafeInteger(value))) {
+          return res.status(400).json({ error: 'invalid_request', message: `${field} must be an integer.` });
+        }
+      }
       const options: ConfigSetOptions = {
         current_manager: req.body.current_manager,
+        worker_memory_mib: req.body.worker_memory_mib,
+        memory_floor_mib: req.body.memory_floor_mib,
         notification_channel: req.body.notification_channel,
         telegram_chat_id: req.body.telegram_chat_id,
         clear: req.body.clear,
@@ -2375,6 +2385,18 @@ export function createServer(
       res.json(factoryRunOutput(req.params.runId, Number(req.query.after ?? 0), undefined, req.query.full === '1', since));
     } catch (error) {
       res.status(502).json({ error: 'Failed to read run output', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get('/api/loop/last-decision', async (req, res) => {
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : DEFAULT_PROFILE;
+    try {
+      res.json(deriveLastDecision(await runEvents(profile, '24h')));
+    } catch (error) {
+      res.status(502).json({
+        error: 'Failed to load the last loop decision',
+        message: error instanceof Error ? error.message : String(error)
+      });
     }
   });
 

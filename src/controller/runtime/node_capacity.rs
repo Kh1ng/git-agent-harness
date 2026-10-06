@@ -4,7 +4,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const GIB: u64 = 1024 * 1024 * 1024;
-const MIN_MEMORY_RESERVE: u64 = 2 * GIB;
 const MIN_CRITICAL_MEMORY: u64 = 512 * 1024 * 1024;
 
 /// A cheap, point-in-time view of pressure on the node running GAH.
@@ -65,13 +64,16 @@ pub(crate) enum LiveAdmission {
 /// and a compiler-heavy implementation as equal-sized workers. These are
 /// admission reservations, not hard limits: live MemAvailable, load, and PSI
 /// are sampled again before every subsequent worker and refill.
-fn reservation_for(action: &NextAction) -> WorkerReservation {
+fn reservation_for(
+    action: &NextAction,
+    settings: crate::config::NodeCapacitySettings,
+) -> WorkerReservation {
     match action {
         NextAction::DispatchTicket { .. }
         | NextAction::FixMr { .. }
         | NextAction::Retry { .. }
         | NextAction::Escalate { .. } => WorkerReservation {
-            memory_bytes: 4 * GIB,
+            memory_bytes: settings.worker_memory_mib * 1024 * 1024,
             cpu_units: 2.0,
         },
         NextAction::DecomposeIssue { .. } => WorkerReservation {
@@ -94,14 +96,33 @@ fn reservation_for(action: &NextAction) -> WorkerReservation {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn admission_for(
     action: &NextAction,
     active_workers: usize,
     committed: WorkerReservation,
     pressure: NodePressure,
 ) -> Admission {
-    let requested = reservation_for(action);
-    let memory_reserve = MIN_MEMORY_RESERVE.max(pressure.memory_total_bytes / 6);
+    admission_for_settings(
+        action,
+        active_workers,
+        committed,
+        pressure,
+        crate::config::NodeCapacitySettings::default(),
+    )
+}
+
+pub(crate) fn admission_for_settings(
+    action: &NextAction,
+    active_workers: usize,
+    committed: WorkerReservation,
+    pressure: NodePressure,
+    settings: crate::config::NodeCapacitySettings,
+) -> Admission {
+    let requested = reservation_for(action, settings);
+    // One formula for the free-memory floor, shared with the CLI and the
+    // Settings page (review of #1383): NodeCapacitySettings owns it.
+    let memory_reserve = settings.memory_reserve_bytes(pressure.memory_total_bytes);
     let critical_memory = MIN_CRITICAL_MEMORY.max(pressure.memory_total_bytes / 32);
 
     if pressure.memory_available_bytes <= critical_memory {
@@ -122,11 +143,16 @@ pub(crate) fn admission_for(
     let effective_available = pressure.memory_available_bytes.min(uncommitted_capacity);
     let projected_available = effective_available.saturating_sub(requested.memory_bytes);
     if projected_available < memory_reserve {
+        // The settings context rides only on the memory-reserve deferral:
+        // attaching it to CPU and PSI deferrals pointed operators at the
+        // memory knobs when CPU was the actual blocker (review of #1383).
         return Admission::Defer(format!(
-            "node memory reserve would be crossed ({} MiB available, {} MiB reserved for active/new workers, {} MiB safety floor)",
+            "node memory reserve would be crossed ({} MiB available, {} MiB reserved for active/new workers, {} MiB safety floor; node_capacity: worker reservation {} MiB, memory floor {})",
             pressure.memory_available_bytes / (1024 * 1024),
-            (committed.memory_bytes + requested.memory_bytes) / (1024 * 1024),
-            memory_reserve / (1024 * 1024)
+            committed.memory_bytes.saturating_add(requested.memory_bytes) / (1024 * 1024),
+            memory_reserve / (1024 * 1024),
+            settings.worker_memory_mib,
+            settings.floor_description(),
         ));
     }
 
@@ -173,8 +199,15 @@ pub(crate) fn admission_for(
 pub(crate) fn try_acquire(
     action: &NextAction,
     local_active_workers: usize,
+    settings: crate::config::NodeCapacitySettings,
 ) -> std::io::Result<LiveAdmission> {
-    acquire_in_dir(&capacity_dir(), action, sample()?, local_active_workers)
+    acquire_in_dir(
+        &capacity_dir(),
+        action,
+        sample()?,
+        local_active_workers,
+        settings,
+    )
 }
 
 fn acquire_in_dir(
@@ -182,6 +215,7 @@ fn acquire_in_dir(
     action: &NextAction,
     pressure: NodePressure,
     local_active_workers: usize,
+    settings: crate::config::NodeCapacitySettings,
 ) -> std::io::Result<LiveAdmission> {
     std::fs::create_dir_all(dir)?;
     let registry_lock = open_registry_lock(dir)?;
@@ -218,8 +252,17 @@ fn acquire_in_dir(
     }
 
     let admission_active_workers = active_workers.max(local_active_workers);
-    let reservation = match admission_for(action, admission_active_workers, committed, pressure) {
+    let reservation = match admission_for_settings(
+        action,
+        admission_active_workers,
+        committed,
+        pressure,
+        settings,
+    ) {
         Admission::Admit(reservation) => reservation,
+        // The reason already carries the settings context where it is
+        // relevant (see admission_for_settings); no extra suffix here, so
+        // CPU and PSI deferrals do not point at the memory knobs.
         Admission::Defer(reason) => return Ok(LiveAdmission::Defer(reason)),
     };
 
@@ -504,6 +547,85 @@ mod tests {
     }
 
     #[test]
+    fn lower_reservation_admits_second_worker_with_same_pressure() {
+        let node = pressure(6, 10, 0.5);
+        let settings = crate::config::NodeCapacitySettings {
+            worker_memory_mib: 1536,
+            memory_floor_mib: 0,
+        };
+        let first = match admission_for_settings(
+            &implementation(),
+            0,
+            WorkerReservation::default(),
+            node,
+            settings,
+        ) {
+            Admission::Admit(value) => value,
+            other => panic!("first worker: {other:?}"),
+        };
+        assert!(matches!(
+            admission_for_settings(
+                &implementation(),
+                1,
+                first,
+                node,
+                crate::config::NodeCapacitySettings::default()
+            ),
+            Admission::Defer(_)
+        ));
+        assert!(matches!(
+            admission_for_settings(&implementation(), 1, first, node, settings),
+            Admission::Admit(_)
+        ));
+    }
+
+    #[test]
+    fn default_settings_match_legacy_admission() {
+        for available in [1, 5] {
+            let node = pressure(available, 10, 0.5);
+            let committed = WorkerReservation {
+                memory_bytes: 4 * GIB,
+                cpu_units: 2.0,
+            };
+            assert!(
+                matches!(admission_for_settings(&implementation(), 1, committed, node, crate::config::NodeCapacitySettings::default()), Admission::Defer(reason) if reason.contains("memory reserve"))
+            );
+        }
+        let node = pressure(15, 10, 0.5);
+        let committed = WorkerReservation {
+            memory_bytes: 4 * GIB,
+            cpu_units: 2.0,
+        };
+        assert!(
+            matches!(admission_for_settings(&implementation(), 1, committed, node, crate::config::NodeCapacitySettings::default()), Admission::Admit(WorkerReservation { memory_bytes, cpu_units: 2.0 }) if memory_bytes == 4 * GIB)
+        );
+    }
+
+    #[test]
+    fn explicit_floor_changes_admission_without_disabling_critical_pressure() {
+        let settings = crate::config::NodeCapacitySettings {
+            worker_memory_mib: 1024,
+            memory_floor_mib: 512,
+        };
+        let node = pressure(2, 10, 0.0);
+        assert!(matches!(
+            admission_for_settings(
+                &implementation(),
+                0,
+                WorkerReservation::default(),
+                node,
+                settings
+            ),
+            Admission::Admit(_)
+        ));
+        let mut critical = node;
+        critical.memory_available_bytes = 400 * 1024 * 1024;
+        assert!(
+            matches!(admission_for_settings(&implementation(), 0, WorkerReservation::default(), critical, settings), Admission::Defer(reason) if reason.contains("critical"))
+        );
+    }
+
+    #[test]
     fn cpu_pressure_stops_refill_but_not_first_safe_worker() {
         let node = pressure(12, 4, 3.2);
         assert!(matches!(
@@ -592,29 +714,51 @@ mod tests {
     fn leases_coordinate_capacity_across_independent_workers_and_recover_on_drop() {
         let dir = tempfile::tempdir().unwrap();
         let node = pressure(15, 10, 0.5);
-        let LiveAdmission::Admit(first) =
-            acquire_in_dir(dir.path(), &implementation(), node, 0).unwrap()
-        else {
+        let LiveAdmission::Admit(first) = acquire_in_dir(
+            dir.path(),
+            &implementation(),
+            node,
+            0,
+            crate::config::NodeCapacitySettings::default(),
+        )
+        .unwrap() else {
             panic!("first worker should be admitted");
         };
-        let LiveAdmission::Admit(_second) =
-            acquire_in_dir(dir.path(), &implementation(), node, 0).unwrap()
-        else {
+        let LiveAdmission::Admit(_second) = acquire_in_dir(
+            dir.path(),
+            &implementation(),
+            node,
+            0,
+            crate::config::NodeCapacitySettings::default(),
+        )
+        .unwrap() else {
             panic!("second worker should be admitted");
         };
-        let LiveAdmission::Admit(_third) =
-            acquire_in_dir(dir.path(), &implementation(), node, 0).unwrap()
-        else {
+        let LiveAdmission::Admit(_third) = acquire_in_dir(
+            dir.path(),
+            &implementation(),
+            node,
+            0,
+            crate::config::NodeCapacitySettings::default(),
+        )
+        .unwrap() else {
             panic!("third worker should be admitted");
         };
         assert!(matches!(
-            acquire_in_dir(dir.path(), &implementation(), node, 0).unwrap(),
+            acquire_in_dir(dir.path(), &implementation(), node, 0, crate::config::NodeCapacitySettings::default()).unwrap(),
             LiveAdmission::Defer(reason) if reason.contains("memory reserve")
         ));
 
         drop(first);
         assert!(matches!(
-            acquire_in_dir(dir.path(), &review(), node, 0).unwrap(),
+            acquire_in_dir(
+                dir.path(),
+                &review(),
+                node,
+                0,
+                crate::config::NodeCapacitySettings::default()
+            )
+            .unwrap(),
             LiveAdmission::Admit(_)
         ));
     }
@@ -633,17 +777,28 @@ mod tests {
         file.write_all(b"not-a-reservation\n").unwrap();
         file.sync_data().unwrap();
 
-        let error = acquire_in_dir(dir.path(), &review(), pressure(15, 10, 0.5), 0)
-            .expect_err("a corrupt live lease must not be ignored");
+        let error = acquire_in_dir(
+            dir.path(),
+            &review(),
+            pressure(15, 10, 0.5),
+            0,
+            crate::config::NodeCapacitySettings::default(),
+        )
+        .expect_err("a corrupt live lease must not be ignored");
         assert!(error.to_string().contains("memory reservation"));
     }
 
     #[test]
     fn lease_drop_serializes_with_registry_scan_lock() {
         let dir = tempfile::tempdir().unwrap();
-        let LiveAdmission::Admit(lease) =
-            acquire_in_dir(dir.path(), &review(), pressure(15, 10, 0.5), 0).unwrap()
-        else {
+        let LiveAdmission::Admit(lease) = acquire_in_dir(
+            dir.path(),
+            &review(),
+            pressure(15, 10, 0.5),
+            0,
+            crate::config::NodeCapacitySettings::default(),
+        )
+        .unwrap() else {
             panic!("review should be admitted");
         };
         let lease_path = lease.path.clone();

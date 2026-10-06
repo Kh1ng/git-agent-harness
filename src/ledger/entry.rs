@@ -19,6 +19,7 @@ pub enum FailureClass {
     HarnessError,
     EnvironmentError,
     BackendError,
+    ConfigError,
     AgentNoProgress,
     AgentFailure,
     /// The reviewer process completed, but its structured payload could not
@@ -57,6 +58,7 @@ impl FailureClass {
             Self::HarnessError => "harness_error",
             Self::EnvironmentError => "environment_error",
             Self::BackendError => "backend_error",
+            Self::ConfigError => "config_error",
             Self::AgentNoProgress => "agent_no_progress",
             Self::AgentFailure => "agent_failure",
             Self::ReviewOutputInvalid => "review_output_invalid",
@@ -337,17 +339,10 @@ pub struct LedgerUsage {
     pub requests_count: Option<u64>,
     pub estimated_cost_usd: Option<f64>,
     pub actual_cost_usd: Option<f64>,
-    pub quota_window: Option<String>,
-    pub quota_used_percent: Option<f64>,
-    pub quota_remaining_percent: Option<f64>,
-    pub quota_reset_at: Option<String>,
     /// Exact token counters were not exposed for this execution. Distinct
     /// from zero tokens, which must only be recorded when the backend says 0.
     #[serde(default)]
     pub token_usage_unknown_reason: Option<String>,
-    /// Quota state was unavailable for a quota-backed execution.
-    #[serde(default)]
-    pub quota_unknown_reason: Option<String>,
     /// Issue #119: provenance-aware per-attempt behavior metrics (tool calls,
     /// shell calls, file edits, test runs). Optional so historical ledger
     /// lines without this key deserialize as `None` (unknown), never zero.

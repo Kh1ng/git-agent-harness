@@ -57,6 +57,7 @@ export function projectProfile(value: unknown): ProfileSummary {
     max_open_managed_mrs: p.max_open_managed_mrs, manager_wake_autonomy: p.manager_wake_autonomy,
     validation_timeout_seconds: p.validation_timeout_seconds,
     ...(p.delivery_mode === 'pr' || p.delivery_mode === 'handoff' ? { delivery_mode: p.delivery_mode } : {}),
+    ...(typeof p.hold_contract_changes === 'boolean' ? { hold_contract_changes: p.hold_contract_changes } : {}),
     ...(Number.isFinite(p.chat_session_idle_days) ? { chat_session_idle_days: p.chat_session_idle_days } : {})
   };
 }
