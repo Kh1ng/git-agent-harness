@@ -970,7 +970,6 @@ pub enum ProfileCommands {
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         validation_timeout_seconds: Option<u64>,
         /// Manager-wake autonomy for this profile: off | review_only | full.
-        /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         manager_wake_autonomy: Option<String>,
         /// Delivery mode for work results: pr (default) | handoff.
@@ -1050,7 +1049,6 @@ pub enum ProfileCommands {
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         validation_timeout_seconds: Option<u64>,
         /// Manager-wake autonomy for this profile: off | review_only | full.
-        /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         manager_wake_autonomy: Option<String>,
         /// Delivery mode for work results: pr | handoff.
@@ -1078,7 +1076,6 @@ pub enum ProfileCommands {
         #[arg(long, requires = "boost_workers")]
         boost_hours: Option<f64>,
         /// Hold approved schema/API contract changes for human review.
-        /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         hold_contract_changes: Option<bool>,
         /// Clear the specified field(s) - for fields that support it
