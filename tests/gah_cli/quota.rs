@@ -36,6 +36,43 @@ fn quota_record_persists_validated_account_observation_from_stdin() {
     assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
 }
 
+/// `gah quota record` accepts a collector that still reports used percent,
+/// stores remaining only, and rejects a used value that is not a percentage
+/// even when a valid remaining value is sent with it.
+#[test]
+fn quota_record_normalizes_used_percent_and_rejects_one_out_of_range() {
+    let tmp = test_tempdir();
+    let path = tmp.path().join("quota.jsonl");
+    let payload = |percents: &str| {
+        format!(
+            r#"{{"backend":"agy","backend_instance":"agy-1",{percents},"observed_at":"2026-10-02T23:00:00Z","checked_at":"2026-10-02T23:00:00Z","usage_source":"cli_router"}}"#
+        )
+    };
+    bin()
+        .args(["quota", "record", "--store-path"])
+        .arg(&path)
+        .write_stdin(payload(r#""quota_used_percent":25"#))
+        .assert()
+        .success();
+    let recorded: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(recorded["quota_remaining_percent"], 75.0);
+    assert!(recorded.get("quota_used_percent").is_none());
+
+    for percents in [
+        r#""quota_used_percent":500"#,
+        r#""quota_used_percent":500,"quota_remaining_percent":40"#,
+    ] {
+        bin()
+            .args(["quota", "record", "--store-path"])
+            .arg(&path)
+            .write_stdin(payload(percents))
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("between 0 and 100"));
+    }
+    assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
+}
+
 #[test]
 fn quota_list_json_reads_existing_store_records() {
     let tmp = test_tempdir();
