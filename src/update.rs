@@ -16,10 +16,10 @@ use std::process::Command;
 
 mod installation;
 mod units;
-use installation::install_selected_agent_assets;
 pub use installation::installation_plan;
 #[cfg(test)]
 use installation::quota_refresh_selected;
+use installation::{agents_to_refresh, install_selected_agent_assets};
 
 pub use crate::node_role::NodeRole as HostRole;
 
@@ -45,7 +45,9 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         ensure_default_branch_checkout(&repo)?;
         ensure_clean(&repo)?;
     }
-    let plan = installation_plan(args.role, &args.agents)?;
+    let config_home = user_config_home()?;
+    let agents = agents_to_refresh(&config_home, &args.agents);
+    let plan = installation_plan(args.role, &agents)?;
     for change in &plan {
         println!("  - {change}");
     }
@@ -102,7 +104,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     // early so a later failed step cannot skip it.
     enable_user_lingering(&repo, args.role);
 
-    install_selected_agent_assets(&repo, &user_config_home()?, &args.agents)?;
+    install_selected_agent_assets(&repo, &config_home, &agents)?;
 
     if cfg!(target_os = "macos") && args.role == HostRole::Worker {
         run_command(

@@ -42,6 +42,30 @@ pub(super) fn quota_refresh_selected(agents: &[String]) -> bool {
         .any(|agent| matches!(agent.as_str(), "codex" | "vibe"))
 }
 
+/// Refresh installed integrations as well as explicitly requested ones. This
+/// preserves first-install choices for callers such as the dashboard updater
+/// and also supports hosts installed before agent selection was introduced.
+pub(super) fn agents_to_refresh(config_home: &Path, requested: &[String]) -> Vec<String> {
+    let mut agents = requested.to_vec();
+    if ["gah-reviewer.md", "gah-implementer.md"]
+        .iter()
+        .any(|name| config_home.join("opencode/agents").join(name).is_file())
+        && !agents.iter().any(|agent| agent == "opencode")
+    {
+        agents.push("opencode".into());
+    }
+    if ["gah-quota-refresh.service", "gah-quota-refresh.timer"]
+        .iter()
+        .any(|name| config_home.join("systemd/user").join(name).is_file())
+        && !quota_refresh_selected(&agents)
+    {
+        // Codex and Vibe share these assets. This selects the refresh action;
+        // it does not infer which backend the operator uses.
+        agents.push("codex".into());
+    }
+    agents
+}
+
 pub(super) fn install_selected_agent_assets(
     repo: &Path,
     config_home: &Path,

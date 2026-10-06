@@ -193,7 +193,8 @@ pub enum Commands {
         /// Fetch and fast-forward the checkout before building (opt-in).
         #[arg(long)]
         pull: bool,
-        /// Agent integrations to install; repeat or use comma-separated names.
+        /// Agent integrations to install; existing assets are also refreshed.
+        /// Repeat or use comma-separated names.
         #[arg(long, value_delimiter = ',', value_parser = ["claude", "codex", "opencode", "vibe"])]
         agent: Vec<String>,
         /// Accept the printed installation plan without prompting.
