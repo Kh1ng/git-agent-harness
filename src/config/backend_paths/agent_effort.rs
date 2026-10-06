@@ -1,4 +1,4 @@
-use super::Profile;
+use crate::config::Profile;
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 

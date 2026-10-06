@@ -61,11 +61,26 @@ host can have a stale Cargo-installed binary at `$CARGO_HOME/bin/gah` while
 control plane:
 
 ```bash
-gah update --repo /path/to/git-agent-harness --restart-server
+gah update --pull --repo /path/to/git-agent-harness --restart-server
 ```
 
-It refuses a dirty or non-default-branch checkout, pulls with `--ff-only`,
-replaces the actual Cargo-installed CLI with `cargo install --path . --force`,
+`--pull` fetches and fast-forwards before installation. The command prints an
+installation plan and asks for confirmation; pass `--yes` for unattended
+updates. Omit `--pull` when reinstalling the current checkout, such as after
+changing the node role.
+Without `--pull`, it builds the current branch and working tree, including
+uncommitted changes.
+
+For unattended first installs, run `GAH_INSTALL_CONFIRMED=1 scripts/install.sh`
+with the desired role and configuration environment variables. This accepts
+the installer confirmation before it writes configuration or installs services.
+For unattended updates, use `gah update --pull --yes --repo /path/to/git-agent-harness`.
+Updates refresh existing GAH OpenCode agent files and quota-refresh units even
+when `--agent` is omitted; use `--agent` to install additional integrations.
+
+With `--pull`, it refuses a dirty or non-default-branch checkout and pulls
+with `--ff-only`. It replaces the actual Cargo-installed CLI with
+`cargo install --path . --bin gah --force --locked`,
 installs the lockfile-pinned Node dependencies, builds `apps/server`, and
 installs/reloads the `gah-loop@.service` user-unit template. On a central
 node it also reinstalls the system-level `gah-server.service` unit from the
@@ -104,7 +119,7 @@ scripts/install.sh
 ### Upgrade procedure
 
 ```bash
-gah update --repo /path/to/git-agent-harness --restart-server
+gah update --pull --repo /path/to/git-agent-harness --restart-server
 ```
 
 The updater never starts or restarts a recurring `gah loop`; with
@@ -200,7 +215,7 @@ system service. The user units (`gah-loop@`, `gah-prune`,
 verbatim. Then enable the service:
 
 ```bash
-gah update --role central
+gah update --pull --role central
 sudo systemctl enable --now gah-server
 ```
 
@@ -290,7 +305,7 @@ Start/Stop buttons manage `gah-loop@<profile>` rather than creating a detached
 process:
 
 ```bash
-gah update --repo /path/to/git-agent-harness
+gah update --pull --repo /path/to/git-agent-harness
 systemctl --user start gah-loop@gah
 ```
 
@@ -325,7 +340,7 @@ source checkout alone does not change an already-installed loop service.
 After upgrading, rebuild/install and restart the affected user units:
 
 ```bash
-gah update --repo /path/to/git-agent-harness
+gah update --pull --repo /path/to/git-agent-harness
 systemctl --user restart gah-loop@gah gah-loop@sportsball
 journalctl --user -u gah-loop@gah -u gah-loop@sportsball -n 100 --no-pager
 ```

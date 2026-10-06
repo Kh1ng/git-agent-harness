@@ -25,7 +25,6 @@ fn unknown(info: &CredentialInfo, now: OffsetDateTime) -> QuotaObservationRecord
         model: None,
         quota_pool: None,
         quota_window: None,
-        quota_used_percent: None,
         quota_remaining_percent: None,
         quota_reset_at: None,
         observed_at: None,
@@ -176,7 +175,6 @@ fn refresh_with(
                 })
                 .unwrap_or_else(|| unknown(info, now));
             failed.quota_window = None;
-            failed.quota_used_percent = None;
             failed.quota_remaining_percent = None;
             failed.quota_reset_at = None;
             failed.observed_at = None;

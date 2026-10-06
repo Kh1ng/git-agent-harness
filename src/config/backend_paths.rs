@@ -1,4 +1,6 @@
 use super::Profile;
+// Native reasoning effort lives in the same per-backend CLI arguments.
+mod agent_effort;
 
 /// Per-backend executable path overrides and idle-timeout accessors. Split
 /// out of config.rs (which has a tracked, forbidden-to-raise line-count

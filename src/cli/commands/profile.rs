@@ -202,10 +202,6 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             validation_timeout_seconds,
             manager_wake_autonomy,
             delivery_mode,
-            hold_contract_changes,
-            agent_model,
-            agent_effort,
-            max_concurrent,
             worker_scaling,
             worker_scaling_max_workers,
             worker_scaling_extra_per_model,
@@ -213,6 +209,10 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             boost_workers,
             boost_model,
             boost_hours,
+            hold_contract_changes,
+            agent_model,
+            agent_effort,
+            max_concurrent,
             clear,
         } => {
             let mut cfg = config::load(config_path.as_deref())?;
@@ -423,31 +423,6 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 existing.delivery_mode = config::DeliveryMode::default();
             }
 
-            if hold_contract_changes.is_some() || should_clear("hold_contract_changes", &clear) {
-                existing.routing.hold_contract_changes_for_human_review = hold_contract_changes;
-            }
-            for setting in &agent_effort {
-                let (backend, effort) = setting
-                    .split_once('=')
-                    .ok_or_else(|| anyhow::anyhow!("expected backend=effort"))?;
-                existing.set_agent_effort(backend, effort)?;
-            }
-            for switch in &agent_model {
-                let (backend, from, to) = parse_model_switch(switch)?;
-                super::routing_candidates::switch_model(&defaults, existing, backend, from, to)?;
-            }
-            if should_clear("max_concurrent_per_model", &clear) {
-                existing.max_concurrent_per_model.clear();
-            }
-            for cap in &max_concurrent {
-                let (model, count) = parse_model_cap(cap)?;
-                if count == 0 {
-                    existing.max_concurrent_per_model.remove(&model);
-                } else {
-                    existing.max_concurrent_per_model.insert(model, count);
-                }
-            }
-
             let scaling = &mut existing.worker_scaling;
             if let Some(v) = &worker_scaling {
                 scaling.enabled = parse_on_off("worker_scaling", v)?;
@@ -472,6 +447,30 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 scaling.boost_until = boost_hours.map(boost_expiry).transpose()?;
             } else if should_clear("worker_boost", &clear) {
                 scaling.clear_boost();
+            }
+            if hold_contract_changes.is_some() || should_clear("hold_contract_changes", &clear) {
+                existing.routing.hold_contract_changes_for_human_review = hold_contract_changes;
+            }
+            for setting in &agent_effort {
+                let (backend, effort) = setting
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("expected backend=effort"))?;
+                existing.set_agent_effort(backend, effort)?;
+            }
+            for switch in &agent_model {
+                let (backend, from, to) = parse_model_switch(switch)?;
+                super::routing_candidates::switch_model(&defaults, existing, backend, from, to)?;
+            }
+            if should_clear("max_concurrent_per_model", &clear) {
+                existing.max_concurrent_per_model.clear();
+            }
+            for cap in &max_concurrent {
+                let (model, count) = parse_model_cap(cap)?;
+                if count == 0 {
+                    existing.max_concurrent_per_model.remove(&model);
+                } else {
+                    existing.max_concurrent_per_model.insert(model, count);
+                }
             }
 
             config::save(&cfg, config_path.as_deref())?;

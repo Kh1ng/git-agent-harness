@@ -75,8 +75,8 @@ pub(crate) mod telemetry_tests {
     #[test]
     fn test_schema_version_in_record() {
         assert_eq!(
-            SCHEMA_VERSION, 11,
-            "#1341 re-sourced quota observation export onto the account quota store"
+            SCHEMA_VERSION, 12,
+            "remaining-only quota exports must be distinguishable from schema v11"
         );
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
@@ -390,6 +390,7 @@ pub(crate) mod telemetry_tests {
             checkpoint_sha: None,
             cli_version: None,
             usage: LedgerUsage {
+                usage_unknown_reason: None,
                 usage_source: Some("attempt".to_string()),
                 behavior_metrics: None,
                 usage_classification: None,
@@ -436,6 +437,7 @@ pub(crate) mod telemetry_tests {
             checkpoint_sha: None,
             cli_version: None,
             usage: LedgerUsage {
+                usage_unknown_reason: None,
                 usage_source: Some("attempt".to_string()),
                 behavior_metrics: None,
                 usage_classification: None,
@@ -467,6 +469,7 @@ pub(crate) mod telemetry_tests {
         entry.attempts = vec![attempt];
         // Update entry-level usage to be different from attempt
         entry.usage = LedgerUsage {
+            usage_unknown_reason: None,
             usage_source: Some("entry".to_string()),
             behavior_metrics: None,
             usage_classification: None,

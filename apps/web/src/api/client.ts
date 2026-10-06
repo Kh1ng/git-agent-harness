@@ -236,14 +236,6 @@ export interface ProfileUpdateData {
   validation_timeout_seconds?: number | null;
   max_parallel_workers?: number;
   manager_wake_autonomy?: WakeAutonomyValue;
-  /** Hold approved schema/API contract changes for human review (#1405). */
-  hold_contract_changes?: boolean;
-  /** Model switches for a backend's routing candidates, each `backend/old=new`. */
-  agent_model?: string[];
-  /** Native reasoning setting per backend, each backend=effort. */
-  agent_effort?: string[];
-  /** Per-model concurrency caps, each `backend/model=count`. */
-  max_concurrent?: string[];
   /** Automatic worker scaling: 'on' | 'off'. */
   worker_scaling?: 'on' | 'off';
   worker_scaling_max_workers?: number;
@@ -253,6 +245,14 @@ export interface ProfileUpdateData {
   boost_workers?: number;
   boost_model?: string;
   boost_hours?: number;
+  /** Hold approved schema/API contract changes for human review (#1405). */
+  hold_contract_changes?: boolean;
+  /** Model switches for a backend's routing candidates, each `backend/old=new`. */
+  agent_model?: string[];
+  /** Native reasoning setting per backend, each backend=effort. */
+  agent_effort?: string[];
+  /** Per-model concurrency caps, each `backend/model=count`. */
+  max_concurrent?: string[];
   clear?: string[];
 }
 

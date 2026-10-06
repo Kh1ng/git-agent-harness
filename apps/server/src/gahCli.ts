@@ -966,14 +966,6 @@ export interface ProfileSetOptions {
   manager_wake_autonomy?: string | null;
   /** Validation command timeout in seconds. */
   validation_timeout_seconds?: number | null;
-  /** Hold approved schema/API contract changes for human review (#1405). */
-  hold_contract_changes?: boolean | null;
-  /** Model switches for a backend's routing candidates, each `backend/old=new`. */
-  agent_model?: string[];
-  /** Native reasoning setting per backend, each backend=effort. */
-  agent_effort?: string[];
-  /** Per-model concurrency caps, each `backend/model=count`. */
-  max_concurrent?: string[];
   /** Automatic worker scaling: 'on' | 'off'. */
   worker_scaling?: string | null;
   worker_scaling_max_workers?: number | null;
@@ -983,6 +975,14 @@ export interface ProfileSetOptions {
   boost_workers?: number | null;
   boost_model?: string | null;
   boost_hours?: number | null;
+  /** Hold approved schema/API contract changes for human review (#1405). */
+  hold_contract_changes?: boolean | null;
+  /** Model switches for a backend's routing candidates, each `backend/old=new`. */
+  agent_model?: string[];
+  /** Native reasoning setting per backend, each backend=effort. */
+  agent_effort?: string[];
+  /** Per-model concurrency caps, each `backend/model=count`. */
+  max_concurrent?: string[];
   clear?: string[];
   config?: string;
 }
@@ -1084,11 +1084,6 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   } else if (options.clear?.includes('manager_wake_autonomy')) {
     args.push('--clear', 'manager_wake_autonomy');
   }
-  if (typeof options.hold_contract_changes === 'boolean') {
-    args.push('--hold-contract-changes', String(options.hold_contract_changes));
-  } else if (options.clear?.includes('hold_contract_changes')) {
-    args.push('--clear', 'hold_contract_changes');
-  }
   for (const change of options.agent_model ?? []) args.push('--agent-model', change);
   for (const cap of options.max_concurrent ?? []) args.push('--max-concurrent', cap);
   const scalingFlags = [
@@ -1102,6 +1097,11 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   ] as const;
   for (const [flag, value] of scalingFlags) {
     if (value !== undefined && value !== null && value !== '') args.push(flag, String(value));
+  }
+  if (typeof options.hold_contract_changes === 'boolean') {
+    args.push('--hold-contract-changes', String(options.hold_contract_changes));
+  } else if (options.clear?.includes('hold_contract_changes')) {
+    args.push('--clear', 'hold_contract_changes');
   }
   appendClearArgs(
     args,
@@ -1335,7 +1335,7 @@ export async function runClaimsList(
 
 export async function runQuotaList(
   config?: string
-): Promise<import('@git-agent-harness/contracts').QuotaListRecord[]> {
+): Promise<import('@git-agent-harness/contracts').QuotaObservation[]> {
   // No --store from clients: the server reads its own configured store.
   // (`quota list` has no --config flag; the store path resolves from the
   // server's own environment.)

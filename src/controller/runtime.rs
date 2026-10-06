@@ -38,6 +38,7 @@ use dispatch_state::{
 mod intake;
 use intake::{
     action_creates_managed_mr, action_intake_key, apply_parallel_projection, retain_unclaimed_work,
+    unavailable_work_ids,
 };
 #[path = "runtime/admission.rs"]
 mod admission;
@@ -690,7 +691,11 @@ fn run_parallel_once(
                     cfg,
                     profile_name,
                     &action,
-                    &capacity_deferred_work_ids,
+                    &unavailable_work_ids(
+                        &capacity_deferred_work_ids,
+                        &claimed_work_ids,
+                        &executed_work_ids,
+                    ),
                 )? {
                     action = redispatch;
                 }
@@ -936,6 +941,14 @@ fn run_parallel_once(
             };
             admission_coordinator.complete_worker(sequence);
             active -= 1;
+            // A finished item's next step (the review of a new PR, the merge
+            // after a review) may run in this batch rather than wait for the
+            // slowest sibling.
+            if has_follow_up_in_batch(&result.action, &result.outcome) {
+                if let Some(work_id) = result.action.work_id() {
+                    executed_work_ids.remove(&crate::work_claim::normalize_work_identity(work_id));
+                }
+            }
             if action_creates_managed_mr(&result.action) {
                 if let Some(key) = action_intake_key(&result.action) {
                     active_intake_keys.remove(&key);
@@ -1048,6 +1061,23 @@ fn update_parallel_refill_budget(
         *fill_attempts_remaining = parallel_limit;
     }
     failed
+}
+
+/// Whether a finished worker's item may be selected again in this batch.
+/// Only agent work that ran to the end qualifies: it changes what the item
+/// needs next. A merge or other bookkeeping step has no follow-up, and its
+/// failures are reported in an ordinary outcome, so releasing it would retry
+/// a refused merge at once. Errors and capacity deferrals stay excluded too.
+fn has_follow_up_in_batch(action: &NextAction, outcome: &str) -> bool {
+    matches!(
+        action,
+        NextAction::DispatchTicket { .. }
+            | NextAction::FixMr { .. }
+            | NextAction::Retry { .. }
+            | NextAction::Escalate { .. }
+            | NextAction::ReviewMr { .. }
+    ) && !outcome.starts_with("Error:")
+        && !outcome.starts_with("Deferred ")
 }
 
 fn parallel_outcome_is_failure(outcome: &str) -> bool {
