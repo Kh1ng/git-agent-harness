@@ -201,6 +201,7 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             validation_timeout_seconds,
             manager_wake_autonomy,
             delivery_mode,
+            hold_contract_changes,
             clear,
         } => {
             let mut cfg = config::load(config_path.as_deref())?;
@@ -408,6 +409,10 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 existing.delivery_mode = parse_delivery_mode(v)?;
             } else if should_clear("delivery_mode", &clear) {
                 existing.delivery_mode = config::DeliveryMode::default();
+            }
+
+            if hold_contract_changes.is_some() || should_clear("hold_contract_changes", &clear) {
+                existing.routing.hold_contract_changes_for_human_review = hold_contract_changes;
             }
 
             config::save(&cfg, config_path.as_deref())?;

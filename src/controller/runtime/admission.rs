@@ -37,6 +37,9 @@ pub struct RouteNodeAdmission {
     sequence: usize,
     action: NextAction,
     requests: Option<Sender<AdmissionMessage>>,
+    /// Node-capacity settings for the single-worker path, which admits
+    /// directly instead of going through the coordinator (issue #1380).
+    settings: crate::config::NodeCapacitySettings,
 }
 
 impl RouteNodeAdmission {
@@ -44,21 +47,27 @@ impl RouteNodeAdmission {
         sequence: usize,
         action: NextAction,
         requests: Sender<AdmissionMessage>,
+        settings: crate::config::NodeCapacitySettings,
     ) -> Self {
         Self {
             sequence,
             action,
             requests: Some(requests),
+            settings,
         }
     }
 
     /// Single-worker loops reserve node capacity after reserving their route,
     /// without a supervisor channel or another controller thread.
-    pub(crate) fn single_worker(action: NextAction) -> Self {
+    pub(crate) fn single_worker(
+        action: NextAction,
+        settings: crate::config::NodeCapacitySettings,
+    ) -> Self {
         Self {
             sequence: 0,
             action,
             requests: None,
+            settings,
         }
     }
 
@@ -67,7 +76,7 @@ impl RouteNodeAdmission {
             bail!("shutdown requested before node admission");
         }
         let Some(requests) = &self.requests else {
-            return match super::node_capacity::try_acquire(&self.action, 0) {
+            return match super::node_capacity::try_acquire(&self.action, 0, self.settings) {
                 Ok(super::node_capacity::LiveAdmission::Admit(lease)) => Ok(WorkerNodeLease {
                     _lease: lease,
                     sequence: self.sequence,
@@ -126,7 +135,12 @@ impl RouteNodeAdmission {
             };
             let _ = request.response.send(response);
         });
-        Self::new(1, action, requests)
+        Self::new(
+            1,
+            action,
+            requests,
+            crate::config::NodeCapacitySettings::default(),
+        )
     }
 
     #[cfg(test)]
@@ -185,13 +199,18 @@ pub(crate) enum PollOutcome {
 pub(crate) struct Coordinator {
     requests: Receiver<AdmissionMessage>,
     node_admitted_sequences: HashSet<usize>,
+    settings: crate::config::NodeCapacitySettings,
 }
 
 impl Coordinator {
-    pub(crate) fn new(requests: Receiver<AdmissionMessage>) -> Self {
+    pub(crate) fn new(
+        requests: Receiver<AdmissionMessage>,
+        settings: crate::config::NodeCapacitySettings,
+    ) -> Self {
         Self {
             requests,
             node_admitted_sequences: HashSet::new(),
+            settings,
         }
     }
 
@@ -226,7 +245,8 @@ impl Coordinator {
             return PollOutcome::Shutdown;
         }
 
-        match super::node_capacity::try_acquire(&action, self.active_node_workers()) {
+        match super::node_capacity::try_acquire(&action, self.active_node_workers(), self.settings)
+        {
             Ok(super::node_capacity::LiveAdmission::Admit(lease)) => {
                 self.node_admitted_sequences.insert(sequence);
                 if request
@@ -355,7 +375,12 @@ mod tests {
     #[test]
     fn route_blocked_worker_requests_no_node_capacity() {
         let (requests, receiver) = request_channel();
-        let handshake = RouteNodeAdmission::new(1, implementation(), requests);
+        let handshake = RouteNodeAdmission::new(
+            1,
+            implementation(),
+            requests,
+            crate::config::NodeCapacitySettings::default(),
+        );
         let route_available = Arc::new(AtomicBool::new(false));
         let worker_route_available = Arc::clone(&route_available);
         let worker = std::thread::spawn(move || {
@@ -391,7 +416,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (lease, lease_path) = super::super::node_capacity::test_lease(temp.path()).unwrap();
         let (requests, receiver) = request_channel();
-        let handshake = RouteNodeAdmission::new(4, implementation(), requests);
+        let handshake = RouteNodeAdmission::new(
+            4,
+            implementation(),
+            requests,
+            crate::config::NodeCapacitySettings::default(),
+        );
         let (backend_started, started) = channel();
         let (release, released) = channel();
         let worker = std::thread::spawn(move || {
@@ -434,7 +464,12 @@ mod tests {
         }
 
         let (requests, receiver) = request_channel();
-        let handshake = RouteNodeAdmission::new(2, implementation(), requests);
+        let handshake = RouteNodeAdmission::new(
+            2,
+            implementation(),
+            requests,
+            crate::config::NodeCapacitySettings::default(),
+        );
         let route_released = Arc::new(AtomicBool::new(false));
         let released = Arc::clone(&route_released);
         let backend_started = Arc::new(AtomicBool::new(false));
@@ -467,7 +502,12 @@ mod tests {
         }
 
         let (requests, receiver) = request_channel();
-        let handshake = RouteNodeAdmission::new(3, implementation(), requests);
+        let handshake = RouteNodeAdmission::new(
+            3,
+            implementation(),
+            requests,
+            crate::config::NodeCapacitySettings::default(),
+        );
         let route_released = Arc::new(AtomicBool::new(false));
         let released = Arc::clone(&route_released);
         let worker = std::thread::spawn(move || {
