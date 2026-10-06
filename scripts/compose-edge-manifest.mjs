@@ -17,7 +17,8 @@ const headSha = process.argv[2];
 if (!headSha || !/^[0-9a-f]{7,40}$/.test(headSha)) {
   throw new Error('usage: compose-edge-manifest.mjs <head-sha>');
 }
-const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+// The product version lives in the repository root, not among the artifacts.
+const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const sha256 = (name) => createHash('sha256').update(readFileSync(name)).digest('hex');
 
 const KINDS = {
