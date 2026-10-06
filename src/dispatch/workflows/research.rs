@@ -141,13 +141,30 @@ pub(crate) fn research(
         ledger.work_id.as_deref(),
         None,
         crate::runner::WriteIntent::ReadOnly,
-    )?;
+    )
+    .inspect_err(|_| {
+        let log_path = attempt_dir.join("backend-output.log");
+        if !log_path.exists() {
+            ledger.usage.usage_unknown_reason =
+                Some(crate::ledger::UsageUnknownReason::BackendNotInvoked);
+        }
+    })?;
     println!(
         "Backend finished: exit={} duration={:.0}s log={}",
         result.exit_code, result.duration_secs, result.log_path
     );
     ledger.backend_exit_code = Some(result.exit_code);
     record_external_approval_consumption_for_last_attempt(cfg, profile_name, profile, ledger);
+
+    if ledger.usage.usage_unknown_reason.is_none() {
+        ledger.usage = super::super::attempts::attempt_usage(
+            &result.log_path,
+            result.agy_cli_log_delta.as_deref(),
+            crate::usage_attribution::UsageAttribution::from_route(&route),
+            result.transcript_path.as_deref(),
+            None,
+        );
+    }
 
     if kind == JobKind::Estimate {
         if result.exit_code != 0 {

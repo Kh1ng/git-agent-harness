@@ -467,7 +467,8 @@ fn report_shows_store_account_quota_for_instance_scoped_and_router_rows() {
         .iter()
         .find(|q| q["quota_window"] == "weekly")
         .unwrap();
-    assert_eq!(weekly["quota_used_percent"], 12.5);
+    assert_eq!(weekly["quota_remaining_percent"], 87.5);
+    assert!(weekly.get("quota_used_percent").is_none());
     assert_eq!(weekly["backend_instance"], "claude");
 
     let agy = rows
