@@ -233,7 +233,6 @@ pub(crate) fn normalize_attempt_usage(
         usage.token_usage_unknown_reason = None;
     }
     if usage.usage_classification.as_deref() == Some("quota_backed")
-        && usage.quota_used_percent.is_none()
         && usage.quota_remaining_percent.is_none()
         && usage.quota_reset_at.is_none()
     {
@@ -286,7 +285,6 @@ pub(crate) fn usage_has_observation(usage: &LedgerUsage) -> bool {
         || usage.estimated_cost_usd.is_some()
         || usage.actual_cost_usd.is_some()
         || usage.quota_window.is_some()
-        || usage.quota_used_percent.is_some()
         || usage.quota_remaining_percent.is_some()
         || usage.quota_reset_at.is_some()
 }
@@ -367,7 +365,6 @@ pub(crate) fn aggregate_attempt_usage(attempts: &[AttemptRecord]) -> LedgerUsage
     {
         aggregated.observed_at = latest.observed_at.clone();
         aggregated.quota_window = latest.quota_window.clone();
-        aggregated.quota_used_percent = latest.quota_used_percent;
         aggregated.quota_remaining_percent = latest.quota_remaining_percent;
         aggregated.quota_reset_at = latest.quota_reset_at.clone();
     }

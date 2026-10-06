@@ -340,7 +340,6 @@ pub struct LedgerUsage {
     pub estimated_cost_usd: Option<f64>,
     pub actual_cost_usd: Option<f64>,
     pub quota_window: Option<String>,
-    pub quota_used_percent: Option<f64>,
     pub quota_remaining_percent: Option<f64>,
     pub quota_reset_at: Option<String>,
     /// Exact token counters were not exposed for this execution. Distinct

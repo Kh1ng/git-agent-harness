@@ -587,7 +587,6 @@ export interface QuotaObservation {
   backend: string;
   model?: string | null;
   quota_window?: string | null;
-  quota_used_percent?: number | null;
   quota_remaining_percent?: number | null;
   quota_reset_at?: string | null;
   observed_at?: string | null;
@@ -937,13 +936,12 @@ export interface WorkClaimDetail {
 /** Issue #519: one row of `gah quota list --json` (HTTP adapter
  * GET /api/quota/list). Persisted observations, distinct from the computed
  * snapshot GET /api/quota returns. */
-export interface QuotaListRecord {
+export interface QuotaObservation {
   backend: string;
   backend_instance?: string | null;
   model?: string | null;
   quota_pool?: string | null;
   quota_window?: string | null;
-  quota_used_percent?: number | null;
   quota_remaining_percent?: number | null;
   quota_reset_at?: string | null;
   observed_at?: string | null;
@@ -1307,7 +1305,6 @@ export interface LedgerUsage {
   estimated_cost_usd: number | null;
   actual_cost_usd: number | null;
   quota_window: string | null;
-  quota_used_percent: number | null;
   quota_remaining_percent: number | null;
   quota_reset_at: string | null;
   token_usage_unknown_reason?: string | null;

@@ -482,7 +482,6 @@ type QuotaObservationKey = (
     Option<String>,
     Option<String>,
     Option<u64>,
-    Option<u64>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -495,7 +494,6 @@ fn observation_key(record: &crate::quota_store::QuotaObservationRecord) -> Quota
         record.credential_id.clone(),
         record.quota_pool.clone(),
         record.quota_window.clone(),
-        record.quota_used_percent.map(f64::to_bits),
         record.quota_remaining_percent.map(f64::to_bits),
         record.quota_reset_at.clone(),
         record.observed_at.clone(),
@@ -663,8 +661,8 @@ fn display_report(
                             .map(|w| format!(":{w}"))
                             .unwrap_or_default(),
                         quota
-                            .quota_used_percent
-                            .map(|n| format!("{n:.1}%"))
+                            .quota_remaining_percent
+                            .map(|n| format!("{:.1}%", 100.0 - n))
                             .unwrap_or_else(|| "unknown".to_string()),
                         quota
                             .quota_remaining_percent

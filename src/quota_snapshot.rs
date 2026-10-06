@@ -26,33 +26,6 @@ pub struct UsageSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct QuotaObservation {
-    pub backend: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub credential_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend_instance: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_pool: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_window: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_used_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_remaining_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_reset_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub observed_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub account_usage: Option<crate::usage::account_usage::AccountUsageObservation>,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct QuotaCandidateStatus {
     pub modes: Vec<String>,
     pub backend: String,
@@ -78,7 +51,7 @@ pub struct QuotaCandidateStatus {
     pub observed_at: Option<String>,
     pub usage: UsageSummary,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub quota_observations: Vec<QuotaObservation>,
+    pub quota_observations: Vec<crate::quota_store::QuotaObservationRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -580,39 +553,16 @@ fn aggregate_observations(
     model_group: Option<&ledger::summary::GroupSummary>,
     account_quota: &[quota_store::QuotaObservationRecord],
     identity: &crate::execution_identity::ExecutionIdentity,
-) -> Vec<QuotaObservation> {
+) -> Vec<crate::quota_store::QuotaObservationRecord> {
     let mut out = Vec::new();
     if let Some(group) = backend_group {
-        out.extend(
-            group
-                .quota_observations
-                .iter()
-                .map(convert_group_observation),
-        );
+        out.extend(group.quota_observations.iter().cloned());
     }
     if let Some(group) = model_group {
-        out.extend(
-            group
-                .quota_observations
-                .iter()
-                .map(convert_group_observation),
-        );
+        out.extend(group.quota_observations.iter().cloned());
     }
     for account in quota_store::latest_windows_for_identity(account_quota, identity) {
-        out.push(QuotaObservation {
-            backend: account.backend.clone(),
-            backend_instance: account.backend_instance.clone(),
-            model: account.model.clone(),
-            quota_pool: account.quota_pool.clone(),
-            quota_window: account.quota_window.clone(),
-            quota_used_percent: account.quota_used_percent,
-            quota_remaining_percent: account.quota_remaining_percent,
-            quota_reset_at: account.quota_reset_at.clone(),
-            observed_at: account.observed_at.clone(),
-            usage_source: account.usage_source.clone(),
-            account_usage: account.account_usage.clone(),
-            credential_id: account.credential_id.clone(),
-        });
+        out.push((*account).clone());
     }
 
     // A bound source may report a provider account distinct from its runner
@@ -653,7 +603,6 @@ fn aggregate_observations(
             obs.model.clone(),
             obs.quota_pool.clone(),
             obs.quota_window.clone(),
-            obs.quota_used_percent.map(f64::to_bits),
             obs.quota_remaining_percent.map(f64::to_bits),
             obs.quota_reset_at.clone(),
             obs.observed_at.clone(),
@@ -669,23 +618,6 @@ fn aggregate_observations(
 /// pool and credential are `None`) exactly as the former ledger summary
 /// type did: a broad ledger aggregate has no verified source identity and
 /// must not present itself as one account's balance.
-fn convert_group_observation(obs: &crate::quota_store::QuotaObservationRecord) -> QuotaObservation {
-    QuotaObservation {
-        backend: obs.backend.clone(),
-        backend_instance: None,
-        model: obs.model.clone(),
-        quota_pool: None,
-        quota_window: obs.quota_window.clone(),
-        quota_used_percent: obs.quota_used_percent,
-        quota_remaining_percent: obs.quota_remaining_percent,
-        quota_reset_at: obs.quota_reset_at.clone(),
-        observed_at: obs.observed_at.clone(),
-        usage_source: obs.usage_source.clone(),
-        account_usage: None,
-        credential_id: None,
-    }
-}
-
 fn summarize_groups(groups: Vec<ledger::summary::GroupSummary>) -> UsageSummary {
     let mut summary = UsageSummary::default();
     for group in groups {

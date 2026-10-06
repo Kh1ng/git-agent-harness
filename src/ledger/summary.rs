@@ -960,7 +960,6 @@ where
                 estimated_cost_seen = true;
             }
             if observed.usage.quota_window.is_some()
-                || observed.usage.quota_used_percent.is_some()
                 || observed.usage.quota_remaining_percent.is_some()
                 || observed.usage.quota_reset_at.is_some()
             {
@@ -978,7 +977,6 @@ where
                     model: observed.model.map(str::to_string),
                     quota_pool: observed.usage.quota_pool.clone(),
                     quota_window: observed.usage.quota_window.clone(),
-                    quota_used_percent: observed.usage.quota_used_percent,
                     quota_remaining_percent: observed.usage.quota_remaining_percent,
                     quota_reset_at: observed.usage.quota_reset_at.clone(),
                     observed_at: observed.usage.observed_at.clone(),
@@ -1131,7 +1129,6 @@ fn usage_has_observation(usage: &LedgerUsage) -> bool {
         || usage.estimated_cost_usd.is_some()
         || usage.actual_cost_usd.is_some()
         || usage.quota_window.is_some()
-        || usage.quota_used_percent.is_some()
         || usage.quota_remaining_percent.is_some()
         || usage.quota_reset_at.is_some()
 }

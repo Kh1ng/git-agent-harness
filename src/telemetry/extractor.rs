@@ -204,7 +204,6 @@ pub fn extract_attempt_usage_records(
             estimated_cost_usd: attempt.usage.estimated_cost_usd,
             actual_cost_usd: attempt.usage.actual_cost_usd,
             quota_window: attempt.usage.quota_window.clone(),
-            quota_used_percent: attempt.usage.quota_used_percent,
             quota_remaining_percent: attempt.usage.quota_remaining_percent,
             quota_reset_at: attempt.usage.quota_reset_at.clone(),
             token_usage_unknown_reason: attempt.usage.token_usage_unknown_reason.clone(),
@@ -249,7 +248,7 @@ pub fn extract_attempt_usage_records(
 pub fn extract_quota_observation_records(
     records: &[crate::quota_store::QuotaObservationRecord],
     exported_at: &str,
-) -> Vec<QuotaObservationRecord> {
+) -> Vec<ExportedQuotaObservationRecord> {
     records
         .iter()
         .filter_map(|record| {
@@ -265,7 +264,7 @@ pub fn extract_quota_observation_records(
                 observed_at: observed_at.clone(),
             };
 
-            Some(QuotaObservationRecord {
+            Some(ExportedQuotaObservationRecord {
                 base,
                 backend: record.backend.clone(),
                 backend_instance: record.backend_instance.clone(),
@@ -273,7 +272,6 @@ pub fn extract_quota_observation_records(
                 model: record.model.clone(),
                 quota_pool: record.quota_pool.clone(),
                 quota_window: record.quota_window.clone(),
-                quota_used_percent: record.quota_used_percent,
                 quota_remaining_percent: record.quota_remaining_percent,
                 quota_reset_at: record.quota_reset_at.clone(),
                 checked_at: record.checked_at.clone(),

@@ -30,7 +30,7 @@ pub struct QuotaCheck {
     pub status: QuotaCheckStatus,
     /// Account readings remain visible even when no routing candidate uses them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub quota_observations: Vec<super::QuotaObservation>,
+    pub quota_observations: Vec<crate::quota_store::QuotaObservationRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -76,7 +76,6 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
             && record.mistral_admin.is_none()
             && record.quota_window.is_none()
             && record.quota_remaining_percent.is_none()
-            && record.quota_used_percent.is_none()
             && record.quota_reset_at.is_none()
             && record.check_error.as_deref()
                 == Some("auth_required: MISTRAL_ADMIN_API_KEY is not configured")
@@ -134,7 +133,6 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
                 let quota_observations =
                     super::aggregate_observations(None, None, &scoped, &identity);
                 let has_data = record.quota_window.is_some()
-                    || record.quota_used_percent.is_some()
                     || record.quota_remaining_percent.is_some()
                     || record.quota_reset_at.is_some()
                     || record.mistral_admin.is_some()
@@ -176,7 +174,7 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quota_snapshot::{QuotaCandidateStatus, QuotaObservation, UsageSummary};
+    use crate::quota_snapshot::{QuotaCandidateStatus, UsageSummary};
     #[test]
     fn an_unconfigured_admin_auth_method_does_not_poison_the_connected_dashboard() {
         let now = Some("2026-10-03T04:00:00Z");
@@ -204,7 +202,6 @@ mod tests {
             model: None,
             quota_pool: None,
             quota_window: (status == QuotaCheckStatus::Data).then(|| "weekly".to_string()),
-            quota_used_percent: None,
             quota_remaining_percent: None,
             quota_reset_at: None,
             observed_at: observed_at.map(str::to_string),
@@ -241,16 +238,18 @@ mod tests {
             last_error_summary: None,
             observed_at: None,
             usage: UsageSummary::default(),
-            quota_observations: vec![QuotaObservation {
+            quota_observations: vec![QuotaObservationRecord {
                 backend: "codex".to_string(),
                 backend_instance: None,
                 model: None,
                 quota_pool: None,
                 quota_window: Some("weekly".to_string()),
-                quota_used_percent: None,
                 quota_remaining_percent: Some(42.0),
                 quota_reset_at: None,
                 observed_at: Some("2026-08-22T19:47:14Z".to_string()),
+                checked_at: None,
+                check_error: None,
+                mistral_admin: None,
                 usage_source: None,
                 account_usage: None,
                 credential_id: None,

@@ -378,29 +378,30 @@ pub fn parse_admin_spend_limit(json: &str) -> LedgerUsage {
         .get("monthly_limit_reached")
         .and_then(Value::as_bool);
 
-    let quota_used_percent =
-        admin_spend_limit_quota_used_percent(total_usage, usage_limit, monthly_limit_reached);
+    let quota_remaining_percent =
+        admin_spend_limit_quota_remaining_percent(total_usage, usage_limit, monthly_limit_reached);
 
-    if quota_used_percent.is_none() {
+    if quota_remaining_percent.is_none() {
         return LedgerUsage::default();
     }
 
     LedgerUsage {
         usage_source: Some("mistral_admin_spend_limit".to_string()),
-        quota_used_percent,
-        quota_remaining_percent: quota_used_percent.map(|pct| 100.0 - pct),
+        quota_remaining_percent,
         ..LedgerUsage::default()
     }
 }
 
-fn admin_spend_limit_quota_used_percent(
+fn admin_spend_limit_quota_remaining_percent(
     total_usage: Option<f64>,
     usage_limit: Option<f64>,
     monthly_limit_reached: Option<bool>,
 ) -> Option<f64> {
     match (total_usage, usage_limit) {
-        (Some(used), Some(limit)) if limit > 0.0 => Some((used / limit * 100.0).clamp(0.0, 100.0)),
-        _ => monthly_limit_reached.and_then(|reached| reached.then_some(100.0)),
+        (Some(used), Some(limit)) if limit > 0.0 => {
+            Some(100.0 - (used / limit * 100.0).clamp(0.0, 100.0))
+        }
+        _ => monthly_limit_reached.and_then(|reached| reached.then_some(0.0)),
     }
 }
 
@@ -422,7 +423,6 @@ pub fn admin_spend_limit_to_quota_observation(
         model: model.map(|m| m.to_string()),
         quota_pool: None,
         quota_window: Some("monthly".to_string()),
-        quota_used_percent: usage.quota_used_percent,
         quota_remaining_percent: usage.quota_remaining_percent,
         quota_reset_at: None,
         observed_at: time::OffsetDateTime::now_utc()
@@ -588,21 +588,24 @@ mod tests {
 
     #[test]
     fn parses_admin_spend_limit_exact_ratio() {
-        let quota_used_percent =
-            admin_spend_limit_quota_used_percent(Some(169.52), Some(500.0), Some(false));
-        assert_eq!(quota_used_percent, Some(33.904));
+        let quota_remaining_percent =
+            admin_spend_limit_quota_remaining_percent(Some(169.52), Some(500.0), Some(false));
+        assert_eq!(
+            quota_remaining_percent,
+            Some(100.0 - (169.52 / 500.0 * 100.0))
+        );
     }
 
     #[test]
     fn spend_limit_reached_with_no_numeric_breakdown_reports_full_not_unknown() {
-        let quota_used_percent = admin_spend_limit_quota_used_percent(None, None, Some(true));
-        assert_eq!(quota_used_percent, Some(100.0));
+        let quota_remaining_percent =
+            admin_spend_limit_quota_remaining_percent(None, None, Some(true));
+        assert_eq!(quota_remaining_percent, Some(0.0));
     }
 
     #[test]
     fn spend_limit_not_reached_with_no_numbers_stays_unknown() {
         let usage = parse_admin_spend_limit(SPEND_LIMIT_DOCS);
-        assert_eq!(usage.quota_used_percent, None);
         assert!(usage.usage_source.is_none());
     }
 
@@ -611,7 +614,6 @@ mod tests {
         let obs = admin_spend_limit_to_quota_observation(&spend_limit_ratio_body(), "vibe", None)
             .expect("spend limit yields an observation");
         assert_eq!(obs.backend, "vibe");
-        assert_eq!(obs.quota_used_percent, Some(33.904));
         assert_eq!(obs.quota_window.as_deref(), Some("monthly"));
         assert_eq!(
             obs.usage_source.as_deref(),
@@ -786,7 +788,6 @@ mod tests {
         assert_eq!(refresh.rate_limits.requests_per_second, Some(87));
         let spend = refresh.spend_limit.expect("spend limit observation");
         assert_eq!(spend.backend, "vibe");
-        assert_eq!(spend.quota_used_percent, Some(33.904));
     }
 
     #[test]

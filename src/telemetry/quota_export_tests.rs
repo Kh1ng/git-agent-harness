@@ -30,7 +30,6 @@ fn store_record(
         model: None,
         quota_pool: None,
         quota_window: window.map(str::to_string),
-        quota_used_percent: None,
         quota_remaining_percent: remaining_percent,
         quota_reset_at: None,
         observed_at: observed_at.map(str::to_string),

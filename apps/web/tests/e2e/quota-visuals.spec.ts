@@ -28,15 +28,15 @@ test('quota windows compare exact percentages and distinguish missing, stale, an
       candidates: [
         {
           modes: ['fix'], backend: 'codex', model: 'gpt-5.3', quota_pool: 'subscription', configured: true, eligible_now: true, observed_at: now, usage,
-          quota_observations: [{ backend: 'codex', model: 'gpt-5.3', quota_window: '5-hour', quota_used_percent: 40, quota_remaining_percent: 60, quota_reset_at: resetAt, observed_at: now, usage_source: 'subscription' }]
+          quota_observations: [{ backend: 'codex', model: 'gpt-5.3', quota_window: '5-hour', quota_remaining_percent: 60, quota_reset_at: resetAt, observed_at: now, usage_source: 'subscription' }]
         },
         {
           modes: ['review'], backend: 'claude', model: 'opus', quota_pool: 'subscription', configured: true, eligible_now: true, observed_at: now, usage,
-          quota_observations: [{ backend: 'claude', model: 'opus', quota_window: 'weekly', quota_used_percent: null, quota_remaining_percent: 25, quota_reset_at: resetAt, observed_at: now, usage_source: 'subscription' }]
+          quota_observations: [{ backend: 'claude', model: 'opus', quota_window: 'weekly', quota_remaining_percent: 25, quota_reset_at: resetAt, observed_at: now, usage_source: 'subscription' }]
         },
         {
           modes: ['fix'], backend: 'vibe', model: null, quota_pool: 'metered', configured: true, eligible_now: false, reason: 'Account check failed', observed_at: '2000-01-01T00:00:00Z', usage,
-          quota_observations: [{ backend: 'vibe', quota_window: 'monthly', quota_used_percent: null, quota_remaining_percent: null, quota_reset_at: null, observed_at: '2000-01-01T00:00:00Z', usage_source: 'provider' }]
+          quota_observations: [{ backend: 'vibe', quota_window: 'monthly', quota_remaining_percent: null, quota_reset_at: null, observed_at: '2000-01-01T00:00:00Z', usage_source: 'provider' }]
         }
       ]
     }

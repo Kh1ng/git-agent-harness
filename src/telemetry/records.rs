@@ -174,7 +174,6 @@ pub struct AttemptUsageRecord {
     /// Quota window identifier
     pub quota_window: Option<String>,
     /// Quota used percentage
-    pub quota_used_percent: Option<f64>,
     /// Quota remaining percentage
     pub quota_remaining_percent: Option<f64>,
     /// When quota resets
@@ -205,7 +204,7 @@ pub struct AttemptUsageRecord {
 /// Credential ids are labels, never secrets; the check error is already
 /// redacted by the store.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct QuotaObservationRecord {
+pub struct ExportedQuotaObservationRecord {
     #[serde(flatten)]
     pub base: TelemetryRecord,
 
@@ -227,8 +226,6 @@ pub struct QuotaObservationRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_window: Option<String>,
     /// Quota used percentage
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_used_percent: Option<f64>,
     /// Quota remaining percentage
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_remaining_percent: Option<f64>,
@@ -396,7 +393,7 @@ pub enum ExportedTelemetryRecord {
     #[serde(rename = "attempt_usage")]
     AttemptUsage(Box<AttemptUsageRecord>),
     #[serde(rename = "quota_observation")]
-    QuotaObservation(Box<QuotaObservationRecord>),
+    QuotaObservation(Box<ExportedQuotaObservationRecord>),
     #[serde(rename = "task_outcome")]
     TaskOutcome(Box<TaskOutcomeRecord>),
     #[serde(rename = "review_outcome")]
@@ -552,7 +549,7 @@ pub fn generate_store_quota_observation_id(
     }
     let percent = |value: Option<f64>| value.map(|value| value.to_string()).unwrap_or_default();
     format!(
-        "quota_obs:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        "quota_obs:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
         part(&record.observed_at),
         part(&record.checked_at),
         record.backend,
@@ -561,7 +558,6 @@ pub fn generate_store_quota_observation_id(
         part(&record.model),
         part(&record.quota_pool),
         part(&record.quota_window),
-        percent(record.quota_used_percent),
         percent(record.quota_remaining_percent),
         part(&record.quota_reset_at),
         part(&record.check_error),

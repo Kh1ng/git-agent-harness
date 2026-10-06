@@ -37,7 +37,8 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
     let quota_remaining_percent = find_f64(
         text,
         &["quota_remaining_percent", "quota remaining percent"],
-    );
+    )
+    .or_else(|| quota_used_percent.map(|used| 100.0 - used));
     let quota_window = find_string_after(text, &["quota_window", "quota window"]);
     let quota_reset_at = find_string_after(text, &["quota_reset_at", "quota reset at"]);
 
@@ -51,7 +52,6 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
         requests_count,
         estimated_cost_usd,
         actual_cost_usd,
-        quota_used_percent,
         quota_remaining_percent,
         quota_window,
         quota_reset_at,
@@ -81,7 +81,6 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
         || usage.cache_read_tokens.is_some()
         || usage.cache_write_tokens.is_some()
         || usage.requests_count.is_some()
-        || usage.quota_used_percent.is_some()
         || usage.quota_remaining_percent.is_some()
         || usage.quota_window.is_some()
         || usage.quota_reset_at.is_some()
@@ -106,7 +105,6 @@ pub fn parse_openhands_usage(text: &str) -> LedgerUsage {
     #[derive(Debug)]
     struct Bucket {
         label: &'static str,
-        used_percent: f64,
         remaining_percent: f64,
         reset_at: Option<String>,
     }
@@ -159,7 +157,7 @@ pub fn parse_openhands_usage(text: &str) -> LedgerUsage {
             continue;
         }
 
-        let used_percent = ((limit - remaining) as f64 / limit as f64) * 100.0;
+        let _used_percent = ((limit - remaining) as f64 / limit as f64) * 100.0;
         let remaining_percent = (remaining as f64 / limit as f64) * 100.0;
         let reset_at = find_header_u64(text, &[keys[2]])
             .or_else(|| find_header_u64(text, &["retry-after"]))
@@ -167,7 +165,6 @@ pub fn parse_openhands_usage(text: &str) -> LedgerUsage {
 
         buckets.push(Bucket {
             label,
-            used_percent,
             remaining_percent,
             reset_at,
         });
@@ -183,7 +180,6 @@ pub fn parse_openhands_usage(text: &str) -> LedgerUsage {
     LedgerUsage {
         usage_source: Some("openhands_rate_limit_headers".to_string()),
         quota_window: Some(bucket.label.to_string()),
-        quota_used_percent: Some(bucket.used_percent),
         quota_remaining_percent: Some(bucket.remaining_percent),
         quota_reset_at: bucket.reset_at,
         ..LedgerUsage::default()
@@ -557,7 +553,6 @@ pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
         requests_count: base.requests_count.or(other.requests_count),
         estimated_cost_usd: base.estimated_cost_usd.or(other.estimated_cost_usd),
         actual_cost_usd: base.actual_cost_usd.or(other.actual_cost_usd),
-        quota_used_percent: base.quota_used_percent.or(other.quota_used_percent),
         quota_remaining_percent: base
             .quota_remaining_percent
             .or(other.quota_remaining_percent),
@@ -853,7 +848,6 @@ pub fn codex_rate_limit_windows(
                 model: model.map(str::to_string),
                 quota_pool: None,
                 quota_window,
-                quota_used_percent: used,
                 quota_remaining_percent: used.map(|used| 100.0 - used),
                 quota_reset_at,
                 observed_at: observed_at.clone(),
@@ -1030,20 +1024,11 @@ mod tests {
         let windows = codex_windows(CODEX_RATE_LIMITS_JSON);
         let summary: Vec<_> = windows
             .iter()
-            .map(|w| {
-                (
-                    w.quota_window.as_deref(),
-                    w.quota_used_percent,
-                    w.quota_remaining_percent,
-                )
-            })
+            .map(|w| (w.quota_window.as_deref(), w.quota_remaining_percent))
             .collect();
         assert_eq!(
             summary,
-            [
-                (Some("300m"), Some(25.0), Some(75.0)),
-                (Some("10080m"), Some(18.0), Some(82.0)),
-            ]
+            [(Some("300m"), Some(75.0)), (Some("10080m"), Some(82.0)),]
         );
         for window in &windows {
             assert_eq!(window.backend, "codex");
@@ -1060,7 +1045,7 @@ mod tests {
             r#"{"rateLimits":{"primary":{"usedPercent":80,"windowDurationMins":300}},"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":7,"windowDurationMins":10080}},"codex_bengalfox":{"primary":{"usedPercent":99,"windowDurationMins":300}}}}"#,
         );
         assert_eq!(windows.len(), 1, "a missing secondary is not fabricated");
-        assert_eq!(windows[0].quota_used_percent, Some(7.0));
+        assert_eq!(windows[0].quota_remaining_percent, Some(93.0));
         assert_eq!(windows[0].quota_window.as_deref(), Some("10080m"));
     }
 
@@ -1114,7 +1099,7 @@ mod tests {
         assert_eq!(usage.quota_window.as_deref(), Some("AGY individual quota"));
         assert_eq!(usage.quota_reset_at.as_deref(), Some("in 16m44s"));
         // Critical spec point: percentage is never fabricated.
-        assert_eq!(usage.quota_used_percent, None);
+        assert_eq!(usage.quota_remaining_percent, None);
         assert_eq!(usage.usage_source.as_deref(), Some("agy_cli_log_delta"));
     }
 
@@ -1126,7 +1111,7 @@ mod tests {
             usage.quota_reset_at.as_deref(),
             Some("2026-07-10 12:34:56 UTC")
         );
-        assert_eq!(usage.quota_used_percent, None);
+        assert_eq!(usage.quota_remaining_percent, None);
     }
 
     #[test]
@@ -1138,7 +1123,7 @@ mod tests {
         assert!(usage.quota_reset_at.is_some());
         // The free-text "80%" is NOT a structured percentage source; we must
         // not guess/estimate a number from prose.
-        assert_eq!(usage.quota_used_percent, None);
+        assert_eq!(usage.quota_remaining_percent, None);
     }
 
     #[test]
@@ -1149,7 +1134,7 @@ mod tests {
         let usage = parse_agy_cli_log_delta(delta, "agy_cli_log_delta");
         assert_eq!(usage.quota_window, None);
         assert_eq!(usage.quota_reset_at, None);
-        assert_eq!(usage.quota_used_percent, None);
+        assert_eq!(usage.quota_remaining_percent, None);
         assert_eq!(usage.usage_source, None);
     }
 
@@ -1158,7 +1143,7 @@ mod tests {
         let usage = parse_agy_cli_log_delta("", "agy_cli_log_delta");
         assert_eq!(usage.quota_window, None);
         assert_eq!(usage.quota_reset_at, None);
-        assert_eq!(usage.quota_used_percent, None);
+        assert_eq!(usage.quota_remaining_percent, None);
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.usage_source, None);
     }
@@ -1205,7 +1190,7 @@ mod tests {
             Some("openhands_rate_limit_headers")
         );
         assert_eq!(usage.quota_window.as_deref(), Some("requests 1h"));
-        assert_eq!(usage.quota_used_percent, Some(100.0));
+        assert_eq!(usage.quota_remaining_percent, Some(0.0));
         assert_eq!(usage.quota_remaining_percent, Some(0.0));
         assert_eq!(usage.quota_reset_at.as_deref(), Some("in 3100s"));
     }
@@ -1222,7 +1207,7 @@ mod tests {
             Some("openhands_rate_limit_headers")
         );
         assert_eq!(usage.quota_window.as_deref(), Some("tokens 1h"));
-        assert_eq!(usage.quota_used_percent, Some(90.0));
+        assert_eq!(usage.quota_remaining_percent, Some(10.0));
         assert_eq!(usage.quota_remaining_percent, Some(10.0));
     }
 
@@ -1231,7 +1216,7 @@ mod tests {
         let usage = parse_openhands_usage("agent started\nmade progress\nfinished");
         assert_eq!(usage.usage_source, None);
         assert_eq!(usage.quota_window, None);
-        assert_eq!(usage.quota_used_percent, None);
+        assert_eq!(usage.quota_remaining_percent, None);
         assert_eq!(usage.quota_remaining_percent, None);
     }
 
