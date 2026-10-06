@@ -27,6 +27,42 @@ esac
 if [ -z "${GAH_INSTALL_CONFIRMED:-}" ]; then
   echo "Install GAH for role '$role' from $repo_root; configure node settings, credentials, and role services."
   echo "Gateway mode: ${GAH_GATEWAY_MODE:-none}; agent assets: ${GAH_INSTALL_AGENT:-none}."
+  echo '  - Persist node role and optional central URL in GAH configuration; write worker coordinator credentials to ~/.config/gah/gah-loop.env when supplied.'
+  echo '  - Install only gah into $CARGO_HOME/bin (default ~/.cargo/bin); build dependencies and outputs in the checkout.'
+  echo '  - Install gah-loop@.service and gah-watchdog.service/timer in the user systemd directory; enable user lingering via loginctl/sudo.'
+  if [ "$role" != worker ]; then
+    echo '  - Build server/MCP; use sudo to write /etc/systemd/system/gah-server.service; install and enable user gah-prune.service/timer.'
+    if [ -n "${GAH_WEB_DEPLOY_ROOT-/var/www/gah}" ]; then
+      echo "  - Build and deploy web UI to ${GAH_WEB_DEPLOY_ROOT-/var/www/gah} using sudo; replace index and prune stale assets."
+    fi
+    echo '  - Use sudo to create /etc/gah/server.env if absent; enable and start gah-server.service.'
+    if [ "$role" = central ]; then
+      echo "  - For a new server.env, set HOST to ${GAH_SERVER_HOST:-the Tailscale IP (fallback 127.0.0.1)}; preserve existing central HOST settings."
+    fi
+    if [ "$role" = standalone ]; then
+      echo "  - Set HOST=${GAH_SERVER_HOST:-127.0.0.1} in /etc/gah/server.env and restart gah-server.service."
+    fi
+  fi
+  if [ "$role" != standalone ]; then
+    echo '  - Enable Tailscale accept-dns when Tailscale is installed (sudo).'
+  fi
+  case "${GAH_GATEWAY_MODE:-}" in
+    remote|colocated)
+      echo '  - Configure gateway URL in ~/.config/gah/gah-loop.env and, for central/standalone, /etc/gah/server.env (sudo); store gateway credentials in ~/.config/gah/tdai-gateway.env.'
+      if [ "$GAH_GATEWAY_MODE" = colocated ]; then
+        echo "  - Seed ${GAH_GATEWAY_MEMORYCORE_PATH:-<MemoryCore checkout>}/tdai-gateway.local.yaml if absent; install and enable user tdai-memory-gateway.service."
+      else
+        echo '  - Check remote gateway reachability and authentication.'
+      fi
+      ;;
+  esac
+  if [ -n "${GAH_IMPORT_REPO:-}" ]; then
+    echo "  - Import project context from $GAH_IMPORT_REPO into the configured memory gateway."
+  fi
+  case "${GAH_INSTALL_AGENT:-}" in
+    opencode) echo '  - Install OpenCode files in the user config directory opencode/agents/.' ;;
+    codex|vibe) echo '  - Install and enable user gah-quota-refresh.service/timer where systemd is available.' ;;
+  esac
   printf 'Apply these changes? [y/N] '
   answer=""
   read -r answer || true

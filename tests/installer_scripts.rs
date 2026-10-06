@@ -170,7 +170,7 @@ esac
 }
 
 #[test]
-fn declining_installers_preserves_configuration_and_gateway_files() {
+fn declining_installers_disclose_effects_before_confirmation_and_preserve_files() {
     use std::io::Write;
     use std::process::Stdio;
 
@@ -209,6 +209,7 @@ fn declining_installers_preserves_configuration_and_gateway_files() {
                     .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
                     .env("GAH_TEST_LOG", &log)
                     .env("GAH_NODE_ROLE", role)
+                    .env("GAH_INSTALL_AGENT", "codex")
                     .env("COORDINATOR_TOKEN", "new-token")
                     .env("GAH_CENTRAL_URL", "https://central.test")
                     .env(
@@ -239,6 +240,53 @@ fn declining_installers_preserves_configuration_and_gateway_files() {
                     "{}",
                     text(&output)
                 );
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let plan = stdout.split_once("Apply these changes? [y/N]").unwrap().0;
+                for effect in [
+                    "$CARGO_HOME/bin",
+                    "node role",
+                    "gah-loop.env",
+                    "accept-dns",
+                    "gah-quota-refresh.service/timer",
+                ] {
+                    assert!(
+                        plan.contains(effect),
+                        "missing {effect} before approval: {stdout}"
+                    );
+                }
+                if installer == "install-linux.sh" {
+                    for effect in [
+                        "gah-loop@.service",
+                        "gah-watchdog.service/timer",
+                        "lingering",
+                        "loginctl/sudo",
+                    ] {
+                        assert!(plan.contains(effect), "missing {effect}: {stdout}");
+                    }
+                    if role == "central" {
+                        for effect in [
+                            "/var/www/gah",
+                            "/etc/systemd/system/gah-server.service",
+                            "gah-prune.service/timer",
+                            "/etc/gah/server.env",
+                            "tdai-memory-gateway.service",
+                            "tdai-gateway.local.yaml",
+                            "tdai-gateway.env",
+                        ] {
+                            assert!(plan.contains(effect), "missing {effect}: {stdout}");
+                        }
+                    } else {
+                        assert!(!plan.contains("/var/www/gah"));
+                        assert!(!plan.contains("/etc/systemd/system/gah-server.service"));
+                    }
+                } else {
+                    assert!(plan.contains("~/Applications"));
+                    assert!(plan.contains("~/Library/LaunchAgents"));
+                    if role == "central" {
+                        assert!(plan.contains("memory-gateway LaunchAgent"));
+                        assert!(plan.contains("tdai-gateway.env"));
+                    }
+                }
                 assert!(!log.exists(), "cancellation must precede external commands");
                 assert!(!memory.join("tdai-gateway.local.yaml").exists());
                 assert_eq!(std::fs::read_dir(&config).unwrap().count(), 4);

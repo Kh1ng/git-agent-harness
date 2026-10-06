@@ -29,6 +29,29 @@ cd "$repo_root"
 if [ -z "${GAH_INSTALL_CONFIRMED:-}" ]; then
   echo "Install GAH for role '$role' from $repo_root; configure node settings, credentials, and role services."
   echo "Gateway mode: ${GAH_GATEWAY_MODE:-none}; agent assets: ${GAH_INSTALL_AGENT:-none}."
+  echo '  - Persist node role and optional central URL in GAH configuration; write worker coordinator credentials to ~/.config/gah/gah-loop.env when supplied.'
+  echo '  - Install only gah into $CARGO_HOME/bin (default ~/.cargo/bin); build dependencies and outputs in the checkout.'
+  echo '  - Install npm dependencies and build the role server; install the desktop app under ~/Applications and role LaunchAgents under ~/Library/LaunchAgents (replace old role agents).'
+  if [ "$role" = central ]; then
+    echo '  - Build MCP and web UI in the checkout; start the central server LaunchAgent.'
+    case "${GAH_GATEWAY_MODE:-}" in
+      remote|colocated)
+        echo '  - Store gateway credentials in ~/.config/gah/tdai-gateway.env and gateway URL in ~/.config/gah/server.env.'
+        if [ "$GAH_GATEWAY_MODE" = colocated ]; then
+          echo "  - Seed ${GAH_GATEWAY_MEMORYCORE_PATH:-<MemoryCore checkout>}/tdai-gateway.local.yaml if absent; install and start the memory-gateway LaunchAgent."
+        else
+          echo '  - Check remote gateway reachability and authentication.'
+        fi
+        ;;
+    esac
+  else
+    echo '  - Configure worker identity and desktop settings under ~/.local/share/gah/worker and ~/.config/gah; install the worker LaunchAgent stopped until a profile is configured.'
+  fi
+  echo '  - Enable Tailscale accept-dns when Tailscale is installed.'
+  case "${GAH_INSTALL_AGENT:-}" in
+    opencode) echo '  - Install OpenCode files in the user config directory opencode/agents/.' ;;
+    codex|vibe) echo '  - Install and enable user gah-quota-refresh.service/timer where systemd is available.' ;;
+  esac
   printf 'Apply these changes? [y/N] '
   answer=""
   read -r answer || true
