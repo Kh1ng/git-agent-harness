@@ -375,6 +375,13 @@ JAVASCRIPT
       exit 1
     fi
 
+    if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
+      if ! curl -fsS http://127.0.0.1:8420/health | grep -q '"embeddingService":true'; then
+        echo "ERROR: Gateway started but embedding service is disabled. Check that a valid embedding API key is provided and stored." >&2
+        exit 1
+      fi
+    fi
+
     upsert_gateway_env_line TDAI_GATEWAY_URL "http://127.0.0.1:8420"
     echo "Co-located gateway is healthy; wired into: ${gateway_env_files[*]}"
     ;;

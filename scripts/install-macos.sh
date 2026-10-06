@@ -194,6 +194,10 @@ if [ "$role" = central ] && [ "${GAH_GATEWAY_MODE:-}" = colocated ]; then
     sleep 2
   done
   [ "$gateway_ready" = 1 ] || { echo 'ERROR: the macOS memory-gateway LaunchAgent did not become healthy. Read ~/.local/state/gah/memory-gateway.log.' >&2; exit 1; }
+
+  if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
+    curl -fsS http://127.0.0.1:8420/health | grep -q '"embeddingService":true' || { echo 'ERROR: Gateway started but embedding service is disabled. Check that a valid embedding API key is provided and stored.' >&2; exit 1; }
+  fi
 fi
 
 if command -v tailscale >/dev/null 2>&1; then

@@ -590,9 +590,9 @@ OpenAI commands that Settings generates prompt privately for an optional
 generation key and the required embedding key. Ollama commands do not
 prompt.
 
-**Validation performed (live Ollama backend).** Validated against a live local Ollama instance running `llama3` and `nomic-embed-text`:
+**Validation performed (mocked Ollama backend).** Validated against the `scripts/ollama-api-stub.mjs` backend instead of a live Ollama instance, as the fork's contract could not be retrieved and live validation could not be performed.
 
-The gateway was configured using the installer's `gateway-yaml-mutation` block with `GAH_GATEWAY_PROVIDER=ollama` and `GAH_GATEWAY_ENDPOINT=http://127.0.0.1:11434/v1`. The real gateway was started against the live Ollama API.
+The gateway was configured using the installer's `gateway-yaml-mutation` block with `GAH_GATEWAY_PROVIDER=ollama` and `GAH_GATEWAY_ENDPOINT=http://127.0.0.1:11534/v1`. The real gateway was started against the mocked Ollama API.
 
 Sanitized output:
 
@@ -604,6 +604,8 @@ gateway log   -> Using remote embedding (provider=ollama, model=nomic-embed-text
                  Background embedding complete: 2/2 vectors updated
                  [hybrid-embedding] Embedding OK
 ```
+
+*(Note: The mocked backend does not yield a non-empty recall due to its simple vector generation).*
 
 Control: with the earlier YAML mutation (no `apiKey` or `dimensions`, no `/v1`), the same gateway reported `"embeddingService":false`.
 

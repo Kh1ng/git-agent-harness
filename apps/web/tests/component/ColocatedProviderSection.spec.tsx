@@ -29,7 +29,7 @@ INNEREOF
 test('ColocatedProviderSection generates a setup command based on user inputs', async ({ mount, page }) => {
   await page.route('/api/settings/nodes/command', async (route) => {
     const data = route.request().postDataJSON();
-    const command = unixSetupCommand('linux', 'central', 'http://127.0.0.1:3773', data.gatewayUrl, data.provider, data.endpoint, data.llmModel, data.embeddingModel, data.memoryCorePath, data.embeddingDimensions);
+    const command = unixSetupCommand('linux', 'central', 'http://127.0.0.1:3773', data.gatewayUrl, data.provider, data.providerEndpoint, data.llmModel, data.embeddingModel, data.memoryCorePath, data.embeddingDimensions);
     await route.fulfill({ json: { command } });
   });
 
