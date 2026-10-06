@@ -36,11 +36,21 @@ pub(super) fn annotate_unknown_usage(entry: &mut LedgerEntry) {
             .iter()
             .filter_map(|attempt| attempt.usage.usage_unknown_reason)
             .max()
-            .or(match (entry.attempts_started, entry.attempts.is_empty()) {
-                (None, true) => None,
-                (Some(0), true) => Some(UsageUnknownReason::NoAttemptStarted),
-                (Some(_), true) => Some(UsageUnknownReason::BackendNotInvoked),
-                (_, false) => Some(UsageUnknownReason::UsageArtifactMissing),
+            .or_else(|| {
+                // Some workflows run the backend without writing attempt records.
+                // Improve can also fail after completion but before recording usage.
+                if entry.backend_exit_code.is_some()
+                    || entry.attempts_completed.is_some_and(|count| count > 0)
+                    || !entry.attempt_routing.is_empty()
+                {
+                    return Some(UsageUnknownReason::UsageArtifactMissing);
+                }
+                match (entry.attempts_started, entry.attempts.is_empty()) {
+                    (None, true) => None,
+                    (Some(0), true) => Some(UsageUnknownReason::NoAttemptStarted),
+                    (Some(_), true) => Some(UsageUnknownReason::BackendNotInvoked),
+                    (_, false) => Some(UsageUnknownReason::UsageArtifactMissing),
+                }
             });
     }
 }
@@ -95,6 +105,84 @@ mod tests {
         }
     }
     #[test]
+    fn persistence_records_missing_usage_with_invocation_evidence_without_attempt_records() {
+        for attempts_started in [Some(0), Some(1), None] {
+            for evidence in ["exit_success", "exit_failure", "completed", "routing"] {
+                let mut entry = LedgerEntry::new(
+                    "test",
+                    &crate::ledger::test_util::profile(),
+                    "vibe",
+                    "fix",
+                    "task",
+                    None,
+                    None,
+                );
+                entry.attempts_started = attempts_started;
+                match evidence {
+                    "exit_success" => entry.backend_exit_code = Some(0),
+                    "exit_failure" => entry.backend_exit_code = Some(1),
+                    "completed" => entry.attempts_completed = Some(1),
+                    "routing" => entry
+                        .attempt_routing
+                        .push(crate::ledger::AttemptRoutingRecord {
+                            attempt_number: 1,
+                            backend_instance: "vibe".into(),
+                            effective_model: None,
+                            identity: None,
+                            routing_diagnostics: None,
+                        }),
+                    _ => unreachable!(),
+                }
+                assert!(entry.attempts.is_empty());
+                let normalized = entry.normalized_for_persistence();
+                assert_eq!(
+                    normalized.usage.usage_unknown_reason,
+                    Some(UsageUnknownReason::UsageArtifactMissing),
+                    "{evidence}, attempts_started={attempts_started:?}",
+                );
+                assert_eq!(normalized.usage.usage_source, None);
+                assert_eq!(normalized.usage.total_tokens, None);
+                assert_eq!(normalized.usage.requests_count, None);
+            }
+        }
+    }
+
+    #[test]
+    fn persistence_preserves_backend_launch_failure_reason_with_routing_evidence() {
+        let mut entry = LedgerEntry::new(
+            "test",
+            &crate::ledger::test_util::profile(),
+            "vibe",
+            "fix",
+            "task",
+            None,
+            None,
+        );
+        entry
+            .attempt_routing
+            .push(crate::ledger::AttemptRoutingRecord {
+                attempt_number: 1,
+                backend_instance: "vibe".into(),
+                effective_model: None,
+                identity: None,
+                routing_diagnostics: None,
+            });
+        entry.attempts.push(crate::ledger::AttemptRecord {
+            failure_stage: Some("backend_launch".into()),
+            ..Default::default()
+        });
+        let normalized = entry.normalized_for_persistence();
+        assert_eq!(
+            normalized.usage.usage_unknown_reason,
+            Some(UsageUnknownReason::BackendNotInvoked)
+        );
+        assert_eq!(
+            normalized.attempts[0].usage.usage_unknown_reason,
+            Some(UsageUnknownReason::BackendNotInvoked)
+        );
+    }
+
+    #[test]
     fn persistence_preserves_legacy_unknown_usage() {
         let mut entry = LedgerEntry::new(
             "test",
@@ -107,6 +195,8 @@ mod tests {
         );
         entry.schema_version = super::super::LEDGER_SCHEMA_VERSION - 1;
         entry.attempts_started = None;
+        entry.backend_exit_code = Some(0);
+        entry.attempts_completed = Some(1);
         assert_eq!(
             entry
                 .normalized_for_persistence()
