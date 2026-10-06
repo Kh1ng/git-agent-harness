@@ -274,11 +274,12 @@ mod tests {
     }
 
     /// The whole output of a real `codex exec --json --sandbox read-only` run
-    /// asked to create a file (codex-cli 0.160.0), ids shortened. It exits 0
-    /// and the stderr line is the only trace of the refusal.
-    #[test]
-    fn codex_refusal_is_recognised_from_the_cli_log_line_of_a_real_run() {
-        let log = concat!(
+    /// asked to create a file, ids shortened. It exits 0 and the stderr line
+    /// is the only trace of the refusal. Captured from codex-cli 0.160.0: when
+    /// a newer CLI words this differently, capture its output as a new
+    /// fixture next to this one and extend `codex_refused_writes` until both
+    /// pass. Until then refused Codex runs are retried instead of stopped.
+    const CODEX_CLI_0_160_0_READ_ONLY_REFUSAL: &str = concat!(
             r#"{"type":"thread.started","thread_id":"t"}"#,
             "\n",
             r#"{"type":"turn.started"}"#,
@@ -290,8 +291,23 @@ mod tests {
             "\n",
             r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
             "\n",
+    );
+
+    #[test]
+    fn codex_cli_0_160_0_read_only_refusal_is_recognised() {
+        assert!(
+            codex_refused_writes(CODEX_CLI_0_160_0_READ_ONLY_REFUSAL),
+            "codex_refused_writes no longer matches the refusal line codex-cli 0.160.0 prints; \
+             refused Codex runs would be retried instead of stopped"
         );
-        assert!(codex_refused_writes(log));
+        // The stderr line alone carries the signal: without it this run is
+        // indistinguishable from one that chose not to write.
+        let without_log_line: String = CODEX_CLI_0_160_0_READ_ONLY_REFUSAL
+            .lines()
+            .filter(|line| !line.contains(" ERROR codex_core::"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert!(!codex_refused_writes(&without_log_line));
     }
 
     #[test]

@@ -12,7 +12,25 @@ use crate::runner::resolve::filtered_backend_args;
 use crate::runner::{RunResult, WriteIntent};
 
 const DEFAULT_PERMISSION_MODE: &str = "acceptEdits";
-const DEFAULT_ALLOWED_TOOLS: &str = "Edit,Write,MultiEdit,NotebookEdit,Bash";
+const DEFAULT_EDIT_TOOLS: &str = "Edit,Write,MultiEdit,NotebookEdit";
+/// Shell commands an implementation run may start by default: version
+/// control, the common build and test tools, and read-only inspection.
+/// Claude Code has no sandbox, so plain `Bash` would let an unattended job
+/// run anything as the node user, network included. This is a reduction, not
+/// a sandbox: a build script or test can still run arbitrary code. A profile
+/// widens or replaces it with `claude_args = ["--allowedTools", "..."]`.
+const DEFAULT_SHELL_COMMANDS: &[&str] = &[
+    "git", "cargo", "npm", "npx", "node", "pnpm", "yarn", "make", "python", "python3", "pytest",
+    "go", "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "mkdir",
+];
+
+fn default_allowed_tools() -> String {
+    let mut tools = DEFAULT_EDIT_TOOLS.to_string();
+    for command in DEFAULT_SHELL_COMMANDS {
+        tools.push_str(&format!(",Bash({command}:*)"));
+    }
+    tools
+}
 
 /// Run Claude CLI non-interactively via `claude -p`.
 /// extra_args come from profile.claude_args (e.g. `--allowedTools Edit,Write,Bash`).
@@ -75,8 +93,9 @@ pub(crate) fn run_with_executable(
     if implementation && !profile_sets_permission_mode {
         cmd.args(["--permission-mode", DEFAULT_PERMISSION_MODE]);
     }
+    let default_tools = default_allowed_tools();
     if implementation && !profile_sets_allowed_tools {
-        cmd.args(["--allowedTools", DEFAULT_ALLOWED_TOOLS]);
+        cmd.args(["--allowedTools", &default_tools]);
     }
     cmd.args(filtered_extra);
     crate::runner::apply_child_env(&mut cmd, env_vars);
@@ -119,7 +138,7 @@ pub(crate) fn run_with_executable(
             "profile claude_args overrides GAH's default --permission-mode/--allowedTools; make it grant these tools or remove the override".to_string()
         } else {
             format!(
-                "GAH's defaults (--permission-mode {DEFAULT_PERMISSION_MODE} --allowedTools {DEFAULT_ALLOWED_TOOLS}) were not enough; check the Claude settings permissions (deny rules, managed policy) or set profile claude_args"
+                "GAH's defaults (--permission-mode {DEFAULT_PERMISSION_MODE} --allowedTools {default_tools}) were not enough; check the Claude settings permissions (deny rules, managed policy) or set profile claude_args"
             )
         };
         write_refusal::report(
@@ -255,9 +274,22 @@ mod tests {
         assert!(argv
             .windows(2)
             .any(|args| args == ["--permission-mode", "acceptEdits"]));
-        assert!(argv
+        let tools = argv
             .windows(2)
-            .any(|args| args == ["--allowedTools", "Edit,Write,MultiEdit,NotebookEdit,Bash"]));
+            .find_map(|args| (args[0] == "--allowedTools").then(|| args[1].clone()))
+            .expect("default --allowedTools");
+        let tools: Vec<&str> = tools.split(',').collect();
+        for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+            assert!(tools.contains(&tool), "got {tools:?}");
+        }
+        for command in ["Bash(git:*)", "Bash(cargo:*)", "Bash(npm:*)"] {
+            assert!(tools.contains(&command), "got {tools:?}");
+        }
+        // Unrestricted shell is never the default: Claude Code has no sandbox.
+        assert!(!tools.contains(&"Bash"), "got {tools:?}");
+        assert!(tools
+            .iter()
+            .all(|tool| !tool.starts_with("Bash(curl") && !tool.starts_with("Bash(ssh")));
     }
 
     #[test]
