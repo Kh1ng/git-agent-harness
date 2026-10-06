@@ -39,8 +39,17 @@ fn operator_home() -> Option<String> {
 fn standard_home_path_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        regex::Regex::new(r#"(?:/home/[^/\s`"'<>]+|/Users/[^/\s`"'<>]+|/root\b)(?:/[^\s`"'<>]*)?"#)
-            .expect("valid home path regex")
+        // A home path must start at a path-start boundary: start of text,
+        // whitespace, or one of ` " ' ( < = :. Without it the filter also
+        // rewrites repo-relative paths such as app/home/page.tsx,
+        // src/root.rs, and Controllers/Users/Index.cshtml. file:///home/...
+        // still carries a local path, so file:// is an allowed lead. The
+        // leading token is captured (the regex engine has no lookahead) and
+        // restored by the replacer.
+        regex::Regex::new(
+            r#"(?P<lead>^|[\s`"'(<=:]|file://)(?:/home/[^/\s`"'<>]+|/Users/[^/\s`"'<>]+|/root\b)(?:/[^\s`"'<>]*)?"#,
+        )
+        .expect("valid home path regex")
     })
 }
 
@@ -54,10 +63,15 @@ fn configured_home_path_re(home: &str) -> Option<regex::Regex> {
     }
     // Match the home itself or descendants only: the home must be followed by
     // a `/`, a `\`, or a character that cannot continue a path component, so
-    // a sibling such as /srv/gah-operator-tools is left alone. The trailing character is
-    // captured (regex has no lookahead) and restored by the replacer.
+    // a sibling such as /srv/gah-operator-tools is left alone. The home must
+    // also start at a path-start boundary (start of text, whitespace, or one
+    // of ` " ' ( < = :) so a short home such as /app does not rewrite
+    // repo-relative paths like src/app/page.tsx; file:// stays an allowed
+    // lead to keep file://<home>/... URLs redacted. The lead and trailing
+    // characters are captured (regex has no lookahead) and restored by the
+    // replacer.
     regex::Regex::new(&format!(
-        r#"{}(?:[/\\][^\s`"'<>]*|(?P<end>[\s`"'<>,;:)\]!?]|$))"#,
+        r#"(?P<lead>^|[\s`"'(<=:]|file://){}(?:[/\\][^\s`"'<>]*|(?P<end>[\s`"'<>,;:)\]!?]|$))"#,
         regex::escape(home)
     ))
     .ok()
@@ -80,14 +94,20 @@ pub(super) fn publication_body(body: &str) -> String {
         let text = match &home_re {
             Some(re) => re.replace_all(text, |caps: &regex::Captures| {
                 format!(
-                    "[local path removed]{}",
+                    "{}[local path removed]{}",
+                    caps.name("lead").map_or("", |m| m.as_str()),
                     caps.name("end").map_or("", |m| m.as_str())
                 )
             }),
             None => std::borrow::Cow::Borrowed(text),
         };
         standard_home_path_re()
-            .replace_all(&text, "[local path removed]")
+            .replace_all(&text, |caps: &regex::Captures| {
+                format!(
+                    "{}[local path removed]",
+                    caps.name("lead").map_or("", |m| m.as_str())
+                )
+            })
             .into_owned()
     };
     let mut published = String::with_capacity(redacted.len());

@@ -96,6 +96,37 @@ fn provider_publication_bodies_preserve_web_urls_with_home_like_paths() {
 }
 
 #[test]
+fn provider_publication_bodies_preserve_repo_relative_paths() {
+    let body = "Updated `app/home/page.tsx`, edited src/root.rs and crates/root/lib.rs, see Controllers/Users/Index.cshtml and ios/Users/List.swift; artifacts /home/operator/.local/share/gah/artifacts/session-123";
+
+    let published = crate::provider::publication_body(body);
+
+    assert!(published.contains("`app/home/page.tsx`"), "{published}");
+    assert!(published.contains("src/root.rs"), "{published}");
+    assert!(published.contains("crates/root/lib.rs"), "{published}");
+    assert!(
+        published.contains("Controllers/Users/Index.cshtml"),
+        "{published}"
+    );
+    assert!(published.contains("ios/Users/List.swift"), "{published}");
+    assert!(published.contains("[local path removed]"), "{published}");
+    assert!(!published.contains("/home/operator"), "{published}");
+}
+
+#[test]
+fn provider_publication_bodies_preserve_repo_relative_paths_for_a_configured_home() {
+    let _guard = HomeOverride::set("/app".to_string());
+    let body = "changed src/app/page.tsx and templates/app/home/page.tsx; state /app/gah/run.log";
+
+    let published = crate::provider::publication_body(body);
+
+    assert_eq!(
+        published,
+        "changed src/app/page.tsx and templates/app/home/page.tsx; state [local path removed]"
+    );
+}
+
+#[test]
 fn github_mr_missing_gh_produces_actionable_error() {
     let tmp = TempDir::new().unwrap();
     let empty_bin = tmp.path().join("bin");
