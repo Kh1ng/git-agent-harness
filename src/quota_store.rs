@@ -20,10 +20,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+mod agy;
 #[cfg(test)]
 mod compatibility_tests;
 mod identity;
 mod instances;
+pub use agy::{launch as agy_launch, refresh_and_store as refresh_agy_and_store};
 pub(crate) use identity::current_source_records;
 pub use identity::{
     latest_windows_for_backend, latest_windows_for_identity,
@@ -516,6 +518,7 @@ pub fn refresh_stale_quota_observations(
     {
         handles.push(handle);
     }
+    handles.extend(agy::refresh_handles(profile, store_path, now));
     if crate::usage::nous::configured() {
         if let Some(handle) = maybe_refresh_backend_instance(
             store_path,
