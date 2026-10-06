@@ -287,11 +287,7 @@ fn install_macos_launch_agent(repo: &Path, role: HostRole) -> Result<Option<Path
     } else {
         String::new()
     };
-    let role_name = match role {
-        HostRole::Central => "central",
-        HostRole::Standalone => "standalone",
-        HostRole::Worker => "worker",
-    };
+    let role_name = macos_launch_agent_role(role);
     run_command(
         repo,
         "bash",
@@ -313,6 +309,14 @@ fn install_macos_launch_agent(repo: &Path, role: HostRole) -> Result<Option<Path
         .join("Library/LaunchAgents")
         .join(label);
     Ok(target.is_file().then_some(target))
+}
+
+fn macos_launch_agent_role(role: HostRole) -> &'static str {
+    match role {
+        // Standalone hosts run the same control-plane service as central hosts.
+        HostRole::Central | HostRole::Standalone => "central",
+        HostRole::Worker => "worker",
+    }
 }
 
 /// Best-effort probe, not a hard dependency check: a missing `systemctl`
@@ -933,6 +937,30 @@ mod tests {
     use tempfile::TempDir;
 
     static XDG_CONFIG_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn macos_launch_agent_roles_match_the_installer_contract() {
+        for (role, expected) in [
+            (HostRole::Central, "central"),
+            (HostRole::Standalone, "central"),
+            (HostRole::Worker, "worker"),
+        ] {
+            let installer_role = super::macos_launch_agent_role(role);
+            assert_eq!(installer_role, expected);
+            // Exercise the script's role validation without changing host services.
+            let output = Command::new("bash")
+                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/macos-launchd.sh"))
+                .args(["status", installer_role])
+                .env("GAH_LAUNCHD_DRY_RUN", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "installer rejected {role:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 
     #[test]
     fn a_stale_lockfile_stops_the_update_before_install() {
