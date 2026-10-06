@@ -140,7 +140,11 @@ pub(crate) fn research(
         env_path,
         ledger.work_id.as_deref(),
         None,
-    )?;
+    )
+    .inspect_err(|_| {
+        ledger.usage.usage_unknown_reason =
+            Some(crate::ledger::UsageUnknownReason::BackendNotInvoked);
+    })?;
     println!(
         "Backend finished: exit={} duration={:.0}s log={}",
         result.exit_code, result.duration_secs, result.log_path

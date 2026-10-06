@@ -22,7 +22,11 @@ pub(super) fn annotate_unknown_usage(entry: &mut LedgerEntry) {
     for attempt in &mut entry.attempts {
         if attempt.usage.usage_source.is_none() && attempt.usage.usage_unknown_reason.is_none() {
             attempt.usage.usage_unknown_reason = Some(
-                if attempt.failure_stage.as_deref() == Some("backend_launch") {
+                if attempt.failure_stage.as_deref() == Some("backend_launch")
+                    || attempt.resources.as_ref().is_some_and(|resources| {
+                        resources == &super::AttemptResourceUsage::never_launched()
+                    })
+                {
                     UsageUnknownReason::BackendNotInvoked
                 } else {
                     UsageUnknownReason::UsageArtifactMissing
@@ -37,11 +41,13 @@ pub(super) fn annotate_unknown_usage(entry: &mut LedgerEntry) {
             .filter_map(|attempt| attempt.usage.usage_unknown_reason)
             .max()
             .or_else(|| {
+                if entry.failure_stage.as_deref() == Some("backend_launch") {
+                    return Some(UsageUnknownReason::BackendNotInvoked);
+                }
                 // Some workflows run the backend without writing attempt records.
                 // Improve can also fail after completion but before recording usage.
                 if entry.backend_exit_code.is_some()
                     || entry.attempts_completed.is_some_and(|count| count > 0)
-                    || !entry.attempt_routing.is_empty()
                 {
                     return Some(UsageUnknownReason::UsageArtifactMissing);
                 }
@@ -107,7 +113,7 @@ mod tests {
     #[test]
     fn persistence_records_missing_usage_with_invocation_evidence_without_attempt_records() {
         for attempts_started in [Some(0), Some(1), None] {
-            for evidence in ["exit_success", "exit_failure", "completed", "routing"] {
+            for evidence in ["exit_success", "exit_failure", "completed"] {
                 let mut entry = LedgerEntry::new(
                     "test",
                     &crate::ledger::test_util::profile(),
@@ -122,15 +128,6 @@ mod tests {
                     "exit_success" => entry.backend_exit_code = Some(0),
                     "exit_failure" => entry.backend_exit_code = Some(1),
                     "completed" => entry.attempts_completed = Some(1),
-                    "routing" => entry
-                        .attempt_routing
-                        .push(crate::ledger::AttemptRoutingRecord {
-                            attempt_number: 1,
-                            backend_instance: "vibe".into(),
-                            effective_model: None,
-                            identity: None,
-                            routing_diagnostics: None,
-                        }),
                     _ => unreachable!(),
                 }
                 assert!(entry.attempts.is_empty());
@@ -169,6 +166,87 @@ mod tests {
             });
         entry.attempts.push(crate::ledger::AttemptRecord {
             failure_stage: Some("backend_launch".into()),
+            ..Default::default()
+        });
+        let normalized = entry.normalized_for_persistence();
+        assert_eq!(
+            normalized.usage.usage_unknown_reason,
+            Some(UsageUnknownReason::BackendNotInvoked)
+        );
+        assert_eq!(
+            normalized.attempts[0].usage.usage_unknown_reason,
+            Some(UsageUnknownReason::BackendNotInvoked)
+        );
+    }
+
+    #[test]
+    fn persistence_does_not_treat_routing_as_invocation() {
+        for attempts_started in [Some(0), Some(1), None] {
+            let mut entry = LedgerEntry::new(
+                "test",
+                &crate::ledger::test_util::profile(),
+                "vibe",
+                "research",
+                "task",
+                None,
+                None,
+            );
+            entry.attempts_started = attempts_started;
+            entry
+                .attempt_routing
+                .push(crate::ledger::AttemptRoutingRecord {
+                    attempt_number: 1,
+                    backend_instance: "vibe".into(),
+                    effective_model: None,
+                    identity: None,
+                    routing_diagnostics: None,
+                });
+            assert_eq!(
+                entry
+                    .normalized_for_persistence()
+                    .usage
+                    .usage_unknown_reason,
+                match attempts_started {
+                    Some(0) => Some(UsageUnknownReason::NoAttemptStarted),
+                    Some(_) => Some(UsageUnknownReason::BackendNotInvoked),
+                    None => None,
+                }
+            );
+            // Pre-launch workflow errors must override even a synthetic exit code.
+            entry.backend_exit_code = Some(-1);
+            entry.usage.usage_unknown_reason = Some(UsageUnknownReason::BackendNotInvoked);
+            assert_eq!(
+                entry
+                    .normalized_for_persistence()
+                    .usage
+                    .usage_unknown_reason,
+                Some(UsageUnknownReason::BackendNotInvoked)
+            );
+            entry.usage.usage_unknown_reason = None;
+            entry.failure_stage = Some("backend_launch".into());
+            assert_eq!(
+                entry
+                    .normalized_for_persistence()
+                    .usage
+                    .usage_unknown_reason,
+                Some(UsageUnknownReason::BackendNotInvoked)
+            );
+        }
+    }
+
+    #[test]
+    fn persistence_honors_never_launched_resources() {
+        let mut entry = LedgerEntry::new(
+            "test",
+            &crate::ledger::test_util::profile(),
+            "vibe",
+            "fix",
+            "task",
+            None,
+            None,
+        );
+        entry.attempts.push(crate::ledger::AttemptRecord {
+            resources: Some(crate::ledger::AttemptResourceUsage::never_launched()),
             ..Default::default()
         });
         let normalized = entry.normalized_for_persistence();

@@ -145,6 +145,8 @@ pub(crate) fn experiment(
     ) {
         Ok(r) => r,
         Err(e) => {
+            ledger.usage.usage_unknown_reason =
+                Some(crate::ledger::UsageUnknownReason::BackendNotInvoked);
             eprintln!("Backend error (continuing for judge evaluation): {:#}", e);
             let log_path = attempt_dir.join("backend-output.log");
             let _ = std::fs::write(&log_path, format!("Backend error: {:#}", e));
