@@ -8,7 +8,9 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 mod quota;
+mod routing_candidates;
 pub use quota::{CredentialCommands, QuotaCommands};
+pub use routing_candidates::RoutingCandidateCommands;
 
 #[derive(Parser)]
 #[command(name = "gah", version, about = "git agent harness")]
@@ -190,6 +192,16 @@ pub enum Commands {
         /// Repository checkout to update (defaults to the current checkout).
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Fetch and fast-forward the checkout before building (opt-in).
+        #[arg(long)]
+        pull: bool,
+        /// Agent integrations to install; existing assets are also refreshed.
+        /// Repeat or use comma-separated names.
+        #[arg(long, value_delimiter = ',', value_parser = ["claude", "codex", "opencode", "vibe"])]
+        agent: Vec<String>,
+        /// Accept the printed installation plan without prompting.
+        #[arg(long)]
+        yes: bool,
         /// "central" (builds/serves the control plane, default) or "worker"
         /// (CLI + dispatch loop only -- never builds apps/server or touches
         /// gah-server.service).
@@ -721,73 +733,6 @@ pub enum ConfigCommands {
 }
 
 #[derive(Subcommand)]
-pub enum RoutingCandidateCommands {
-    /// Append a candidate to the list.
-    Add {
-        #[arg(long)]
-        profile: String,
-        /// Which ordered list: pm | improve | review | escalatory | routine (single reviewer; add replaces it).
-        #[arg(long)]
-        list: String,
-        #[arg(long)]
-        backend: String,
-        #[arg(long)]
-        instance: Option<String>,
-        #[arg(long)]
-        model: Option<String>,
-        #[arg(long)]
-        quota_pool: Option<String>,
-        #[arg(long, default_value_t = 0)]
-        priority: i32,
-        #[arg(long, default_value_t = false)]
-        included_in_quota: bool,
-        #[arg(long)]
-        marginal_cost_usd: Option<f64>,
-        #[arg(long, default_value_t = false)]
-        requires_approval: bool,
-        #[arg(long = "config", visible_alias = "config-path")]
-        config_path: Option<String>,
-        /// Print the resulting order without saving.
-        #[arg(long, default_value_t = false)]
-        dry_run: bool,
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    /// Remove the candidate at a 0-based index of the effective list.
-    Remove {
-        #[arg(long)]
-        profile: String,
-        #[arg(long)]
-        list: String,
-        #[arg(long)]
-        index: usize,
-        #[arg(long = "config", visible_alias = "config-path")]
-        config_path: Option<String>,
-        #[arg(long, default_value_t = false)]
-        dry_run: bool,
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-    /// Move a candidate from one 0-based index to another.
-    Move {
-        #[arg(long)]
-        profile: String,
-        #[arg(long)]
-        list: String,
-        #[arg(long)]
-        from: usize,
-        #[arg(long)]
-        to: usize,
-        #[arg(long = "config", visible_alias = "config-path")]
-        config_path: Option<String>,
-        #[arg(long, default_value_t = false)]
-        dry_run: bool,
-        #[arg(long, default_value_t = false)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand)]
 pub enum PromptPolicyCommands {
     /// Show default and profile-specific policy metadata without prompt text.
     Show {
@@ -963,7 +908,6 @@ pub enum ProfileCommands {
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         validation_timeout_seconds: Option<u64>,
         /// Manager-wake autonomy for this profile: off | review_only | full.
-        /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         manager_wake_autonomy: Option<String>,
         /// Delivery mode for work results: pr (default) | handoff.
@@ -1043,14 +987,33 @@ pub enum ProfileCommands {
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         validation_timeout_seconds: Option<u64>,
         /// Manager-wake autonomy for this profile: off | review_only | full.
-        /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         manager_wake_autonomy: Option<String>,
         /// Delivery mode for work results: pr | handoff.
         #[arg(long)]
         delivery_mode: Option<String>,
+        /// Automatic worker scaling from quota headroom: on | off (see `WorkerScaling`).
+        #[arg(long)]
+        worker_scaling: Option<String>,
+        /// Most workers automatic scaling may reach (default: twice the baseline).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        worker_scaling_max_workers: Option<u32>,
+        /// Extra concurrent runs a model gets while it has quota headroom.
+        #[arg(long)]
+        worker_scaling_extra_per_model: Option<u32>,
+        /// Percent every fresh quota window must still have for a model to scale.
+        #[arg(long)]
+        worker_scaling_min_remaining_percent: Option<f64>,
+        /// Add this many workers now; replaces an earlier boost (`--clear worker_boost` ends it).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        boost_workers: Option<u32>,
+        /// Give the boost to one `backend/model` instead of every capped model.
+        #[arg(long, requires = "boost_workers")]
+        boost_model: Option<String>,
+        /// End the boost after this many hours (default: until cleared).
+        #[arg(long, requires = "boost_workers")]
+        boost_hours: Option<f64>,
         /// Hold approved schema/API contract changes for human review.
-        /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         hold_contract_changes: Option<bool>,
         /// Clear the specified field(s) - for fields that support it

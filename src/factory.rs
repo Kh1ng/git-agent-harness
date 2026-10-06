@@ -24,6 +24,26 @@ pub fn disabled_by_config(config_path: Option<&str>) -> bool {
         && matches!(enabled(config_path), Ok(false))
 }
 
+/// `gah update` has just reinstalled the loop and watchdog units. When this
+/// host's config turns the module off, stop them again. A host with no config
+/// at the default path, or one that does not parse, keeps its loops. A
+/// service-control failure is a warning and never aborts the update:
+/// `gah loop` refuses to start while the module is off.
+pub fn keep_services_off_after_update() {
+    if !disabled_by_config(None) {
+        return;
+    }
+    match apply_services(false) {
+        Ok(()) => {
+            println!("Factory automation disabled: loop and watchdog services remain inactive.")
+        }
+        Err(error) => eprintln!(
+            "warning: factory automation is disabled but its services could not be stopped: {error:#}. \
+             Run `gah config set --factory-enabled false` again once systemd is reachable."
+        ),
+    }
+}
+
 pub fn require_enabled(config_path: Option<&str>) -> Result<()> {
     if !enabled(config_path)? {
         bail!("Factory automation is disabled. Enable it in this computer's Settings or with gah config set --factory-enabled true.");

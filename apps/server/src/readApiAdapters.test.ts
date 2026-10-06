@@ -116,7 +116,7 @@ test('read adapters expose typed responses, validate inputs, and drop local path
       assert.equal(profile, 'real');
       return [{ work_id: '#1', pid: 123, hostname: 'worker-a', claimed_at: '2026-09-10T00:00:00Z', is_stale: false }];
     },
-    quota: async () => [{ backend: 'codex', quota_used_percent: 10 }],
+    quota: async () => [{ backend: 'codex', quota_remaining_percent: 10 }],
     inspect: async params => {
       inspectArgs = params;
       return scope;
@@ -132,7 +132,7 @@ test('read adapters expose typed responses, validate inputs, and drop local path
   assert.equal(claims.length, 1);
   assert.equal(claims[0].work_id, '#1');
 
-  const quota = (await (await fetch(`${origin}/api/quota/list`)).json()) as import('@git-agent-harness/contracts').QuotaListRecord[];
+  const quota = (await (await fetch(`${origin}/api/quota/list`)).json()) as import('@git-agent-harness/contracts').QuotaObservation[];
   assert.equal(quota[0].backend, 'codex');
 
   const inspected = (await (await fetch(`${origin}/api/external-approval/inspect?profile=real&work_id=%23653&credential_label=external-api-key&operation_kind=api_call`)).json()) as ExternalApprovalScope;

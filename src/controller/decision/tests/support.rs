@@ -52,6 +52,7 @@ pub(super) fn empty_snapshot() -> StatusSnapshot {
         publishing_allow_pr: true,
         generated_artifact_deny_patterns: vec![],
         max_parallel_workers: 1,
+        worker_limits: Default::default(),
         open_managed_mr_count: 0,
         inflight_implementation_count: 0,
         implementation_intake_paused: false,

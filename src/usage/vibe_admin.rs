@@ -355,18 +355,19 @@ pub fn parse_admin_rate_limit(json: &str) -> AdminRateLimits {
     }
 }
 
-/// Parse `GET /v1/admin/spend-limit` (`LimitsOUT`) into an account quota used percentage.
+/// Parse `GET /v1/admin/spend-limit` (`LimitsOUT`) into the account's
+/// remaining quota percentage.
 ///
 /// `total_usage`/`usage_limit` give an exact ratio when both are present.
 /// When the API only asserts `monthly_limit_reached: true` with no numeric
-/// breakdown, that boolean *is* the evidence -- it directly means 100% used,
-/// not an inferred fabrication. `monthly_limit_reached: false` with no
-/// numbers stays unknown (anywhere from 0-99% is still consistent with
-/// "not yet reached").
+/// breakdown, that boolean *is* the evidence -- it directly means nothing
+/// remains, not an inferred fabrication. `monthly_limit_reached: false` with
+/// no numbers stays unknown (anywhere from 1-100% remaining is still
+/// consistent with "not yet reached").
 pub fn parse_admin_spend_limit(json: &str) -> Option<f64> {
     let root = serde_json::from_str::<Value>(json).ok()?;
     let completion = root.get("limits")?.get("completion")?;
-    admin_spend_limit_quota_used_percent(
+    admin_spend_limit_quota_remaining_percent(
         completion.get("total_usage").and_then(Value::as_f64),
         completion.get("usage_limit").and_then(Value::as_f64),
         completion
@@ -375,14 +376,16 @@ pub fn parse_admin_spend_limit(json: &str) -> Option<f64> {
     )
 }
 
-fn admin_spend_limit_quota_used_percent(
+fn admin_spend_limit_quota_remaining_percent(
     total_usage: Option<f64>,
     usage_limit: Option<f64>,
     monthly_limit_reached: Option<bool>,
 ) -> Option<f64> {
     match (total_usage, usage_limit) {
-        (Some(used), Some(limit)) if limit > 0.0 => Some((used / limit * 100.0).clamp(0.0, 100.0)),
-        _ => monthly_limit_reached.and_then(|reached| reached.then_some(100.0)),
+        (Some(used), Some(limit)) if limit > 0.0 => {
+            Some(100.0 - (used / limit * 100.0).clamp(0.0, 100.0))
+        }
+        _ => monthly_limit_reached.and_then(|reached| reached.then_some(0.0)),
     }
 }
 
@@ -395,7 +398,7 @@ pub fn admin_spend_limit_to_quota_observation(
     backend: &str,
     model: Option<&str>,
 ) -> Option<QuotaObservationRecord> {
-    let used_percent = parse_admin_spend_limit(json)?;
+    let remaining_percent = parse_admin_spend_limit(json)?;
     Some(QuotaObservationRecord {
         backend: backend.to_string(),
         backend_instance: None,
@@ -403,8 +406,7 @@ pub fn admin_spend_limit_to_quota_observation(
         model: model.map(|m| m.to_string()),
         quota_pool: None,
         quota_window: Some("monthly".to_string()),
-        quota_used_percent: Some(used_percent),
-        quota_remaining_percent: Some(100.0 - used_percent),
+        quota_remaining_percent: Some(remaining_percent),
         quota_reset_at: None,
         observed_at: time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
@@ -569,15 +571,19 @@ mod tests {
 
     #[test]
     fn parses_admin_spend_limit_exact_ratio() {
-        let quota_used_percent =
-            admin_spend_limit_quota_used_percent(Some(169.52), Some(500.0), Some(false));
-        assert_eq!(quota_used_percent, Some(33.904));
+        let quota_remaining_percent =
+            admin_spend_limit_quota_remaining_percent(Some(169.52), Some(500.0), Some(false));
+        assert_eq!(
+            quota_remaining_percent,
+            Some(100.0 - (169.52 / 500.0 * 100.0))
+        );
     }
 
     #[test]
     fn spend_limit_reached_with_no_numeric_breakdown_reports_full_not_unknown() {
-        let quota_used_percent = admin_spend_limit_quota_used_percent(None, None, Some(true));
-        assert_eq!(quota_used_percent, Some(100.0));
+        let quota_remaining_percent =
+            admin_spend_limit_quota_remaining_percent(None, None, Some(true));
+        assert_eq!(quota_remaining_percent, Some(0.0));
     }
 
     #[test]
@@ -591,7 +597,6 @@ mod tests {
         let obs = admin_spend_limit_to_quota_observation(&spend_limit_ratio_body(), "vibe", None)
             .expect("spend limit yields an observation");
         assert_eq!(obs.backend, "vibe");
-        assert_eq!(obs.quota_used_percent, Some(33.904));
         assert_eq!(obs.quota_window.as_deref(), Some("monthly"));
         assert_eq!(
             obs.usage_source.as_deref(),
@@ -766,7 +771,6 @@ mod tests {
         assert_eq!(refresh.rate_limits.requests_per_second, Some(87));
         let spend = refresh.spend_limit.expect("spend limit observation");
         assert_eq!(spend.backend, "vibe");
-        assert_eq!(spend.quota_used_percent, Some(33.904));
     }
 
     #[test]

@@ -99,6 +99,11 @@ configuration. Disabling factory loops and their watchdog leaves the dashboard,
 chats, agents, repository workflows, and shared maintenance available. See
 [factory module defaults, migration, and verification](docs/verification/1317-factory-module.md).
 
+The installer asks for confirmation before making changes. For unattended
+installs, use `GAH_INSTALL_CONFIRMED=1 scripts/install.sh` to accept the
+installation plan. Supply the desired role and other settings through the
+same environment variables as an interactive install.
+
 For a roaming worker using `GAH_GATEWAY_MODE=remote`, the gateway URL must
 name the central/gateway node by its tailnet IP or MagicDNS name, never a LAN
 IP or the worker's own `tailscale ip -4`. If `GAH_GATEWAY_URL` is omitted, the
@@ -134,8 +139,12 @@ replace the executable selected by `PATH`, rebuild the server, and restart the
 system service only after all build steps succeed:
 
 ```bash
-gah update --repo /path/to/git-agent-harness --restart-server
+gah update --pull --repo /path/to/git-agent-harness --restart-server
 ```
+
+`--pull` fetches and fast-forwards the checkout before installing. Review the
+printed installation plan and confirm, or pass `--yes` for unattended updates.
+Omit `--pull` to reinstall the current checkout without changing its revision.
 
 `cargo build --release` is a development build only. It updates
 `target/release/gah`; it does not replace the Cargo-installed `gah` executable

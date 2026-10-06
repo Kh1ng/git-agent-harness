@@ -177,8 +177,11 @@ pub fn run_route_approval(command: RouteApprovalCommands) -> Result<()> {
 
 pub fn run_loop(args: LoopArgs) -> Result<()> {
     runner::install_shutdown_handler()?;
-    let cfg = config::load(args.config_path.as_deref())?;
+    let mut cfg = config::load(args.config_path.as_deref())?;
     crate::factory::require_enabled(args.config_path.as_deref())?;
+    // A bounded `--once` run honors scaling too; the recurring loop re-applies
+    // it to each reloaded config.
+    crate::routing::worker_scaling::apply(&mut cfg, &args.profile);
     let resolved_config_path = config::resolve_config_path(args.config_path.as_deref());
 
     // Issue #881: advisory only -- unset registry_central_url skips this
