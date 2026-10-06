@@ -581,6 +581,7 @@ export interface AccountUsageObservation {
   models: AccountUsageModel[];
 }
 
+/** Shared quota store record used by quota list and snapshot observations. */
 export interface QuotaObservation {
   credential_id?: string | null;
   backend_instance?: string | null;
@@ -588,14 +589,26 @@ export interface QuotaObservation {
   backend: string;
   model?: string | null;
   quota_window?: string | null;
-  quota_used_percent?: number | null;
   quota_remaining_percent?: number | null;
   quota_reset_at?: string | null;
   observed_at?: string | null;
   /** When the check ran, on store-derived report rows (#1339). */
   checked_at?: string | null;
+  check_error?: string | null;
   usage_source?: string | null;
   account_usage?: AccountUsageObservation | null;
+  mistral_admin?: {
+    workspace_usage?: LedgerUsage | null;
+    billing?: LedgerUsage | null;
+    rate_limits?: {
+      requests_per_second: number | null;
+      model_limits: {
+        model: string;
+        tokens_per_minute: number | null;
+        tokens_per_month: number | null;
+      }[];
+    } | null;
+  } | null;
 }
 
 export interface BackendModelComparison {
@@ -934,24 +947,6 @@ export interface WorkClaimDetail {
   hostname: string;
   claimed_at: string;
   is_stale: boolean;
-}
-
-/** Issue #519: one row of `gah quota list --json` (HTTP adapter
- * GET /api/quota/list). Persisted observations, distinct from the computed
- * snapshot GET /api/quota returns. */
-export interface QuotaListRecord {
-  backend: string;
-  backend_instance?: string | null;
-  model?: string | null;
-  quota_pool?: string | null;
-  quota_window?: string | null;
-  quota_used_percent?: number | null;
-  quota_remaining_percent?: number | null;
-  quota_reset_at?: string | null;
-  observed_at?: string | null;
-  checked_at?: string | null;
-  check_error?: string | null;
-  usage_source?: string | null;
 }
 
 /** Issue #519: the remote projection of `gah external-approval inspect --json`.

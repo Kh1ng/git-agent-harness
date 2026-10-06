@@ -275,7 +275,7 @@ function isQuotaSnapshot(value: unknown, profile: string, since: string): value 
       && [observation.credential_id, observation.backend_instance, observation.model, observation.quota_pool, observation.quota_window,
         observation.quota_reset_at, observation.observed_at, observation.usage_source].every(optionalText)
       && accountUsageValid(observation.account_usage)
-      && [observation.quota_used_percent, observation.quota_remaining_percent].every(percent => percent == null
+      && [observation.quota_remaining_percent].every(percent => percent == null
         || (typeof percent === 'number' && Number.isFinite(percent) && percent >= 0 && percent <= 100))));
   return snapshot.schema_version === 2 && typeof snapshot.generated_at === 'string'
     && Number.isFinite(Date.parse(snapshot.generated_at)) && snapshot.profile?.profile === profile
