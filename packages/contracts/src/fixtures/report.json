@@ -44,6 +44,7 @@
       "total_cost_usd": null,
       "total_cpu_time_seconds": null,
       "total_tokens": 175,
+      "usage_unknown_reasons": {},
       "validation_pass": 1
     }
   ],

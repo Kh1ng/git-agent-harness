@@ -54,6 +54,7 @@ struct TrendPoint {
 /// Comparison data for a single backend or model
 #[derive(Debug, Serialize)]
 struct BackendModelComparison {
+    usage_unknown_reasons: BTreeMap<ledger::UsageUnknownReason, usize>,
     backend_or_model: String,
     is_model: bool,
     entries: usize,
@@ -360,6 +361,7 @@ fn transform_to_report_format(
             quota_observations.retain(|record| seen.insert(observation_key(record)));
 
             comparisons.push(BackendModelComparison {
+                usage_unknown_reasons: group.usage_unknown_reasons.clone(),
                 backend_or_model: group.group_key.clone(),
                 is_model,
                 entries: group.entries,
@@ -544,6 +546,12 @@ fn display_report(
         for group in sorted_groups {
             println!("\n{}:", group.group_key);
             println!("  Entries: {} ({} attempts)", group.entries, group.attempts);
+            if !group.usage_unknown_reasons.is_empty() {
+                println!(
+                    "  Usage unknown reasons: {}",
+                    serde_json::to_string(&group.usage_unknown_reasons)?
+                );
+            }
             // `None` means every entry in this group was a review verdict or
             // a routing failure that never reached a real backend -- there's
             // nothing to score. Collapsing that to "0.0%" (as if `entries`
@@ -694,6 +702,7 @@ mod tests {
     fn mock_summary_data() -> SummaryData {
         let mut grouped_by_backend = Vec::new();
         grouped_by_backend.push(GroupSummary {
+            usage_unknown_reasons: Default::default(),
             group_key: "agy".to_string(),
             entries: 10,
             attempts: 5,
@@ -728,6 +737,7 @@ mod tests {
             quota_observations: vec![],
         });
         grouped_by_backend.push(GroupSummary {
+            usage_unknown_reasons: Default::default(),
             group_key: "codex".to_string(),
             entries: 5,
             attempts: 3,
@@ -763,6 +773,7 @@ mod tests {
         });
 
         SummaryData {
+            usage_unknown_reasons: Default::default(),
             ledger_path: "/tmp/ledger.jsonl".to_string(),
             entries: 15,
             success: 12,
@@ -900,6 +911,7 @@ mod tests {
     #[test]
     fn test_success_rate_calculation() {
         let grouped_data = vec![GroupSummary {
+            usage_unknown_reasons: Default::default(),
             group_key: "test".to_string(),
             entries: 4,
             attempts: 2,
@@ -946,6 +958,7 @@ mod tests {
     #[test]
     fn test_zero_entries_success_rate() {
         let grouped_data = vec![GroupSummary {
+            usage_unknown_reasons: Default::default(),
             group_key: "test".to_string(),
             entries: 0,
             attempts: 0,

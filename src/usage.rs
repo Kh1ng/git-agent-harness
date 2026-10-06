@@ -529,6 +529,7 @@ fn agy_find_after(text: &str, keys: &[&str]) -> Option<String> {
 /// stdout parse doesn't have). Returns a new `LedgerUsage`.
 pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
     LedgerUsage {
+        usage_unknown_reason: base.usage_unknown_reason.or(other.usage_unknown_reason),
         usage_classification: base.usage_classification.or(other.usage_classification),
         backend_instance: base.backend_instance.or(other.backend_instance),
         provider: base.provider.or(other.provider),

@@ -382,6 +382,7 @@ pub(crate) mod telemetry_tests {
             checkpoint_sha: None,
             cli_version: None,
             usage: LedgerUsage {
+                usage_unknown_reason: None,
                 usage_source: Some("attempt".to_string()),
                 behavior_metrics: None,
                 usage_classification: None,
@@ -433,6 +434,7 @@ pub(crate) mod telemetry_tests {
             checkpoint_sha: None,
             cli_version: None,
             usage: LedgerUsage {
+                usage_unknown_reason: None,
                 usage_source: Some("attempt".to_string()),
                 behavior_metrics: None,
                 usage_classification: None,
@@ -469,6 +471,7 @@ pub(crate) mod telemetry_tests {
         entry.attempts = vec![attempt];
         // Update entry-level usage to be different from attempt
         entry.usage = LedgerUsage {
+            usage_unknown_reason: None,
             usage_source: Some("entry".to_string()),
             behavior_metrics: None,
             usage_classification: None,

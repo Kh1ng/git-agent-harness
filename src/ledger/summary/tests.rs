@@ -927,3 +927,40 @@ fn legacy_fixture_grouped_summary_separates_unknown() {
     assert_eq!(group.attempts_started_unknown, 1);
     assert_eq!(group.attempts_completed_unknown, 1);
 }
+
+#[test]
+fn usage_unknown_reasons_are_counted_without_mirroring_attempts() {
+    use crate::ledger::UsageUnknownReason::*;
+    let (_tmp, cfg) = test_config();
+    for reason in [
+        NoAttemptStarted,
+        BackendNotInvoked,
+        UsageArtifactMissing,
+        UsageArtifactUnparsed,
+    ] {
+        let mut entry = LedgerEntry::new("test", &profile(), "vibe", "fix", "task", None, None);
+        entry.usage.usage_unknown_reason = Some(reason);
+        append(&cfg, &entry).unwrap();
+    }
+    let mut entry = LedgerEntry::new("test", &profile(), "vibe", "fix", "task", None, None);
+    entry.usage.usage_unknown_reason = Some(UsageArtifactMissing);
+    entry.attempts.push(crate::ledger::AttemptRecord {
+        attempt_number: 1,
+        backend: "vibe".into(),
+        usage: LedgerUsage {
+            usage_unknown_reason: Some(UsageArtifactMissing),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    append(&cfg, &entry).unwrap();
+    let summary = build_summary(&cfg, "7d", Some("test"), GroupBy::Backend).unwrap();
+    assert_eq!(summary.usage_unknown_reasons[&NoAttemptStarted], 1);
+    assert_eq!(summary.usage_unknown_reasons[&BackendNotInvoked], 1);
+    assert_eq!(summary.usage_unknown_reasons[&UsageArtifactMissing], 2);
+    assert_eq!(summary.usage_unknown_reasons[&UsageArtifactUnparsed], 1);
+    assert_eq!(summary.usage_total_tokens, None);
+    let group = &summary.grouped_by_backend.unwrap()[0];
+    assert_eq!(group.usage_unknown_reasons, summary.usage_unknown_reasons);
+    assert_eq!(group.total_tokens, None);
+}

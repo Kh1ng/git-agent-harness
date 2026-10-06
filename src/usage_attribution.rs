@@ -214,6 +214,11 @@ pub(crate) fn normalize_attempt_usage(
         usage.requests_count = Some(1);
     }
     if usage.usage_source.is_none() {
+        usage.usage_unknown_reason.get_or_insert(if launched {
+            crate::ledger::UsageUnknownReason::UsageArtifactMissing
+        } else {
+            crate::ledger::UsageUnknownReason::BackendNotInvoked
+        });
         usage.usage_source = Some(if launched {
             "execution_observed".to_string()
         } else {
@@ -333,6 +338,12 @@ pub(crate) fn aggregate_attempt_usage(attempts: &[AttemptRecord]) -> LedgerUsage
         .filter(|attempt| usage_has_observation(&attempt.usage))
         .map(|attempt| &attempt.usage)
         .collect::<Vec<_>>();
+    // Keep one closed-set reason on the row; rollups count the canonical
+    // per-attempt reasons individually, including mixed outcomes.
+    aggregated.usage_unknown_reason = attempts
+        .iter()
+        .filter_map(|attempt| attempt.usage.usage_unknown_reason)
+        .max();
     if observed.is_empty() {
         return aggregated;
     }
@@ -642,5 +653,25 @@ mod tests {
             Some("agy-main:google-native")
         );
         assert_eq!(alias.account_label.as_deref(), Some("agy:google-native"));
+    }
+}
+
+#[cfg(test)]
+mod unknown_usage_tests {
+    use super::*;
+
+    #[test]
+    fn failed_launch_records_backend_not_invoked() {
+        let usage = normalize_attempt_usage(
+            LedgerUsage::default(),
+            UsageAttribution::backend(Some("vibe"), None),
+            false,
+        );
+        assert_eq!(
+            usage.usage_unknown_reason,
+            Some(crate::ledger::UsageUnknownReason::BackendNotInvoked)
+        );
+        assert_eq!(usage.requests_count, None);
+        assert_eq!(usage.total_tokens, None);
     }
 }

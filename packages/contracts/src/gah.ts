@@ -471,6 +471,7 @@ export interface StatusSnapshot {
 // ---------------------------------------------------------------------------
 
 export interface QuotaUsageSummary {
+  usage_unknown_reasons?: Partial<Record<UsageUnknownReason, number>>;
   entries: number;
   attempts: number;
   validation_pass: number;
@@ -598,6 +599,7 @@ export interface QuotaObservation {
 }
 
 export interface BackendModelComparison {
+  usage_unknown_reasons?: Partial<Record<UsageUnknownReason, number>>;
   backend_or_model: string;
   is_model: boolean;
   entries: number;
@@ -1279,8 +1281,15 @@ export interface ControllerActivity {
 // gah ledger work <id> --json (src/ledger.rs LedgerEntry, full shape)
 // ---------------------------------------------------------------------------
 
+export type UsageUnknownReason =
+  | 'no_attempt_started'
+  | 'backend_not_invoked'
+  | 'usage_artifact_missing'
+  | 'usage_artifact_unparsed';
+
 export interface LedgerUsage {
   usage_source: string | null;
+  usage_unknown_reason?: UsageUnknownReason | null;
   usage_classification?: 'quota_backed' | 'api_key_backed' | 'local_unmetered' | 'unknown' | 'mixed' | 'mixed_or_unknown' | null;
   /** Safe logical execution instance, optionally qualified by quota pool. */
   backend_instance?: string | null;
@@ -1475,6 +1484,7 @@ export interface LedgerEntry {
 // ---------------------------------------------------------------------------
 
 export interface LedgerSummary {
+  usage_unknown_reasons?: Partial<Record<UsageUnknownReason, number>>;
   ledger_path: string;
   entries: number;
   success: number;
@@ -1514,6 +1524,7 @@ export interface LedgerSummary {
 
 /** `ledger::summary::GroupSummary`; unknown observations remain null. */
 export interface LedgerGroupSummary {
+  usage_unknown_reasons?: Partial<Record<UsageUnknownReason, number>>;
   group_key: string;
   entries: number;
   attempts: number;

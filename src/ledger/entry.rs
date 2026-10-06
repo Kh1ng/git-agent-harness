@@ -1,4 +1,5 @@
 use super::resources::AttemptResourceUsage;
+use super::UsageUnknownReason;
 use crate::config::Profile;
 use crate::routing::RoutingRuntimeState;
 use serde::{Deserialize, Serialize};
@@ -288,6 +289,8 @@ pub struct ExternalApprovalRecord {
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct LedgerUsage {
     pub usage_source: Option<String>,
+    #[serde(default)]
+    pub usage_unknown_reason: Option<UsageUnknownReason>,
     /// Normalized accounting class. This is explicit even when the backend
     /// cannot identify it; `unknown` is never treated as zero-cost.
     #[serde(default)]
@@ -740,6 +743,7 @@ impl LedgerEntry {
     /// without them retain their legacy top-level fields unchanged.
     pub fn normalized_for_persistence(&self) -> Self {
         let mut normalized = self.clone();
+        super::usage_unknown::annotate_unknown_usage(&mut normalized);
         let identities = normalized
             .attempt_routing
             .iter()
