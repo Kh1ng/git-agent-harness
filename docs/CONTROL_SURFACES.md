@@ -83,7 +83,26 @@ This support does not imply complete parity for every provider operation.
 The public server uses [Express HTTP routes](../apps/server/src/server.ts) and [WebSocket messages](../apps/server/src/wsServer.ts).
 Effect packages appear in [package dependencies](../apps/server/package.json), but the active HTTP/session implementation uses Express and promises.
 The [session manager](../apps/server/src/sessions/SessionManager.ts) launches real `gah dispatch` processes through [gahCli](../apps/server/src/gahCli.ts).
-The [MCP server](../apps/mcp-server/src/server.ts) calls fixed HTTP operations through its client.
+The [MCP server](../src/mcp.rs) is the Rust binary `gah-mcp-server`, installed next to `gah`. It calls fixed HTTP operations through its [client](../src/mcp/control_plane.rs).
+
+#### MCP server
+
+`gah-mcp-server` translates each MCP tool call into one request against the central server's REST API ([openapi.yaml](openapi.yaml)).
+It exposes 24 tools. Tools backed by a CLI operation take their input schemas from the [capability manifest](../packages/contracts/src/cli-capabilities.manifest.json) compiled into the binary. Tools backed by HTTP-only routes have hand-written schemas in the same module.
+[Contract tests](../tests/mcp_server.rs) drive the binary against a fake control plane.
+`gah_work_history` accepts `work_id`, matching its advertised schema; the former Node handler read `workId` instead.
+CLI releases include separate `gah-mcp-server-linux-x86_64` and `gah-mcp-server-macos-universal` executables alongside the CLI assets.
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `GAH_SERVER_URL` | Central server base URL. | `http://127.0.0.1:3773` |
+| `GAH_SERVER_TOKEN` | Coordinator token, sent as a bearer token. Do not send it over plain HTTP to a remote server. | none |
+| `GAH_PROFILE` | Profile for tools that accept one when a call names none. | `gah` |
+
+- **stdio:** run `gah-mcp-server` with no arguments and point the MCP client at that command.
+- **Streamable HTTP:** run `gah-mcp-server --http`. The endpoint is `http://127.0.0.1:3774/mcp`. `--host` (or `GAH_MCP_HOST`) and `--port` (or `GAH_MCP_PORT`) change the bind address; the host must be a literal IP address. The listener requires `GAH_SERVER_TOKEN` to start, and every request must present that token as a bearer token. It serves plain HTTP, so a non-loopback bind belongs behind TLS or a private network.
+
+Mutating tools send a fresh `Idempotency-Key` per call and never retry. A non-2xx response is returned as a tool error carrying the server's message and HTTP status. `gah_dispatch` waits for the terminal event by default, for up to two hours; set `waitForCompletion=false` to return as soon as the session is created.
 
 | Boundary | Implemented behavior | Test evidence or gap |
 | --- | --- | --- |

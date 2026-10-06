@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn quota_snapshot_signals_the_v3_source_check_contract() {
+    let tmp = test_tempdir();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+    let output = bin()
+        .args([
+            "quota",
+            "snapshot",
+            "--profile",
+            "real",
+            "--json",
+            "--config-path",
+        ])
+        .arg(cfg)
+        .assert()
+        .success();
+    let snapshot: Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(snapshot["schema_version"], 3);
+}
+
+#[test]
 fn native_claude_refresh_cannot_attribute_default_login_to_another_account() {
     let tmp = test_tempdir();
     let path = tmp.path().join("quota.jsonl");
@@ -33,6 +56,43 @@ fn quota_record_persists_validated_account_observation_from_stdin() {
     bin().args(["quota", "record", "--store-path"]).arg(&path)
         .write_stdin(r#"{"backend":"agy","backend_instance":"agy-1","quota_remaining_percent":142,"checked_at":"2026-10-02T23:00:00Z","usage_source":"cli_router"}"#)
         .assert().failure();
+    assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
+}
+
+/// `gah quota record` accepts a collector that still reports used percent,
+/// stores remaining only, and rejects a used value that is not a percentage
+/// even when a valid remaining value is sent with it.
+#[test]
+fn quota_record_normalizes_used_percent_and_rejects_one_out_of_range() {
+    let tmp = test_tempdir();
+    let path = tmp.path().join("quota.jsonl");
+    let payload = |percents: &str| {
+        format!(
+            r#"{{"backend":"agy","backend_instance":"agy-1",{percents},"observed_at":"2026-10-02T23:00:00Z","checked_at":"2026-10-02T23:00:00Z","usage_source":"cli_router"}}"#
+        )
+    };
+    bin()
+        .args(["quota", "record", "--store-path"])
+        .arg(&path)
+        .write_stdin(payload(r#""quota_used_percent":25"#))
+        .assert()
+        .success();
+    let recorded: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(recorded["quota_remaining_percent"], 75.0);
+    assert!(recorded.get("quota_used_percent").is_none());
+
+    for percents in [
+        r#""quota_used_percent":500"#,
+        r#""quota_used_percent":500,"quota_remaining_percent":40"#,
+    ] {
+        bin()
+            .args(["quota", "record", "--store-path"])
+            .arg(&path)
+            .write_stdin(payload(percents))
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("between 0 and 100"));
+    }
     assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
 }
 

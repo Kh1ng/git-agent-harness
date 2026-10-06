@@ -4,6 +4,19 @@ use anyhow::{bail, Result};
 use std::env;
 use std::path::Path;
 
+/// `npm ci` arguments shared by the source build path and the release
+/// path's dependency-drift reinstall (issue #1416): the release bundle
+/// normally ships prebuilt `dist/` output, but when its lockfile differs
+/// from the checkout's the installed node_modules must be refreshed too.
+pub(super) const NPM_CI_ARGS: &[&str] = &[
+    "ci",
+    "--include=dev",
+    "--legacy-peer-deps",
+    "--prefer-offline",
+    "--no-audit",
+    "--no-fund",
+];
+
 /// Enumerate installation effects before confirmation, shared with setup.
 pub fn installation_plan(role: HostRole, agents: &[String]) -> Result<Vec<String>> {
     for agent in agents {
@@ -17,12 +30,15 @@ pub fn installation_plan(role: HostRole, agents: &[String]) -> Result<Vec<String
     ];
     if matches!(role, HostRole::Central | HostRole::Standalone) {
         plan.push("Build server/MCP; use sudo to install /etc/systemd/system/gah-server.service; install and enable user gah-prune.service/timer".into());
-        if let Some(root) = super::resolve_web_deploy_root(env::var_os("GAH_WEB_DEPLOY_ROOT"))? {
-            plan.push(format!(
-                "Build and deploy web UI to {} (sudo; replace index and prune stale assets)",
-                root.display()
-            ));
-        }
+        plan.push(
+            match super::resolve_web_deploy_root(env::var_os("GAH_WEB_DEPLOY_ROOT"))? {
+                Some(root) => format!(
+                    "Build and deploy web UI to {} (sudo; replace index and prune stale assets)",
+                    root.display()
+                ),
+                None => "Build web UI in the checkout; gah-server serves it".into(),
+            },
+        );
     }
     if agents.iter().any(|agent| agent == "opencode") {
         plan.push("Install OpenCode files in the user config directory opencode/agents/".into());
@@ -80,6 +96,33 @@ pub(super) fn install_selected_agent_assets(
     }
     if quota_refresh_selected(agents) {
         install_quota_refresh_unit_template(repo)?;
+    }
+    Ok(())
+}
+
+/// Print the plan and, unless `--yes`, ask before changing anything.
+pub(super) fn confirm(plan: &[String], args: &super::UpdateArgs, repo: &Path) -> Result<()> {
+    for change in plan {
+        println!("  - {change}");
+    }
+    if args.restart_server {
+        println!("  - Restart control-plane service {}", args.server_service);
+    }
+    if args.pull {
+        println!(
+            "  - Fetch origin and pull --ff-only into {}",
+            repo.display()
+        );
+    }
+    if !args.yes {
+        use std::io::Write;
+        print!("Apply these changes? [y/N] ");
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            bail!("Update cancelled before installation");
+        }
     }
     Ok(())
 }

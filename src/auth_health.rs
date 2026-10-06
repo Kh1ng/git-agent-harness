@@ -56,6 +56,8 @@ pub enum AuthSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AuthProbe {
     pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend_instance: Option<String>,
     /// The provider behind a multi-provider backend (opencode), or the API
     /// provider for a key-only login. `None` for single-login backends.
     pub provider: Option<String>,
@@ -346,6 +348,7 @@ fn resolve(command: &str) -> Option<PathBuf> {
 fn probe(backend: &str, provider: Option<&str>, health: AuthHealth) -> AuthProbe {
     AuthProbe {
         backend: backend.to_string(),
+        backend_instance: None,
         provider: provider.map(str::to_string),
         health,
         source: AuthSource::Probe,
@@ -444,20 +447,24 @@ fn dispatch_failures(now: time::OffsetDateTime) -> Vec<AuthProbe> {
     else {
         return Vec::new();
     };
+    dispatch_failures_for_scopes(scopes)
+}
+
+fn dispatch_failures_for_scopes(scopes: Vec<crate::availability::ScopeStatus>) -> Vec<AuthProbe> {
     let mut failures: Vec<AuthProbe> = Vec::new();
     for scope in scopes {
         if scope.eligible || scope.reason != Some(crate::availability::Reason::AuthenticationError)
         {
             continue;
         }
-        if failures
-            .iter()
-            .any(|failure| failure.backend == scope.backend)
-        {
+        if failures.iter().any(|failure| {
+            failure.backend == scope.backend && failure.backend_instance == scope.backend_instance
+        }) {
             continue;
         }
         failures.push(AuthProbe {
             backend: scope.backend,
+            backend_instance: scope.backend_instance,
             provider: None,
             health: AuthHealth::new(
                 AuthState::Expired,
@@ -470,11 +477,75 @@ fn dispatch_failures(now: time::OffsetDateTime) -> Vec<AuthProbe> {
     failures
 }
 
+/// Auth probes for declared Claude instances. The ambient probe below covers
+/// the shared default login; each instance isolates either a native OAuth
+/// login (checked under its own state root) or a saved subscription token.
+/// A saved token is not verifiable through a local login check, so it reads
+/// as unknown rather than healthy (#1352).
+fn claude_instance_probes(config: &crate::config::GahConfig) -> Vec<AuthProbe> {
+    claude_instance_probes_with(config, |instance| {
+        if let Some(credential) = instance.credential_id.as_deref() {
+            return match crate::credentials::get(credential) {
+                Ok(info)
+                    if info.kind == crate::credentials::CredentialKind::ClaudeSubscriptionToken =>
+                {
+                    Some(AuthHealth::new(
+                        AuthState::Unknown,
+                        Some("The saved Claude subscription token was not verified by this check."),
+                    ))
+                }
+                Ok(_) => None,
+                Err(_) => Some(AuthHealth::new(
+                    AuthState::Missing,
+                    Some(&format!(
+                        "Bound credential '{credential}' is not saved on this node."
+                    )),
+                )),
+            };
+        }
+        let root = instance.state_root.as_deref().map(Path::new)?;
+        let crate::runner::ExecutableResolution::Found(executable) =
+            crate::runner::resolve_backend_instance_executable(instance)
+        else {
+            return None;
+        };
+        Some(claude_login(&executable, Some(root)).unwrap_or_else(timed_out))
+    })
+}
+
+fn claude_instance_probes_with(
+    config: &crate::config::GahConfig,
+    mut instance_health: impl FnMut(&crate::config::BackendInstanceConfig) -> Option<AuthHealth>,
+) -> Vec<AuthProbe> {
+    let mut probes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for profile in config.profiles.values() {
+        for (id, instance) in &profile
+            .effective_routing(&config.defaults)
+            .backend_instances
+        {
+            if instance.runner_kind != "claude" || !instance.enabled() || !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(health) = instance_health(instance) else {
+                continue;
+            };
+            let mut result = probe("claude", None, health);
+            result.backend_instance = Some(id.clone());
+            probes.push(result);
+        }
+    }
+    probes
+}
+
 /// Every login this node can check, plus logins dispatch found dead.
 /// Backends whose CLI is not installed are skipped, not reported missing.
 pub fn probe_node() -> AuthHealthReport {
     let now = time::OffsetDateTime::now_utc();
     let mut probes = Vec::new();
+    if let Ok(config) = crate::config::load(None) {
+        probes.extend(claude_instance_probes(&config));
+    }
     if let Some(claude) = resolve("claude") {
         probes.push(probe(
             "claude",
@@ -553,6 +624,150 @@ pub fn probe_node() -> AuthHealthReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatch_failures_preserve_login_identity() {
+        let scope = |backend: &str, instance: Option<&str>, model: Option<&str>| {
+            crate::availability::ScopeStatus {
+                backend: backend.into(),
+                backend_instance: instance.map(str::to_string),
+                model: model.map(str::to_string),
+                quota_pool: None,
+                eligible: false,
+                reason: Some(crate::availability::Reason::AuthenticationError),
+                unavailable_until: None,
+                scope: None,
+                source: None,
+                last_error_summary: None,
+                observed_at: None,
+            }
+        };
+        let mut eligible = scope("claude", Some("healthy"), None);
+        eligible.eligible = true;
+        let mut quota_failure = scope("claude", Some("quota-limited"), None);
+        quota_failure.reason = Some(crate::availability::Reason::RateLimited);
+        let failures = dispatch_failures_for_scopes(vec![
+            scope("claude", Some("token-a"), None),
+            scope("claude", Some("token-a"), Some("sonnet")),
+            scope("claude", Some("token-b"), None),
+            scope("claude", None, None),
+            scope("claude", None, Some("sonnet")),
+            scope("codex", Some("token-a"), None),
+            eligible,
+            quota_failure,
+        ]);
+        let identities: Vec<_> = failures
+            .iter()
+            .map(|failure| {
+                (
+                    failure.backend.as_str(),
+                    failure.backend_instance.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            identities,
+            vec![
+                ("claude", Some("token-a")),
+                ("claude", Some("token-b")),
+                ("claude", None),
+                ("codex", Some("token-a")),
+            ]
+        );
+        for failure in failures {
+            assert_eq!(failure.health.state, AuthState::Expired);
+            assert_eq!(failure.source, AuthSource::Dispatch);
+            assert_eq!(failure.provider, None);
+        }
+        let instance_only =
+            dispatch_failures_for_scopes(vec![scope("claude", Some("rejected-token"), None)]);
+        assert_eq!(instance_only.len(), 1);
+        assert_eq!(
+            instance_only[0].backend_instance.as_deref(),
+            Some("rejected-token")
+        );
+    }
+
+    #[test]
+    fn claude_instance_probes_report_each_instance_without_ambient_mixing() {
+        let mut config = crate::config::GahConfig {
+            defaults: Default::default(),
+            profiles: Default::default(),
+            context: Default::default(),
+        };
+        for (id, credential) in [
+            ("token-saved", Some("saved-token")),
+            ("token-missing", Some("missing-token")),
+            ("api-key", Some("api-key")),
+        ] {
+            config.defaults.routing.backend_instances.insert(
+                id.into(),
+                crate::config::BackendInstanceConfig {
+                    runner_kind: "claude".into(),
+                    credential_id: credential.map(str::to_string),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut profile = crate::config::tests::test_profile_for_notifications();
+        profile.routing.backend_instances.insert(
+            "oauth-instance".into(),
+            crate::config::BackendInstanceConfig {
+                runner_kind: "claude".into(),
+                state_root: Some("/isolated/claude".into()),
+                ..Default::default()
+            },
+        );
+        profile.routing.backend_instances.insert(
+            "disabled".into(),
+            crate::config::BackendInstanceConfig {
+                runner_kind: "claude".into(),
+                enabled: Some(false),
+                ..Default::default()
+            },
+        );
+        config.profiles.insert("test".into(), profile);
+        // A sibling profile inherits the same default instances; one logical
+        // instance must still report exactly one probe.
+        config.profiles.insert(
+            "second".into(),
+            crate::config::tests::test_profile_for_notifications(),
+        );
+        let probes = claude_instance_probes_with(&config, |instance| {
+            match instance.credential_id.as_deref() {
+                Some("saved-token") => Some(AuthHealth::new(
+                    AuthState::Unknown,
+                    Some("The saved Claude subscription token was not verified by this check."),
+                )),
+                Some("missing-token") => Some(AuthHealth::new(
+                    AuthState::Missing,
+                    Some("Bound credential 'missing-token' is not saved on this node."),
+                )),
+                Some("api-key") => None,
+                Some(other) => panic!("unexpected credential {other}"),
+                None if instance.state_root.is_some() => Some(AuthHealth::new(AuthState::Ok, None)),
+                None => panic!("state-root instance expected"),
+            }
+        });
+        let by_id = |id: &str| {
+            probes
+                .iter()
+                .find(|probe| probe.backend_instance.as_deref() == Some(id))
+        };
+        assert_eq!(
+            probes.len(),
+            3,
+            "api-key, disabled and duplicate instances report no login probe"
+        );
+        let saved = by_id("token-saved").unwrap();
+        assert_eq!(saved.health.state, AuthState::Unknown);
+        assert_eq!(saved.backend, "claude");
+        assert_eq!(
+            by_id("token-missing").unwrap().health.state,
+            AuthState::Missing
+        );
+        assert_eq!(by_id("oauth-instance").unwrap().health.state, AuthState::Ok);
+    }
 
     fn text(success: bool, stdout: &str) -> AuthState {
         classify_status_output(success, stdout.as_bytes(), b"").state
