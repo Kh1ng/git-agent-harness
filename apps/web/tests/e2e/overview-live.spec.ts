@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { agentDisplayName, modelDisplayName, buildLiveRows, formatDuration, liveAccounts } from '../../src/components/LiveAgentsCard.js';
+import { agentDisplayName, modelDisplayName, buildLiveRows, formatDuration, liveAccounts, liveRowTitle } from '../../src/components/LiveAgentsCard.js';
 
 // Overview's Live card: one row per agent account, busy rows first, with
 // the job, how long it has run, its claim, and the files its last attempt
@@ -72,12 +72,24 @@ test('rows derive their state from sessions, runs, claims, instance health and q
     ledgers: { '#1380': { effective_backend: 'claude', effective_model: 'sonnet', mode: 'fix' } as never },
     factoryAgents: [{ pid: 1, tool: 'codex', cwd: '/w/a', started_at: '2026-10-04T11:55:13Z', model: 'gpt-6-sol' }] });
   expect(retried.filter((row) => row.job).map((row) => [row.name, row.model, row.runId])).toEqual([['codex', 'gpt-6-sol', 'a']]);
+  // A route the loop recorded on the claim names the agent outright: no ledger entry or process is consulted.
+  const routed = buildLiveRows({ accounts: idle, sessions: [],
+    controllerRuns: [{ run_id: 'a', profile: 'gah', work_id: '#1380', started_at: '2026-10-04T11:54:43Z', finished_at: null, action: 'dispatch_ticket: 1380', status: 'running', outcome: null }],
+    claims: [
+      { work_id: '#1380', pid: 1, scope: 'gah@repo', hostname: 'box', claimed_at: '2026-10-04T11:54:40Z', age_seconds: 320, route: { backend: 'claude', backend_instance: 'claude', model: 'sonnet' } },
+      { work_id: '#1381', pid: 1, scope: 'gah@repo', hostname: 'box', claimed_at: '2026-10-04T11:54:50Z', age_seconds: 310 }
+    ],
+    ledgers: { '#1380': { effective_backend: 'codex', effective_model: 'gpt-6-sol', mode: 'fix' } as never },
+    factoryAgents: [{ pid: 1, tool: 'codex', cwd: '/w/a', started_at: '2026-10-04T11:55:13Z', model: 'gpt-6-sol' }] });
+  expect(routed.filter((row) => row.job).map((row) => [row.name, row.model, row.job, row.runId])).toEqual([['claude', 'sonnet', '#1380', 'a'], ['Choosing an agent', null, '#1381', null]]);
+  expect(liveRowTitle(routed[0])).toBe('Claude · sonnet on #1380');
   expect(rows.map((row) => [row.name, row.state, row.job, row.mode])).toEqual([
     ['Work account', 'working', '#946', 'improve'],
     ['vibe', 'working', '#951', 'fix'],
     ['other', 'gates', '#950', 'review'],
-    ['controller', 'gates', '#952', 'merge'],
-    ['controller', 'working', '#953', 'improve'],
+    ['Choosing an agent', 'gates', '#952', 'merge'],
+    // A claim's scope is its profile and repository, never a mode.
+    ['Choosing an agent', 'working', '#953', null],
     ['codex-work', 'halted', null, null],
     ['agy-second', 'down', null, null],
     ['gemini', 'paused', null, null],
@@ -125,7 +137,7 @@ test('Overview shows each agent account with its job, elapsed time, claim and fi
   const agents = live.getByRole('list', { name: 'Agents' }).getByRole('listitem');
   await expect(agents).toHaveCount(2);
   // The name line carries the model: "Work account Opus".
-  await expect(agents.nth(0)).toContainText('Work account Opus');
+  await expect(agents.nth(0)).toContainText('Work account · opus');
   await expect(agents.nth(0)).toContainText(/improve on #946 for 5m \d\ds/);
   await expect(agents.nth(0)).toContainText('3 files changed · claimed 4m 50s ago · last attempt 1m');
   await expect(agents.nth(0).getByRole('img', { name: 'working' })).toBeVisible();

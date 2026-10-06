@@ -226,6 +226,53 @@ test('profile set args map fields and emit each clear key once', () => {
   );
 });
 
+test('profile set args carry worker scaling, a boost, and their clear keys', () => {
+  assert.deepEqual(
+    buildProfileSetArgs({
+      name: 'api-worker',
+      worker_scaling: 'on',
+      worker_scaling_max_workers: 6,
+      worker_scaling_extra_per_model: 0,
+      worker_scaling_min_remaining_percent: 40,
+      boost_workers: 2,
+      boost_model: 'codex/gpt-5',
+      boost_hours: 1.5,
+      agent_model: ['claude/sonnet=opus'],
+      max_concurrent: ['codex/gpt-5=3', 'agy/Gemini 3.1 Pro (High)=1'],
+      clear: ['worker_boost', 'worker_scaling_max_workers'],
+    }),
+    [
+      'profile',
+      'set',
+      'api-worker',
+      '--agent-model',
+      'claude/sonnet=opus',
+      '--max-concurrent',
+      'codex/gpt-5=3',
+      '--max-concurrent',
+      'agy/Gemini 3.1 Pro (High)=1',
+      '--worker-scaling',
+      'on',
+      '--worker-scaling-max-workers',
+      '6',
+      '--worker-scaling-extra-per-model',
+      '0',
+      '--worker-scaling-min-remaining-percent',
+      '40',
+      '--boost-workers',
+      '2',
+      '--boost-model',
+      'codex/gpt-5',
+      '--boost-hours',
+      '1.5',
+      '--clear',
+      'worker_boost',
+      '--clear',
+      'worker_scaling_max_workers',
+    ],
+  );
+});
+
 test('profile set emits validation timeout clear exactly once', () => {
   assert.deepEqual(
     buildProfileSetArgs({

@@ -20,6 +20,19 @@ pub struct WorkClaim {
     pub hostname: String,
     /// Timestamp when the claim was made
     pub claimed_at: DateTime<Utc>,
+    /// The agent running the job, once routing has picked one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<ClaimRoute>,
+}
+
+/// Which agent a claimed job is running on. A running attempt has no ledger
+/// entry yet, so this is how status displays name the agent.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ClaimRoute {
+    pub backend: String,
+    pub backend_instance: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Normalize a raw work identifier into a provider-neutral key.
@@ -111,6 +124,7 @@ impl WorkClaimState {
                             pid: 0, // Unknown PID for migrated v1 claims
                             hostname: "unknown".to_string(),
                             claimed_at: Utc::now(),
+                            route: None,
                         })
                     })
                     .collect();
@@ -137,11 +151,23 @@ impl WorkClaimState {
             pid: std::process::id(),
             hostname: get().unwrap_or_default().to_string_lossy().into_owned(),
             claimed_at: Utc::now(),
+            route: None,
         };
         self.claims
             .entry(profile.to_string())
             .or_default()
             .push(WorkClaimStateEntry::V2(claim));
+    }
+
+    fn set_route(&mut self, profile: &str, work_id: &str, route: ClaimRoute) {
+        let work_id = normalize_work_identity(work_id);
+        for entry in self.claims.get_mut(profile).into_iter().flatten() {
+            if let WorkClaimStateEntry::V2(claim) = entry {
+                if normalize_work_identity(&claim.work_id) == work_id {
+                    claim.route = Some(route.clone());
+                }
+            }
+        }
     }
 
     /// Release a work_id for a profile
@@ -281,6 +307,7 @@ impl WorkClaimState {
                             hostname: "unknown".to_string(),
                             claimed_at: Utc::now(),
                             is_stale: true,
+                            route: None,
                         },
                         WorkClaimStateEntry::V2(claim) => {
                             let is_stale = claim.pid == 0 || !is_process_alive(claim.pid);
@@ -290,6 +317,7 @@ impl WorkClaimState {
                                 hostname: claim.hostname.clone(),
                                 claimed_at: claim.claimed_at,
                                 is_stale,
+                                route: claim.route.clone(),
                             }
                         }
                     })
@@ -307,6 +335,7 @@ pub struct ClaimDetail {
     pub hostname: String,
     pub claimed_at: DateTime<Utc>,
     pub is_stale: bool,
+    pub route: Option<ClaimRoute>,
 }
 
 /// Load raw claim details for one profile scope in a single filesystem read.
@@ -453,6 +482,15 @@ pub fn try_claim_work(profile: &str, work_id: &str) -> Result<bool> {
 }
 
 /// Release all claims for a profile (useful for cleanup)
+/// Note which agent a claimed job is running on. A job with no claim in
+/// `profile` (a manual dispatch) is left alone.
+pub fn record_route(profile: &str, work_id: &str, route: ClaimRoute) -> Result<()> {
+    with_locked_state(|state| {
+        state.set_route(profile, work_id, route);
+        Ok(())
+    })
+}
+
 pub fn release_all_for_profile(profile: &str) -> Result<()> {
     with_locked_state(|state| {
         state.claims.remove(profile);
@@ -519,6 +557,7 @@ pub fn handle_claims_list(profile: Option<&str>, json: bool) -> Result<()> {
                             hostname: "unknown".to_string(),
                             claimed_at: Utc::now(),
                             is_stale: true,
+                            route: None,
                         },
                         WorkClaimStateEntry::V2(claim) => {
                             let is_stale = claim.pid == 0 || !is_process_alive(claim.pid);
@@ -528,6 +567,7 @@ pub fn handle_claims_list(profile: Option<&str>, json: bool) -> Result<()> {
                                 hostname: claim.hostname.clone(),
                                 claimed_at: claim.claimed_at,
                                 is_stale,
+                                route: claim.route.clone(),
                             }
                         }
                     };
@@ -747,6 +787,7 @@ mod tests {
                 pid: 0, // Dead process
                 hostname: "test-host".to_string(),
                 claimed_at: Utc::now(),
+                route: None,
             })],
         );
 
@@ -762,6 +803,7 @@ mod tests {
                 pid: 12345, // Alive process but old claim
                 hostname: "test-host".to_string(),
                 claimed_at: old_time,
+                route: None,
             })],
         );
 
@@ -787,6 +829,7 @@ mod tests {
                 pid: 999_999, // Extremely unlikely to be a live PID
                 hostname: "test-host".to_string(),
                 claimed_at: Utc::now(),
+                route: None,
             })],
         );
 
@@ -806,6 +849,29 @@ mod tests {
         assert_eq!(normalize_work_identity("071"), canonical);
         assert_eq!(normalize_work_identity("  71 "), canonical);
         assert_eq!(normalize_work_identity("0"), "#0");
+    }
+
+    #[test]
+    fn a_recorded_route_is_reported_with_its_claim_only() {
+        let mut state = WorkClaimState::new();
+        state.claim("p@repo", "#7");
+        state.claim("p@repo", "#8");
+        let route = ClaimRoute {
+            backend: "codex".into(),
+            backend_instance: "codex".into(),
+            model: Some("gpt-5".into()),
+        };
+        state.set_route("p@repo", "7", route.clone());
+        state.set_route("p@repo", "#99", route.clone());
+        let routes: Vec<_> = state
+            .get_claims_with_details("p@repo")
+            .into_iter()
+            .map(|claim| (claim.work_id, claim.route))
+            .collect();
+        assert_eq!(
+            routes,
+            [("#7".to_string(), Some(route)), ("#8".to_string(), None)]
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
 import { ProfileEditor } from '../components/ProfileEditor.js';
+import { WorkerScalingSection } from '../components/WorkerScalingSection.js';
 import { oldestFetchedAt } from '../lib/format.js';
 import { backendInstancesApi, promptPoliciesApi, routingCandidatesApi, GahApiError, type BackendRunnerKind } from '../api/client.js';
 import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary } from '@git-agent-harness/contracts';
@@ -110,6 +111,7 @@ export function ProfilePanel() {
         profileLoading={profiles.loading}
         profileError={profiles.error}
       />
+      {selected && <WorkerScalingSection selectedName={selectedName} selected={selected} />}
       <ProfileConfigViewerSection
         selectedName={selectedName}
         profileConfig={profileConfig}
@@ -804,6 +806,28 @@ export function BackendInstancesCard({ profileName, effective }: { profileName: 
   );
 }
 
+/** The routing lists on their own: which agents take each kind of job, in order. */
+export function AgentPoolSection({ profileName, effective, onRefresh }: {
+  profileName: string;
+  effective: Pick<SettingsConfigProfileSummary, 'pm_candidates' | 'improve_candidates' | 'review_candidates'>;
+  onRefresh: () => void;
+}) {
+  return (
+    <section className="card-padded" aria-labelledby="agent-pool-title">
+      <h3 id="agent-pool-title" className="text-sm font-semibold text-primary mb-1">Agent pool</h3>
+      <p className="text-xs text-muted mb-3">
+        Which agents take each kind of job, tried from the top. Add one by its backend and exact model name: for
+        Antigravity the backend is <code>agy</code> and the model is a name from <code>agy models</code>.
+      </p>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <EditableCandidateList title="Coding" listKey="improve" profile={profileName} candidates={effective.improve_candidates} onMutate={onRefresh} />
+        <EditableCandidateList title="Review" listKey="review" profile={profileName} candidates={effective.review_candidates} onMutate={onRefresh} />
+        <EditableCandidateList title="Planning" listKey="pm" profile={profileName} candidates={effective.pm_candidates} onMutate={onRefresh} />
+      </div>
+    </section>
+  );
+}
+
 const ROUTING_LISTS = ['pm', 'improve', 'review', 'escalatory'] as const;
 type RoutingListKey = (typeof ROUTING_LISTS)[number];
 
@@ -841,11 +865,14 @@ function EditableCandidateList({ title, listKey, profile, candidates, onMutate }
     const backend = newBackend.trim();
     if (!backend) return;
     setAdding(false);
+    // Another model on a backend already listed bills the same way that one does.
+    const sibling = candidates.find((candidate) => candidate.backend === backend);
     void runMutation('add', () =>
       routingCandidatesApi.add(profile, {
         list: listKey,
         backend,
         ...(newModel.trim() !== '' ? { model: newModel.trim() } : {}),
+        ...(sibling ? { included_in_quota: sibling.included_in_quota, requires_approval: sibling.requires_approval } : {}),
       }));
     setNewBackend('');
     setNewModel('');
@@ -873,7 +900,7 @@ function EditableCandidateList({ title, listKey, profile, candidates, onMutate }
                   type="button"
                   title="Move up"
                   disabled={pending !== null || index === 0}
-                  onClick={() => runMutation(`up-${index}`, () => routingCandidatesApi.move(profile, index, index - 1))}
+                  onClick={() => runMutation(`up-${index}`, () => routingCandidatesApi.move(profile, listKey, index, index - 1))}
                   className="px-1.5 py-0.5 border border-subtle rounded text-secondary hover:text-primary disabled:opacity-40"
                 >
                   ↑
@@ -882,7 +909,7 @@ function EditableCandidateList({ title, listKey, profile, candidates, onMutate }
                   type="button"
                   title="Move down"
                   disabled={pending !== null || index === candidates.length - 1}
-                  onClick={() => runMutation(`down-${index}`, () => routingCandidatesApi.move(profile, index, index + 1))}
+                  onClick={() => runMutation(`down-${index}`, () => routingCandidatesApi.move(profile, listKey, index, index + 1))}
                   className="px-1.5 py-0.5 border border-subtle rounded text-secondary hover:text-primary disabled:opacity-40"
                 >
                   ↓
@@ -891,7 +918,7 @@ function EditableCandidateList({ title, listKey, profile, candidates, onMutate }
                   type="button"
                   title="Remove"
                   disabled={pending !== null}
-                  onClick={() => runMutation(`rm-${index}`, () => routingCandidatesApi.remove(profile, index))}
+                  onClick={() => runMutation(`rm-${index}`, () => routingCandidatesApi.remove(profile, listKey, index))}
                   className="px-1.5 py-0.5 border border-critical/40 rounded text-critical hover:bg-critical/10 disabled:opacity-40"
                 >
                   ✕

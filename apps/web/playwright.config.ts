@@ -44,7 +44,8 @@ export default defineConfig({
       timeout: 60_000
     },
     {
-      command: `VITE_PROXY_TARGET=http://localhost:${mockPort} VITE_WS_PROXY_TARGET=ws://localhost:${mockPort} npm run dev -- --port ${port}`,
+      command: `npm run dev -- --port ${port}`,
+      env: { VITE_PROXY_TARGET: `http://localhost:${mockPort}`, VITE_WS_PROXY_TARGET: `ws://localhost:${mockPort}` },
       url: baseURL,
       reuseExistingServer: false,
       timeout: 30_000

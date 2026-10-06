@@ -3,7 +3,7 @@ import { Bot, ChevronRight } from 'lucide-react';
 import type { ControllerActivity, DeviceAgent, Session } from '@git-agent-harness/contracts';
 import { useGahStore } from '../store/gahStore.js';
 import { AgentLiveView, type WatchableRun } from '../components/AgentLiveView.js';
-import { agentDisplayName, buildLiveRows, formatDuration, liveAccounts } from '../components/LiveAgentsCard.js';
+import { buildLiveRows, formatDuration, liveAccounts, liveRowTitle } from '../components/LiveAgentsCard.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState } from '../components/ui/EmptyState.js';
 
@@ -29,7 +29,7 @@ export function RunningAgentsPanel({ profile, sessions, controllerRuns, factoryA
     const accounts = liveAccounts([], quota?.candidates ?? [], Date.now());
     return buildLiveRows({ accounts, sessions, controllerRuns, claims: status?.active_claims ?? [], ledgers: {}, factoryAgents })
       .filter((row) => row.runId)
-      .map((row) => ({ runId: row.runId!, title: `${agentDisplayName(row.name)}${row.model ? ` ${row.model}` : ''} on ${row.job ?? 'a job'}`, subtitle: row.mode, since: row.since, job: row.job }));
+      .map((row) => ({ runId: row.runId!, title: liveRowTitle(row), subtitle: row.mode, since: row.since, job: row.job }));
   }, [quota, sessions, controllerRuns, status, factoryAgents]);
 
   const [now, setNow] = useState(() => Date.now());

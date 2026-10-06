@@ -1050,6 +1050,39 @@ pub enum ProfileCommands {
         /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         hold_contract_changes: Option<bool>,
+        /// Switch a backend's model in every routing list: `backend/old=new`.
+        /// The old model's concurrency cap and boost move with it. Repeatable.
+        #[arg(long)]
+        agent_model: Vec<String>,
+        /// Cap one model's concurrent runs: `backend/model=count`, or remove
+        /// its cap with a count of 0. Repeat for several models;
+        /// `--clear max_concurrent_per_model` removes every cap.
+        #[arg(long)]
+        max_concurrent: Vec<String>,
+        /// Automatic worker scaling from quota headroom: on | off. See
+        /// `WorkerScaling` for the rule the remaining flags tune.
+        #[arg(long)]
+        worker_scaling: Option<String>,
+        /// Most workers automatic scaling may reach (default: twice the
+        /// baseline). `--clear worker_scaling_max_workers` restores that.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        worker_scaling_max_workers: Option<u32>,
+        /// Extra concurrent runs a model gets while it has quota headroom.
+        #[arg(long)]
+        worker_scaling_extra_per_model: Option<u32>,
+        /// Percent every fresh quota window must still have for a model to scale.
+        #[arg(long)]
+        worker_scaling_min_remaining_percent: Option<f64>,
+        /// Add this many workers now, on top of the baseline and automatic
+        /// scaling. Replaces any earlier boost; `--clear worker_boost` ends it.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        boost_workers: Option<u32>,
+        /// Give the boost to one `backend/model` instead of every capped model.
+        #[arg(long, requires = "boost_workers")]
+        boost_model: Option<String>,
+        /// End the boost after this many hours (default: until cleared).
+        #[arg(long, requires = "boost_workers")]
+        boost_hours: Option<f64>,
         /// Clear the specified field(s) - for fields that support it
         #[arg(long, value_delimiter = ',')]
         clear: Vec<String>,

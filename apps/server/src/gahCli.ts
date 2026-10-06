@@ -964,6 +964,19 @@ export interface ProfileSetOptions {
   validation_timeout_seconds?: number | null;
   /** Hold approved schema/API contract changes for human review (#1405). */
   hold_contract_changes?: boolean | null;
+  /** Model switches for a backend's routing candidates, each `backend/old=new`. */
+  agent_model?: string[];
+  /** Per-model concurrency caps, each `backend/model=count`. */
+  max_concurrent?: string[];
+  /** Automatic worker scaling: 'on' | 'off'. */
+  worker_scaling?: string | null;
+  worker_scaling_max_workers?: number | null;
+  worker_scaling_extra_per_model?: number | null;
+  worker_scaling_min_remaining_percent?: number | null;
+  /** Replaces any earlier boost; `clear: ['worker_boost']` ends it. */
+  boost_workers?: number | null;
+  boost_model?: string | null;
+  boost_hours?: number | null;
   clear?: string[];
   config?: string;
 }
@@ -1068,6 +1081,20 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
     args.push('--hold-contract-changes', String(options.hold_contract_changes));
   } else if (options.clear?.includes('hold_contract_changes')) {
     args.push('--clear', 'hold_contract_changes');
+  }
+  for (const change of options.agent_model ?? []) args.push('--agent-model', change);
+  for (const cap of options.max_concurrent ?? []) args.push('--max-concurrent', cap);
+  const scalingFlags = [
+    ['--worker-scaling', options.worker_scaling],
+    ['--worker-scaling-max-workers', options.worker_scaling_max_workers],
+    ['--worker-scaling-extra-per-model', options.worker_scaling_extra_per_model],
+    ['--worker-scaling-min-remaining-percent', options.worker_scaling_min_remaining_percent],
+    ['--boost-workers', options.boost_workers],
+    ['--boost-model', options.boost_model],
+    ['--boost-hours', options.boost_hours],
+  ] as const;
+  for (const [flag, value] of scalingFlags) {
+    if (value !== undefined && value !== null && value !== '') args.push(flag, String(value));
   }
   appendClearArgs(
     args,

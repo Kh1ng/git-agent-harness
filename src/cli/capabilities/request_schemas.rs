@@ -681,6 +681,70 @@ pub(super) fn add_request_schemas(manifest: &mut CapabilityManifest) {
     set("profile.add", profile_add);
     let mut profile_set = profile_fields;
     profile_set["required"] = json!(["name"]);
+    let scaling_fields = object(&[
+        (
+            "agent_model",
+            "string",
+            false,
+            "Model switches for a backend's routing candidates, each backend/old=new.",
+        ),
+        (
+            "max_concurrent",
+            "string",
+            false,
+            "Per-model concurrency caps, each backend/model=count.",
+        ),
+        (
+            "worker_scaling",
+            "string",
+            false,
+            "Automatic worker scaling from quota headroom: on or off.",
+        ),
+        (
+            "worker_scaling_max_workers",
+            "number",
+            false,
+            "Most workers automatic scaling may reach.",
+        ),
+        (
+            "worker_scaling_extra_per_model",
+            "number",
+            false,
+            "Extra concurrent runs for a model with quota headroom.",
+        ),
+        (
+            "worker_scaling_min_remaining_percent",
+            "number",
+            false,
+            "Percent every fresh quota window must have left to scale.",
+        ),
+        (
+            "boost_workers",
+            "number",
+            false,
+            "Workers to add now on top of baseline and scaling.",
+        ),
+        (
+            "boost_model",
+            "string",
+            false,
+            "backend/model that receives the boost.",
+        ),
+        (
+            "boost_hours",
+            "number",
+            false,
+            "Hours until the boost ends.",
+        ),
+    ]);
+    for (name, schema) in scaling_fields["properties"]
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        profile_set["properties"][name] = schema.clone();
+    }
+    let profile_set = string_arrays(profile_set, &["agent_model", "max_concurrent"]);
     set("profile.set", profile_set);
 
     set(

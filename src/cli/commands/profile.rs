@@ -132,6 +132,7 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 hermes_idle_timeout_seconds: None,
                 max_parallel_workers,
                 max_open_managed_mrs,
+                worker_scaling: Default::default(),
                 notify_command,
                 manager_wake_autonomy: match &manager_wake_autonomy {
                     Some(v) => parse_wake_autonomy(v)?,
@@ -202,9 +203,19 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             manager_wake_autonomy,
             delivery_mode,
             hold_contract_changes,
+            agent_model,
+            max_concurrent,
+            worker_scaling,
+            worker_scaling_max_workers,
+            worker_scaling_extra_per_model,
+            worker_scaling_min_remaining_percent,
+            boost_workers,
+            boost_model,
+            boost_hours,
             clear,
         } => {
             let mut cfg = config::load(config_path.as_deref())?;
+            let defaults = cfg.defaults.clone();
             let existing = config::get_profile_mut(&mut cfg, &name)?;
 
             // Helper to clear a field if requested
@@ -414,6 +425,47 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             if hold_contract_changes.is_some() || should_clear("hold_contract_changes", &clear) {
                 existing.routing.hold_contract_changes_for_human_review = hold_contract_changes;
             }
+            for switch in &agent_model {
+                let (backend, from, to) = parse_model_switch(switch)?;
+                super::routing_candidates::switch_model(&defaults, existing, backend, from, to)?;
+            }
+            if should_clear("max_concurrent_per_model", &clear) {
+                existing.max_concurrent_per_model.clear();
+            }
+            for cap in &max_concurrent {
+                let (model, count) = parse_model_cap(cap)?;
+                if count == 0 {
+                    existing.max_concurrent_per_model.remove(&model);
+                } else {
+                    existing.max_concurrent_per_model.insert(model, count);
+                }
+            }
+
+            let scaling = &mut existing.worker_scaling;
+            if let Some(v) = &worker_scaling {
+                scaling.enabled = parse_on_off("worker_scaling", v)?;
+            }
+            if let Some(v) = worker_scaling_max_workers {
+                scaling.max_workers = Some(v);
+            } else if should_clear("worker_scaling_max_workers", &clear) {
+                scaling.max_workers = None;
+            }
+            if let Some(v) = worker_scaling_extra_per_model {
+                scaling.extra_per_model = v;
+            }
+            if let Some(v) = worker_scaling_min_remaining_percent {
+                if !(0.0..=100.0).contains(&v) {
+                    anyhow::bail!("worker_scaling_min_remaining_percent must be between 0 and 100");
+                }
+                scaling.min_remaining_percent = v;
+            }
+            if let Some(workers) = boost_workers {
+                scaling.boost_workers = workers;
+                scaling.boost_model = boost_model;
+                scaling.boost_until = boost_hours.map(boost_expiry).transpose()?;
+            } else if should_clear("worker_boost", &clear) {
+                scaling.clear_boost();
+            }
 
             config::save(&cfg, config_path.as_deref())?;
             println!("Updated profile '{}'", name);
@@ -435,4 +487,49 @@ pub fn run(command: ProfileCommands) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn parse_on_off(field: &str, value: &str) -> Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "on" | "true" => Ok(true),
+        "off" | "false" => Ok(false),
+        other => anyhow::bail!("invalid {field} '{other}' (expected on | off)"),
+    }
+}
+
+/// RFC 3339 time `hours` from now, the `WorkerScaling::boost_until` spelling.
+fn boost_expiry(hours: f64) -> Result<String> {
+    if !hours.is_finite() || hours <= 0.0 {
+        anyhow::bail!("boost_hours must be greater than zero");
+    }
+    let until = time::OffsetDateTime::now_utc() + time::Duration::seconds_f64(hours * 3600.0);
+    Ok(until
+        .replace_nanosecond(0)?
+        .format(&time::format_description::well_known::Rfc3339)?)
+}
+
+/// `backend/model=count`, where a count of 0 removes that model's cap. The
+/// model may itself contain `=` or spaces, so the count is whatever follows
+/// the last `=`.
+fn parse_model_cap(value: &str) -> Result<(String, u32)> {
+    let parsed = value.rsplit_once('=').and_then(|(model, count)| {
+        let count = count.trim().parse::<u32>().ok()?;
+        let model = model.trim();
+        (model.contains('/') && !model.starts_with('/')).then(|| (model.to_string(), count))
+    });
+    parsed.ok_or_else(|| {
+        anyhow::anyhow!("invalid max_concurrent '{value}' (expected backend/model=count)")
+    })
+}
+
+/// `backend/old=new`. The backend ends at the first `/`; a model may itself
+/// contain `/`, so the new model is whatever follows the last `=`.
+fn parse_model_switch(value: &str) -> Result<(&str, &str, &str)> {
+    let parsed = value.split_once('/').and_then(|(backend, models)| {
+        let (from, to) = models.rsplit_once('=')?;
+        let parts = (backend.trim(), from.trim(), to.trim());
+        (!parts.0.is_empty() && !parts.1.is_empty() && !parts.2.is_empty()).then_some(parts)
+    });
+    parsed
+        .ok_or_else(|| anyhow::anyhow!("invalid agent_model '{value}' (expected backend/old=new)"))
 }

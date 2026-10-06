@@ -74,6 +74,7 @@ mod tests {
             hostname: "test".into(),
             claimed_at: "2026-07-17T00:00:00Z".into(),
             age_seconds: 1,
+            route: None,
         }
     }
 

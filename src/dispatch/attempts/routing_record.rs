@@ -25,5 +25,17 @@ pub(in crate::dispatch) fn record_route_attempt(
             identity: Some(route.identity.clone()),
             routing_diagnostics: Some(diagnostics),
         });
+    if let Some(work_id) = ledger.work_id.as_deref() {
+        // Best effort: the claim's route only feeds status displays.
+        let _ = crate::work_claim::record_route(
+            &crate::work_claim::canonical_claim_scope(&ledger.profile, &ledger.repo_id),
+            work_id,
+            crate::work_claim::ClaimRoute {
+                backend: route.identity.logical_backend.clone(),
+                backend_instance: route.identity.backend_instance.clone(),
+                model: route.effective_model.clone(),
+            },
+        );
+    }
     Ok(())
 }

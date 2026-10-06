@@ -18,6 +18,7 @@ import { WorkDetailDrawer } from './components/WorkDetailDrawer.js';
 import { generateProviderInstanceId } from '@git-agent-harness/shared';
 import { useUiStore } from './store/uiStore.js';
 
+const AgentsPage = lazy(() => import('./pages/AgentsPage.js').then((module) => ({ default: module.AgentsPage })));
 const WorkPage = lazy(() => import('./pages/WorkPage.js').then((module) => ({ default: module.WorkPage })));
 const TelemetryPage = lazy(() => import('./pages/TelemetryPage.js').then((module) => ({ default: module.TelemetryPage })));
 const QuotaPage = lazy(() => import('./pages/QuotaPage.js').then((module) => ({ default: module.QuotaPage })));
@@ -85,7 +86,7 @@ export function App() {
   const [deviceAgents, setDeviceAgents] = useState<{ data: DeviceAgentsSnapshot | null; error: string | null }>({ data: null, error: null });
   // Each read scans the device's processes: fast while an agents view shows them, at the
   // quota cadence for the navbar rings otherwise, and not at all from a hidden tab.
-  const agentsVisible = currentPage === 'overview' || sideView === 'agents';
+  const agentsVisible = currentPage === 'overview' || currentPage === 'agentpool' || sideView === 'agents';
   useEffect(() => {
     let current = true;
     const load = () => document.hidden ? undefined : gahApi.getDeviceAgents()
@@ -153,6 +154,8 @@ export function App() {
         return <GitPage />;
       case 'planning':
         return <PlanningPage onNavigate={navigate} />;
+      case 'agentpool':
+        return <AgentsPage sessions={sessions} deviceAgents={deviceAgents} onNavigate={navigate} onWatchRun={watchRun} />;
       case 'overview':
       default:
         return (
