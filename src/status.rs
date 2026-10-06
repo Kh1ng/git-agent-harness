@@ -911,7 +911,7 @@ fn build_snapshot_inner(
     // Only backends with a real Rust implementation are listed. `configured`
     // is true when the profile sets up this backend (an explicit executable
     // path or profile marker). `configured_path` echoes the configured marker
-    // for display. Backends with no implementation (grok/cursor) are omitted
+    // for display. Backends with no implementation (grok) are omitted
     // entirely so the frontend can show them as not_implemented.
     let implemented_backends = [
         "codex",
@@ -923,6 +923,7 @@ fn build_snapshot_inner(
         "opencode",
         "openhands",
         "hermes",
+        "cursor",
     ];
     let mut backend_configured: std::collections::HashMap<String, bool> =
         std::collections::HashMap::new();

@@ -482,6 +482,7 @@ pub(super) fn run_backend_with_reserved_route(
         print_timeout_seconds: Option<u64>,
     }
     let skill_args;
+    let cursor_args = runner::backends::cursor::permission_args(profile);
     let shape = match backend_kind {
         BackendKind::Codex => LaunchShape {
             model: effective_model,
@@ -556,6 +557,13 @@ pub(super) fn run_backend_with_reserved_route(
                 print_timeout_seconds: None,
             }
         }
+        BackendKind::Cursor => LaunchShape {
+            model: effective_model,
+            llm: None,
+            extra_args: &cursor_args,
+            idle_timeout_seconds: runner::backends::cursor::IDLE_TIMEOUT_SECONDS,
+            print_timeout_seconds: None,
+        },
     };
     let result = runner::for_kind(backend_kind).run(&runner::RunContext {
         executable: &executable,
@@ -707,6 +715,8 @@ pub(super) fn attempt_usage(
         usage::parse_codex_exec_json(&text)
     } else if backend_kind == Some(BackendKind::Agy) {
         usage::parse_agy_output_json(&text)
+    } else if backend_kind == Some(BackendKind::Cursor) {
+        runner::backends::cursor::parse_output(&text).usage
     } else {
         crate::ledger::LedgerUsage::default()
     };
@@ -721,10 +731,10 @@ pub(super) fn attempt_usage(
         }
     }
     let has_json_lines = text.lines().any(|line| line.trim_start().starts_with('{'));
-    if usage.usage_source.is_none() && (backend_kind != Some(BackendKind::Codex) || !has_json_lines)
-    {
+    let structured = matches!(backend_kind, Some(BackendKind::Codex | BackendKind::Cursor));
+    if usage.usage_source.is_none() && (!structured || !has_json_lines) {
         // Fall back to the generic regex-based parser for other backends (or
-        // for codex running in non-JSON mode).
+        // for codex/cursor output that carried no JSON at all).
         usage = usage::parse_generic_usage(&text, "attempt_output_log");
     }
 
@@ -790,7 +800,7 @@ fn ensure_supported_runner_kind(
 ) -> Result<()> {
     if matches!(
         identity.runner_kind.as_str(),
-        "agy" | "claude" | "codex" | "openhands" | "opencode" | "vibe"
+        "agy" | "claude" | "codex" | "cursor" | "openhands" | "opencode" | "vibe"
     ) {
         Ok(())
     } else {

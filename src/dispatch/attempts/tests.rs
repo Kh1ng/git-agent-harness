@@ -86,6 +86,34 @@ fn attempt_usage_is_empty_when_log_has_no_usage_info() {
     assert_eq!(usage.usage_classification, Some("quota_backed".to_string()));
 }
 #[test]
+fn attempt_usage_attributes_cursor_and_keeps_unreported_tokens_unknown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("backend-output.log");
+    // No `usage` object; the prose must not be scraped into token counts.
+    fs::write(
+        &path,
+        "{\"type\":\"result\",\"result\":\"the log said input_tokens: 500\"}\n",
+    )
+    .unwrap();
+    let attribution = UsageAttribution::backend(Some("cursor"), None);
+
+    let usage = attempt_usage(path.to_str().unwrap(), None, attribution, None, None);
+    assert_eq!(usage.backend_instance.as_deref(), Some("cursor"));
+    assert_eq!(usage.input_tokens, None);
+    assert_eq!(usage.total_tokens, None);
+    assert!(usage.token_usage_unknown_reason.is_some());
+
+    fs::write(
+        &path,
+        "{\"type\":\"result\",\"result\":\"ok\",\"usage\":{\"inputTokens\":7}}\n",
+    )
+    .unwrap();
+    let usage = attempt_usage(path.to_str().unwrap(), None, attribution, None, None);
+    assert_eq!(usage.usage_source.as_deref(), Some("cursor_output_json"));
+    assert_eq!(usage.input_tokens, Some(7));
+    assert_eq!(usage.output_tokens, None);
+}
+#[test]
 fn structured_behavior_survives_every_structured_usage_early_return() {
     let tmp = tempfile::tempdir().unwrap();
     let log = tmp.path().join("attempt.log");

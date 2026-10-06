@@ -48,6 +48,7 @@ pub enum BackendKind {
     Vibe,
     Agy,
     Hermes,
+    Cursor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +75,7 @@ impl BackendKind {
             "vibe" => Ok(Self::Vibe),
             "agy" => Ok(Self::Agy),
             "hermes" => Ok(Self::Hermes),
+            "cursor" => Ok(Self::Cursor),
             other => Err(UnknownBackendKind(other.to_string())),
         }
     }
@@ -87,10 +89,21 @@ impl BackendKind {
             Self::Vibe => "vibe",
             Self::Agy => "agy",
             Self::Hermes => "hermes",
+            Self::Cursor => "cursor",
         }
     }
 
-    pub fn all() -> [BackendKind; 7] {
+    /// The executable this kind launches. Same as `as_str()` for every kind
+    /// except Cursor, whose CLI ships as `cursor-agent` (`cursor` on PATH is
+    /// the editor launcher, not the agent).
+    pub fn command_name(&self) -> &'static str {
+        match self {
+            Self::Cursor => "cursor-agent",
+            other => other.as_str(),
+        }
+    }
+
+    pub fn all() -> [BackendKind; 8] {
         [
             Self::Claude,
             Self::Codex,
@@ -99,6 +112,7 @@ impl BackendKind {
             Self::Vibe,
             Self::Agy,
             Self::Hermes,
+            Self::Cursor,
         ]
     }
 }
@@ -153,12 +167,24 @@ mod tests {
     }
 
     #[test]
-    fn all_returns_exactly_seven_kinds_with_no_duplicates() {
+    fn all_returns_exactly_eight_kinds_with_no_duplicates() {
         let all = BackendKind::all();
-        assert_eq!(all.len(), 7);
+        assert_eq!(all.len(), 8);
         let mut seen = std::collections::HashSet::new();
         for kind in all {
             assert!(seen.insert(kind), "duplicate kind in all(): {kind:?}");
+        }
+    }
+
+    #[test]
+    fn cursor_kind_is_named_cursor_but_launches_cursor_agent() {
+        assert_eq!(BackendKind::parse("cursor").unwrap(), BackendKind::Cursor);
+        assert_eq!(BackendKind::Cursor.as_str(), "cursor");
+        assert_eq!(BackendKind::Cursor.command_name(), "cursor-agent");
+        for kind in BackendKind::all() {
+            if kind != BackendKind::Cursor {
+                assert_eq!(kind.command_name(), kind.as_str());
+            }
         }
     }
 

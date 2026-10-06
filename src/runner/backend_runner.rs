@@ -123,6 +123,7 @@ pub fn for_kind(kind: BackendKind) -> Box<dyn BackendRunner> {
         BackendKind::Vibe => Box::new(VibeRunner),
         BackendKind::Agy => Box::new(AgyRunner),
         BackendKind::Hermes => Box::new(HermesRunner),
+        BackendKind::Cursor => Box::new(CursorRunner),
     }
 }
 
@@ -229,6 +230,27 @@ impl BackendRunner for HermesRunner {
             ctx.cwd,
             ctx.env_vars,
             ctx.timeout,
+        )
+    }
+}
+
+pub struct CursorRunner;
+
+impl BackendRunner for CursorRunner {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Cursor
+    }
+
+    fn run(&self, ctx: &RunContext) -> Result<RunResult> {
+        crate::runner::backends::cursor::run_with_executable(
+            ctx.executable,
+            ctx.worktree,
+            ctx.task,
+            ctx.session_dir,
+            ctx.model,
+            ctx.extra_args,
+            ctx.env_vars,
+            ctx.idle_timeout_seconds,
         )
     }
 }

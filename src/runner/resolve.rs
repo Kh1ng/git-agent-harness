@@ -77,9 +77,11 @@ pub fn resolve_backend_instance_executable(
         };
     }
     if instance.resolves_from_path() {
-        return match resolve_executable_on_path(&instance.runner_kind) {
+        let command =
+            backend_command_name(&instance.runner_kind).unwrap_or(instance.runner_kind.as_str());
+        return match resolve_executable_on_path(command) {
             Some(path) => ExecutableResolution::Found(path),
-            None => ExecutableResolution::MissingFromPath(instance.runner_kind.clone()),
+            None => ExecutableResolution::MissingFromPath(command.to_string()),
         };
     }
     ExecutableResolution::MissingExplicitPath(PathBuf::new())
@@ -232,7 +234,7 @@ fn backend_command_name(name: &str) -> Option<&'static str> {
     }
     crate::backend_kind::BackendKind::parse(name)
         .ok()
-        .map(|kind| kind.as_str())
+        .map(|kind| kind.command_name())
 }
 
 pub(crate) fn resolve_executable_on_path(name: &str) -> Option<PathBuf> {

@@ -84,7 +84,10 @@ impl ReviewUsageCapture {
             Some(BackendKind::Opencode) => Self::OpenCode {
                 started_at: SystemTime::now(),
             },
-            Some(BackendKind::Openhands) | Some(BackendKind::Hermes) | None => Self::None,
+            Some(BackendKind::Openhands)
+            | Some(BackendKind::Hermes)
+            | Some(BackendKind::Cursor)
+            | None => Self::None,
         }
     }
 
