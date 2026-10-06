@@ -1097,8 +1097,12 @@ The token counts as subscription quota: candidates on a bound instance are
 token; list `CLAUDE_CODE_OAUTH_TOKEN` in a scope if runs with it should need
 work-scoped approval. `gah auth-health`
 reports each instance independently; a saved token reads as unknown there
-because a login check cannot verify it — `gah quota refresh --credential
-claude-work` (also run by auto-refresh) verifies it against the subscription.
+because a login check cannot verify it. `gah quota refresh --credential
+claude-work` (also run by auto-refresh) asks the subscription usage endpoint
+for the 5-hour and weekly windows. That endpoint needs the `user:profile`
+scope, and `claude setup-token` tokens are reported to be inference-only; when
+the endpoint rejects the scope, the check records "quota unavailable" for the
+credential and the instance's windows stay unknown. That is not a token fault.
 Save one credential per account and give each instance its own `state_root`,
 so concurrent instances never rewrite shared login state. The token is
 stored owner-only and never appears in argv, logs, ledger, or telemetry.
