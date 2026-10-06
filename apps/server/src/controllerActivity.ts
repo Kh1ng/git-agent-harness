@@ -29,6 +29,7 @@ export function deriveControllerActivity(events: ControllerEvent[]): ControllerA
       run.finished_at = event.timestamp;
       run.status = controllerDispatchSucceeded(event.details) ? 'finished' : 'failed';
       run.outcome = event.details;
+      if (event.skipped?.length) run.skipped = event.skipped;
     }
   }
 

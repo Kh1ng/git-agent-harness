@@ -57,6 +57,8 @@ export interface KanbanCard {
   blocks: string[];
   /** Who the router passed over the last time it tried this card, and why. */
   skipped: KanbanSkip[];
+  /** Why handing this card to an agent would not move it; null when it would. */
+  assignHeldBy: string | null;
 }
 
 export interface KanbanAgent {
@@ -121,6 +123,15 @@ function plainSkip(reason: string): { short: string; long: string } {
   return { short: humanize(reason), long: sentence(humanize(reason)) };
 }
 
+/**
+ * Who the router passed over on a run. The run record carries the list; a run
+ * recorded before it did only has the sentence, read by `parseSkipped`.
+ */
+export function runSkipped(run: Pick<ControllerActivity, 'skipped' | 'outcome'>): KanbanSkip[] {
+  if (run.skipped?.length) return run.skipped.map((skip) => ({ backend: skip.backend, model: skip.model ?? null, reason: skip.reason }));
+  return parseSkipped(run.outcome);
+}
+
 /** `…; skipped: claude/opus[1m]: max_concurrent_reached, codex/gpt-6.1-sol: model-specific authentication_error route_state=…` */
 export function parseSkipped(outcome: string | null | undefined): KanbanSkip[] {
   const list = /skipped: (.*?)(?:\s+route_state=\S+)?\s*$/s.exec(outcome ?? '')?.[1];
@@ -180,6 +191,15 @@ function plainBlock(blocker: Blocker | undefined, ticket: AvailableTicket | null
     default: return sentence(humanize(code));
   }
 }
+
+/**
+ * Gates a manually started fix job does not lift: the job would run and the
+ * card would stay parked, so Assign is off for them.
+ */
+const ASSIGN_HELD_BY: Record<string, string> = {
+  fix_retry_cap_exceeded: 'Assign is off: this job is past the fix limit, and starting another fix by hand does not lift that',
+  stuck_loop_gate: 'Assign is off: this job was stopped for repeating the same step, and starting a fix by hand does not lift that'
+};
 
 const latest = (...times: (string | null | undefined)[]) =>
   times.filter((time): time is string => !!time && Number.isFinite(Date.parse(time))).sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
@@ -297,10 +317,11 @@ export function buildKanban(input: KanbanInput): KanbanBoard {
     const blocker = blockerByKey.get(key);
     const fixUsed = mergeRequest ? status?.fix_attempt_counts?.[mergeRequest.branch] ?? 0 : 0;
     const processes = agentsOnCard.get(key) ?? [];
-    const skipped = lastRun?.status === 'failed' ? parseSkipped(lastRun.outcome) : [];
+    const skipped = lastRun?.status === 'failed' ? runSkipped(lastRun) : [];
     const lastOutcome = lastRun?.status === 'failed' ? plainOutcome(lastRun) : null;
     const working = !mergeRequest?.merged && (runningRun !== undefined || claim !== undefined);
     const blocks: string[] = [];
+    const gateCode = blocker?.reason_code ?? blocker?.reason ?? ticket?.human_required_reason_code ?? null;
 
     let column: KanbanColumnKey;
     let reason: string;
@@ -409,7 +430,8 @@ export function buildKanban(input: KanbanInput): KanbanBoard {
       held: held.has(key) && column !== 'done',
       job,
       blocks,
-      skipped
+      skipped,
+      assignHeldBy: column === 'needs_you' && gateCode ? ASSIGN_HELD_BY[gateCode] ?? null : null
     });
   }
   // Work in hand first, then whatever moved most recently; Ready keeps the queue's order.

@@ -160,6 +160,7 @@ fn capacity_event(work_id: &str, details: &str) -> crate::events::ControllerEven
         review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
         details: details.into(),
         remediation_plan: None,
+        skipped: Vec::new(),
     }
 }
 

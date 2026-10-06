@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/experimental-ct-react';
 import type { AvailableTicket, ControllerActivity, DeviceAgent, MergeRequest, QuotaCandidateStatus, StatusSnapshot } from '@git-agent-harness/contracts';
-import { buildKanban, parseSkipped, workingNow, type KanbanInput } from '../../src/lib/kanbanBoard.js';
+import { buildKanban, parseSkipped, runSkipped, workingNow, type KanbanInput } from '../../src/lib/kanbanBoard.js';
 import { WorkingNowMenu } from '../../src/components/WorkingNowMenu.js';
 import { KanbanView } from '../../src/pages/KanbanPage.js';
 
@@ -97,6 +97,20 @@ test('reads each skipped route out of a deferred run', () => {
   expect(parseSkipped('agy:google-native/Gemini 3.1 Pro (High): max_concurrent_reached')).toEqual([]);
 });
 
+test('the list on the run record is used as recorded, whatever the sentence says', () => {
+  const run = {
+    outcome: 'review: the router rewrote this sentence and names nobody',
+    skipped: [{ backend: 'agy', backend_instance: 'agy:google-native', model: 'Gemini 3.1 Pro (High)', reason: 'max_concurrent_reached', unavailable_until: null }]
+  };
+  expect(runSkipped(run)).toEqual([{ backend: 'agy', model: 'Gemini 3.1 Pro (High)', reason: 'max_concurrent_reached' }]);
+  // A run recorded before the list existed still reads the sentence.
+  expect(runSkipped({ outcome: controllerRuns[1].outcome })).toHaveLength(2);
+
+  const reworded = controllerRuns.map((item) => (item.run_id === 'review' ? { ...item, ...run } : item));
+  const review = buildKanban({ ...input, controllerRuns: reworded }).cards.find((card) => card.workId === '#3');
+  expect(review?.reason).toBe('Waiting for a reviewer: Antigravity at its job limit');
+});
+
 test('every job sits in the column its records put it in, with a reason in plain words', async ({ mount }) => {
   const component = await mount(<KanbanView board={board} now={NOW} onOpenWork={() => {}} />);
   const column = (name: string) => component.getByRole('region', { name: new RegExp(`^${name}, `) });
@@ -159,10 +173,31 @@ test('a waiting card answers why it is not running, agent by agent', async ({ mo
   await expect(why).toHaveCount(0);
 });
 
+// #5 without the stuck-loop stop: approved and waiting for a merge decision.
+const approvedBoard = buildKanban({
+  ...input,
+  status: {
+    ...status,
+    available_tickets: status.available_tickets.map((item) => (item.work_id === '#5' ? ticket('#5', { has_active_mr: true }) : item)),
+    blocked_work_items: []
+  } as StatusSnapshot
+});
+
+test('Assign is off, with the reason shown, on a job held by a gate a manual fix does not lift', async ({ mount }) => {
+  const sent: string[] = [];
+  const component = await mount(
+    <KanbanView board={board} now={NOW} onOpenWork={() => {}} assign={{ unavailable: null, send: (card) => sent.push(String(card.workId)) }} />
+  );
+  const needsYou = component.getByRole('region', { name: /^Needs you, / });
+  await expect(needsYou.getByRole('button', { name: 'Assign' })).toBeDisabled();
+  await expect(needsYou).toContainText('Assign is off: this job was stopped for repeating the same step');
+  expect(sent).toEqual([]);
+});
+
 test('a Needs you job can be handed to an agent that is available', async ({ mount }) => {
   const sent: string[] = [];
   const component = await mount(
-    <KanbanView board={board} now={NOW} onOpenWork={() => {}} assign={{ unavailable: null, send: (card, agent) => sent.push(`${card.workId} -> ${agent.backend}`) }} />
+    <KanbanView board={approvedBoard} now={NOW} onOpenWork={() => {}} assign={{ unavailable: null, send: (card, agent) => sent.push(`${card.workId} -> ${agent.backend}`) }} />
   );
   const needsYou = component.getByRole('region', { name: /^Needs you, / });
   const picker = needsYou.getByRole('combobox', { name: 'Agent for #5' });

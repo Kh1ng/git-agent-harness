@@ -48,9 +48,10 @@ function AssignControl({ card, agents, assign }: { card: KanbanCard; agents: Kan
   const [agentId, setAgentId] = useState<string | null>(null);
   const [sent, setSent] = useState<string | null>(null);
   const agent = usable.find((item) => item.id === agentId) ?? usable[0];
-  const blocked = assign.unavailable ?? (agent ? null : 'No agent is available right now');
+  const blocked = card.assignHeldBy ?? assign.unavailable ?? (agent ? null : 'No agent is available right now');
   return (
     <div className="mt-2">
+      {card.assignHeldBy && <p className="mb-1 text-[11px] text-muted">{card.assignHeldBy}.</p>}
       <div className="flex items-center gap-1.5">
         <select aria-label={`Agent for ${card.workId}`} value={agent?.id ?? ''} onChange={(event) => setAgentId(event.target.value)}
           className="input min-w-0 flex-1 !px-2 !py-1 text-xs">
