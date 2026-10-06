@@ -826,6 +826,33 @@ mod tests {
     }
 
     #[test]
+    fn colocated_memory_forwards_a_generation_key_from_the_environment() {
+        let path = PathBuf::from("/memory");
+        let host = ready_host()
+            .with_path(path.join("src/gateway/server.ts"))
+            .with_path(path.join("node_modules"))
+            .with_env("GAH_GATEWAY_LLM_API_KEY", "generation-canary");
+        let mut prompter = Script::default();
+        let mut effects = Recorder::default();
+        let mut setup = Setup {
+            host: &host,
+            prompter: &mut prompter,
+            effects: &mut effects,
+            options: Options {
+                memory: Some(MemoryMode::Colocated),
+                memorycore: Some(path),
+                ..Default::default()
+            },
+        };
+        let mut env = InstallEnv::default();
+        setup.memory_settings(&mut env).unwrap();
+        assert!(prompter.asked.is_empty());
+        assert!(env
+            .0
+            .contains(&("GAH_GATEWAY_LLM_API_KEY", "generation-canary".into())));
+    }
+
+    #[test]
     fn a_ready_central_machine_asks_three_questions_then_installs() {
         let host = ready_host();
         let mut prompter = Script {

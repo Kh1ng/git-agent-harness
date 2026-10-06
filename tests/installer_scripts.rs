@@ -793,26 +793,40 @@ fn colocated_installers_preserve_credentials_without_a_generation_key() {
                 &source[start..end]
             )
         };
-        let run = || {
-            bash(
-                &["-euc", &block],
-                &[
-                    ("HOME", home.to_str().unwrap()),
-                    ("PATH", &format!("{}:/usr/bin:/bin", bin.display())),
-                    ("GAH_TEST_BIN", GAH),
-                ],
-                true,
-            )
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        let run = |given: &[(&str, &str)]| {
+            let mut envs = vec![
+                ("HOME", home.to_str().unwrap()),
+                ("PATH", path.as_str()),
+                ("GAH_TEST_BIN", GAH),
+            ];
+            envs.extend(given);
+            let output = bash(&["-euc", &block], &envs, true);
+            assert!(output.status.success(), "{platform}: {}", text(&output));
+            assert_eq!(mode(&file), 0o600);
         };
-        let output = run();
-        assert!(output.status.success(), "{platform}: {}", text(&output));
+        run(&[]);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
-        assert_eq!(mode(&file), 0o600);
+
+        // The previous Linux installer wrote bare, unquoted values.
+        let bare = "TDAI_GATEWAY_API_KEY=access-canary\nTDAI_LLM_API_KEY=generation-canary\n";
+        std::fs::write(&file, bare).unwrap();
+        run(&[]);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), bare);
+
+        // Given keys replace only their own lines.
+        std::fs::write(&file, before).unwrap();
+        run(&[
+            ("GAH_GATEWAY_API_KEY", "new-access"),
+            ("GAH_GATEWAY_LLM_API_KEY", "new-generation"),
+        ]);
+        assert_eq!(sourced(&file, "TDAI_GATEWAY_API_KEY"), "new-access");
+        assert_eq!(sourced(&file, "TDAI_LLM_API_KEY"), "new-generation");
+        assert_eq!(sourced(&file, "TDAI_EMBEDDING_API_KEY"), "embedding-canary");
+
         std::fs::remove_file(&file).unwrap();
-        let output = run();
-        assert!(output.status.success(), "{platform}: {}", text(&output));
+        run(&[]);
         assert!(!sourced(&file, "TDAI_GATEWAY_API_KEY").is_empty());
         assert!(sourced(&file, "TDAI_LLM_API_KEY").is_empty());
-        assert_eq!(mode(&file), 0o600);
     }
 }

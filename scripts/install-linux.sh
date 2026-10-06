@@ -191,14 +191,18 @@ case "${GAH_GATEWAY_MODE:-}" in
     # Preserve model/provider credentials and existing gateway authentication.
     if [ -n "${GAH_GATEWAY_API_KEY:-}" ]; then
       upsert_env_line "$gateway_env_file" TDAI_GATEWAY_API_KEY "$GAH_GATEWAY_API_KEY" ""
+      echo "Wrote the given gateway API key to $gateway_env_file"
     elif ! "$(command -v gah || echo "$HOME/.cargo/bin/gah")" installer env-has --file "$gateway_env_file" TDAI_GATEWAY_API_KEY >/dev/null 2>&1; then
       upsert_env_line "$gateway_env_file" TDAI_GATEWAY_API_KEY "$(openssl rand -hex 24)" ""
+      echo "Generated a gateway API key in $gateway_env_file"
+    else
+      echo "Kept the existing gateway API key in $gateway_env_file"
     fi
     if [ -n "${GAH_GATEWAY_LLM_API_KEY:-}" ]; then
       upsert_env_line "$gateway_env_file" TDAI_LLM_API_KEY "$GAH_GATEWAY_LLM_API_KEY" ""
+      echo "Wrote the given LLM API key to $gateway_env_file"
     fi
     chmod 0600 "$gateway_env_file"
-    echo "Preserved gateway configuration in $gateway_env_file"
 
     node_dir="$(dirname "$(command -v node)")"
     gateway_unit_dst="$HOME/.config/systemd/user/tdai-memory-gateway.service"
