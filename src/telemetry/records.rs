@@ -171,18 +171,8 @@ pub struct AttemptUsageRecord {
     /// Actual cost in USD
     pub actual_cost_usd: Option<f64>,
 
-    /// Quota window identifier
-    pub quota_window: Option<String>,
-    /// Quota used percentage
-    pub quota_used_percent: Option<f64>,
-    /// Quota remaining percentage
-    pub quota_remaining_percent: Option<f64>,
-    /// When quota resets
-    pub quota_reset_at: Option<String>,
     #[serde(default)]
     pub token_usage_unknown_reason: Option<String>,
-    #[serde(default)]
-    pub quota_unknown_reason: Option<String>,
 
     /// Issue #119: provenance-aware per-attempt behavior metrics. `None` means
     /// the metric was not present in the source telemetry (unknown), never a
