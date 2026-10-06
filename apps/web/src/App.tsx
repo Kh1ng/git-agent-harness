@@ -11,6 +11,8 @@ import { activityApi, gahApi } from './api/client.js';
 import type { DeviceAgentsSnapshot } from '@git-agent-harness/contracts';
 import { NotificationsMenu } from './components/NotificationsMenu.js';
 import { SubscriptionUsageMenu } from './components/SubscriptionUsageMenu.js';
+import { WorkingNowMenu } from './components/WorkingNowMenu.js';
+import { workingNow } from './lib/kanbanBoard.js';
 import { busySubscriptionIds, subscriptionUsage } from './lib/subscriptionUsage.js';
 import { useGahStore } from './store/gahStore.js';
 import { Maximize2, PanelRight, X } from 'lucide-react';
@@ -99,6 +101,11 @@ export function App() {
   const busySubscriptions = useMemo(() => busySubscriptionIds({ subscriptions, sessions, controllerRuns: controllerActivity, claims: statusSnapshot?.active_claims ?? [], recentLedger: statusSnapshot?.recent_ledger, factoryAgents: deviceAgents.data?.factory_agents }),
     [subscriptions, sessions, controllerActivity, statusSnapshot, deviceAgents.data]);
 
+  // The navbar's "Working on #…": live from controller runs, with whatever status and quota are already loaded.
+  const loopRunning = useGahStore((state) => state.loopStatus.data?.running ?? null);
+  const working = useMemo(() => workingNow({ status: statusSnapshot, quota: quota.data, controllerRuns: controllerActivity, factoryAgents: deviceAgents.data?.factory_agents ?? [], loopRunning, now: Date.now() }),
+    [statusSnapshot, quota.data, controllerActivity, deviceAgents.data, loopRunning]);
+
   /** Pages link to each other by name; a sidebar view opens in the sidebar. */
   const navigate = (page: Page) => {
     if (isSideView(page)) return setSideView(page);
@@ -179,7 +186,7 @@ export function App() {
       <Navbar currentPage={currentPage} sideView={sideView} onPageChange={navigate} activityUnreadCount={activityUnreadCount}
         chatOpen={isChatPage || chatDocked} onChatToggle={toggleChat}
         onImportProject={() => { requestAction('import'); expandChat(true); }} onCreateProject={() => { requestAction('create'); setSideView('profile'); }}
-        actions={<><SubscriptionUsageMenu subscriptions={subscriptions} busy={busySubscriptions} onOpenQuota={() => navigate('quota')} /><NotificationsMenu liveActivity={liveActivity} muted={sideView === 'events'} unreadCount={activityUnreadCount} revision={activityRevision} autoPopup={notificationPopups} /></>} />
+        actions={<><WorkingNowMenu jobs={working.jobs} agents={working.agents} onOpenBoard={() => navigate('kanban')} /><SubscriptionUsageMenu subscriptions={subscriptions} busy={busySubscriptions} onOpenQuota={() => navigate('quota')} /><NotificationsMenu liveActivity={liveActivity} muted={sideView === 'events'} unreadCount={activityUnreadCount} revision={activityRevision} autoPopup={notificationPopups} /></>} />
 
       {/* Left to right: icon strip, sidebar view, main panel, chat sidebar. */}
       <div className="flex min-h-0 flex-1">

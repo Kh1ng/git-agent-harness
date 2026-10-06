@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ArrowLeft, Check, KanbanSquare, X } from 'lucide-react';
+import { Check, KanbanSquare, X } from 'lucide-react';
 import type { DeviceAgentsSnapshot, ProviderKind } from '@git-agent-harness/contracts';
 import { generateProviderInstanceId } from '@git-agent-harness/shared';
 import { useWebSocket } from '../ws/WebSocketContext.js';
@@ -9,10 +9,9 @@ import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState, ErrorState, LoadingState } from '../components/ui/EmptyState.js';
-import { StatusBadge, type StatusTone } from '../components/ui/StatusBadge.js';
+import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { ExternalAnchor } from '../components/ExternalAnchor.js';
 import { formatAge, formatDuration } from '../lib/format.js';
-import { usageTone } from '../lib/subscriptionUsage.js';
 import { KANBAN_COLUMNS, backendLabel, buildKanban, whyNotRunning, type KanbanAgent, type KanbanBoard, type KanbanCard, type KanbanGate } from '../lib/kanbanBoard.js';
 
 const KANBAN_REFRESH_MS = 15 * 1000;
@@ -20,13 +19,6 @@ const KANBAN_REFRESH_MS = 15 * 1000;
 const DONE_SHOWN = 8;
 
 const CARD_EDGE: Record<KanbanCard['tone'], string> = { good: 'border-l-good', warning: 'border-l-warning', critical: 'border-l-critical', unknown: 'border-l-subtle' };
-const BAR_FILL: Record<ReturnType<typeof usageTone>, string> = { good: 'bg-good', warning: 'bg-warning', critical: 'bg-critical', unknown: 'bg-unknown' };
-const AGENT_STATE: Record<KanbanAgent['state'], { tone: StatusTone; label: string }> = {
-  working: { tone: 'good', label: 'Working' },
-  idle: { tone: 'unknown', label: 'Idle' },
-  unavailable: { tone: 'critical', label: 'Unavailable' }
-};
-
 function elapsed(card: KanbanCard, now: number): string | null {
   if (!card.since) return null;
   if (card.working) return `working ${formatDuration(Math.max(0, (now - Date.parse(card.since)) / 1000))}`;
@@ -122,45 +114,6 @@ function Gates({ gates }: { gates: KanbanGate[] }) {
   );
 }
 
-function AgentsPanel({ agents, onSelectCard }: { agents: KanbanAgent[]; onSelectCard: (key: string) => void }) {
-  return (
-    <section aria-label="Agents">
-      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Agents</h3>
-      {agents.length === 0 && <p className="card p-3 text-xs text-muted">No agent subscriptions reported yet.</p>}
-      <ul className="space-y-2">
-        {agents.map((agent) => {
-          const state = AGENT_STATE[agent.state];
-          const job = agent.jobs.find((item) => item.cardKey);
-          return (
-            <li key={agent.id} className="card p-3">
-              <div className="flex items-start justify-between gap-2">
-                <p className="min-w-0 break-words text-sm font-semibold text-primary">{agent.name}</p>
-                <StatusBadge tone={state.tone} label={state.label} />
-              </div>
-              <p className="mt-0.5 text-[11px] text-muted">
-                {agent.subscription}{agent.modes.length > 0 && ` · does ${agent.modes.join(', ')}`} · {agent.jobs.length} running
-              </p>
-              <p className="mt-1.5 text-xs text-secondary">
-                {job ? <button type="button" onClick={() => onSelectCard(job.cardKey!)} className="text-left hover:underline">{agent.reason}</button> : agent.reason}
-              </p>
-              {agent.usedPercent !== null ? (
-                <div className="mt-2">
-                  <div className="h-1.5 overflow-hidden rounded bg-raised" role="img" aria-label={`${Math.round(agent.usedPercent)}% of ${agent.usageLabel ?? 'allowance'} used`}>
-                    <div className={`h-full ${BAR_FILL[usageTone(agent.usedPercent)]}`} style={{ width: `${agent.usedPercent}%` }} />
-                  </div>
-                  <p className="mt-1 text-[11px] text-muted">
-                    {agent.usageLabel}: {Math.round(agent.usedPercent)}% used{agent.resetsIn && `, resets in ${agent.resetsIn}`}
-                  </p>
-                </div>
-              ) : <p className="mt-2 text-[11px] text-muted">No allowance reading</p>}
-            </li>
-          );
-        })}
-      </ul>
-    </section>
-  );
-}
-
 function Verdict({ ok, children }: { ok: boolean | null; children: ReactNode }) {
   const Icon = ok ? Check : X;
   return (
@@ -178,8 +131,8 @@ function WhyPanel({ board, card, now, onClose, onOpenWork, assign }: { board: Ka
   return (
     <section aria-label={heading}>
       <button type="button" onClick={onClose} className="mb-2 inline-flex items-center gap-1 text-xs text-secondary hover:text-primary">
-        <ArrowLeft size={13} aria-hidden="true" />
-        All agents
+        <X size={13} aria-hidden="true" />
+        Close
       </button>
       <div className="card p-3">
         <h3 className="text-sm font-semibold text-primary">{heading}</h3>
@@ -214,20 +167,18 @@ function WhyPanel({ board, card, now, onClose, onOpenWork, assign }: { board: Ka
   );
 }
 
-/** The board and its side panel, from an already derived board: no fetching here. */
+/** The board, and beside it the why-not answer for a selected card, from an already derived board: no fetching here. */
 export function KanbanView({ board, now, onOpenWork, assign }: { board: KanbanBoard; now: number; onOpenWork: (workId: string) => void; assign?: KanbanAssign }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const side = useRef<HTMLElement>(null);
   const selected = board.cards.find((card) => card.key === selectedKey) ?? null;
-  const select = (key: string) => {
-    setSelectedKey(key === selectedKey ? null : key);
-    // Below the board on a narrow screen: bring the answer into view.
-    if (key !== selectedKey) side.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  };
+  const select = (key: string) => setSelectedKey(key === selectedKey ? null : key);
+  // Below the board on a narrow screen: bring the answer into view.
+  useEffect(() => { if (selectedKey) side.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, [selectedKey]);
   return (
     <>
       <Gates gates={board.gates} />
-      <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
+      <div className={selected ? 'grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]' : ''}>
         <div className="flex items-start gap-3 overflow-x-auto pb-2" role="group" aria-label="Job board">
           {KANBAN_COLUMNS.map((column) => {
             const cards = board.cards.filter((card) => card.column === column.key);
@@ -251,11 +202,11 @@ export function KanbanView({ board, now, onOpenWork, assign }: { board: KanbanBo
             );
           })}
         </div>
-        <aside ref={side} className="min-w-0 xl:sticky xl:top-0">
-          {selected
-            ? <WhyPanel board={board} card={selected} now={now} onClose={() => setSelectedKey(null)} onOpenWork={onOpenWork} assign={assign} />
-            : <AgentsPanel agents={board.agents} onSelectCard={select} />}
-        </aside>
+        {selected && (
+          <aside ref={side} className="min-w-0 xl:sticky xl:top-0">
+            <WhyPanel board={board} card={selected} now={now} onClose={() => setSelectedKey(null)} onOpenWork={onOpenWork} assign={assign} />
+          </aside>
+        )}
       </div>
       {board.notPickedUp.length > 0 && (
         <details className="card mt-4 p-3">
@@ -280,7 +231,7 @@ type KanbanPageProps = {
   onOpenWork: (workId: string) => void;
 };
 
-/** One page for "what is running, what is not, and why": a job board beside the agents that could do the jobs. */
+/** One page for "what is running, what is not, and why": a job board whose cards each explain themselves. */
 export function KanbanPage({ deviceAgents, onOpenWork }: KanbanPageProps) {
   const { profile: wsProfile, controllerActivity, sendMessage, isConnected } = useWebSocket();
   const profileOverride = useUiStore((state) => state.profileOverride);
@@ -333,7 +284,7 @@ export function KanbanPage({ deviceAgents, onOpenWork }: KanbanPageProps) {
       <PageHeader title="Kanban" description="What is running, what is not, and why." onRefresh={() => refresh()} refreshing={status.loading} lastUpdated={status.fetchedAt} />
       {!snapshot && status.error ? <ErrorState message={status.error} endpoint="/api/status" onRetry={() => refresh()} />
         : !snapshot ? <LoadingState label="Loading the board…" />
-          : board.cards.length === 0 && board.agents.length === 0 ? <EmptyState icon={KanbanSquare} title="No jobs yet" description="Issues the factory accepts show up here as soon as it sees them." />
+          : board.cards.length === 0 ? <EmptyState icon={KanbanSquare} title="No jobs yet" description="Issues the factory accepts show up here as soon as it sees them." />
             : <KanbanView board={board} now={now} onOpenWork={onOpenWork} assign={assign} />}
     </div>
   );

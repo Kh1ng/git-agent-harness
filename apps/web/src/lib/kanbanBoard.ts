@@ -253,9 +253,23 @@ export function buildKanban(input: KanbanInput): KanbanBoard {
     const branch = runBranch(run);
     if (branch && run.work_id && !keyOfSlug.has(worktreeSlug(branch))) keyOfSlug.set(worktreeSlug(branch), workKey(run.work_id));
   }
-  const agentsOnCard = new Map<string, DeviceAgent[]>();
+  const keyOfProcess = new Map<number, string>();
   for (const agent of factoryAgents) {
     const key = keyOfSlug.get(cwdSlug(agent.cwd) ?? '');
+    if (key) keyOfProcess.set(agent.pid, key);
+  }
+  // A first build has no branch to match by: one unplaced process and one unplaced running job are each other's.
+  const runningByKey = new Map<string, ControllerActivity>();
+  for (const [key, keyRuns] of runsByKey) {
+    const running = keyRuns.find((run) => run.status === 'running');
+    if (running) runningByKey.set(key, running);
+  }
+  const strayProcesses = factoryAgents.filter((agent) => !keyOfProcess.has(agent.pid));
+  const strayKeys = [...runningByKey.keys()].filter((key) => ![...keyOfProcess.values()].includes(key));
+  if (strayProcesses.length === 1 && strayKeys.length === 1) keyOfProcess.set(strayProcesses[0].pid, strayKeys[0]);
+  const agentsOnCard = new Map<string, DeviceAgent[]>();
+  for (const agent of factoryAgents) {
+    const key = keyOfProcess.get(agent.pid);
     if (key) agentsOnCard.set(key, [...(agentsOnCard.get(key) ?? []), agent]);
   }
 
@@ -405,7 +419,7 @@ export function buildKanban(input: KanbanInput): KanbanBoard {
 
   return {
     cards,
-    agents: buildAgents(input, cards, factoryAgents, keyOfSlug),
+    agents: buildAgents(input, cards, factoryAgents, keyOfProcess, runningByKey),
     gates,
     notPickedUp: (status?.issue_intake_rejections ?? []).map((rejection) => ({ workId: rejection.work_id, title: rejection.title ?? rejection.ticket_path, reason: sentence(rejection.reason) }))
   };
@@ -422,7 +436,7 @@ function plainUnavailable(reason: string | null, until: string | null, now: numb
   return back && back !== 'now' ? `${why}; back in ${back}` : why;
 }
 
-function buildAgents(input: KanbanInput, cards: KanbanCard[], factoryAgents: DeviceAgent[], keyOfSlug: Map<string, string>): KanbanAgent[] {
+function buildAgents(input: KanbanInput, cards: KanbanCard[], factoryAgents: DeviceAgent[], keyOfProcess: Map<number, string>, runningByKey: Map<string, ControllerActivity>): KanbanAgent[] {
   const { quota, loopRunning, now, status } = input;
   const usage = new Map(subscriptionUsage(quota).map((subscription) => [subscription.id, subscription]));
   const cardByKey = new Map(cards.map((card) => [card.key, card]));
@@ -466,10 +480,14 @@ function buildAgents(input: KanbanInput, cards: KanbanCard[], factoryAgents: Dev
 
   for (const agent of agents.values()) {
     for (const process of factoryAgents.filter((item) => item.tool === agent.backend)) {
-      const card = cardByKey.get(keyOfSlug.get(cwdSlug(process.cwd) ?? '') ?? '');
+      const key = keyOfProcess.get(process.pid);
+      const card = cardByKey.get(key ?? '');
+      // Before the status snapshot loads there are no cards; the running job still names its issue.
+      const job = card?.job ?? (key && runningByKey.has(key) ? runJob(runningByKey.get(key)!) : null);
+      const name = card ? card.workId ?? card.title : key ?? cwdSlug(process.cwd) ?? 'a factory job';
       agent.jobs.push({
         cardKey: card?.key ?? null,
-        label: card ? `${card.workId ?? card.title}${card.job ? ` (${JOB_NOUN[card.job]})` : ''}` : cwdSlug(process.cwd) ?? 'a factory job',
+        label: `${name}${job ? ` (${JOB_NOUN[job]})` : ''}`,
         model: process.model ?? null,
         since: process.started_at
       });
@@ -489,6 +507,8 @@ function buildAgents(input: KanbanInput, cards: KanbanCard[], factoryAgents: Dev
       agent.reason = `Allowance used up${agent.resetsIn ? `; resets in ${agent.resetsIn}` : ''}`;
     } else if (loopRunning === false) {
       agent.reason = 'Idle: the loop is stopped';
+    } else if (!status) {
+      agent.reason = 'Idle';
     } else if (idleCards.length === 0) {
       agent.reason = 'Idle: no work is waiting';
     } else if (takeable.length === 0) {
@@ -526,4 +546,26 @@ export function whyNotRunning(board: KanbanBoard, card: KanbanCard): KanbanVerdi
     if (agent.state === 'working') return { agent, ok: false, verdict: `Busy: ${agent.reason.charAt(0).toLowerCase()}${agent.reason.slice(1)}` };
     return { agent, ok: true, verdict: 'Available' };
   });
+}
+
+export interface WorkingJob {
+  runId: string;
+  /** `#1367 (fix)` */
+  label: string;
+  workId: string | null;
+  /** Subscription and model, once its process is visible. */
+  agent: string | null;
+  since: string;
+}
+
+/** What the factory is doing right now, for the navbar: each running job, and each agent with why it is or is not working. */
+export function workingNow(input: KanbanInput): { jobs: WorkingJob[]; agents: KanbanAgent[] } {
+  const board = buildKanban(input);
+  const jobs = input.controllerRuns.filter((run) => run.status === 'running').map((run) => {
+    const job = runJob(run);
+    const workId = run.work_id ? workKey(run.work_id) : null;
+    const label = `${workId ?? runBranch(run) ?? run.action}${job ? ` (${JOB_NOUN[job]})` : ''}`;
+    return { runId: run.run_id, label, workId, agent: board.agents.find((agent) => agent.jobs.some((item) => item.label === label))?.name ?? null, since: run.started_at };
+  });
+  return { jobs, agents: board.agents };
 }

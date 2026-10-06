@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/experimental-ct-react';
 import type { AvailableTicket, ControllerActivity, DeviceAgent, MergeRequest, QuotaCandidateStatus, StatusSnapshot } from '@git-agent-harness/contracts';
-import { buildKanban, parseSkipped } from '../../src/lib/kanbanBoard.js';
+import { buildKanban, parseSkipped, workingNow, type KanbanInput } from '../../src/lib/kanbanBoard.js';
+import { WorkingNowMenu } from '../../src/components/WorkingNowMenu.js';
 import { KanbanView } from '../../src/pages/KanbanPage.js';
 
 const NOW = Date.parse('2026-10-05T18:30:00Z');
@@ -74,7 +75,7 @@ const controllerRuns: ControllerActivity[] = [
 
 const factoryAgents: DeviceAgent[] = [{ pid: 2, tool: 'claude', cwd: '/home/me/worktrees/gah-job-4', started_at: '2026-10-05T18:13:30Z', model: 'opus[1m]' }];
 
-const board = buildKanban({
+const input: KanbanInput = {
   status,
   quota: { candidates: [
     candidate('claude', 'sonnet', ['improve', 'review']),
@@ -85,7 +86,8 @@ const board = buildKanban({
   factoryAgents,
   loopRunning: true,
   now: NOW
-});
+};
+const board = buildKanban(input);
 
 test('reads each skipped route out of a deferred run', () => {
   expect(parseSkipped(controllerRuns[1].outcome)).toEqual([
@@ -112,17 +114,35 @@ test('every job sits in the column its records put it in, with a reason in plain
   await expect(component.getByText('Not picked up (1)')).toBeVisible();
 });
 
-test('the agents panel names the subscription, the exact model, and why an agent is idle', async ({ mount }) => {
-  const component = await mount(<KanbanView board={board} now={NOW} onOpenWork={() => {}} />);
-  const agents = component.getByRole('region', { name: 'Agents' }).getByRole('listitem');
+test('the navbar names the job in hand; hovering lists each agent with its exact model and why it is idle', async ({ mount }) => {
+  const { jobs, agents } = workingNow(input);
+  const component = await mount(<WorkingNowMenu jobs={jobs} agents={agents} onOpenBoard={() => {}} />);
+  const chip = component.getByRole('button', { name: /^Working on #4/ });
+  await expect(chip).toHaveText('Working on #4');
+  await chip.hover();
 
+  const menu = component.getByRole('dialog', { name: 'What the factory is doing now' });
   // The running process reports the exact model; the route only said `sonnet`.
-  await expect(agents.nth(0)).toContainText('Claude · opus[1m]');
-  await expect(agents.nth(0)).toContainText('Working on #4 (fix)');
-  await expect(agents.nth(1)).toContainText('Antigravity · Gemini 3.1 Pro (High)');
-  await expect(agents.nth(1)).toContainText("Free: picks up work on the loop's next pass");
-  await expect(agents.nth(2)).toContainText('Codex · gpt-6.1-sol');
-  await expect(agents.nth(2)).toContainText('Sign-in failed; it needs to be logged in again');
+  await expect(menu).toContainText('#4 (fix)');
+  await expect(menu).toContainText('Claude · opus[1m] · ');
+  const rows = menu.getByRole('listitem');
+  await expect(rows.nth(1)).toContainText('Working on #4 (fix)');
+  await expect(rows.nth(2)).toContainText('Antigravity · Gemini 3.1 Pro (High)');
+  await expect(rows.nth(2)).toContainText("Free: picks up work on the loop's next pass");
+  await expect(rows.nth(3)).toContainText('Codex · gpt-6.1-sol');
+  await expect(rows.nth(3)).toContainText('Sign-in failed; it needs to be logged in again');
+});
+
+test('before the status snapshot loads, the navbar still names the running job and its agent', () => {
+  const { jobs, agents } = workingNow({ ...input, status: null });
+  expect(jobs.map((job) => `${job.label} by ${job.agent}`)).toEqual(['#4 (fix) by Claude · opus[1m]']);
+  expect(agents.find((agent) => agent.backend === 'agy')?.reason).toBe('Idle');
+});
+
+test('the board has no agents panel: nothing sits beside it until a card is selected', async ({ mount }) => {
+  const component = await mount(<KanbanView board={board} now={NOW} onOpenWork={() => {}} />);
+  await expect(component.getByRole('region', { name: 'Agents' })).toHaveCount(0);
+  await expect(component.getByRole('complementary')).toHaveCount(0);
 });
 
 test('a waiting card answers why it is not running, agent by agent', async ({ mount }) => {
@@ -135,8 +155,8 @@ test('a waiting card answers why it is not running, agent by agent', async ({ mo
   await expect(why).toContainText('Antigravity · Gemini 3.1 Pro (High): Not set up for review jobs');
   await expect(why).toContainText('Codex · gpt-6.1-sol: Sign-in failed; it needs to be logged in again (gpt-6.1-sol)');
 
-  await why.getByRole('button', { name: 'All agents' }).click();
-  await expect(component.getByRole('region', { name: 'Agents' })).toBeVisible();
+  await why.getByRole('button', { name: 'Close' }).click();
+  await expect(why).toHaveCount(0);
 });
 
 test('a Needs you job can be handed to an agent that is available', async ({ mount }) => {
