@@ -345,6 +345,52 @@ fn validate_instance(
     }
 }
 
+impl RoutingPolicy {
+    /// Resolve billing from the current credential, including replacements made
+    /// after the route was configured. Persisted candidate flags can be stale.
+    pub(crate) fn normalize_subscription_candidates(
+        &mut self,
+        mut is_subscription: impl FnMut(&str) -> bool,
+    ) {
+        let instances: std::collections::HashSet<_> = self
+            .backend_instances
+            .iter()
+            .filter(|(_, instance)| instance.runner_kind == "claude")
+            .filter_map(|(id, instance)| {
+                instance
+                    .credential_id
+                    .as_deref()
+                    .filter(|credential| is_subscription(credential))
+                    .map(|_| id.clone())
+            })
+            .collect();
+        for candidate in self
+            .pm_candidates
+            .iter_mut()
+            .flatten()
+            .chain(self.improve_candidates.iter_mut().flatten())
+            .chain(self.review_candidates.iter_mut().flatten())
+            .chain(self.routine_reviewer.iter_mut())
+            .chain(self.escalatory_reviewers.iter_mut())
+            .chain(
+                self.task_routing_rules
+                    .iter_mut()
+                    .flat_map(|rule| rule.candidates.iter_mut()),
+            )
+        {
+            if candidate
+                .instance
+                .as_ref()
+                .is_some_and(|id| instances.contains(id))
+            {
+                candidate.included_in_quota = true;
+                candidate.requires_approval = false;
+                candidate.marginal_cost_usd = None;
+            }
+        }
+    }
+}
+
 fn all_candidates(routing: &RoutingPolicy) -> impl Iterator<Item = &CandidateConfig> {
     routing
         .labeled_candidates()
@@ -416,6 +462,8 @@ fn validate_cost(
     instance: &BackendInstanceConfig,
     errors: &mut Vec<String>,
 ) {
+    // Subscription-bound candidates need no check here: effective_routing()
+    // already normalized them via normalize_subscription_candidates (#1352).
     let label = format!(
         "{}/{}",
         candidate.backend,
@@ -458,6 +506,50 @@ mod tests {
     use super::*;
     use crate::config::tests::test_profile_for_notifications;
     use crate::runner::backends::test_util::make_fake_bin;
+
+    #[test]
+    fn credential_replacement_reclassifies_every_candidate_collection() {
+        let paid = CandidateConfig {
+            backend: "claude".into(),
+            instance: Some("account".into()),
+            requires_approval: true,
+            marginal_cost_usd: Some(0.5),
+            ..Default::default()
+        };
+        let mut stored = RoutingPolicy {
+            pm_candidates: Some(vec![paid.clone()]),
+            improve_candidates: Some(vec![paid.clone()]),
+            review_candidates: Some(vec![paid.clone()]),
+            routine_reviewer: Some(paid.clone()),
+            escalatory_reviewers: vec![paid.clone()],
+            task_routing_rules: vec![crate::config::TaskRoutingRule {
+                candidates: vec![paid],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        stored.backend_instances.insert(
+            "account".into(),
+            BackendInstanceConfig {
+                runner_kind: "claude".into(),
+                credential_id: Some("credential".into()),
+                ..Default::default()
+            },
+        );
+        let mut api = stored.clone();
+        api.normalize_subscription_candidates(|_| false);
+        assert!(all_candidates(&api)
+            .all(|candidate| candidate.requires_approval && !candidate.included_in_quota));
+        let mut subscription = stored.clone();
+        subscription.normalize_subscription_candidates(|id| id == "credential");
+        assert_eq!(all_candidates(&subscription).count(), 6);
+        assert!(
+            all_candidates(&subscription).all(|candidate| candidate.included_in_quota
+                && !candidate.requires_approval
+                && candidate.marginal_cost_usd.is_none())
+        );
+        assert!(all_candidates(&stored).all(|candidate| candidate.requires_approval));
+    }
 
     #[test]
     fn profile_registry_overrides_global_by_instance_key() {

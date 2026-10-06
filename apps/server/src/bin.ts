@@ -14,6 +14,7 @@ import { getProviderRegistry } from './provider/ProviderRegistry.js';
 import { RegistryService } from './registryService.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
 import { markReadinessCheck } from './serverReadiness.js';
+import { resolveWebRoot } from './webRoot.js';
 import {
   InvalidBindHostError,
   resolveBindHost,
@@ -95,6 +96,12 @@ async function main() {
     : undefined;
 
   const cliRouterQuotaObserver = node.role === 'central' ? createCliRouterQuotaObserver() : undefined;
+
+  // A central or standalone node serves the dashboard itself unless the
+  // operator pointed GAH_WEB_ROOT elsewhere or emptied it (#1327). A worker
+  // has no dashboard.
+  const webRoot = node.role === 'worker' ? null : resolveWebRoot(process.env.GAH_WEB_ROOT);
+  process.env.GAH_WEB_ROOT = webRoot ?? '';
 
   // Create Express app
   const app = createExpressServer({
@@ -183,6 +190,11 @@ async function main() {
     if (process.env.GAH_DISABLE_PRICE_REFRESH !== '1') startModelPriceRefresh(helperPriceExtractor('gah'), logLifecycle);
     console.log(`WebSocket server available on ws://${HOST}:${PORT}`);
     console.log(`Health check available on http://${HOST}:${PORT}/health`);
+    if (webRoot) {
+      console.log(`Dashboard served from ${webRoot}`);
+    } else if (node.role !== 'worker') {
+      console.warn('No dashboard is served: apps/web is not built and GAH_WEB_ROOT is not set. Run `gah update`, or set GAH_WEB_ROOT to a built web app.');
+    }
     const warning = networkExposureWarning(HOST);
     if (warning) {
       console.warn(warning);
