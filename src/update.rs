@@ -101,13 +101,19 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             ],
         )?;
         run_command(&repo, "npm", &["run", "build:server"])?;
-        run_command(&repo, "npm", &["run", "build:mcp-server"])?;
         if !repo.join("apps/server/dist/bin.js").is_file() {
             bail!("server build did not produce apps/server/dist/bin.js");
         }
-        if !repo.join("apps/mcp-server/dist/bin.js").is_file() {
-            bail!("MCP build did not produce apps/mcp-server/dist/bin.js");
+        // The MCP server is a Rust binary of this crate: `cargo install`
+        // above already placed it next to `gah`.
+        let mcp_server = binary.with_file_name("gah-mcp-server");
+        if !mcp_server.is_file() {
+            bail!(
+                "cargo install completed but expected executable is missing: {}",
+                mcp_server.display()
+            );
         }
+        println!("Installed MCP server: {}", mcp_server.display());
         println!(
             "Built server:  {}",
             repo.join("apps/server/dist/bin.js").display()
