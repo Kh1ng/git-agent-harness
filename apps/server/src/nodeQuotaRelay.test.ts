@@ -24,6 +24,87 @@ async function listen(server: http.Server): Promise<string> {
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
+test('relay accepts v2/v3 snapshots and rejects unsupported schema versions', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'gah-quota-schema-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let version = 2;
+  t.mock.method(globalThis, 'fetch', async () => {
+    const snapshot = { ...quota(), schema_version: version };
+    if (version === 3) {
+      snapshot.quota_checks = [
+        { backend: 'claude', status: 'auth_required', checked_at: '2026-10-04T08:30:00Z' },
+        { backend: 'vibe', status: 'not_configured' }
+      ];
+    }
+    return new Response(JSON.stringify(snapshot), { headers: { 'content-type': 'application/json' } });
+  });
+  for (const schemaVersion of [2, 3, 1, 4]) {
+    version = schemaVersion;
+    const registry = new RegistryService(join(directory, `registry-${version}.json`));
+    registry.registerNode({ node_id: 'worker', display_name: 'Worker', advertised_url: 'http://127.0.0.1:3773',
+      version: '0.1.2', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback', secret_ref: 'env:UNUSED', profiles: ['gah'] });
+    const node = (await registry.getNodeQuotas('gah', '7d')).nodes[0];
+    const supported = version === 2 || version === 3;
+    assert.equal(node.state, supported ? 'available' : 'unavailable');
+    assert.equal(node.quota?.schema_version ?? null, supported ? version : null);
+  }
+});
+
+/** #1336: worker snapshots now carry `auth_required` and `not_configured`
+ * source checks (and an optional `checked_at`/`failing_since`); central's
+ * relay must pass them through instead of dropping the worker as
+ * unavailable. */
+test('relay accepts auth_required and not_configured quota source checks', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'gah-quota-auth-required-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let failingSince = '2026-10-02T08:00:00Z';
+  const worker = http.createServer((_req, res) => {
+    const snapshot = quota();
+    snapshot.schema_version = 3;
+    snapshot.quota_checks = [
+      {
+        backend: 'claude',
+        backend_instance: 'claude',
+        provider: 'anthropic',
+        checked_at: '2026-10-04T08:30:00Z',
+        status: 'auth_required',
+        failing_since: failingSince,
+        error: 'auth_required: Claude OAuth login expired; run claude auth login'
+      },
+      {
+        backend: 'vibe',
+        provider: 'mistral',
+        status: 'not_configured',
+        error: 'no Mistral Admin API allowance source on this node'
+      }
+    ];
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(snapshot));
+  });
+  t.after(() => { worker.closeAllConnections(); worker.close(); });
+  const registry = new RegistryService(join(directory, 'registry.json'));
+  const workerUrl = await listen(worker);
+  registry.registerNode({ node_id: 'worker', display_name: 'Worker', advertised_url: workerUrl,
+    version: '0.1.2', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback', secret_ref: 'env:UNUSED', profiles: ['gah'] });
+  const node = (await registry.getNodeQuotas('gah', '7d')).nodes[0];
+  assert.equal(node.state, 'available');
+  assert.equal(node.quota?.schema_version, 3);
+  assert.equal(node.quota?.quota_checks.length, 2);
+  const auth = node.quota?.quota_checks.find((check) => check.backend === 'claude');
+  assert.equal(auth?.status, 'auth_required');
+  assert.equal(auth?.failing_since, '2026-10-02T08:00:00Z');
+  const missing = node.quota?.quota_checks.find((check) => check.backend === 'vibe');
+  assert.equal(missing?.status, 'not_configured');
+  assert.equal(missing?.checked_at, undefined);
+
+  // A streak start that is not a timestamp is invalid worker data.
+  failingSince = 'not a time';
+  const fresh = new RegistryService(join(directory, 'registry-malformed.json'));
+  fresh.registerNode({ node_id: 'worker', display_name: 'Worker', advertised_url: workerUrl,
+    version: '0.1.2', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback', secret_ref: 'env:UNUSED', profiles: ['gah'] });
+  assert.equal((await fresh.getNodeQuotas('gah', '7d')).nodes[0].state, 'unavailable');
+});
+
 test('relay preserves scoped dashboard consumption and rejects invalid or credential-bearing metadata', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'gah-quota-dashboard-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
