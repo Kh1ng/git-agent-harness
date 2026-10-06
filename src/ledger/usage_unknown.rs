@@ -12,11 +12,17 @@ pub enum UsageUnknownReason {
     UsageArtifactUnparsed,
 }
 
-/// Durable sinks share this boundary so early dispatch/control rows and
-/// current attempt records carry a reason for absent usage. Historical rows
-/// retain unknown telemetry rather than acquiring inferred facts during import.
+/// Durable sinks share this boundary so early dispatch rows and current
+/// attempt records carry a reason for absent usage. Historical rows retain
+/// unknown telemetry rather than acquiring inferred facts during import.
+/// Control/marker rows (`claim`, `clear_attempts`, `review_hold`, approval
+/// records, ...) never describe an execution, so they get no inferred reason;
+/// otherwise every dispatch's claim row would be counted as a run that never
+/// started on top of its real completion row.
 pub(super) fn annotate_unknown_usage(entry: &mut LedgerEntry) {
-    if entry.schema_version < super::LEDGER_SCHEMA_VERSION {
+    if entry.schema_version < super::LEDGER_SCHEMA_VERSION
+        || crate::job_kind::JobKind::parse(&entry.mode).is_err()
+    {
         return;
     }
     for attempt in &mut entry.attempts {
@@ -286,5 +292,28 @@ mod tests {
         let normalized = entry.normalized_for_persistence();
         assert_eq!(normalized.usage.usage_unknown_reason, None);
         assert_eq!(normalized.attempts[0].usage.usage_unknown_reason, None);
+    }
+}
+
+#[cfg(test)]
+mod control_row_tests {
+    use super::*;
+
+    #[test]
+    fn persistence_leaves_control_rows_without_reason() {
+        let prof = crate::ledger::test_util::profile();
+        for entry in [
+            LedgerEntry::new_claim("test", &prof, "TICKET-1"),
+            LedgerEntry::new_clear_attempts("test", &prof, "TICKET-1"),
+            LedgerEntry::new_review_hold("test", &prof, "TICKET-1", None),
+            LedgerEntry::new_review_hold_release("test", &prof, "TICKET-1"),
+        ] {
+            let normalized = entry.normalized_for_persistence();
+            assert_eq!(
+                normalized.usage.usage_unknown_reason, None,
+                "mode={}",
+                normalized.mode
+            );
+        }
     }
 }

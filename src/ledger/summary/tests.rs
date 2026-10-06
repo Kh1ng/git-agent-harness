@@ -964,3 +964,41 @@ fn usage_unknown_reasons_are_counted_without_mirroring_attempts() {
     assert_eq!(group.usage_unknown_reasons, summary.usage_unknown_reasons);
     assert_eq!(group.total_tokens, None);
 }
+
+#[test]
+fn control_rows_do_not_count_as_unknown_usage() {
+    let (_tmp, cfg) = test_config();
+    let prof = profile();
+    append(&cfg, &LedgerEntry::new_claim("test", &prof, "TICKET-1")).unwrap();
+    append(
+        &cfg,
+        &LedgerEntry::new_clear_attempts("test", &prof, "TICKET-1"),
+    )
+    .unwrap();
+    append(
+        &cfg,
+        &LedgerEntry::new_review_hold("test", &prof, "TICKET-1", None),
+    )
+    .unwrap();
+    let summary = build_summary(&cfg, "7d", Some("test"), GroupBy::None).unwrap();
+    assert!(
+        summary.usage_unknown_reasons.is_empty(),
+        "{:?}",
+        summary.usage_unknown_reasons
+    );
+
+    // The real dispatch row is still counted exactly once.
+    append(
+        &cfg,
+        &LedgerEntry::new("test", &prof, "vibe", "fix", "task", None, None),
+    )
+    .unwrap();
+    let summary = build_summary(&cfg, "7d", Some("test"), GroupBy::None).unwrap();
+    assert_eq!(
+        summary.usage_unknown_reasons,
+        std::collections::BTreeMap::from([(
+            crate::ledger::UsageUnknownReason::NoAttemptStarted,
+            1
+        )])
+    );
+}
