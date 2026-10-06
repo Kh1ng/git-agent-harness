@@ -7,6 +7,7 @@ use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
 mod repository;
+pub(crate) mod requested_changes;
 mod review_state;
 pub use repository::fetch_repository_mrs;
 pub(crate) use review_state::review_metadata_fingerprint;

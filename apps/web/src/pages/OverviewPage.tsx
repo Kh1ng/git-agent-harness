@@ -142,15 +142,16 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, onWa
         actions={
           profile && (
             <div className="flex items-center gap-2">
-              <StatusBadge tone={loopRunning ? 'good' : 'unknown'} label={loopRunning ? 'Loop running' : 'Loop stopped'} />
+              <StatusBadge tone={loopRunning ? 'good' : 'unknown'} label={loopRunning ? 'Factory on' : 'Factory off'} />
               <button
                 onClick={toggleLoop}
                 disabled={loopAction.pending || loopStatus.loading}
                 className={loopRunning ? 'btn-secondary text-critical border-critical/30' : 'btn-secondary'}
                 title={loopAction.error ?? undefined}
+                aria-label={loopRunning ? 'Turn factory off' : 'Turn factory on'}
               >
                 {loopRunning ? <Square size={14} aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
-                <span className="hidden sm:inline">{loopRunning ? 'Stop loop' : 'Start loop'}</span>
+                <span className="hidden sm:inline">{loopRunning ? 'Turn factory off' : 'Turn factory on'}</span>
               </button>
             </div>
           )
@@ -161,7 +162,7 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, onWa
       )}
       {lastDecision && (
         <p className="text-xs text-secondary -mt-4 break-words" title={formatLocalTime(lastDecision.timestamp) ?? lastDecision.timestamp}>
-          <span className="text-muted">Loop last decided {formatAge(lastDecision.timestamp)}: </span>
+          <span className="text-muted">Factory last decided {formatAge(lastDecision.timestamp)}: </span>
           <span className="font-mono">{lastDecision.kind.replace(/_/g, ' ')}</span>
           {lastDecision.work_id && <span className="font-mono"> {lastDecision.work_id}</span>}
           {' — '}{lastDecision.reason}

@@ -360,10 +360,6 @@ const MOCK_LEDGER_ENTRY = {
     requests_count: 1,
     estimated_cost_usd: 0.04,
     actual_cost_usd: null,
-    quota_window: null,
-    quota_used_percent: null,
-    quota_remaining_percent: null,
-    quota_reset_at: null
   }
 } satisfies LedgerEntry;
 
