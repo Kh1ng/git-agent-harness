@@ -218,10 +218,28 @@ where
         // explicit --model flag would be a standing bypass of the approval
         // gate this routing layer exists to enforce.
         if decision.effective_model.as_deref() != Some(model.as_str()) {
-            if let Some(candidate) = candidates.iter().find(|candidate| {
-                candidate.backend() == decision.effective_backend
-                    && candidate.model() == Some(model.as_str())
-            }) {
+            // On an allow-listed kind the model may be admitted by an entry
+            // for every model of the backend rather than by the entry that
+            // was selected; that entry's gates apply then.
+            let allow_listed = profile
+                .effective_routing(defaults)
+                .allowed_models_for(&mode)
+                .is_some();
+            let on_backend = || {
+                candidates
+                    .iter()
+                    .filter(|candidate| candidate.backend() == decision.effective_backend)
+            };
+            let gate = on_backend()
+                .find(|candidate| candidate.model() == Some(model.as_str()))
+                .or_else(|| {
+                    on_backend().find(|candidate| {
+                        allow_listed
+                            && candidate.model().is_none()
+                            && decision.effective_model.is_some()
+                    })
+                });
+            if let Some(candidate) = gate {
                 let exclude_attempted = is_genuine_agent_failure(last_failure_class)
                     || !runtime.attempted.is_empty()
                     || !runtime.dispatch_attempted.is_empty();
@@ -323,14 +341,35 @@ where
     let requested_model = req.requested_model.map(str::to_string);
     let effective_routing = profile.effective_routing(defaults);
 
+    // A restriction that cannot be applied as written stops routing: letting
+    // the job run unrestricted is the one outcome the operator ruled out.
+    if let Some(error) = effective_routing.allowed_model_errors().first() {
+        anyhow::bail!("{error}; fix the profile's routing.allowed_models before dispatching");
+    }
     let allowed_models = effective_routing.allowed_models_for(req.mode);
 
     if req.requested_backend != "auto" {
-        if !effective_routing.allows_model(req.mode, req.requested_backend, req.requested_model) {
+        // `--backend codex` with no model runs whatever the profile's
+        // backend args pin, so that is the model the list is asked about.
+        let pinned_model = match req.requested_backend {
+            _ if req.requested_model.is_some() || allowed_models.is_none() => None,
+            "codex" => runner::extract_model_from_backend_args("codex", &profile.codex_args),
+            "opencode" => {
+                runner::extract_model_from_backend_args("opencode", &profile.opencode_args)
+            }
+            "claude" => runner::extract_model_from_backend_args("claude", &profile.claude_args),
+            _ => None,
+        };
+        let requested_model = requested_model.or(pinned_model);
+        if !effective_routing.allows_model(
+            req.mode,
+            req.requested_backend,
+            requested_model.as_deref(),
+        ) {
             anyhow::bail!(
                 "{}/{} is not in routing.allowed_models for {} jobs on this profile",
                 req.requested_backend,
-                req.requested_model.unwrap_or("default"),
+                requested_model.as_deref().unwrap_or("default"),
                 req.mode
             );
         }
@@ -438,13 +477,22 @@ where
             order_candidates(profile, candidates, escalate, runtime, req.mode);
         let preferred = candidates.first().cloned().expect("non-empty list");
         let candidates_for_diagnostics = candidates.clone();
+        // An allow-listed kind has nowhere else to go. Once every listed
+        // route has been tried it runs them again instead of ending as "no
+        // eligible backend"; a busy, exhausted or unapproved route is still
+        // skipped, and that is what makes the job wait.
+        let every_route_tried = allowed_models.is_some()
+            && candidates.iter().all(|candidate| {
+                let key = CandidateIdentity::from_execution_identity(&candidate.identity);
+                runtime.attempted.contains(&key) || runtime.dispatch_attempted.contains(&key)
+            });
         let (selected, skipped) = pick_route_candidate(
             candidates,
             &evaluation,
             &profile.max_concurrent_per_model,
             backend_available,
             runtime,
-            escalate,
+            escalate && !every_route_tried,
             &profile.effective_routing(defaults),
         )?;
 

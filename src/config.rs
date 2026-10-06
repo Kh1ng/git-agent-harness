@@ -478,7 +478,7 @@ pub fn check_profile_candidate_model_consistency(
         }
     }
 
-    let mut errors = routing.unknown_allowed_model_kinds();
+    let mut errors = routing.allowed_model_errors();
     for (label, candidate) in candidates {
         let args = match candidate.backend.as_str() {
             "codex" => &profile.codex_args,

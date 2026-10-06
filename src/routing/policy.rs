@@ -569,12 +569,11 @@ pub(super) fn configured_route_requires_approval(
             .any(|candidate| matches(candidate) && candidate.requires_approval)
     });
 
-    let allowed_models_require_approval =
-        routing.allowed_models_for(mode).is_some_and(|candidates| {
-            candidates
-                .iter()
-                .any(|candidate| matches(candidate) && candidate.requires_approval)
-        });
+    // The entry that admits the route decides its approval, including an
+    // entry that admits every model of the backend.
+    let allowed_models_require_approval = routing
+        .allowed_entry(mode, backend, model)
+        .is_some_and(|entry| entry.requires_approval);
 
     mode_candidates_require_approval
         || allowed_models_require_approval
@@ -760,11 +759,20 @@ pub(super) fn configured_route_candidate(
     };
 
     // For an allow-listed kind the allow-list IS that kind's candidate pool,
-    // so its entry metadata is authoritative on the explicit route too.
-    let configured = routing
-        .allowed_models_for(mode)
-        .and_then(|list| list.iter().find(matches))
-        .or_else(|| mode_candidates.into_iter().flatten().find(matches))
+    // so the entry that admits the route supplies its approval, billing and
+    // instance on the explicit route too. An entry for every model of the
+    // backend runs the model that was asked for.
+    if let Some(entry) = routing.allowed_entry(mode, backend, model) {
+        let entry = crate::config::CandidateConfig {
+            model: model.map(str::to_string),
+            ..entry.clone()
+        };
+        return route_candidates(routing, std::slice::from_ref(&entry)).pop();
+    }
+    let configured = mode_candidates
+        .into_iter()
+        .flatten()
+        .find(matches)
         .or_else(|| {
             routing
                 .pm_candidates

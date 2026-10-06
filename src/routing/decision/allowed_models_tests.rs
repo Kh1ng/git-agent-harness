@@ -143,10 +143,10 @@ fn an_entry_without_a_model_allows_every_model_of_that_backend() {
 #[test]
 fn an_unknown_job_kind_is_a_config_error() {
     let mut profile = profile();
-    profile
-        .routing
-        .allowed_models
-        .insert("dispatch_ticket".into(), vec![]);
+    profile.routing.allowed_models.insert(
+        "dispatch_ticket".into(),
+        vec![candidate_config("claude", Some("opus"), None)],
+    );
 
     let errors = crate::config::check_profile_candidate_model_consistency(&defaults(), &profile)
         .unwrap_err();
@@ -154,6 +154,182 @@ fn an_unknown_job_kind_is_a_config_error() {
         errors,
         ["routing.allowed_models: unknown job kind 'dispatch_ticket'"]
     );
+
+    // The operator meant to restrict something. Until the key is fixed no
+    // job on this profile is routed, restricted kind or not.
+    let tmp = TempDir::new().unwrap();
+    let err = decide(&profile, request("improve", "auto", None), &tmp).unwrap_err();
+    assert!(err.to_string().contains("unknown job kind"), "{err}");
+}
+
+#[test]
+fn a_backend_level_entry_keeps_its_approval_gate_for_a_named_model() {
+    // `--backend claude --model opus` is admitted by the entry for every
+    // claude model, so that entry's approval requirement applies to it.
+    let tmp = TempDir::new().unwrap();
+    let mut profile = profile();
+    let mut entry = candidate_config("claude", None, Some("claude-team"));
+    entry.requires_approval = true;
+    profile
+        .routing
+        .allowed_models
+        .insert("review".into(), vec![entry]);
+
+    let err = decide(&profile, request("review", "claude", Some("opus")), &tmp).unwrap_err();
+    assert!(matches!(
+        err.downcast_ref::<RouteError>(),
+        Some(RouteError::ApprovalRequired { backend, model, .. })
+            if backend == "claude" && model.as_deref() == Some("opus")
+    ));
+
+    let mut runtime = RoutingRuntimeState::default();
+    runtime
+        .approved
+        .insert(CandidateIdentity::new("claude", Some("opus")));
+    let decision = decide_with_runtime(
+        &defaults(),
+        &profile,
+        request("review", "claude", Some("opus")),
+        &runtime,
+        &path(&tmp),
+        OffsetDateTime::now_utc(),
+        backend_available,
+    )
+    .unwrap();
+    assert_eq!(decision.effective_model.as_deref(), Some("opus"));
+    assert_eq!(
+        decision.effective_quota_pool.as_deref(),
+        Some("claude-team")
+    );
+}
+
+#[test]
+fn fix_jobs_are_held_to_the_improve_list() {
+    // A retry or escalation of an improve job is dispatched as `fix`.
+    let tmp = TempDir::new().unwrap();
+    let mut profile = opus_only_review_profile();
+    profile.routing.allowed_models.insert(
+        "improve".into(),
+        vec![candidate_config("claude", Some("opus"), None)],
+    );
+
+    let fix = decide(&profile, request("fix", "auto", None), &tmp).unwrap();
+    assert_eq!(fix.effective_model.as_deref(), Some("opus"));
+    decide(&profile, request("fix", "claude", Some("sonnet")), &tmp).unwrap_err();
+
+    // A `fix` list of its own wins.
+    profile.routing.allowed_models.insert(
+        "fix".into(),
+        vec![candidate_config("claude", Some("sonnet"), None)],
+    );
+    let fix = decide(&profile, request("fix", "auto", None), &tmp).unwrap();
+    assert_eq!(fix.effective_model.as_deref(), Some("sonnet"));
+}
+
+#[test]
+fn the_implement_alias_restricts_improve_jobs() {
+    let tmp = TempDir::new().unwrap();
+    let mut profile = opus_only_review_profile();
+    profile.routing.allowed_models.insert(
+        "implement".into(),
+        vec![candidate_config("claude", Some("opus"), None)],
+    );
+
+    let improve = decide(&profile, request("improve", "auto", None), &tmp).unwrap();
+    assert_eq!(improve.effective_model.as_deref(), Some("opus"));
+
+    // Two keys for one kind are ambiguous, so they are an error.
+    profile.routing.allowed_models.insert(
+        "improve".into(),
+        vec![candidate_config("claude", Some("sonnet"), None)],
+    );
+    let err = decide(&profile, request("improve", "auto", None), &tmp).unwrap_err();
+    assert!(err.to_string().contains("repeats the list"), "{err}");
+}
+
+#[test]
+fn a_one_model_list_retries_that_model_after_a_failed_attempt() {
+    let tmp = TempDir::new().unwrap();
+    let profile = opus_only_review_profile();
+    let mut runtime = RoutingRuntimeState::default();
+    runtime
+        .attempted
+        .insert(CandidateIdentity::new("claude", Some("opus")));
+    let mut req = request("review", "auto", None);
+    req.last_failure_class = Some("agent_failure");
+
+    let decision = decide_with_runtime(
+        &defaults(),
+        &profile,
+        req,
+        &runtime,
+        &path(&tmp),
+        OffsetDateTime::now_utc(),
+        backend_available,
+    )
+    .unwrap();
+    assert_eq!(decision.effective_backend, "claude");
+    assert_eq!(decision.effective_model.as_deref(), Some("opus"));
+}
+
+#[test]
+fn an_entry_pinned_to_an_instance_does_not_admit_another_instance() {
+    let candidate = |instance: Option<&str>| crate::config::CandidateConfig {
+        backend: "claude".into(),
+        model: Some("opus".into()),
+        instance: instance.map(str::to_string),
+        ..crate::config::CandidateConfig::default()
+    };
+    let routing = RoutingPolicy {
+        allowed_models: [("review".into(), vec![candidate(Some("claude-work"))])].into(),
+        ..RoutingPolicy::default()
+    };
+
+    assert!(routing.allows_candidate("review", &candidate(Some("claude-work"))));
+    assert!(!routing.allows_candidate("review", &candidate(Some("claude-personal"))));
+    assert!(!routing.allows_candidate("review", &candidate(None)));
+    // The instance is not declared, which doctor and routing both report.
+    assert_eq!(
+        routing.allowed_model_errors(),
+        ["routing.allowed_models.review: backend instance 'claude-work' is not declared"]
+    );
+}
+
+#[test]
+fn an_empty_profile_list_does_not_lift_a_canonical_restriction() {
+    let defaults = RoutingPolicy {
+        allowed_models: [(
+            "review".into(),
+            vec![candidate_config("claude", Some("opus"), None)],
+        )]
+        .into(),
+        ..RoutingPolicy::default()
+    };
+    let profile = RoutingPolicy {
+        allowed_models: [("review".into(), vec![])].into(),
+        ..RoutingPolicy::default()
+    };
+
+    let merged = profile.merged_with_defaults(&defaults);
+    assert!(merged.allows_model("review", "claude", Some("opus")));
+    assert!(!merged.allows_model("review", "codex", Some("gpt-4")));
+}
+
+#[test]
+fn a_backend_with_no_model_asked_is_checked_against_its_pinned_model() {
+    let tmp = TempDir::new().unwrap();
+    let mut profile = profile();
+    profile.codex_args = vec!["--model".into(), "gpt-4".into()];
+    profile.routing.allowed_models.insert(
+        "review".into(),
+        vec![candidate_config("codex", Some("gpt-4"), None)],
+    );
+
+    let decision = decide(&profile, request("review", "codex", None), &tmp).unwrap();
+    assert_eq!(decision.effective_model.as_deref(), Some("gpt-4"));
+
+    profile.codex_args = vec!["--model".into(), "gpt-other".into()];
+    decide(&profile, request("review", "codex", None), &tmp).unwrap_err();
 }
 
 #[test]

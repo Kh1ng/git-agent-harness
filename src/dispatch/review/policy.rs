@@ -450,7 +450,7 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
     let candidates = routing
         .effective_escalatory_reviewers()
         .into_iter()
-        .filter(|c| routing.allows_model("review", &c.backend, c.model.as_deref()))
+        .filter(|c| routing.allows_candidate("review", c))
         .collect();
     pick_next_untried(state_path, candidates, profile, &attempted)
 }
