@@ -497,7 +497,9 @@ fn claude_instance_probes(config: &crate::config::GahConfig) -> Vec<AuthProbe> {
                 Ok(_) => None,
                 Err(_) => Some(AuthHealth::new(
                     AuthState::Missing,
-                    Some("The bound Claude subscription token is not saved on this node."),
+                    Some(&format!(
+                        "Bound credential '{credential}' is not saved on this node."
+                    )),
                 )),
             };
         }
@@ -739,7 +741,7 @@ mod tests {
                 )),
                 Some("missing-token") => Some(AuthHealth::new(
                     AuthState::Missing,
-                    Some("The bound Claude subscription token is not saved on this node."),
+                    Some("Bound credential 'missing-token' is not saved on this node."),
                 )),
                 Some("api-key") => None,
                 Some(other) => panic!("unexpected credential {other}"),
