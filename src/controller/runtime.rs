@@ -202,6 +202,29 @@ pub fn node_total_memory_bytes() -> Option<u64> {
         .map(|pressure| pressure.memory_total_bytes)
 }
 
+/// What admission measures against on this node, for the Settings page to
+/// show beside the limits. `None` where the platform does not expose it.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct NodeResources {
+    pub memory_total_mib: u64,
+    pub memory_available_mib: u64,
+    pub logical_cpus: usize,
+    pub load_one: f64,
+    /// Inside WSL the totals are what Windows grants the VM, not the host's.
+    pub wsl: bool,
+}
+
+pub fn node_resources() -> Option<NodeResources> {
+    let pressure = node_capacity::sample().ok()?;
+    Some(NodeResources {
+        memory_total_mib: pressure.memory_total_bytes / (1024 * 1024),
+        memory_available_mib: pressure.memory_available_bytes / (1024 * 1024),
+        logical_cpus: pressure.logical_cpus,
+        load_one: pressure.load_one,
+        wsl: std::env::var_os("WSL_DISTRO_NAME").is_some(),
+    })
+}
+
 /// Announce node-capacity settings when they change, not on every ~30s
 /// iteration -- an unattended loop would otherwise repeat the same line
 /// about 2,880 times a day (review of #1383). A fresh process (`--once`,

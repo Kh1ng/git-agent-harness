@@ -126,6 +126,9 @@ test('config set args deduplicate clear values and use the CLI config flag', () 
 });
 
 test('node capacity fields travel through config set arguments', () => {
+  assert.deepEqual(buildConfigSetArgs({ worker_cpu_cores: 1, cpu_ceiling_percent: 150 }), [
+    'config', 'set', '--worker-cpu-cores', '1', '--cpu-ceiling-percent', '150',
+  ]);
   assert.deepEqual(buildConfigSetArgs({ worker_memory_mib: 1536, memory_floor_mib: 768 }), [
     'config', 'set', '--worker-memory-mib', '1536', '--memory-floor-mib', '768',
   ]);

@@ -13,8 +13,8 @@ import { SkillBankSettingsSection } from '../components/SkillBankSettingsSection
 import { StatusBadge } from '../components/ui/StatusBadge.js';
 import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
 import { gahApi, backendInstancesApi, GahApiError } from '../api/client.js';
-import type { ConfigSetData, NotificationSettingsSummary, NodeCapacitySettings } from '@git-agent-harness/contracts';
-import { NODE_CAPACITY_MIN_MIB, NODE_CAPACITY_DEFAULTS } from '@git-agent-harness/contracts';
+import type { ConfigSetData, NotificationSettingsSummary, NodeCapacitySettings, NodeResources } from '@git-agent-harness/contracts';
+import { NODE_CAPACITY_MIN_MIB, NODE_CAPACITY_DEFAULTS, NODE_CAPACITY_CPU_LIMITS } from '@git-agent-harness/contracts';
 import type { ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, AdminUpdatePendingInfo, AdminUpdateState, BackendInstanceSummary, HelperRoutePreference, ManagerModelInfo } from '@git-agent-harness/contracts';
 
 const SETTINGS_REFRESH_MS = 60 * 1000;
@@ -302,6 +302,7 @@ interface GlobalManagerSectionProps {
     data: {
       current_manager: string | null;
       node_capacity?: NodeCapacitySettings;
+      node_resources?: NodeResources;
       notifications?: NotificationSettingsSummary;
     } | null;
     loading: boolean;
@@ -311,39 +312,103 @@ interface GlobalManagerSectionProps {
   clearConfigErrors: () => void;
 }
 
+/** A whole number in `[min, max]` from form text; NaN for blank or invalid
+ * text, so an empty field never validates as zero (review of #1383). */
+function wholeIn(text: string, min: number, max = Number.MAX_SAFE_INTEGER): number {
+  const value = text.trim() === '' ? Number.NaN : Number(text);
+  return Number.isSafeInteger(value) && value >= min && value <= max ? value : Number.NaN;
+}
+
+/**
+ * How much of the machine the factory may take: the memory and CPU each
+ * coding job reserves, and how full the machine may get. Shown with what
+ * the machine has, and how many coding jobs the entered values allow.
+ */
 function NodeCapacitySection({ config, setConfig }: Pick<GlobalManagerSectionProps, 'config' | 'setConfig'>) {
   const nodeCapacity = config.data?.node_capacity;
+  const resources = config.data?.node_resources;
   const [worker, setWorker] = useState('');
   const [floor, setFloor] = useState('');
+  const [cores, setCores] = useState('');
+  const [ceiling, setCeiling] = useState('');
+  // A CLI that predates the CPU settings reports only the memory pair.
+  const cpuKnown = nodeCapacity?.worker_cpu_cores !== undefined && nodeCapacity?.cpu_ceiling_percent !== undefined;
   useEffect(() => {
     setWorker(nodeCapacity ? String(nodeCapacity.worker_memory_mib) : '');
     setFloor(nodeCapacity ? String(nodeCapacity.memory_floor_mib) : '');
-  }, [nodeCapacity?.worker_memory_mib, nodeCapacity?.memory_floor_mib]);
-  // Number('') is 0, which would silently validate as the adaptive floor;
-  // empty input must stay invalid instead (review of #1383).
-  const workerValue = worker.trim() === '' ? Number.NaN : Number(worker);
-  const floorValue = floor.trim() === '' ? Number.NaN : Number(floor);
+    setCores(nodeCapacity?.worker_cpu_cores !== undefined ? String(nodeCapacity.worker_cpu_cores) : '');
+    setCeiling(nodeCapacity?.cpu_ceiling_percent !== undefined ? String(nodeCapacity.cpu_ceiling_percent) : '');
+  }, [nodeCapacity?.worker_memory_mib, nodeCapacity?.memory_floor_mib, nodeCapacity?.worker_cpu_cores, nodeCapacity?.cpu_ceiling_percent]);
+  const workerValue = wholeIn(worker, NODE_CAPACITY_MIN_MIB);
+  const floorValue = floor.trim() === '0' ? 0 : wholeIn(floor, NODE_CAPACITY_MIN_MIB);
+  const coresValue = wholeIn(cores, ...NODE_CAPACITY_CPU_LIMITS.cores);
+  const ceilingValue = wholeIn(ceiling, ...NODE_CAPACITY_CPU_LIMITS.ceiling_percent);
   // Without loaded values (older CLI/server, failed load) the section must
   // not offer defaults for one-click saving: that would overwrite custom
   // values with the defaults (review of #1383).
   const loaded = nodeCapacity !== undefined;
-  const valid = loaded
-    && Number.isSafeInteger(workerValue) && workerValue >= NODE_CAPACITY_MIN_MIB
-    && Number.isSafeInteger(floorValue) && (floorValue === 0 || floorValue >= NODE_CAPACITY_MIN_MIB);
+  const memoryValid = !Number.isNaN(workerValue) && !Number.isNaN(floorValue);
+  const cpuValid = !cpuKnown || (!Number.isNaN(coresValue) && !Number.isNaN(ceilingValue));
+  const valid = loaded && memoryValid && cpuValid;
+
+  // The same sums admission does, for an otherwise idle machine.
+  const fit = resources && valid ? {
+    memory: Math.floor((resources.memory_total_mib - (floorValue === 0 ? Math.max(2048, resources.memory_total_mib / 6) : floorValue)) / workerValue),
+    cpu: cpuKnown ? Math.floor(Math.max(1, resources.logical_cpus * ceilingValue / 100) / coresValue) : null
+  } : null;
+  const inputClass = 'w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary';
+  const gib = (mib: number) => (mib / 1024).toFixed(1);
+
   return (
-    <section className="card-padded max-w-md">
-      <h3 className="text-sm font-semibold text-primary mb-1">Node memory capacity</h3>
-      <p className="text-xs text-muted mb-3">Lowering these values raises the risk of the node running out of memory.</p>
+    <section className="card-padded max-w-md" aria-labelledby="node-capacity-title">
+      <h3 id="node-capacity-title" className="text-sm font-semibold text-primary mb-1">Machine capacity</h3>
+      <p className="text-xs text-muted mb-3">
+        How much of this machine coding jobs may take. Smaller reservations and a higher CPU limit run more jobs at
+        once, with more risk of the machine running short.
+      </p>
+
+      {resources && (
+        <div className="mb-3 rounded-md border border-subtle bg-raised px-3 py-2 text-xs text-secondary" role="status">
+          <p>This machine: <span className="text-primary">{gib(resources.memory_total_mib)} GB</span> memory ({gib(resources.memory_available_mib)} GB free), <span className="text-primary">{resources.logical_cpus}</span> CPUs, load {resources.load_one.toFixed(1)}.</p>
+          {resources.wsl && <p className="mt-1 text-muted">This is what Windows gives WSL, not the whole PC. Raising it is a <code>.wslconfig</code> change on the Windows side.</p>}
+          {fit && (
+            <p className="mt-1">
+              With these values: up to <span className="text-primary">{Math.max(0, fit.memory)}</span> coding jobs by memory
+              {fit.cpu !== null && <> and <span className="text-primary">{fit.cpu}</span> by CPU when nothing else is running</>}.
+            </p>
+          )}
+        </div>
+      )}
+
       <label className="block text-xs font-medium text-secondary mb-1" htmlFor="worker-memory-mib">Implementation worker reservation (MiB)</label>
-      <input id="worker-memory-mib" type="number" min={NODE_CAPACITY_MIN_MIB} step={1} value={worker} placeholder={String(NODE_CAPACITY_DEFAULTS.worker_memory_mib)} disabled={!loaded} onChange={(event) => setWorker(event.target.value)} className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary" />
+      <input id="worker-memory-mib" type="number" min={NODE_CAPACITY_MIN_MIB} step={1} value={worker} placeholder={String(NODE_CAPACITY_DEFAULTS.worker_memory_mib)} disabled={!loaded} onChange={(event) => setWorker(event.target.value)} className={inputClass} />
       <p className="text-xs text-muted mt-1 mb-3">Default: {NODE_CAPACITY_DEFAULTS.worker_memory_mib} MiB per implementation, fix, retry, or escalation worker.</p>
       <label className="block text-xs font-medium text-secondary mb-1" htmlFor="memory-floor-mib">Free memory floor (MiB)</label>
-      <input id="memory-floor-mib" type="number" min={0} step={1} value={floor} placeholder={String(NODE_CAPACITY_DEFAULTS.memory_floor_mib)} disabled={!loaded} onChange={(event) => setFloor(event.target.value)} className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary" />
-      <p className="text-xs text-muted mt-1">Default: 0 uses max(2048 MiB, total memory / 6). An explicit floor must be at least {NODE_CAPACITY_MIN_MIB} MiB.</p>
+      <input id="memory-floor-mib" type="number" min={0} step={1} value={floor} placeholder={String(NODE_CAPACITY_DEFAULTS.memory_floor_mib)} disabled={!loaded} onChange={(event) => setFloor(event.target.value)} className={inputClass} />
+      <p className="text-xs text-muted mt-1 mb-3">Default: 0 uses max(2048 MiB, total memory / 6). An explicit floor must be at least {NODE_CAPACITY_MIN_MIB} MiB.</p>
+
+      {cpuKnown && (
+        <>
+          <label className="block text-xs font-medium text-secondary mb-1" htmlFor="worker-cpu-cores">CPUs reserved per coding job</label>
+          <input id="worker-cpu-cores" type="number" min={NODE_CAPACITY_CPU_LIMITS.cores[0]} max={NODE_CAPACITY_CPU_LIMITS.cores[1]} step={1} value={cores} onChange={(event) => setCores(event.target.value)} className={inputClass} />
+          <p className="text-xs text-muted mt-1 mb-3">Default: {NODE_CAPACITY_DEFAULTS.worker_cpu_cores}. Reviews and merges reserve less and are not affected.</p>
+          <label className="block text-xs font-medium text-secondary mb-1" htmlFor="cpu-ceiling-percent">CPU limit (% of this machine's CPUs)</label>
+          <input id="cpu-ceiling-percent" type="number" min={NODE_CAPACITY_CPU_LIMITS.ceiling_percent[0]} max={NODE_CAPACITY_CPU_LIMITS.ceiling_percent[1]} step={1} value={ceiling} onChange={(event) => setCeiling(event.target.value)} className={inputClass} />
+          <p className="text-xs text-muted mt-1">
+            Default: {NODE_CAPACITY_DEFAULTS.cpu_ceiling_percent}. Another job waits while load plus reservations would pass this. Above 100 allows
+            more jobs than CPUs, which suits agents that mostly wait on their model.
+          </p>
+        </>
+      )}
+
       {!loaded && <p role="status" className="text-xs text-muted mt-2">Node capacity settings are unavailable from this server or CLI version; update it to manage them here.</p>}
-      {loaded && !valid && <p role="alert" className="text-xs text-critical mt-2">Enter whole MiB values: worker at least {NODE_CAPACITY_MIN_MIB}; floor 0 or at least {NODE_CAPACITY_MIN_MIB}.</p>}
+      {loaded && !memoryValid && <p role="alert" className="text-xs text-critical mt-2">Enter whole MiB values: worker at least {NODE_CAPACITY_MIN_MIB}; floor 0 or at least {NODE_CAPACITY_MIN_MIB}.</p>}
+      {loaded && !cpuValid && <p role="alert" className="text-xs text-critical mt-2">Enter whole numbers: CPUs per job {NODE_CAPACITY_CPU_LIMITS.cores[0]} to {NODE_CAPACITY_CPU_LIMITS.cores[1]}; CPU limit {NODE_CAPACITY_CPU_LIMITS.ceiling_percent[0]} to {NODE_CAPACITY_CPU_LIMITS.ceiling_percent[1]}.</p>}
       {config.error && <p role="alert" className="text-xs text-critical mt-2">Error: {config.error}</p>}
-      <button onClick={() => setConfig({ worker_memory_mib: workerValue, memory_floor_mib: floorValue })} disabled={!valid || config.loading} className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed">Save node capacity</button>
+      <button
+        onClick={() => setConfig({ worker_memory_mib: workerValue, memory_floor_mib: floorValue, ...(cpuKnown ? { worker_cpu_cores: coresValue, cpu_ceiling_percent: ceilingValue } : {}) })}
+        disabled={!valid || config.loading}
+        className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed">Save node capacity</button>
     </section>
   );
 }
