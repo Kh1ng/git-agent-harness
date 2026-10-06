@@ -6,8 +6,10 @@ use std::{collections::HashMap, path::PathBuf};
 
 mod backend_instances;
 mod merge_policy;
+mod node_capacity;
 pub use backend_instances::*;
 pub use merge_policy::MergePolicy;
+pub use node_capacity::NodeCapacitySettings;
 mod backend_paths;
 mod issue_intake;
 pub use issue_intake::IssueIntakeMode;
@@ -45,6 +47,7 @@ pub struct Defaults {
     pub llm_model_local: String,
     pub llm_model_cloud: String,
     pub routing: RoutingPolicy,
+    pub node_capacity: NodeCapacitySettings,
     /// Global manager CLI ("claude" | "codex" | "hermes") across all projects.
     /// `Profile::manager_wake_autonomy` uses it for notify-worthy events;
     /// `None`/unrecognized means no wake, even when profile autonomy is enabled.
@@ -518,6 +521,9 @@ pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let mut cfg: GahConfig =
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    // Invalid values must not lock the operator out of the config; the
+    // rationale lives on NodeCapacitySettings::sanitized.
+    cfg.defaults.node_capacity = cfg.defaults.node_capacity.sanitized();
     if let Some(canonical_routing) = load_canonical_routing()? {
         cfg.defaults.routing = merge_routing_policy(canonical_routing, cfg.defaults.routing);
     }
@@ -548,6 +554,7 @@ pub fn get_profile<'a>(config: &'a GahConfig, name: &str) -> Result<&'a Profile>
 
 /// Save the config back to the TOML file
 pub fn save(config: &GahConfig, path: Option<&str>) -> Result<()> {
+    config.defaults.node_capacity.validate()?;
     let target_path = resolve_config_path(path);
 
     // Ensure parent directory exists
@@ -1378,16 +1385,9 @@ improve_backend = "agy"
         assert!(effective.allow_review_fallback);
     }
 
-    #[test]
-    fn canonical_backend_name_merges_cloud_coder_alias_into_openhands() {
-        // Live-observed: --backend openhands and --backend cloud-coder both
-        // run the identical OpenHands executable (runner::backend_command_name),
-        // but nothing canonicalized the raw CLI string before it reached the
-        // ledger/quota page, producing two separate cards for one backend.
-        assert_eq!(canonical_backend_name("cloud-coder"), "openhands");
-        assert_eq!(canonical_backend_name("openhands"), "openhands");
-    }
-
+    // The cloud-coder → openhands merge is asserted against the same
+    // public function in tests/execution_identity.rs; only the
+    // pass-through cases are unit-tested here.
     #[test]
     fn canonical_backend_name_leaves_other_backends_and_auto_untouched() {
         // "auto" must NOT be rewritten here: its effective backend is

@@ -156,6 +156,27 @@ test('GET /api/config/effective returns profile JSON on success', async () => {
   });
 });
 
+// Review of #1383: node-capacity values go straight into argv; type mistakes
+// must fail as a 400 at the API boundary instead of a 502 from the CLI.
+test('POST /api/config rejects non-integer node capacity values with 400', async () => {
+  await withTestServer(async (profile) => profilePayload(profile), async (baseUrl) => {
+    for (const [field, value] of [
+      ['worker_memory_mib', null],
+      ['worker_memory_mib', '4096'],
+      ['memory_floor_mib', 512.5],
+    ] as const) {
+      const response = await fetch(`${baseUrl}/api/config`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ [field]: value }),
+      });
+      assert.equal(response.status, 400, `${field}: ${String(value)}`);
+      const body = (await response.json()) as { message: string };
+      assert.match(body.message, new RegExp(`${field} must be an integer`));
+    }
+  });
+});
+
 test('GET /api/config/effective omits environment values while preserving configured status', async () => {
   const canary = 'TDAI_GATEWAY_API_KEY=GAH_TEST_CANARY_1014_DO_NOT_SERIALIZE';
 

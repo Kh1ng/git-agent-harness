@@ -37,4 +37,4 @@ pub(crate) use self::runtime::{NodeAdmissionDeferred, WorkerNodeLease};
 // reports the re-export as unused in non-binary targets.
 #[allow(unused_imports)]
 pub(crate) use self::runtime::run_dispatch_and_record;
-pub use self::runtime::{acquire_profile_lock, run_loop, run_once};
+pub use self::runtime::{acquire_profile_lock, node_total_memory_bytes, run_loop, run_once};

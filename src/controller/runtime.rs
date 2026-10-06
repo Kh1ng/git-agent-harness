@@ -197,6 +197,44 @@ fn wait_interruptibly(delay: Duration, shutdown_requested: impl Fn() -> bool) ->
     }
 }
 
+/// Total memory of this node when the platform exposes it. `gah config
+/// set` uses it to reject node-capacity values this node could never
+/// admit (review of #1383); callers skip the check when it is `None`, so
+/// configs written for other machines still load and save.
+pub fn node_total_memory_bytes() -> Option<u64> {
+    node_capacity::sample()
+        .ok()
+        .map(|pressure| pressure.memory_total_bytes)
+}
+
+/// Announce node-capacity settings when they change, not on every ~30s
+/// iteration -- an unattended loop would otherwise repeat the same line
+/// about 2,880 times a day (review of #1383). A fresh process (`--once`,
+/// loop restart) always logs once. Also warns when the settings can
+/// never be satisfied on this node, instead of leaving that fact buried
+/// in per-deferral logs.
+fn log_node_capacity_settings(settings: crate::config::NodeCapacitySettings) {
+    static LAST_LOGGED: std::sync::Mutex<Option<crate::config::NodeCapacitySettings>> =
+        std::sync::Mutex::new(None);
+    let Ok(mut last) = LAST_LOGGED.lock() else {
+        return;
+    };
+    if last.as_ref() == Some(&settings) {
+        return;
+    }
+    *last = Some(settings);
+    eprintln!(
+        "gah loop: node capacity worker reservation {} MiB, memory floor {}",
+        settings.worker_memory_mib,
+        settings.floor_description(),
+    );
+    if let Some(total) = node_total_memory_bytes() {
+        if let Err(error) = settings.validate_against_node_total(total) {
+            eprintln!("gah loop: WARNING {error:#}");
+        }
+    }
+}
+
 pub fn run_once(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
@@ -205,6 +243,7 @@ pub fn run_once(
     skip_validation_gate: bool,
     run_periodic_probes: bool,
 ) -> Result<()> {
+    log_node_capacity_settings(cfg.defaults.node_capacity);
     let mut ledger_entries = crate::ledger::read_entries(cfg)?;
     reconcile_abandoned_dispatches(cfg, profile_name, &mut ledger_entries)?;
     let profile = crate::config::get_profile(cfg, profile_name)?;
@@ -356,7 +395,10 @@ pub fn run_once(
                     &action,
                     &ledger_entries,
                     skip_validation_gate,
-                    Some(RouteNodeAdmission::single_worker(action.clone())),
+                    Some(RouteNodeAdmission::single_worker(
+                        action.clone(),
+                        cfg.defaults.node_capacity,
+                    )),
                 ) {
                     Ok(outcome) => {
                         crate::work_claim::release_work(&claim_scope, &work_id)?;
@@ -375,7 +417,10 @@ pub fn run_once(
                 &action,
                 &ledger_entries,
                 skip_validation_gate,
-                Some(RouteNodeAdmission::single_worker(action.clone())),
+                Some(RouteNodeAdmission::single_worker(
+                    action.clone(),
+                    cfg.defaults.node_capacity,
+                )),
             )?
         };
 
@@ -519,7 +564,8 @@ fn run_parallel_once(
         let mut node_alternative_attempts_remaining = effective_parallel_limit;
         let (done_tx, done_rx) = sync_channel::<(usize, LoopOnceResult)>(effective_parallel_limit);
         let (route_admission_tx, route_admission_rx) = admission::request_channel();
-        let mut admission_coordinator = admission::Coordinator::new(route_admission_rx);
+        let mut admission_coordinator =
+            admission::Coordinator::new(route_admission_rx, cfg.defaults.node_capacity);
 
         'scheduler: loop {
             if admission::service_pending_request(
@@ -665,6 +711,7 @@ fn run_parallel_once(
                             let admission = match node_capacity::try_acquire(
                                 &action,
                                 admission_coordinator.active_node_workers(),
+                                cfg.defaults.node_capacity,
                             ) {
                                 Ok(admission) => admission,
                                 Err(error) => {
@@ -731,6 +778,7 @@ fn run_parallel_once(
                                 sequence,
                                 action_for_thread.clone(),
                                 route_admission_tx.clone(),
+                                cfg.defaults.node_capacity,
                             ))
                         } else {
                             None
@@ -845,6 +893,7 @@ fn run_parallel_once(
                     &done_rx,
                     admission_coordinator.active_node_workers(),
                     effective_parallel_limit,
+                    cfg.defaults.node_capacity,
                 )? {
                     ReprobeWaitOutcome::WorkerCompleted(result) => result,
                     ReprobeWaitOutcome::RetryFill => {
@@ -954,7 +1003,7 @@ fn action_admitted_work(action: &NextAction, outcome: &str) -> bool {
         action,
         NextAction::WaitUntil { .. } | NextAction::HumanRequired { .. } | NextAction::NoOp { .. }
     ) && !outcome.starts_with("Skipped ")
-        && !(outcome.starts_with("Deferred ") && outcome.contains("no backend launched"))
+        && (!outcome.starts_with("Deferred ") || !outcome.contains("no backend launched"))
 }
 
 fn update_parallel_refill_budget(
