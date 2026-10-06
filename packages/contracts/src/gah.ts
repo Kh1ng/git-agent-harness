@@ -535,6 +535,8 @@ export interface QuotaCheck {
 }
 
 export interface QuotaSnapshot {
+  /** v3 adds auth_required/not_configured checks and optional checked_at;
+   * central also accepts legacy v2 worker snapshots. */
   schema_version: number;
   generated_at: string;
   freshness: {

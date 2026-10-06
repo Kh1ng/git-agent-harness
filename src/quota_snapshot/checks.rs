@@ -501,10 +501,10 @@ mod tests {
         let now = Some("2026-10-03T04:00:00Z");
         let mut ok = record("agy", None, now, QuotaCheckStatus::NoData);
         ok.backend_instance = Some("agy:usage-probe".into());
-        assert!(build_quota_checks(&[ok]).is_empty());
+        assert!(build_quota_checks(&[ok], &[]).is_empty());
         let mut failed = record("agy", None, now, QuotaCheckStatus::Failed);
         failed.backend_instance = Some("agy:usage-probe".into());
-        assert_eq!(build_quota_checks(&[failed]).len(), 1);
+        assert_eq!(build_quota_checks(&[failed], &[]).len(), 1);
     }
 
     fn record(

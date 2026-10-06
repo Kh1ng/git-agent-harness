@@ -277,7 +277,9 @@ function isQuotaSnapshot(value: unknown, profile: string, since: string): value 
       && accountUsageValid(observation.account_usage)
       && [observation.quota_remaining_percent].every(percent => percent == null
         || (typeof percent === 'number' && Number.isFinite(percent) && percent >= 0 && percent <= 100))));
-  return snapshot.schema_version === 2 && typeof snapshot.generated_at === 'string'
+  // v3 adds auth_required/not_configured checks and allows absent checked_at.
+  // Keep accepting v2 snapshots from workers that have not been upgraded.
+  return (snapshot.schema_version === 2 || snapshot.schema_version === 3) && typeof snapshot.generated_at === 'string'
     && Number.isFinite(Date.parse(snapshot.generated_at)) && snapshot.profile?.profile === profile
     && snapshot.since === since && !!snapshot.freshness && typeof snapshot.freshness === 'object'
     && !!snapshot.usage && typeof snapshot.usage === 'object' && Array.isArray(snapshot.quota_checks)

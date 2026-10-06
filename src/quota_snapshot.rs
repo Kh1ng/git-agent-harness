@@ -316,7 +316,7 @@ pub fn build_snapshot(
     let quota_checks = build_quota_checks(&account_quota, &expected_sources);
 
     Ok(QuotaSnapshot {
-        schema_version: 2,
+        schema_version: 3,
         generated_at,
         freshness,
         quota_checks,
