@@ -514,12 +514,23 @@ OpenAI commands that Settings generates prompt privately for an optional
 generation key and the required embedding key. Ollama commands do not
 prompt.
 
-**Validation performed.** The gateway at the commit above ran with
-`tdai-gateway.standalone.yaml` as the template. The installer's
-`gateway-yaml-mutation` block applied
-`GAH_GATEWAY_PROVIDER=ollama` and set the endpoint to a local stub of Ollama's
-OpenAI-compatible API (`/v1/embeddings`, `/v1/chat/completions`). The test
-did not use a live Ollama server. Sanitized results:
+**Validation performed (stub backend, not a live Ollama).** Reproduce with:
+
+```bash
+git clone https://github.com/Kh1ng/TencentDB-Agent-Memory
+git -C TencentDB-Agent-Memory checkout a0f993ba1eeda16243a8267ba9d1929074b806f9
+(cd TencentDB-Agent-Memory/MemoryCore && npm install)
+scripts/validate-gateway-provider.sh TencentDB-Agent-Memory/MemoryCore
+```
+
+The script seeds `tdai-gateway.local.yaml` from the checkout's
+`tdai-gateway.standalone.yaml`, applies the installer's
+`gateway-yaml-mutation` block with `GAH_GATEWAY_PROVIDER=ollama`, and starts
+the real gateway on scratch ports with a scratch data directory. The endpoint
+is `scripts/ollama-api-stub.mjs`, a stub of Ollama's OpenAI-compatible API
+(`/v1/embeddings`, `/v1/chat/completions`). The script exits non-zero unless
+`/health` reports `"embeddingService":true`. Sanitized output at the commit
+above:
 
 ```text
 GET /health   -> {"status":"ok","stores":{"vectorStore":true,"embeddingService":true}}
@@ -528,17 +539,19 @@ POST /recall  -> {"code":0,"message":"ok","memory_count":0}
 stub saw      -> POST /v1/embeddings model=nomic-embed-text dimensions=768 (capture and recall)
                  POST /v1/chat/completions model=llama3
 gateway log   -> Using remote embedding (provider=ollama, model=nomic-embed-text)
-                 [recall] [hybrid-embedding] Embedding OK, dims=768
+                 Background embedding complete: 2/2 vectors updated
+                 [hybrid-embedding] Embedding OK, dims=768
 ```
 
 Control: with the earlier YAML mutation (no `apiKey` or `dimensions`, no
 `/v1`), the same gateway reported `"embeddingService":false`.
 
-**Reproduce against a live Ollama** on the central node. Use your own
-gateway key, and keep it out of shared logs:
+**Reproduce against a live Ollama.** Run the same script with
+`VALIDATION_ENDPOINT=http://127.0.0.1:11434/v1` after
+`ollama pull llama3 && ollama pull nomic-embed-text`. Or check an installed
+central node. Use your own gateway key, and keep it out of shared logs:
 
 ```bash
-ollama pull llama3 && ollama pull nomic-embed-text
 GAH_GATEWAY_MODE=colocated GAH_GATEWAY_PROVIDER=ollama \
 GAH_GATEWAY_MEMORYCORE_PATH="$HOME/TencentDB-Agent-Memory/MemoryCore" \
 scripts/install.sh
@@ -550,8 +563,8 @@ curl -fsS -H "Authorization: Bearer $TDAI_GATEWAY_API_KEY" -H 'Content-Type: app
 journalctl --user -u tdai-memory-gateway | grep -i 'embedding'   # no "Embedding has been disabled"
 ```
 
-This change was not validated against a live Ollama server. Use the
-procedure above as the acceptance check on a real node.
+This change was not validated against a live Ollama server. Use one of the
+procedures above as the acceptance check on a real node.
 
 ### Network exposure (issue #879)
 
