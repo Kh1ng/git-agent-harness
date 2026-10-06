@@ -844,7 +844,8 @@ function EditableCandidateList({ title, listKey, profile, candidates, effective,
     ...effective.escalatory_reviewers,
     ...(effective.routine_reviewer ? [effective.routine_reviewer] : []),
   ]) {
-    if (candidate.backend === selectedBackend && candidate.model) knownModels.add(candidate.model);
+    const sameAccount = !selectedInstance || candidate.instance === selectedInstance.backend_instance;
+    if (candidate.backend === selectedBackend && sameAccount && candidate.model) knownModels.add(candidate.model);
   }
   const topPriority = candidates.reduce((max, candidate) => Math.max(max, candidate.priority), 0) + 10;
   const datalistId = `models-${listKey}`;
@@ -872,12 +873,14 @@ function EditableCandidateList({ title, listKey, profile, candidates, effective,
         backend: selectedBackend,
         ...(selectedInstance ? { instance: selectedInstance.backend_instance } : {}),
         ...(newModel.trim() !== '' ? { model: newModel.trim() } : {}),
-        priority: Number.isFinite(parsedPriority) ? parsedPriority : topPriority,
+        // The routine slot holds one reviewer, so keep its priority stable across changes.
+        priority: single ? (candidates[0]?.priority ?? 100) : Number.isFinite(parsedPriority) ? parsedPriority : topPriority,
         included_in_quota: included,
       }));
     setRunner('');
     setNewModel('');
     setPriority('');
+    setIncluded(true);
   };
 
   const fieldClass = 'w-full bg-raised border border-subtle rounded px-2 py-1 text-xs text-primary';
