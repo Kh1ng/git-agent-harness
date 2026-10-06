@@ -109,12 +109,13 @@ if (!Number.isInteger(dimensions) || dimensions <= 0) {
   process.exit(1);
 }
 const doc = yaml.parseDocument(readFileSync(configPath, 'utf8'));
+const existingLlmKey = doc.getIn(['llm', 'apiKey']);
 doc.setIn(['llm', 'baseUrl'], baseUrl);
 doc.setIn(['llm', 'model'], llmModel || defaults.llmModel);
 // Ollama ignores bearer credentials, but the gateway enables generation and
 // embedding only with a non-empty key. The literal placeholder is not a
 // secret; TDAI_LLM_API_KEY still overrides llm.apiKey when it is set.
-doc.setIn(['llm', 'apiKey'], provider === 'ollama' && !llmKeyGiven ? 'ollama' : (llmKeyGiven ? '${TDAI_LLM_API_KEY}' : ''));
+doc.setIn(['llm', 'apiKey'], provider === 'ollama' && !llmKeyGiven ? 'ollama' : (llmKeyGiven ? '${TDAI_LLM_API_KEY}' : (existingLlmKey || '')));
 doc.setIn(['memory', 'embedding', 'provider'], provider);
 doc.setIn(['memory', 'embedding', 'baseUrl'], baseUrl);
 doc.setIn(['memory', 'embedding', 'model'], model);
