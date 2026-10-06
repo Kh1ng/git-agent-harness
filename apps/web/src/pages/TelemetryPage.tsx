@@ -347,12 +347,10 @@ function latestRowQuotaPercent(
   checks: QuotaSnapshot['quota_checks'] | undefined,
   row: BackendModelComparison,
 ): { percent: number; window: string | null } | null {
-  const resolve = (used: number | null | undefined, remaining: number | null | undefined) =>
-    typeof used === 'number' && Number.isFinite(used)
-      ? used
-      : typeof remaining === 'number' && Number.isFinite(remaining)
-        ? 100 - remaining
-        : null;
+  const resolve = (remaining: number | null | undefined) =>
+    typeof remaining === 'number' && Number.isFinite(remaining)
+      ? 100 - remaining
+      : null;
 
   // Backend rows map to a source identity; model rows have none.
   if (!row.is_model) {
@@ -361,7 +359,7 @@ function latestRowQuotaPercent(
       if (check.status !== 'data' || check.backend !== row.backend_or_model) continue;
       const at = check.checked_at ?? '';
       for (const observation of check.quota_observations ?? []) {
-        const percent = resolve(observation.quota_used_percent, observation.quota_remaining_percent);
+        const percent = resolve(observation.quota_remaining_percent);
         if (percent === null || percent < 0 || percent > 100) continue;
         if (!snapshot || at >= snapshot.at) {
           snapshot = { percent, window: observation.quota_window ?? null, at };
@@ -376,7 +374,7 @@ function latestRowQuotaPercent(
   // for this row.
   const rowReadings = (row.quota_observations ?? [])
     .map((q) => {
-      const percent = resolve(q.quota_used_percent, q.quota_remaining_percent);
+      const percent = resolve(q.quota_remaining_percent);
       return percent === null ? null : { percent, window: q.quota_window ?? null, at: q.observed_at ?? '' };
     })
     .filter((q): q is { percent: number; window: string | null; at: string } => q !== null);

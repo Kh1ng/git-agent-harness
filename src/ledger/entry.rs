@@ -1,4 +1,5 @@
 use super::resources::AttemptResourceUsage;
+use super::UsageUnknownReason;
 use crate::config::Profile;
 use crate::routing::RoutingRuntimeState;
 use serde::{Deserialize, Serialize};
@@ -288,6 +289,8 @@ pub struct ExternalApprovalRecord {
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct LedgerUsage {
     pub usage_source: Option<String>,
+    #[serde(default)]
+    pub usage_unknown_reason: Option<UsageUnknownReason>,
     /// Normalized accounting class. This is explicit even when the backend
     /// cannot identify it; `unknown` is never treated as zero-cost.
     #[serde(default)]
@@ -455,7 +458,9 @@ pub struct RoutingCandidateDiagnostic {
 // controller reconciliation. Every added field defaults for historical rows.
 // v9 adds canonical per-attempt route identity and safe usage attribution
 // projections. Historical absence remains unknown via additive Option fields.
-pub const LEDGER_SCHEMA_VERSION: u32 = 9;
+// v10 records explicit absent-usage reasons for new rows; older rows retain
+// their unknown telemetry during persistence normalization.
+pub const LEDGER_SCHEMA_VERSION: u32 = 10;
 
 /// Version of the machine-enforced review output and lifecycle policy. Bump
 /// this when an older review opinion, retry budget, or derived human gate must
@@ -733,6 +738,7 @@ impl LedgerEntry {
     /// without them retain their legacy top-level fields unchanged.
     pub fn normalized_for_persistence(&self) -> Self {
         let mut normalized = self.clone();
+        super::usage_unknown::annotate_unknown_usage(&mut normalized);
         let identities = normalized
             .attempt_routing
             .iter()
@@ -1154,6 +1160,7 @@ mod tests {
             hermes_idle_timeout_seconds: None,
             max_parallel_workers: None,
             max_open_managed_mrs: None,
+            worker_scaling: Default::default(),
             policy_path: None,
             env_file: None,
             env_file_prod: None,

@@ -9,6 +9,7 @@ pub mod subscription;
 #[cfg(test)]
 mod test_support;
 mod types;
+pub mod worker_scaling;
 
 pub use decision::{decide_for_task_with_state, decide_with_state};
 pub use reservation::ConcurrencyGuard;

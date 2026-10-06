@@ -44,6 +44,7 @@ pub(super) fn profile(local_path: &Path) -> Profile {
         hermes_idle_timeout_seconds: None,
         max_parallel_workers: None,
         max_open_managed_mrs: None,
+        worker_scaling: Default::default(),
         policy_path: None,
         env_file: None,
         env_file_prod: None,

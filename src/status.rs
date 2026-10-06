@@ -133,6 +133,9 @@ pub struct StatusSnapshot {
     /// to decide how many worker loops to launch when not given explicitly
     /// on its own command line.
     pub max_parallel_workers: u32,
+    /// How `max_parallel_workers` was reached from the configured baseline.
+    #[serde(default)]
+    pub worker_limits: crate::routing::worker_scaling::WorkerLimits,
     /// Provider-neutral implementation intake backpressure. Open managed MRs
     /// and in-flight implementation claims consume this limit; lifecycle work
     /// continues while intake is paused.
@@ -414,6 +417,8 @@ fn build_snapshot_inner(
     include_provider: bool,
 ) -> Result<StatusSnapshot> {
     let profile = crate::config::get_profile(cfg, profile_name)?;
+    let worker_limits =
+        crate::routing::worker_scaling::current_worker_limits(&cfg.defaults, profile, now);
     let generated_at = now.format(&Rfc3339).unwrap_or_default();
 
     let effective_routing = profile.effective_routing(&cfg.defaults);
@@ -1066,7 +1071,8 @@ fn build_snapshot_inner(
             .publishing
             .generated_artifact_deny_patterns
             .clone(),
-        max_parallel_workers: profile.max_parallel_workers(),
+        max_parallel_workers: worker_limits.workers,
+        worker_limits,
         open_managed_mr_count: intake.open_mrs,
         inflight_implementation_count: intake.inflight_implementations,
         implementation_intake_paused: intake.paused,

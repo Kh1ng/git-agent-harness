@@ -322,6 +322,23 @@ pub fn claude_login(executable: &Path, state_root: Option<&Path>) -> Option<Auth
         .map(|output| classify_claude_status(output.status.success(), &output.stdout))
 }
 
+/// Whether this backend's own login check says it is signed in right now.
+/// `false` when the backend has no such check, its executable is unknown, or
+/// the check did not finish: only a positive answer may overrule a login
+/// failure read from a backend's output.
+pub fn login_confirmed(identity: &crate::execution_identity::ExecutionIdentity) -> bool {
+    let Some(executable) = identity.executable.as_deref() else {
+        return false;
+    };
+    let state_root = identity.state_root.as_deref();
+    let health = match identity.runner_kind.as_str() {
+        "codex" => codex_login(executable, state_root),
+        "claude" => claude_login(executable, state_root),
+        _ => None,
+    };
+    health.is_some_and(|health| health.state == AuthState::Ok)
+}
+
 fn resolve(command: &str) -> Option<PathBuf> {
     crate::runner::resolve::resolve_executable_on_path(command)
 }
