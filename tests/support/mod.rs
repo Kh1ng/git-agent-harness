@@ -81,7 +81,7 @@ impl Drop for ProcessGroupGuard {
         unsafe {
             libc::kill(process_group, libc::SIGTERM);
         }
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }

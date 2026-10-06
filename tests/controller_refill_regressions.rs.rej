@@ -1,0 +1,14 @@
+--- controller_refill_regressions.rs
++++ controller_refill_regressions.rs
+@@ -611,7 +611,10 @@
+         &format!(
+             "#!/bin/sh\n\
+              mkdir -p '{calls}'\n\
+-             n=1; while ! mkdir '{calls}'/$n 2>/dev/null; do n=$((n + 1)); done\n\
++             n=1\n\
++             while ! mkdir '{calls}'/$n 2>/dev/null; do n=$((n + 1)); done\n\
++             echo \"\$(date) - codex started with args: \$@, n=\$n, cwd=\$(pwd)\" >> /tmp/codex-debug.log\n\
+              printf 'agent edit %s\\n' \"\$n\" > \"followup-\$n.txt\"\n\
+              if [ \"\$n\" = 1 ]; then while [ ! -f '{slow_release}' ]; do sleep 0.2; done; fi\n\
++             echo \"\$(date) - codex exiting n=\$n\" >> /tmp/codex-debug.log\n\
+              exit 0\n",

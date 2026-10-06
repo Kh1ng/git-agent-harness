@@ -160,6 +160,30 @@ pub struct RoutingPolicy {
 }
 
 impl RoutingPolicy {
+    pub fn labeled_candidates(&self) -> Vec<(&'static str, &CandidateConfig)> {
+        let mut c = Vec::new();
+        let mut add = |l, v| c.push((l, v));
+        if let Some(ref x) = self.routine_reviewer {
+            add("routine_reviewer", x);
+        }
+        for x in &self.escalatory_reviewers {
+            add("escalatory_reviewer", x);
+        }
+        for x in self.pm_candidates.iter().flatten() {
+            add("pm_candidate", x);
+        }
+        for x in self.improve_candidates.iter().flatten() {
+            add("improve_candidate", x);
+        }
+        for x in self.task_routing_rules.iter().flat_map(|r| &r.candidates) {
+            add("task_routing_rule", x);
+        }
+        for x in self.review_candidates.iter().flatten() {
+            add("review_candidate", x);
+        }
+        c
+    }
+
     pub fn merged_with_defaults(&self, defaults: &RoutingPolicy) -> RoutingPolicy {
         let mut routing = merge_routing_policy(defaults.clone(), self.clone());
         routing.normalize_subscription_candidates(|id| {

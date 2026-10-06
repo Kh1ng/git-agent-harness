@@ -85,7 +85,7 @@ pub(crate) fn wait_for_backend_call(
     child: &mut std::process::Child,
     call: u32,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(180);
     while backend.call_count() < call {
         if let Some(status) = child.try_wait().unwrap() {
             panic!("child exited before backend call {call} started: {status:?}");

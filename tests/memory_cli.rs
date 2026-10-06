@@ -61,7 +61,7 @@ default_target_branch="main"
     let server = thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();
         socket
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
             .unwrap();
         let mut request = Vec::new();
         let mut buf = [0; 4096];

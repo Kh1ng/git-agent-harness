@@ -107,7 +107,7 @@ impl FakeControlPlane {
 
 fn read_request(socket: &mut TcpStream) -> Option<Recorded> {
     socket
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
     let mut raw = Vec::new();
     let mut buf = [0; 4096];

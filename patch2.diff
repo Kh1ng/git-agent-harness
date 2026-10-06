@@ -1,0 +1,20 @@
+--- tests/controller_refill_regressions.rs
++++ tests/controller_refill_regressions.rs
+@@ -608,9 +608,12 @@
+         &fake_bin,
+         "codex",
+         &format!(
+             "#!/bin/sh\n\
+-             mkdir -p '{calls}'\n\
+-             n=1; while ! mkdir '{calls}'/$n 2>/dev/null; do n=$((n + 1)); done\n\
++             call_count_file='{calls}/count'\n\
++             active_lock_dir='{calls}/lock'\n\
++             mkdir -p '{calls}'\n\
++             while ! mkdir \"$active_lock_dir\" 2>/dev/null; do sleep 0.01; done\n\
++             n=$( [ -f \"$call_count_file\" ] && cat \"$call_count_file\" || echo 0 )\n\
++             n=$((n + 1))\n\
++             echo \"$n\" > \"$call_count_file\"\n\
++             rmdir \"$active_lock_dir\"\n\
+              printf 'agent edit %s\\n' \"$n\" > \"followup-$n.txt\"\n\
+              if [ \"$n\" = 1 ]; then while [ ! -f '{slow_release}' ]; do sleep 0.05; done; fi\n\
+              exit 0\n",
