@@ -473,17 +473,18 @@ Limitations:
 - Provider validation requires the Kh1ng fork of TencentDB-Agent-Memory to parse the `ollama` provider for embedding.
 
 Validation Evidence:
-Supported gateway contract reference: `kh1ng/TencentDB-Agent-Memory` at commit `v0.2.1-fork.1` (or any branch including the `ollama` embedding provider implementation).
+Supported gateway contract reference: `kh1ng/TencentDB-Agent-Memory` at commit `a0f993ba1eeda16243a8267ba9d1929074b806f9` (or any branch including the `ollama` embedding provider implementation).
 
 Sanitized configuration (`tdai-gateway.local.yaml`):
 ```yaml
 llm:
   baseUrl: http://127.0.0.1:11434
   model: llama3
-embedding:
-  provider: ollama
-  baseUrl: http://127.0.0.1:11434
-  model: nomic-embed-text
+memory:
+  embedding:
+    provider: ollama
+    baseUrl: http://127.0.0.1:11434
+    model: nomic-embed-text
 ```
 
 Verification command:

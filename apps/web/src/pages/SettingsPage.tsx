@@ -1087,6 +1087,7 @@ export function AddNodeSection() {
   const [providerEndpoint, setProviderEndpoint] = useState('');
   const [llmModel, setLlmModel] = useState('');
   const [embeddingModel, setEmbeddingModel] = useState('');
+  const [memoryCorePath, setMemoryCorePath] = useState('~/TencentDB-Agent-Memory/MemoryCore');
   const osName = { windows: 'Windows', linux: 'Linux', macos: 'macOS' }[os];
   const [command, setCommand] = useState('');
   const [error, setError] = useState('');
@@ -1096,7 +1097,7 @@ export function AddNodeSection() {
     setBusy(true); setError(''); setCommand(''); setCopied(false);
     try {
       const gatewayOpts = (role === 'central' || role === 'standalone') 
-        ? (gatewayUrl ? { gatewayUrl } : (provider === 'none' ? {} : { provider, providerEndpoint, llmModel, embeddingModel }))
+        ? (gatewayUrl ? { gatewayUrl } : (provider === 'none' ? {} : { provider, providerEndpoint, llmModel, embeddingModel, memoryCorePath }))
         : {};
       setCommand((await gahApi.getNodeSetupCommand({ os, centralUrl, role, ...gatewayOpts })).command);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
@@ -1144,6 +1145,9 @@ export function AddNodeSection() {
               </select>
             </label>
             {provider !== 'none' && <>
+              <label className="block text-xs text-secondary mb-2">MemoryCore Path
+                <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={memoryCorePath} onChange={(event) => { setMemoryCorePath(event.target.value); setCommand(''); }} placeholder="~/TencentDB-Agent-Memory/MemoryCore" />
+              </label>
               <label className="block text-xs text-secondary mb-2">API Endpoint
                 <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={providerEndpoint} onChange={(event) => { setProviderEndpoint(event.target.value); setCommand(''); }} placeholder={provider === 'ollama' ? 'http://127.0.0.1:11434' : 'https://api.openai.com/v1'} />
               </label>
@@ -1393,7 +1397,8 @@ export function ColocatedProviderSection() {
   const [memoryCorePath, setMemoryCorePath] = useState('~/TencentDB-Agent-Memory/MemoryCore');
   const [copied, setCopied] = useState(false);
 
-  const command = `GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH=${memoryCorePath} GAH_GATEWAY_PROVIDER=${provider} ${providerEndpoint ? `GAH_GATEWAY_ENDPOINT=${providerEndpoint} ` : ''}${llmModel ? `GAH_GATEWAY_LLM_MODEL=${llmModel} ` : ''}${embeddingModel ? `GAH_GATEWAY_EMBEDDING_MODEL=${embeddingModel} ` : ''}scripts/install.sh`;
+  const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
+  const command = `GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH=${shellQuote(memoryCorePath)} GAH_GATEWAY_PROVIDER=${shellQuote(provider)} ${providerEndpoint ? `GAH_GATEWAY_ENDPOINT=${shellQuote(providerEndpoint)} ` : ''}${llmModel ? `GAH_GATEWAY_LLM_MODEL=${shellQuote(llmModel)} ` : ''}${embeddingModel ? `GAH_GATEWAY_EMBEDDING_MODEL=${shellQuote(embeddingModel)} ` : ''}scripts/install.sh`;
 
   const copyCommand = () => {
     navigator.clipboard.writeText(command).then(() => {

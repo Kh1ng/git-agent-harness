@@ -37,7 +37,8 @@ if [ "$role" = central ]; then
       gateway_config="$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.local.yaml"
       if [ ! -f "$gateway_config" ]; then
         cp "$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.standalone.yaml" "$gateway_config"
-        # gateway-yaml-mutation:start
+      fi
+      # gateway-yaml-mutation:start
       if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
           node --input-type=module - "$GAH_GATEWAY_MEMORYCORE_PATH" "$gateway_config" "$GAH_GATEWAY_PROVIDER" "${GAH_GATEWAY_ENDPOINT:-}" "${GAH_GATEWAY_LLM_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_MODEL:-}" <<'JAVASCRIPT'
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -54,21 +55,20 @@ const doc = yaml.parseDocument(readFileSync(configPath, 'utf8'));
 if (provider === 'ollama') {
   doc.setIn(['llm', 'baseUrl'], endpoint || 'http://127.0.0.1:11434');
   doc.setIn(['llm', 'model'], llmModel || 'llama3');
-  doc.setIn(['embedding', 'provider'], 'ollama');
-  doc.setIn(['embedding', 'baseUrl'], endpoint || 'http://127.0.0.1:11434');
-  doc.setIn(['embedding', 'model'], embedModel || 'nomic-embed-text');
+  doc.setIn(['memory', 'embedding', 'provider'], 'ollama');
+  doc.setIn(['memory', 'embedding', 'baseUrl'], endpoint || 'http://127.0.0.1:11434');
+  doc.setIn(['memory', 'embedding', 'model'], embedModel || 'nomic-embed-text');
 } else if (provider === 'openai') {
   doc.setIn(['llm', 'baseUrl'], endpoint || 'https://api.openai.com/v1');
   doc.setIn(['llm', 'model'], llmModel || 'gpt-4o');
-  doc.setIn(['embedding', 'provider'], 'openai');
-  doc.setIn(['embedding', 'baseUrl'], endpoint || 'https://api.openai.com/v1');
-  doc.setIn(['embedding', 'model'], embedModel || 'text-embedding-3-small');
+  doc.setIn(['memory', 'embedding', 'provider'], 'openai');
+  doc.setIn(['memory', 'embedding', 'baseUrl'], endpoint || 'https://api.openai.com/v1');
+  doc.setIn(['memory', 'embedding', 'model'], embedModel || 'text-embedding-3-small');
 }
 writeFileSync(configPath, String(doc));
 JAVASCRIPT
-        fi
-        # gateway-yaml-mutation:end
       fi
+      # gateway-yaml-mutation:end
       # gateway-env-setup:start
       gateway_env="$HOME/.config/gah/tdai-gateway.env"
       export GAH_MACOS_GATEWAY_URL=http://127.0.0.1:8420

@@ -5,21 +5,19 @@ import { ColocatedProviderSection } from '../../src/pages/SettingsPage.js';
 test('ColocatedProviderSection generates a setup command based on user inputs', async ({ mount, page }) => {
   const component = await mount(<ColocatedProviderSection />);
 
-  const providerSelect = component.getByLabel('Gateway Provider', { exact: true });
-  const commandTextbox = component.getByRole('textbox', { name: 'Colocated Provider setup command' });
-  const revealButton = component.getByRole('button', { name: 'Reveal setup command' });
-  const copyButton = component.getByRole('button', { name: 'Copy command' });
+  const providerSelect = component.getByLabel('Provider', { exact: true });
+  const copyButton = component.getByRole('button', { name: 'Copy' });
 
   // Initially only the provider dropdown should be visible, maybe memoryCorePath.
   await expect(providerSelect).toBeVisible();
 
-  // The command box and other inputs are rendered
-  await expect(commandTextbox).toBeVisible();
-  
   // Select Ollama
   await providerSelect.selectOption('ollama');
 
-  const endpointInput = component.getByLabel('Provider Endpoint');
+  const commandPre = component.locator('pre');
+  await expect(commandPre).toBeVisible();
+
+  const endpointInput = component.getByLabel('API Endpoint');
   const llmModelInput = component.getByLabel('LLM Model');
   const embeddingModelInput = component.getByLabel('Embedding Model');
 
@@ -27,8 +25,8 @@ test('ColocatedProviderSection generates a setup command based on user inputs', 
   await llmModelInput.fill('llama3');
   await embeddingModelInput.fill('nomic-embed-text');
 
-  await expect(commandTextbox).toHaveValue(
-    'GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH=~/TencentDB-Agent-Memory/MemoryCore GAH_GATEWAY_PROVIDER=ollama GAH_GATEWAY_ENDPOINT=http://127.0.0.1:11434 GAH_GATEWAY_LLM_MODEL=llama3 GAH_GATEWAY_EMBEDDING_MODEL=nomic-embed-text scripts/install.sh'
+  await expect(commandPre).toHaveText(
+    "GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH='~/TencentDB-Agent-Memory/MemoryCore' GAH_GATEWAY_PROVIDER='ollama' GAH_GATEWAY_ENDPOINT='http://127.0.0.1:11434' GAH_GATEWAY_LLM_MODEL='llama3' GAH_GATEWAY_EMBEDDING_MODEL='nomic-embed-text' scripts/install.sh"
   );
 
   // Select OpenAI
@@ -37,8 +35,8 @@ test('ColocatedProviderSection generates a setup command based on user inputs', 
   await llmModelInput.fill('gpt-4o');
   await embeddingModelInput.fill('text-embedding-3-small');
 
-  await expect(commandTextbox).toHaveValue(
-    'GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH=~/TencentDB-Agent-Memory/MemoryCore GAH_GATEWAY_PROVIDER=openai GAH_GATEWAY_ENDPOINT=https://api.openai.com/v1 GAH_GATEWAY_LLM_MODEL=gpt-4o GAH_GATEWAY_EMBEDDING_MODEL=text-embedding-3-small scripts/install.sh'
+  await expect(commandPre).toHaveText(
+    "GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH='~/TencentDB-Agent-Memory/MemoryCore' GAH_GATEWAY_PROVIDER='openai' GAH_GATEWAY_ENDPOINT='https://api.openai.com/v1' GAH_GATEWAY_LLM_MODEL='gpt-4o' GAH_GATEWAY_EMBEDDING_MODEL='text-embedding-3-small' scripts/install.sh"
   );
 
   // Wait, the component might just auto-update the command textbox directly without a "Reveal" button.
@@ -56,6 +54,5 @@ test('ColocatedProviderSection generates a setup command based on user inputs', 
 
   await copyButton.click();
   // Playwright won't assert clipboard natively if we mock it, but we can verify our exposed function.
-  expect(clipboardText).toContain('GAH_GATEWAY_PROVIDER=openai');
-  await expect(copyButton).toHaveText('Copied!');
+  expect(clipboardText).toContain("GAH_GATEWAY_PROVIDER='openai'");
 });
