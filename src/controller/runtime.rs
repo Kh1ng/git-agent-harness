@@ -202,6 +202,7 @@ pub fn run_once(
 ) -> Result<()> {
     let mut ledger_entries = crate::ledger::read_entries(cfg)?;
     reconcile_abandoned_dispatches(cfg, profile_name, &mut ledger_entries)?;
+    super::import_requested_changes(cfg, profile_name, &mut ledger_entries)?;
     let profile = crate::config::get_profile(cfg, profile_name)?;
     let claim_scope = crate::work_claim::canonical_claim_scope(profile_name, &profile.repo_id);
     let now = time::OffsetDateTime::now_utc();

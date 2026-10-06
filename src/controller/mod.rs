@@ -22,7 +22,7 @@ pub use self::remediation::{
 
 mod ownership;
 mod recovery;
-pub(crate) use self::recovery::reconcile_abandoned_dispatches;
+pub(crate) use self::recovery::{import_requested_changes, reconcile_abandoned_dispatches};
 
 mod runtime;
 pub(crate) use self::runtime::execute_action;
