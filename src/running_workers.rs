@@ -85,7 +85,7 @@ pub fn initialize(session: &Path, context: &DispatchContext) {
 }
 
 /// Observation failures must not change dispatch behavior. On normal completion
-/// Drop removes the record; observation excludes records left by dead owners.
+/// Drop removes the record; observation marks records left by dead owners stale.
 pub struct InvocationGuard(Option<PathBuf>);
 impl InvocationGuard {
     pub fn start(
@@ -172,9 +172,7 @@ pub fn observe(root: &Path, now: OffsetDateTime) -> Vec<RunningWorker> {
                 else {
                     continue;
                 };
-                if record.owner_pid.is_some_and(owner_is_gone) {
-                    continue;
-                }
+                let owner_gone = record.owner_pid.is_some_and(owner_is_gone);
                 let mut row = record.worker;
                 let mut last = OffsetDateTime::parse(&row.started_at, &Rfc3339).unwrap_or(now);
                 if let Ok(modified) = fs::metadata(&path).and_then(|m| m.modified()) {
@@ -197,7 +195,9 @@ pub fn observe(root: &Path, now: OffsetDateTime) -> Vec<RunningWorker> {
                     continue;
                 }
                 row.last_activity_at = last.format(&Rfc3339).unwrap_or_default();
-                row.state = if (now - last).whole_seconds() >= row.stale_after_seconds as i64 {
+                row.state = if owner_gone
+                    || (now - last).whole_seconds() >= row.stale_after_seconds as i64
+                {
                     "stale"
                 } else {
                     "running"
@@ -318,7 +318,17 @@ mod tests {
         )
         .unwrap();
         #[cfg(unix)]
-        assert!(observe(temp.path(), now).is_empty());
+        {
+            let crashed = observe(temp.path(), now);
+            assert_eq!(crashed.len(), 1);
+            assert_eq!(crashed[0].run_id, "run");
+            assert_eq!(crashed[0].state, "stale");
+            assert_eq!(
+                observe(temp.path(), now + time::Duration::seconds(901))[0].state,
+                "stale"
+            );
+            assert!(observe(temp.path(), now + time::Duration::days(2)).is_empty());
+        }
         fs::write(
             session.join("running-worker.json"),
             serde_json::to_vec(&aged).unwrap(),
