@@ -852,8 +852,8 @@ export const gahApi: GahDataSource = {
 
 export const routingCandidatesApi = {
   add: (profile: string, body: Record<string, unknown>) => postJson<unknown, Record<string, unknown>>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/add`, body),
-  remove: (profile: string, index: number) => postJson<unknown, { index: number }>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/remove`, { index }),
-  move: (profile: string, from: number, to: number) => postJson<unknown, { from: number; to: number }>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/move`, { from, to }),
+  remove: (profile: string, list: string, index: number) => postJson<unknown, { list: string; index: number }>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/remove`, { list, index }),
+  move: (profile: string, list: string, from: number, to: number) => postJson<unknown, { list: string; from: number; to: number }>(`/api/profiles/${encodeURIComponent(profile)}/routing-candidates/move`, { list, from, to }),
 };
 
 export const promptPoliciesApi = {
