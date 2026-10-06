@@ -15,13 +15,14 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 mod installation;
-mod macos;
+mod launch_agent;
 mod release;
 mod units;
 pub use installation::installation_plan;
 #[cfg(test)]
 use installation::quota_refresh_selected;
 use installation::{agents_to_refresh, install_selected_agent_assets};
+use launch_agent::install_macos_launch_agent;
 
 pub use crate::node_role::NodeRole as HostRole;
 
@@ -91,7 +92,15 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         &repo,
         "cargo",
         &[
-            "install", "--path", ".", "--bin", "gah", "--force", "--locked",
+            "install",
+            "--path",
+            ".",
+            "--bin",
+            "gah",
+            "--bin",
+            "gah-mcp-server",
+            "--force",
+            "--locked",
         ],
     )?;
 
@@ -120,13 +129,19 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         // worker node dispatches jobs only and never serves this.
         run_command(&repo, "npm", NPM_CI_ARGS)?;
         run_command(&repo, "npm", &["run", "build:server"])?;
-        run_command(&repo, "npm", &["run", "build:mcp-server"])?;
         if !repo.join("apps/server/dist/bin.js").is_file() {
             bail!("server build did not produce apps/server/dist/bin.js");
         }
-        if !repo.join("apps/mcp-server/dist/bin.js").is_file() {
-            bail!("MCP build did not produce apps/mcp-server/dist/bin.js");
+        // The MCP server is a Rust binary of this crate: `cargo install`
+        // above already placed it next to `gah`.
+        let mcp_server = binary.with_file_name("gah-mcp-server");
+        if !mcp_server.is_file() {
+            bail!(
+                "cargo install completed but expected executable is missing: {}",
+                mcp_server.display()
+            );
         }
+        println!("Installed MCP server: {}", mcp_server.display());
         println!(
             "Built server:  {}",
             repo.join("apps/server/dist/bin.js").display()
@@ -213,7 +228,7 @@ fn finish_update(
         )?;
     }
 
-    if let Some(agent) = macos::install_macos_launch_agent(repo, role)? {
+    if let Some(agent) = install_macos_launch_agent(repo, role)? {
         println!("Installed macOS LaunchAgent: {}", agent.display());
     }
 

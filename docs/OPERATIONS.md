@@ -56,9 +56,10 @@ Validation is layered so a bad value can never lock you out of the config:
 ### Release channel and in-app updates (issue #1416)
 
 A green merge to `main` publishes a prerelease **edge** channel build
-(`.github/workflows/release-edge.yml`): the CLI binaries (Linux x86_64,
-macOS universal), the server bundle (`gah-server-bundle.tar.gz`: the
-prebuilt `apps/server`, `apps/mcp-server`, and `apps/web` dist outputs plus
+(`.github/workflows/release-edge.yml`): the `gah` and `gah-mcp-server`
+binaries (Linux x86_64, macOS universal), the server bundle
+(`gah-server-bundle.tar.gz`: the prebuilt `apps/server` and `apps/web` dist
+outputs plus
 the OpenCode agent configs), and `edge-manifest.json` — the versioned
 manifest with a SHA-256 per artifact. When the `TAURI_SIGNING_PRIVATE_KEY`
 secret is configured, the same release carries a signed Tauri updater feed

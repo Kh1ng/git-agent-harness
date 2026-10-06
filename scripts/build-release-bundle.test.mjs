@@ -16,7 +16,6 @@ function fixture(t, { complete = true } = {}) {
   writeFileSync(join(root, 'scripts/build-release-bundle.sh'), script, { mode: 0o755 });
   const outputs = [
     'apps/server/dist/bin.js',
-    'apps/mcp-server/dist/bin.js',
     'apps/web/dist/index.html',
     'packaging/opencode/agents/gah-reviewer.md',
     'packaging/opencode/agents/gah-implementer.md',
@@ -32,7 +31,7 @@ function fixture(t, { complete = true } = {}) {
       writeFileSync(join(root, path), '{"lockfileVersion":3}');
       continue;
     }
-    if (complete || path !== 'apps/mcp-server/dist/bin.js') {
+    if (complete || path !== 'apps/web/dist/index.html') {
       mkdirSync(join(root, join(path, '..')), { recursive: true });
       writeFileSync(join(root, path), 'fixture');
     }
@@ -50,7 +49,6 @@ test('a complete build archives exactly the release install layout', t => {
   const names = listing.stdout.trim().split('\n');
   for (const member of [
     'apps/server/dist/bin.js',
-    'apps/mcp-server/dist/bin.js',
     'apps/web/dist/index.html',
     'packaging/opencode/agents/gah-reviewer.md',
     'package.json',
@@ -66,7 +64,7 @@ test('an incomplete build fails naming the first missing output and writes nothi
   const { run, out } = fixture(t, { complete: false });
   const result = run();
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /missing build output: apps\/mcp-server\/dist\/bin\.js/);
+  assert.match(result.stderr, /missing build output: apps\/web\/dist\/index\.html/);
   assert.match(result.stderr, /build:server/);
   assert.equal(result.stderr.includes('package.json') && result.stderr.includes('run:'), false, 'guidance only, no noise');
   assert.ok(!out || result.status !== 0);

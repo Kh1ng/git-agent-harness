@@ -35,15 +35,18 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
-      - name: Build CLI
+      - name: Build CLI and MCP server
         run: |
-          cargo build --release --bin gah
+          cargo build --release --bin gah --bin gah-mcp-server
           cp target/release/gah gah-linux-x86_64
-          chmod +x gah-linux-x86_64
+          cp target/release/gah-mcp-server gah-mcp-server-linux-x86_64
+          chmod +x gah-linux-x86_64 gah-mcp-server-linux-x86_64
       - uses: actions/upload-artifact@v4
         with:
           name: edge-cli-linux
-          path: gah-linux-x86_64
+          path: |
+            gah-linux-x86_64
+            gah-mcp-server-linux-x86_64
           if-no-files-found: error
 
   cli-macos:
@@ -61,19 +64,23 @@ jobs:
           targets: x86_64-apple-darwin
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
-      - name: Build CLI (universal)
+      - name: Build CLI and MCP server (universal)
         run: |
-          cargo build --release --bin gah --target aarch64-apple-darwin
-          cargo build --release --bin gah --target x86_64-apple-darwin
-          lipo -create \
-            target/aarch64-apple-darwin/release/gah \
-            target/x86_64-apple-darwin/release/gah \
-            -output gah-macos-universal
-          chmod +x gah-macos-universal
+          cargo build --release --bin gah --bin gah-mcp-server --target aarch64-apple-darwin
+          cargo build --release --bin gah --bin gah-mcp-server --target x86_64-apple-darwin
+          for bin in gah gah-mcp-server; do
+            lipo -create \
+              "target/aarch64-apple-darwin/release/$bin" \
+              "target/x86_64-apple-darwin/release/$bin" \
+              -output "$bin-macos-universal"
+          done
+          chmod +x gah-macos-universal gah-mcp-server-macos-universal
       - uses: actions/upload-artifact@v4
         with:
           name: edge-cli-macos
-          path: gah-macos-universal
+          path: |
+            gah-macos-universal
+            gah-mcp-server-macos-universal
           if-no-files-found: error
 
   server-bundle:
@@ -94,7 +101,6 @@ jobs:
         run: |
           npm ci
           npm run build:server
-          npm run build:mcp-server
           npm run build:web
       - name: Test the bundle script
         run: node --test scripts/build-release-bundle.test.mjs
@@ -257,7 +263,7 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           cd edge
-          assets=(gah-linux-x86_64 gah-macos-universal gah-server-bundle.tar.gz edge-manifest.json)
+          assets=(gah-linux-x86_64 gah-macos-universal gah-mcp-server-linux-x86_64 gah-mcp-server-macos-universal gah-server-bundle.tar.gz edge-manifest.json)
           for fragment in fragment-*.json; do
             [ -e "$fragment" ] || continue
             name="$(node -e "console.log(JSON.parse(require('fs').readFileSync('$fragment','utf8')).asset_name)")"

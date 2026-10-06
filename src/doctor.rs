@@ -975,21 +975,8 @@ fn configured_backends(defaults: &Defaults, profile: &Profile) -> Vec<String> {
         {
             backends.insert(b.clone());
         }
-        if let Some(r) = &routing.routine_reviewer {
-            backends.insert(r.backend.clone());
-        }
-        for list in [
-            &routing.pm_candidates,
-            &routing.improve_candidates,
-            &routing.review_candidates,
-            &Some(routing.escalatory_reviewers.clone()),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            for c in list {
-                backends.insert(c.backend.clone());
-            }
+        for (_, c) in routing.labeled_candidates() {
+            backends.insert(c.backend.clone());
         }
     }
     backends.into_iter().collect()
@@ -1030,24 +1017,10 @@ fn parse_agy_models(output: &str) -> Vec<String> {
 
 fn check_candidate_models(defaults: &Defaults, profile: &Profile) -> bool {
     let routing = profile.effective_routing(defaults);
-    let mut candidates = Vec::new();
-    if let Some(candidate) = &routing.routine_reviewer {
-        candidates.push(candidate);
-    }
-    candidates.extend(&routing.escalatory_reviewers);
-    for list in [
-        &routing.pm_candidates,
-        &routing.improve_candidates,
-        &routing.review_candidates,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        candidates.extend(list);
-    }
-    for rule in &routing.task_routing_rules {
-        candidates.extend(&rule.candidates);
-    }
+    let candidates = routing
+        .labeled_candidates()
+        .into_iter()
+        .map(|(_, candidate)| candidate);
     let mut cache = std::collections::HashMap::new();
     let mut valid = true;
     for candidate in candidates {

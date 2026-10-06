@@ -5,8 +5,8 @@
 //
 //   node scripts/compose-edge-manifest.mjs <head-sha>
 //
-// Expected in the CWD: gah-linux-x86_64, gah-macos-universal,
-// gah-server-bundle.tar.gz, optional fragment-*.json (one per desktop
+// Expected in the CWD: gah-linux-x86_64, gah-macos-universal, the matching
+// gah-mcp-server-* binaries, gah-server-bundle.tar.gz, optional fragment-*.json (one per desktop
 // platform, referencing the signed updater asset staged beside it).
 // Writes edge-manifest.json and, when fragments exist, latest.json.
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs';
@@ -20,12 +20,19 @@ if (!headSha || !/^[0-9a-f]{7,40}$/.test(headSha)) {
 const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
 const sha256 = (name) => createHash('sha256').update(readFileSync(name)).digest('hex');
 
+const KINDS = {
+  'gah-linux-x86_64': 'cli',
+  'gah-macos-universal': 'cli',
+  'gah-mcp-server-linux-x86_64': 'mcp-server',
+  'gah-mcp-server-macos-universal': 'mcp-server',
+  'gah-server-bundle.tar.gz': 'server-bundle'
+};
 const assets = [];
-for (const name of ['gah-linux-x86_64', 'gah-macos-universal', 'gah-server-bundle.tar.gz']) {
+for (const [name, kind] of Object.entries(KINDS)) {
   if (!existsSync(name)) throw new Error(`missing edge asset: ${name}`);
   assets.push({
     name,
-    kind: name === 'gah-server-bundle.tar.gz' ? 'server-bundle' : 'cli',
+    kind,
     url: `https://github.com/${repo}/releases/download/edge/${name}`,
     sha256: sha256(name),
     size: statSync(name).size

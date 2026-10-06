@@ -387,10 +387,11 @@ pub(in crate::dispatch) fn next_review_candidate(
         attempted.insert((backend.to_string(), model.map(str::to_string)));
     }
 
-    let candidates = profile
-        .effective_routing(&cfg.defaults)
-        .review_candidates
-        .unwrap_or_default();
+    let routing = profile.effective_routing(&cfg.defaults);
+    let candidates = match routing.allowed_models_for("review") {
+        Some(allowed) => allowed.to_vec(),
+        None => routing.review_candidates.unwrap_or_default(),
+    };
     pick_next_untried(state_path, candidates, profile, &attempted)
 }
 
@@ -445,9 +446,12 @@ pub(in crate::dispatch) fn next_escalatory_reviewer(
         attempted.insert((backend.to_string(), model.map(str::to_string)));
     }
 
-    let candidates = profile
-        .effective_routing(&cfg.defaults)
-        .effective_escalatory_reviewers();
+    let routing = profile.effective_routing(&cfg.defaults);
+    let candidates = routing
+        .effective_escalatory_reviewers()
+        .into_iter()
+        .filter(|c| routing.allows_candidate("review", c))
+        .collect();
     pick_next_untried(state_path, candidates, profile, &attempted)
 }
 
@@ -898,6 +902,14 @@ pub(in crate::dispatch) fn derive_reviewer_tier(
         if in_candidates {
             return ReviewerTier::Strong;
         }
+    }
+    // An allow-listed reviewer is the operator's declared trusted reviewer
+    // for this profile, the same standing as a `review_candidates` entry.
+    let routing = profile.effective_routing(&cfg.defaults);
+    if routing.allowed_models_for("review").is_some()
+        && routing.allows_model("review", &route.effective_backend, effective_model)
+    {
+        return ReviewerTier::Strong;
     }
     ReviewerTier::Standard
 }

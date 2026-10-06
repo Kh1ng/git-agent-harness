@@ -1,3 +1,5 @@
+//! The macOS LaunchAgent a role runs under, installed by the same updater
+//! used by first install and the desktop role control.
 use super::{run_command, HostRole};
 use anyhow::{bail, Context, Result};
 use std::env;
@@ -25,11 +27,7 @@ pub(super) fn install_macos_launch_agent(repo: &Path, role: HostRole) -> Result<
     } else {
         String::new()
     };
-    let role_name = match role {
-        HostRole::Central => "central",
-        HostRole::Standalone => "standalone",
-        HostRole::Worker => "worker",
-    };
+    let role_name = macos_launch_agent_role(role);
     run_command(
         repo,
         "bash",
@@ -51,4 +49,42 @@ pub(super) fn install_macos_launch_agent(repo: &Path, role: HostRole) -> Result<
         .join("Library/LaunchAgents")
         .join(label);
     Ok(target.is_file().then_some(target))
+}
+
+fn macos_launch_agent_role(role: HostRole) -> &'static str {
+    match role {
+        // Standalone hosts run the same control-plane service as central hosts.
+        HostRole::Central | HostRole::Standalone => "central",
+        HostRole::Worker => "worker",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn macos_launch_agent_roles_match_the_installer_contract() {
+        for (role, expected) in [
+            (HostRole::Central, "central"),
+            (HostRole::Standalone, "central"),
+            (HostRole::Worker, "worker"),
+        ] {
+            let installer_role = macos_launch_agent_role(role);
+            assert_eq!(installer_role, expected);
+            // Exercise the script's role validation without changing host services.
+            let output = Command::new("bash")
+                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/macos-launchd.sh"))
+                .args(["status", installer_role])
+                .env("GAH_LAUNCHD_DRY_RUN", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "installer rejected {role:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 }

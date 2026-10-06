@@ -69,6 +69,8 @@ pub struct ReleaseAsset {
 #[serde(rename_all = "kebab-case")]
 pub enum ReleaseAssetKind {
     Cli,
+    /// `gah-mcp-server`, a binary of this crate since #1436.
+    McpServer,
     ServerBundle,
 }
 
@@ -255,8 +257,9 @@ fn verify_asset(asset: &ReleaseAsset, path: &Path) -> Result<()> {
 /// must pass `--version` before the rename, so a truncated or wrong-platform
 /// artifact never becomes the installed CLI; the rename itself is atomic
 /// within the bin directory.
-fn install_cli_binary(source: &Path) -> Result<PathBuf> {
-    let target = super::installed_binary_path()?;
+/// Install a downloaded binary at `target` (the CLI, or the MCP server next
+/// to it) only after it passes `--version`.
+fn install_binary(source: &Path, target: PathBuf) -> Result<PathBuf> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating CLI install directory {}", parent.display()))?;
@@ -264,10 +267,13 @@ fn install_cli_binary(source: &Path) -> Result<PathBuf> {
     let staged = target
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join("gah.download");
+        .join(format!(
+            "{}.download",
+            target.file_name().unwrap_or_default().to_string_lossy()
+        ));
     std::fs::copy(source, &staged).with_context(|| {
         format!(
-            "staging release CLI from {} to {}",
+            "staging release binary from {} to {}",
             source.display(),
             staged.display()
         )
@@ -285,12 +291,13 @@ fn install_cli_binary(source: &Path) -> Result<PathBuf> {
         .with_context(|| format!("running {} --version sanity check", staged.display()))?;
     if !probe.status.success() {
         bail!(
-            "downloaded CLI failed its --version sanity check: {}",
+            "downloaded {} failed its --version sanity check: {}",
+            target.display(),
             String::from_utf8_lossy(&probe.stderr).trim()
         );
     }
     std::fs::rename(&staged, &target)
-        .with_context(|| format!("installing release CLI over {}", target.display()))?;
+        .with_context(|| format!("installing release binary over {}", target.display()))?;
     Ok(target)
 }
 
@@ -325,13 +332,9 @@ fn extract_server_bundle(bundle: &Path, repo: &Path, central: bool) -> Result<te
     }
     let mut moves = vec![("apps/server/dist", true)];
     if central {
-        if !staging.path().join("apps/mcp-server/dist/bin.js").is_file() {
-            bail!("release server bundle has no apps/mcp-server/dist/bin.js");
-        }
         if !staging.path().join("apps/web/dist/index.html").is_file() {
             bail!("release server bundle has no apps/web/dist/index.html");
         }
-        moves.push(("apps/mcp-server/dist", true));
         moves.push(("apps/web/dist", true));
     }
     for (relative, needed) in moves {
@@ -399,7 +402,10 @@ fn compare_release_versions(a: &str, b: &str) -> Ordering {
 
 /// The CLI asset the current platform consumes, by the release naming
 /// convention (`gah-macos-universal`, `gah-linux-x86_64`, ...).
-fn cli_asset_for_current_platform(assets: &[ReleaseAsset]) -> Result<&ReleaseAsset> {
+fn asset_for_current_platform(
+    assets: &[ReleaseAsset],
+    kind: ReleaseAssetKind,
+) -> Result<&ReleaseAsset> {
     let wanted = if cfg!(target_os = "macos") {
         "macos"
     } else if cfg!(target_arch = "x86_64") {
@@ -410,7 +416,7 @@ fn cli_asset_for_current_platform(assets: &[ReleaseAsset]) -> Result<&ReleaseAss
     assets
         .iter()
         .find(|asset| {
-            asset.kind == ReleaseAssetKind::Cli
+            asset.kind == kind
                 && (asset.name.contains(wanted)
                     || asset
                         .target
@@ -418,7 +424,7 @@ fn cli_asset_for_current_platform(assets: &[ReleaseAsset]) -> Result<&ReleaseAss
                         .is_some_and(|target| target.contains(wanted)))
         })
         .ok_or_else(|| {
-            anyhow::anyhow!("release manifest has no CLI asset for this platform ({wanted})")
+            anyhow::anyhow!("release manifest has no {kind:?} asset for this platform ({wanted})")
         })
 }
 
@@ -433,16 +439,30 @@ fn install_release_artifacts(
 ) -> Result<Option<tempfile::TempDir>> {
     let download_dir = tempfile::tempdir().context("staging release downloads")?;
 
-    let cli = cli_asset_for_current_platform(&manifest.assets)?;
-    let cli_path = download_dir.path().join(&cli.name);
-    fetch_asset(locator, cli, &cli_path)?;
-    verify_asset(cli, &cli_path)?;
-    let binary = install_cli_binary(&cli_path)?;
+    let fetch = |kind| -> Result<PathBuf> {
+        let asset = asset_for_current_platform(&manifest.assets, kind)?;
+        let path = download_dir.path().join(&asset.name);
+        fetch_asset(locator, asset, &path)?;
+        verify_asset(asset, &path)?;
+        Ok(path)
+    };
+    let binary = install_binary(
+        &fetch(ReleaseAssetKind::Cli)?,
+        super::installed_binary_path()?,
+    )?;
     println!(
         "Installed CLI {} (release {})",
         binary.display(),
         manifest.version
     );
+    // Central and standalone serve MCP, like the source path (#1436).
+    if matches!(role, HostRole::Central | HostRole::Standalone) {
+        let mcp = install_binary(
+            &fetch(ReleaseAssetKind::McpServer)?,
+            binary.with_file_name("gah-mcp-server"),
+        )?;
+        println!("Installed MCP server: {}", mcp.display());
+    }
 
     // Role parity with the source path: central always installs the server
     // bundle; a macOS worker serves the same execution API (its server
@@ -628,7 +648,11 @@ mod tests {
     fn manifest_asset(name: &str, kind: ReleaseAssetKind, sha256: &str) -> ReleaseAsset {
         serde_json::from_value(serde_json::json!({
             "name": name,
-            "kind": match kind { ReleaseAssetKind::Cli => "cli", ReleaseAssetKind::ServerBundle => "server-bundle" },
+            "kind": match kind {
+                ReleaseAssetKind::Cli => "cli",
+                ReleaseAssetKind::McpServer => "mcp-server",
+                ReleaseAssetKind::ServerBundle => "server-bundle",
+            },
             "sha256": sha256,
         }))
         .unwrap()
@@ -709,15 +733,17 @@ mod tests {
         } else {
             "gah-linux-aarch64"
         };
-        let selected = cli_asset_for_current_platform(&assets).unwrap();
+        let selected = asset_for_current_platform(&assets, ReleaseAssetKind::Cli).unwrap();
         assert_eq!(selected.name, wanted);
+        // The MCP server is its own kind: a CLI asset never stands in for it.
+        assert!(asset_for_current_platform(&assets, ReleaseAssetKind::McpServer).is_err());
 
         let bundle_only = vec![manifest_asset(
             "gah-server-bundle.tar.gz",
             ReleaseAssetKind::ServerBundle,
             "22",
         )];
-        assert!(cli_asset_for_current_platform(&bundle_only).is_err());
+        assert!(asset_for_current_platform(&bundle_only, ReleaseAssetKind::Cli).is_err());
     }
 
     #[test]
@@ -800,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn install_cli_binary_requires_version_probe_and_swaps_atomically() {
+    fn install_binary_requires_version_probe_and_swaps_atomically() {
         let dir = tempfile::tempdir().unwrap();
         let cargo_home = dir.path().join("cargo-home");
         let _guard = CargoHomeGuard::set(&cargo_home);
@@ -815,7 +841,8 @@ mod tests {
             fs::set_permissions(&artifact, permissions).unwrap();
         }
 
-        let installed = install_cli_binary(&artifact).unwrap();
+        let installed =
+            install_binary(&artifact, super::super::installed_binary_path().unwrap()).unwrap();
         assert!(installed.ends_with("bin/gah"));
         assert!(installed.is_file());
         // The staged file is gone -- the rename completed.
@@ -830,7 +857,7 @@ mod tests {
             permissions.set_mode(0o755);
             fs::set_permissions(&broken, permissions).unwrap();
         }
-        let error = install_cli_binary(&broken).unwrap_err();
+        let error = install_binary(&broken, installed.clone()).unwrap_err();
         assert!(error.to_string().contains("--version"));
         // The previous good install survived the failed swap.
         assert!(installed.is_file());
@@ -842,8 +869,6 @@ mod tests {
         fs::write(staging.join("apps/server/dist/bin.js"), "server").unwrap();
         fs::write(staging.join("package-lock.json"), "{\"lock\":\"new\"}").unwrap();
         if central {
-            fs::create_dir_all(staging.join("apps/mcp-server/dist")).unwrap();
-            fs::write(staging.join("apps/mcp-server/dist/bin.js"), "mcp").unwrap();
             fs::create_dir_all(staging.join("apps/web/dist")).unwrap();
             fs::write(staging.join("apps/web/dist/index.html"), "<html></html>").unwrap();
         }
@@ -878,7 +903,6 @@ mod tests {
         let staging = extract_server_bundle(&bundle, &repo, true).unwrap();
 
         assert!(repo.join("apps/server/dist/bin.js").is_file());
-        assert!(repo.join("apps/mcp-server/dist/bin.js").is_file());
         assert!(repo.join("apps/web/dist/index.html").is_file());
         assert!(staging
             .path()
@@ -911,7 +935,6 @@ mod tests {
         extract_server_bundle(&bundle, &repo, false).unwrap();
 
         assert!(repo.join("apps/server/dist/bin.js").is_file());
-        assert!(!repo.join("apps/mcp-server/dist").exists());
         assert!(!repo.join("apps/web/dist").exists());
     }
 
@@ -921,8 +944,8 @@ mod tests {
         let repo = outer.path().join("repo");
         fs::create_dir_all(&repo).unwrap();
         let staging = outer.path().join("bundle-src");
-        fs::create_dir_all(staging.join("apps/mcp-server/dist")).unwrap();
-        fs::write(staging.join("apps/mcp-server/dist/bin.js"), "mcp").unwrap();
+        fs::create_dir_all(staging.join("apps/web/dist")).unwrap();
+        fs::write(staging.join("apps/web/dist/index.html"), "<html></html>").unwrap();
         let bundle = outer.path().join("bad-bundle.tar.gz");
         let status = Command::new("tar")
             .args(["-czf"])
@@ -968,6 +991,8 @@ mod tests {
         } else {
             "gah-linux-aarch64"
         };
+        let mcp_name = cli_name.replacen("gah-", "gah-mcp-server-", 1);
+        fs::copy(&artifact, outer.path().join(&mcp_name)).unwrap();
         fs::rename(&artifact, outer.path().join(cli_name)).unwrap();
         let manifest = serde_json::json!({
             "schema": 1,
@@ -975,6 +1000,7 @@ mod tests {
             "channel": "edge",
             "assets": [
                 { "name": cli_name, "kind": "cli", "sha256": sha256_of(&outer.path().join(cli_name)).unwrap() },
+                { "name": mcp_name, "kind": "mcp-server", "sha256": sha256_of(&outer.path().join(&mcp_name)).unwrap() },
                 { "name": "gah-server-bundle.tar.gz", "kind": "server-bundle",
                   "sha256": sha256_of(&bundle).unwrap() },
             ]
@@ -995,6 +1021,7 @@ mod tests {
             install_release_artifacts(&manifest, &locator, &repo, HostRole::Central).unwrap();
         assert!(staging.is_some());
         assert!(cargo_home.join("bin/gah").is_file());
+        assert!(cargo_home.join("bin/gah-mcp-server").is_file());
         assert!(repo.join("apps/server/dist/bin.js").is_file());
         assert!(repo.join("apps/web/dist/index.html").is_file());
     }

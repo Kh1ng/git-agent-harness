@@ -13,7 +13,7 @@ function fixture(t, { fragments = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'gah-edge-manifest-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'package.json'), '{"version":"0.1.3"}');
-  for (const name of ['gah-linux-x86_64', 'gah-macos-universal', 'gah-server-bundle.tar.gz']) {
+  for (const name of ['gah-linux-x86_64', 'gah-macos-universal', 'gah-mcp-server-linux-x86_64', 'gah-mcp-server-macos-universal', 'gah-server-bundle.tar.gz']) {
     writeFileSync(join(dir, name), `fixture-bytes-${name}`);
   }
   for (const [name, body] of fragments) {
@@ -37,7 +37,11 @@ test('composes edge-manifest.json with per-asset SHA-256 and no desktop feed whe
   assert.equal(manifest.version, '0.1.3');
   assert.equal(manifest.channel, 'edge');
   assert.equal(manifest.commit, '0123456789abcdef0123456789abcdef01234567');
-  assert.equal(manifest.assets.length, 3);
+  assert.equal(manifest.assets.length, 5);
+  assert.deepEqual(
+    manifest.assets.filter((asset) => asset.kind === 'mcp-server').map((asset) => asset.name),
+    ['gah-mcp-server-linux-x86_64', 'gah-mcp-server-macos-universal']
+  );
   const bundle = manifest.assets.find((asset) => asset.kind === 'server-bundle');
   assert.equal(bundle.name, 'gah-server-bundle.tar.gz');
   assert.match(bundle.sha256, /^[0-9a-f]{64}$/);
