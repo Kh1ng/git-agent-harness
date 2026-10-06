@@ -11,6 +11,7 @@ import { PageHeader } from '../components/ui/PageHeader.js';
 import { EmptyState } from '../components/ui/EmptyState.js';
 import { SkillBankSettingsSection } from '../components/SkillBankSettingsSection.js';
 import { StatusBadge } from '../components/ui/StatusBadge.js';
+import { ExternalAnchor } from '../components/ExternalAnchor.js';
 import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
 import { gahApi, backendInstancesApi, GahApiError } from '../api/client.js';
 import type { ConfigSetData, NotificationSettingsSummary, NodeCapacitySettings } from '@git-agent-harness/contracts';
@@ -1346,7 +1347,7 @@ export function AdminUpdateSection() {
           {release.release_url && (
             <>
               {' '}
-              <a className="text-accent underline underline-offset-2" href={release.release_url} target="_blank" rel="noreferrer">Release</a>
+              <ExternalAnchor className="text-accent underline underline-offset-2" href={release.release_url}>Release</ExternalAnchor>
             </>
           )}
           {release.notes && (
