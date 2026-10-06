@@ -4,12 +4,17 @@ const mockUrl = process.env.GAH_MOCK_BASE_URL ?? 'http://127.0.0.1:3774';
 
 test.beforeEach(async ({ page, request }) => {
   await request.post(`${mockUrl}/api/mock/reset`);
+  let configuredModel = 'gpt-5';
+  page.on('request', (req) => {
+    if (req.method() === 'PATCH' && req.url().endsWith('/api/profiles/fixture')) {
+      const change = req.postDataJSON()?.agent_model?.[0] as string | undefined;
+      if (change) configuredModel = change.slice(change.indexOf('=') + 1);
+    }
+  });
   await page.route('**/api/config/effective**', async (route) => {
     const response = await route.fetch();
     const config = await response.json();
-    const profiles = await request.get(`${mockUrl}/api/profiles`).then((r) => r.json());
-    const caps = profiles.find((p: { name: string }) => p.name === 'fixture').max_concurrent_per_model ?? {};
-    await route.fulfill({ json: { ...config, improve_candidates: [{ backend: 'codex', model: Object.keys(caps)[0]?.slice(6) ?? 'gpt-5', priority: 100 }] } });
+    await route.fulfill({ json: { ...config, improve_candidates: [{ backend: 'codex', model: configuredModel, priority: 100 }] } });
   });
   await page.route('**/api/manager-chat/models**', (route) => route.fulfill({ json: {
     models: [{ id: 'gpt-6.1-sol', name: 'GPT 6.1 Sol' }], reasoningEfforts: [],
@@ -33,6 +38,7 @@ test('model selection shows the exact model and persists routing and capacity', 
   await page.reload();
   await page.getByRole('button', { name: 'Models & capacity', exact: true }).click();
   await expect(page.getByRole('combobox', { name: /^Model for Codex/ }).first()).toHaveValue('gpt-6.1-sol');
+  await page.screenshot({ path: 'test-results/agents-capacity-desktop.png' });
 });
 
 test('manual capacity persists, can be removed, and reports save failures', async ({ page, request }) => {
@@ -57,6 +63,8 @@ test('capacity controls fit a phone viewport', async ({ page }) => {
   await expect(page.getByLabel('Workers to add')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: 'test-results/agents-capacity-mobile.png', fullPage: true });
+  await page.getByLabel('Workers to add').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: 'test-results/agents-extra-capacity-mobile.png' });
 });
 
 test('expired capacity can be replaced and the work loop can be started', async ({ page, request }) => {
