@@ -347,19 +347,9 @@ fn validate_instance(
 
 fn all_candidates(routing: &RoutingPolicy) -> impl Iterator<Item = &CandidateConfig> {
     routing
-        .pm_candidates
-        .iter()
-        .flatten()
-        .chain(routing.improve_candidates.iter().flatten())
-        .chain(routing.review_candidates.iter().flatten())
-        .chain(routing.routine_reviewer.iter())
-        .chain(routing.escalatory_reviewers.iter())
-        .chain(
-            routing
-                .task_routing_rules
-                .iter()
-                .flat_map(|rule| rule.candidates.iter()),
-        )
+        .labeled_candidates()
+        .into_iter()
+        .map(|(_, candidate)| candidate)
 }
 
 fn validate_candidate(

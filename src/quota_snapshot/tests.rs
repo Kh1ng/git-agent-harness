@@ -692,6 +692,36 @@ fn build_candidates_falls_back_to_default_backend_when_none_configured() {
 }
 
 #[test]
+fn build_candidates_lists_allow_list_entries_under_their_job_kind() {
+    let routing = RoutingPolicy {
+        default_backend: Some("vibe".to_string()),
+        allowed_models: [(
+            "review".to_string(),
+            vec![CandidateConfig {
+                backend: "claude".to_string(),
+                model: Some("opus".to_string()),
+                ..CandidateConfig::default()
+            }],
+        )]
+        .into(),
+        ..RoutingPolicy::default()
+    };
+    let profile = test_profile_for_notifications();
+    let candidates = build_candidates(
+        &routing,
+        &profile,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &[],
+    );
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].backend, "claude");
+    assert_eq!(candidates[0].modes, vec!["review"]);
+}
+
+#[test]
 fn build_candidates_keeps_distinct_quota_pools_separately_scoped() {
     // Two candidates sharing a backend but different quota_pool must not
     // share eligibility -- one being blocked must not leak onto the other.

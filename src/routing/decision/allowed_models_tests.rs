@@ -488,3 +488,24 @@ fn auto_backend_model_override_keeps_the_quota_pool_from_the_allow_list() {
         Some("claude-team")
     );
 }
+
+#[test]
+fn allow_list_entries_are_checked_against_backend_arg_pins() {
+    let mut profile = opus_only_review_profile();
+    profile.routing.review_candidates = None;
+    profile.routing.improve_candidates = None;
+    profile.claude_args = vec!["--model".into(), "sonnet".into()];
+    let errors = crate::config::check_profile_candidate_model_consistency(&defaults(), &profile)
+        .unwrap_err();
+    assert!(errors.iter().any(|error| error.contains("allowed_model")));
+    // A backend-level entry admits any model, so it cannot disagree with a pin.
+    profile.routing.allowed_models.insert(
+        "review".into(),
+        vec![candidate_config("claude", None, None)],
+    );
+    crate::config::check_profile_candidate_model_consistency(&defaults(), &profile).unwrap();
+    assert_eq!(
+        profile.routing.labeled_candidates(),
+        vec![("allowed_model", &candidate_config("claude", None, None))]
+    );
+}

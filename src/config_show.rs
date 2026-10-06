@@ -380,20 +380,9 @@ fn build_profile_summary(
         .collect();
 
     let mut routed_backends: Vec<&str> = routing
-        .pm_candidates
-        .iter()
-        .flatten()
-        .chain(routing.improve_candidates.iter().flatten())
-        .chain(routing.review_candidates.iter().flatten())
-        .chain(
-            routing
-                .task_routing_rules
-                .iter()
-                .flat_map(|rule| rule.candidates.iter()),
-        )
-        .map(|candidate| candidate.backend.as_str())
-        .chain(routine_reviewer.iter().map(|c| c.backend.as_str()))
-        .chain(escalatory_reviewers.iter().map(|c| c.backend.as_str()))
+        .labeled_candidates()
+        .into_iter()
+        .map(|(_, candidate)| candidate.backend.as_str())
         .collect();
     routed_backends.sort_unstable();
     routed_backends.dedup();

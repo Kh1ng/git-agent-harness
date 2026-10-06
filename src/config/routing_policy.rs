@@ -174,6 +174,43 @@ impl RoutingPolicy {
     /// `improve`. A retry or escalation of an `improve` job is dispatched as
     /// `fix`, so `fix` without a list of its own is held to the `improve`
     /// list: "only this model" then survives the first retry.
+    /// Every configured candidate with the setting it came from, including
+    /// allow-list entries. Scans over "all candidates" go through here.
+    pub fn labeled_candidates(&self) -> Vec<(&'static str, &CandidateConfig)> {
+        let lists = [
+            ("pm_candidate", self.pm_candidates.as_deref()),
+            ("improve_candidate", self.improve_candidates.as_deref()),
+            ("review_candidate", self.review_candidates.as_deref()),
+            (
+                "escalatory_reviewer",
+                Some(self.escalatory_reviewers.as_slice()),
+            ),
+        ];
+        let mut candidates: Vec<_> = self
+            .routine_reviewer
+            .iter()
+            .map(|candidate| ("routine_reviewer", candidate))
+            .collect();
+        for (label, list) in lists {
+            candidates.extend(
+                list.into_iter()
+                    .flatten()
+                    .map(|candidate| (label, candidate)),
+            );
+        }
+        for rule in &self.task_routing_rules {
+            candidates.extend(
+                rule.candidates
+                    .iter()
+                    .map(|candidate| ("task_routing_rule", candidate)),
+            );
+        }
+        for list in self.allowed_models.values() {
+            candidates.extend(list.iter().map(|candidate| ("allowed_model", candidate)));
+        }
+        candidates
+    }
+
     pub fn allowed_models_for(&self, mode: &str) -> Option<&[CandidateConfig]> {
         let kind = JobKind::parse(mode).ok()?;
         let list = |kind: JobKind| {
