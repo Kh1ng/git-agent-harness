@@ -109,21 +109,9 @@ jobs:
           git push "$HOME/origin.git" HEAD:refs/heads/main
           git clone "$HOME/origin.git" "$HOME/gah"
 
-      - name: Supply the operator web-root setting (documented drop-in)
-        if: steps.scope.outputs.run == 'true'
-        run: |
-          set -euo pipefail
-          # `gah update` renders the unit for the installing account (#1322),
-          # so no user/path overrides are needed here. The dashboard root is
-          # the one setting the shipped unit leaves to the operator: gah
-          # update deploys the web bundle to /var/www/gah by default, and the
-          # service reads GAH_WEB_ROOT through this systemd drop-in.
-          sudo install -d -m 0755 /etc/systemd/system/gah-server.service.d
-          printf '%s\n' \
-            '[Service]' \
-            'Environment=GAH_WEB_ROOT=/var/www/gah' \
-            | sudo tee /etc/systemd/system/gah-server.service.d/ci-web-root.conf >/dev/null
-
+      # No web-root setting is supplied (#1327): `gah update` renders the unit
+      # for the installing account (#1322), and gah-server serves the
+      # dashboard from the checkout's build with no web server or drop-in.
       - name: Run the real standalone installer
         if: steps.scope.outputs.run == 'true'
         run: |
@@ -156,8 +144,10 @@ jobs:
             || fail "server.env HOST is not loopback: $(sudo cat /etc/gah/server.env)"
           exposed="$(ss -tln | awk '$4 ~ /:3773$/ && $4 !~ /^127\.0\.0\.1:3773$/')"
           [ -z "$exposed" ] || fail "server is listening on a non-loopback address: $exposed"
-          curl -fsS -o /dev/null http://127.0.0.1:3773/ \
-            || fail 'dashboard did not answer on loopback'
+          curl -fsS http://127.0.0.1:3773/ | grep -q '<div id="root">' \
+            || fail 'dashboard page did not load on loopback'
+          [ ! -e /var/www/gah ] \
+            || fail 'a fresh install must not create /var/www/gah'
           curl -fsS http://127.0.0.1:3773/health | grep -q '"status":"healthy"' \
             || fail '/health did not report healthy'
           role_json="$(gah status --role --json 2>&1)" \

@@ -560,7 +560,7 @@ pub fn run_release(args: ReleaseArgs) -> Result<()> {
                         None => unreachable!("a resolved deploy root is never skipped"),
                     }
                 }
-                None => println!("GAH_WEB_DEPLOY_ROOT is empty: skipping web UI deploy."),
+                None => println!("gah-server serves the web UI from apps/web/dist."),
             }
         }
     }

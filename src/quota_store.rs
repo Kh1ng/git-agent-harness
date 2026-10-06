@@ -20,10 +20,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+mod agy;
 #[cfg(test)]
 mod compatibility_tests;
 mod identity;
 mod instances;
+pub use agy::{launch as agy_launch, refresh_and_store as refresh_agy_and_store};
 pub(crate) use identity::current_source_records;
 pub use identity::{
     latest_windows_for_backend, latest_windows_for_identity,
@@ -309,16 +311,27 @@ fn mistral_admin_observation(
 
 /// Append one record under an exclusive lock. Missing parent dirs are created.
 pub fn append(state_path: &Path, rec: &QuotaObservationRecord) -> Result<()> {
-    for (field, value) in [
-        ("backend instance", rec.backend_instance.as_deref()),
-        ("quota pool", rec.quota_pool.as_deref()),
-    ] {
-        if let Some(value) = value {
-            let normalized = crate::execution_identity::validate_operator_label(field, value)?;
-            if normalized != value {
-                anyhow::bail!("{field} must not contain surrounding whitespace");
+    append_all(state_path, std::slice::from_ref(rec))
+}
+
+/// Append several records in one write, so a failure never leaves part of a
+/// multi-window observation in the store.
+pub(crate) fn append_all(state_path: &Path, records: &[QuotaObservationRecord]) -> Result<()> {
+    let mut lines = String::new();
+    for rec in records {
+        for (field, value) in [
+            ("backend instance", rec.backend_instance.as_deref()),
+            ("quota pool", rec.quota_pool.as_deref()),
+        ] {
+            if let Some(value) = value {
+                let normalized = crate::execution_identity::validate_operator_label(field, value)?;
+                if normalized != value {
+                    anyhow::bail!("{field} must not contain surrounding whitespace");
+                }
             }
         }
+        lines.push_str(&serde_json::to_string(rec).context("serialize quota observation")?);
+        lines.push('\n');
     }
     if let Some(parent) = state_path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -330,8 +343,8 @@ pub fn append(state_path: &Path, rec: &QuotaObservationRecord) -> Result<()> {
         .context("open quota store")?;
     file.lock_exclusive()
         .with_context(|| format!("locking {}", state_path.display()))?;
-    let line = serde_json::to_string(rec).context("serialize quota observation")?;
-    writeln!(file, "{line}").context("write quota observation")?;
+    file.write_all(lines.as_bytes())
+        .context("write quota observation")?;
     let _ = file.unlock();
     Ok(())
 }
@@ -505,6 +518,7 @@ pub fn refresh_stale_quota_observations(
     {
         handles.push(handle);
     }
+    handles.extend(agy::refresh_handles(profile, store_path, now));
     if crate::usage::nous::configured() {
         if let Some(handle) = maybe_refresh_backend_instance(
             store_path,

@@ -169,6 +169,9 @@ export type AuthState = 'ok' | 'expired' | 'missing' | 'unknown' | 'error';
 /** One login on one node: a backend, or a provider behind it. */
 export interface AuthProbe {
   backend: string;
+  /** Declared backend instance this login belongs to (#1352), or null for
+   * the node's shared default login. */
+  backend_instance?: string | null;
   provider: string | null;
   state: AuthState;
   /** Repository CLI package presence, independent of authentication. */

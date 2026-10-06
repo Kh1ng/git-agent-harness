@@ -157,12 +157,9 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             }
         }
 
-        // Issue #896: build the web dashboard and deploy it to the host's
-        // web-server root (configurable via GAH_WEB_DEPLOY_ROOT; unset
-        // defaults to /var/www/gah). The deploy root is a convention, not
-        // something this repo ships -- an operator MUST point it at wherever
-        // the host actually serves the dashboard from, and the deploy prints
-        // the chosen root so a mismatch is visible.
+        // The server serves the dashboard from the checkout's build (#1327).
+        // A host with its own web server also gets a copy in that server's
+        // root; see `resolve_web_deploy_root`.
         if cfg!(target_os = "macos") {
             run_command(&repo, "npm", WEB_BUILD_ARGS)?;
             println!(
@@ -172,7 +169,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         } else {
             match deploy_web_ui(&repo)? {
                 Some(root) => println!("Deployed web UI to {}", root.display()),
-                None => println!("GAH_WEB_DEPLOY_ROOT is empty: skipping web UI deploy."),
+                None => println!("Built web UI; gah-server serves it from apps/web/dist."),
             }
         }
     } else if cfg!(target_os = "macos") {
@@ -502,25 +499,23 @@ fn install_server_unit_template(repo: &Path, server_service: &str) -> Result<Opt
     Ok(Some(target))
 }
 
-/// Issue #896: build `apps/web` and deploy its `dist` to wherever the host's
-/// web server serves the dashboard from. The deploy root is configurable via
-/// `GAH_WEB_DEPLOY_ROOT`:
+/// Where to copy the built dashboard for a separate web server (issue #896),
+/// from `GAH_WEB_DEPLOY_ROOT`. The copy needs `sudo`.
 ///
-/// - unset -> `/var/www/gah` (a conventional static-site root; the operator
-///   MUST set this to the actual root of whatever web server serves the
-///   dashboard on this host, and the deploy prints the chosen root so a
-///   mismatch is visible)
+/// - unset -> `/var/www/gah` when that directory already exists (a host set
+///   up before #1327, serving it with Caddy or similar); otherwise no copy,
+///   and the GAH server serves the checkout's build without root
 /// - set to a non-empty path -> that path
-/// - set to empty -> skip deployment entirely
-///
-/// The web root is typically root-owned, so copying needs `sudo`.
+/// - set to empty -> no copy
 fn resolve_web_deploy_root(configured: Option<OsString>) -> Result<Option<PathBuf>> {
-    let root = configured
+    let legacy = Path::new("/var/www/gah");
+    let Some(root) = configured
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/www/gah"));
-    if root.as_os_str().is_empty() {
+        .or_else(|| legacy.is_dir().then(|| legacy.to_path_buf()))
+        .filter(|root| !root.as_os_str().is_empty())
+    else {
         return Ok(None);
-    }
+    };
     if !root.is_absolute()
         || root == Path::new("/")
         || root.components().any(|part| part == Component::ParentDir)
@@ -556,11 +551,16 @@ const WEB_BUILD_ARGS: &[&str] = &["run", "--workspace=apps/web", "build"];
 /// operator-provided files in the root (favicon overrides, robots.txt, a
 /// web-server config file) survive the update.
 fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
+    // Always build: the server serves this directory when nothing is copied.
+    run_command(repo, "npm", WEB_BUILD_ARGS)?;
+    let dist = repo.join("apps/web/dist");
+    if !dist.join("index.html").is_file() {
+        bail!("web build did not produce apps/web/dist/index.html");
+    }
     let Some(root_path) = resolve_web_deploy_root(env::var_os("GAH_WEB_DEPLOY_ROOT"))? else {
         return Ok(None);
     };
-    run_command(repo, "npm", WEB_BUILD_ARGS)?;
-    deploy_web_dist(repo, &repo.join("apps/web/dist"), root_path)
+    deploy_web_dist(repo, &dist, root_path)
 }
 
 /// Issue #1416: the release path calls this directly with the freshly
@@ -1350,6 +1350,12 @@ mod tests {
         assert!(resolve_web_deploy_root(Some(OsString::from("/"))).is_err());
         assert!(resolve_web_deploy_root(Some(OsString::from("/tmp/.."))).is_err());
         assert!(resolve_web_deploy_root(Some(OsString::from("/var/www/gah/../../.."))).is_err());
+        // Unset copies only into a web root an earlier install created (#1327).
+        let legacy = Path::new("/var/www/gah");
+        assert_eq!(
+            resolve_web_deploy_root(None).unwrap(),
+            legacy.is_dir().then(|| legacy.to_path_buf())
+        );
     }
 
     /// Issue #1010: the production updater must build `apps/web` directly,

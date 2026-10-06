@@ -119,16 +119,28 @@ installs the lockfile-pinned Node dependencies, builds `apps/server`, and
 installs/reloads the `gah-loop@.service` user-unit template. On a central
 node it also reinstalls the system-level `gah-server.service` unit from the
 tracked template (issue #894, so the installed unit can't drift from
-`packaging/systemd/`), builds the web dashboard and deploys its `dist` to the
-web root (issue #896), and optionally restarts `gah-server.service`. It does
-not build or deploy desktop, TUI, mobile, or other client packages.
+`packaging/systemd/`), builds the web dashboard, and optionally restarts
+`gah-server.service`. It does not build or deploy desktop, TUI, mobile, or
+other client packages.
 
-The web deploy root defaults to `/var/www/gah`, a conventional static-site
-root. It is **not** something this repo ships or documents as a server
-layout — set `GAH_WEB_DEPLOY_ROOT` to wherever the web server on this host
-actually serves the dashboard from (the deploy prints the chosen root so a
-mismatch is visible). Set it to an empty string to skip web deploy entirely
-on hosts that serve the dashboard from elsewhere.
+**Who serves the dashboard.** `gah-server` serves the built web app itself
+(`apps/web/dist` in the checkout), so a fresh install needs no separate web
+server and no root to deploy the dashboard (issue #1327). `GAH_WEB_ROOT` in
+`/etc/gah/server.env` overrides the directory; set it to an empty value when
+another web server serves the dashboard and `gah-server` should serve only the
+API.
+
+**Hosts with their own web server.** `gah update` also copies the build into a
+web root for Caddy or similar (issue #896), using `sudo`:
+
+- `GAH_WEB_DEPLOY_ROOT` unset: copy to `/var/www/gah` if that directory already
+  exists, as on a host set up before #1327. Otherwise nothing is copied.
+- `GAH_WEB_DEPLOY_ROOT=/some/root`: copy there. The update prints the root.
+- `GAH_WEB_DEPLOY_ROOT=` (empty): never copy.
+
+An existing Caddy install therefore keeps working unchanged. To move it to
+`gah-server`, remove the dashboard site from Caddy, delete `/var/www/gah`, and
+restart `gah-server.service`.
 
 `--restart-server` refuses to run while any `gah loop --profile …` process is
 active. The loop has its own systemd user cgroup and must be stopped cleanly
@@ -841,7 +853,9 @@ Each backend authenticates through its own CLI, not through GAH:
   `codex doctor` (websocket connect + auth). Account-level quota is subscription,
   not API-metered.
 - **claude** — `claude` CLI login; configured executable path allowed via
-  profile `claude_path`.
+  profile `claude_path`. A saved subscription token (`claude setup-token`,
+  credential kind `claude_subscription_token`) can be bound to an instance
+  instead of a browser login; see "Claude subscription token" below.
 - **agy / agy-main / agy-second** — `agy` and the `agy-main` wrapper share the
   default `HOME` and therefore one authenticated account/quota pool;
   `agy-second` is isolated by `agy_second_home` as a distinct account.
@@ -1107,6 +1121,37 @@ The CLI supports the same storage through `gah credentials list --json`,
 The save command reads the secret from stdin. Its `--id`, `--provider`,
 `--kind`, and `--account-label` arguments contain metadata only.
 `gah quota refresh --credential NAME` checks only that connection.
+
+### Claude subscription token
+
+GAH runs Claude under isolated per-attempt state, so the interactive OAuth
+login in `~/.claude` is invisible to dispatched runs. `claude setup-token`
+prints one long-lived token for the subscription; save it once per account
+and bind it to a Claude instance (issue #1352). The runner receives it only
+as `CLAUDE_CODE_OAUTH_TOKEN`, never as an API key:
+
+```sh
+claude setup-token            # prints the token; do not paste it into shell history
+read -rs TOKEN; printf '%s' "$TOKEN" | \
+  gah credentials save --id claude-work --provider claude \
+    --kind claude_subscription_token --account-label work
+```
+
+The token counts as subscription quota: candidates on a bound instance are
+`included_in_quota` and never require paid-route approval. An
+`external_credential_scopes` entry for `ANTHROPIC_API_KEY` does not cover the
+token; list `CLAUDE_CODE_OAUTH_TOKEN` in a scope if runs with it should need
+work-scoped approval. `gah auth-health`
+reports each instance independently; a saved token reads as unknown there
+because a login check cannot verify it. `gah quota refresh --credential
+claude-work` (also run by auto-refresh) asks the subscription usage endpoint
+for the 5-hour and weekly windows. That endpoint needs the `user:profile`
+scope, and `claude setup-token` tokens are reported to be inference-only; when
+the endpoint rejects the scope, the check records "quota unavailable" for the
+credential and the instance's windows stay unknown. That is not a token fault.
+Save one credential per account and give each instance its own `state_root`,
+so concurrent instances never rewrite shared login state. The token is
+stored owner-only and never appears in argv, logs, ledger, or telemetry.
 
 ### Mistral dashboard usage
 
