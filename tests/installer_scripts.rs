@@ -126,7 +126,12 @@ esac
         let log = home.join("commands.log");
         let path = format!("{}:/usr/bin:/bin", bin.display());
         let output = bash(
-            &[scripts.join("install.sh").to_str().unwrap()],
+            &[
+                "-c",
+                "printf 'yes\\n' | bash \"$1\"",
+                "install-test",
+                scripts.join("install.sh").to_str().unwrap(),
+            ],
             &[
                 ("HOME", home.to_str().unwrap()),
                 ("PATH", &path),
@@ -134,6 +139,10 @@ esac
                 ("GAH_TEST_LOG", log.to_str().unwrap()),
                 ("GAH_TEST_BIN", GAH),
                 ("GAH_NODE_ROLE", "worker"),
+                (
+                    "GAH_INSTALL_CONFIRMED",
+                    if os == "Linux" { "1" } else { "" },
+                ),
                 ("GAH_CENTRAL_URL", "https://central.test"),
                 ("COORDINATOR_TOKEN", "installer-test-token"),
             ],
@@ -145,7 +154,9 @@ esac
         let calls: Vec<&str> = calls.lines().collect();
         assert_eq!(calls.len(), 2, "{os}: {calls:?}");
         assert!(
-            calls[0].starts_with("config set") && calls[1].starts_with("update"),
+            calls[0].starts_with("config set")
+                && calls[1].starts_with("update")
+                && calls[1].ends_with("--yes"),
             "{calls:?}"
         );
         let credential = home.join(".config/gah/gah-loop.env");
@@ -155,6 +166,152 @@ esac
         );
         assert_eq!(mode(&credential), 0o600);
         assert!(!home.join(".config/systemd").exists());
+    }
+}
+
+#[test]
+fn declining_installers_disclose_effects_before_confirmation_and_preserve_files() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    for installer in ["install-linux.sh", "install-macos.sh"] {
+        for role in ["worker", "central"] {
+            for answer in ["n\n", ""] {
+                let temp = tempfile::tempdir().unwrap();
+                let home = temp.path().join("home");
+                let config = home.join(".config/gah");
+                std::fs::create_dir_all(&config).unwrap();
+                for file in [
+                    "config.toml",
+                    "gah-loop.env",
+                    "tdai-gateway.env",
+                    "server.env",
+                ] {
+                    std::fs::write(config.join(file), "existing settings\n").unwrap();
+                }
+                let memory = temp.path().join("MemoryCore");
+                std::fs::create_dir_all(memory.join("src/gateway")).unwrap();
+                std::fs::write(memory.join("src/gateway/server.ts"), "").unwrap();
+                std::fs::write(memory.join("tdai-gateway.standalone.yaml"), "template").unwrap();
+                let bin = temp.path().join("bin");
+                let log = temp.path().join("commands.log");
+                executable(&bin.join("uname"), "echo Darwin\n");
+                for command in ["cargo", "sudo", "curl", "openssl", "systemctl", "tailscale"] {
+                    executable(
+                        &bin.join(command),
+                        "echo forbidden >> \"$GAH_TEST_LOG\"; exit 99\n",
+                    );
+                }
+                let mut child = Command::new("bash")
+                    .arg(repo().join("scripts").join(installer))
+                    .env_clear()
+                    .env("HOME", &home)
+                    .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                    .env("GAH_TEST_LOG", &log)
+                    .env("GAH_NODE_ROLE", role)
+                    .env("GAH_INSTALL_AGENT", "codex")
+                    .env("COORDINATOR_TOKEN", "new-token")
+                    .env("GAH_CENTRAL_URL", "https://central.test")
+                    .env(
+                        "GAH_GATEWAY_MODE",
+                        if role == "central" { "colocated" } else { "" },
+                    )
+                    .env("GAH_GATEWAY_MEMORYCORE_PATH", &memory)
+                    .env("GAH_GATEWAY_LLM_API_KEY", "new-key")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(answer.as_bytes())
+                    .unwrap();
+                let output = child.wait_with_output().unwrap();
+                assert!(
+                    !output.status.success(),
+                    "{installer} {role}: {}",
+                    text(&output)
+                );
+                assert!(
+                    text(&output).contains("Installation cancelled before configuration"),
+                    "{}",
+                    text(&output)
+                );
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let plan = stdout.split_once("Apply these changes? [y/N]").unwrap().0;
+                for effect in [
+                    "$CARGO_HOME/bin",
+                    "node role",
+                    "gah-loop.env",
+                    "accept-dns",
+                    "gah-quota-refresh.service/timer",
+                ] {
+                    assert!(
+                        plan.contains(effect),
+                        "missing {effect} before approval: {stdout}"
+                    );
+                }
+                if installer == "install-linux.sh" {
+                    for effect in [
+                        "gah-loop@.service",
+                        "gah-watchdog.service/timer",
+                        "lingering",
+                        "loginctl/sudo",
+                    ] {
+                        assert!(plan.contains(effect), "missing {effect}: {stdout}");
+                    }
+                    if role == "central" {
+                        // #1327: the dashboard is copied into /var/www/gah
+                        // only where an earlier install created it;
+                        // otherwise gah-server serves the checkout's build.
+                        let legacy_root = Path::new("/var/www/gah").is_dir();
+                        assert_eq!(plan.contains("/var/www/gah"), legacy_root, "{stdout}");
+                        assert_eq!(
+                            plan.contains("gah-server serves it"),
+                            !legacy_root,
+                            "{stdout}"
+                        );
+                        for effect in [
+                            "/etc/systemd/system/gah-server.service",
+                            "gah-prune.service/timer",
+                            "/etc/gah/server.env",
+                            "tdai-memory-gateway.service",
+                            "tdai-gateway.local.yaml",
+                            "tdai-gateway.env",
+                        ] {
+                            assert!(plan.contains(effect), "missing {effect}: {stdout}");
+                        }
+                    } else {
+                        assert!(!plan.contains("/var/www/gah"));
+                        assert!(!plan.contains("/etc/systemd/system/gah-server.service"));
+                    }
+                } else {
+                    assert!(plan.contains("~/Applications"));
+                    assert!(plan.contains("~/Library/LaunchAgents"));
+                    if role == "central" {
+                        assert!(plan.contains("memory-gateway LaunchAgent"));
+                        assert!(plan.contains("tdai-gateway.env"));
+                    }
+                }
+                assert!(!log.exists(), "cancellation must precede external commands");
+                assert!(!memory.join("tdai-gateway.local.yaml").exists());
+                assert_eq!(std::fs::read_dir(&config).unwrap().count(), 4);
+                for file in [
+                    "config.toml",
+                    "gah-loop.env",
+                    "tdai-gateway.env",
+                    "server.env",
+                ] {
+                    assert_eq!(
+                        std::fs::read_to_string(config.join(file)).unwrap(),
+                        "existing settings\n"
+                    );
+                }
+            }
+        }
     }
 }
 

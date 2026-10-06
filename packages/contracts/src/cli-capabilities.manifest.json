@@ -2366,6 +2366,18 @@
           },
           "type": "array"
         },
+        "boost_hours": {
+          "description": "Hours until the boost ends.",
+          "type": "number"
+        },
+        "boost_model": {
+          "description": "backend/model that receives the boost.",
+          "type": "string"
+        },
+        "boost_workers": {
+          "description": "Workers to add now on top of baseline and scaling.",
+          "type": "number"
+        },
         "claude_args": {
           "description": "Claude CLI arguments.",
           "items": {
@@ -2494,6 +2506,22 @@
         "vibe_path": {
           "description": "Vibe executable path on the node.",
           "type": "string"
+        },
+        "worker_scaling": {
+          "description": "Automatic worker scaling from quota headroom: on or off.",
+          "type": "string"
+        },
+        "worker_scaling_extra_per_model": {
+          "description": "Extra concurrent runs for a model with quota headroom.",
+          "type": "number"
+        },
+        "worker_scaling_max_workers": {
+          "description": "Most workers automatic scaling may reach.",
+          "type": "number"
+        },
+        "worker_scaling_min_remaining_percent": {
+          "description": "Percent every fresh quota window must have left to scale.",
+          "type": "number"
         }
       },
       "required": [

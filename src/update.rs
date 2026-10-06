@@ -14,12 +14,20 @@ use std::fs::{copy, create_dir_all, read_dir, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+mod installation;
 mod units;
+pub use installation::installation_plan;
+#[cfg(test)]
+use installation::quota_refresh_selected;
+use installation::{agents_to_refresh, install_selected_agent_assets};
 
 pub use crate::node_role::NodeRole as HostRole;
 
 pub struct UpdateArgs {
     pub repo: Option<PathBuf>,
+    pub pull: bool,
+    pub agents: Vec<String>,
+    pub yes: bool,
     pub role: HostRole,
     pub restart_server: bool,
     pub server_service: String,
@@ -33,15 +41,44 @@ pub fn run(args: UpdateArgs) -> Result<()> {
 
     let repo = resolve_repo(args.repo.as_deref())?;
     let _update_lock = acquire_update_lock(&repo)?;
-    ensure_default_branch_checkout(&repo)?;
-    ensure_clean(&repo)?;
+    if args.pull {
+        ensure_default_branch_checkout(&repo)?;
+        ensure_clean(&repo)?;
+    }
+    let config_home = user_config_home()?;
+    let agents = agents_to_refresh(&config_home, &args.agents);
+    let plan = installation_plan(args.role, &agents)?;
+    for change in &plan {
+        println!("  - {change}");
+    }
+    if args.restart_server {
+        println!("  - Restart control-plane service {}", args.server_service);
+    }
+    if args.pull {
+        println!(
+            "  - Fetch origin and pull --ff-only into {}",
+            repo.display()
+        );
+    }
+    if !args.yes {
+        use std::io::Write;
+        print!("Apply these changes? [y/N] ");
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            bail!("Update cancelled before installation");
+        }
+    }
     if args.restart_server {
         ensure_no_running_loop_before_server_restart()?;
     }
 
     println!("Updating GAH CLI/control plane from {}", repo.display());
-    run_command(&repo, "git", &["fetch", "origin", "--prune"])?;
-    run_command(&repo, "git", &["pull", "--ff-only"])?;
+    if args.pull {
+        run_command(&repo, "git", &["fetch", "origin", "--prune"])?;
+        run_command(&repo, "git", &["pull", "--ff-only"])?;
+    }
 
     // This is the authoritative CLI deployment step. It replaces the Cargo
     // executable selected by PATH, unlike a target/release-only build.
@@ -49,7 +86,9 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     run_command(
         &repo,
         "cargo",
-        &["install", "--path", ".", "--force", "--locked"],
+        &[
+            "install", "--path", ".", "--bin", "gah", "--force", "--locked",
+        ],
     )?;
 
     let binary = installed_binary_path()?;
@@ -65,9 +104,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     // early so a later failed step cannot skip it.
     enable_user_lingering(&repo, args.role);
 
-    for agent in copy_opencode_agent_configs(&repo, &user_config_home()?)? {
-        println!("Installed OpenCode agent: {}", agent.display());
-    }
+    install_selected_agent_assets(&repo, &config_home, &agents)?;
 
     if cfg!(target_os = "macos") && args.role == HostRole::Worker {
         run_command(
@@ -138,12 +175,9 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             }
         }
 
-        // Issue #896: build the web dashboard and deploy it to the host's
-        // web-server root (configurable via GAH_WEB_DEPLOY_ROOT; unset
-        // defaults to /var/www/gah). The deploy root is a convention, not
-        // something this repo ships -- an operator MUST point it at wherever
-        // the host actually serves the dashboard from, and the deploy prints
-        // the chosen root so a mismatch is visible.
+        // The server serves the dashboard from the checkout's build (#1327).
+        // A host with its own web server also gets a copy in that server's
+        // root; see `resolve_web_deploy_root`.
         if cfg!(target_os = "macos") {
             run_command(&repo, "npm", WEB_BUILD_ARGS)?;
             println!(
@@ -153,7 +187,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         } else {
             match deploy_web_ui(&repo)? {
                 Some(root) => println!("Deployed web UI to {}", root.display()),
-                None => println!("GAH_WEB_DEPLOY_ROOT is empty: skipping web UI deploy."),
+                None => println!("Built web UI; gah-server serves it from apps/web/dist."),
             }
         }
     } else if cfg!(target_os = "macos") {
@@ -211,21 +245,6 @@ pub fn run(args: UpdateArgs) -> Result<()> {
             );
         }
         None => println!("systemd not available on this host: skipping watchdog unit install."),
-    }
-    match install_quota_refresh_unit_template(&repo)? {
-        Some(quota_refresh_units) => {
-            for unit in &quota_refresh_units {
-                println!("Installed quota refresh unit: {}", unit.display());
-            }
-            println!(
-                "Quota refresh timer is installed and enabled: account-level quota \
-                 (codex/vibe) refreshes every 15 minutes (issue #761). Opt out with \
-                 `systemctl --user disable --now gah-quota-refresh.timer`."
-            );
-        }
-        None => {
-            println!("systemd not available on this host: skipping quota refresh unit install.")
-        }
     }
 
     if args.restart_server && cfg!(target_os = "macos") {
@@ -524,25 +543,23 @@ fn install_server_unit_template(repo: &Path, server_service: &str) -> Result<Opt
     Ok(Some(target))
 }
 
-/// Issue #896: build `apps/web` and deploy its `dist` to wherever the host's
-/// web server serves the dashboard from. The deploy root is configurable via
-/// `GAH_WEB_DEPLOY_ROOT`:
+/// Where to copy the built dashboard for a separate web server (issue #896),
+/// from `GAH_WEB_DEPLOY_ROOT`. The copy needs `sudo`.
 ///
-/// - unset -> `/var/www/gah` (a conventional static-site root; the operator
-///   MUST set this to the actual root of whatever web server serves the
-///   dashboard on this host, and the deploy prints the chosen root so a
-///   mismatch is visible)
+/// - unset -> `/var/www/gah` when that directory already exists (a host set
+///   up before #1327, serving it with Caddy or similar); otherwise no copy,
+///   and the GAH server serves the checkout's build without root
 /// - set to a non-empty path -> that path
-/// - set to empty -> skip deployment entirely
-///
-/// The web root is typically root-owned, so copying needs `sudo`.
+/// - set to empty -> no copy
 fn resolve_web_deploy_root(configured: Option<OsString>) -> Result<Option<PathBuf>> {
-    let root = configured
+    let legacy = Path::new("/var/www/gah");
+    let Some(root) = configured
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/www/gah"));
-    if root.as_os_str().is_empty() {
+        .or_else(|| legacy.is_dir().then(|| legacy.to_path_buf()))
+        .filter(|root| !root.as_os_str().is_empty())
+    else {
         return Ok(None);
-    }
+    };
     if !root.is_absolute()
         || root == Path::new("/")
         || root.components().any(|part| part == Component::ParentDir)
@@ -578,14 +595,15 @@ const WEB_BUILD_ARGS: &[&str] = &["run", "--workspace=apps/web", "build"];
 /// operator-provided files in the root (favicon overrides, robots.txt, a
 /// web-server config file) survive the update.
 fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
-    let Some(root_path) = resolve_web_deploy_root(env::var_os("GAH_WEB_DEPLOY_ROOT"))? else {
-        return Ok(None);
-    };
+    // Always build: the server serves this directory when nothing is copied.
     run_command(repo, "npm", WEB_BUILD_ARGS)?;
     let dist = repo.join("apps/web/dist");
     if !dist.join("index.html").is_file() {
         bail!("web build did not produce apps/web/dist/index.html");
     }
+    let Some(root_path) = resolve_web_deploy_root(env::var_os("GAH_WEB_DEPLOY_ROOT"))? else {
+        return Ok(None);
+    };
     let root = root_path
         .to_str()
         .context("GAH_WEB_DEPLOY_ROOT is not UTF-8")?;
@@ -929,6 +947,26 @@ mod tests {
     static XDG_CONFIG_HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn claude_only_installs_no_opencode_files_or_quota_units() {
+        let config = TempDir::new().unwrap();
+        let agents = vec!["claude".to_string()];
+        super::install_selected_agent_assets(
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            config.path(),
+            &agents,
+        )
+        .unwrap();
+        assert!(!config.path().join("opencode").exists());
+        assert!(!config.path().join("systemd").exists());
+        let plan = super::installation_plan(HostRole::Worker, &agents).unwrap();
+        assert!(!plan
+            .iter()
+            .any(|line| line.contains("OpenCode") || line.contains("quota-refresh")));
+        assert!(super::quota_refresh_selected(&["codex".into()]));
+        assert!(super::quota_refresh_selected(&["vibe".into()]));
+    }
+
+    #[test]
     fn a_stale_lockfile_stops_the_update_before_install() {
         // A path dependency keeps this offline: no registry lookup is needed.
         let tmp = TempDir::new().unwrap();
@@ -1237,6 +1275,9 @@ mod tests {
     fn worker_role_rejects_restart_server_flag() {
         let err = run(UpdateArgs {
             repo: None,
+            pull: false,
+            agents: vec![],
+            yes: true,
             role: HostRole::Worker,
             restart_server: true,
             server_service: "gah-server.service".into(),
@@ -1341,6 +1382,12 @@ mod tests {
         assert!(resolve_web_deploy_root(Some(OsString::from("/"))).is_err());
         assert!(resolve_web_deploy_root(Some(OsString::from("/tmp/.."))).is_err());
         assert!(resolve_web_deploy_root(Some(OsString::from("/var/www/gah/../../.."))).is_err());
+        // Unset copies only into a web root an earlier install created (#1327).
+        let legacy = Path::new("/var/www/gah");
+        assert_eq!(
+            resolve_web_deploy_root(None).unwrap(),
+            legacy.is_dir().then(|| legacy.to_path_buf())
+        );
     }
 
     /// Issue #1010: the production updater must build `apps/web` directly,

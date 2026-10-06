@@ -96,3 +96,20 @@ test('worker reports are validated before central trusts them', () => {
   ] });
   assert.deepEqual(parsed, { checked_at: 'now', probes: [{ backend: 'codex', provider: null, state: 'ok', source: 'probe' }] });
 });
+
+test('claude backend instances stay separate logins, each announced on its own (#1352)', async () => {
+  const instance = (name: string, state: AuthProbe['state']): RawProbe => ({
+    backend: 'claude', backend_instance: name, provider: null, state, source: 'probe'
+  });
+  const f = fixture([instance('claude-work', 'ok'), instance('claude-personal', 'ok')]);
+  await f.prober.refresh();
+  assert.deepEqual(f.events, []);
+  assert.equal(f.monitor.rows().length, 2);
+  f.setLocal([instance('claude-work', 'ok'), instance('claude-personal', 'expired')]);
+  f.tick();
+  await f.prober.refresh();
+  assert.deepEqual(f.events, ['auth_expired Central · claude · claude-personal: login expired']);
+  assert.deepEqual(f.monitor.rows().map((row) => [row.backend_instance, row.state]), [
+    ['claude-work', 'ok'], ['claude-personal', 'expired']
+  ]);
+});

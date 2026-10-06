@@ -51,7 +51,17 @@ pub fn install(args: &Args, home: &Path) -> Result<()> {
     super::files::check_value("COORDINATOR_TOKEN", &settings.token)?;
     let config = home.join(".config/gah/config.toml");
     if !config.exists() {
-        replace(&config, b"[defaults]\n\n[profiles]\n", 0o644)?;
+        // Issue #1366: the initial config must carry a worktree_base default,
+        // otherwise every later dispatch plans its worktree at the filesystem
+        // root until a profile is added. Paths are TOML-escaped (\\ and ").
+        let worktree_base = home
+            .join(".local/share/gah/worktrees")
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let defaults = format!("[defaults]\nworktree_base = \"{worktree_base}\"\n\n[profiles]\n");
+        replace(&config, defaults.as_bytes(), 0o644)?;
     }
 
     let identity_path = args.root.join("identity.json");

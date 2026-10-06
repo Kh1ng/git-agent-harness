@@ -20,8 +20,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+mod agy;
+#[cfg(test)]
+mod compatibility_tests;
 mod identity;
 mod instances;
+pub use agy::{launch as agy_launch, refresh_and_store as refresh_agy_and_store};
 pub(crate) use identity::current_source_records;
 pub use identity::{
     latest_windows_for_backend, latest_windows_for_identity,
@@ -29,6 +33,7 @@ pub use identity::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "QuotaObservationRecordRaw")]
 pub struct QuotaObservationRecord {
     pub backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,8 +46,6 @@ pub struct QuotaObservationRecord {
     pub quota_pool: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_window: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_used_percent: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_remaining_percent: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,6 +62,53 @@ pub struct QuotaObservationRecord {
     pub mistral_admin: Option<MistralAdminObservationRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_usage: Option<crate::usage::account_usage::AccountUsageObservation>,
+}
+
+#[derive(Deserialize)]
+struct QuotaObservationRecordRaw {
+    pub backend: String,
+    pub credential_id: Option<String>,
+    pub backend_instance: Option<String>,
+    pub model: Option<String>,
+    pub quota_pool: Option<String>,
+    pub quota_window: Option<String>,
+    pub quota_used_percent: Option<f64>,
+    pub quota_remaining_percent: Option<f64>,
+    pub quota_reset_at: Option<String>,
+    pub observed_at: Option<String>,
+    pub checked_at: Option<String>,
+    pub check_error: Option<String>,
+    pub usage_source: Option<String>,
+    pub mistral_admin: Option<MistralAdminObservationRecord>,
+    pub account_usage: Option<crate::usage::account_usage::AccountUsageObservation>,
+}
+
+impl From<QuotaObservationRecordRaw> for QuotaObservationRecord {
+    fn from(raw: QuotaObservationRecordRaw) -> Self {
+        // A used percent outside 0..=100 is not a reading; it must not
+        // become a negative or over-100 remaining value.
+        let quota_remaining_percent = raw.quota_remaining_percent.or_else(|| {
+            raw.quota_used_percent
+                .filter(|used| (0.0..=100.0).contains(used))
+                .map(|used| 100.0 - used)
+        });
+        Self {
+            backend: raw.backend,
+            credential_id: raw.credential_id,
+            backend_instance: raw.backend_instance,
+            model: raw.model,
+            quota_pool: raw.quota_pool,
+            quota_window: raw.quota_window,
+            quota_remaining_percent,
+            quota_reset_at: raw.quota_reset_at,
+            observed_at: raw.observed_at,
+            checked_at: raw.checked_at,
+            check_error: raw.check_error,
+            usage_source: raw.usage_source,
+            mistral_admin: raw.mistral_admin,
+            account_usage: raw.account_usage,
+        }
+    }
 }
 
 /// Persisted Mistral Admin API payloads associated with a single refresh.
@@ -164,6 +214,9 @@ pub fn parse_external_observation(input: &str) -> Result<QuotaObservationRecord>
     if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
         anyhow::bail!("unsupported quota observation field");
     }
+    let submitted_used = fields
+        .get("quota_used_percent")
+        .and_then(|used| used.as_f64());
     let mut record: QuotaObservationRecord = serde_json::from_value(value)
         .map_err(|_| anyhow::anyhow!("invalid quota observation schema"))?;
     if let Some(usage) = &record.account_usage {
@@ -188,7 +241,7 @@ pub fn parse_external_observation(input: &str) -> Result<QuotaObservationRecord>
     {
         anyhow::bail!("backend_instance, checked_at and usage_source are required");
     }
-    for value in [record.quota_used_percent, record.quota_remaining_percent]
+    for value in [record.quota_remaining_percent, submitted_used]
         .into_iter()
         .flatten()
     {
@@ -263,16 +316,27 @@ fn mistral_admin_observation(
 
 /// Append one record under an exclusive lock. Missing parent dirs are created.
 pub fn append(state_path: &Path, rec: &QuotaObservationRecord) -> Result<()> {
-    for (field, value) in [
-        ("backend instance", rec.backend_instance.as_deref()),
-        ("quota pool", rec.quota_pool.as_deref()),
-    ] {
-        if let Some(value) = value {
-            let normalized = crate::execution_identity::validate_operator_label(field, value)?;
-            if normalized != value {
-                anyhow::bail!("{field} must not contain surrounding whitespace");
+    append_all(state_path, std::slice::from_ref(rec))
+}
+
+/// Append several records in one write, so a failure never leaves part of a
+/// multi-window observation in the store.
+pub(crate) fn append_all(state_path: &Path, records: &[QuotaObservationRecord]) -> Result<()> {
+    let mut lines = String::new();
+    for rec in records {
+        for (field, value) in [
+            ("backend instance", rec.backend_instance.as_deref()),
+            ("quota pool", rec.quota_pool.as_deref()),
+        ] {
+            if let Some(value) = value {
+                let normalized = crate::execution_identity::validate_operator_label(field, value)?;
+                if normalized != value {
+                    anyhow::bail!("{field} must not contain surrounding whitespace");
+                }
             }
         }
+        lines.push_str(&serde_json::to_string(rec).context("serialize quota observation")?);
+        lines.push('\n');
     }
     if let Some(parent) = state_path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -284,8 +348,8 @@ pub fn append(state_path: &Path, rec: &QuotaObservationRecord) -> Result<()> {
         .context("open quota store")?;
     file.lock_exclusive()
         .with_context(|| format!("locking {}", state_path.display()))?;
-    let line = serde_json::to_string(rec).context("serialize quota observation")?;
-    writeln!(file, "{line}").context("write quota observation")?;
+    file.write_all(lines.as_bytes())
+        .context("write quota observation")?;
     let _ = file.unlock();
     Ok(())
 }
@@ -303,8 +367,7 @@ pub fn latest_for_identity<'a>(
 }
 
 fn has_quota_data(record: &QuotaObservationRecord) -> bool {
-    record.quota_used_percent.is_some()
-        || record.quota_remaining_percent.is_some()
+    record.quota_remaining_percent.is_some()
         || record.quota_window.is_some()
         || record.quota_reset_at.is_some()
         || record.account_usage.is_some()
@@ -388,7 +451,6 @@ pub(crate) fn refresh_vibe_admin_record(
                 model: model.map(str::to_string),
                 quota_pool: None,
                 quota_window: None,
-                quota_used_percent: None,
                 quota_remaining_percent: None,
                 quota_reset_at: None,
                 observed_at: time::OffsetDateTime::now_utc()
@@ -461,6 +523,7 @@ pub fn refresh_stale_quota_observations(
     {
         handles.push(handle);
     }
+    handles.extend(agy::refresh_handles(profile, store_path, now));
     if crate::usage::nous::configured() {
         if let Some(handle) = maybe_refresh_backend_instance(
             store_path,
@@ -663,7 +726,6 @@ fn maybe_refresh_source(
                 model: None,
                 quota_pool: None,
                 quota_window: None,
-                quota_used_percent: None,
                 quota_remaining_percent: None,
                 quota_reset_at: None,
                 observed_at: None,
@@ -998,7 +1060,7 @@ mod tests {
             .unwrap()
             .expect("spend limit observation persisted");
         assert_eq!(rec.backend, "vibe");
-        assert_eq!(rec.quota_used_percent, Some(33.904));
+        assert_eq!(rec.quota_remaining_percent, Some(100.0 - 33.904));
         assert_eq!(
             rec.usage_source.as_deref(),
             Some("mistral_admin_spend_limit")
@@ -1078,7 +1140,7 @@ mod tests {
         let records = load(&path).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(rec.backend, "vibe");
-        assert!(rec.quota_used_percent.is_none());
+        assert!(rec.quota_remaining_percent.is_none());
         assert_eq!(rec.usage_source.as_deref(), Some("mistral_admin_refresh"));
         let admin = rec.mistral_admin.as_ref().expect("admin payload persisted");
         assert!(admin.workspace_usage.is_some());
@@ -1106,7 +1168,6 @@ mod tests {
                 model: Some("gpt-5".into()),
                 quota_pool: None,
                 quota_window: Some("300m".into()),
-                quota_used_percent: Some(25.0),
                 quota_remaining_percent: Some(75.0),
                 quota_reset_at: Some("2026-04-29T12:00:00Z".into()),
                 observed_at: Some("2026-04-28T10:00:00Z".into()),
@@ -1123,7 +1184,7 @@ mod tests {
         let records = load(&path).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].backend, "codex");
-        assert_eq!(records[0].quota_used_percent, Some(25.0));
+        assert_eq!(records[0].quota_remaining_percent, Some(100.0 - 25.0));
         assert_eq!(records[0].quota_remaining_percent, Some(75.0));
     }
 
@@ -1138,7 +1199,6 @@ mod tests {
             model: None,
             quota_pool: None,
             quota_window: Some("weekly".into()),
-            quota_used_percent: Some(10.0),
             quota_remaining_percent: Some(90.0),
             quota_reset_at: None,
             observed_at: Some("2026-04-28T10:00:00Z".into()),
@@ -1150,7 +1210,7 @@ mod tests {
             credential_id: None,
         };
         let good2 = QuotaObservationRecord {
-            quota_used_percent: Some(20.0),
+            quota_remaining_percent: Some(100.0 - 20.0),
             observed_at: Some("2026-04-29T10:00:00Z".into()),
             mistral_admin: None,
             account_usage: None,
@@ -1170,8 +1230,8 @@ mod tests {
             2,
             "the bad line should be skipped, not fatal"
         );
-        assert_eq!(records[0].quota_used_percent, Some(10.0));
-        assert_eq!(records[1].quota_used_percent, Some(20.0));
+        assert_eq!(records[0].quota_remaining_percent, Some(100.0 - 10.0));
+        assert_eq!(records[1].quota_remaining_percent, Some(100.0 - 20.0));
     }
 
     fn scoped_record(
@@ -1185,7 +1245,6 @@ mod tests {
             model: Some("shared-model".into()),
             quota_pool: Some("shared-pool".into()),
             quota_window: Some("daily".into()),
-            quota_used_percent: Some(percent),
             quota_remaining_percent: Some(100.0 - percent),
             quota_reset_at: None,
             observed_at: Some(observed_at.into()),
@@ -1218,12 +1277,12 @@ mod tests {
         old.observed_at = Some("2026-07-19T10:00:00Z".into());
         let mut sibling = weekly.clone();
         sibling.backend_instance = Some("account-b".into());
-        sibling.quota_used_percent = Some(99.0);
+        sibling.quota_remaining_percent = Some(1.0);
         let records = [weekly, short, old, sibling];
         let windows = latest_windows_for_identity(&records, &identity("account-a"));
         assert_eq!(windows.len(), 2);
-        assert_eq!(windows[0].quota_used_percent, Some(90.0));
-        assert_eq!(windows[1].quota_used_percent, Some(20.0));
+        assert_eq!(windows[0].quota_remaining_percent, Some(100.0 - 90.0));
+        assert_eq!(windows[1].quota_remaining_percent, Some(100.0 - 20.0));
     }
 
     /// #1384 review: a newer account-wide reading must not hide an exhausted
@@ -1238,7 +1297,7 @@ mod tests {
         assert_eq!(windows.len(), 2);
         assert!(windows
             .iter()
-            .any(|record| record.model.is_some() && record.quota_used_percent == Some(100.0)));
+            .any(|record| record.model.is_some() && record.quota_remaining_percent == Some(0.0)));
     }
 
     #[test]
@@ -1247,7 +1306,6 @@ mod tests {
         let sibling = scoped_record(Some("account-b"), 70.0, "2026-07-20T10:00:00Z");
         let mut failure = success.clone();
         failure.quota_window = None;
-        failure.quota_used_percent = None;
         failure.quota_remaining_percent = None;
         failure.observed_at = None;
         failure.checked_at = Some("2026-07-20T11:00:00Z".into());
@@ -1258,8 +1316,8 @@ mod tests {
             assert_eq!(
                 latest_for_identity(&records, &identity("account-b"))
                     .unwrap()
-                    .quota_used_percent,
-                Some(70.0)
+                    .quota_remaining_percent,
+                Some(30.0)
             );
         }
     }
@@ -1306,8 +1364,8 @@ mod tests {
         let first = latest_for_identity(&records, &identity("account-a")).unwrap();
         let second = latest_for_identity(&records, &identity("account-b")).unwrap();
 
-        assert_eq!(first.quota_used_percent, Some(10.0));
-        assert_eq!(second.quota_used_percent, Some(70.0));
+        assert_eq!(first.quota_remaining_percent, Some(100.0 - 10.0));
+        assert_eq!(second.quota_remaining_percent, Some(100.0 - 70.0));
         assert!(
             latest_for_identity(&records, &identity("account-c")).is_none(),
             "legacy aggregation must not erase explicit instance identity"
@@ -1325,7 +1383,6 @@ mod tests {
             model: None,
             quota_pool: None,
             quota_window: Some("5h".into()),
-            quota_used_percent: None,
             quota_remaining_percent: Some(40.0),
             quota_reset_at: None,
             observed_at: Some("2026-10-04T08:00:00Z".into()),
@@ -1345,7 +1402,6 @@ mod tests {
             model: None,
             quota_pool: Some("agy:external".into()),
             quota_window: Some("weekly".into()),
-            quota_used_percent: None,
             quota_remaining_percent: Some(63.0),
             quota_reset_at: Some("in 16m44s".into()),
             observed_at: Some("2026-10-04T08:30:00Z".into()),
@@ -1381,7 +1437,6 @@ mod tests {
             model: None,
             quota_pool: None,
             quota_window: Some("5h".into()),
-            quota_used_percent: None,
             quota_remaining_percent: Some(40.0),
             quota_reset_at: None,
             observed_at: Some("2026-10-04T08:00:00Z".into()),
@@ -1413,7 +1468,7 @@ mod tests {
         let observed = latest_for_identity(&records, &identity("account-a")).unwrap();
 
         assert_eq!(observed.backend_instance, None);
-        assert_eq!(observed.quota_used_percent, Some(40.0));
+        assert_eq!(observed.quota_remaining_percent, Some(100.0 - 40.0));
     }
 
     #[test]
@@ -1425,7 +1480,7 @@ mod tests {
         let observed = latest_for_identity(&records, &identity("account-a")).unwrap();
 
         assert_eq!(observed.model, None);
-        assert_eq!(observed.quota_used_percent, Some(55.0));
+        assert_eq!(observed.quota_remaining_percent, Some(100.0 - 55.0));
     }
 
     #[test]
