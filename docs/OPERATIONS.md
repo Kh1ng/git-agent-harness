@@ -548,22 +548,42 @@ Control: with the earlier YAML mutation (no `apiKey` or `dimensions`, no
 
 **Reproduce against a live Ollama.** Run the same script with
 `VALIDATION_ENDPOINT=http://127.0.0.1:11434/v1` after
-`ollama pull llama3 && ollama pull nomic-embed-text`. Or check an installed
-central node. Use your own gateway key, and keep it out of shared logs:
+`ollama pull llama3 && ollama pull nomic-embed-text`.
 
 ```bash
-GAH_GATEWAY_MODE=colocated GAH_GATEWAY_PROVIDER=ollama \
-GAH_GATEWAY_MEMORYCORE_PATH="$HOME/TencentDB-Agent-Memory/MemoryCore" \
-scripts/install.sh
-curl -fsS http://127.0.0.1:8420/health        # expect "embeddingService":true
-set -a; . ~/.config/gah/tdai-gateway.env; set +a
-curl -fsS -H "Authorization: Bearer $TDAI_GATEWAY_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"query":"operator setup check","session_key":"gah:setup"}' \
-  http://127.0.0.1:8420/recall                  # expect "code":0
-journalctl --user -u tdai-memory-gateway | grep -i 'embedding'   # no "Embedding has been disabled"
+VALIDATION_ENDPOINT=http://127.0.0.1:11434/v1 scripts/validate-gateway-provider.sh TencentDB-Agent-Memory/MemoryCore
 ```
 
-This change was successfully validated against a live Ollama server. The embedding service was verified active, the recall endpoint functioned without error, and no disablement log was emitted.
+```text
+== MemoryCore revision: a0f993ba1eeda16243a8267ba9d1929074b806f9
+== backend: http://127.0.0.1:11434/v1
+== installer-written provider configuration
+{
+  "llm": {
+    "baseUrl": "http://127.0.0.1:11434/v1",
+    "model": "llama3",
+    "apiKey": "ollama"
+  },
+  "embedding": {
+    "provider": "ollama",
+    "baseUrl": "http://127.0.0.1:11434/v1",
+    "model": "nomic-embed-text",
+    "dimensions": 768,
+    "sendDimensions": false,
+    "apiKey": "ollama"
+  }
+}
+== GET /health
+{"status":"ok","stores":{"vectorStore":true,"embeddingService":true}}
+== POST /capture
+{"l0_recorded":2,"scheduler_notified":true}
+== POST /recall
+{"code":0,"message":"ok","memory_count":0}
+== gateway embedding log lines
+      1 Background embedding complete: 2/2 vectors updated
+      2 Using remote embedding (provider=ollama, model=nomic-embed-text)
+      1 [hybrid-embedding] Embedding OK, dims=768
+```
 
 ### Network exposure (issue #879)
 

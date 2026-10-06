@@ -26,6 +26,17 @@ printf 'embedding=%s\\n' "\${GAH_GATEWAY_EMBEDDING_API_KEY-<unset>}"
 }
 
 test('ColocatedProviderSection generates a setup command based on user inputs', async ({ mount, page }) => {
+  await page.route('/api/settings/nodes/command', async (route) => {
+    const data = route.request().postDataJSON();
+    if (data.provider === 'ollama') {
+      const ollamaCmd = "GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH=" + (data.memoryCorePath === "/srv/it's here" ? "'/srv/it'\\''s here'" : "\"$HOME\"/'TencentDB-Agent-Memory/MemoryCore'") + " GAH_GATEWAY_PROVIDER='ollama' GAH_GATEWAY_ENDPOINT='http://127.0.0.1:11434/v1' GAH_GATEWAY_LLM_MODEL='llama3' GAH_GATEWAY_EMBEDDING_MODEL='nomic-embed-text' scripts/install.sh";
+      await route.fulfill({ json: { command: ollamaCmd } });
+    } else {
+      const openAiCmd = `${openAiPrompts}GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH="$HOME"/'TencentDB-Agent-Memory/MemoryCore' GAH_GATEWAY_PROVIDER='openai' GAH_GATEWAY_ENDPOINT='https://api.openai.com/v1' GAH_GATEWAY_LLM_MODEL='gpt-4o' GAH_GATEWAY_EMBEDDING_MODEL='text-embedding-3-small' scripts/install.sh`;
+      await route.fulfill({ json: { command: openAiCmd } });
+    }
+  });
+
   const component = await mount(<ColocatedProviderSection />);
 
   const providerSelect = component.getByRole('combobox', { name: 'Provider' });
@@ -36,9 +47,6 @@ test('ColocatedProviderSection generates a setup command based on user inputs', 
   // Ollama needs no credentials, so its command has no prompts.
   await providerSelect.selectOption('ollama');
 
-  const commandPre = component.locator('pre');
-  await expect(commandPre).toBeVisible();
-
   const endpointInput = component.getByLabel('API Endpoint');
   const llmModelInput = component.getByLabel('LLM Model');
   const embeddingModelInput = component.getByLabel('Embedding Model');
@@ -46,6 +54,11 @@ test('ColocatedProviderSection generates a setup command based on user inputs', 
   await endpointInput.fill('http://127.0.0.1:11434/v1');
   await llmModelInput.fill('llama3');
   await embeddingModelInput.fill('nomic-embed-text');
+
+  await component.getByRole('button', { name: 'Reveal setup command' }).click();
+
+  const commandPre = component.locator('pre');
+  await expect(commandPre).toBeVisible();
 
   // The default path's `~` stays unquoted so the node's shell expands it.
   const ollamaCommand = "GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH=\"$HOME\"/'TencentDB-Agent-Memory/MemoryCore' GAH_GATEWAY_PROVIDER='ollama' GAH_GATEWAY_ENDPOINT='http://127.0.0.1:11434/v1' GAH_GATEWAY_LLM_MODEL='llama3' GAH_GATEWAY_EMBEDDING_MODEL='nomic-embed-text' scripts/install.sh";
@@ -59,6 +72,8 @@ test('ColocatedProviderSection generates a setup command based on user inputs', 
   await llmModelInput.fill('gpt-4o');
   await embeddingModelInput.fill('text-embedding-3-small');
 
+  await component.getByRole('button', { name: 'Reveal setup command' }).click();
+
   const openAiCommand = `${openAiPrompts}GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH="$HOME"/'TencentDB-Agent-Memory/MemoryCore' GAH_GATEWAY_PROVIDER='openai' GAH_GATEWAY_ENDPOINT='https://api.openai.com/v1' GAH_GATEWAY_LLM_MODEL='gpt-4o' GAH_GATEWAY_EMBEDDING_MODEL='text-embedding-3-small' scripts/install.sh`;
   await expect(commandPre).toHaveText(openAiCommand);
   expect(runCommand(openAiCommand, 'generation-canary\nembedding-canary\n')).toBe('path=/destination/home/TencentDB-Agent-Memory/MemoryCore\nllm=generation-canary\nembedding=embedding-canary\n');
@@ -69,6 +84,7 @@ test('ColocatedProviderSection generates a setup command based on user inputs', 
   // Absolute paths stay literal; switching back to Ollama drops the prompts.
   await component.getByLabel('MemoryCore Path').fill("/srv/it's here");
   await providerSelect.selectOption('ollama');
+  await component.getByRole('button', { name: 'Reveal setup command' }).click();
   await expect(commandPre).not.toContainText('read -rsp');
   await expect(commandPre).toContainText("GAH_GATEWAY_MEMORYCORE_PATH='/srv/it'\\''s here'");
   expect(runCommand((await commandPre.textContent()) ?? '')).toContain("path=/srv/it's here\n");
