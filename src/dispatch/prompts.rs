@@ -1012,39 +1012,6 @@ mod tests {
     }
 
     #[test]
-    fn design_rules_reach_implementation_and_fix_prompts_only() {
-        let tmp = tempfile::tempdir().unwrap();
-        fs::create_dir_all(tmp.path().join("docs")).unwrap();
-        fs::write(
-            tmp.path().join("docs/PROJECT_BRIEF.md"),
-            "## Working rules\n- Preserve unknown telemetry as unknown.\n\n## Design rules\n- Prefer deep modules.\n\n## Verification\n- cargo test\n",
-        )
-        .unwrap();
-        let prof = profile(tmp.path());
-        let wt = tmp.path().join("worktree");
-        fs::create_dir_all(&wt).unwrap();
-
-        for mode in ["improve", "fix"] {
-            let task = build_task(&prof, &wt, mode, "#42", None);
-            let working = task.find("### Working rules").unwrap();
-            let design = task.find("### Design rules").unwrap();
-            let verification = task.find("### Verification").unwrap();
-            assert!(working < design && design < verification);
-            assert!(task.contains("Prefer deep modules."));
-        }
-
-        for mode in ["research", "audit", "estimate", "experiment"] {
-            let task = build_task(&prof, &wt, mode, "#42", None);
-            assert!(
-                !task.contains("### Design rules"),
-                "{mode} prompt must not carry the design rules:\n{task}"
-            );
-            assert!(task.contains("### Working rules"));
-            assert!(!task.contains("Prefer deep modules."));
-        }
-    }
-
-    #[test]
     fn build_task_omits_project_brief_section_when_file_absent() {
         let tmp = tempfile::tempdir().unwrap();
         let wt = tmp.path().join("worktree");
@@ -1503,3 +1470,7 @@ mod tests {
         assert!(updated.contains("## Protected Worker Policy"));
     }
 }
+
+#[cfg(test)]
+#[path = "prompts/design_rules_tests.rs"]
+mod design_rules_tests;
