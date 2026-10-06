@@ -109,8 +109,12 @@ impl TelemetryExporter {
 
         // Walk through existing telemetry files and collect record IDs
         let mut collected_ids = BTreeSet::new();
-        self.walk_telemetry_files(|record: &ExportedTelemetryRecord| {
+        self.walk_telemetry_values(|value| {
+            let record: ExportedTelemetryRecord = serde_json::from_value(value.clone())?;
             collected_ids.insert(record.get_id());
+            if let Some(id) = legacy_store_quota_id_alias(value)? {
+                collected_ids.insert(id);
+            }
             Ok(())
         })?;
         self.exported_ids = collected_ids;
@@ -123,6 +127,16 @@ impl TelemetryExporter {
     pub fn walk_telemetry_files<F>(&self, mut callback: F) -> Result<()>
     where
         F: FnMut(&ExportedTelemetryRecord) -> Result<()>,
+    {
+        self.walk_telemetry_values(|value| {
+            let record = serde_json::from_value(value.clone())?;
+            callback(&record)
+        })
+    }
+
+    fn walk_telemetry_values<F>(&self, mut callback: F) -> Result<()>
+    where
+        F: FnMut(&serde_json::Value) -> Result<()>,
     {
         let raw_dir = self.config.telemetry_repo_path.join("raw");
         if !raw_dir.exists() {
@@ -153,7 +167,7 @@ impl TelemetryExporter {
     /// Walk through a directory and apply callback to each JSONL record
     fn walk_directory<F>(&self, dir: &Path, callback: &mut F) -> Result<()>
     where
-        F: FnMut(&ExportedTelemetryRecord) -> Result<()>,
+        F: FnMut(&serde_json::Value) -> Result<()>,
     {
         if !dir.exists() || !dir.is_dir() {
             return Ok(());
@@ -184,7 +198,7 @@ impl TelemetryExporter {
     /// Process a single JSONL file and apply callback to each record
     fn process_jsonl_file<F>(&self, path: &Path, callback: &mut F) -> Result<()>
     where
-        F: FnMut(&ExportedTelemetryRecord) -> Result<()>,
+        F: FnMut(&serde_json::Value) -> Result<()>,
     {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Reading telemetry file: {}", path.display()))?;
@@ -195,16 +209,21 @@ impl TelemetryExporter {
                 continue;
             }
 
-            let record: ExportedTelemetryRecord =
-                serde_json::from_str(line).with_context(|| {
-                    format!(
-                        "Parsing JSONL record at line {} in {}",
-                        line_num + 1,
-                        path.display()
-                    )
-                })?;
+            let record: serde_json::Value = serde_json::from_str(line).with_context(|| {
+                format!(
+                    "Parsing JSONL record at line {} in {}",
+                    line_num + 1,
+                    path.display()
+                )
+            })?;
 
-            callback(&record)?;
+            callback(&record).with_context(|| {
+                format!(
+                    "Processing JSONL record at line {} in {}",
+                    line_num + 1,
+                    path.display()
+                )
+            })?;
         }
 
         Ok(())
@@ -590,6 +609,51 @@ impl TelemetryExporter {
     pub fn exported_ids(&self) -> &BTreeSet<String> {
         &self.exported_ids
     }
+}
+
+/// Recognize the old store ID using its payload rather than splitting IDs:
+/// timestamps, pool labels and errors can themselves contain colons.
+fn legacy_store_quota_id_alias(value: &serde_json::Value) -> Result<Option<String>> {
+    if value["record_type"] != "quota_observation" {
+        return Ok(None);
+    }
+    let value = &value["data"];
+    let mut record: crate::quota_store::QuotaObservationRecord =
+        serde_json::from_value(value.clone())?;
+    let part = |key: &str| value[key].as_str().unwrap_or("");
+    let percent = |key: &str| {
+        value[key]
+            .as_f64()
+            .map(|n| n.to_string())
+            .unwrap_or_default()
+    };
+    // Exported observed_at falls back to checked_at; try both original forms.
+    for observed_at in [Some(part("observed_at")), None] {
+        if observed_at.is_none() && part("observed_at") != part("checked_at") {
+            continue;
+        }
+        let legacy_id = format!(
+            "quota_obs:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            observed_at.unwrap_or(""),
+            part("checked_at"),
+            part("backend"),
+            part("backend_instance"),
+            part("credential_id"),
+            part("model"),
+            part("quota_pool"),
+            part("quota_window"),
+            percent("quota_used_percent"),
+            percent("quota_remaining_percent"),
+            part("quota_reset_at"),
+            part("check_error"),
+            part("usage_source"),
+        );
+        if value["record_id"].as_str() == Some(&legacy_id) {
+            record.observed_at = observed_at.map(str::to_string);
+            return Ok(Some(generate_store_quota_observation_id(&record)));
+        }
+    }
+    Ok(None)
 }
 
 /// Export telemetry from ledger entries

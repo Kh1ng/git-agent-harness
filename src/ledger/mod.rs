@@ -1,6 +1,8 @@
 mod approvals;
 mod dispatch_notify;
 mod entry;
+mod usage_unknown;
+pub use self::usage_unknown::UsageUnknownReason;
 mod jsonl;
 mod locking;
 mod paid_route_notify;

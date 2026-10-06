@@ -60,7 +60,7 @@ export function WorkerScalingSection({ selectedName, selected, agents }: WorkerS
 
   if (!scaling) {
     return (
-      <section className="card-padded">
+      <section className="card-padded max-w-md">
         <h3 className="text-sm font-semibold text-primary mb-1">Worker scaling</h3>
         <p className="text-xs text-muted">This node's <code>gah</code> does not support worker scaling yet. Update it to use these settings.</p>
       </section>
@@ -108,7 +108,7 @@ export function WorkerScalingSection({ selectedName, selected, agents }: WorkerS
   const boostActive = (scaling.boost_workers ?? 0) > 0;
 
   return (
-    <section className="card-padded">
+    <section className="card-padded max-w-md">
       <h3 className="text-sm font-semibold text-primary mb-1">Worker scaling</h3>
       <p className="text-xs text-muted mb-3">
         Workers beyond the baseline of <span className="font-mono text-secondary">{baseline}</span> for{' '}

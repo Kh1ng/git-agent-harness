@@ -79,7 +79,6 @@ fn fresh_remaining_percent(record: &QuotaObservationRecord, now: OffsetDateTime)
     }
     record
         .quota_remaining_percent
-        .or_else(|| record.quota_used_percent.map(|used| 100.0 - used))
         .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
 }
 
