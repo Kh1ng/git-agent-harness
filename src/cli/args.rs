@@ -1046,18 +1046,13 @@ pub enum ProfileCommands {
         /// Delivery mode for work results: pr | handoff.
         #[arg(long)]
         delivery_mode: Option<String>,
-<<<<<<< HEAD
         /// Switch a backend's model in every routing list (`backend/old=new`); its cap follows.
         #[arg(long)]
         agent_model: Vec<String>,
         /// Cap a model's concurrent runs (`backend/model=count`; 0 removes the cap). Repeatable.
         #[arg(long)]
         max_concurrent: Vec<String>,
-        /// Automatic worker scaling from quota headroom: on | off. See
-        /// `WorkerScaling` for the rule the remaining flags tune.
-=======
         /// Automatic worker scaling from quota headroom: on | off (see `WorkerScaling`).
->>>>>>> feat/worker-scaling
         #[arg(long)]
         worker_scaling: Option<String>,
         /// Most workers automatic scaling may reach (default: twice the baseline).
