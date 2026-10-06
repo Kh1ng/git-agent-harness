@@ -24,7 +24,9 @@ test('model selection shows the exact model and persists routing and capacity', 
   await picker.selectOption('gpt-6.1-sol');
   await page.getByLabel(/^Limit for Codex/).first().fill('2');
   await page.getByLabel('Base worker capacity').fill('4');
+  const mutation = page.waitForRequest((req) => req.method() === 'PATCH' && req.url().endsWith('/api/profiles/fixture'));
   await page.getByRole('button', { name: 'Save models and limits' }).click();
+  expect((await mutation).postDataJSON()).toMatchObject({ agent_model: ['codex/gpt-5=gpt-6.1-sol'], max_concurrent: ['codex/gpt-6.1-sol=2'] });
   await expect(page.getByText('Agent models and limits saved.')).toBeVisible();
   const profiles = await request.get(`${mockUrl}/api/profiles`).then((r) => r.json());
   expect(profiles.find((p: { name: string }) => p.name === 'fixture').max_parallel_workers).toBe(4);
