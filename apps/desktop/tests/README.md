@@ -29,6 +29,11 @@ Factory service lifecycle, network pairing and local embedding-provider configur
 tracked separately in #1317, #1318 and #1319; bundled release installation is
 tracked in #1321.
 
+Follow [the native Linux acceptance checklist](linux-native-validation.md) for
+the fresh-desktop run and evidence handoff required by #1320 acceptance criterion
+7. The checklist is a procedure, not evidence of a completed run. Keep criterion
+7 open until real native captures and observed results are available to review.
+
 ## Repair validation — 2026-10-06
 
 This worker environment is headless and has no PolicyKit authentication agent,
