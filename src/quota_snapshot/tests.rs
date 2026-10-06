@@ -30,6 +30,7 @@ use crate::config::tests::test_profile_for_notifications;
 /// that module's own fixture convention.
 fn empty_group() -> ledger::summary::GroupSummary {
     ledger::summary::GroupSummary {
+        usage_unknown_reasons: Default::default(),
         group_key: "g".to_string(),
         entries: 0,
         attempts: 0,
@@ -897,4 +898,25 @@ fn build_candidates_creates_four_distinct_agy_scopes() {
             Some("agy-second:external".to_string()),
         ]
     );
+}
+
+#[test]
+fn quota_usage_counts_each_unknown_reason_separately() {
+    use ledger::UsageUnknownReason::*;
+    let reasons = [
+        NoAttemptStarted,
+        BackendNotInvoked,
+        UsageArtifactMissing,
+        UsageArtifactUnparsed,
+    ];
+    let mut group = empty_group();
+    group.usage_unknown_reasons = reasons.into_iter().map(|reason| (reason, 1)).collect();
+    let candidate = aggregate_usage(Some(&group), None);
+    assert_eq!(candidate.usage_unknown_reasons, group.usage_unknown_reasons);
+    let total = summarize_groups(vec![group.clone(), group]);
+    for reason in reasons {
+        assert_eq!(total.usage_unknown_reasons[&reason], 2);
+    }
+    assert_eq!(total.total_tokens, None);
+    assert_eq!(total.requests_count, None);
 }
