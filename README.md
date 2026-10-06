@@ -97,7 +97,7 @@ Factory automation is optional in desktop onboarding and **Settings → This
 computer**. Fresh standalone installs default to off; upgrades preserve existing
 configuration. Disabling factory loops and their watchdog leaves the dashboard,
 chats, agents, repository workflows, and shared maintenance available. See
-[factory module defaults, migration, and verification](docs/verification/1317-factory-module.md).
+[Optional factory automation](docs/OPERATIONS.md#optional-factory-automation).
 
 The installer asks for confirmation before making changes. For unattended
 installs, use `GAH_INSTALL_CONFIRMED=1 scripts/install.sh` to accept the

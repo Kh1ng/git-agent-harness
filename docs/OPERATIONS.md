@@ -1396,3 +1396,42 @@ During extraction, remove or lower legacy entries:
 
 Stale baseline entries for deleted/moved paths are reported explicitly by the
 test without blocking the run, so they can be cleaned up in the extraction PR.
+
+## Optional factory automation
+
+The factory module is separate from the local application. The desktop's
+**Set up this computer** section appears during onboarding and in **Settings →
+This computer**. Select **Enable factory automation** before installation, or
+use **Save factory module** afterward. The dashboard, chats, agent execution,
+repository workflows, and local worker API do not depend on this selection.
+
+Fresh standalone installs default to off. Existing configuration files without
+`defaults.factory_enabled` retain the previous enabled behavior. Updates preserve
+explicit true/false values. Fresh networked central/worker installations retain
+legacy behavior. `GAH_FACTORY_ENABLED=true|false` overrides installer selection;
+`gah setup --factory-enabled true|false` forwards that choice. No configuration
+file means the read-only setup check reports the module off.
+
+`gah config set --factory-enabled false` disables and stops all installed or
+loaded systemd `gah-loop@<profile>.service` instances and the factory watchdog
+service/timer. It leaves the loop template available for later enablement.
+`gah loop` rejects starts while disabled; an unmanaged loop also exits when its
+next iteration reloads the disabled setting. Managed loops stop immediately.
+The dashboard checks module policy before enabling a loop unit. Enabling the module does not start loops or restore
+previous boot enablement: start each desired project loop explicitly. This avoids
+unexpected ticket dispatch on a later enable. Service-control errors are reported,
+not treated as successful transitions. The disabled policy is saved first, so
+new dispatch is prevented even if service cleanup fails; retry disabling to
+complete cleanup.
+
+Shared services remain active: `gah-server`/`gah-worker` serve application and
+execution APIs; `gah-prune` performs storage and chat maintenance;
+`gah-quota-refresh` collects account telemetry used by both chats and dispatch;
+the optional memory gateway serves both workflows. Only dispatch loops and their
+watchdog are factory services. macOS uses application/worker LaunchAgents rather
+than the Linux factory units; these shared agents remain available.
+
+Read-only setup JSON retains `ready` for compatibility and exposes
+`application_ready`, `factory_enabled`, and `factory_ready` separately.
+Factory readiness means the module is enabled and setup prerequisites are ready;
+project/backend dispatch readiness still comes from the existing doctor checks.
