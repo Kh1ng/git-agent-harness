@@ -42,10 +42,12 @@ pub(super) fn quota_refresh_selected(agents: &[String]) -> bool {
         .any(|agent| matches!(agent.as_str(), "codex" | "vibe"))
 }
 
-/// Refresh installed integrations as well as explicitly requested ones. This
-/// preserves first-install choices for callers such as the dashboard updater
-/// and also supports hosts installed before agent selection was introduced.
+/// Honor explicit selections; otherwise discover installed integrations for
+/// callers such as the dashboard updater and older installations.
 pub(super) fn agents_to_refresh(config_home: &Path, requested: &[String]) -> Vec<String> {
+    if !requested.is_empty() {
+        return requested.to_vec();
+    }
     let mut agents = requested.to_vec();
     if ["gah-reviewer.md", "gah-implementer.md"]
         .iter()
@@ -80,4 +82,48 @@ pub(super) fn install_selected_agent_assets(
         install_quota_refresh_unit_template(repo)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{agents_to_refresh, install_selected_agent_assets};
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    #[test]
+    fn explicit_agents_do_not_refresh_unselected_existing_integrations() {
+        let config = TempDir::new().unwrap();
+        let assets = [
+            "opencode/agents/gah-reviewer.md",
+            "opencode/agents/gah-implementer.md",
+            "systemd/user/gah-quota-refresh.service",
+            "systemd/user/gah-quota-refresh.timer",
+        ];
+        for asset in assets {
+            let path = config.path().join(asset);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "existing asset").unwrap();
+        }
+        for agent in ["claude", "codex", "vibe", "opencode"] {
+            let requested = vec![agent.to_string()];
+            assert_eq!(agents_to_refresh(config.path(), &requested), requested);
+        }
+        let agents = agents_to_refresh(config.path(), &["claude".into()]);
+        install_selected_agent_assets(
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            config.path(),
+            &agents,
+        )
+        .unwrap();
+        for asset in assets {
+            assert_eq!(
+                std::fs::read_to_string(config.path().join(asset)).unwrap(),
+                "existing asset"
+            );
+        }
+        assert_eq!(
+            agents_to_refresh(config.path(), &[]),
+            vec!["opencode".to_string(), "codex".to_string()]
+        );
+    }
 }
