@@ -85,16 +85,28 @@ installs the lockfile-pinned Node dependencies, builds `apps/server`, and
 installs/reloads the `gah-loop@.service` user-unit template. On a central
 node it also reinstalls the system-level `gah-server.service` unit from the
 tracked template (issue #894, so the installed unit can't drift from
-`packaging/systemd/`), builds the web dashboard and deploys its `dist` to the
-web root (issue #896), and optionally restarts `gah-server.service`. It does
-not build or deploy desktop, TUI, mobile, or other client packages.
+`packaging/systemd/`), builds the web dashboard, and optionally restarts
+`gah-server.service`. It does not build or deploy desktop, TUI, mobile, or
+other client packages.
 
-The web deploy root defaults to `/var/www/gah`, a conventional static-site
-root. It is **not** something this repo ships or documents as a server
-layout — set `GAH_WEB_DEPLOY_ROOT` to wherever the web server on this host
-actually serves the dashboard from (the deploy prints the chosen root so a
-mismatch is visible). Set it to an empty string to skip web deploy entirely
-on hosts that serve the dashboard from elsewhere.
+**Who serves the dashboard.** `gah-server` serves the built web app itself
+(`apps/web/dist` in the checkout), so a fresh install needs no separate web
+server and no root to deploy the dashboard (issue #1327). `GAH_WEB_ROOT` in
+`/etc/gah/server.env` overrides the directory; set it to an empty value when
+another web server serves the dashboard and `gah-server` should serve only the
+API.
+
+**Hosts with their own web server.** `gah update` also copies the build into a
+web root for Caddy or similar (issue #896), using `sudo`:
+
+- `GAH_WEB_DEPLOY_ROOT` unset: copy to `/var/www/gah` if that directory already
+  exists, as on a host set up before #1327. Otherwise nothing is copied.
+- `GAH_WEB_DEPLOY_ROOT=/some/root`: copy there. The update prints the root.
+- `GAH_WEB_DEPLOY_ROOT=` (empty): never copy.
+
+An existing Caddy install therefore keeps working unchanged. To move it to
+`gah-server`, remove the dashboard site from Caddy, delete `/var/www/gah`, and
+restart `gah-server.service`.
 
 `--restart-server` refuses to run while any `gah loop --profile …` process is
 active. The loop has its own systemd user cgroup and must be stopped cleanly
