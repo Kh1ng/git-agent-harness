@@ -8,6 +8,7 @@
     "agy-second": false,
     "claude": false,
     "codex": false,
+    "cursor": false,
     "hermes": false,
     "opencode": false,
     "openhands": false,
@@ -27,7 +28,7 @@
     "last_success_at": null,
     "record_count": 0,
     "retry_pending": false,
-    "schema_version": 11,
+    "schema_version": 12,
     "status": "never_run"
   },
   "fix_attempt_counts": {},
