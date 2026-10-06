@@ -1813,8 +1813,8 @@ export const CLI_CAPABILITIES_MANIFEST: CapabilityManifest = {
           "type": "boolean"
         },
         "waitTimeoutSeconds": {
-          "default": 3600,
-          "description": "Wait ceiling in seconds (1-7200, default 3600).",
+          "default": 7200,
+          "description": "Wait ceiling in seconds (1-7200, default 7200).",
           "type": "number"
         }
       },

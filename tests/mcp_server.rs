@@ -393,7 +393,7 @@ fn lists_the_same_24_tools_with_their_titles_and_input_schemas() {
     );
     assert_eq!(
         dispatch["properties"]["waitTimeoutSeconds"]["default"],
-        json!(3600)
+        json!(7200)
     );
     assert_eq!(
         tool("gah_route_approval_grant")["inputSchema"]["required"],
@@ -599,7 +599,7 @@ fn every_tool_forwards_its_exact_http_request() {
                 "profile": "gah", "providerKind": "github", "instanceId": "local",
                 "repo": "Kh1ng/git-agent-harness", "mode": "fix", "mr": "1100",
                 "backend": "claude", "model": "sonnet", "retries": 1, "dryRun": true,
-                "waitForCompletion": true, "waitTimeoutSeconds": 3600,
+                "waitForCompletion": true, "waitTimeoutSeconds": 7200,
             })),
         ),
         (
@@ -609,7 +609,7 @@ fn every_tool_forwards_its_exact_http_request() {
             "/api/dispatch",
             Some(json!({
                 "profile": "fixture", "repo": "o/r", "mode": "improve",
-                "waitForCompletion": false, "waitTimeoutSeconds": 3600,
+                "waitForCompletion": false, "waitTimeoutSeconds": 7200,
             })),
         ),
         (
@@ -721,6 +721,11 @@ fn success_text_is_the_indented_response_in_the_servers_key_order() {
         text(&result),
         "[\n  {\n    \"work_id\": \"#653\",\n    \"approved\": false\n  }\n]"
     );
+
+    // Trailing whitespace is preserved for non-JSON text.
+    control_plane.reply_with(200, "done\n");
+    let text_result = client.call("gah_route_approvals", json!({ "profile": "real" }));
+    assert_eq!(text(&text_result), "\"done\\n\"");
 }
 
 #[test]
@@ -750,11 +755,16 @@ fn failures_surface_the_servers_message_and_status_without_a_retry() {
     assert!(is_error(&bad_gateway));
     assert_eq!(text(&bad_gateway), "upstream down (HTTP 502)");
 
+    control_plane.reply_with(502, "upstream down\n");
+    let bad_gateway_nl = client.call("gah_status", json!({}));
+    assert!(is_error(&bad_gateway_nl));
+    assert_eq!(text(&bad_gateway_nl), "upstream down\n (HTTP 502)");
+
     control_plane.reply_with(500, "");
     let empty = client.call("gah_info", json!({}));
     assert!(is_error(&empty));
     assert_eq!(text(&empty), "HTTP 500 (HTTP 500)");
-    assert_eq!(control_plane.requests().len(), 3);
+    assert_eq!(control_plane.requests().len(), 4);
 }
 
 #[test]
