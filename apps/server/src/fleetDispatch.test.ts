@@ -953,6 +953,21 @@ test('fleet dispatch skips unsupported, unavailable, and saturated nodes, and ma
     assert.equal(transportMap.get('blocked-model')?.startCalls ?? 0, 0);
     assert.equal(transportMap.get('saturated-node')?.startCalls ?? 0, 0);
 
+    const manual = await coordinator.startSession({
+      requestId: 'manual-saturated-node', nodeId: 'saturated-node', profile: 'gah',
+      providerKind: 'codex', instanceId: 'codex-0', repo: 'owner/repo', mode: 'improve',
+      backend: 'codex', model: 'gpt-5.4', target: 'extra-job.md', manualWorker: true,
+      reasoningEffort: 'high'
+    });
+    assert.equal(manual.nodeId, 'saturated-node');
+    assert.equal(transportMap.get('saturated-node')?.startCalls, 1);
+    await assert.rejects(coordinator.startSession({
+      requestId: 'manual-unavailable-node', nodeId: 'blocked-availability', profile: 'gah',
+      providerKind: 'codex', instanceId: 'codex-0', repo: 'owner/repo', mode: 'improve',
+      backend: 'codex', model: 'gpt-4.1', target: 'unavailable-job.md', manualWorker: true
+    }));
+    assert.equal(transportMap.get('blocked-availability')?.startCalls ?? 0, 0);
+
     await coordinator.reconcileLeases('gah');
     const reconciled = coordinator.getSession(routed.id);
     assert.equal(reconciled?.leaseState, 'uncertain_reconciling');

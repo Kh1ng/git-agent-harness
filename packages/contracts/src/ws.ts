@@ -385,6 +385,9 @@ export type ClientMessage =
     }
   | {
       type: "session.start";
+      /** Explicit extra job outside automatic node/worker admission. */
+      manualWorker?: boolean;
+      reasoningEffort?: string;
       requestId: string;
       /** Optional explicit node pin for fleet routing. */
       nodeId?: string;

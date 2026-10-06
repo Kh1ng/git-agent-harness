@@ -484,6 +484,8 @@ export interface DispatchOptions {
   prod?: boolean;
   allowUnknownRedBaseline?: boolean;
   escalate?: boolean;
+  manualWorker?: boolean;
+  reasoningEffort?: string;
 }
 
 export interface DispatchResult {
@@ -503,6 +505,8 @@ export interface CancellableDispatch {
 
 function buildDispatchArgs(options: DispatchOptions): string[] {
   const args = ['dispatch', '--profile', options.profile, '--mode', options.mode];
+  if (options.manualWorker) args.push('--manual-worker');
+  if (options.reasoningEffort) args.push('--reasoning-effort', options.reasoningEffort);
 
   if (options.backend) {
     args.push('--backend', options.backend);

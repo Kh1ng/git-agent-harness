@@ -262,6 +262,8 @@ pub fn run() -> Result<()> {
             escalate,
             existing_branch,
             skip_validation_gate,
+            manual_worker,
+            reasoning_effort,
         } => commands::dispatch::run(commands::dispatch::Args {
             profile,
             mode,
@@ -283,6 +285,8 @@ pub fn run() -> Result<()> {
             escalate,
             existing_branch,
             skip_validation_gate,
+            manual_worker,
+            reasoning_effort,
         })?,
 
         Commands::Pm { command } => commands::pm::run(command)?,

@@ -11,6 +11,7 @@ import { LiveAgentsCard, liveRowTitle } from '../components/LiveAgentsCard.js';
 import type { WatchableRun } from '../components/AgentLiveView.js';
 import { NonFactoryAgentsCard } from '../components/NonFactoryAgentsCard.js';
 import { AgentLimitsSection } from '../components/AgentLimitsSection.js';
+import { StartWorkerSection } from '../components/StartWorkerSection.js';
 import { WorkerScalingSection } from '../components/WorkerScalingSection.js';
 import { AgentPoolSection } from './ProfilePanel.js';
 import { updateNavigation } from '../lib/navigationState.js';
@@ -110,8 +111,13 @@ export function AgentsPage({ sessions, deviceAgents, onNavigate, onWatchRun }: {
         <p className="text-sm text-muted">{profiles.loading ? 'Loading the profile…' : 'Pick a project in the navbar to change its agent settings.'}</p>
       ) : view === 'capacity' ? (
         <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-2">
-          <AgentLimitsSection key={`models-${profile}`} selectedName={profile} selected={selected} agents={agents} onSaved={() => refresh(true)} />
-          <WorkerScalingSection key={`scaling-${profile}`} selectedName={profile} selected={selected} agents={agents} />
+          <StartWorkerSection key={profile} profile={selected} agents={agents} tickets={status.key === profile ? status.data?.available_tickets ?? [] : []} sessions={sessions} onActivity={() => setView('activity')} />
+          <div className="space-y-6">
+            <AgentLimitsSection key={`models-${profile}`} selectedName={profile} selected={selected} agents={agents} onSaved={() => refresh(true)} />
+            <details className="rounded-lg border border-subtle p-4"><summary className="cursor-pointer text-sm font-medium text-secondary">Automatic scaling & capacity settings</summary><div className="mt-4">
+              <WorkerScalingSection key={`scaling-${profile}`} selectedName={profile} selected={selected} agents={agents} />
+            </div></details>
+          </div>
         </div>
       ) : config ? <>
         <p className="text-sm text-muted">Choose which agents handle planning, implementation, and review. Use Models & capacity for everyday model and worker changes.</p>

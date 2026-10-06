@@ -34,7 +34,7 @@ function count(text: string): number | undefined {
  * passes to it: Antigravity is addressed by display name, the others by id.
  * A backend that lists nothing just gets no suggestions.
  */
-function useBackendModels(profile: string, backends: string[]): Record<string, { options: AgentModelOption[]; efforts?: { id: string; name: string }[]; loading: boolean; failed: boolean }> {
+export function useBackendModels(profile: string, backends: string[]): Record<string, { options: AgentModelOption[]; efforts?: { id: string; name: string }[]; loading: boolean; failed: boolean }> {
   const [models, setModels] = useState<Record<string, { options: AgentModelOption[]; efforts?: { id: string; name: string }[]; loading: boolean; failed: boolean }>>({});
   const wanted = backends.join(',');
   useEffect(() => {

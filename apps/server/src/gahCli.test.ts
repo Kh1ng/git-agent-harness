@@ -34,6 +34,18 @@ function pinFakeGah(body: string): () => void {
   };
 }
 
+test('manual worker and per-launch reasoning reach the actual dispatch CLI argv', async () => {
+  const restore = pinFakeGah('printf "%s\\n" "$@"');
+  const lines: string[] = [];
+  try {
+    const result = await runDispatchCancellable({ profile: 'repo', mode: 'improve', backend: 'codex', model: 'gpt-6.1-sol', target: 'ticket.md', manualWorker: true, reasoningEffort: 'high' }, (line) => lines.push(line)).promise;
+    assert.equal(result.exitCode, 0);
+    assert.ok(lines.includes('--manual-worker'));
+    const effortFlag = lines.indexOf('--reasoning-effort');
+    assert.equal(lines[effortFlag + 1], 'high');
+  } finally { restore(); }
+});
+
 test('read commands reject with the exit code and stderr when gah fails', async () => {
   const restore = pinFakeGah('echo "quota exploded" >&2\nexit 3');
   try {

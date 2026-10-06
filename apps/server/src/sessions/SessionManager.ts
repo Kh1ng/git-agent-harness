@@ -38,6 +38,8 @@ export type SessionOptions = {
   prod?: boolean;
   allowUnknownRedBaseline?: boolean;
   escalate?: boolean;
+  manualWorker?: boolean;
+  reasoningEffort?: string;
   requestId?: string;
 };
 
@@ -173,7 +175,9 @@ class SessionManagerImpl {
       allowDraftFail: options.allowDraftFail,
       prod: options.prod,
       allowUnknownRedBaseline: options.allowUnknownRedBaseline,
-      escalate: options.escalate
+      escalate: options.escalate,
+      manualWorker: options.manualWorker,
+      reasoningEffort: options.reasoningEffort
     };
     
     // Start the actual gah dispatch process
@@ -203,6 +207,10 @@ class SessionManagerImpl {
     sessionId: SessionId,
     options: DispatchOptions
   ): CancellableDispatch {
+    if (options.manualWorker) {
+      // Explicit extra workers launch immediately; their CLI keeps atomic work claims.
+      return this.dispatchRunner(options, (line) => this.addSessionOutput(sessionId, line, false));
+    }
     const previous = this.profileDispatchTails.get(options.profile) ?? Promise.resolve();
     let release: () => void;
     const slot = new Promise<void>((resolve) => { release = resolve; });

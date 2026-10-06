@@ -25,6 +25,7 @@ test.beforeEach(async ({ page, request }) => {
   } }));
   await page.goto('/?page=agentpool&profile=fixture');
   await page.getByRole('button', { name: 'Models & capacity', exact: true }).click();
+  await page.getByText('Automatic scaling & capacity settings', { exact: true }).click();
 });
 
 test('model selection shows the exact model and persists routing and capacity', async ({ page, request }) => {
@@ -76,6 +77,7 @@ test('expired capacity can be replaced and the work loop can be started', async 
   await request.post(`${mockUrl}/api/loop/stop`);
   await page.reload();
   await page.getByRole('button', { name: 'Models & capacity', exact: true }).click();
+  await page.getByText('Automatic scaling & capacity settings', { exact: true }).click();
   await expect(page.getByRole('button', { name: 'Add worker capacity', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Start work loop' }).click();
   await expect(page.getByText('Work loop running', { exact: true })).toBeVisible();
@@ -85,7 +87,7 @@ test('an unlisted model is editable and catalog failure keeps the current select
   await page.route('**/api/manager-chat/models**', (route) => route.fulfill({ status: 503, json: { error: 'Unavailable' } }));
   await page.reload();
   await page.getByRole('button', { name: 'Models & capacity', exact: true }).click();
-  await expect(page.getByText('Couldn’t load models.', { exact: false })).toBeVisible();
+  await expect(page.getByText('Couldn’t load models.', { exact: false }).first()).toBeVisible();
   const picker = page.getByRole('combobox', { name: /^Model for Codex/ }).first();
   await expect(picker).toHaveValue('gpt-5');
   await picker.selectOption('__custom__');
@@ -151,7 +153,7 @@ test('Antigravity separates model family from reasoning and saves the exact prov
   await expect(reasoning.getByRole('option')).toHaveText(['Low', 'Medium', 'High']);
   await reasoning.selectOption('low');
   await expect(picker).toHaveAttribute('title', /Model ID: gemini-3.8-flash-low/);
-  await page.getByText('Model details', { exact: true }).click();
+  await page.getByRole('region', { name: 'Models, reasoning & worker limits' }).getByText('Model details', { exact: true }).first().click();
   await expect(page.getByText('Provider name: Gemini 3.8 Flash (Low)', { exact: false })).toBeVisible();
   const mutation = page.waitForRequest((req) => req.method() === 'PATCH' && req.url().endsWith('/api/profiles/fixture'));
   await page.getByRole('button', { name: 'Save agent settings' }).click();
@@ -164,7 +166,7 @@ test('Codex reasoning persists independently of model and uses consistent GPT ca
   } }));
   await page.reload();
   await page.getByRole('button', { name: 'Models & capacity', exact: true }).click();
-  await expect(page.getByRole('option', { name: 'GPT 6.1 Sol' })).toBeAttached();
+  await expect(page.getByRole('combobox', { name: /^Model for Codex/ }).getByRole('option', { name: 'GPT 6.1 Sol' })).toBeAttached();
   await page.getByRole('combobox', { name: /^Reasoning for Codex/ }).selectOption('high');
   const mutation = page.waitForRequest((req) => req.method() === 'PATCH' && req.url().endsWith('/api/profiles/fixture'));
   await page.getByRole('button', { name: 'Save agent settings' }).click();
@@ -173,4 +175,34 @@ test('Codex reasoning persists independently of model and uses consistent GPT ca
   await page.reload();
   await page.getByRole('button', { name: 'Models & capacity', exact: true }).click();
   await expect(page.getByRole('combobox', { name: /^Reasoning for Codex/ })).toHaveValue('high');
+});
+
+test('manual start defaults to the next job, allows a specific job, and reports launch errors', async ({ page }) => {
+  await page.route('**/api/status**', async (route) => {
+    const status = await (await route.fetch()).json();
+    await route.fulfill({ json: { ...status, available_tickets: ['first', 'second'].map((name) => ({
+      ticket_path: `${name}.md`, title: `${name} queued job`, has_active_claim: false, has_active_mr: false, human_required: false,
+      execution_policy: { dispatchable_now: true },
+    })) } });
+  });
+  await page.route('**/api/manager-chat/models**', (route) => route.fulfill({ json: {
+    models: [{ id: 'gpt-6.1-sol', name: 'GPT 6.1 Sol' }], reasoningEfforts: [{ id: 'high', name: 'High' }],
+  } }));
+  await page.reload();
+  await page.getByRole('button', { name: 'Models & capacity', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: 'Worker job' })).toHaveValue('');
+  await expect(page.getByRole('paragraph').filter({ hasText: /^first queued job$/ })).toBeVisible();
+  await page.getByRole('combobox', { name: 'Worker model', exact: true }).selectOption('gpt-6.1-sol');
+  await page.getByRole('combobox', { name: 'Worker reasoning level' }).selectOption('high');
+  await page.getByRole('combobox', { name: 'Worker job' }).selectOption('second.md');
+  await page.route('**/api/dispatch', (route) => route.fulfill({ status: 202, json: { session: {
+    id: 'manual-worker-1', status: 'error', error: 'Subscriber is signed out', target: 'second.md', providerKind: 'github', instanceId: 'github-0',
+  } } }));
+  const start = page.waitForRequest((req) => req.method() === 'POST' && req.url().endsWith('/api/dispatch'));
+  await page.getByRole('button', { name: 'Start worker', exact: true }).click();
+  expect((await start).postDataJSON()).toMatchObject({ backend: 'codex', model: 'gpt-6.1-sol', reasoningEffort: 'high', manualWorker: true, target: 'second.md', mode: 'improve' });
+  await expect(page.getByRole('alert')).toContainText('Subscriber is signed out');
+  await page.route('**/api/dispatch', (route) => route.fulfill({ status: 502, json: { error: 'Provider unavailable' } }));
+  await page.getByRole('button', { name: 'Start worker', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Worker could not start');
 });

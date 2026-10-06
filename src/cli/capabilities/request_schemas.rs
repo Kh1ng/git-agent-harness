@@ -173,6 +173,8 @@ pub(super) fn add_request_schemas(manifest: &mut CapabilityManifest) {
         ),
         ("backend", "string", false, "Explicit backend override."),
         ("model", "string", false, "Explicit model override."),
+        ("manualWorker", "boolean", false, "Launch an explicit extra job outside automatic node and worker admission; retains work claims and route policy."),
+        ("reasoningEffort", "string", false, "Native reasoning for this manual launch only."),
         ("budget", "number", false, "Spend budget in dollars."),
         (
             "dryRun",
