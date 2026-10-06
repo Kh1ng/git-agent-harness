@@ -90,6 +90,8 @@ The [MCP server](../src/mcp.rs) is the Rust binary `gah-mcp-server`, installed n
 `gah-mcp-server` translates each MCP tool call into one request against the central server's REST API ([openapi.yaml](openapi.yaml)).
 It exposes 24 tools. Tools backed by a CLI operation take their input schemas from the [capability manifest](../packages/contracts/src/cli-capabilities.manifest.json) compiled into the binary. Tools backed by HTTP-only routes have hand-written schemas in the same module.
 [Contract tests](../tests/mcp_server.rs) drive the binary against a fake control plane.
+`gah_work_history` accepts `work_id`, matching its advertised schema; the former Node handler read `workId` instead.
+CLI releases include separate `gah-mcp-server-linux-x86_64` and `gah-mcp-server-macos-universal` executables alongside the CLI assets.
 
 | Variable | Meaning | Default |
 | --- | --- | --- |

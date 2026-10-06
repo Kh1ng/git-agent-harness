@@ -432,6 +432,13 @@ fn every_tool_forwards_its_exact_http_request() {
             "/api/usage/rollup?profile=gah&days=7",
             None,
         ),
+        (
+            "gah_usage_rollup",
+            json!({ "days": 30.0 }),
+            "GET",
+            "/api/usage/rollup?profile=fixture&days=30",
+            None,
+        ),
         // days defaults to the 30-day monthly view.
         (
             "gah_usage_rollup",
@@ -738,6 +745,7 @@ fn rejected_arguments_never_reach_the_control_plane() {
         ("gah_hold_set", json!({ "work_id": 532 })),
         ("gah_usage_rollup", json!({ "days": 91 })),
         ("gah_usage_rollup", json!({ "days": 0 })),
+        ("gah_usage_rollup", json!({ "days": 30.5 })),
         ("gah_dispatch", json!({ "repo": "o/r" })),
     ] {
         let result = client.call(name, arguments.clone());

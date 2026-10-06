@@ -71,8 +71,12 @@ impl Field {
             {
                 return Ok(())
             }
-            Kind::Integer { min, max } => match value.as_i64() {
-                Some(number) if (min..=max).contains(&number) => return Ok(()),
+            Kind::Integer { min, max } => match value.as_f64() {
+                Some(number)
+                    if number.fract() == 0.0 && number >= min as f64 && number <= max as f64 =>
+                {
+                    return Ok(())
+                }
                 _ => {
                     return Err(format!(
                         "{}: expected an integer from {min} to {max}",
@@ -164,7 +168,13 @@ pub(super) fn parse(
         match (arguments.get(&field.name), &field.default) {
             (Some(value), _) => match field.check(value) {
                 Ok(()) => {
-                    values.insert(field.name.clone(), value.clone());
+                    // Normalize integral floats so integer query parameters remain parseable.
+                    let value = if matches!(field.kind, Kind::Integer { .. }) {
+                        json!(value.as_f64().expect("validated number") as i64)
+                    } else {
+                        value.clone()
+                    };
+                    values.insert(field.name.clone(), value);
                 }
                 Err(problem) => problems.push(problem),
             },
@@ -251,6 +261,29 @@ mod tests {
             parse(&sample(), &arguments).unwrap_err(),
             "tags: expected an array of strings; wait: expected a boolean; work_id: required"
         );
+    }
+
+    #[test]
+    fn integer_arguments_accept_integral_numbers_and_reject_fractions() {
+        let fields = vec![Field::optional(
+            "days",
+            Kind::Integer { min: 1, max: 90 },
+            "",
+        )];
+        for days in [json!(30), json!(30.0), json!(1.0), json!(90.0)] {
+            let parsed = parse(&fields, &object(json!({ "days": days }))).unwrap();
+            assert!(parsed["days"].as_i64().is_some());
+        }
+        for days in [
+            json!(30.5),
+            json!(0.5),
+            json!(90.5),
+            json!(0.0),
+            json!(91.0),
+            json!("30"),
+        ] {
+            assert!(parse(&fields, &object(json!({ "days": days }))).is_err());
+        }
     }
 
     #[test]
