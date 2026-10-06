@@ -291,6 +291,63 @@ fn doctor_json_reports_unwritable_worktree_base_with_no_profiles() {
     }));
 }
 
+/// Issue #1366: an empty `worktree_base` passes doctor, which reports the
+/// default that dispatch will use, and the check creates nothing under HOME.
+#[test]
+fn doctor_json_reports_the_resolved_default_for_an_empty_worktree_base() {
+    let tmp = test_tempdir();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let cfg = tmp.path().join("gah-config-empty.toml");
+    fs::write(&cfg, "[defaults]\nworktree_base = \"\"\n").unwrap();
+
+    let output = bin()
+        .args(["doctor", "--config-path", cfg.to_str().unwrap(), "--json"])
+        .env("HOME", &home)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let snapshot: Value = serde_json::from_slice(&output).unwrap();
+
+    let resolved = home.join(".local/share/gah/worktrees");
+    assert!(snapshot["checks"].as_array().is_some_and(|checks| {
+        checks.iter().any(|check| {
+            check["name"] == "worktree_base"
+                && check["status"] == "ok"
+                && check["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(resolved.to_str().unwrap()))
+        })
+    }));
+    assert!(!home.join(".local").exists());
+}
+
+/// A regular file above the worktree base blocks creating it, so doctor must
+/// fail instead of probing the directory that holds the file.
+#[test]
+fn doctor_fails_for_a_worktree_base_below_a_regular_file() {
+    let tmp = test_tempdir();
+    let file = tmp.path().join("not-a-directory");
+    fs::write(&file, "regular file").unwrap();
+    let cfg = tmp.path().join("gah-config-empty.toml");
+    fs::write(
+        &cfg,
+        format!(
+            "[defaults]\nworktree_base = \"{}\"\n",
+            file.join("worktrees").display()
+        ),
+    )
+    .unwrap();
+
+    bin()
+        .args(["doctor", "--config-path", cfg.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[FAIL]").and(predicate::str::contains("worktree_base")));
+}
+
 /// TICKET-105: `gah doctor --validate` reuses the exact same
 /// `review_preflight` check as the real review invocation.
 #[test]

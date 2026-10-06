@@ -164,9 +164,6 @@ pub(crate) fn improve(
         format!("gah/{}-{}", profile.repo_id, ts)
     };
     apply_manual_fix_context_to_ledger(ledger, ticket_meta.as_ref(), &branch, &manual_fix);
-    // An empty defaults.worktree_base stays empty in the config (#1366):
-    // planning resolves the default at the point of use so dispatch never
-    // places worktrees at the filesystem root.
     let worktree_base = crate::config::effective_worktree_base(&cfg.defaults);
     let repo = Path::new(&profile.local_path);
     ensure_dispatch_capacity(profile, &worktree_base)?;

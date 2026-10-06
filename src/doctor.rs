@@ -234,11 +234,17 @@ fn worktree_base_probe(path: &Path) -> Result<(), String> {
         }
         path.to_path_buf()
     } else {
-        path.ancestors()
+        // A regular file anywhere above the base blocks creating it, so the
+        // nearest existing ancestor must itself be a directory.
+        let ancestor = path
+            .ancestors()
             .skip(1)
-            .find(|ancestor| ancestor.is_dir())
-            .map(std::path::Path::to_path_buf)
-            .ok_or_else(|| format!("no existing ancestor for {}", path.display()))?
+            .find(|ancestor| ancestor.exists())
+            .ok_or_else(|| format!("no existing ancestor for {}", path.display()))?;
+        if !ancestor.is_dir() {
+            return Err(format!("{} is not a directory", ancestor.display()));
+        }
+        ancestor.to_path_buf()
     };
     let probe = probe_dir.join(".gah-write-test");
     match fs::write(&probe, b"ok") {
@@ -1361,13 +1367,8 @@ mod tests {
     // (work GAH plans resolves the default at the point of use) and must
     // resolve instead of failing; doctor must still reject an unwritable,
     // non-absolute, or file-valued base, and must never create the base.
-    #[test]
-    fn doctor_worktree_base_check_resolves_empty_to_default() {
-        let defaults = crate::config::Defaults::default();
-
-        assert!(super::check_worktree_base(&defaults));
-    }
-
+    // The empty-value case depends on $HOME, so it is covered through the CLI
+    // with HOME pointed at a tempdir (tests/gah_cli/doctor.rs).
     #[test]
     fn doctor_worktree_base_check_fails_when_unwritable() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1411,7 +1412,6 @@ mod tests {
         assert!(!base.exists());
         assert!(!tmp.path().join("a").exists());
     }
-
     #[test]
     fn doctor_gitlab_preflight_requires_provider_project_id() {
         let mut profile = gitlab_profile(Some("https://gitlab.example.internal/api/v4"));
