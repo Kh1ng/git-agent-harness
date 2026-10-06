@@ -143,7 +143,7 @@ export function adminUpdateEnvironment(
   };
 }
 
-/** Launches `gah update --repo <cwd> --role central --restart-server`
+/** Launches `gah update --repo <cwd> --role central --restart-server --pull --yes`
  * detached (so it outlives this HTTP request, and survives this process
  * being the one that gets restarted) and streams its combined output into
  * the state file. `--repo` pins it to this server's own checkout
@@ -159,7 +159,7 @@ export function startAdminUpdate(options: StartAdminUpdateOptions = {}): StartAd
   const uid = process.platform === 'linux' && typeof process.getuid === 'function' ? process.getuid() : undefined;
   const child: ChildProcess = spawnFn(
     findGahBinary(),
-    ['update', '--repo', process.cwd(), '--role', 'central', '--restart-server'],
+    ['update', '--repo', process.cwd(), '--role', 'central', '--restart-server', '--pull', '--yes'],
     {
       cwd: process.cwd(),
       env: adminUpdateEnvironment(process.env, process.platform, uid),

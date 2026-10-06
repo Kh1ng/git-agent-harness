@@ -312,7 +312,7 @@ if [ -n "${GAH_IMPORT_REPO:-}" ]; then
 fi
 
 if [ "$role" = "central" ] || [ "$role" = "standalone" ]; then
-  echo "GAH installed. Update with: gah update --repo $repo_root --role $role --restart-server"
+  echo "GAH installed. Update with: gah update --pull --repo $repo_root --role $role --restart-server"
 else
-  echo "GAH installed. Update with: gah update --repo $repo_root --role worker"
+  echo "GAH installed. Update with: gah update --pull --repo $repo_root --role worker"
 fi

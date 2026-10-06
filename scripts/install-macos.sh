@@ -103,7 +103,7 @@ fi
 
 gateway_env_file="$HOME/.config/gah/gah-loop.env"
 
-echo "GAH installed. Update with: gah update --repo $repo_root --role $role"
+echo "GAH installed. Update with: gah update --pull --repo $repo_root --role $role"
 if [ "$role" = worker ] && [ -f "$gateway_env_file" ]; then
   echo "Worker credentials are in $gateway_env_file; launchd loads them when the desktop starts the worker."
 fi
