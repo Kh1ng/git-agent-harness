@@ -118,11 +118,11 @@ test.describe('Dependency Blockers Component', () => {
       </MockStoreProvider>
     );
 
-    // Check that the dependency blocker is displayed
-    await expect(component.getByText('Dependency blocked')).toBeVisible();
-    await expect(component.getByText('#653')).toBeVisible();
-    await expect(component.getByText('Test issue blocked by open dependency')).toBeVisible();
-    await expect(component.getByText('Blocked by open prerequisite #652')).toBeVisible();
+    // Needs attention is a table: the kind badge, the work id, and one summary cell with title, reason and blockers.
+    await expect(component.getByText('Dependency', { exact: true }).first()).toBeVisible();
+    await expect(component.getByText(/\#653/).first()).toBeVisible();
+    await expect(component.getByText(/Test\ issue\ blocked\ by\ open\ dependency/).first()).toBeVisible();
+    await expect(component.getByText(/Blocked\ by\ open\ prerequisite\ \#652/).first()).toBeVisible();
   });
 
   test('renders dependency blockers with cycle state', async ({ mount }) => {
@@ -152,11 +152,11 @@ test.describe('Dependency Blockers Component', () => {
     );
 
     // Check that the cycle dependency blocker is displayed
-    await expect(component.getByText('Dependency blocked')).toBeVisible();
-    await expect(component.getByText('#1')).toBeVisible();
-    await expect(component.getByText('Cyclic dependency issue')).toBeVisible();
-    await expect(component.getByText('Dependency cycle detected')).toBeVisible();
-    await expect(component.getByText('#1 [open], #2 [open]')).toBeVisible();
+    await expect(component.getByText('Dependency', { exact: true }).first()).toBeVisible();
+    await expect(component.getByText(/\#1/).first()).toBeVisible();
+    await expect(component.getByText(/Cyclic\ dependency\ issue/).first()).toBeVisible();
+    await expect(component.getByText(/Dependency\ cycle\ detected/).first()).toBeVisible();
+    await expect(component.getByText(/\#1\ \[open\],\ \#2\ \[open\]/).first()).toBeVisible();
   });
 
   test('renders dependency blockers with missing state', async ({ mount }) => {
@@ -183,11 +183,11 @@ test.describe('Dependency Blockers Component', () => {
     );
 
     // Check that the missing dependency blocker is displayed
-    await expect(component.getByText('Dependency blocked')).toBeVisible();
-    await expect(component.getByText('#999')).toBeVisible();
-    await expect(component.getByText('Issue with missing dependency')).toBeVisible();
-    await expect(component.getByText('Could not resolve dependency #404')).toBeVisible();
-    await expect(component.getByText('#404')).toBeVisible();
+    await expect(component.getByText('Dependency', { exact: true }).first()).toBeVisible();
+    await expect(component.getByText(/\#999/).first()).toBeVisible();
+    await expect(component.getByText(/Issue\ with\ missing\ dependency/).first()).toBeVisible();
+    await expect(component.getByText(/Could\ not\ resolve\ dependency\ \#404/).first()).toBeVisible();
+    await expect(component.getByText(/\#404/).first()).toBeVisible();
   });
 
   test('renders dependency blockers with inaccessible state', async ({ mount }) => {
@@ -214,11 +214,11 @@ test.describe('Dependency Blockers Component', () => {
     );
 
     // Check that the inaccessible dependency blocker is displayed
-    await expect(component.getByText('Dependency blocked')).toBeVisible();
-    await expect(component.getByText('#777')).toBeVisible();
-    await expect(component.getByText('Issue with inaccessible dependency')).toBeVisible();
-    await expect(component.getByText('Permission denied')).toBeVisible();
-    await expect(component.getByText('#888')).toBeVisible();
+    await expect(component.getByText('Dependency', { exact: true }).first()).toBeVisible();
+    await expect(component.getByText(/\#777/).first()).toBeVisible();
+    await expect(component.getByText(/Issue\ with\ inaccessible\ dependency/).first()).toBeVisible();
+    await expect(component.getByText(/Permission\ denied/).first()).toBeVisible();
+    await expect(component.getByText(/\#888/).first()).toBeVisible();
   });
 
   test('renders dependency blockers with unknown/error state', async ({ mount }) => {
@@ -245,11 +245,11 @@ test.describe('Dependency Blockers Component', () => {
     );
 
     // Check that the unknown dependency blocker is displayed
-    await expect(component.getByText('Dependency blocked')).toBeVisible();
-    await expect(component.getByText('#555')).toBeVisible();
-    await expect(component.getByText('Issue with unknown dependency state')).toBeVisible();
-    await expect(component.getByText('Unknown error accessing dependency #666')).toBeVisible();
-    await expect(component.getByText('#666')).toBeVisible();
+    await expect(component.getByText('Dependency', { exact: true }).first()).toBeVisible();
+    await expect(component.getByText(/\#555/).first()).toBeVisible();
+    await expect(component.getByText(/Issue\ with\ unknown\ dependency\ state/).first()).toBeVisible();
+    await expect(component.getByText(/Unknown\ error\ accessing\ dependency\ \#666/).first()).toBeVisible();
+    await expect(component.getByText(/\#666/).first()).toBeVisible();
   });
 
   test('renders dependency blockers with released state (empty blockers list)', async ({ mount }) => {
@@ -270,7 +270,7 @@ test.describe('Dependency Blockers Component', () => {
     );
 
     // Check that no dependency blockers are displayed when all are released
-    await expect(component.getByText('Dependency blocked')).not.toBeVisible();
+    await expect(component.getByText('Dependency', { exact: true }).first()).not.toBeVisible();
   });
 
   test('renders multiple dependency blockers', async ({ mount }) => {
@@ -305,10 +305,10 @@ test.describe('Dependency Blockers Component', () => {
     );
 
     // Check that both dependency blockers are displayed
-    await expect(component.getByText('Dependency blocked').first()).toBeVisible();
-    await expect(component.getByText('#100')).toBeVisible();
-    await expect(component.getByText('#101')).toBeVisible();
-    await expect(component.getByText('First blocked issue')).toBeVisible();
-    await expect(component.getByText('Second blocked issue')).toBeVisible();
+    await expect(component.getByText('Dependency', { exact: true }).first()).toBeVisible();
+    await expect(component.getByText(/\#100/).first()).toBeVisible();
+    await expect(component.getByText(/\#101/).first()).toBeVisible();
+    await expect(component.getByText(/First\ blocked\ issue/).first()).toBeVisible();
+    await expect(component.getByText(/Second\ blocked\ issue/).first()).toBeVisible();
   });
 });

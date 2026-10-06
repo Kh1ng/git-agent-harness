@@ -1,9 +1,10 @@
 use super::decision::decide_next_action;
 use super::human_required_reason::HumanRequiredReason;
 use super::recovery::{
-    defer_if_branch_attached, detect_stuck_loop, latest_clear_attempts_timestamp,
+    defer_if_branch_attached, detect_stuck_loop, human_required_already_reported,
+    human_required_report_identity, latest_clear_attempts_timestamp, no_admission_diagnostics,
     recently_capacity_deferred_work_ids, reconcile_abandoned_dispatches, record_action_events,
-    remediation_plan_for_action, retain_snapshot_candidates,
+    remediation_plan_for_action, report_blocked_work_items_once, retain_snapshot_candidates,
 };
 use super::NextAction;
 use anyhow::Result;
@@ -191,6 +192,44 @@ fn wait_interruptibly(delay: Duration, shutdown_requested: impl Fn() -> bool) ->
     }
 }
 
+/// Total memory of this node when the platform exposes it. `gah config
+/// set` uses it to reject node-capacity values this node could never
+/// admit (review of #1383); callers skip the check when it is `None`, so
+/// configs written for other machines still load and save.
+pub fn node_total_memory_bytes() -> Option<u64> {
+    node_capacity::sample()
+        .ok()
+        .map(|pressure| pressure.memory_total_bytes)
+}
+
+/// Announce node-capacity settings when they change, not on every ~30s
+/// iteration -- an unattended loop would otherwise repeat the same line
+/// about 2,880 times a day (review of #1383). A fresh process (`--once`,
+/// loop restart) always logs once. Also warns when the settings can
+/// never be satisfied on this node, instead of leaving that fact buried
+/// in per-deferral logs.
+fn log_node_capacity_settings(settings: crate::config::NodeCapacitySettings) {
+    static LAST_LOGGED: std::sync::Mutex<Option<crate::config::NodeCapacitySettings>> =
+        std::sync::Mutex::new(None);
+    let Ok(mut last) = LAST_LOGGED.lock() else {
+        return;
+    };
+    if last.as_ref() == Some(&settings) {
+        return;
+    }
+    *last = Some(settings);
+    eprintln!(
+        "gah loop: node capacity worker reservation {} MiB, memory floor {}",
+        settings.worker_memory_mib,
+        settings.floor_description(),
+    );
+    if let Some(total) = node_total_memory_bytes() {
+        if let Err(error) = settings.validate_against_node_total(total) {
+            eprintln!("gah loop: WARNING {error:#}");
+        }
+    }
+}
+
 pub fn run_once(
     cfg: &crate::config::GahConfig,
     profile_name: &str,
@@ -199,6 +238,7 @@ pub fn run_once(
     skip_validation_gate: bool,
     run_periodic_probes: bool,
 ) -> Result<()> {
+    log_node_capacity_settings(cfg.defaults.node_capacity);
     let mut ledger_entries = crate::ledger::read_entries(cfg)?;
     reconcile_abandoned_dispatches(cfg, profile_name, &mut ledger_entries)?;
     let profile = crate::config::get_profile(cfg, profile_name)?;
@@ -227,6 +267,10 @@ pub fn run_once(
         profile_name,
         &profile.repo_id,
     );
+
+    // Issue #1381: blocked items are reported once even when other work is
+    // dispatched this tick.
+    report_blocked_work_items_once(cfg, profile_name, &snapshot)?;
 
     // For parallel > 1, we need to decide multiple actions
     if parallel > 1 {
@@ -346,7 +390,10 @@ pub fn run_once(
                     &action,
                     &ledger_entries,
                     skip_validation_gate,
-                    None,
+                    Some(RouteNodeAdmission::single_worker(
+                        action.clone(),
+                        cfg.defaults.node_capacity,
+                    )),
                 ) {
                     Ok(outcome) => {
                         crate::work_claim::release_work(&claim_scope, &work_id)?;
@@ -365,7 +412,10 @@ pub fn run_once(
                 &action,
                 &ledger_entries,
                 skip_validation_gate,
-                None,
+                Some(RouteNodeAdmission::single_worker(
+                    action.clone(),
+                    cfg.defaults.node_capacity,
+                )),
             )?
         };
 
@@ -374,25 +424,25 @@ pub fn run_once(
             NextAction::HumanRequired { .. } => crate::events::EventType::HumanRequired,
             _ => crate::events::EventType::LoopStopped,
         };
-        if matches!(action, NextAction::HumanRequired { .. }) {
-            crate::events::record_with_reason_code_and_plan(
-                cfg,
-                stop_event_type,
-                Some(profile_name),
-                action.work_id(),
-                outcome.clone(),
-                action.human_required_reason_code(),
-                remediation_plan_for_action(cfg, profile_name, &action).as_ref(),
-            )?;
-        } else {
-            crate::events::record(
-                cfg,
-                stop_event_type,
-                Some(profile_name),
-                action.work_id(),
-                outcome.clone(),
-            )?;
-        }
+        let admission_note = (!action_admitted_work(&action, &outcome)).then(|| {
+            let node_deferral = outcome
+                .starts_with("Deferred ")
+                .then(|| {
+                    outcome
+                        .split_once("; admission reason: ")
+                        .map(|(_, reason)| reason)
+                })
+                .flatten();
+            no_admission_diagnostics(&snapshot, 0, 1, node_deferral)
+        });
+        let newly_reported = record_stop_event(
+            cfg,
+            profile_name,
+            &history,
+            &action,
+            stop_event_type,
+            &outcome,
+        )?;
 
         if json {
             println!(
@@ -400,11 +450,56 @@ pub fn run_once(
                 serde_json::to_string_pretty(&LoopOnceResult { action, outcome })?
             );
         } else {
-            println!("Decided: {} -- {}", action.kind(), action.reason());
-            println!("{outcome}");
+            if newly_reported {
+                println!("Decided: {} -- {}", action.kind(), action.reason());
+                println!("{outcome}");
+            }
+            if let Some(note) = admission_note {
+                println!("{note}");
+            }
         }
     }
     Ok(())
+}
+
+/// Record the stop event for a wait/human-required/no-op action. A repeated
+/// human-required report is suppressed (issue #1381), and human-required
+/// events always persist their reason code and remediation plan so the
+/// deduplication can recognise them on the next tick. Returns false when the
+/// report was a repeat, so callers can suppress repeated text output too.
+fn record_stop_event(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    _history: &[crate::events::ControllerEvent],
+    action: &NextAction,
+    stop_event_type: crate::events::EventType,
+    outcome: &str,
+) -> Result<bool> {
+    let history = crate::events::read_events(cfg)?;
+    if human_required_already_reported(&history, profile_name, action) {
+        return Ok(false);
+    }
+    if matches!(action, NextAction::HumanRequired { .. }) {
+        crate::events::record_with_reason_code_and_plan(
+            cfg,
+            stop_event_type,
+            Some(profile_name),
+            human_required_report_identity(action),
+            outcome,
+            action.human_required_reason_code(),
+            remediation_plan_for_action(cfg, profile_name, action).as_ref(),
+        )?;
+        Ok(true)
+    } else {
+        crate::events::record(
+            cfg,
+            stop_event_type,
+            Some(profile_name),
+            action.work_id(),
+            outcome,
+        )?;
+        Ok(true)
+    }
 }
 
 /// TICKET-096: Parallel execution for multiple actions
@@ -435,6 +530,10 @@ fn run_parallel_once(
     let effective_parallel_limit = max_parallel;
 
     let mut results: Vec<(usize, LoopOnceResult)> = Vec::new();
+    // Issue #1381: why the most recent fill attempt admitted nothing.
+    let mut no_admission_note: Option<String> = None;
+    // Sequences whose human-required stop repeated the previous tick's report.
+    let mut repeated_stop_sequences: HashSet<usize> = HashSet::new();
 
     fn observe_snapshot(
         cfg: &crate::config::GahConfig,
@@ -460,7 +559,8 @@ fn run_parallel_once(
         let mut node_alternative_attempts_remaining = effective_parallel_limit;
         let (done_tx, done_rx) = sync_channel::<(usize, LoopOnceResult)>(effective_parallel_limit);
         let (route_admission_tx, route_admission_rx) = admission::request_channel();
-        let mut admission_coordinator = admission::Coordinator::new(route_admission_rx);
+        let mut admission_coordinator =
+            admission::Coordinator::new(route_admission_rx, cfg.defaults.node_capacity);
 
         'scheduler: loop {
             if admission::service_pending_request(
@@ -582,6 +682,12 @@ fn run_parallel_once(
                     | NextAction::HumanRequired { .. }
                     | NextAction::NoOp { .. } => {
                         if !saw_real_work {
+                            no_admission_note = Some(no_admission_diagnostics(
+                                &fresh_snapshot,
+                                active,
+                                effective_parallel_limit,
+                                None,
+                            ));
                             pending_terminal =
                                 Some((original_action, action, original_review_generation));
                             if active == 0 {
@@ -600,6 +706,7 @@ fn run_parallel_once(
                             let admission = match node_capacity::try_acquire(
                                 &action,
                                 admission_coordinator.active_node_workers(),
+                                cfg.defaults.node_capacity,
                             ) {
                                 Ok(admission) => admission,
                                 Err(error) => {
@@ -617,6 +724,12 @@ fn run_parallel_once(
                                     eprintln!(
                                         "gah loop: deferring additional worker at {active}/{effective_parallel_limit}: {reason}"
                                     );
+                                    no_admission_note = Some(no_admission_diagnostics(
+                                        &fresh_snapshot,
+                                        active,
+                                        effective_parallel_limit,
+                                        Some(&reason),
+                                    ));
                                     if active > 0 {
                                         node_capacity_reprobe.schedule(action.clone());
                                     }
@@ -660,6 +773,7 @@ fn run_parallel_once(
                                 sequence,
                                 action_for_thread.clone(),
                                 route_admission_tx.clone(),
+                                cfg.defaults.node_capacity,
                             ))
                         } else {
                             None
@@ -751,13 +865,17 @@ fn run_parallel_once(
                             NextAction::NoOp { .. } => crate::events::EventType::LoopStopped,
                             _ => unreachable!(),
                         };
-                        crate::events::record(
+                        let history = crate::events::read_events(cfg)?;
+                        if !record_stop_event(
                             cfg,
+                            profile_name,
+                            &history,
+                            &action,
                             stop_event_type,
-                            Some(profile_name),
-                            action.work_id(),
-                            outcome.clone(),
-                        )?;
+                            &outcome,
+                        )? {
+                            repeated_stop_sequences.insert(next_sequence);
+                        }
 
                         results.push((next_sequence, LoopOnceResult { action, outcome }));
                     }
@@ -770,6 +888,7 @@ fn run_parallel_once(
                     &done_rx,
                     admission_coordinator.active_node_workers(),
                     effective_parallel_limit,
+                    cfg.defaults.node_capacity,
                 )? {
                     ReprobeWaitOutcome::WorkerCompleted(result) => result,
                     ReprobeWaitOutcome::RetryFill => {
@@ -812,14 +931,22 @@ fn run_parallel_once(
     })?;
 
     results.sort_by_key(|(sequence, _)| *sequence);
-    let results: Vec<LoopOnceResult> = results.into_iter().map(|(_, result)| result).collect();
+    let (reported, results): (Vec<bool>, Vec<LoopOnceResult>) = results
+        .into_iter()
+        .map(|(sequence, result)| (!repeated_stop_sequences.contains(&sequence), result))
+        .unzip();
 
     // Output results
     if json {
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
-        for (i, result) in results.iter().enumerate() {
-            if i > 0 {
+        for (printed, (result, _)) in results
+            .iter()
+            .zip(&reported)
+            .filter(|(_, new)| **new)
+            .enumerate()
+        {
+            if printed > 0 {
                 println!("---");
             }
             println!(
@@ -831,6 +958,20 @@ fn run_parallel_once(
         }
         if results.is_empty() {
             println!("No actions executed (parallel limit reached or no eligible work)");
+        }
+        let admitted_work = results
+            .iter()
+            .any(|result| action_admitted_work(&result.action, &result.outcome));
+        if !admitted_work {
+            println!(
+                "{}",
+                no_admission_note.unwrap_or_else(|| no_admission_diagnostics(
+                    _snapshot,
+                    0,
+                    effective_parallel_limit,
+                    None
+                ))
+            );
         }
     }
 
@@ -848,6 +989,16 @@ fn run_parallel_once(
     }
 
     Ok(())
+}
+
+/// Capacity fallback after an attempt still represents admitted work; an
+/// initial deferral or a lost claim does not.
+fn action_admitted_work(action: &NextAction, outcome: &str) -> bool {
+    !matches!(
+        action,
+        NextAction::WaitUntil { .. } | NextAction::HumanRequired { .. } | NextAction::NoOp { .. }
+    ) && !outcome.starts_with("Skipped ")
+        && !(outcome.starts_with("Deferred ") && outcome.contains("no backend launched"))
 }
 
 fn update_parallel_refill_budget(
@@ -981,430 +1132,5 @@ mod ledger_read_tests;
 mod capacity_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::profile_lock::{acquire_profile_lock, loop_lock_path, reload_config_for_profile};
-    use super::{
-        append_stuck_loop_gate_if_transition, is_validation_gate_failure, loop_parallel_argument,
-        wait_interruptibly,
-    };
-
-    #[test]
-    fn recurring_loop_preserves_live_config_sentinel_but_once_resolves_it() {
-        assert_eq!(loop_parallel_argument(false, 0, 2), 0);
-        assert_eq!(loop_parallel_argument(true, 0, 2), 2);
-        assert_eq!(loop_parallel_argument(false, 3, 2), 3);
-        assert_eq!(loop_parallel_argument(true, 3, 2), 3);
-    }
-
-    #[test]
-    fn review_actions_wait_until_the_selected_route_is_reserved() {
-        let action = crate::controller::NextAction::ReviewMr {
-            branch: "gah/review-cap".into(),
-            work_id: Some("#471".into()),
-            mr_url: None,
-            reason: "review required".into(),
-        };
-        assert!(super::admission::action_needs_handshake(&action));
-    }
-
-    #[test]
-    fn validation_gate_errors_are_identified_through_anyhow_context() {
-        let error = anyhow::Error::new(crate::dispatch::ValidationGateError)
-            .context("detailed failed command output");
-        assert!(is_validation_gate_failure(&error));
-    }
-
-    #[test]
-    fn ordinary_errors_are_not_misclassified_as_validation_gate_failures() {
-        let error = anyhow::anyhow!("backend command timed out");
-        assert!(!is_validation_gate_failure(&error));
-    }
-
-    #[test]
-    fn stuck_loop_gate_append_is_an_idempotent_state_transition() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("cfg.toml");
-        std::fs::write(
-            &path,
-            format!(
-                r#"
-[defaults]
-artifact_root = "{}"
-
-[profiles.test]
-display_name = "Test"
-repo_id = "test/test"
-provider = "github"
-repo = "test/test"
-local_path = "/tmp"
-artifact_root = "{}"
-default_target_branch = "main"
-"#,
-                tmp.path().display(),
-                tmp.path().display()
-            ),
-        )
-        .unwrap();
-        let cfg = crate::config::load(Some(path.to_str().unwrap())).unwrap();
-
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
-        let appended = std::thread::scope(|scope| {
-            let handles = (0..8)
-                .map(|_| {
-                    let barrier = barrier.clone();
-                    let cfg = &cfg;
-                    scope.spawn(move || {
-                        barrier.wait();
-                        append_stuck_loop_gate_if_transition(
-                            cfg,
-                            "test",
-                            "#639",
-                            "same stuck decision",
-                            None,
-                        )
-                        .unwrap()
-                    })
-                })
-                .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| handle.join().unwrap())
-                .filter(|appended| *appended)
-                .count()
-        });
-        assert_eq!(
-            appended, 1,
-            "exactly one concurrent slot owns the transition"
-        );
-
-        let entries = crate::ledger::read_entries(&cfg).unwrap();
-        assert_eq!(
-            entries
-                .iter()
-                .filter(|entry| entry.dispatch_reason.as_deref() == Some("stuck_loop_gate"))
-                .count(),
-            1
-        );
-    }
-
-    /// TICKET/incident: an autonomous session ran `gah loop --profile X
-    /// --once` as an ad-hoc diagnostic while the real daemon (`gah loop
-    /// --profile X`, no `--once`) was already running for that profile --
-    /// both executed uncoordinated. `acquire_profile_lock` is the single
-    /// shared entry point both `--once` (main.rs) and manual `gah dispatch`
-    /// (main.rs) now call before doing any real execution; prove a second
-    /// caller for the same profile is rejected, regardless of which of
-    /// those two call sites it simulates.
-    ///
-    /// Uses a unique profile name (not a mocked/overridden lock path) so
-    /// this can't collide with a real profile's lock file or with another
-    /// test running concurrently -- avoids the env-var test race documented
-    /// on `canonical_config_path` above.
-    #[test]
-    fn acquire_profile_lock_rejects_concurrent_second_holder() {
-        let profile = format!("test-lock-race-{}", std::process::id());
-        // A real config file stand-in: two invocations against the *same*
-        // config path are what the real incident looked like (daemon and
-        // `--once` both using the default config).
-        let config_file = tempfile::NamedTempFile::new().unwrap();
-        let config_path = config_file.path();
-        let lock_path = loop_lock_path(&profile, config_path);
-
-        // Simulates the daemon (`gah loop --profile <p>`, no `--once`)
-        // already holding the lock for this profile.
-        let daemon_lock =
-            acquire_profile_lock(&profile, config_path).expect("daemon should acquire cleanly");
-
-        // Simulates a `gah loop --profile <p> --once` invocation racing
-        // against the still-running daemon.
-        let once_err = acquire_profile_lock(&profile, config_path)
-            .err()
-            .expect("--once attempt must fail while the daemon holds the lock");
-        assert!(once_err.to_string().contains(&profile));
-        assert!(once_err
-            .to_string()
-            .contains(&lock_path.display().to_string()));
-
-        // Simulates a manual `gah dispatch --profile <p>` invocation also
-        // racing against the still-running daemon.
-        let dispatch_err = acquire_profile_lock(&profile, config_path)
-            .err()
-            .expect("manual dispatch attempt must fail while the daemon holds the lock");
-        assert!(dispatch_err.to_string().contains(&profile));
-
-        drop(daemon_lock);
-        let _ = std::fs::remove_file(&lock_path);
-    }
-
-    #[test]
-    fn profile_lock_is_adjacent_to_config_not_xdg_state() {
-        let config_file = tempfile::NamedTempFile::new().unwrap();
-        let lock_path = loop_lock_path("test-profile", config_file.path());
-        let expected_dir = config_file
-            .path()
-            .parent()
-            .unwrap()
-            .canonicalize()
-            .unwrap()
-            .join(".gah-locks");
-        assert_eq!(lock_path.parent(), Some(expected_dir.as_path()));
-    }
-
-    #[test]
-    fn reload_config_for_profile_succeeds_when_profile_still_present() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("cfg.toml");
-        std::fs::write(
-            &path,
-            r#"
-[profiles.test]
-display_name = "Test"
-repo_id = "test/test"
-provider = "github"
-repo = "test/test"
-local_path = "/tmp"
-artifact_root = "/tmp"
-default_target_branch = "main"
-"#,
-        )
-        .unwrap();
-
-        let cfg = reload_config_for_profile(&path, "test").expect("profile is present");
-        assert!(crate::config::get_profile(&cfg, "test").is_ok());
-    }
-
-    #[test]
-    fn reload_config_for_profile_errs_when_profile_renamed_or_removed() {
-        // A parse-clean reload that no longer resolves the running profile
-        // (renamed/removed mid-run, e.g. via the dashboard Settings UI) must
-        // report an error rather than silently handing back a config the
-        // daemon can't dispatch against -- the caller (`run_loop`) relies on
-        // this to fall back to its last-known-good config instead of
-        // hard-erroring out of the whole loop.
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("cfg.toml");
-        std::fs::write(
-            &path,
-            r#"
-[profiles.renamed]
-display_name = "Test"
-repo_id = "test/test"
-provider = "github"
-repo = "test/test"
-local_path = "/tmp"
-artifact_root = "/tmp"
-default_target_branch = "main"
-"#,
-        )
-        .unwrap();
-
-        let error = reload_config_for_profile(&path, "test")
-            .expect_err("profile no longer exists in the reloaded config");
-        assert!(error.to_string().contains("test"));
-    }
-
-    #[test]
-    fn interruptible_wait_stops_during_backoff() {
-        let checks = std::sync::atomic::AtomicUsize::new(0);
-        let completed = wait_interruptibly(std::time::Duration::from_secs(300), || {
-            checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
-        });
-        assert!(!completed);
-        assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 2);
-    }
-
-    // TICKET-096: Parallel dispatch tests
-    use crate::models::AvailableTicket;
-    use crate::status::{
-        ObservationStatus, Observations, ProfileIdentity, ScopeStatusJson, StatusSnapshot,
-    };
-
-    pub(super) fn empty_snapshot() -> StatusSnapshot {
-        StatusSnapshot {
-            schema_version: 1,
-            review_contract_version: crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION,
-            generated_at: "2026-07-05T00:00:00Z".into(),
-            profile: ProfileIdentity {
-                profile: "real".into(),
-                display_name: "Real".into(),
-                repo_id: "real".into(),
-                provider: "github".into(),
-                local_path: "/tmp/repo".into(),
-                default_target_branch: "main".into(),
-                merge_policy: crate::config::MergePolicy::default(),
-                max_fix_attempts_per_mr: 2,
-                max_implementation_failures_per_ticket: 2,
-                max_open_managed_mrs: 1,
-                issue_intake_policy: crate::models::IssueIntakePolicy {
-                    mode: "canonical_autonomous_only".into(),
-                    canonical_autonomous_label: "exec:autonomous".into(),
-                    trusted_human_authors: vec![],
-                    trusted_bot_authors: vec![],
-                    github_issue_author_allowlist: vec![],
-                },
-            },
-            observations: Observations {
-                sync: ObservationStatus { status: "ok" },
-                availability: ObservationStatus { status: "ok" },
-                ledger: ObservationStatus { status: "ok" },
-            },
-            merge_requests: vec![],
-            availability: vec![],
-            recent_ledger: None,
-            constraints: vec![],
-            blockers: vec![],
-            blocked_work_items: vec![],
-            issue_intake_rejections: vec![],
-            dependency_blockers: vec![],
-            errors: vec![],
-            available_tickets: vec![],
-            work_waypoint_evidence: Default::default(),
-            active_claims: vec![],
-            pm_parent_states: vec![],
-            pm_decomposition_attempt_counts: std::collections::HashMap::new(),
-            pm_max_attempts: 2,
-            fix_attempt_counts: std::collections::HashMap::new(),
-            merge_attempt_counts: std::collections::HashMap::new(),
-            review_held_work_ids: std::collections::HashSet::new(),
-            publishing_allow_pr: true,
-            generated_artifact_deny_patterns: vec![],
-            max_parallel_workers: 1,
-            open_managed_mr_count: 0,
-            inflight_implementation_count: 0,
-            implementation_intake_paused: false,
-            backend_configured: std::collections::HashMap::new(),
-            backend_instances: vec![],
-            export_health: Default::default(),
-            skill_inventory: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn parallel_dispatch_respects_max_parallel_limit() {
-        let mut snapshot = empty_snapshot();
-
-        // Add multiple eligible backends (more than max_parallel)
-        for _ in 0..5 {
-            snapshot.availability.push(ScopeStatusJson {
-                backend_instance: None,
-                backend: "test_backend".to_string(),
-                model: None,
-                quota_pool: None,
-                eligible_now: true,
-                reason: None,
-                unavailable_until: None,
-                source: None,
-                last_error_summary: None,
-                observed_at: None,
-                scope: None,
-            });
-        }
-
-        // Add 3 available tickets
-        for i in 0..3 {
-            snapshot.available_tickets.push(AvailableTicket {
-                ticket_path: format!("ticket_{}.md", i),
-                work_id: Some(format!("TICKET-{}", i + 100)),
-                normalized_work_identity: crate::work_claim::normalize_work_identity(&format!(
-                    "TICKET-{}",
-                    i + 100
-                )),
-                source: crate::models::CandidateSource::LegacyTicket,
-                execution_policy: crate::models::CandidateExecutionPolicy {
-                    intake_mode: "canonical_autonomous_only".into(),
-                    explicit_autonomy_required: true,
-                    autonomous_metadata_present: true,
-                    dispatchable_now: true,
-                    exclusion_reason_code: None,
-                    exclusion_reason: None,
-                },
-                title: Some(format!("Test ticket {}", i)),
-                has_active_mr: false,
-                priority: crate::models::TicketPriority::Unspecified,
-                prior_attempt_count: 0,
-                genuine_agent_failure_count: 0,
-                last_failure_class: None,
-                recommended_backend: None,
-                recommended_model: None,
-                human_required: false,
-                human_required_reason_code: None,
-                has_active_claim: false,
-            });
-        }
-
-        // With max_parallel=2, we should only process 2 tickets
-        // Note: This test exercises the logic but doesn't run the actual parallel execution
-        // since that requires a full GAH setup
-        let effective_parallel_limit = std::cmp::min(
-            2,
-            snapshot
-                .availability
-                .iter()
-                .filter(|a| a.eligible_now)
-                .count(),
-        );
-        assert_eq!(effective_parallel_limit, 2);
-    }
-
-    #[test]
-    fn backend_availability_limits_parallelism() {
-        let mut snapshot = empty_snapshot();
-
-        // Add 3 eligible backends
-        for i in 0..3 {
-            snapshot.availability.push(ScopeStatusJson {
-                backend_instance: None,
-                backend: format!("backend_{}", i),
-                model: None,
-                quota_pool: None,
-                eligible_now: true,
-                reason: None,
-                unavailable_until: None,
-                source: None,
-                last_error_summary: None,
-                observed_at: None,
-                scope: None,
-            });
-        }
-
-        // With 3 eligible backends, max_parallel=5 should be limited to 3
-        let effective_parallel_limit = std::cmp::min(
-            5,
-            snapshot
-                .availability
-                .iter()
-                .filter(|a| a.eligible_now)
-                .count(),
-        );
-        assert_eq!(effective_parallel_limit, 3);
-    }
-
-    #[test]
-    fn no_backend_availability_zero_parallelism() {
-        let mut snapshot = empty_snapshot();
-        for i in 0..3 {
-            snapshot.availability.push(ScopeStatusJson {
-                backend_instance: None,
-                backend: format!("backend_{i}"),
-                model: None,
-                quota_pool: None,
-                eligible_now: false,
-                reason: Some("rate limited".into()),
-                unavailable_until: Some(time::OffsetDateTime::now_utc().to_string()),
-                source: None,
-                last_error_summary: None,
-                observed_at: None,
-                scope: None,
-            });
-        }
-        let effective_parallel_limit = std::cmp::min(
-            5,
-            snapshot
-                .availability
-                .iter()
-                .filter(|a| a.eligible_now)
-                .count(),
-        );
-        assert_eq!(effective_parallel_limit, 0);
-    }
-}
+#[path = "runtime/tests.rs"]
+mod tests;

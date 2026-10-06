@@ -47,17 +47,23 @@ pub(super) fn record_capacity_deferral(
 }
 
 fn capacity_deferral_outcome(label: &str, error: &anyhow::Error) -> String {
-    let capacity = if crate::dispatch::node_capacity_deferred_error(error) {
+    let node_deferred = crate::dispatch::node_capacity_deferred_error(error);
+    let detail = if node_deferred {
+        format!("; admission reason: {error:#}")
+    } else {
+        String::new()
+    };
+    let capacity = if node_deferred {
         "node"
     } else {
         "configured route"
     };
     if let Some(attempts) = crate::dispatch::post_attempt_capacity_deferral(error) {
         return format!(
-            "Deferred {label} fallback because {capacity} capacity is busy after {attempts} backend attempt(s); prior backend outcome preserved"
+            "Deferred {label} fallback because {capacity} capacity is busy after {attempts} backend attempt(s); prior backend outcome preserved{detail}"
         );
     }
-    format!("Deferred {label} because {capacity} capacity is busy; no backend launched")
+    format!("Deferred {label} because {capacity} capacity is busy; no backend launched{detail}")
 }
 
 /// Hash JSON objects by sorted key, not serializer iteration order. Profile
@@ -110,7 +116,7 @@ mod tests {
         ));
         assert_eq!(
             capacity_deferral_outcome("review_mr", &error),
-            "Deferred review_mr because node capacity is busy; no backend launched"
+            "Deferred review_mr because node capacity is busy; no backend launched; admission reason: node admission deferred: memory reserve"
         );
     }
 
@@ -123,10 +129,10 @@ mod tests {
             1,
         );
         let outcome = capacity_deferral_outcome("review_mr", &error);
-        assert_eq!(
-            outcome,
-            "Deferred review_mr fallback because node capacity is busy after 1 backend attempt(s); prior backend outcome preserved"
-        );
+        assert!(outcome.starts_with(
+            "Deferred review_mr fallback because node capacity is busy after 1 backend attempt(s); prior backend outcome preserved; admission reason: "
+        ));
+        assert!(outcome.contains("node admission deferred: memory reserve"));
         assert!(!outcome.contains("no backend launched"));
     }
 }

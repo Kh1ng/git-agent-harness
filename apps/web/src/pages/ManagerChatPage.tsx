@@ -6,7 +6,7 @@ import { ExternalAnchor } from '../components/ExternalAnchor';
 import { useUiStore } from '../store/uiStore.js';
 import { ChatNodePicker } from '../components/ChatNodePicker.js';
 import { useChatNodes } from '../hooks/useChatNodes.js';
-import { NewChatModal, type ChatProfile } from '../components/NewChatModal.js';
+import { NewChatPanel, type ChatProfile } from '../components/NewChatPanel.js';
 import { toChatProfile } from '../hooks/useChatProfiles.js';
 import { formatChatName } from '../lib/format.js';
 import { DEFAULT_CONVERSATION_ID, readNavigation, updateNavigation, type Page } from '../lib/navigationState.js';
@@ -452,11 +452,13 @@ function associatedWorkId(session: ChatSessionSummary): string | null {
   return session.issueNumber ? `#${session.issueNumber}` : null;
 }
 
-export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }: { launcherRequest?: number; onNavigate?: (page: Page) => void; onOpenWork?: (workId: string) => void }) {
+export function ManagerChatPage({ docked = false, onNavigate, onOpenWork }: { /** In the right sidebar: always the narrow layout. */ docked?: boolean; onNavigate?: (page: Page) => void; onOpenWork?: (workId: string) => void }) {
   const { sendMessage, messages, isConnected, reconnectSeq } = useWebSocket();
   const wsProfile = useWebSocket().profile;
   const profileOverride = useUiStore((s) => s.profileOverride);
   const setProfileOverride = useUiStore((s) => s.setProfileOverride);
+  const chatRequest = useUiStore((s) => s.chatRequest);
+  const clearChatRequest = useUiStore((s) => s.clearChatRequest);
   const profile = profileOverride ?? wsProfile ?? 'gah';
   const [availableProfiles, setAvailableProfiles] = useState<ChatProfile[]>([]);
   const [nodeChoice, setNodeChoice] = useState<{ profile: string; sessionId: string | null; nodeId: string } | null>(null);
@@ -701,6 +703,15 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
     refreshSessions(profile);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile]);
+  // After the [profile] effect, so a conversation opened in another project wins over its reset.
+  useEffect(() => {
+    if (!chatRequest) return;
+    setSelection({ profile: chatRequest.profile, sessionId: chatRequest.sessionId });
+    // The new conversation is not in the list yet.
+    refreshSessions(chatRequest.profile);
+    clearChatRequest();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatRequest, clearChatRequest]);
 
   const refreshStorage = async (forProfile = profile) => {
     setStorageLoading(true);
@@ -1368,7 +1379,6 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
   };
 
   const [newChatOpen, setNewChatOpen] = useState(false);
-  const [launcherOpen, setLauncherOpen] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const toolsRef = useRef<HTMLDivElement>(null);
@@ -1433,7 +1443,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
     }
   };
 
-  /** New-chat completion: switch project if the modal picked another one,
+  /** New-chat completion: switch project if the panel picked another one,
    * then select the fresh session (its history effect clears the view).
    * The pending ref keeps the id alive through the profile-switch effect,
    * same as a cross-project picker selection. */
@@ -1445,13 +1455,6 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
     refreshSessions(createdProfile);
     setSessionId(createdSessionId);
   };
-
-  useEffect(() => {
-    if (launcherRequest > 0) {
-      setLauncherOpen(true);
-      setNewChatOpen(true);
-    }
-  }, [launcherRequest]);
 
   const chatTitle = activeSession ? formatChatName(activeSession) : 'Default conversation';
   const projectName = currentProfileInfo?.repo?.split('/').pop() ?? profile;
@@ -1476,10 +1479,10 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
   }, [turns]);
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+    <div className={`flex min-h-0 min-w-0 flex-1 flex-col gap-3 ${docked ? 'chat-docked' : ''}`}>
       {/* One slim bar: where you are, git at a glance, and everything else behind ⋯. */}
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <div className="grid min-w-0 basis-full grid-cols-2 gap-1.5 xl:hidden">
+        <div className="grid min-w-0 basis-full grid-cols-2 gap-1.5 wide:hidden">
           <label className="min-w-0">
             <span className="sr-only">Project</span>
             <select
@@ -1519,7 +1522,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
             </select>
           </label>
         </div>
-        <div className="hidden min-w-0 flex-1 items-baseline gap-1.5 xl:flex">
+        <div className="hidden min-w-0 flex-1 items-baseline gap-1.5 wide:flex">
           <h2 className="shrink-0 text-sm text-muted" title={currentProfileInfo?.repo ?? profile}>{projectName}</h2>
           <span className="text-sm text-muted" aria-hidden="true">/</span>
           <span className="truncate text-base font-semibold text-primary">{chatTitle}</span>
@@ -1558,8 +1561,8 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
             {gitError && <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-critical" aria-hidden="true" />}
           </button>
           {toolsOpen && (
-            <div id="chat-tools" className="fixed inset-x-3 bottom-3 z-30 max-h-[calc(100dvh-1.5rem)] space-y-1 overflow-y-auto rounded-lg border border-subtle bg-card p-2 shadow-xl max-xl:[&_button]:min-h-11 max-xl:[&_button]:min-w-11 xl:absolute xl:inset-x-auto xl:bottom-auto xl:right-0 xl:top-full xl:mt-1 xl:w-80 xl:max-w-[calc(100vw-2rem)]">
-              <div className="flex items-center justify-between pl-2 xl:hidden">
+            <div id="chat-tools" className="fixed inset-x-3 bottom-3 z-30 max-h-[calc(100dvh-1.5rem)] space-y-1 overflow-y-auto rounded-lg border border-subtle bg-card p-2 shadow-xl narrow:[&_button]:min-h-11 narrow:[&_button]:min-w-11 wide:absolute wide:inset-x-auto wide:bottom-auto wide:right-0 wide:top-full wide:mt-1 wide:w-80 wide:max-w-[calc(100vw-2rem)]">
+              <div className="flex items-center justify-between pl-2 wide:hidden">
                 <span className="text-sm font-semibold text-primary">Chat tools</span>
                 <button type="button" onClick={closeTools}
                   className="inline-flex items-center justify-center rounded-md text-muted hover:text-primary"
@@ -1615,7 +1618,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
               <button
                 type="button"
                 onClick={() => { setNavigationOpen(true); closeTools(); }}
-                className="chat-menu-item xl:hidden"
+                className="chat-menu-item wide:hidden"
               >
                 <GitBranch size={14} aria-hidden="true" /> Manage projects
               </button>
@@ -1726,17 +1729,6 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
         );
       })()}
 
-      <NewChatModal
-        open={newChatOpen}
-        launcher={launcherOpen}
-        currentProfile={profile}
-        profiles={availableProfiles}
-        backends={availableBackends}
-        nodesRefreshKey={nodesRefreshKey}
-        onClose={() => { setNewChatOpen(false); setLauncherOpen(false); }}
-        onViewAllProjects={onNavigate ? () => onNavigate('projects') : undefined}
-        onCreated={handleChatCreated}
-      />
       {sessionDetailOpen && activeSession && (
         <ChatSessionDetailDrawer
           session={activeSession}
@@ -1756,12 +1748,12 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
         />
       )}
 
-      <div className={`relative grid min-h-0 min-w-0 flex-1 gap-4 max-xl:overflow-y-auto ${previewOpen && activeSession && !remoteSession ? 'xl:grid-cols-[15rem_minmax(0,1fr)_minmax(0,26rem)]' : 'xl:grid-cols-[15rem_minmax(0,1fr)]'}`}>
+      <div className={`relative grid min-h-0 min-w-0 flex-1 gap-4 narrow:overflow-y-auto ${previewOpen && activeSession && !remoteSession ? 'wide:grid-cols-[15rem_minmax(0,1fr)_minmax(0,26rem)]' : 'wide:grid-cols-[15rem_minmax(0,1fr)]'}`}>
         {/* Below xl the rail floats over the conversation so opening it never reflows the chat. */}
-        <div id="chat-navigation" className={`max-xl:[&_button]:!min-h-11 max-xl:[&_summary]:min-h-11 min-h-0 ${navigationOpen ? 'max-xl:absolute max-xl:inset-x-0 max-xl:top-0 max-xl:z-20 max-xl:max-h-full max-xl:flex max-xl:flex-col max-xl:shadow-2xl' : 'max-xl:hidden'}`}>
+        <div id="chat-navigation" className={`narrow:[&_button]:!min-h-11 narrow:[&_summary]:min-h-11 min-h-0 ${navigationOpen ? 'narrow:absolute narrow:inset-x-0 narrow:top-0 narrow:z-20 narrow:max-h-full narrow:flex narrow:flex-col narrow:shadow-2xl' : 'narrow:hidden'}`}>
           {navigationOpen && (
             <button type="button" onClick={() => setNavigationOpen(false)}
-              className="touch-target absolute right-2 top-2 z-10 inline-flex items-center justify-center rounded-md bg-raised text-muted hover:text-primary xl:hidden"
+              className="touch-target absolute right-2 top-2 z-10 inline-flex items-center justify-center rounded-md bg-raised text-muted hover:text-primary wide:hidden"
               aria-label="Close project manager">
               <X size={16} aria-hidden="true" />
             </button>
@@ -1785,7 +1777,7 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
           dedicated preview port. Auto-detect lights it up mid-turn; the
           port can also be set manually. */}
       {previewOpen && activeSession && !remoteSession && (
-        <div className="card-padded flex min-w-0 flex-col order-3 max-xl:h-[65vh] xl:order-none">
+        <div className="card-padded flex min-w-0 flex-col order-3 narrow:h-[65vh] wide:order-none">
           <div className="flex items-center justify-between gap-2 pb-2">
             <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
               <MonitorPlay size={13} aria-hidden="true" /> Preview
@@ -1883,19 +1875,29 @@ export function ManagerChatPage({ launcherRequest = 0, onNavigate, onOpenWork }:
       <div className="flex h-full min-h-0 min-w-0 flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto h-full max-w-3xl space-y-4 px-1 pb-2">
-          {!historyLoaded && turns.length === 0 && (
+          {newChatOpen && (
+            <NewChatPanel
+              currentProfile={profile}
+              profiles={availableProfiles}
+              backends={availableBackends}
+              nodesRefreshKey={nodesRefreshKey}
+              onClose={() => setNewChatOpen(false)}
+              onCreated={handleChatCreated}
+            />
+          )}
+          {!newChatOpen && !historyLoaded && turns.length === 0 && (
             <div className="h-full flex flex-col items-center justify-center text-center text-muted gap-2">
               <MessageSquare size={24} className="opacity-50 animate-pulse" aria-hidden="true" />
               <p className="text-sm">Loading conversation…</p>
             </div>
           )}
-          {historyLoaded && turns.length === 0 && (
+          {!newChatOpen && historyLoaded && turns.length === 0 && (
             <div className="h-full flex flex-col items-center justify-center text-center text-muted gap-2">
               <MessageSquare size={24} className="opacity-50" aria-hidden="true" />
               <p className="text-sm" title="Context is shared across backends — switching models keeps this session's memory.">Ask about status, blockers, or next steps. Type "/" for commands.</p>
             </div>
           )}
-          {turns.filter((turn) => !turn.tool || !liveTools[turn.tool.toolCallId]).map((turn, i) => (
+          {!newChatOpen && turns.filter((turn) => !turn.tool || !liveTools[turn.tool.toolCallId]).map((turn, i) => (
             <div key={i} className={`flex flex-col ${turn.role === 'user' ? 'items-end' : 'items-start'}`}>
               {turn.role === 'tool' && turn.tool ? (
                 <ToolCallCard tool={turn.tool} />

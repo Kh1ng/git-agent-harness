@@ -439,6 +439,7 @@ impl<'a> Setup<'a> {
             };
             let Some(next) = list.iter().find(|requirement| {
                 !requirement.status.is_ok()
+                    && !requirement.status.is_unresolved()
                     && requirement.action.is_some()
                     && !declined.contains(&requirement.id)
                     && requirement.needs().is_none_or(ready)
@@ -467,6 +468,15 @@ impl<'a> Setup<'a> {
                 if !self.effects.run(&command, None, &[]) {
                     self.prompter
                         .say(&format!("✗ `{command}` did not finish successfully."));
+                    // A failed login stops setup (#1324): the next question
+                    // would hide the failure behind unrelated prompts.
+                    if action.kind == ActionKind::Login {
+                        bail!(
+                            "{} is still needed. Run `{command}` in this terminal and finish its prompts, then run `{}` again. It picks up where it stopped.",
+                            next.label,
+                            self.again()
+                        );
+                    }
                     declined.push(id);
                 }
                 host::refresh_path();
@@ -475,6 +485,17 @@ impl<'a> Setup<'a> {
             }
         }
         let list = requirements::requirements(selection, self.host);
+        for requirement in list.iter().filter(|r| r.status.is_unresolved()) {
+            if let Status::StatusUnknown { reason } | Status::StatusFailed { reason } =
+                &requirement.status
+            {
+                self.prompter.say(&format!(
+                    "! {}: {reason} The login may still be valid, so setup continues. If GAH later reports a login error, run `{}` again to re-check it.",
+                    requirement.label,
+                    self.again()
+                ));
+            }
+        }
         let blocking: Vec<&Requirement> = list
             .iter()
             .filter(|requirement| requirement.blocking())
@@ -632,7 +653,10 @@ fn line(requirement: &Requirement) -> String {
             "missing".into(),
         ),
         Status::Outdated { found } => ("✗", format!("too old ({found})")),
-        Status::NotLoggedIn => ("✗", "not logged in".into()),
+        Status::NotLoggedIn { reason }
+        | Status::CredentialsRejected { reason }
+        | Status::StatusUnknown { reason }
+        | Status::StatusFailed { reason } => ("✗", reason.clone()),
         Status::Unsupported { reason } => ("✗", reason.clone()),
     };
     let optional = if requirement.optional {
@@ -736,6 +760,7 @@ mod tests {
         http: Vec<(String, String)>,
         status: Option<u16>,
         profiles: Vec<String>,
+        fails: bool,
     }
 
     impl Effects for Recorder {
@@ -746,7 +771,7 @@ mod tests {
                     .map(|(k, v)| (k.to_string(), v.clone()))
                     .collect(),
             ));
-            true
+            !self.fails
         }
         fn http(
             &mut self,
@@ -1062,5 +1087,92 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("COORDINATOR_TOKEN is required"));
         assert!(prompter.asked.is_empty(), "--yes never prompts");
+    }
+
+    /// A CLI-only machine where everything is ready except, maybe, the gh
+    /// login: `gh_status` is the `gh auth status` probe, `None` if it hung.
+    fn cli_setup(gh_status: Option<(bool, &str)>, fails: bool) -> (Result<()>, Script, Recorder) {
+        let mut host = FakeHost::new(Os::Linux, Some(PackageManager::Apt))
+            .with("git --version", true, "git version 2.43.0")
+            .with("cargo --version", true, "cargo 1.94.1")
+            .with("node --version", true, "v22.4.0")
+            .with("claude --version", true, "2.1.0")
+            .with("claude auth status --json", true, r#"{"loggedIn":true}"#)
+            .with("gh --version", true, "gh version 2.45.0")
+            .with("curl --version", true, "curl 8.5.0");
+        if let Some((success, stderr)) = gh_status {
+            host = host.with_streams("gh auth status", success, "", stderr);
+        }
+        let mut prompter = Script {
+            answers: ["", "y", "y"].map(String::from).into(),
+            ..Default::default()
+        };
+        let mut effects = Recorder {
+            fails,
+            ..Default::default()
+        };
+        let result = Setup {
+            host: &host,
+            prompter: &mut prompter,
+            effects: &mut effects,
+            options: Options {
+                role: Some(Role::CliOnly),
+                agent: Some(Agent::Claude),
+                provider: Some(Provider::Github),
+                source: PathBuf::from("/src"),
+                ..Default::default()
+            },
+        }
+        .run();
+        (result, prompter, effects)
+    }
+
+    /// Issue #1324: a failed `gh auth login` stops setup with the next step
+    /// instead of moving on to the next question.
+    #[test]
+    fn a_failed_login_stops_setup_and_says_what_to_do() {
+        let (result, prompter, effects) = cli_setup(
+            Some((
+                false,
+                "You are not logged into any GitHub hosts. To log in, run: gh auth login\n",
+            )),
+            true,
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("Run `gh auth login` in this terminal"),
+            "{error}"
+        );
+        assert_eq!(
+            effects.commands.len(),
+            1,
+            "nothing runs after the failed login"
+        );
+        assert!(
+            prompter.asked.last().unwrap().contains("gh auth login"),
+            "no question follows the failed login: {:?}",
+            prompter.asked
+        );
+    }
+
+    /// Issue #1324: a status check that did not settle the login says
+    /// nothing about it, so setup never sends the user through `gh auth
+    /// login` and does not refuse to build; it warns and continues.
+    #[test]
+    fn an_unconfirmed_login_warns_and_continues() {
+        for gh_status in [None, Some((true, "unrecognized output"))] {
+            let (result, prompter, effects) = cli_setup(gh_status, false);
+            result.unwrap();
+            assert!(
+                !prompter.asked.iter().any(|q| q.contains("auth login")),
+                "{:?}",
+                prompter.asked
+            );
+            assert_eq!(effects.commands.len(), 1, "the build still runs");
+            assert!(prompter
+                .said
+                .iter()
+                .any(|line| line.contains("The login may still be valid")));
+        }
     }
 }
