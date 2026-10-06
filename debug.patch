@@ -1,0 +1,14 @@
+--- tests/installer_scripts.rs
++++ tests/installer_scripts.rs
+@@ -883,6 +883,7 @@
+             let check_output = Command::new("node")
+                 .arg("-e")
+                 .arg(print_json)
+                 .arg(&config_path)
+                 .current_dir(home.join("MemoryCore"))
+                 .output()
+                 .unwrap();
+             assert!(check_output.status.success(), "failed to parse yaml");
++            println!("OUTPUT FOR {platform} {provider}: {}", String::from_utf8_lossy(&check_output.stdout));
+             let json: serde_json::Value = serde_json::from_slice(&check_output.stdout).unwrap();
+             json

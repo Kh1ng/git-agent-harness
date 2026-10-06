@@ -837,33 +837,19 @@ fn colocated_installers_mutate_provider_yaml_safely() {
         let home = temp.path().join("home");
         let bin = temp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::create_dir_all(home.join("MemoryCore/node_modules/yaml")).unwrap();
+        std::fs::create_dir_all(home.join("MemoryCore")).unwrap();
         std::fs::write(
             home.join("MemoryCore/package.json"),
             "{\"name\":\"MemoryCore\"}",
         )
         .unwrap();
-        std::fs::write(
-            home.join("MemoryCore/node_modules/yaml/index.js"),
-            r#"module.exports = {
-              parseDocument: function(str) {
-                let obj = {};
-                try { obj = JSON.parse(str); } catch(e) {}
-                obj.llm = obj.llm || {};
-                obj.embedding = obj.embedding || {};
-                return {
-                  setIn: function(path, val) {
-                    if(path.length === 2) {
-                      obj[path[0]] = obj[path[0]] || {};
-                      obj[path[0]][path[1]] = val;
-                    }
-                  },
-                  toString: function() { return JSON.stringify(obj); }
-                }
-              }
-            };"#,
-        )
-        .unwrap();
+
+        let npm_output = std::process::Command::new("npm")
+            .args(["install", "yaml"])
+            .current_dir(home.join("MemoryCore"))
+            .output()
+            .unwrap();
+        assert!(npm_output.status.success(), "npm install yaml failed");
 
         let source = script(&format!("install-{platform}.sh"));
         let start = source.find("# gateway-yaml-mutation:start\n").unwrap();
@@ -874,7 +860,11 @@ fn colocated_installers_mutate_provider_yaml_safely() {
             let memory_core_path = home.join("MemoryCore").to_string_lossy().into_owned();
             let path_env = format!("{}:/usr/bin:/bin:/usr/local/bin", bin.display());
             let config_path = home.join("tdai-gateway.local.yaml");
-            std::fs::write(&config_path, "{\"llm\":{}, \"embedding\":{}}").unwrap();
+            std::fs::write(
+                &config_path,
+                "{\"llm\":{}, \"embedding\":{}, \"memory\":{}}",
+            )
+            .unwrap();
             let envs = vec![
                 ("HOME", home.to_str().unwrap()),
                 ("PATH", path_env.as_str()),
@@ -888,8 +878,21 @@ fn colocated_installers_mutate_provider_yaml_safely() {
             ];
             let output = bash(&["-euc", block], &envs, true);
             assert!(output.status.success(), "{platform}: {}", text(&output));
-            let content = std::fs::read_to_string(&config_path).unwrap();
-            let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+            let print_json = r#"
+const yaml = require('yaml');
+const fs = require('fs');
+console.log(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[1], 'utf8'))));
+"#;
+            let check_output = std::process::Command::new("node")
+                .arg("-e")
+                .arg(print_json)
+                .arg(&config_path)
+                .current_dir(home.join("MemoryCore"))
+                .output()
+                .unwrap();
+            assert!(check_output.status.success(), "failed to parse yaml");
+            let json: serde_json::Value = serde_json::from_slice(&check_output.stdout).unwrap();
             json
         };
 
@@ -897,17 +900,26 @@ fn colocated_installers_mutate_provider_yaml_safely() {
         let ollama = run("ollama", "http://test:11434", "my-llama", "my-embed");
         assert_eq!(ollama["llm"]["baseUrl"], "http://test:11434");
         assert_eq!(ollama["llm"]["model"], "my-llama");
-        assert_eq!(ollama["embedding"]["provider"], "ollama");
-        assert_eq!(ollama["embedding"]["baseUrl"], "http://test:11434");
-        assert_eq!(ollama["embedding"]["model"], "my-embed");
+        assert_eq!(ollama["memory"]["embedding"]["provider"], "ollama");
+        assert_eq!(
+            ollama["memory"]["embedding"]["baseUrl"],
+            "http://test:11434"
+        );
+        assert_eq!(ollama["memory"]["embedding"]["model"], "my-embed");
 
         // Test openai with defaults
         let openai = run("openai", "", "", "");
         assert_eq!(openai["llm"]["baseUrl"], "https://api.openai.com/v1");
         assert_eq!(openai["llm"]["model"], "gpt-4o");
-        assert_eq!(openai["embedding"]["provider"], "openai");
-        assert_eq!(openai["embedding"]["baseUrl"], "https://api.openai.com/v1");
-        assert_eq!(openai["embedding"]["model"], "text-embedding-3-small");
+        assert_eq!(openai["memory"]["embedding"]["provider"], "openai");
+        assert_eq!(
+            openai["memory"]["embedding"]["baseUrl"],
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            openai["memory"]["embedding"]["model"],
+            "text-embedding-3-small"
+        );
 
         // Test sed injection via query param on endpoint (issue #1319 regression)
         let ollama_injection = run(

@@ -411,118 +411,142 @@ impl<'a> Setup<'a> {
                     ("GAH_GATEWAY_MODE", "colocated".to_string()),
                     ("GAH_GATEWAY_MEMORYCORE_PATH", path.display().to_string()),
                 ]);
+                let existing_config = self.host.exists(&path.join("tdai-gateway.local.yaml"));
                 let provider = match self.host.env("GAH_GATEWAY_PROVIDER") {
-                    Some(val) => val,
-                    None if self.options.yes => "openai".to_string(),
+                    Some(val) => Some(val),
+                    None if existing_config && self.options.yes => None,
+                    None if self.options.yes => Some("openai".to_string()),
                     None => {
-                        let opts = [
-                            "OpenAI / Compatible".to_string(),
-                            "Ollama (local, unmetered)".to_string(),
-                        ];
-                        match self.ask_choice(
-                            "Select the model provider for MemoryCore",
-                            &opts,
-                            0,
-                        )? {
-                            1 => "ollama".to_string(),
-                            _ => "openai".to_string(),
-                        }
-                    }
-                };
-                env.0.push(("GAH_GATEWAY_PROVIDER", provider.clone()));
-
-                let (default_endpoint, default_llm, default_embed) = match provider.as_str() {
-                    "ollama" => ("http://127.0.0.1:11434", "llama3", "nomic-embed-text"),
-                    _ => (
-                        "https://api.openai.com/v1",
-                        "gpt-4o",
-                        "text-embedding-3-small",
-                    ),
-                };
-
-                let endpoint = match self.host.env("GAH_GATEWAY_ENDPOINT") {
-                    Some(val) => val,
-                    None if self.options.yes => default_endpoint.to_string(),
-                    None => {
-                        let text = self
-                            .prompter
-                            .text(&format!("API Endpoint (default: {default_endpoint})"), None)?;
-                        if text.is_empty() {
-                            default_endpoint.to_string()
+                        if existing_config {
+                            let opts = [
+                                "Keep existing configuration".to_string(),
+                                "OpenAI / Compatible".to_string(),
+                                "Ollama (local, unmetered)".to_string(),
+                            ];
+                            match self.ask_choice(
+                                "Select the model provider for MemoryCore",
+                                &opts,
+                                0,
+                            )? {
+                                0 => None,
+                                2 => Some("ollama".to_string()),
+                                _ => Some("openai".to_string()),
+                            }
                         } else {
-                            text
+                            let opts = [
+                                "OpenAI / Compatible".to_string(),
+                                "Ollama (local, unmetered)".to_string(),
+                            ];
+                            match self.ask_choice(
+                                "Select the model provider for MemoryCore",
+                                &opts,
+                                0,
+                            )? {
+                                1 => Some("ollama".to_string()),
+                                _ => Some("openai".to_string()),
+                            }
                         }
                     }
                 };
-                env.0.push(("GAH_GATEWAY_ENDPOINT", endpoint));
 
-                let llm_model = match self.host.env("GAH_GATEWAY_LLM_MODEL") {
-                    Some(val) => val,
-                    None if self.options.yes => default_llm.to_string(),
-                    None => {
-                        let text = self
-                            .prompter
-                            .text(&format!("LLM Model (default: {default_llm})"), None)?;
-                        if text.is_empty() {
-                            default_llm.to_string()
-                        } else {
-                            text
-                        }
-                    }
-                };
-                env.0.push(("GAH_GATEWAY_LLM_MODEL", llm_model));
+                if let Some(provider) = provider {
+                    env.0.push(("GAH_GATEWAY_PROVIDER", provider.clone()));
 
-                let embed_model = match self.host.env("GAH_GATEWAY_EMBEDDING_MODEL") {
-                    Some(val) => val,
-                    None if self.options.yes => default_embed.to_string(),
-                    None => {
-                        let text = self
-                            .prompter
-                            .text(&format!("Embedding Model (default: {default_embed})"), None)?;
-                        if text.is_empty() {
-                            default_embed.to_string()
-                        } else {
-                            text
-                        }
-                    }
-                };
-                env.0.push(("GAH_GATEWAY_EMBEDDING_MODEL", embed_model));
+                    let (default_endpoint, default_llm, default_embed) = match provider.as_str() {
+                        "ollama" => ("http://127.0.0.1:11434", "llama3", "nomic-embed-text"),
+                        _ => (
+                            "https://api.openai.com/v1",
+                            "gpt-4o",
+                            "text-embedding-3-small",
+                        ),
+                    };
 
-                if provider == "openai" {
-                    let llm_key = match self.host.env("GAH_GATEWAY_LLM_API_KEY") {
-                        Some(val) => Some(val),
+                    let endpoint = match self.host.env("GAH_GATEWAY_ENDPOINT") {
+                        Some(val) => val,
+                        None if self.options.yes => default_endpoint.to_string(),
                         None => {
-                            if self.options.yes {
-                                None
+                            let text = self.prompter.text(
+                                &format!("API Endpoint (default: {default_endpoint})"),
+                                None,
+                            )?;
+                            if text.is_empty() {
+                                default_endpoint.to_string()
                             } else {
-                                let val = self
-                                    .prompter
-                                    .secret("LLM API key (hidden, empty to skip)")?;
-                                if val.trim().is_empty() {
-                                    None
-                                } else {
-                                    Some(val.trim().to_string())
-                                }
+                                text
                             }
                         }
                     };
-                    if let Some(val) = llm_key {
-                        env.0.push(("GAH_GATEWAY_LLM_API_KEY", val));
-                    }
-                    let embed_key = match self.host.env("GAH_GATEWAY_EMBEDDING_API_KEY") {
+                    env.0.push(("GAH_GATEWAY_ENDPOINT", endpoint));
+
+                    let llm_model = match self.host.env("GAH_GATEWAY_LLM_MODEL") {
                         Some(val) => val,
-                        None => self.secret_from(
-                            "GAH_GATEWAY_EMBEDDING_API_KEY",
-                            "Embedding API key (hidden)",
-                        )?,
+                        None if self.options.yes => default_llm.to_string(),
+                        None => {
+                            let text = self
+                                .prompter
+                                .text(&format!("LLM Model (default: {default_llm})"), None)?;
+                            if text.is_empty() {
+                                default_llm.to_string()
+                            } else {
+                                text
+                            }
+                        }
                     };
-                    env.0.push(("GAH_GATEWAY_EMBEDDING_API_KEY", embed_key));
-                } else {
-                    if let Some(key) = self.host.env("GAH_GATEWAY_LLM_API_KEY") {
-                        env.0.push(("GAH_GATEWAY_LLM_API_KEY", key));
-                    }
-                    if let Some(key) = self.host.env("GAH_GATEWAY_EMBEDDING_API_KEY") {
-                        env.0.push(("GAH_GATEWAY_EMBEDDING_API_KEY", key));
+                    env.0.push(("GAH_GATEWAY_LLM_MODEL", llm_model));
+
+                    let embed_model = match self.host.env("GAH_GATEWAY_EMBEDDING_MODEL") {
+                        Some(val) => val,
+                        None if self.options.yes => default_embed.to_string(),
+                        None => {
+                            let text = self.prompter.text(
+                                &format!("Embedding Model (default: {default_embed})"),
+                                None,
+                            )?;
+                            if text.is_empty() {
+                                default_embed.to_string()
+                            } else {
+                                text
+                            }
+                        }
+                    };
+                    env.0.push(("GAH_GATEWAY_EMBEDDING_MODEL", embed_model));
+
+                    if provider == "openai" {
+                        let llm_key = match self.host.env("GAH_GATEWAY_LLM_API_KEY") {
+                            Some(val) => Some(val),
+                            None => {
+                                if self.options.yes {
+                                    None
+                                } else {
+                                    let val = self
+                                        .prompter
+                                        .secret("LLM API key (hidden, empty to skip)")?;
+                                    if val.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(val.trim().to_string())
+                                    }
+                                }
+                            }
+                        };
+                        if let Some(val) = llm_key {
+                            env.0.push(("GAH_GATEWAY_LLM_API_KEY", val));
+                        }
+                        let embed_key = match self.host.env("GAH_GATEWAY_EMBEDDING_API_KEY") {
+                            Some(val) => val,
+                            None => self.secret_from(
+                                "GAH_GATEWAY_EMBEDDING_API_KEY",
+                                "Embedding API key (hidden)",
+                            )?,
+                        };
+                        env.0.push(("GAH_GATEWAY_EMBEDDING_API_KEY", embed_key));
+                    } else {
+                        if let Some(key) = self.host.env("GAH_GATEWAY_LLM_API_KEY") {
+                            env.0.push(("GAH_GATEWAY_LLM_API_KEY", key));
+                        }
+                        if let Some(key) = self.host.env("GAH_GATEWAY_EMBEDDING_API_KEY") {
+                            env.0.push(("GAH_GATEWAY_EMBEDDING_API_KEY", key));
+                        }
                     }
                 }
                 self.prompter

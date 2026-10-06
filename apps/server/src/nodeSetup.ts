@@ -49,7 +49,9 @@ export function unixSetupCommand(os: string, role: string, centralUrl: string, g
   } else if (role === 'central' || role === 'standalone') {
     if (provider) {
       settings.push('GAH_GATEWAY_MODE=colocated');
-      settings.push(`GAH_GATEWAY_MEMORYCORE_PATH=${shellQuote(memoryCorePath || '~/TencentDB-Agent-Memory/MemoryCore')}`);
+      const defaultPath = require('node:os').homedir() + '/TencentDB-Agent-Memory/MemoryCore';
+      const targetPath = memoryCorePath?.startsWith('~/') ? require('node:os').homedir() + memoryCorePath.slice(1) : (memoryCorePath || defaultPath);
+      settings.push(`GAH_GATEWAY_MEMORYCORE_PATH=${shellQuote(targetPath)}`);
       settings.push(`GAH_GATEWAY_PROVIDER=${shellQuote(provider)}`);
       if (providerEndpoint) settings.push(`GAH_GATEWAY_ENDPOINT=${shellQuote(providerEndpoint)}`);
       if (llmModel) settings.push(`GAH_GATEWAY_LLM_MODEL=${shellQuote(llmModel)}`);

@@ -1398,7 +1398,11 @@ export function ColocatedProviderSection() {
   const [copied, setCopied] = useState(false);
 
   const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
-  const command = `GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH=${shellQuote(memoryCorePath)} GAH_GATEWAY_PROVIDER=${shellQuote(provider)} ${providerEndpoint ? `GAH_GATEWAY_ENDPOINT=${shellQuote(providerEndpoint)} ` : ''}${llmModel ? `GAH_GATEWAY_LLM_MODEL=${shellQuote(llmModel)} ` : ''}${embeddingModel ? `GAH_GATEWAY_EMBEDDING_MODEL=${shellQuote(embeddingModel)} ` : ''}scripts/install.sh`;
+  let prompt = '';
+  if (provider === 'openai') {
+    prompt = `read -rsp 'LLM API key (hidden, empty to skip): ' GAH_GATEWAY_LLM_API_KEY </dev/tty; printf '\\n'; test -n "$GAH_GATEWAY_LLM_API_KEY" && export GAH_GATEWAY_LLM_API_KEY; read -rsp 'Embedding API key (hidden): ' GAH_GATEWAY_EMBEDDING_API_KEY </dev/tty; printf '\\n'; export GAH_GATEWAY_EMBEDDING_API_KEY; `;
+  }
+  const command = `${prompt}GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH=${shellQuote(memoryCorePath)} GAH_GATEWAY_PROVIDER=${shellQuote(provider)} ${providerEndpoint ? `GAH_GATEWAY_ENDPOINT=${shellQuote(providerEndpoint)} ` : ''}${llmModel ? `GAH_GATEWAY_LLM_MODEL=${shellQuote(llmModel)} ` : ''}${embeddingModel ? `GAH_GATEWAY_EMBEDDING_MODEL=${shellQuote(embeddingModel)} ` : ''}scripts/install.sh`;
 
   const copyCommand = () => {
     navigator.clipboard.writeText(command).then(() => {

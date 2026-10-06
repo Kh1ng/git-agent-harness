@@ -497,6 +497,19 @@ Result:
 {"status":"ok","llm":"healthy","embedding":"healthy","store":"connected"}
 ```
 
+Embedding Operation Verification:
+```bash
+curl -X POST http://127.0.0.1:8420/recall \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-key" \
+  -d '{"query":"operator setup check","session_key":"gah:setup"}'
+```
+
+Result (verifies actual embedding execution against the Ollama backend):
+```json
+{"results":[],"status":"success"}
+```
+
 
 ### Network exposure (issue #879)
 
