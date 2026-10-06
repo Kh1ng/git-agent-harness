@@ -100,7 +100,7 @@ fn bindings_fail_closed_and_cannot_change_runtime_configuration() {
 }
 
 #[test]
-fn claude_subscription_is_private_and_only_binds_the_claude_runner() {
+fn claude_subscription_is_private_and_only_resolves_for_anthropic() {
     let mut source = info("subscription");
     source.provider = "claude".into();
     source.kind = CredentialKind::ClaudeSubscriptionToken;
@@ -118,7 +118,7 @@ fn claude_subscription_is_private_and_only_binds_the_claude_runner() {
         execution_env_with(
             saved.clone(),
             "synthetic-subscription-token".into(),
-            "claude"
+            "anthropic"
         )
         .unwrap(),
         vec![(
@@ -129,7 +129,7 @@ fn claude_subscription_is_private_and_only_binds_the_claude_runner() {
     assert!(execution_env_with(
         saved.clone(),
         "synthetic-subscription-token".into(),
-        "anthropic"
+        "openai"
     )
     .is_err());
     let mut invalid = saved;

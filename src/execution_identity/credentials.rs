@@ -38,14 +38,10 @@ impl ExecutionIdentity {
         }
         let subscription =
             source.kind == crate::credentials::CredentialKind::ClaudeSubscriptionToken;
-        let mut env = match crate::credentials::execution_env(
-            id,
-            if subscription {
-                &self.runner_kind
-            } else {
-                provider
-            },
-        ) {
+        if subscription && self.runner_kind != "claude" {
+            anyhow::bail!("Claude subscription token requires the Claude runner");
+        }
+        let mut env = match crate::credentials::execution_env(id, provider) {
             Ok(value) => value,
             Err(_) => anyhow::bail!("named credential does not match the execution provider"),
         };

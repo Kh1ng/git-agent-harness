@@ -464,6 +464,8 @@ pub(crate) fn selected(id: &str) -> Result<(CredentialInfo, String)> {
 
 /// Resolve a single explicitly bound execution source. Dashboard cookies never enter
 /// execution, and a provider mismatch cannot fall back to an ambient key.
+/// Which runner may use the source is the caller's check
+/// (`ExecutionIdentity::credential_env`).
 pub fn execution_env(id: &str, expected_provider: &str) -> Result<Vec<(String, String)>> {
     let (info, secret) = match selected(id) {
         Ok(value) => value,
@@ -486,9 +488,6 @@ fn execution_env_with(
         bail!("named credential does not match the execution provider");
     }
     if info.kind == CredentialKind::ClaudeSubscriptionToken {
-        if expected_provider != "claude" {
-            bail!("Claude subscription token requires the Claude runner");
-        }
         return Ok(vec![("CLAUDE_CODE_OAUTH_TOKEN".into(), secret)]);
     }
     Ok(vec![(

@@ -382,6 +382,35 @@ fn named_key_obeys_existing_paid_external_scope_approval() {
         ));
 }
 
+// A subscription token is not a paid Anthropic key, so an ANTHROPIC_API_KEY
+// scope does not gate it. An operator who lists CLAUDE_CODE_OAUTH_TOKEN in a
+// scope has asked for approval, and gets it.
+#[test]
+fn subscription_token_is_gated_only_by_a_scope_that_names_it() {
+    let f = BindingFixture::new("claude", "#!/bin/sh\nprintf launched\n");
+    f.save_subscription("claude-work", "claude", "synthetic-subscription-token");
+    f.add("claude-one", "claude", "claude-work");
+    let scope = |env_var: &str| {
+        let mut config: toml::Value =
+            toml::from_str(&fs::read_to_string(&f.config).unwrap()).unwrap();
+        config["profiles"]["test"]["external_credential_scopes"] =
+            toml::Value::try_from(serde_json::json!({"paid": {"env_vars": [env_var]}})).unwrap();
+        fs::write(&f.config, toml::to_string(&config).unwrap()).unwrap();
+    };
+
+    scope("ANTHROPIC_API_KEY");
+    f.exec("claude-one").assert().success().stdout("launched");
+
+    scope("CLAUDE_CODE_OAUTH_TOKEN");
+    f.exec("claude-one")
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "work-scoped external API approval",
+        ));
+}
+
 #[test]
 fn codex_explicit_provider_configuration_contains_env_reference_not_key() {
     let f = BindingFixture::new("codex", "#!/bin/sh\nprintf '%s|%s|%s|%s' \"$CODEX_CONFIG\" \"$MODEL_PROVIDER\" \"${CODEX_API_KEY-unset}\" \"$*\"\n");

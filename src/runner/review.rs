@@ -101,15 +101,12 @@ pub fn run_review_backend_for_identity(
         .validate_launch_config(worktree)
         .and_then(|_| identity.credential_env())
         .and_then(|selected| {
-            // Workflow approval filtering must not be undone by source
-            // injection. The Claude subscription token is quota, not a paid
-            // credential, so scopes never gate it (#1352).
+            // Workflow approval filtering must not be undone by source injection.
             if selected.iter().any(|entry| {
-                !crate::execution_identity::is_subscription_injection(&entry.0)
-                    && profile
-                        .external_credential_scopes
-                        .values()
-                        .any(|scope| scope.env_vars.contains(&entry.0))
+                profile
+                    .external_credential_scopes
+                    .values()
+                    .any(|scope| scope.env_vars.contains(&entry.0))
                     && !env_vars.contains(entry)
             }) {
                 anyhow::bail!("selected credential requires work-scoped external API approval");

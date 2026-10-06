@@ -1049,7 +1049,10 @@ read -rs TOKEN; printf '%s' "$TOKEN" | \
 ```
 
 The token counts as subscription quota: candidates on a bound instance are
-`included_in_quota` and never require paid-route approval. `gah auth-health`
+`included_in_quota` and never require paid-route approval. An
+`external_credential_scopes` entry for `ANTHROPIC_API_KEY` does not cover the
+token; list `CLAUDE_CODE_OAUTH_TOKEN` in a scope if runs with it should need
+work-scoped approval. `gah auth-health`
 reports each instance independently; a saved token reads as unknown there
 because a login check cannot verify it — `gah quota refresh --credential
 claude-work` (also run by auto-refresh) verifies it against the subscription.
