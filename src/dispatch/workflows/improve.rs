@@ -161,7 +161,10 @@ pub(crate) fn improve(
     let branch = if let Some(ref existing_branch) = manual_fix.existing_branch {
         existing_branch.clone()
     } else {
-        format!("gah/{}-{}", profile.repo_id, ts)
+        format!(
+            "{}{}-{}",
+            profile.publishing.managed_branch_prefix, profile.repo_id, ts
+        )
     };
     apply_manual_fix_context_to_ledger(ledger, ticket_meta.as_ref(), &branch, &manual_fix);
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);

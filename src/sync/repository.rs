@@ -11,6 +11,8 @@ const RECENT_MERGED_PR_LIMIT: usize = 20;
 
 #[derive(Debug, Deserialize)]
 struct GithubRestPr {
+    #[serde(default)]
+    user: serde_json::Value,
     number: i64,
     title: String,
     #[serde(default)]
@@ -106,7 +108,26 @@ pub(super) fn active_github_mrs_without_ci(
 ) -> Result<Vec<SyncMr>> {
     Ok(github_open_prs_rest(profile, "active observation")?
         .into_iter()
-        .filter(|pr| !filter_gah_branches || pr.head.branch.starts_with("gah/"))
+        .filter(|pr| {
+            if filter_gah_branches && profile.publishing.github_claim_identity.is_some() {
+                let labels = pr
+                    .labels
+                    .iter()
+                    .map(|label| label.name.clone())
+                    .collect::<Vec<_>>();
+                crate::dispatch::github_work_item_intake_allowed(
+                    profile,
+                    &serde_json::json!({"user": pr.user}),
+                    &labels,
+                )
+            } else {
+                !filter_gah_branches
+                    || pr
+                        .head
+                        .branch
+                        .starts_with(&profile.publishing.managed_branch_prefix)
+            }
+        })
         .map(|pr| SyncMr {
             work_id: extract_work_id_from_title(&pr.title),
             title: pr.title,
@@ -158,7 +179,12 @@ pub(super) fn fetch_historical_github_mrs(
     let prs: Vec<GithubPr> = serde_json::from_slice(&out.stdout)?;
     Ok(prs
         .into_iter()
-        .filter(|pr| !filter_gah_branches || pr.head_ref_name.starts_with("gah/"))
+        .filter(|pr| {
+            !filter_gah_branches
+                || pr
+                    .head_ref_name
+                    .starts_with(&profile.publishing.managed_branch_prefix)
+        })
         .map(|pr| SyncMr {
             merge_commit_sha: pr.merge_commit_sha(),
             work_id: extract_work_id_from_title(&pr.title),

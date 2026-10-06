@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 use url::Url;
 
+pub(crate) mod claims;
 mod comments;
 mod publication;
 mod relations;

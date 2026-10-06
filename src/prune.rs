@@ -39,10 +39,11 @@ pub fn run_automatic(
         .iter()
         .any(|error| error.subsystem == "claims" && error.incomplete_snapshot))
     .then_some(snapshot.active_claims.as_slice());
-    let observed = automatic_worktree_sets(
+    let observed = automatic_worktree_sets_with_prefix(
         ledger_entries,
         profile_name,
         &profile.repo_id,
+        &profile.publishing.managed_branch_prefix,
         active_mrs,
         active_claims,
     );
@@ -64,6 +65,7 @@ struct AutomaticWorktreeSets {
     protected: HashSet<String>,
 }
 
+#[cfg(test)]
 fn automatic_worktree_sets(
     ledger_entries: &[crate::ledger::LedgerEntry],
     profile_name: &str,
@@ -71,7 +73,28 @@ fn automatic_worktree_sets(
     active_mrs: Option<&[crate::sync::SyncMrJson]>,
     active_claims: Option<&[crate::status::ActiveClaimSnapshot]>,
 ) -> AutomaticWorktreeSets {
-    let dispatch_prefixes = [format!("gah/{repo_id}-"), format!("gah/exp/{repo_id}-")];
+    automatic_worktree_sets_with_prefix(
+        ledger_entries,
+        profile_name,
+        repo_id,
+        "gah/",
+        active_mrs,
+        active_claims,
+    )
+}
+
+fn automatic_worktree_sets_with_prefix(
+    ledger_entries: &[crate::ledger::LedgerEntry],
+    profile_name: &str,
+    repo_id: &str,
+    managed_prefix: &str,
+    active_mrs: Option<&[crate::sync::SyncMrJson]>,
+    active_claims: Option<&[crate::status::ActiveClaimSnapshot]>,
+) -> AutomaticWorktreeSets {
+    let dispatch_prefixes = [
+        format!("{managed_prefix}{repo_id}-"),
+        format!("{managed_prefix}exp/{repo_id}-"),
+    ];
     let published = ledger_entries
         .iter()
         .filter(|entry| entry.profile == profile_name && entry.repo_id == repo_id)
@@ -204,7 +227,9 @@ fn prune_remote_gah_branches(profile: &Profile, dry_run: bool) -> Result<()> {
     let push_url = profile.push_url()?;
     let pat = profile.pat();
     let repo_path = Path::new(&profile.local_path);
-    for (branch, class) in remote_gah_branches_to_delete(&mrs) {
+    for (branch, class) in
+        remote_branches_to_delete(&mrs, &profile.publishing.managed_branch_prefix)
+    {
         if dry_run {
             println!("  would delete remote branch {branch} ({class})");
             continue;
@@ -221,9 +246,14 @@ fn prune_remote_gah_branches(profile: &Profile, dry_run: bool) -> Result<()> {
 /// delete on the remote, and why. Scoped to gah's own dispatch naming
 /// convention (`gah/...`) deliberately -- this must never touch a
 /// human-authored branch just because its PR happened to merge.
+#[cfg(test)]
 pub(crate) fn remote_gah_branches_to_delete(mrs: &[SyncMr]) -> Vec<(&str, &'static str)> {
+    remote_branches_to_delete(mrs, "gah/")
+}
+
+fn remote_branches_to_delete<'a>(mrs: &'a [SyncMr], prefix: &str) -> Vec<(&'a str, &'static str)> {
     mrs.iter()
-        .filter(|mr| mr.branch.starts_with("gah/"))
+        .filter(|mr| !prefix.is_empty() && mr.branch.starts_with(prefix))
         .filter_map(|mr| match sync::classify(mr) {
             class @ ("MERGED" | "CLOSED_UNMERGED") => Some((mr.branch.as_str(), class)),
             _ => None,

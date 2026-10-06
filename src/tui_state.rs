@@ -206,7 +206,8 @@ mod tests {
                 max_open_managed_mrs: 1,
                 issue_intake_policy: crate::models::IssueIntakePolicy {
                     mode: "canonical_autonomous_only".into(),
-                    canonical_autonomous_label: "exec:autonomous".into(),
+                    canonical_autonomous_label: crate::config::PublishingPolicy::default()
+                        .canonical_autonomous_label,
                     trusted_human_authors: vec![],
                     trusted_bot_authors: vec![],
                     github_issue_author_allowlist: vec![],

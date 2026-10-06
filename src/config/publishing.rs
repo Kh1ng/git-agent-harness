@@ -7,6 +7,17 @@ use std::collections::BTreeMap;
 /// and merge authorization.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct PublishingPolicy {
+    /// GitHub login used for cross-fleet claims. Configure one bot per fleet.
+    #[serde(default)]
+    pub github_claim_identity: Option<String>,
+    #[serde(default = "default_claim_settle_seconds")]
+    pub github_claim_settle_seconds: u64,
+    #[serde(default = "default_claim_lease_seconds")]
+    pub github_claim_lease_seconds: u64,
+    #[serde(default = "default_claim_poll_seconds")]
+    pub github_claim_poll_seconds: u64,
+    #[serde(default = "default_managed_branch_prefix")]
+    pub managed_branch_prefix: String,
     #[serde(default = "default_true")]
     pub allow_pull_request_creation: bool,
     #[serde(default = "default_true")]
@@ -62,6 +73,11 @@ pub struct PublishingPolicy {
 impl Default for PublishingPolicy {
     fn default() -> Self {
         Self {
+            github_claim_identity: None,
+            github_claim_settle_seconds: default_claim_settle_seconds(),
+            github_claim_lease_seconds: default_claim_lease_seconds(),
+            github_claim_poll_seconds: default_claim_poll_seconds(),
+            managed_branch_prefix: default_managed_branch_prefix(),
             allow_pull_request_creation: true,
             allow_commit_message_generation: true,
             allow_issue_comments: true,
@@ -139,6 +155,19 @@ impl PublishingPolicy {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_claim_settle_seconds() -> u64 {
+    2
+}
+fn default_claim_lease_seconds() -> u64 {
+    900
+}
+fn default_claim_poll_seconds() -> u64 {
+    15
+}
+fn default_managed_branch_prefix() -> String {
+    "gah/".into()
 }
 
 #[cfg(test)]

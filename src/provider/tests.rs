@@ -1251,3 +1251,6 @@ mod comment_tests;
 mod parallel_tests;
 #[path = "tests/publication_tests.rs"]
 mod publication_tests;
+
+#[path = "tests/claim_tests.rs"]
+mod claim_tests;

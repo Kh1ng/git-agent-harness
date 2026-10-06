@@ -1260,3 +1260,18 @@ pub(super) fn resolve_target_to_issue_or_string(
 
 #[cfg(test)]
 mod tests;
+
+/// Shared PR intake uses exactly the issue trust and unattended policy.
+pub(crate) fn github_work_item_intake_allowed(
+    profile: &Profile,
+    response: &serde_json::Value,
+    labels: &[String],
+) -> bool {
+    evaluate_issue_intake(
+        profile,
+        parse_github_author(response).as_ref(),
+        labels,
+        false,
+    )
+    .is_ok()
+}

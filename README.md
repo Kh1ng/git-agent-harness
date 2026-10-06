@@ -502,6 +502,55 @@ trust. GitLab project access-token users are recognized from the project-scoped
 `project_<project-id>_bot_*` username and must still be listed exactly in
 `trusted_issue_bot_authors`. Explicit empty lists deny that author class.
 
+### Shared GitHub claims
+
+Configure each installation's authenticated bot login under its profile:
+
+```toml
+[profiles.my_profile.publishing]
+github_claim_identity = "my-fleet-bot"
+github_claim_settle_seconds = 2
+github_claim_lease_seconds = 900
+github_claim_poll_seconds = 15
+managed_branch_prefix = "gah/"
+```
+
+Both installations discover the same eligible open issues and PRs. PR discovery
+uses the same trusted-author and unattended-label policy as issue discovery;
+fleet-routing labels have no effect. Controller blockers, review holds, and
+retry budgets still run before dispatch and assignment. An issue dispatch claims
+its issue number; a review or repair claims the PR number (never the linked
+source issue). The selected action determines the role.
+
+The bot replaces the assignee list, waits the mandatory settle window, then
+starts only if it is the sole assignee. A lost race skips to the next candidate.
+An assigned item is reclaimable only after the activity lease expires; assignment,
+comments, commits, and check/status activity protect it. Ownership monitoring
+stops the individual worker on a lost or unavailable claim. Completion removes
+only the worker's bot assignment. Distinct installations must use distinct bot
+logins, and their authenticated GitHub credentials must be allowed to assign
+those logins. Profiles without a claim identity retain legacy intake for
+compatibility; enable claims on each participating factory.
+
+Intake literal inventory (defaults retain existing values):
+
+| Gate or capacity | Configuration | Default |
+| --- | --- | --- |
+| Managed branch creation, legacy pickup, pruning | `publishing.managed_branch_prefix` | `gah/` |
+| Unattended eligibility, including runtime display fallback | `publishing.canonical_autonomous_label` | `exec:autonomous` |
+| Author trust | `publishing.trusted_issue_human_authors`, `publishing.trusted_issue_bot_authors` | repository owner / no bots |
+| Issue eligibility mode | `publishing.issue_intake_mode` | `legacy` |
+| Fleet identity and claim timing | `publishing.github_claim_*` | identity unset; 2s / 900s / 15s |
+| Factory concurrency | `max_parallel_workers` | 1 |
+| Implementation publication backpressure | `max_open_managed_mrs` | factory concurrency |
+| Repair budget | `routing.max_fix_attempts_per_mr` | 2 |
+| Review budget | `routing.max_review_cycles_per_ticket` | repair budget + 1 |
+| Implementation failure budget | `routing.max_implementation_failures_per_ticket` | 8 |
+| Fleet-routing convention | no intake configuration or gate | ignored |
+
+Review verdict labels remain fixed protocol outputs. They continue to select
+review, repair, or human handoff and are not fleet selectors.
+
 ### Generated-artifact publication guard
 
 Before GAH creates or pushes a commit, it rejects newly tracked files matching

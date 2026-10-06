@@ -71,7 +71,10 @@ pub(crate) fn experiment(
     }
 
     let ts = timestamp();
-    let branch = format!("gah/exp-{}-{}", profile.repo_id, ts);
+    let branch = format!(
+        "{}exp-{}-{}",
+        profile.publishing.managed_branch_prefix, profile.repo_id, ts
+    );
     let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
     let repo = Path::new(&profile.local_path);
 

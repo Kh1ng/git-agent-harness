@@ -260,11 +260,13 @@ pub fn classify(mr: &SyncMr) -> &'static str {
     {
         return "NEEDS_REVIEW";
     }
+    if mr.state.as_deref().is_some_and(|state| {
+        state.eq_ignore_ascii_case("open") || state.eq_ignore_ascii_case("opened")
+    }) {
+        return "NEEDS_REVIEW";
+    }
     if is_stale(mr.updated_at.as_deref()) {
         return "STALE";
-    }
-    if mr.branch.starts_with("gah/") {
-        return "NEEDS_REVIEW";
     }
     "UNKNOWN"
 }
@@ -532,10 +534,12 @@ fn gitlab_mrs(
         )?;
         let mrs: Vec<GitlabMr> = serde_json::from_value(response)?;
         let count = mrs.len();
-        for mr in mrs
-            .into_iter()
-            .filter(|mr| !filter_gah_branches || mr.source_branch.starts_with("gah/"))
-        {
+        for mr in mrs.into_iter().filter(|mr| {
+            !filter_gah_branches
+                || mr
+                    .source_branch
+                    .starts_with(&profile.publishing.managed_branch_prefix)
+        }) {
             let iid = mr
                 .iid
                 .as_ref()

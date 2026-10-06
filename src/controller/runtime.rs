@@ -1045,6 +1045,21 @@ pub(crate) fn run_dispatch_and_record(
     work_id: Option<&str>,
     args: &crate::dispatch::DispatchArgs,
 ) -> Result<Option<String>> {
+    let profile = crate::config::get_profile(cfg, &args.profile)?;
+    let provider_claim =
+        if profile.provider == "github" && profile.publishing.github_claim_identity.is_some() {
+            let branch = args.branch.as_deref().or(args.existing_branch.as_deref());
+            match crate::provider::claims::GithubClaim::acquire(profile, work_id, branch)? {
+                Some(claim) => Some(claim),
+                None => {
+                    return Ok(Some(
+                        "GitHub claim unavailable; moving to next eligible item".into(),
+                    ))
+                }
+            }
+        } else {
+            None
+        };
     let target_context = args
         .branch
         .as_deref()
@@ -1060,7 +1075,12 @@ pub(crate) fn run_dispatch_and_record(
         args.run_id.as_deref(),
         start_detail,
     )?;
-    match crate::dispatch::run(cfg, args) {
+    let result = crate::dispatch::run(cfg, args);
+    let result = match provider_claim.as_ref() {
+        Some(claim) => claim.ensure_owned().and(result),
+        None => result,
+    };
+    match result {
         Ok(()) => {
             crate::events::record_with_run_id(
                 cfg,

@@ -135,7 +135,7 @@ fn bounded_private_stdin_cannot_block_the_process_deadline() {
 }
 
 pub fn shutdown_requested() -> bool {
-    SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
+    SHUTDOWN_REQUESTED.load(Ordering::SeqCst) || crate::provider::claims::claim_lost()
 }
 
 #[cfg(unix)]
@@ -732,7 +732,9 @@ fn spawn_with_idle_watch_with_shutdown(
         match child.try_wait() {
             Ok(Some(status)) => break status.code().unwrap_or(-1),
             Ok(None) => {
-                if shutdown_requested.load(Ordering::SeqCst) {
+                if shutdown_requested.load(Ordering::SeqCst)
+                    || crate::provider::claims::claim_lost()
+                {
                     cleanup_error = kill_process_group(&mut child);
                     let _ = child.wait();
                     killed_for_shutdown = true;

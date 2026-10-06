@@ -22,6 +22,7 @@ mod error;
 pub(crate) mod external_approval_pause;
 mod identity;
 mod issues;
+pub(crate) use issues::github_work_item_intake_allowed;
 mod metrics;
 mod mutation_policy;
 mod prior_attempts;
