@@ -898,11 +898,10 @@ fn dimension_key(dimension: AggregationDimension) -> String {
 /// metered API account. `quota_backed` is the canonical ledger value; retain
 /// `subscription` for older records written before normalization.
 fn is_quota_backed(usage: &LedgerUsage) -> bool {
-    usage.quota_window.is_some()
-        || matches!(
-            usage.usage_classification.as_deref(),
-            Some("quota_backed" | "subscription")
-        )
+    matches!(
+        usage.usage_classification.as_deref(),
+        Some("quota_backed" | "subscription")
+    )
 }
 
 /// Calculate totals across all entries
