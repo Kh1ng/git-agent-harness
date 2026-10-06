@@ -287,6 +287,7 @@ function isQuotaSnapshot(value: unknown, profile: string, since: string): value 
       && (check.checked_at == null || (typeof check.checked_at === 'string' && Number.isFinite(Date.parse(check.checked_at))))
       && ['data', 'no_data', 'failed', 'auth_required', 'not_configured'].includes(check.status)
       && [check.credential_id, check.backend_instance, check.model, check.quota_pool, check.provider, check.error, check.failing_since].every(optionalText)
+      && (check.failing_since == null || Number.isFinite(Date.parse(check.failing_since)))
       && observationsValid(check.quota_observations))
     && Array.isArray(snapshot.candidates) && snapshot.candidates.every(candidate => candidate
       && typeof candidate.backend === 'string' && (candidate.model === null || typeof candidate.model === 'string')

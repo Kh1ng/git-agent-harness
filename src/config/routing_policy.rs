@@ -153,6 +153,15 @@ pub struct RoutingPolicy {
     /// `None` inherits the canonical/defaults policy (resolved to `Auto`).
     #[serde(default)]
     pub merge_policy: Option<MergePolicy>,
+    /// Strict per-job-kind allow-list, keyed by `JobKind::as_str()` (for
+    /// example `review`). A kind with a non-empty list may only ever run on
+    /// one of its entries: the list replaces that kind's candidate pool and
+    /// task routing rules for auto routing, and an explicit route or review
+    /// escalation outside it is refused. When no entry is available the job
+    /// waits; it never falls back to another model. Kinds without an entry
+    /// keep the ordinary pools. Profile entries replace same-key defaults.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub allowed_models: HashMap<String, Vec<CandidateConfig>>,
     /// Hold an APPROVE that changes a persisted or wire contract without
     /// compatibility evidence for a human. Unset means on (#1405).
     #[serde(default)]
@@ -160,6 +169,127 @@ pub struct RoutingPolicy {
 }
 
 impl RoutingPolicy {
+    /// The allow-list restricting `mode`, or `None` when that job kind is
+    /// open. Keys are matched by job kind, so the `implement` alias restricts
+    /// `improve`. A retry or escalation of an `improve` job is dispatched as
+    /// `fix`, so `fix` without a list of its own is held to the `improve`
+    /// list: "only this model" then survives the first retry.
+    /// Every configured candidate with the setting it came from, including
+    /// allow-list entries. Scans over "all candidates" go through here.
+    pub fn labeled_candidates(&self) -> Vec<(&'static str, &CandidateConfig)> {
+        let lists = [
+            ("pm_candidate", self.pm_candidates.as_deref()),
+            ("improve_candidate", self.improve_candidates.as_deref()),
+            ("review_candidate", self.review_candidates.as_deref()),
+            (
+                "escalatory_reviewer",
+                Some(self.escalatory_reviewers.as_slice()),
+            ),
+        ];
+        let mut candidates: Vec<_> = self
+            .routine_reviewer
+            .iter()
+            .map(|candidate| ("routine_reviewer", candidate))
+            .collect();
+        for (label, list) in lists {
+            candidates.extend(
+                list.into_iter()
+                    .flatten()
+                    .map(|candidate| (label, candidate)),
+            );
+        }
+        for rule in &self.task_routing_rules {
+            candidates.extend(
+                rule.candidates
+                    .iter()
+                    .map(|candidate| ("task_routing_rule", candidate)),
+            );
+        }
+        for list in self.allowed_models.values() {
+            candidates.extend(list.iter().map(|candidate| ("allowed_model", candidate)));
+        }
+        candidates
+    }
+
+    pub fn allowed_models_for(&self, mode: &str) -> Option<&[CandidateConfig]> {
+        let kind = JobKind::parse(mode).ok()?;
+        let list = |kind: JobKind| {
+            self.allowed_models
+                .iter()
+                .find(|(key, list)| JobKind::parse(key).ok() == Some(kind) && !list.is_empty())
+                .map(|(_, list)| list.as_slice())
+        };
+        list(kind).or_else(|| (kind == JobKind::Fix).then(|| list(JobKind::Improve))?)
+    }
+
+    /// The allow-list entry that admits `backend`/`model` for `mode`. An
+    /// entry without a model admits every model of its backend; an entry
+    /// naming the model wins over such a wildcard. Every caller that asks
+    /// whether a route is allowed, needs approval, or which quota pool it
+    /// draws on goes through this one match.
+    pub fn allowed_entry(
+        &self,
+        mode: &str,
+        backend: &str,
+        model: Option<&str>,
+    ) -> Option<&CandidateConfig> {
+        let list = self.allowed_models_for(mode)?;
+        let on_backend = || list.iter().filter(|entry| entry.backend == backend);
+        on_backend()
+            .find(|entry| entry.model.as_deref() == model)
+            .or_else(|| on_backend().find(|entry| entry.model.is_none()))
+    }
+
+    /// True when `mode` is open or `backend`/`model` is on its allow-list.
+    pub fn allows_model(&self, mode: &str, backend: &str, model: Option<&str>) -> bool {
+        self.allowed_models_for(mode).is_none()
+            || self.allowed_entry(mode, backend, model).is_some()
+    }
+
+    /// True when `mode` is open or a configured candidate is on its
+    /// allow-list. Unlike a bare backend/model request, a candidate names
+    /// the account it runs on, so an entry pinned to one instance does not
+    /// admit the same model on another.
+    pub fn allows_candidate(&self, mode: &str, candidate: &CandidateConfig) -> bool {
+        self.allowed_models_for(mode).is_none_or(|list| {
+            list.iter().any(|entry| {
+                entry.backend == candidate.backend
+                    && (entry.model.is_none() || entry.model == candidate.model)
+                    && (entry.instance.is_none() || entry.instance == candidate.instance)
+            })
+        })
+    }
+
+    /// Config errors in `allowed_models`. Routing refuses to pick a route
+    /// while any exist: a restriction the operator wrote but GAH cannot
+    /// apply must stop the job, not let it run unrestricted.
+    pub(crate) fn allowed_model_errors(&self) -> Vec<String> {
+        let mut keys: Vec<&String> = self.allowed_models.keys().collect();
+        keys.sort();
+        let mut errors = Vec::new();
+        let mut seen = Vec::new();
+        for key in keys {
+            match JobKind::parse(key) {
+                Err(_) => errors.push(format!("routing.allowed_models: unknown job kind '{key}'")),
+                Ok(kind) if seen.contains(&kind) => errors.push(format!(
+                    "routing.allowed_models: '{key}' repeats the list for {} jobs",
+                    kind.as_str()
+                )),
+                Ok(kind) => seen.push(kind),
+            }
+            for entry in &self.allowed_models[key] {
+                if let Some(instance) = entry.instance.as_deref() {
+                    if !self.backend_instances.contains_key(instance) {
+                        errors.push(format!(
+                            "routing.allowed_models.{key}: backend instance '{instance}' is not declared"
+                        ));
+                    }
+                }
+            }
+        }
+        errors
+    }
+
     pub fn merged_with_defaults(&self, defaults: &RoutingPolicy) -> RoutingPolicy {
         let mut routing = merge_routing_policy(defaults.clone(), self.clone());
         routing.normalize_subscription_candidates(|id| {
@@ -243,25 +373,40 @@ impl RoutingPolicy {
     pub fn max_implementation_failures_per_ticket(&self) -> u32 {
         self.max_implementation_failures_per_ticket.unwrap_or(8)
     }
+
     pub fn find_quota_pool(
         &self,
         mode: &str,
         backend: &str,
         model: Option<&str>,
     ) -> Option<String> {
-        let candidates = match JobKind::parse(mode).map(|kind| kind.family()) {
-            Ok(JobFamily::Pm) => self.pm_candidates.as_ref(),
-            Ok(JobFamily::Review) => self.review_candidates.as_ref(),
-            Ok(JobFamily::ImproveLike) => self.improve_candidates.as_ref(),
-            _ => None,
-        };
-        let configured = candidates.and_then(|list| {
-            list.iter()
-                .find(|c| c.backend == backend && c.model.as_deref() == model)
-                .and_then(|c| c.quota_pool.as_deref())
-        });
+        // An allow-list entry is authoritative for its kind: it replaces
+        // that kind's candidate pool, so its quota tag wins over the ordinary
+        // pool declarations.
+        let configured = self
+            .allowed_entry(mode, backend, model)
+            .and_then(|entry| entry.quota_pool.as_deref())
+            .or_else(|| {
+                let candidates = match JobKind::parse(mode).map(|kind| kind.family()) {
+                    Ok(JobFamily::Pm) => self.pm_candidates.as_ref(),
+                    Ok(JobFamily::Review) => self.review_candidates.as_ref(),
+                    Ok(JobFamily::ImproveLike) => self.improve_candidates.as_ref(),
+                    _ => None,
+                };
+                candidates.and_then(|list| configured_quota_pool(list, backend, model))
+            });
         crate::availability::resolve_candidate_quota_pool(backend, model, configured)
     }
+}
+
+fn configured_quota_pool<'a>(
+    list: &'a [CandidateConfig],
+    backend: &str,
+    model: Option<&str>,
+) -> Option<&'a str> {
+    list.iter()
+        .find(|c| c.backend == backend && c.model.as_deref() == model)
+        .and_then(|c| c.quota_pool.as_deref())
 }
 
 impl Profile {
@@ -440,6 +585,23 @@ pub(super) fn merge_routing_policy(
     capabilities.extend(repo.review_required_capabilities);
     repo.review_required_capabilities = capabilities;
     repo.merge_policy = repo.merge_policy.or(canonical.merge_policy);
+    // A profile list replaces the canonical one for its kind. An empty
+    // profile list is not a list: it must not lift a canonical restriction.
+    // Replacement is by kind, so `implement` in defaults yields to `improve`.
+    let repo_lists: HashMap<_, _> = repo
+        .allowed_models
+        .into_iter()
+        .filter(|(_, list)| !list.is_empty())
+        .collect();
+    let repo_kinds: Vec<_> = repo_lists
+        .keys()
+        .filter_map(|key| JobKind::parse(key).ok())
+        .collect();
+    let mut allowed_models = canonical.allowed_models;
+    allowed_models
+        .retain(|key, _| JobKind::parse(key).map_or(true, |kind| !repo_kinds.contains(&kind)));
+    allowed_models.extend(repo_lists);
+    repo.allowed_models = allowed_models;
     repo.hold_contract_changes_for_human_review = repo
         .hold_contract_changes_for_human_review
         .or(canonical.hold_contract_changes_for_human_review);

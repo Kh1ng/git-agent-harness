@@ -57,6 +57,7 @@ test('relay accepts v2/v3 snapshots and rejects unsupported schema versions', as
 test('relay accepts auth_required and not_configured quota source checks', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'gah-quota-auth-required-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
+  let failingSince = '2026-10-02T08:00:00Z';
   const worker = http.createServer((_req, res) => {
     const snapshot = quota();
     snapshot.schema_version = 3;
@@ -67,7 +68,7 @@ test('relay accepts auth_required and not_configured quota source checks', async
         provider: 'anthropic',
         checked_at: '2026-10-04T08:30:00Z',
         status: 'auth_required',
-        failing_since: '2026-10-02T08:00:00Z',
+        failing_since: failingSince,
         error: 'auth_required: Claude OAuth login expired; run claude auth login'
       },
       {
@@ -82,7 +83,8 @@ test('relay accepts auth_required and not_configured quota source checks', async
   });
   t.after(() => { worker.closeAllConnections(); worker.close(); });
   const registry = new RegistryService(join(directory, 'registry.json'));
-  registry.registerNode({ node_id: 'worker', display_name: 'Worker', advertised_url: await listen(worker),
+  const workerUrl = await listen(worker);
+  registry.registerNode({ node_id: 'worker', display_name: 'Worker', advertised_url: workerUrl,
     version: '0.1.2', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback', secret_ref: 'env:UNUSED', profiles: ['gah'] });
   const node = (await registry.getNodeQuotas('gah', '7d')).nodes[0];
   assert.equal(node.state, 'available');
@@ -94,6 +96,13 @@ test('relay accepts auth_required and not_configured quota source checks', async
   const missing = node.quota?.quota_checks.find((check) => check.backend === 'vibe');
   assert.equal(missing?.status, 'not_configured');
   assert.equal(missing?.checked_at, undefined);
+
+  // A streak start that is not a timestamp is invalid worker data.
+  failingSince = 'not a time';
+  const fresh = new RegistryService(join(directory, 'registry-malformed.json'));
+  fresh.registerNode({ node_id: 'worker', display_name: 'Worker', advertised_url: workerUrl,
+    version: '0.1.2', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback', secret_ref: 'env:UNUSED', profiles: ['gah'] });
+  assert.equal((await fresh.getNodeQuotas('gah', '7d')).nodes[0].state, 'unavailable');
 });
 
 test('relay preserves scoped dashboard consumption and rejects invalid or credential-bearing metadata', async t => {

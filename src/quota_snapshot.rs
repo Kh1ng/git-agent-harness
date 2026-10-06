@@ -401,7 +401,7 @@ fn latest_timestamp(values: impl Iterator<Item = String>) -> Option<String> {
 /// Every routing candidate in declaration order with the mode that
 /// configured it. The default backend stands in only when no candidate is
 /// declared at all, matching routing's own fallback rule.
-fn configured_candidates(routing: &RoutingPolicy) -> Vec<(&'static str, CandidateConfig)> {
+fn configured_candidates(routing: &RoutingPolicy) -> Vec<(&str, CandidateConfig)> {
     let mut out = Vec::new();
     for (mode, list) in [
         ("pm", &routing.pm_candidates),
@@ -417,6 +417,14 @@ fn configured_candidates(routing: &RoutingPolicy) -> Vec<(&'static str, Candidat
     }
     for candidate in &routing.escalatory_reviewers {
         out.push(("escalatory_review", candidate.clone()));
+    }
+    // Per-kind allow-lists (#1386) are candidates too.
+    let mut allowed: Vec<_> = routing.allowed_models.iter().collect();
+    allowed.sort_by_key(|(kind, _)| kind.as_str());
+    for (kind, list) in allowed {
+        for candidate in list {
+            out.push((kind.as_str(), candidate.clone()));
+        }
     }
     if out.is_empty() {
         if let Some(backend) = routing.default_backend.clone() {

@@ -167,7 +167,10 @@ export function activitiesFromQuota(snapshot: QuotaSnapshot): ActivityEvent[] {
   // no event, which is what clears the condition.
   for (const check of snapshot.quota_checks) {
     if (check.status !== 'auth_required') continue;
-    const failingSince = check.failing_since ?? check.checked_at ?? snapshot.generated_at;
+    // A timestamp that does not parse must not abort every quota event.
+    const failingSince = [check.failing_since, check.checked_at, snapshot.generated_at]
+      .find((value): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value)))
+      ?? snapshot.generated_at;
     const identity = [check.backend, check.backend_instance, check.credential_id]
       .filter(part => part != null && part !== '')
       .join('/');
@@ -178,7 +181,7 @@ export function activitiesFromQuota(snapshot: QuotaSnapshot): ActivityEvent[] {
       kind: 'action_required',
       severity: 'warning',
       title: `${identity} quota source needs login`,
-      message: `${check.error ?? 'Its login expired.'} Failing since ${new Date(failingSince).toISOString()}.`,
+      message: `${check.error ?? 'Its login expired.'} Failing since ${Number.isFinite(Date.parse(failingSince)) ? new Date(failingSince).toISOString() : failingSince}.`,
     });
   }
   for (const candidate of snapshot.candidates) {

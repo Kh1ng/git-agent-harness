@@ -153,6 +153,13 @@ test('an auth_required quota source becomes one action_required event per streak
   const renewed = activitiesFromQuota(refailed)[0];
   assert.notEqual(renewed.id, event.id);
   assert.equal(renewed.occurredAt, '2026-10-06T08:00:00Z');
+
+  // An unparsable streak start falls back to the check time instead of
+  // throwing and dropping every other quota event.
+  const malformed = structuredClone(refailed);
+  malformed.quota_checks[0].failing_since = 'not a time';
+  const fallback = activitiesFromQuota(malformed)[0];
+  assert.equal(fallback.occurredAt, '2026-10-06T08:00:00Z');
 });
 
 test('live chat lifecycle maps only actionable outcomes with stable bounded content', () => {
