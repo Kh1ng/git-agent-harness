@@ -109,6 +109,11 @@ if (!Number.isInteger(dimensions) || dimensions <= 0) {
   process.exit(1);
 }
 const doc = yaml.parseDocument(readFileSync(configPath, 'utf8'));
+const existingProvider = doc.getIn(['memory', 'embedding', 'provider']);
+const existingLlmBaseUrl = doc.getIn(['llm', 'baseUrl']);
+if (existingProvider && (existingProvider !== provider || existingLlmBaseUrl !== baseUrl)) {
+  writeFileSync(configPath + '.changed', '1');
+}
 const existingLlmKey = doc.getIn(['llm', 'apiKey']);
 doc.setIn(['llm', 'baseUrl'], baseUrl);
 doc.setIn(['llm', 'model'], llmModel || defaults.llmModel);
@@ -129,6 +134,13 @@ JAVASCRIPT
       # gateway-env-setup:start
       gateway_env="$HOME/.config/gah/tdai-gateway.env"
       export GAH_MACOS_GATEWAY_URL=http://127.0.0.1:8420
+      
+      creds_changed=0
+      if [ -f "${gateway_config:-}.changed" ]; then
+        creds_changed=1
+        rm -f "${gateway_config:-}.changed"
+      fi
+
       # Values travel on stdin; preserve existing provider and access credentials.
       if [ -n "${GAH_GATEWAY_API_KEY:-}" ]; then
         printf '%s' "$GAH_GATEWAY_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_GATEWAY_API_KEY
@@ -137,9 +149,13 @@ JAVASCRIPT
       fi
       if [ -n "${GAH_GATEWAY_LLM_API_KEY:-}" ]; then
         printf '%s' "$GAH_GATEWAY_LLM_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_LLM_API_KEY
+      elif [ "$creds_changed" = "1" ]; then
+        printf "" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_LLM_API_KEY
       fi
       if [ -n "${GAH_GATEWAY_EMBEDDING_API_KEY:-}" ]; then
         printf "%s" "$GAH_GATEWAY_EMBEDDING_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_EMBEDDING_API_KEY
+      elif [ "$creds_changed" = "1" ]; then
+        printf "" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_EMBEDDING_API_KEY
       fi
       chmod 0600 "$gateway_env"
       # gateway-env-setup:end

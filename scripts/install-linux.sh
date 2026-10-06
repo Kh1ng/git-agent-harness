@@ -275,6 +275,11 @@ if (!Number.isInteger(dimensions) || dimensions <= 0) {
   process.exit(1);
 }
 const doc = yaml.parseDocument(readFileSync(configPath, 'utf8'));
+const existingProvider = doc.getIn(['memory', 'embedding', 'provider']);
+const existingLlmBaseUrl = doc.getIn(['llm', 'baseUrl']);
+if (existingProvider && (existingProvider !== provider || existingLlmBaseUrl !== baseUrl)) {
+  writeFileSync(configPath + '.changed', '1');
+}
 const existingLlmKey = doc.getIn(['llm', 'apiKey']);
 doc.setIn(['llm', 'baseUrl'], baseUrl);
 doc.setIn(['llm', 'model'], llmModel || defaults.llmModel);
@@ -296,6 +301,13 @@ JAVASCRIPT
     # gateway-env-setup:start
     gateway_env_file="$HOME/.config/gah/tdai-gateway.env"
     install -d -m 0700 "$(dirname "$gateway_env_file")"
+    
+    creds_changed=0
+    if [ -f "${gateway_local_config:-}.changed" ]; then
+      creds_changed=1
+      rm -f "${gateway_local_config:-}.changed"
+    fi
+
     # Preserve model/provider credentials and existing gateway authentication.
     if [ -n "${GAH_GATEWAY_API_KEY:-}" ]; then
       upsert_env_line "$gateway_env_file" TDAI_GATEWAY_API_KEY "$GAH_GATEWAY_API_KEY" ""
@@ -309,10 +321,16 @@ JAVASCRIPT
     if [ -n "${GAH_GATEWAY_LLM_API_KEY:-}" ]; then
       upsert_env_line "$gateway_env_file" TDAI_LLM_API_KEY "$GAH_GATEWAY_LLM_API_KEY" ""
       echo "Wrote the given LLM API key to $gateway_env_file"
+    elif [ "$creds_changed" = "1" ]; then
+      upsert_env_line "$gateway_env_file" TDAI_LLM_API_KEY "" ""
+      echo "Cleared existing LLM API key due to provider/endpoint change"
     fi
     if [ -n "${GAH_GATEWAY_EMBEDDING_API_KEY:-}" ]; then
       upsert_env_line "$gateway_env_file" TDAI_EMBEDDING_API_KEY "$GAH_GATEWAY_EMBEDDING_API_KEY" ""
       echo "Wrote the given embedding API key to $gateway_env_file"
+    elif [ "$creds_changed" = "1" ]; then
+      upsert_env_line "$gateway_env_file" TDAI_EMBEDDING_API_KEY "" ""
+      echo "Cleared existing embedding API key due to provider/endpoint change"
     fi
     chmod 0600 "$gateway_env_file"
     # gateway-env-setup:end

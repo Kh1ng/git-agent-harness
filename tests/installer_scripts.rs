@@ -981,6 +981,37 @@ fn colocated_installers_preserve_credentials_without_a_generation_key() {
         assert_eq!(sourced(&file, "TDAI_LLM_API_KEY"), "new-generation");
         assert_eq!(sourced(&file, "TDAI_EMBEDDING_API_KEY"), "embedding-canary");
 
+        // When the provider changes, existing credentials are cleared if not explicitly given.
+        std::fs::write(&file, before).unwrap();
+        if platform == "linux" {
+            std::fs::write(
+                home.join(".config/gah/tdai-gateway.local.yaml.changed"),
+                "1",
+            )
+            .unwrap();
+            run(&[(
+                "gateway_local_config",
+                home.join(".config/gah/tdai-gateway.local.yaml")
+                    .to_str()
+                    .unwrap(),
+            )]);
+        } else {
+            std::fs::write(
+                home.join(".config/gah/tdai-gateway.local.yaml.changed"),
+                "1",
+            )
+            .unwrap();
+            run(&[(
+                "gateway_config",
+                home.join(".config/gah/tdai-gateway.local.yaml")
+                    .to_str()
+                    .unwrap(),
+            )]);
+        }
+        assert_eq!(sourced(&file, "TDAI_GATEWAY_API_KEY"), "access-canary");
+        assert!(sourced(&file, "TDAI_LLM_API_KEY").is_empty());
+        assert!(sourced(&file, "TDAI_EMBEDDING_API_KEY").is_empty());
+
         std::fs::remove_file(&file).unwrap();
         run(&[]);
         assert!(!sourced(&file, "TDAI_GATEWAY_API_KEY").is_empty());

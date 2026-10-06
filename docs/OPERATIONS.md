@@ -545,6 +545,7 @@ To meet that contract, the installer writes:
 | `llm.apiKey` | `ollama` (a non-secret placeholder: Ollama ignores it) | `${TDAI_LLM_API_KEY}` |
 | `memory.embedding.model` | default `nomic-embed-text` | default `text-embedding-3-small` |
 | `memory.embedding.dimensions` | `GAH_GATEWAY_EMBEDDING_DIMENSIONS`, or the known size of the model (`nomic-embed-text` 768) | the same (`text-embedding-3-small` 1536) |
+| `memory.embedding.sendDimensions` | `false` | `true` |
 | `memory.embedding.apiKey` | `ollama`, or `${TDAI_EMBEDDING_API_KEY}` when `GAH_GATEWAY_EMBEDDING_API_KEY` is given | `${TDAI_EMBEDDING_API_KEY}` |
 
 If the embedding model's size is unknown and
@@ -576,11 +577,11 @@ above:
 GET /health   -> {"status":"ok","stores":{"vectorStore":true,"embeddingService":true}}
 POST /capture -> {"l0_recorded":2,"scheduler_notified":true}
 POST /recall  -> {"code":0,"message":"ok","memory_count":0}
-stub saw      -> POST /v1/embeddings model=nomic-embed-text dimensions=768 (capture and recall)
+stub saw      -> POST /v1/embeddings model=nomic-embed-text (capture and recall)
                  POST /v1/chat/completions model=llama3
 gateway log   -> Using remote embedding (provider=ollama, model=nomic-embed-text)
                  Background embedding complete: 2/2 vectors updated
-                 [hybrid-embedding] Embedding OK, dims=768
+                 [hybrid-embedding] Embedding OK
 ```
 
 Control: with the earlier YAML mutation (no `apiKey` or `dimensions`, no
