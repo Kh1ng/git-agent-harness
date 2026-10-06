@@ -28,6 +28,7 @@ struct ProfileSummary<'a> {
     chat_session_idle_days: u64,
     manager_wake_autonomy: &'a str,
     delivery_mode: &'a str,
+    hold_contract_changes: bool,
 }
 
 pub(crate) fn list_json(cfg: &GahConfig) -> Result<String> {
@@ -58,6 +59,9 @@ pub(crate) fn list_json(cfg: &GahConfig) -> Result<String> {
                     WakeAutonomy::Full => "full",
                 },
                 delivery_mode: profile.delivery_mode.as_str(),
+                hold_contract_changes: profile
+                    .effective_routing(&cfg.defaults)
+                    .hold_contract_changes_for_human_review(),
             }
         })
         .collect::<Vec<_>>();

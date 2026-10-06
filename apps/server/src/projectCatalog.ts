@@ -59,6 +59,7 @@ export function projectProfile(value: unknown): ProfileSummary {
     ...(p.delivery_mode === 'pr' || p.delivery_mode === 'handoff' ? { delivery_mode: p.delivery_mode } : {}),
     ...(p.worker_scaling && typeof p.worker_scaling === 'object' ? { worker_scaling: p.worker_scaling } : {}),
     ...(p.max_concurrent_per_model && typeof p.max_concurrent_per_model === 'object' ? { max_concurrent_per_model: p.max_concurrent_per_model } : {}),
+    ...(typeof p.hold_contract_changes === 'boolean' ? { hold_contract_changes: p.hold_contract_changes } : {}),
     ...(Number.isFinite(p.chat_session_idle_days) ? { chat_session_idle_days: p.chat_session_idle_days } : {})
   };
 }

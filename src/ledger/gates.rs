@@ -201,7 +201,14 @@ fn effective_human_gate_for_scope(
         gate = Some(EffectiveHumanGate {
             reason_code: entry.human_required_reason_code.clone(),
             dispatch_reason: entry.dispatch_reason.clone(),
-            message: entry.error_summary.clone(),
+            message: entry.error_summary.clone().or_else(|| {
+                review_hold_message(
+                    entry.review_verdict.as_deref(),
+                    entry.review_gate_reason.as_deref(),
+                    entry.reviewer_backend.as_deref(),
+                    entry.reviewer_model.as_deref(),
+                )
+            }),
             mode: entry.mode.clone(),
             timestamp: entry.timestamp.clone(),
             routing_diagnostics: entry.routing_diagnostics.clone(),
@@ -210,6 +217,26 @@ fn effective_human_gate_for_scope(
         });
     }
     gate
+}
+
+/// Why a review left the PR waiting for a person, so the dashboard shows
+/// the actual reason instead of a generic "human required" (#1406).
+fn review_hold_message(
+    verdict: Option<&str>,
+    gate_reason: Option<&str>,
+    reviewer_backend: Option<&str>,
+    reviewer_model: Option<&str>,
+) -> Option<String> {
+    let reason = match (gate_reason, verdict) {
+        (Some(reason), _) => format!("GAH safety gate: {reason}"),
+        (None, Some("HUMAN_REVIEW")) => "Reviewer asked for human review".to_string(),
+        _ => return None,
+    };
+    Some(match (reviewer_backend, reviewer_model) {
+        (Some(backend), Some(model)) => format!("{reason} (reviewer {backend}/{model})"),
+        (Some(backend), None) => format!("{reason} (reviewer {backend})"),
+        _ => reason,
+    })
 }
 
 pub fn effective_human_gate_from_index(
@@ -254,4 +281,31 @@ pub fn index_entries_by_work_id(entries: &[LedgerEntry]) -> LedgerEntriesByWorkI
         }
     }
     index
+}
+
+#[cfg(test)]
+mod review_hold_message_tests {
+    use super::review_hold_message;
+
+    #[test]
+    fn names_the_gate_or_reviewer_reason() {
+        assert_eq!(
+            review_hold_message(
+                Some("HUMAN_REVIEW"),
+                Some("APPROVE omitted required concrete review evidence"),
+                Some("codex"),
+                Some("gpt-6.1-sol"),
+            )
+            .as_deref(),
+            Some("GAH safety gate: APPROVE omitted required concrete review evidence (reviewer codex/gpt-6.1-sol)")
+        );
+        assert_eq!(
+            review_hold_message(Some("HUMAN_REVIEW"), None, Some("claude"), None).as_deref(),
+            Some("Reviewer asked for human review (reviewer claude)")
+        );
+        assert_eq!(
+            review_hold_message(Some("NEEDS_FIX"), None, None, None),
+            None
+        );
+    }
 }

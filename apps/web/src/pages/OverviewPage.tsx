@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { ExternalAnchor } from '../components/ExternalAnchor';
 import { useAutoRefresh } from '../hooks/useAutoRefresh.js';
 import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
@@ -13,7 +13,8 @@ import {
   Square
 } from 'lucide-react';
 import type { Page } from '../App.js';
-import type { DeviceAgentsSnapshot, Session } from '@git-agent-harness/contracts';
+import type { DeviceAgentsSnapshot, LoopDecision, Session } from '@git-agent-harness/contracts';
+import { gahApi } from '../api/client.js';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -51,15 +52,25 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, onWa
   const startLoop = useGahStore((s) => s.startLoop);
   const stopLoop = useGahStore((s) => s.stopLoop);
 
+  // What the loop last decided and why, so a stalled loop explains itself (#1406).
+  const [lastDecision, setLastDecision] = useState<LoopDecision | null>(null);
+  const fetchLastDecision = () => {
+    if (!profile) return;
+    gahApi.getLoopDecision(profile).then(setLastDecision, () => setLastDecision(null));
+  };
+
   useEffect(() => {
     fetchStatus(profile ?? undefined);
     fetchQuota({ profile: profile ?? undefined, since: '7d' });
     if (profile) fetchLoopStatus(profile);
+    fetchLastDecision();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refetch on profile change only
   }, [profile, fetchStatus, fetchQuota, fetchLoopStatus]);
 
   const refresh = () => {
     fetchStatus(profile ?? undefined, { force: true });
     fetchQuota({ profile: profile ?? undefined, since: '7d' }, { force: true });
+    fetchLastDecision();
   };
   useAutoRefresh(refresh, OVERVIEW_REFRESH_MS);
   useWsReconnectRefresh(refresh);
@@ -147,6 +158,14 @@ export function OverviewPage({ sessions, onNavigate, onOpenWork = () => {}, onWa
       />
       {loopAction.error && (
         <p className="text-xs text-critical -mt-4">{loopAction.error}</p>
+      )}
+      {lastDecision && (
+        <p className="text-xs text-secondary -mt-4 break-words" title={formatLocalTime(lastDecision.timestamp) ?? lastDecision.timestamp}>
+          <span className="text-muted">Loop last decided {formatAge(lastDecision.timestamp)}: </span>
+          <span className="font-mono">{lastDecision.kind.replace(/_/g, ' ')}</span>
+          {lastDecision.work_id && <span className="font-mono"> {lastDecision.work_id}</span>}
+          {' — '}{lastDecision.reason}
+        </p>
       )}
 
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">

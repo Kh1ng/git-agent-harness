@@ -1120,9 +1120,15 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, light: bool) -> Resu
     if json {
         let mut output = serde_json::to_value(&snapshot)?;
         output["node"] = serde_json::to_value(&node)?;
+        output["node_capacity"] = serde_json::to_value(cfg.defaults.node_capacity)?;
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("Status for Profile: {}", profile_name);
+        println!(
+            "Node capacity: worker reservation {} MiB, memory floor {}",
+            cfg.defaults.node_capacity.worker_memory_mib,
+            cfg.defaults.node_capacity.floor_description(),
+        );
         println!(
             "Role: {:?} | Central URL: {}",
             node.role,

@@ -585,6 +585,16 @@ pub enum ConfigCommands {
         /// Telegram chat id for the telegram channel (non-secret).
         #[arg(long)]
         telegram_chat_id: Option<String>,
+        /// Issue #1380: memory reservation (MiB) per implementation,
+        /// fix, retry, or escalation worker. At least 512; the default
+        /// is 4096.
+        #[arg(long)]
+        worker_memory_mib: Option<u64>,
+        /// Issue #1380: free-memory floor (MiB) the node must keep.
+        /// 0 (the default) keeps the adaptive max(2048 MiB, total / 6);
+        /// an explicit floor must be at least 512.
+        #[arg(long)]
+        memory_floor_mib: Option<u64>,
     },
     /// Issue #149: ordered routing-candidate editing for a profile. The
     /// lists are `pm` / `improve` / `review` / `escalatory`. Every mutation
@@ -1069,6 +1079,10 @@ pub enum ProfileCommands {
         /// End the boost after this many hours (default: until cleared).
         #[arg(long, requires = "boost_workers")]
         boost_hours: Option<f64>,
+        /// Hold approved schema/API contract changes for human review.
+        /// Exposed in the dashboard Settings UI.
+        #[arg(long)]
+        hold_contract_changes: Option<bool>,
         /// Clear the specified field(s) - for fields that support it
         #[arg(long, value_delimiter = ',')]
         clear: Vec<String>,

@@ -211,6 +211,7 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             boost_workers,
             boost_model,
             boost_hours,
+            hold_contract_changes,
             clear,
         } => {
             let mut cfg = config::load(config_path.as_deref())?;
@@ -461,6 +462,9 @@ pub fn run(command: ProfileCommands) -> Result<()> {
                 scaling.boost_until = boost_hours.map(boost_expiry).transpose()?;
             } else if should_clear("worker_boost", &clear) {
                 scaling.clear_boost();
+            }
+            if hold_contract_changes.is_some() || should_clear("hold_contract_changes", &clear) {
+                existing.routing.hold_contract_changes_for_human_review = hold_contract_changes;
             }
 
             config::save(&cfg, config_path.as_deref())?;
