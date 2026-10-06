@@ -1491,3 +1491,41 @@ fn dispatch_fix_aborts_on_first_attempt_when_failure_matches_baseline() {
     assert_eq!(entry["push_attempted"], false);
     let _ = out;
 }
+
+#[test]
+fn dispatch_experiment_missing_backend_records_backend_not_invoked() {
+    let tmp = test_tempdir();
+    let (_repo, home, cfg) = setup_fix_dispatch_repo(
+        &tmp,
+        "experiment_backend = \"codex\"\n[backends.codex]\nexecutable = \"/does/not/exist\"\n",
+    );
+    let ledger_path = tmp.path().join("ledger.jsonl");
+
+    let fake_bin = tmp.path().join("bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "real",
+            "--mode",
+            "experiment",
+            "--config-path",
+            cfg.to_str().unwrap(),
+            "--target",
+            "experiment with the thing",
+        ])
+        .env("PATH", prepend_path(&fake_bin))
+        .env("HOME", &home)
+        .env("GAH_LEDGER_PATH", &ledger_path)
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(&ledger_path).unwrap();
+    let entry: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        entry["usage"]["usage_unknown_reason"].as_str(),
+        Some("backend_not_invoked")
+    );
+}

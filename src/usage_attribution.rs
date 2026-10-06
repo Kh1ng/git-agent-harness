@@ -276,6 +276,7 @@ pub(crate) fn usage_has_observation(usage: &LedgerUsage) -> bool {
         || usage.requests_count.is_some()
         || usage.estimated_cost_usd.is_some()
         || usage.actual_cost_usd.is_some()
+        || usage.usage_unknown_reason.is_some()
 }
 
 enum AggregatedAttribution {

@@ -54,6 +54,7 @@ struct TrendPoint {
 /// Comparison data for a single backend or model
 #[derive(Debug, Serialize)]
 struct BackendModelComparison {
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     usage_unknown_reasons: BTreeMap<ledger::UsageUnknownReason, usize>,
     backend_or_model: String,
     is_model: bool,

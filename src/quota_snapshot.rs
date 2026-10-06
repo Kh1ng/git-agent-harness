@@ -16,6 +16,7 @@ pub use checks::{QuotaCheck, QuotaCheckStatus};
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UsageSummary {
     pub entries: usize,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty", default)]
     pub usage_unknown_reasons: std::collections::BTreeMap<ledger::UsageUnknownReason, usize>,
     pub attempts: usize,
     pub validation_pass: usize,

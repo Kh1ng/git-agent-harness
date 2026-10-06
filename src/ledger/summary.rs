@@ -47,6 +47,7 @@ use time::{Duration, OffsetDateTime};
 pub struct GroupSummary {
     pub group_key: String,
     pub entries: usize,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub usage_unknown_reasons: BTreeMap<super::UsageUnknownReason, usize>,
     pub attempts: usize,
     /// Issue #240: attempt counters are `Option<u32>` on `LedgerEntry`, so
@@ -110,6 +111,7 @@ pub struct GroupSummary {
 pub struct SummaryData {
     pub ledger_path: String,
     pub entries: usize,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub usage_unknown_reasons: BTreeMap<super::UsageUnknownReason, usize>,
     pub success: usize,
     pub failed: usize,
