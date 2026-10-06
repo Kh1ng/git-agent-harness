@@ -66,7 +66,7 @@ test('windows are named and sized from the provider names, and projected to rese
 test('one ring per account: pools are windows of it, router aliases are not accounts (#1411)', () => {
   const weekly = (backend: string, instance: string, used: number) => ({
     backend, provider: 'antigravity', backend_instance: instance, quota_pool: instance, checked_at: '', status: 'data',
-    quota_observations: [{ backend, quota_window: 'weekly', quota_used_percent: used, observed_at: '2026-10-05T19:48:00Z' }]
+    quota_observations: [{ backend, quota_window: 'weekly', quota_remaining_percent: 100 - used, observed_at: '2026-10-05T19:48:00Z' }]
   });
   const usage = subscriptionUsage({
     candidates: [{ backend: 'agy', backend_instance: 'agy:external', provider: 'antigravity', model: 'Claude Sonnet 4.6 (Thinking)', modes: [], configured: true, eligible_now: true, usage: {} }],
