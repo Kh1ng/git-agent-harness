@@ -47,6 +47,8 @@ use time::{Duration, OffsetDateTime};
 pub struct GroupSummary {
     pub group_key: String,
     pub entries: usize,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub usage_unknown_reasons: BTreeMap<super::UsageUnknownReason, usize>,
     pub attempts: usize,
     /// Issue #240: attempt counters are `Option<u32>` on `LedgerEntry`, so
     /// an unknown (pre-tracking) entry is excluded from the sum rather than
@@ -109,6 +111,8 @@ pub struct GroupSummary {
 pub struct SummaryData {
     pub ledger_path: String,
     pub entries: usize,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub usage_unknown_reasons: BTreeMap<super::UsageUnknownReason, usize>,
     pub success: usize,
     pub failed: usize,
     pub by_mode: BTreeMap<String, usize>,
@@ -415,6 +419,7 @@ pub fn build_summary(
     // them keeps success-rate and cost-per-execution denominators honest.
     entries.retain(|entry| !is_capacity_deferral(entry));
 
+    let mut usage_unknown_reasons = BTreeMap::new();
     let mut by_mode: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_backend: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_requested_backend: BTreeMap<String, usize> = BTreeMap::new();
@@ -516,6 +521,9 @@ pub fn build_summary(
             None => attempts_completed_unknown += 1,
         }
         for observed in canonical_usage_observations(entry) {
+            if let Some(reason) = observed.usage.usage_unknown_reason {
+                *usage_unknown_reasons.entry(reason).or_default() += 1;
+            }
             if let Some(tokens) = observed.usage.input_tokens {
                 input_tokens += tokens;
                 input_tokens_seen = true;
@@ -639,6 +647,7 @@ pub fn build_summary(
     };
 
     Ok(SummaryData {
+        usage_unknown_reasons,
         ledger_path: cfg.defaults.ledger_path().display().to_string(),
         entries: entries.len(),
         success,
@@ -749,6 +758,7 @@ where
         .collect();
     for group_key in all_group_keys {
         let group_entries = groups.remove(&group_key).unwrap_or_default();
+        let mut usage_unknown_reasons = BTreeMap::new();
         let group_usage = usage_groups.remove(&group_key).unwrap_or_default();
         let group_entry_count = group_entries.len();
         let attempts = attempt_counts.remove(&group_key).unwrap_or(0);
@@ -907,6 +917,9 @@ where
         }
 
         for observed in group_usage {
+            if let Some(reason) = observed.usage.usage_unknown_reason {
+                *usage_unknown_reasons.entry(reason).or_default() += 1;
+            }
             if let Some(tokens) = observed.usage.input_tokens {
                 input_tokens += tokens;
                 input_tokens_seen = true;
@@ -992,6 +1005,7 @@ where
             .then_some(predicted_difficulty_match as f64 / predicted_difficulty_compared as f64);
 
         summaries.push(GroupSummary {
+            usage_unknown_reasons,
             group_key,
             entries: group_entry_count,
             attempts,
@@ -1040,7 +1054,8 @@ pub struct UsageObservation<'a> {
 }
 
 fn usage_has_observation(usage: &LedgerUsage) -> bool {
-    usage.usage_source.is_some()
+    usage.usage_unknown_reason.is_some()
+        || usage.usage_source.is_some()
         || usage.input_tokens.is_some()
         || usage.output_tokens.is_some()
         || usage.reasoning_tokens.is_some()
