@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AuthHealthRow, DoctorSnapshot, FleetSnapshot, NodeHealthCheckResult, NodeObservationSnapshot, PairedDevice } from '@git-agent-harness/contracts';
+import type { AuthHealthRow, DoctorSnapshot, FleetSnapshot, FleetUpdateResult, NodeHealthCheckResult, NodeObservationSnapshot, NodeSummary, PairedDevice, WorkerUpdateStatus } from '@git-agent-harness/contracts';
 import { authHealthApi, gahApi, pairingApi, type CoordinatorInfo } from '../api/client.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { LoginRepairPanel } from '../components/LoginRepairPanel.js';
@@ -31,6 +31,117 @@ function Resources({ observation }: { observation?: NodeObservationSnapshot }) {
 }
 
 const LOGIN_PROBLEM: Partial<Record<AuthHealthRow['state'], string>> = { expired: 'Login expired', missing: 'Not logged in' };
+
+/** Issue #1416: how a worker's version relates to the coordinator. */
+function versionBadge(node: NodeSummary): { text: string; tone: string } | null {
+  const update = node.update;
+  if (!update || update.status === 'current') return null;
+  if (update.status === 'unsupported') {
+    return {
+      text: `Unsupported version v${update.node_version} — this coordinator supports v${update.minimum_worker_version} and newer`,
+      tone: 'text-critical'
+    };
+  }
+  return {
+    text: `Behind — v${update.node_version} → v${update.coordinator_version}`,
+    tone: 'text-warning'
+  };
+}
+
+function describeWorkerUpdate(status: WorkerUpdateStatus): string {
+  switch (status.status) {
+    case 'waiting':
+      return `Waiting for ${status.active_dispatches ?? 0} active dispatch(es) to finish before updating`;
+    case 'running':
+      return 'Installing the release update…';
+    case 'success':
+      return `Updated to v${status.current_version}`;
+    case 'inferred_restart':
+      return 'Update finished; the node is restarting';
+    case 'failed':
+      return 'Update failed — see the node operator logs';
+    default:
+      return 'No update in progress';
+  }
+}
+
+/** Per-node coordinator-driven update controls (#1416): ask this worker to
+ * pull the same release artifacts central installs, and opt it in to
+ * automatic updates whenever central sees it behind. The worker itself
+ * waits for a running dispatch to finish before restarting anything. */
+function NodeUpdateControls({ node, onChanged }: { node: NodeSummary; onChanged: () => void }) {
+  const [status, setStatus] = useState<WorkerUpdateStatus | null>(null);
+  const [autoUpdate, setAutoUpdate] = useState(node.auto_update === true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const sequence = useRef(0);
+
+  const refreshStatus = useCallback(async () => {
+    const current = ++sequence.current;
+    try {
+      const next = await gahApi.getNodeUpdateStatus(node.node_id);
+      if (current === sequence.current) setStatus(next);
+    } catch {
+      // Older workers do not expose the update endpoint; the controls stay quiet.
+      if (current === sequence.current) setStatus(null);
+    }
+  }, [node.node_id]);
+
+  useEffect(() => {
+    void refreshStatus();
+  }, [refreshStatus]);
+
+  useEffect(() => {
+    if (status?.status !== 'waiting' && status?.status !== 'running') return;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      if (!cancelled) void refreshStatus();
+    }, 3_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [status?.status, refreshStatus]);
+
+  const updateNode = async () => {
+    const current = ++sequence.current;
+    setBusy(true); setError('');
+    try {
+      const next = await gahApi.startNodeUpdate(node.node_id);
+      if (current === sequence.current) setStatus(next);
+      onChanged();
+    } catch (err) {
+      if (current === sequence.current) setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (current === sequence.current) setBusy(false);
+    }
+  };
+
+  const toggleAutoUpdate = async (enabled: boolean) => {
+    setAutoUpdate(enabled);
+    try {
+      await gahApi.setNodeAutoUpdate(node.node_id, enabled);
+      onChanged();
+    } catch (err) {
+      setAutoUpdate(!enabled);
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const inFlight = status?.status === 'running' || status?.status === 'waiting';
+
+  return <div className="flex flex-wrap items-center gap-3 text-sm">
+    <button type="button" className="btn-secondary" disabled={busy || inFlight} onClick={() => void updateNode()}>
+      {inFlight ? 'Updating…' : 'Update node'}
+    </button>
+    <label className="flex items-center gap-1.5 text-secondary">
+      <input type="checkbox" checked={autoUpdate} onChange={(event) => void toggleAutoUpdate(event.target.checked)} />
+      Auto-update when behind
+    </label>
+    {status && status.status !== 'idle' && <span className={status.status === 'failed' ? 'text-critical' : 'text-secondary'}>{describeWorkerUpdate(status)}</span>}
+    {error && <span role="alert" className="text-critical">{error}</span>}
+  </div>;
+}
 
 /** Every node's provider logins, as central last saw them (#1271). A broken
  * login is a red row naming the node, backend, and provider. */
@@ -82,6 +193,8 @@ export function NodesPage() {
   const [healthError, setHealthError] = useState('');
   const [checking, setChecking] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
+  const [updateAllResults, setUpdateAllResults] = useState<FleetUpdateResult[] | null>(null);
+  const [updatingAll, setUpdatingAll] = useState(false);
   const refreshSequence = useRef(0);
   const healthSequence = useRef(0);
   const lastChange = [...messages].reverse().find(({ message }) => message.type === 'fleet.changed')?.id ?? 0;
@@ -128,6 +241,26 @@ export function NodesPage() {
       if (sequence === healthSequence.current) setChecking(false);
     }
   };
+  const updateAll = async () => {
+    setUpdatingAll(true);
+    setUpdateAllResults(null);
+    try {
+      const { results } = await gahApi.updateAllNodes();
+      setUpdateAllResults(results);
+      void refresh();
+    } catch (err) {
+      setUpdateAllResults([{
+        node_id: 'fleet',
+        display_name: 'Fleet',
+        started: false,
+        status: null,
+        error: err instanceof Error ? err.message : String(err)
+      }]);
+    } finally {
+      setUpdatingAll(false);
+    }
+  };
+
   const selected = fleet?.nodes.find((node) => node.node_id === selectedId);
   const observation = fleet?.observations.find((item) => item.node_id === selectedId) ?? health?.snapshot ?? undefined;
   const leases = fleet?.leases.filter((lease) => lease.node_id === selectedId) ?? [];
@@ -136,7 +269,14 @@ export function NodesPage() {
   return <>
     <PageHeader title="Fleet" description="This node, the coordinator, controller devices, workers, health, and work ownership."
       onRefresh={refresh} refreshing={refreshing} lastUpdated={fetchedAt}
-      actions={<button type="button" className="btn-secondary" aria-expanded={showSetup || empty} onClick={() => setShowSetup(!showSetup)}>Register a node</button>} />
+      actions={<div className="flex items-center gap-2">
+        {fleet && fleet.nodes.length > 0 && (
+          <button type="button" className="btn-secondary" disabled={updatingAll} onClick={() => void updateAll()}>
+            {updatingAll ? 'Updating nodes…' : 'Update all nodes'}
+          </button>
+        )}
+        <button type="button" className="btn-secondary" aria-expanded={showSetup || empty} onClick={() => setShowSetup(!showSetup)}>Register a node</button>
+      </div>} />
     {!isConnected && <p role="status" className="mb-4 text-sm text-warning">Live updates disconnected. Showing the last fetched snapshot; reconnect or refresh to update.</p>}
     {error && <p role="alert" className="mb-4 text-sm text-critical">Cannot load the registry: {error}. Use Refresh to retry.</p>}
     {!fleet && !error && <p role="status" className="text-secondary">Loading registered nodes…</p>}
@@ -177,6 +317,7 @@ export function NodesPage() {
           const observed = fleet.observations.find((item) => item.node_id === node.node_id);
           const label = observationLabel(observed);
           const tone = label.startsWith('Stale') ? 'text-warning' : label.startsWith('Unhealthy') ? 'text-critical' : label === 'Healthy' ? 'text-primary' : 'text-secondary';
+          const badge = versionBadge(node);
           return <section key={node.node_id} className="py-4 space-y-2" aria-label={node.display_name}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <button type="button" className="text-base font-semibold text-primary underline underline-offset-4" aria-pressed={selectedId === node.node_id} onClick={() => void check(node.node_id)}>{node.display_name}</button>
@@ -189,12 +330,25 @@ export function NodesPage() {
               <div><dt className="inline text-secondary">Declared profiles: </dt><dd className="inline text-primary">{node.profiles?.join(', ') || 'None — cannot claim work'}</dd></div>
               <div><dt className="inline text-secondary">Last seen: </dt><dd className="inline text-primary">{age(observed?.last_seen_at ?? node.last_seen_at)}</dd></div>
               <div><dt className="inline text-secondary">Observed: </dt><dd className="inline text-primary">{age(observed?.observed_at)}</dd></div>
+              <div><dt className="inline text-secondary">Version: </dt><dd className="inline text-primary">{node.version}{node.update && <span className={`ml-2 ${badge?.tone ?? ''}`}>{badge?.text}</span>}</dd></div>
             </dl>
             {(observed?.error || node.last_error_kind) && <p className="text-sm text-critical">{observed?.error?.kind ?? node.last_error_kind}: {observed?.error?.message ?? node.last_error_message}</p>}
             <Resources observation={observed} />
+            <NodeUpdateControls node={node} onChanged={() => void refresh()} />
           </section>;
         })}
       </div>
+      {updateAllResults && <section className="mt-4 space-y-1" aria-label="Fleet update results">
+        <h3 className="text-sm font-semibold text-primary">Update all nodes — results</h3>
+        <ul className="space-y-1 text-sm">
+          {updateAllResults.map((result) => <li key={result.node_id}>
+            <span className="font-medium text-primary">{result.display_name}: </span>
+            <span className={result.error ? 'text-critical' : 'text-secondary'}>
+              {result.error ?? (result.started ? `update ${result.status?.status === 'waiting' ? 'armed — waiting for active dispatches' : 'started'}` : 'already updating')}
+            </span>
+          </li>)}
+        </ul>
+      </section>}
     </>}
     {selected && <section className="mt-6 space-y-3" aria-label="Node detail">
       <div className="flex flex-wrap items-center justify-between gap-2">

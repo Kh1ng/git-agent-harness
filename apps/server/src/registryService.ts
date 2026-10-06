@@ -7,6 +7,7 @@ import type {
   DoctorSnapshot,
   RegisteredNode,
   NodeSummary,
+  NodeUpdateInfo,
   NodeHealthCheckResult,
   NodeObservationSnapshot,
   NodeObservationState,
@@ -14,7 +15,7 @@ import type {
   NodeQuotaRelay,
   FleetQuotaSnapshot
 } from '@git-agent-harness/contracts';
-import { COORDINATOR_VERSION } from '@git-agent-harness/contracts';
+import { COORDINATOR_MINIMUM_WORKER_VERSION, COORDINATOR_VERSION, compareVersions } from '@git-agent-harness/contracts';
 import { COORDINATOR_SCHEMA_DIGEST } from './coordinatorIdentity.js';
 
 export function isLoopback(urlStr: string): boolean {
@@ -133,6 +134,23 @@ function majorMinor(version: string): string | null {
   const parts = version.split('.');
   if (parts.length < 2) return null;
   return `${parts[0]}.${parts[1]}`;
+}
+
+/** Issue #1416: how a node's version relates to this coordinator. Computed
+ * coordinator-side so dashboards never re-derive it: `behind` is older than
+ * the coordinator (an update is available), `unsupported` is older than the
+ * coordinator's minimum supported worker version (update before it breaks).
+ * The observation-time major.minor equality check is unchanged and still
+ * the hard gate. Exported for the fleet contracts' own tests. */
+export function nodeVersionStatus(nodeVersion: string): NodeUpdateInfo {
+  const behind = compareVersions(nodeVersion, COORDINATOR_VERSION) < 0;
+  const unsupported = compareVersions(nodeVersion, COORDINATOR_MINIMUM_WORKER_VERSION) < 0;
+  return {
+    status: unsupported ? 'unsupported' : behind ? 'behind' : 'current',
+    node_version: nodeVersion,
+    coordinator_version: COORDINATOR_VERSION,
+    minimum_worker_version: COORDINATOR_MINIMUM_WORKER_VERSION
+  };
 }
 
 function normalizeResourcePressure(value: unknown): NodeObservationSnapshot['resource_pressure'] {
@@ -453,7 +471,22 @@ export class RegistryService {
   }
 
   getNodesSummary(): NodeSummary[] {
-    return this.getNodes().map(({ secret_ref, ...summary }) => summary);
+    return this.getNodes().map(({ secret_ref, ...summary }) => ({
+      ...summary,
+      update: nodeVersionStatus(summary.version)
+    }));
+  }
+
+  /** Issue #1416: opt a node in or out of coordinator-driven automatic
+   * updates. Persisted with the registration, like the profiles list. */
+  setAutoUpdate(nodeId: string, enabled: boolean): void {
+    const node = this.nodes.get(nodeId);
+    if (!node) {
+      throw new Error(`Node ${nodeId} not found`);
+    }
+    this.nodes.set(nodeId, { ...node, auto_update: enabled });
+    this.save();
+    this.changed();
   }
 
   /** Notify dashboards to refetch authenticated data, without publishing node details. */

@@ -43,7 +43,8 @@ test('readAdminUpdateState returns idle when no state file exists', () => {
       finishedAt: null,
       exitCode: null,
       pid: null,
-      output: ''
+      output: '',
+      mode: null
     });
   });
 });
@@ -182,6 +183,35 @@ test('startAdminUpdate records failure on a non-zero exit code', () => {
     (child as unknown as EventEmitter).emit('close', 1);
     assert.equal(readAdminUpdateState().status, 'failed');
     assert.equal(readAdminUpdateState().exitCode, 1);
+  });
+});
+
+test('startAdminUpdate release mode appends --from-release and records the mode (issue #1416)', () => {
+  withStatePath(() => {
+    let capturedArgs: string[] = [];
+    const child = fakeChildProcess(4343);
+    const spawnFn = ((_bin: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as typeof spawn;
+
+    const result = startAdminUpdate({ spawnFn, mode: 'release' });
+    assert.equal(result.started, true);
+    assert.deepEqual(capturedArgs, [
+      'update',
+      '--repo',
+      process.cwd(),
+      '--role',
+      'central',
+      '--restart-server',
+      '--from-release'
+    ]);
+    assert.equal(result.state.mode, 'release');
+
+    (child as unknown as EventEmitter).emit('close', 0);
+    const finalState = readAdminUpdateState();
+    assert.equal(finalState.status, 'success');
+    assert.equal(finalState.mode, 'release');
   });
 });
 

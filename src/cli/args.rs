@@ -200,6 +200,16 @@ pub enum Commands {
         restart_server: bool,
         #[arg(long, default_value = "gah-server.service")]
         server_service: String,
+        /// Install published release artifacts (issue #1416) instead of
+        /// rebuilding from source: no git pull, no cargo, no npm build. The
+        /// checkout stays the deployment root; only the artifact source changes.
+        #[arg(long, default_value_t = false)]
+        from_release: bool,
+        /// URL or local path of the release manifest (edge-manifest.json).
+        /// Defaults to the edge channel feed derived from the checkout's
+        /// origin remote.
+        #[arg(long)]
+        release_manifest: Option<String>,
     },
     /// Create or print a starter GAH config/profile
     Init {

@@ -1853,6 +1853,30 @@ export interface AdminUpdateState {
   exitCode: number | null;
   pid: number | null;
   output: string;
+  /** Issue #1416: which install path this run used -- `release` (download
+   * published artifacts, no rebuild) or `source` (git pull + rebuild).
+   * Absent on states written by pre-#1416 servers. */
+  mode?: 'release' | 'source' | null;
+}
+
+// ---------------------------------------------------------------------------
+// Release channel (issue #1416): a green merge to main publishes a
+// prerelease "edge" build; central compares its own version against the
+// channel's latest so the dashboard can show "Update available · vX → vY"
+// without rebuilding from source.
+// ---------------------------------------------------------------------------
+
+export type ReleaseChannel = 'edge' | 'stable';
+
+export interface ReleaseChannelStatus {
+  channel: ReleaseChannel;
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  release_url: string | null;
+  published_at: string | null;
+  /** The release's own notes/changelog body, bounded by the server. */
+  notes: string;
 }
 
 /** Exact work-item scope of a paid-route request or existing operator grant. */

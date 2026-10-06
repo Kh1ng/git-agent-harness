@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 
 import { createServer } from './server.js';
-import { RegistryService, containsSecretWords, isSchemaCompatible } from './registryService.js';
+import { RegistryService, containsSecretWords, isSchemaCompatible, nodeVersionStatus } from './registryService.js';
 import { COORDINATOR_SCHEMA_DIGEST, getCoordinatorIdentity, resetCachedCoordinatorIdentity } from './coordinatorIdentity.js';
 import { authMiddleware, isLocalAddress } from './authMiddleware.js';
 import { ClaimsService } from './claimsService.js';
@@ -1298,5 +1298,86 @@ test('fleet publication ignores superseded polls and revoked or repointed regist
   } finally {
     await worker.stop();
     unlinkSync(path);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1416: version skew and auto-update opt-in
+// ---------------------------------------------------------------------------
+
+test('getNodesSummary classifies each node against the coordinator version and its minimum', () => {
+  const tempPath = createTempRegistryFile();
+  const registry = new RegistryService(tempPath);
+  try {
+    const node = (nodeId: string, version: string): RegisteredNode => ({
+      node_id: nodeId,
+      display_name: `Node ${nodeId}`,
+      advertised_url: `http://localhost:${9000 + Number(nodeId.slice(-1))}`,
+      version,
+      schema_digest: COORDINATOR_SCHEMA_DIGEST,
+      transport_mode: 'loopback',
+      secret_ref: 'env:NODE_SECRET'
+    });
+    registry.registerNode(node('node-1', COORDINATOR_VERSION));
+    registry.registerNode(node('node-2', '0.1.0'));
+
+    const summaries = registry.getNodesSummary();
+    const current = summaries.find((entry) => entry.node_id === 'node-1');
+    const old = summaries.find((entry) => entry.node_id === 'node-2');
+
+    assert.equal(current?.update?.status, 'current');
+    assert.equal(current?.update?.coordinator_version, COORDINATOR_VERSION);
+    // 0.1.0 sorts below the minimum supported worker version, so it is
+    // `unsupported`, not merely `behind` -- the warning the fleet page shows.
+    assert.equal(old?.update?.status, 'unsupported');
+    assert.equal(old?.update?.node_version, '0.1.0');
+    assert.ok(old?.update?.minimum_worker_version);
+
+    // The secret reference never leaves the registry.
+    assert.equal('secret_ref' in (summaries[0] as object), false);
+  } finally {
+    unlinkSync(tempPath);
+  }
+});
+
+test('nodeVersionStatus separates `behind` from `unsupported` (issue #1416)', () => {
+  // With today's pinned protocol (minimum == coordinator version) an older
+  // worker is always `unsupported`; `behind` appears once the coordinator
+  // advances past the minimum it still supports. Exercise the classifier
+  // directly with both shapes.
+  const current = nodeVersionStatus(COORDINATOR_VERSION);
+  assert.equal(current.status, 'current');
+  assert.equal(current.coordinator_version, COORDINATOR_VERSION);
+
+  const unsupported = nodeVersionStatus('0.0.1');
+  assert.equal(unsupported.status, 'unsupported');
+  assert.equal(unsupported.minimum_worker_version, current.minimum_worker_version);
+});
+
+test('setAutoUpdate persists the opt-in on the registration', () => {
+  const tempPath = createTempRegistryFile();
+  const registry = new RegistryService(tempPath);
+  try {
+    registry.registerNode({
+      node_id: 'auto-node',
+      display_name: 'Auto Node',
+      advertised_url: 'http://localhost:9200',
+      version: COORDINATOR_VERSION,
+      schema_digest: COORDINATOR_SCHEMA_DIGEST,
+      transport_mode: 'loopback',
+      secret_ref: 'env:NODE_SECRET'
+    });
+    assert.equal(registry.getNodesSummary().find((entry) => entry.node_id === 'auto-node')?.auto_update, undefined);
+
+    registry.setAutoUpdate('auto-node', true);
+    assert.equal(registry.getNode('auto-node')?.auto_update, true);
+    assert.equal(registry.getNodesSummary().find((entry) => entry.node_id === 'auto-node')?.auto_update, true);
+
+    registry.setAutoUpdate('auto-node', false);
+    assert.equal(registry.getNode('auto-node')?.auto_update, false);
+
+    assert.throws(() => registry.setAutoUpdate('missing', true), /not found/);
+  } finally {
+    unlinkSync(tempPath);
   }
 });

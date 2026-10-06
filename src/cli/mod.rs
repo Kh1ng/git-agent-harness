@@ -105,11 +105,15 @@ pub fn run() -> Result<()> {
             role,
             restart_server,
             server_service,
+            from_release,
+            release_manifest,
         } => commands::update::run(commands::update::Args {
             repo,
             role,
             restart_server,
             server_service,
+            from_release,
+            release_manifest,
         })?,
 
         Commands::Init {

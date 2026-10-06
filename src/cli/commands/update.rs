@@ -11,6 +11,8 @@ pub struct Args {
     pub role: String,
     pub restart_server: bool,
     pub server_service: String,
+    pub from_release: bool,
+    pub release_manifest: Option<String>,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -19,5 +21,7 @@ pub fn run(args: Args) -> Result<()> {
         role: update_module::HostRole::parse(&args.role)?,
         restart_server: args.restart_server,
         server_service: args.server_service,
+        from_release: args.from_release,
+        release_manifest: args.release_manifest,
     })
 }

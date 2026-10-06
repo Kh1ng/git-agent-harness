@@ -67,7 +67,11 @@ import type {
   HelperSuggestion,
   HelperUsageRecord,
   AdminUpdatePendingInfo,
-  AdminUpdateState
+  AdminUpdateState,
+  FleetUpdateResult,
+  NodeUpdateInfo,
+  ReleaseChannelStatus,
+  WorkerUpdateStatus
 } from '@git-agent-harness/contracts';
 
 const SERVER_URL =
@@ -379,7 +383,12 @@ export interface GahDataSource {
   startPlanningChat(request: PlanningChatRequest): Promise<ChatSessionSummary>;
   getAdminUpdatePending(): Promise<AdminUpdatePendingInfo>;
   getAdminUpdateStatus(): Promise<AdminUpdateState>;
-  startAdminUpdate(): Promise<AdminUpdateState>;
+  startAdminUpdate(mode?: 'release' | 'source'): Promise<AdminUpdateState>;
+  getReleaseStatus(): Promise<ReleaseChannelStatus>;
+  getNodeUpdateStatus(nodeId: string): Promise<WorkerUpdateStatus>;
+  startNodeUpdate(nodeId: string): Promise<WorkerUpdateStatus>;
+  updateAllNodes(): Promise<{ results: FleetUpdateResult[] }>;
+  setNodeAutoUpdate(nodeId: string, enabled: boolean): Promise<{ node_id: string; auto_update: boolean; update: NodeUpdateInfo | null }>;
 }
 
 export interface CoordinatorInfo {
@@ -828,14 +837,50 @@ export const gahApi: GahDataSource = {
   getAdminUpdateStatus() {
     return getJson<AdminUpdateState>('/api/admin/update/status');
   },
-  async startAdminUpdate() {
+  getReleaseStatus() {
+    return getJson<ReleaseChannelStatus>('/api/admin/release/status');
+  },
+  getNodeUpdateStatus(nodeId: string) {
+    return getJson<WorkerUpdateStatus>(`/api/registry/nodes/${encodeURIComponent(nodeId)}/update`);
+  },
+  async startNodeUpdate(nodeId: string) {
+    // 202 (started) and 409 (already updating) both carry the worker's
+    // status as their body, mirroring startAdminUpdate's contract.
+    const url = new URL(`/api/registry/nodes/${encodeURIComponent(nodeId)}/update`, SERVER_URL);
+    const res = await fetch(url.toString(), { method: 'POST', headers: mutationHeaders() });
+    if (res.status === 202 || res.status === 409) {
+      return (await res.json()) as WorkerUpdateStatus;
+    }
+    let message = `${res.status} ${res.statusText}`;
+    try {
+      const body = await res.json();
+      if (typeof body?.message === 'string') message = body.message;
+    } catch {
+      // response body wasn't JSON -- fall back to the status text above
+    }
+    throw new GahApiError(message, res.status, url.pathname);
+  },
+  updateAllNodes() {
+    return postJson<{ results: FleetUpdateResult[] }, Record<string, never>>('/api/registry/fleet/update-all', {});
+  },
+  setNodeAutoUpdate(nodeId: string, enabled: boolean) {
+    return postJson<{ node_id: string; auto_update: boolean; update: NodeUpdateInfo | null }, { enabled: boolean }>(
+      `/api/registry/nodes/${encodeURIComponent(nodeId)}/auto-update`,
+      { enabled }
+    );
+  },
+  async startAdminUpdate(mode: 'release' | 'source' = 'source') {
     // Like startLoop: 202 (started) and 409 (already running) both carry
     // the current state as their body, not just an error to throw. Any
     // other non-ok status (404 disabled, 403 unauthenticated, 500) is a
     // real error and goes through the same message extraction as
     // postJson/patchJson.
     const url = new URL('/api/admin/update', SERVER_URL);
-    const res = await fetch(url.toString(), { method: 'POST', headers: authHeaders() });
+    const res = await fetch(url.toString(), {
+      method: 'POST',
+      headers: { ...mutationHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode })
+    });
     if (res.status === 202 || res.status === 409) {
       return (await res.json()) as AdminUpdateState;
     }

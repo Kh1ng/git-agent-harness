@@ -15,7 +15,7 @@ import { oldestFetchedAt, formatAge, isStale } from '../lib/format.js';
 import { gahApi, backendInstancesApi, GahApiError } from '../api/client.js';
 import type { ConfigSetData, NotificationSettingsSummary, NodeCapacitySettings } from '@git-agent-harness/contracts';
 import { NODE_CAPACITY_MIN_MIB, NODE_CAPACITY_DEFAULTS } from '@git-agent-harness/contracts';
-import type { ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, AdminUpdatePendingInfo, AdminUpdateState, BackendInstanceSummary, HelperRoutePreference, ManagerModelInfo } from '@git-agent-harness/contracts';
+import type { ManagerChatSettingsSummary, ProfileSummary, GatewaySettingsSummary, MemoryContextPolicy, AdminUpdatePendingInfo, AdminUpdateState, ReleaseChannelStatus, BackendInstanceSummary, HelperRoutePreference, ManagerModelInfo } from '@git-agent-harness/contracts';
 
 const SETTINGS_REFRESH_MS = 60 * 1000;
 const SETTINGS_SECTIONS_KEY = 'gah.settings.openSections';
@@ -1250,6 +1250,8 @@ function GatewaySetupSection() {
 export function AdminUpdateSection() {
   const [enabled, setEnabled] = useState(true);
   const [pending, setPending] = useState<AdminUpdatePendingInfo | null>(null);
+  const [release, setRelease] = useState<ReleaseChannelStatus | null>(null);
+  const [showNotes, setShowNotes] = useState(false);
   const [status, setStatus] = useState<AdminUpdateState | null>(null);
   const [polling, setPolling] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1265,6 +1267,10 @@ export function AdminUpdateSection() {
         }
         setError(err instanceof Error ? err.message : String(err));
       });
+    gahApi
+      .getReleaseStatus()
+      .then(data => setRelease(data))
+      .catch(() => { /* The banner shows channel errors; settings stays quiet. */ });
     gahApi
       .getAdminUpdateStatus()
       .then((data) => {
@@ -1304,10 +1310,10 @@ export function AdminUpdateSection() {
     };
   }, [polling]);
 
-  const runUpdate = async () => {
+  const runUpdate = async (mode: 'release' | 'source') => {
     setError(null);
     try {
-      const state = await gahApi.startAdminUpdate();
+      const state = await gahApi.startAdminUpdate(mode);
       setStatus(state);
       if (state.status === 'running') setPolling(true);
     } catch (err) {
@@ -1323,21 +1329,52 @@ export function AdminUpdateSection() {
     <section className="card-padded max-w-2xl space-y-3">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-primary">Update GAH</h3>
-        <button onClick={runUpdate} disabled={running} className="btn-primary text-xs px-3 py-1.5 disabled:opacity-50">
-          {running ? 'Updating…' : 'Update now'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => void runUpdate('source')} disabled={running} className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50">
+            Rebuild from source
+          </button>
+          <button onClick={() => void runUpdate('release')} disabled={running} className="btn-primary text-xs px-3 py-1.5 disabled:opacity-50">
+            {running ? 'Updating…' : release?.update_available ? `Update and restart (v${release.latest_version})` : 'Update and restart'}
+          </button>
+        </div>
       </div>
+      {release && (
+        <p className="text-xs text-secondary">
+          {release.channel} channel · this server runs v{release.current_version}
+          {release.latest_version ? ` · latest published is v${release.latest_version}` : ' · no published release yet'}
+          {release.update_available ? ' — an update is available.' : ''}
+          {release.release_url && (
+            <>
+              {' '}
+              <a className="text-accent underline underline-offset-2" href={release.release_url} target="_blank" rel="noreferrer">Release</a>
+            </>
+          )}
+          {release.notes && (
+            <>
+              {' '}
+              <button type="button" className="text-accent underline underline-offset-2" aria-expanded={showNotes} onClick={() => setShowNotes(!showNotes)}>
+                {showNotes ? 'Hide changelog' : 'Changelog'}
+              </button>
+            </>
+          )}
+        </p>
+      )}
+      {release?.notes && showNotes && (
+        <pre className="max-h-64 overflow-auto bg-raised border border-subtle rounded-md px-3 py-2 text-xs font-mono whitespace-pre-wrap">
+          {release.notes}
+        </pre>
+      )}
       {pending && (
         <p className="text-xs text-muted font-mono">
           {pending.upToDate
-            ? `Up to date at ${pending.current?.short ?? '?'}`
+            ? `Source checkout up to date at ${pending.current?.short ?? '?'}`
             : `${pending.commitsBehind} commit(s) behind: ${pending.current?.short ?? '?'} → ${pending.latest?.short ?? '?'}`}
         </p>
       )}
       {status && status.status !== 'idle' && (
         <div>
           <p className="text-xs text-secondary">
-            Status: {status.status}
+            Status: {status.status}{status.mode ? ` (${status.mode === 'release' ? 'release install' : 'source rebuild'})` : ''}
             {status.status === 'inferred_restart' && ' — server restarted, reloading…'}
           </p>
           {status.output && (
