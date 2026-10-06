@@ -1077,6 +1077,7 @@ console.log(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[1], 'utf8')))
         );
         assert_eq!(ollama["memory"]["embedding"]["model"], "nomic-embed-text");
         assert_eq!(ollama["memory"]["embedding"]["dimensions"], 768);
+        assert_eq!(ollama["memory"]["embedding"]["sendDimensions"], false);
         assert_eq!(ollama["memory"]["embedding"]["apiKey"], "ollama");
 
         // Explicit values, a custom model with explicit dimensions, and a
@@ -1095,6 +1096,7 @@ console.log(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[1], 'utf8')))
         assert_eq!(custom["llm"]["model"], "my-llama");
         assert_eq!(custom["memory"]["embedding"]["model"], "my-embed");
         assert_eq!(custom["memory"]["embedding"]["dimensions"], 512);
+        assert_eq!(custom["memory"]["embedding"]["sendDimensions"], false);
         assert_eq!(
             custom["memory"]["embedding"]["apiKey"],
             "${TDAI_EMBEDDING_API_KEY}"
@@ -1121,12 +1123,12 @@ console.log(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[1], 'utf8')))
             "{platform}: {invalid}"
         );
 
-        // OpenAI defaults reference the stored credentials, never literals.
+        // OpenAI defaults reference the stored credentials, never literals, unless an API key was explicitly given.
         let openai = run(&[("GAH_GATEWAY_PROVIDER", "openai")]).unwrap();
         complete(&openai);
         assert_eq!(openai["llm"]["baseUrl"], "https://api.openai.com/v1");
         assert_eq!(openai["llm"]["model"], "gpt-4o");
-        assert_eq!(openai["llm"]["apiKey"], "${TDAI_LLM_API_KEY}");
+        assert_eq!(openai["llm"]["apiKey"], "");
         assert_eq!(openai["memory"]["embedding"]["provider"], "openai");
         assert_eq!(
             openai["memory"]["embedding"]["baseUrl"],
@@ -1137,6 +1139,7 @@ console.log(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[1], 'utf8')))
             "text-embedding-3-small"
         );
         assert_eq!(openai["memory"]["embedding"]["dimensions"], 1536);
+        assert_eq!(openai["memory"]["embedding"]["sendDimensions"], true);
         assert_eq!(
             openai["memory"]["embedding"]["apiKey"],
             "${TDAI_EMBEDDING_API_KEY}"

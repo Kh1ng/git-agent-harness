@@ -33,6 +33,10 @@ createServer((req, res) => {
     }) + '\n');
     res.setHeader('Content-Type', 'application/json');
     if (req.method === 'POST' && req.url === '/v1/embeddings') {
+      if ('dimensions' in json) {
+        res.statusCode = 400;
+        return res.end('{"error":{"message":"Ollama compatible endpoints do not accept the dimensions field."}}');
+      }
       const inputs = Array.isArray(json.input) ? json.input : [json.input ?? ''];
       return res.end(JSON.stringify({
         object: 'list',

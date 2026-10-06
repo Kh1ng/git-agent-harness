@@ -1087,6 +1087,7 @@ export function AddNodeSection() {
   const [providerEndpoint, setProviderEndpoint] = useState('');
   const [llmModel, setLlmModel] = useState('');
   const [embeddingModel, setEmbeddingModel] = useState('');
+  const [embeddingDimensions, setEmbeddingDimensions] = useState('');
   const [memoryCorePath, setMemoryCorePath] = useState('~/TencentDB-Agent-Memory/MemoryCore');
   const osName = { windows: 'Windows', linux: 'Linux', macos: 'macOS' }[os];
   const [command, setCommand] = useState('');
@@ -1097,7 +1098,7 @@ export function AddNodeSection() {
     setBusy(true); setError(''); setCommand(''); setCopied(false);
     try {
       const gatewayOpts = (role === 'central' || role === 'standalone') 
-        ? (gatewayUrl ? { gatewayUrl } : (provider === 'none' ? {} : { provider, providerEndpoint, llmModel, embeddingModel, memoryCorePath }))
+        ? (gatewayUrl ? { gatewayUrl } : (provider === 'none' ? {} : { provider, providerEndpoint, llmModel, embeddingModel, embeddingDimensions, memoryCorePath }))
         : {};
       setCommand((await gahApi.getNodeSetupCommand({ os, centralUrl, role, ...gatewayOpts })).command);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
@@ -1156,6 +1157,9 @@ export function AddNodeSection() {
               </label>
               <label className="block text-xs text-secondary mb-2">Embedding Model
                 <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={embeddingModel} onChange={(event) => { setEmbeddingModel(event.target.value); setCommand(''); }} placeholder={provider === 'ollama' ? 'nomic-embed-text' : 'text-embedding-3-small'} />
+              </label>
+              <label className="block text-xs text-secondary mb-2">Embedding Dimensions
+                <input disabled={busy} type="number" className="input w-full mt-1 min-h-11" value={embeddingDimensions} onChange={(event) => { setEmbeddingDimensions(event.target.value); setCommand(''); }} placeholder="e.g. 768 (leave empty for known models)" />
               </label>
             </>}
           </div>
@@ -1394,21 +1398,38 @@ export function ColocatedProviderSection() {
   const [providerEndpoint, setProviderEndpoint] = useState('');
   const [llmModel, setLlmModel] = useState('');
   const [embeddingModel, setEmbeddingModel] = useState('');
+  const [embeddingDimensions, setEmbeddingDimensions] = useState('');
   const [memoryCorePath, setMemoryCorePath] = useState('~/TencentDB-Agent-Memory/MemoryCore');
   const [copied, setCopied] = useState(false);
+  const [command, setCommand] = useState<string | null>(null);
+  const [revealing, setRevealing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
-  // A quoted `~` never expands; let the shell that runs the command resolve the home directory.
-  const destinationPath = (path: string): string => path === '~' ? '"$HOME"'
-    : path.startsWith('~/') ? `"$HOME"/${shellQuote(path.slice(2))}` : shellQuote(path);
-  // Credentials are read privately on the node and never appear in the command text.
-  // Generation is optional; the authenticated OpenAI embedding backend needs its key.
-  const prompt = provider === 'openai'
-    ? `read -rsp 'LLM API key (hidden, empty to skip): ' GAH_GATEWAY_LLM_API_KEY </dev/tty; printf '\\n'; if [ -n "$GAH_GATEWAY_LLM_API_KEY" ]; then export GAH_GATEWAY_LLM_API_KEY; fi; read -rsp 'Embedding API key (hidden): ' GAH_GATEWAY_EMBEDDING_API_KEY </dev/tty; printf '\\n'; test -n "$GAH_GATEWAY_EMBEDDING_API_KEY" && export GAH_GATEWAY_EMBEDDING_API_KEY && `
-    : '';
-  const command = `${prompt}GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH=${destinationPath(memoryCorePath.trim() || '~/TencentDB-Agent-Memory/MemoryCore')} GAH_GATEWAY_PROVIDER=${shellQuote(provider)} ${providerEndpoint ? `GAH_GATEWAY_ENDPOINT=${shellQuote(providerEndpoint)} ` : ''}${llmModel ? `GAH_GATEWAY_LLM_MODEL=${shellQuote(llmModel)} ` : ''}${embeddingModel ? `GAH_GATEWAY_EMBEDDING_MODEL=${shellQuote(embeddingModel)} ` : ''}scripts/install.sh`;
+  const revealCommand = async () => {
+    setRevealing(true);
+    setError(null);
+    try {
+      const revealed = await gahApi.getNodeSetupCommand({
+        os: 'linux',
+        centralUrl: window.location.origin,
+        role: 'central',
+        provider,
+        providerEndpoint,
+        llmModel,
+        embeddingModel,
+        embeddingDimensions,
+        memoryCorePath,
+      });
+      setCommand(revealed.command);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRevealing(false);
+    }
+  };
 
   const copyCommand = () => {
+    if (!command) return;
     navigator.clipboard.writeText(command).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
@@ -1422,10 +1443,10 @@ export function ColocatedProviderSection() {
         Generate a command to configure the local memory gateway's LLM and embedding provider. Run this on this central node.
       </p>
       <label className="block text-xs text-secondary mb-2">MemoryCore Path
-        <input type="text" className="input w-full mt-1 min-h-11" value={memoryCorePath} onChange={(e) => setMemoryCorePath(e.target.value)} />
+        <input type="text" className="input w-full mt-1 min-h-11" value={memoryCorePath} onChange={(e) => { setMemoryCorePath(e.target.value); setCommand(null); }} />
       </label>
       <label className="block text-xs text-secondary mb-2">Provider
-        <select className="input w-full mt-1 min-h-11" value={provider} onChange={(e) => setProvider(e.target.value as any)}>
+        <select className="input w-full mt-1 min-h-11" value={provider} onChange={(e) => { setProvider(e.target.value as any); setCommand(null); }}>
           <option value="none">None (keep current)</option>
           <option value="openai">OpenAI / Compatible</option>
           <option value="ollama">Ollama (local, unmetered)</option>
@@ -1433,16 +1454,29 @@ export function ColocatedProviderSection() {
       </label>
       {provider !== 'none' && <>
         <label className="block text-xs text-secondary mb-2">API Endpoint
-          <input type="text" className="input w-full mt-1 min-h-11" value={providerEndpoint} onChange={(e) => setProviderEndpoint(e.target.value)} placeholder={provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : 'https://api.openai.com/v1'} />
+          <input type="text" className="input w-full mt-1 min-h-11" value={providerEndpoint} onChange={(e) => { setProviderEndpoint(e.target.value); setCommand(null); }} placeholder={provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : 'https://api.openai.com/v1'} />
         </label>
         <label className="block text-xs text-secondary mb-2">LLM Model
-          <input type="text" className="input w-full mt-1 min-h-11" value={llmModel} onChange={(e) => setLlmModel(e.target.value)} placeholder={provider === 'ollama' ? 'llama3' : 'gpt-4o'} />
+          <input type="text" className="input w-full mt-1 min-h-11" value={llmModel} onChange={(e) => { setLlmModel(e.target.value); setCommand(null); }} placeholder={provider === 'ollama' ? 'llama3' : 'gpt-4o'} />
         </label>
         <label className="block text-xs text-secondary mb-2">Embedding Model
-          <input type="text" className="input w-full mt-1 min-h-11" value={embeddingModel} onChange={(e) => setEmbeddingModel(e.target.value)} placeholder={provider === 'ollama' ? 'nomic-embed-text' : 'text-embedding-3-small'} />
+          <input type="text" className="input w-full mt-1 min-h-11" value={embeddingModel} onChange={(e) => { setEmbeddingModel(e.target.value); setCommand(null); }} placeholder={provider === 'ollama' ? 'nomic-embed-text' : 'text-embedding-3-small'} />
+        </label>
+        <label className="block text-xs text-secondary mb-2">Embedding Dimensions
+          <input type="number" className="input w-full mt-1 min-h-11" value={embeddingDimensions} onChange={(e) => { setEmbeddingDimensions(e.target.value); setCommand(null); }} placeholder="e.g. 768 (leave empty for known models)" />
         </label>
       </>}
-      {provider !== 'none' && (
+      {provider !== 'none' && !command && (
+        <button
+          type="button"
+          onClick={revealCommand}
+          disabled={revealing}
+          className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50 mt-3"
+        >
+          {revealing ? 'Revealing…' : 'Reveal setup command'}
+        </button>
+      )}
+      {provider !== 'none' && command && (
         <div className="flex items-start gap-2 mt-3">
           <pre className="flex-1 bg-raised border border-subtle rounded-md px-3 py-2 text-xs text-primary font-mono whitespace-pre-wrap break-all">
             {command}
@@ -1452,6 +1486,7 @@ export function ColocatedProviderSection() {
           </button>
         </div>
       )}
+      {error && <p className="mt-3 text-xs text-critical">Error: {error}</p>}
     </section>
   );
 }

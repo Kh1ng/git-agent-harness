@@ -415,13 +415,13 @@ impl<'a> Setup<'a> {
                 let provider = match self.host.env("GAH_GATEWAY_PROVIDER") {
                     Some(val) => Some(val),
                     None if existing_config && self.options.yes => None,
-                    None if self.options.yes => Some("openai".to_string()),
+                    None if self.options.yes => Some("ollama".to_string()),
                     None => {
                         if existing_config {
                             let opts = [
                                 "Keep existing configuration".to_string(),
-                                "OpenAI / Compatible".to_string(),
                                 "Ollama (local, unmetered)".to_string(),
+                                "OpenAI / Compatible".to_string(),
                             ];
                             match self.ask_choice(
                                 "Select the model provider for MemoryCore",
@@ -429,21 +429,21 @@ impl<'a> Setup<'a> {
                                 0,
                             )? {
                                 0 => None,
-                                2 => Some("ollama".to_string()),
-                                _ => Some("openai".to_string()),
+                                2 => Some("openai".to_string()),
+                                _ => Some("ollama".to_string()),
                             }
                         } else {
                             let opts = [
-                                "OpenAI / Compatible".to_string(),
                                 "Ollama (local, unmetered)".to_string(),
+                                "OpenAI / Compatible".to_string(),
                             ];
                             match self.ask_choice(
                                 "Select the model provider for MemoryCore",
                                 &opts,
                                 0,
                             )? {
-                                1 => Some("ollama".to_string()),
-                                _ => Some("openai".to_string()),
+                                1 => Some("openai".to_string()),
+                                _ => Some("ollama".to_string()),
                             }
                         }
                     }
@@ -510,6 +510,25 @@ impl<'a> Setup<'a> {
                         }
                     };
                     env.0.push(("GAH_GATEWAY_EMBEDDING_MODEL", embed_model));
+
+                    let embed_dims = match self.host.env("GAH_GATEWAY_EMBEDDING_DIMENSIONS") {
+                        Some(val) => Some(val),
+                        None if self.options.yes => None,
+                        None => {
+                            let text = self.prompter.text(
+                                "Embedding Dimensions (leave empty for known models)",
+                                None,
+                            )?;
+                            if text.trim().is_empty() {
+                                None
+                            } else {
+                                Some(text.trim().to_string())
+                            }
+                        }
+                    };
+                    if let Some(dims) = embed_dims {
+                        env.0.push(("GAH_GATEWAY_EMBEDDING_DIMENSIONS", dims));
+                    }
 
                     if provider == "openai" {
                         let llm_key = match self.host.env("GAH_GATEWAY_LLM_API_KEY") {
@@ -1003,7 +1022,8 @@ mod tests {
             .with_env("GAH_GATEWAY_PROVIDER", "ollama")
             .with_env("GAH_GATEWAY_ENDPOINT", "http://127.0.0.1:11434/v1")
             .with_env("GAH_GATEWAY_LLM_MODEL", "llama3")
-            .with_env("GAH_GATEWAY_EMBEDDING_MODEL", "nomic-embed-text");
+            .with_env("GAH_GATEWAY_EMBEDDING_MODEL", "nomic-embed-text")
+            .with_env("GAH_GATEWAY_EMBEDDING_DIMENSIONS", "");
         let mut prompter = Script::default();
         let mut effects = Recorder::default();
         let mut setup = Setup {
@@ -1043,7 +1063,8 @@ mod tests {
             .with_env("GAH_GATEWAY_ENDPOINT", "https://api.openai.com/v1")
             .with_env("GAH_GATEWAY_LLM_MODEL", "gpt-4o")
             .with_env("GAH_GATEWAY_EMBEDDING_MODEL", "text-embedding-3-small")
-            .with_env("GAH_GATEWAY_EMBEDDING_API_KEY", "embedding-canary");
+            .with_env("GAH_GATEWAY_EMBEDDING_API_KEY", "embedding-canary")
+            .with_env("GAH_GATEWAY_EMBEDDING_DIMENSIONS", "");
         let mut prompter = Script::default();
         let mut effects = Recorder::default();
         let mut setup = Setup {

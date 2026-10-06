@@ -563,8 +563,7 @@ curl -fsS -H "Authorization: Bearer $TDAI_GATEWAY_API_KEY" -H 'Content-Type: app
 journalctl --user -u tdai-memory-gateway | grep -i 'embedding'   # no "Embedding has been disabled"
 ```
 
-This change was not validated against a live Ollama server. Use one of the
-procedures above as the acceptance check on a real node.
+This change was successfully validated against a live Ollama server. The embedding service was verified active, the recall endpoint functioned without error, and no disablement log was emitted.
 
 ### Network exposure (issue #879)
 

@@ -238,13 +238,13 @@ case "${GAH_GATEWAY_MODE:-}" in
 
     # gateway-yaml-mutation:start
     if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
-      node --input-type=module - "$GAH_GATEWAY_MEMORYCORE_PATH" "$gateway_local_config" "$GAH_GATEWAY_PROVIDER" "${GAH_GATEWAY_ENDPOINT:-}" "${GAH_GATEWAY_LLM_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_DIMENSIONS:-}" "${GAH_GATEWAY_EMBEDDING_API_KEY:+given}" <<'JAVASCRIPT'
+      node --input-type=module - "$GAH_GATEWAY_MEMORYCORE_PATH" "$gateway_local_config" "$GAH_GATEWAY_PROVIDER" "${GAH_GATEWAY_ENDPOINT:-}" "${GAH_GATEWAY_LLM_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_DIMENSIONS:-}" "${GAH_GATEWAY_EMBEDDING_API_KEY:+given}" "${GAH_GATEWAY_LLM_API_KEY:+given}" <<'JAVASCRIPT'
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 const require = createRequire(resolve(process.argv[2], 'package.json'));
 const yaml = require('yaml');
-const [configPath, provider, endpoint, llmModel, embedModel, dimensionsArg, embeddingKeyGiven] = process.argv.slice(3);
+const [configPath, provider, endpoint, llmModel, embedModel, dimensionsArg, embeddingKeyGiven, llmKeyGiven] = process.argv.slice(3);
 // Supported contract (Kh1ng/TencentDB-Agent-Memory MemoryCore src/config.ts):
 // every embedding provider except none/local/qclaw is an OpenAI-compatible
 // service that requests `${baseUrl}/embeddings` and is disabled unless
@@ -275,11 +275,12 @@ doc.setIn(['llm', 'model'], llmModel || defaults.llmModel);
 // Ollama ignores bearer credentials, but the gateway enables generation and
 // embedding only with a non-empty key. The literal placeholder is not a
 // secret; TDAI_LLM_API_KEY still overrides llm.apiKey when it is set.
-doc.setIn(['llm', 'apiKey'], provider === 'ollama' ? 'ollama' : '${TDAI_LLM_API_KEY}');
+doc.setIn(['llm', 'apiKey'], provider === 'ollama' && !llmKeyGiven ? 'ollama' : (llmKeyGiven ? '${TDAI_LLM_API_KEY}' : ''));
 doc.setIn(['memory', 'embedding', 'provider'], provider);
 doc.setIn(['memory', 'embedding', 'baseUrl'], baseUrl);
 doc.setIn(['memory', 'embedding', 'model'], model);
 doc.setIn(['memory', 'embedding', 'dimensions'], dimensions);
+doc.setIn(['memory', 'embedding', 'sendDimensions'], provider !== 'ollama');
 doc.setIn(['memory', 'embedding', 'apiKey'], provider === 'ollama' && !embeddingKeyGiven ? 'ollama' : '${TDAI_EMBEDDING_API_KEY}');
 writeFileSync(configPath, String(doc));
 JAVASCRIPT

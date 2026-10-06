@@ -53,7 +53,7 @@ function credentialPrompt(variable: string, label: string, required: boolean): s
 }
 
 /** Generate a Unix bootstrap command without exporting stored gateway or coordinator secrets. */
-export function unixSetupCommand(os: string, role: string, centralUrl: string, gatewayUrl?: string, provider?: string, providerEndpoint?: string, llmModel?: string, embeddingModel?: string, memoryCorePath?: string): string {
+export function unixSetupCommand(os: string, role: string, centralUrl: string, gatewayUrl?: string, provider?: string, providerEndpoint?: string, llmModel?: string, embeddingModel?: string, memoryCorePath?: string, embeddingDimensions?: string): string {
   if (!['linux', 'macos'].includes(os)) throw new Error('Choose Linux, macOS, or Windows.');
   if (!['central', 'standalone', 'worker'].includes(role)) throw new Error('Choose central, standalone, or worker.');
   if (os === 'macos' && (role === 'central' || role === 'standalone')) throw new Error('macOS central installation is not available yet. Choose a macOS worker or a Linux central node.');
@@ -76,6 +76,7 @@ export function unixSetupCommand(os: string, role: string, centralUrl: string, g
     if (providerEndpoint) settings.push(`GAH_GATEWAY_ENDPOINT=${shellQuote(providerEndpoint)}`);
     if (llmModel) settings.push(`GAH_GATEWAY_LLM_MODEL=${shellQuote(llmModel)}`);
     if (embeddingModel) settings.push(`GAH_GATEWAY_EMBEDDING_MODEL=${shellQuote(embeddingModel)}`);
+    if (embeddingDimensions) settings.push(`GAH_GATEWAY_EMBEDDING_DIMENSIONS=${shellQuote(embeddingDimensions)}`);
     if (provider === 'openai') {
       // Generation is optional; the authenticated embedding backend needs its key.
       prompts.push(
@@ -111,7 +112,7 @@ export function nodeSetupRouter(): Router {
   router.post('/command', (req, res) => {
     try {
       if (req.body.os && req.body.os !== 'windows') {
-        return res.json({ command: unixSetupCommand(req.body.os, req.body.role, req.body.centralUrl, req.body.gatewayUrl, req.body.provider, req.body.providerEndpoint, req.body.llmModel, req.body.embeddingModel, req.body.memoryCorePath) });
+        return res.json({ command: unixSetupCommand(req.body.os, req.body.role, req.body.centralUrl, req.body.gatewayUrl, req.body.provider, req.body.providerEndpoint, req.body.llmModel, req.body.embeddingModel, req.body.memoryCorePath, req.body.embeddingDimensions) });
       }
       if (req.body.role !== 'desktop' && process.env.GAH_ALLOW_INSECURE_HTTP !== '1') {
         return res.status(409).json({ message: 'WSL worker enrollment currently uses trusted LAN transport. Set GAH_ALLOW_INSECURE_HTTP=1 on the central server for a trusted LAN/VPN, or install the desktop only.' });
