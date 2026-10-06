@@ -726,7 +726,7 @@ pub enum RoutingCandidateCommands {
     Add {
         #[arg(long)]
         profile: String,
-        /// Which ordered list: pm | improve | review | escalatory.
+        /// Which ordered list: pm | improve | review | escalatory | routine (single reviewer; add replaces it).
         #[arg(long)]
         list: String,
         #[arg(long)]

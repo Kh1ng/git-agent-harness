@@ -58,3 +58,46 @@ fn review_project_brief_section_respects_profile_gate() {
     assert!(section.is_empty());
     assert!(metadata.is_none());
 }
+
+#[test]
+fn review_project_brief_section_excludes_design_rules() {
+    let mut cfg = config::GahConfig {
+        context: Default::default(),
+        defaults: config::Defaults::default(),
+        profiles: HashMap::new(),
+    };
+    cfg.context.profiles.insert(
+        "gah".into(),
+        crate::context::ContextOverride {
+            include_review_project_brief: Some(true),
+            ..Default::default()
+        },
+    );
+
+    let tmp = tempdir().unwrap();
+    let mut profile = crate::config::tests::test_profile_for_notifications();
+    profile.local_path = tmp.path().display().to_string();
+    std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+    let brief_path = tmp.path().join("docs/PROJECT_BRIEF.md");
+    std::fs::write(
+        &brief_path,
+        "## Working rules\n- Preserve unknown telemetry as unknown.\n\n## Design rules\n- Prefer deep modules: a small interface.\n\n## Verification\n- cargo test\n",
+    )
+    .unwrap();
+
+    let (section, metadata) = build_review_project_brief_section(&cfg, "gah", &profile);
+    let metadata = metadata.unwrap();
+
+    assert!(metadata.included);
+    assert!(!metadata.truncated);
+    // Telemetry still describes the on-disk source, not the post-exclusion payload.
+    assert_eq!(
+        metadata.source_bytes,
+        std::fs::metadata(&brief_path).unwrap().len()
+    );
+    assert!(metadata.sent_bytes < metadata.source_bytes);
+    assert!(section.contains("## Working rules"));
+    assert!(section.contains("## Verification"));
+    assert!(!section.contains("Design rules"));
+    assert!(!section.contains("deep modules"));
+}
