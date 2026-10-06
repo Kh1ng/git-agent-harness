@@ -449,6 +449,9 @@ export interface StatusSnapshot {
    * before commit/push. */
   generated_artifact_deny_patterns: string[];
   max_parallel_workers: number;
+  /** How `max_parallel_workers` was reached from the configured baseline.
+   * Absent on CLIs without worker scaling. */
+  worker_limits?: WorkerLimits;
   open_managed_mr_count: number;
   inflight_implementation_count: number;
   implementation_intake_paused: boolean;
@@ -769,6 +772,29 @@ export interface ReportSeriesData {
  * `WakeAutonomy` in src/config.rs (serde snake_case). */
 export type WakeAutonomyValue = 'off' | 'review_only' | 'full';
 
+/** Growth past a profile's baseline worker count: automatic while a
+ * subscription has quota headroom, and manual through a boost. */
+export interface WorkerScalingSettings {
+  enabled: boolean;
+  /** Ceiling for automatic scaling; unset means twice the baseline. */
+  max_workers?: number;
+  extra_per_model: number;
+  min_remaining_percent: number;
+  boost_workers?: number;
+  /** `backend/model`; unset boosts every capped model. */
+  boost_model?: string;
+  /** RFC 3339 expiry; unset lasts until cleared. */
+  boost_until?: string;
+}
+
+export interface WorkerLimits {
+  baseline_workers: number;
+  workers: number;
+  extra_per_model?: Record<string, number>;
+  /** One operator-readable line per grant or refusal. */
+  notes?: string[];
+}
+
 export interface ProfileSummary {
   name: string;
   display_name: string;
@@ -793,6 +819,8 @@ export interface ProfileSummary {
   max_parallel_workers: number | null;
   /** Effective maximum open managed PRs/MRs for the profile. */
   max_open_managed_mrs: number;
+  /** Absent on CLIs without worker scaling. */
+  worker_scaling?: WorkerScalingSettings;
   /** Manager-wake autonomy for this profile (null = unset -> off). */
   manager_wake_autonomy: WakeAutonomyValue | null;
   /** Delivery mode for work results ('pr' | 'handoff'). Defaults to 'pr' if omitted. */

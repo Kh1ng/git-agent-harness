@@ -82,6 +82,31 @@ pub(crate) fn loop_parallel_argument(
     }
 }
 
+/// Say once, on each change, how many workers scaling allows and why.
+fn report_worker_limits(
+    last: &mut Option<crate::routing::worker_scaling::WorkerLimits>,
+    current: Option<crate::routing::worker_scaling::WorkerLimits>,
+) {
+    if *last == current {
+        return;
+    }
+    if let Some(limits) = &current {
+        if limits.workers != limits.baseline_workers || last.is_some() {
+            eprintln!(
+                "gah loop: {} workers (baseline {}){}",
+                limits.workers,
+                limits.baseline_workers,
+                limits
+                    .notes
+                    .iter()
+                    .map(|note| format!("; {note}"))
+                    .collect::<String>()
+            );
+        }
+    }
+    *last = current;
+}
+
 /// Run the controller continuously in one process. The process lock is held
 /// for the lifetime of the loop so a second manager for the same profile
 /// cannot create a competing worker pool.
@@ -100,6 +125,7 @@ pub fn run_loop(
     // so changes apply without a restart. Falls back to the last-good config
     // on a transient read failure (e.g. mid-write) rather than killing the loop.
     let mut last_cfg: Option<crate::config::GahConfig> = Some(initial_cfg.clone());
+    let mut last_limits = None;
 
     loop {
         if crate::runner::shutdown_requested() {
@@ -110,7 +136,9 @@ pub fn run_loop(
             config_path,
             profile_name,
         ) {
-            Ok(loaded) => {
+            Ok(mut loaded) => {
+                let limits = crate::routing::worker_scaling::apply(&mut loaded, profile_name);
+                report_worker_limits(&mut last_limits, limits);
                 last_cfg = Some(loaded);
                 last_cfg.as_ref().expect("just assigned")
             }
