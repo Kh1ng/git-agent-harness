@@ -25,6 +25,7 @@ struct ProfileSummary<'a> {
     web_url: Option<String>,
     max_parallel_workers: Option<u32>,
     max_open_managed_mrs: u32,
+    worker_scaling: &'a crate::config::WorkerScaling,
     validation_timeout_seconds: u64,
     chat_session_idle_days: u64,
     manager_wake_autonomy: &'a str,
@@ -50,6 +51,7 @@ pub(crate) fn list_json(cfg: &GahConfig) -> Result<String> {
                 web_url: profile.web_url(),
                 max_parallel_workers: profile.max_parallel_workers,
                 max_open_managed_mrs: profile.max_open_managed_mrs(),
+                worker_scaling: &profile.worker_scaling,
                 validation_timeout_seconds: profile.validation_timeout_seconds(),
                 chat_session_idle_days: profile.effective_chat_session_idle_days(),
                 manager_wake_autonomy: match profile.manager_wake_autonomy {
