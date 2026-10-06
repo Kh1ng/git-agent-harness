@@ -83,9 +83,13 @@ struct QuotaObservationRecordRaw {
 
 impl From<QuotaObservationRecordRaw> for QuotaObservationRecord {
     fn from(raw: QuotaObservationRecordRaw) -> Self {
-        let quota_remaining_percent = raw
-            .quota_remaining_percent
-            .or_else(|| raw.quota_used_percent.map(|used| 100.0 - used));
+        // A used percent outside 0..=100 is not a reading; it must not
+        // become a negative or over-100 remaining value.
+        let quota_remaining_percent = raw.quota_remaining_percent.or_else(|| {
+            raw.quota_used_percent
+                .filter(|used| (0.0..=100.0).contains(used))
+                .map(|used| 100.0 - used)
+        });
         Self {
             backend: raw.backend,
             credential_id: raw.credential_id,
@@ -165,11 +169,7 @@ pub fn load(state_path: &Path) -> Result<Vec<QuotaObservationRecord>> {
         // Skip only the malformed line, not the whole file: one corrupt JSONL
         // record (e.g. a partial write) must not discard every valid
         // observation before/after it. Mirrors availability.rs's resilience.
-        let val = match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(val) => val,
-            Err(_) => continue,
-        };
-        match serde_json::from_value::<QuotaObservationRecord>(val) {
+        match serde_json::from_str::<QuotaObservationRecord>(line) {
             Ok(mut rec) => {
                 rec.backend = crate::config::canonical_backend_name(&rec.backend).to_string();
                 records.push(rec);
@@ -212,8 +212,10 @@ pub fn parse_external_observation(input: &str) -> Result<QuotaObservationRecord>
     if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
         anyhow::bail!("unsupported quota observation field");
     }
-    let val = value;
-    let mut record: QuotaObservationRecord = serde_json::from_value(val)
+    let submitted_used = fields
+        .get("quota_used_percent")
+        .and_then(|used| used.as_f64());
+    let mut record: QuotaObservationRecord = serde_json::from_value(value)
         .map_err(|_| anyhow::anyhow!("invalid quota observation schema"))?;
     if let Some(usage) = &record.account_usage {
         usage.validate()?;
@@ -237,7 +239,10 @@ pub fn parse_external_observation(input: &str) -> Result<QuotaObservationRecord>
     {
         anyhow::bail!("backend_instance, checked_at and usage_source are required");
     }
-    for value in [record.quota_remaining_percent].into_iter().flatten() {
+    for value in [record.quota_remaining_percent, submitted_used]
+        .into_iter()
+        .flatten()
+    {
         if !value.is_finite() || !(0.0..=100.0).contains(&value) {
             anyhow::bail!("quota percentages must be between 0 and 100");
         }
