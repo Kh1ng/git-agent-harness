@@ -316,11 +316,10 @@ fn prune_worktrees(
     abandoned_open: &HashSet<String>,
     protected: &HashSet<String>,
 ) -> Result<()> {
-    if cfg.defaults.worktree_base.trim().is_empty() {
-        println!("  worktrees: skipped (no defaults.worktree_base)");
-        return Ok(());
-    }
-    let root = Path::new(&cfg.defaults.worktree_base);
+    // An empty defaults.worktree_base stays empty in the config (#1366):
+    // dispatch plans against the resolved default, so prune must sweep the
+    // same base or GAH-owned worktrees survive their own lifecycle.
+    let root = crate::config::effective_worktree_base(&cfg.defaults);
     if !root.exists() {
         println!("  worktrees: none");
         return Ok(());

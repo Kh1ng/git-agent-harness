@@ -62,8 +62,8 @@ test('Overview displays mutation failures instead of treating them as loop state
     return route.fulfill({ status: 503, json: { error: 'mutation_outcome_unknown', message } });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Start loop' }).click();
+  await page.getByRole('button', { name: 'Turn factory on' }).click();
   await expect(page.getByText(message, { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Start loop' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Turn factory on' })).toBeEnabled();
   expect(calls).toBe(1);
 });

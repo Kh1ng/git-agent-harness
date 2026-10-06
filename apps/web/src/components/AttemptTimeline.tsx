@@ -61,7 +61,6 @@ function attributionUnknownReason(usage: LedgerUsage): string | null {
 function usageUnknownReasons(usage: LedgerUsage): string[] {
   return [
     usage.token_usage_unknown_reason ? `Tokens: ${usage.token_usage_unknown_reason}` : null,
-    usage.quota_unknown_reason ? `Quota: ${usage.quota_unknown_reason}` : null,
     usage.cost_unknown_reason ? `Cost: ${usage.cost_unknown_reason}` : null
   ].filter((reason): reason is string => reason !== null);
 }

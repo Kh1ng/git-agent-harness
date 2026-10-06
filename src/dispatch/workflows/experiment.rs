@@ -20,7 +20,7 @@ use crate::routing::RouteRequest;
 use crate::{provider, runner, worktree};
 use anyhow::Result;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 pub(crate) fn experiment(
@@ -72,7 +72,7 @@ pub(crate) fn experiment(
 
     let ts = timestamp();
     let branch = format!("gah/exp-{}-{}", profile.repo_id, ts);
-    let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
+    let worktree_base = crate::config::effective_worktree_base(&cfg.defaults);
     let repo = Path::new(&profile.local_path);
 
     println!(
@@ -145,8 +145,14 @@ pub(crate) fn experiment(
     ) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Backend error (continuing for judge evaluation): {:#}", e);
             let log_path = attempt_dir.join("backend-output.log");
+            let pre_launch = !log_path.exists();
+            if pre_launch {
+                ledger.usage.usage_unknown_reason =
+                    Some(crate::ledger::UsageUnknownReason::BackendNotInvoked);
+            }
+            eprintln!("Backend error (continuing for judge evaluation): {:#}", e);
+            // Write the error into the log file, which also creates it if missing.
             let _ = std::fs::write(&log_path, format!("Backend error: {:#}", e));
             runner::RunResult {
                 exit_code: -1,
@@ -168,6 +174,16 @@ pub(crate) fn experiment(
     );
     ledger.backend_exit_code = Some(result.exit_code);
     record_external_approval_consumption_for_last_attempt(cfg, profile_name, profile, ledger);
+
+    if ledger.usage.usage_unknown_reason.is_none() {
+        ledger.usage = super::super::attempts::attempt_usage(
+            &result.log_path,
+            result.agy_cli_log_delta.as_deref(),
+            crate::usage_attribution::UsageAttribution::from_route(&route),
+            result.transcript_path.as_deref(),
+            None,
+        );
+    }
     let backend_summary = runner::output::publishable_summary(
         result.final_summary.as_deref(),
         ledger.target_summary.as_deref(),

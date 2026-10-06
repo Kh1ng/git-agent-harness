@@ -555,11 +555,8 @@ fn dispatch_agy_multi_instance_isolated_execution() {
     let text3 = fs::read_to_string(&ledger_path).unwrap();
     let entry3: Value = serde_json::from_str(text3.lines().next().unwrap()).unwrap();
     assert_eq!(entry3["effective_backend"], "agy");
-    assert_eq!(
-        entry3["attempts"][0]["usage"]["quota_window"],
-        "AGY individual quota"
-    );
-    assert_eq!(entry3["usage"]["quota_window"], "AGY individual quota");
+    assert!(entry3["attempts"][0]["usage"].get("quota_window").is_none());
+    assert!(entry3["usage"].get("quota_window").is_none());
 }
 
 #[test]

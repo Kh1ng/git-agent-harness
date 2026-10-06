@@ -50,23 +50,12 @@ function formatQuotaMetadata(q: {
 }
 
 function quotaPercentages(q: {
-  quota_used_percent?: number | null;
   quota_remaining_percent?: number | null;
 }): { used: number; remaining: number } | null {
-  const used = Number.isFinite(q.quota_used_percent) ? q.quota_used_percent : null;
-  const remaining = Number.isFinite(q.quota_remaining_percent) ? q.quota_remaining_percent : null;
-  if (used === null || used === undefined) {
-    if (remaining === null || remaining === undefined) return null;
-    const boundedRemaining = Math.min(100, Math.max(0, remaining));
-    return { used: 100 - boundedRemaining, remaining: boundedRemaining };
-  }
-  const boundedUsed = Math.min(100, Math.max(0, used));
-  return {
-    used: boundedUsed,
-    remaining: remaining === null || remaining === undefined
-      ? 100 - boundedUsed
-      : Math.min(100, Math.max(0, remaining))
-  };
+  const remaining = Number.isFinite(q.quota_remaining_percent) ? q.quota_remaining_percent! : null;
+  if (remaining === null) return null;
+  const boundedRemaining = Math.min(100, Math.max(0, remaining));
+  return { used: 100 - boundedRemaining, remaining: boundedRemaining };
 }
 
 function formatQuotaPercent(value: number): string {

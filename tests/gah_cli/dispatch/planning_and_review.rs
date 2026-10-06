@@ -22,6 +22,45 @@ fn dispatch_dry_run_improve_prints_plan() {
         .stdout(predicate::str::contains("gah/test-repo-"));
 }
 
+/// Issue #1366: with an empty `worktree_base` the plan used to read
+/// `Worktree: /gah-<profile>-<id>`, at the filesystem root.
+#[test]
+fn dispatch_dry_run_plans_an_empty_worktree_base_under_the_default() {
+    let tmp = test_tempdir();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let cfg = write_dispatch_config(&tmp);
+    let text = fs::read_to_string(&cfg).unwrap();
+    assert!(text.contains("worktree_base = \"/tmp/gah-test-worktrees\""));
+    fs::write(
+        &cfg,
+        text.replace(
+            "worktree_base = \"/tmp/gah-test-worktrees\"",
+            "worktree_base = \"\"",
+        ),
+    )
+    .unwrap();
+
+    bin()
+        .args([
+            "dispatch",
+            "--profile",
+            "test-repo",
+            "--mode",
+            "improve",
+            "--dry-run",
+            "--config-path",
+            cfg.to_str().unwrap(),
+        ])
+        .env("HOME", &home)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "Worktree:     {}/gah-test-repo-",
+            home.join(".local/share/gah/worktrees").display()
+        )));
+}
+
 #[test]
 fn dispatch_dry_run_shows_backend_in_plan() {
     let tmp = test_tempdir();

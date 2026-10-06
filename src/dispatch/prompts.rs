@@ -161,7 +161,7 @@ pub(super) fn build_task(
         instruction,
     );
 
-    append_project_rules(&mut task, profile);
+    append_project_rules(&mut task, profile, mode);
     crate::prompt_policy::append_untrusted_section(
         &mut task,
         profile,
@@ -249,7 +249,7 @@ fn build_task_with_issue(profile: &Profile, wt: &Path, mode: &str, issue: &Issue
         instruction,
     );
 
-    append_project_rules(&mut task, profile);
+    append_project_rules(&mut task, profile, mode);
     let task_class = parse_ticket_metadata_from_issue(issue).task_class;
     crate::prompt_policy::append_untrusted_section(
         &mut task,
@@ -281,13 +281,21 @@ fn append_protected_worker_policy(task: &mut String) {
 
 /// Deliver only project rules relevant to executing the ticket. Repository
 /// background stays in the brief, available on demand through its pointer.
-fn append_project_rules(task: &mut String, profile: &Profile) {
+/// Design rules reach only the modes that land a diff (#1379): investigation
+/// prompts keep their structured-output focus, and reviewers judge by the
+/// working rules instead.
+fn append_project_rules(task: &mut String, profile: &Profile, mode: &str) {
     let brief_path = Path::new(&profile.local_path).join("docs/PROJECT_BRIEF.md");
     let Ok(brief) = fs::read_to_string(brief_path) else {
         return;
     };
+    let mut headings: Vec<&str> = vec!["Source of truth", "Working rules"];
+    if mode_receives_design_rules(mode) {
+        headings.push("Design rules");
+    }
+    headings.push("Verification");
     let mut rules = String::new();
-    for heading in ["Source of truth", "Working rules", "Verification"] {
+    for heading in headings {
         if let Some(section) = extract_markdown_section(&brief, heading) {
             rules.push_str(&format!("### {heading}\n\n{section}\n\n"));
         }
@@ -296,6 +304,17 @@ fn append_project_rules(task: &mut String, profile: &Profile) {
         task.push_str("\n## Project Rules\n\n");
         append_bounded_text(task, &rules, PROJECT_RULES_MAX_BYTES, "Project rules");
     }
+}
+
+/// Design rules steer code that lands as a diff. Read-only investigation
+/// kinds, experiment output tasks, and planning kinds keep their focused
+/// prompts; unparseable modes fall back to the implementation instruction,
+/// so they still receive the rules.
+fn mode_receives_design_rules(mode: &str) -> bool {
+    matches!(
+        JobKind::parse(mode),
+        Err(_) | Ok(JobKind::Improve) | Ok(JobKind::Fix)
+    )
 }
 
 /// Materialize a cheap map outside the checkout and deliver only pointers.
@@ -699,7 +718,7 @@ pub(super) fn format_candidate_task(
         out.push('\n');
     }
 
-    append_project_rules(&mut out, profile);
+    append_project_rules(&mut out, profile, mode);
     crate::prompt_policy::append_untrusted_section(
         &mut out,
         profile,
@@ -793,6 +812,7 @@ mod tests {
             hermes_idle_timeout_seconds: None,
             max_parallel_workers: None,
             max_open_managed_mrs: None,
+            worker_scaling: Default::default(),
             policy_path: None,
             env_file: None,
             env_file_prod: None,
@@ -1451,3 +1471,7 @@ mod tests {
         assert!(updated.contains("## Protected Worker Policy"));
     }
 }
+
+#[cfg(test)]
+#[path = "prompts/design_rules_tests.rs"]
+mod design_rules_tests;

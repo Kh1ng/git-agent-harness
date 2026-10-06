@@ -34,7 +34,11 @@ use serde::{Deserialize, Serialize};
 /// ledger-derived fields (profile, repo, work id, effective_* mirrors,
 /// account scope) are gone; a store reading has no ledger entry to borrow
 /// them from. Consumers must read the new field set.
-pub const SCHEMA_VERSION: u32 = 11;
+/// Version 12 removes `quota_used_percent` from quota observation exports;
+/// `quota_remaining_percent` is the canonical percentage. Historical used-only
+/// records remain readable, with remaining derived as 100 minus used when an
+/// explicit remaining percentage is absent.
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// Record types for telemetry data (used for enum tags)
 #[allow(dead_code)]
@@ -171,18 +175,8 @@ pub struct AttemptUsageRecord {
     /// Actual cost in USD
     pub actual_cost_usd: Option<f64>,
 
-    /// Quota window identifier
-    pub quota_window: Option<String>,
-    /// Quota used percentage
-    pub quota_used_percent: Option<f64>,
-    /// Quota remaining percentage
-    pub quota_remaining_percent: Option<f64>,
-    /// When quota resets
-    pub quota_reset_at: Option<String>,
     #[serde(default)]
     pub token_usage_unknown_reason: Option<String>,
-    #[serde(default)]
-    pub quota_unknown_reason: Option<String>,
 
     /// Issue #119: provenance-aware per-attempt behavior metrics. `None` means
     /// the metric was not present in the source telemetry (unknown), never a
@@ -205,7 +199,8 @@ pub struct AttemptUsageRecord {
 /// Credential ids are labels, never secrets; the check error is already
 /// redacted by the store.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct QuotaObservationRecord {
+#[serde(from = "ExportedQuotaObservationRecordRaw")]
+pub struct ExportedQuotaObservationRecord {
     #[serde(flatten)]
     pub base: TelemetryRecord,
 
@@ -226,9 +221,6 @@ pub struct QuotaObservationRecord {
     /// Quota window identifier
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_window: Option<String>,
-    /// Quota used percentage
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_used_percent: Option<f64>,
     /// Quota remaining percentage
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_remaining_percent: Option<f64>,
@@ -244,6 +236,46 @@ pub struct QuotaObservationRecord {
     /// Observation source (where this data came from)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_source: Option<String>,
+}
+
+/// Read historical used-only quota readings while keeping new exports canonical.
+#[derive(Deserialize)]
+struct ExportedQuotaObservationRecordRaw {
+    #[serde(flatten)]
+    base: TelemetryRecord,
+    backend: String,
+    backend_instance: Option<String>,
+    credential_id: Option<String>,
+    model: Option<String>,
+    quota_pool: Option<String>,
+    quota_window: Option<String>,
+    quota_remaining_percent: Option<f64>,
+    quota_used_percent: Option<f64>,
+    quota_reset_at: Option<String>,
+    checked_at: Option<String>,
+    check_error: Option<String>,
+    usage_source: Option<String>,
+}
+
+impl From<ExportedQuotaObservationRecordRaw> for ExportedQuotaObservationRecord {
+    fn from(raw: ExportedQuotaObservationRecordRaw) -> Self {
+        Self {
+            base: raw.base,
+            backend: raw.backend,
+            backend_instance: raw.backend_instance,
+            credential_id: raw.credential_id,
+            model: raw.model,
+            quota_pool: raw.quota_pool,
+            quota_window: raw.quota_window,
+            quota_remaining_percent: raw
+                .quota_remaining_percent
+                .or_else(|| raw.quota_used_percent.map(|used| 100.0 - used)),
+            quota_reset_at: raw.quota_reset_at,
+            checked_at: raw.checked_at,
+            check_error: raw.check_error,
+            usage_source: raw.usage_source,
+        }
+    }
 }
 
 /// Task outcome telemetry record
@@ -396,7 +428,7 @@ pub enum ExportedTelemetryRecord {
     #[serde(rename = "attempt_usage")]
     AttemptUsage(Box<AttemptUsageRecord>),
     #[serde(rename = "quota_observation")]
-    QuotaObservation(Box<QuotaObservationRecord>),
+    QuotaObservation(Box<ExportedQuotaObservationRecord>),
     #[serde(rename = "task_outcome")]
     TaskOutcome(Box<TaskOutcomeRecord>),
     #[serde(rename = "review_outcome")]
@@ -552,7 +584,7 @@ pub fn generate_store_quota_observation_id(
     }
     let percent = |value: Option<f64>| value.map(|value| value.to_string()).unwrap_or_default();
     format!(
-        "quota_obs:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        "quota_obs:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
         part(&record.observed_at),
         part(&record.checked_at),
         record.backend,
@@ -561,7 +593,6 @@ pub fn generate_store_quota_observation_id(
         part(&record.model),
         part(&record.quota_pool),
         part(&record.quota_window),
-        percent(record.quota_used_percent),
         percent(record.quota_remaining_percent),
         part(&record.quota_reset_at),
         part(&record.check_error),
