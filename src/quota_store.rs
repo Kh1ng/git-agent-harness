@@ -20,10 +20,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+mod agy;
 #[cfg(test)]
 mod compatibility_tests;
 mod identity;
 mod instances;
+pub use agy::{launch as agy_launch, refresh_and_store as refresh_agy_and_store};
 pub(crate) use identity::current_source_records;
 pub use identity::{
     latest_windows_for_backend, latest_windows_for_identity,
@@ -83,9 +85,13 @@ struct QuotaObservationRecordRaw {
 
 impl From<QuotaObservationRecordRaw> for QuotaObservationRecord {
     fn from(raw: QuotaObservationRecordRaw) -> Self {
-        let quota_remaining_percent = raw
-            .quota_remaining_percent
-            .or_else(|| raw.quota_used_percent.map(|used| 100.0 - used));
+        // A used percent outside 0..=100 is not a reading; it must not
+        // become a negative or over-100 remaining value.
+        let quota_remaining_percent = raw.quota_remaining_percent.or_else(|| {
+            raw.quota_used_percent
+                .filter(|used| (0.0..=100.0).contains(used))
+                .map(|used| 100.0 - used)
+        });
         Self {
             backend: raw.backend,
             credential_id: raw.credential_id,
@@ -165,11 +171,7 @@ pub fn load(state_path: &Path) -> Result<Vec<QuotaObservationRecord>> {
         // Skip only the malformed line, not the whole file: one corrupt JSONL
         // record (e.g. a partial write) must not discard every valid
         // observation before/after it. Mirrors availability.rs's resilience.
-        let val = match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(val) => val,
-            Err(_) => continue,
-        };
-        match serde_json::from_value::<QuotaObservationRecord>(val) {
+        match serde_json::from_str::<QuotaObservationRecord>(line) {
             Ok(mut rec) => {
                 rec.backend = crate::config::canonical_backend_name(&rec.backend).to_string();
                 records.push(rec);
@@ -212,8 +214,10 @@ pub fn parse_external_observation(input: &str) -> Result<QuotaObservationRecord>
     if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
         anyhow::bail!("unsupported quota observation field");
     }
-    let val = value;
-    let mut record: QuotaObservationRecord = serde_json::from_value(val)
+    let submitted_used = fields
+        .get("quota_used_percent")
+        .and_then(|used| used.as_f64());
+    let mut record: QuotaObservationRecord = serde_json::from_value(value)
         .map_err(|_| anyhow::anyhow!("invalid quota observation schema"))?;
     if let Some(usage) = &record.account_usage {
         usage.validate()?;
@@ -237,7 +241,10 @@ pub fn parse_external_observation(input: &str) -> Result<QuotaObservationRecord>
     {
         anyhow::bail!("backend_instance, checked_at and usage_source are required");
     }
-    for value in [record.quota_remaining_percent].into_iter().flatten() {
+    for value in [record.quota_remaining_percent, submitted_used]
+        .into_iter()
+        .flatten()
+    {
         if !value.is_finite() || !(0.0..=100.0).contains(&value) {
             anyhow::bail!("quota percentages must be between 0 and 100");
         }
@@ -309,16 +316,27 @@ fn mistral_admin_observation(
 
 /// Append one record under an exclusive lock. Missing parent dirs are created.
 pub fn append(state_path: &Path, rec: &QuotaObservationRecord) -> Result<()> {
-    for (field, value) in [
-        ("backend instance", rec.backend_instance.as_deref()),
-        ("quota pool", rec.quota_pool.as_deref()),
-    ] {
-        if let Some(value) = value {
-            let normalized = crate::execution_identity::validate_operator_label(field, value)?;
-            if normalized != value {
-                anyhow::bail!("{field} must not contain surrounding whitespace");
+    append_all(state_path, std::slice::from_ref(rec))
+}
+
+/// Append several records in one write, so a failure never leaves part of a
+/// multi-window observation in the store.
+pub(crate) fn append_all(state_path: &Path, records: &[QuotaObservationRecord]) -> Result<()> {
+    let mut lines = String::new();
+    for rec in records {
+        for (field, value) in [
+            ("backend instance", rec.backend_instance.as_deref()),
+            ("quota pool", rec.quota_pool.as_deref()),
+        ] {
+            if let Some(value) = value {
+                let normalized = crate::execution_identity::validate_operator_label(field, value)?;
+                if normalized != value {
+                    anyhow::bail!("{field} must not contain surrounding whitespace");
+                }
             }
         }
+        lines.push_str(&serde_json::to_string(rec).context("serialize quota observation")?);
+        lines.push('\n');
     }
     if let Some(parent) = state_path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -330,8 +348,8 @@ pub fn append(state_path: &Path, rec: &QuotaObservationRecord) -> Result<()> {
         .context("open quota store")?;
     file.lock_exclusive()
         .with_context(|| format!("locking {}", state_path.display()))?;
-    let line = serde_json::to_string(rec).context("serialize quota observation")?;
-    writeln!(file, "{line}").context("write quota observation")?;
+    file.write_all(lines.as_bytes())
+        .context("write quota observation")?;
     let _ = file.unlock();
     Ok(())
 }
@@ -505,6 +523,7 @@ pub fn refresh_stale_quota_observations(
     {
         handles.push(handle);
     }
+    handles.extend(agy::refresh_handles(profile, store_path, now));
     if crate::usage::nous::configured() {
         if let Some(handle) = maybe_refresh_backend_instance(
             store_path,

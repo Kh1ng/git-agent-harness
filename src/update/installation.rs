@@ -17,12 +17,15 @@ pub fn installation_plan(role: HostRole, agents: &[String]) -> Result<Vec<String
     ];
     if matches!(role, HostRole::Central | HostRole::Standalone) {
         plan.push("Build server/MCP; use sudo to install /etc/systemd/system/gah-server.service; install and enable user gah-prune.service/timer".into());
-        if let Some(root) = super::resolve_web_deploy_root(env::var_os("GAH_WEB_DEPLOY_ROOT"))? {
-            plan.push(format!(
-                "Build and deploy web UI to {} (sudo; replace index and prune stale assets)",
-                root.display()
-            ));
-        }
+        plan.push(
+            match super::resolve_web_deploy_root(env::var_os("GAH_WEB_DEPLOY_ROOT"))? {
+                Some(root) => format!(
+                    "Build and deploy web UI to {} (sudo; replace index and prune stale assets)",
+                    root.display()
+                ),
+                None => "Build web UI in the checkout; gah-server serves it".into(),
+            },
+        );
     }
     if agents.iter().any(|agent| agent == "opencode") {
         plan.push("Install OpenCode files in the user config directory opencode/agents/".into());

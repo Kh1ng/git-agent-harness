@@ -17,7 +17,7 @@ import { classifyAuthFailure, runAuthHealth } from './gahCli.js';
 const PROBE_INTERVAL_MS = 30 * 60 * 1000;
 const AUTH_STATES: ReadonlySet<AuthState> = new Set(['ok', 'expired', 'missing', 'unknown', 'error']);
 const bad = (state: AuthState | undefined) => state === 'expired' || state === 'missing';
-const loginKey = (probe: Pick<AuthProbe, 'backend' | 'provider'>) => `${probe.backend}|${probe.provider ?? ''}`;
+const loginKey = (probe: Pick<AuthProbe, 'backend' | 'provider' | 'backend_instance'>) => `${probe.backend}|${probe.provider ?? ''}|${probe.backend_instance ?? ''}`;
 
 /** Accepts only the documented shape from a worker; drops anything else. */
 export function parseNodeAuthHealth(value: unknown): NodeAuthHealth | null {
@@ -33,6 +33,7 @@ export function parseNodeAuthHealth(value: unknown): NodeAuthHealth | null {
       || !['probe', 'dispatch', 'chat'].includes(probe.source as string)) return [];
     return [{
       backend: probe.backend as string,
+      ...(text(probe.backend_instance, 128) ? { backend_instance: probe.backend_instance as string } : {}),
       provider: probe.provider as string | null,
       state: probe.state as AuthState,
       ...(text(probe.detail, 200) ? { detail: probe.detail as string } : {}),
@@ -150,7 +151,7 @@ export class AuthHealthMonitor {
   async turnFinished(nodeId: string, backend: string, failure?: string): Promise<void> {
     const failures = this.chatFailures.get(nodeId);
     if (failure === undefined) {
-      const key = `${nodeId}|${loginKey({ backend, provider: null })}`;
+      const key = `${nodeId}|${loginKey({ backend, provider: null, backend_instance: null })}`;
       const failed = this.current.find((row) => `${row.node_id}|${loginKey(row)}` === key && bad(row.state));
       if (!failures?.delete(backend)) return;
       this.recompute();
@@ -195,8 +196,8 @@ export class AuthHealthMonitor {
         if (!existing || (bad(probe.state) && !bad(existing.state))) byKey.set(loginKey(probe), { ...probe, node_id: nodeId, node_name: nodeName });
       }
       for (const [backend, since] of failures ?? []) {
-        byKey.set(loginKey({ backend, provider: null }), {
-          backend, provider: null, state: 'expired', source: 'chat',
+        byKey.set(loginKey({ backend, provider: null, backend_instance: null }), {
+          backend, provider: null, backend_instance: null, state: 'expired', source: 'chat',
           detail: 'A chat turn failed to authenticate.', since, node_id: nodeId, node_name: nodeName
         });
       }
@@ -231,9 +232,9 @@ export class AuthHealthMonitor {
 
 export function authActivity(row: AuthHealthRow, kind: 'auth_expired' | 'auth_restored', now: number): ActivityEvent {
   const since = row.since ?? new Date(now).toISOString();
-  const login = [row.node_name, row.backend, row.provider].filter(Boolean).join(' · ');
+  const login = [row.node_name, row.backend, row.backend_instance, row.provider].filter(Boolean).join(' · ');
   return {
-    id: `auth:${crypto.createHash('sha256').update(JSON.stringify([row.node_id, row.backend, row.provider, kind, since])).digest('hex').slice(0, 24)}`,
+    id: `auth:${crypto.createHash('sha256').update(JSON.stringify([row.node_id, row.backend, row.backend_instance ?? null, row.provider, kind, since])).digest('hex').slice(0, 24)}`,
     occurredAt: since,
     profile: null,
     kind,

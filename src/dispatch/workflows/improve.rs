@@ -32,7 +32,7 @@ use crate::validation_runner::{validate_with_exit_code, VALIDATION_COMMAND_TIMEO
 use crate::{runner, worktree};
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 mod attempt_bookkeeping;
 mod bounded_validation;
 pub(crate) use bounded_validation::bounded_validation_failure;
@@ -164,7 +164,7 @@ pub(crate) fn improve(
         format!("gah/{}-{}", profile.repo_id, ts)
     };
     apply_manual_fix_context_to_ledger(ledger, ticket_meta.as_ref(), &branch, &manual_fix);
-    let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
+    let worktree_base = crate::config::effective_worktree_base(&cfg.defaults);
     let repo = Path::new(&profile.local_path);
     ensure_dispatch_capacity(profile, &worktree_base)?;
 
