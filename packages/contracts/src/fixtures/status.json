@@ -88,6 +88,10 @@
     "central_url": null,
     "role": "central"
   },
+  "node_capacity": {
+    "memory_floor_mib": 0,
+    "worker_memory_mib": 4096
+  },
   "observations": {
     "availability": {
       "status": "ok"

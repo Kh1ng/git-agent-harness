@@ -971,6 +971,8 @@ export interface ProfileSetOptions {
   boost_workers?: number | null;
   boost_model?: string | null;
   boost_hours?: number | null;
+  /** Hold approved schema/API contract changes for human review (#1405). */
+  hold_contract_changes?: boolean | null;
   clear?: string[];
   config?: string;
 }
@@ -1083,6 +1085,11 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   for (const [flag, value] of scalingFlags) {
     if (value !== undefined && value !== null && value !== '') args.push(flag, String(value));
   }
+  if (typeof options.hold_contract_changes === 'boolean') {
+    args.push('--hold-contract-changes', String(options.hold_contract_changes));
+  } else if (options.clear?.includes('hold_contract_changes')) {
+    args.push('--clear', 'hold_contract_changes');
+  }
   appendClearArgs(
     args,
     options.clear,
@@ -1090,6 +1097,7 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
       'max_parallel_workers',
       'manager_wake_autonomy',
       'validation_timeout_seconds',
+      'hold_contract_changes',
     ])
   );
   
@@ -1174,6 +1182,8 @@ export async function runProfileRemove(options: ProfileRemoveOptions): Promise<v
 
 export interface ConfigSetOptions {
   current_manager?: string | null;
+  worker_memory_mib?: number;
+  memory_floor_mib?: number;
   /** Issue #653: none | telegram | discord. */
   notification_channel?: string;
   telegram_chat_id?: string | null;
@@ -1183,6 +1193,8 @@ export interface ConfigSetOptions {
 
 export function buildConfigSetArgs(options: ConfigSetOptions): string[] {
   const args = ['config', 'set'];
+  if (options.worker_memory_mib !== undefined) args.push('--worker-memory-mib', String(options.worker_memory_mib));
+  if (options.memory_floor_mib !== undefined) args.push('--memory-floor-mib', String(options.memory_floor_mib));
 
   if (options.current_manager !== undefined && options.current_manager !== null) {
     args.push('--current-manager', options.current_manager);
@@ -1379,7 +1391,7 @@ export async function changeExternalApproval(
 
 export async function runConfigShow(
   config?: string
-): Promise<{ current_manager: string | null; notifications?: import('@git-agent-harness/contracts').NotificationSettingsSummary }> {
+): Promise<{ current_manager: string | null; node_capacity?: import('@git-agent-harness/contracts').NodeCapacitySettings; notifications?: import('@git-agent-harness/contracts').NotificationSettingsSummary }> {
   // The bare `config show --json` response is a locked one-field
   // compatibility shape, so notification settings come from the versioned
   // full projection instead.
@@ -1389,9 +1401,10 @@ export async function runConfigShow(
   }
   const full = await runJsonCommand<{
     current_manager: string | null;
+    node_capacity?: import('@git-agent-harness/contracts').NodeCapacitySettings;
     notifications?: import('@git-agent-harness/contracts').NotificationSettingsSummary;
   }>(args, config);
-  return { current_manager: full.current_manager, notifications: full.notifications };
+  return { current_manager: full.current_manager, node_capacity: full.node_capacity, notifications: full.notifications };
 }
 
 /** Issue #149: ordered routing-candidate editing. The CLI owns config

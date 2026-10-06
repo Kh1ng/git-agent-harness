@@ -543,7 +543,9 @@ pub(crate) fn improve(
                 .internal_log_path
                 .as_deref()
                 .unwrap_or(&result.log_path);
-            let exit_failure = stall::classify_backend_exit_failure(&log_text, result.exit_code);
+            let mut exit_failure =
+                stall::classify_backend_exit_failure(&log_text, result.exit_code);
+            let invalid_model = stall::invalid_model(ledger, &log_text, &route, &mut exit_failure);
             let stalled = exit_failure.stalled;
             let stalled_before_changes = exit_failure.stalled_before_changes;
             let stalled_during_validation = exit_failure.stalled_during_validation;
@@ -595,6 +597,10 @@ pub(crate) fn improve(
                 ledger,
             );
             shutdown_ctx.checkpoint_after_result(ledger, shutdown_after_result)?;
+            if let Some(message) = invalid_model {
+                stall::discard_preserving_wip(&wt, profile, &args.mode, attempt + 1)?;
+                anyhow::bail!("{message}");
+            }
             if stalled {
                 notify_event(
                     cfg,
