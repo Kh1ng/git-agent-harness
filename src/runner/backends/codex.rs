@@ -363,7 +363,7 @@ mod tests {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         initialize_git_worktree(&f.worktree);
-        let envs = make_event_bin(&f, &[PATCH_FAILED], false);
+        let envs = make_event_bin(&f, &[PATCH_REFUSED], false);
 
         let result = run_with_executable(
             Path::new("codex"),
@@ -383,7 +383,9 @@ mod tests {
         assert!(write_refusal::refusal_detail(&log).is_none());
     }
 
-    const PATCH_FAILED: &str = r#"{"type":"item.completed","item":{"id":"i1","type":"file_change","changes":[{"path":"progress.txt","kind":"update"}],"status":"failed"}}"#;
+    /// What codex-cli 0.160.0 prints when its sandbox rejects a patch: one
+    /// stderr log line and no structured event.
+    const PATCH_REFUSED: &str = "2026-10-06T15:36:04.664446Z ERROR codex_core::tools::router: error=patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings";
 
     /// A fake `codex` that prints `events` as its `--json` stream and
     /// optionally edits the worktree.
@@ -416,7 +418,7 @@ mod tests {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         initialize_git_worktree(&f.worktree);
-        let envs = make_event_bin(&f, &[PATCH_FAILED], false);
+        let envs = make_event_bin(&f, &[PATCH_REFUSED], false);
 
         let result = run_with_executable(
             Path::new("codex"),
@@ -443,7 +445,7 @@ mod tests {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         initialize_git_worktree(&f.worktree);
-        let envs = make_event_bin(&f, &[PATCH_FAILED], false);
+        let envs = make_event_bin(&f, &[PATCH_REFUSED], false);
 
         let result = run_with_executable(
             Path::new("codex"),
@@ -472,7 +474,7 @@ mod tests {
         let _exec_guard = crate::test_support::ExecGuard::new();
         let f = fixture();
         initialize_git_worktree(&f.worktree);
-        let envs = make_event_bin(&f, &[PATCH_FAILED], true);
+        let envs = make_event_bin(&f, &[PATCH_REFUSED], true);
 
         let result = run_with_executable(
             Path::new("codex"),

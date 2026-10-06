@@ -56,6 +56,7 @@ pub(crate) fn worktree_changed_since(before: Option<&[u8]>, worktree: &Path) -> 
 pub(crate) fn claude_refused_write_tools(transcript: &str) -> Vec<String> {
     let mut tool_names: HashMap<String, String> = HashMap::new();
     let mut refused: Vec<String> = Vec::new();
+    let mut shell_ran = false;
     for line in transcript.lines().filter(|line| !line.trim().is_empty()) {
         let Ok(event) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -79,10 +80,7 @@ pub(crate) fn claude_refused_write_tools(transcript: &str) -> Vec<String> {
             }
             Some("user") => {
                 for block in content {
-                    if block.get("type").and_then(Value::as_str) != Some("tool_result")
-                        || block.get("is_error").and_then(Value::as_bool) != Some(true)
-                        || !tool_result_text(block).starts_with(CLAUDE_PERMISSION_DENIAL_PREFIX)
-                    {
+                    if block.get("type").and_then(Value::as_str) != Some("tool_result") {
                         continue;
                     }
                     let Some(name) = block
@@ -92,7 +90,12 @@ pub(crate) fn claude_refused_write_tools(transcript: &str) -> Vec<String> {
                     else {
                         continue;
                     };
-                    if CLAUDE_WRITE_TOOLS.contains(&name.as_str()) && !refused.contains(name) {
+                    if block.get("is_error").and_then(Value::as_bool) != Some(true) {
+                        shell_ran |= name == "Bash";
+                    } else if tool_result_text(block).starts_with(CLAUDE_PERMISSION_DENIAL_PREFIX)
+                        && CLAUDE_WRITE_TOOLS.contains(&name.as_str())
+                        && !refused.contains(name)
+                    {
                         refused.push(name.clone());
                     }
                 }
@@ -100,6 +103,11 @@ pub(crate) fn claude_refused_write_tools(transcript: &str) -> Vec<String> {
             _ => {}
         }
     }
+    // A narrowed `--allowedTools` allows some shell commands and denies
+    // others. A run that got shell commands through was not locked out of
+    // the shell, so one denied command there is not a refusal: a run that
+    // rightly changed nothing would otherwise end as a configuration error.
+    refused.retain(|name| name != "Bash" || !shell_ran);
     refused
 }
 
@@ -114,47 +122,41 @@ fn tool_result_text(block: &Value) -> &str {
     }
 }
 
-/// Did `codex exec --json` report that the sandbox rejected its writes?
-/// Either every patch it attempted failed, or Codex raised its own
-/// read-only-sandbox error. Command output and agent messages are ignored.
+/// Did Codex report that its sandbox rejected a write?
+///
+/// `codex exec --json` (checked on codex-cli 0.160.0) emits no structured
+/// event for a refused patch: no `file_change` item, no error event, and it
+/// exits 0. The only record is the CLI's own log line on stderr, which lands
+/// in the backend log as a raw line:
+///
+/// `<timestamp> ERROR codex_core::tools::router: error=patch rejected:
+/// writing is blocked by read-only sandbox; ...`
+///
+/// That line is the signal. A structured error event with the same message
+/// is accepted too, in case a later CLI reports it that way. A patch that
+/// merely failed (bad context, a conflict) is not a refusal and is retried;
+/// command output and agent messages are JSON-encoded inside events, so the
+/// phrase quoted there never matches.
 pub(crate) fn codex_refused_writes(log_text: &str) -> bool {
-    let mut failed_patches = 0;
-    let mut applied_patches = 0;
-    let mut sandbox_error = false;
-    for line in log_text.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(event) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        match event.get("type").and_then(Value::as_str) {
-            Some("error") => {
-                sandbox_error |= event
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .is_some_and(|message| message.contains(CODEX_READ_ONLY_SANDBOX));
-            }
-            Some("item.completed") => {
-                let item_str = |key: &str| {
-                    event
-                        .pointer(&format!("/item/{key}"))
+    log_text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .any(|line| match serde_json::from_str::<Value>(line) {
+            Ok(event) => ["/message", "/item/message"].iter().any(|pointer| {
+                let is_error = event.get("type").and_then(Value::as_str) == Some("error")
+                    || event.pointer("/item/type").and_then(Value::as_str) == Some("error");
+                is_error
+                    && event
+                        .pointer(pointer)
                         .and_then(Value::as_str)
-                };
-                match item_str("type") {
-                    Some("file_change") => match item_str("status") {
-                        Some("failed") => failed_patches += 1,
-                        Some("completed") => applied_patches += 1,
-                        _ => {}
-                    },
-                    Some("error") => {
-                        sandbox_error |= item_str("message")
-                            .is_some_and(|message| message.contains(CODEX_READ_ONLY_SANDBOX));
-                    }
-                    _ => {}
-                }
+                        .is_some_and(|message| message.contains(CODEX_READ_ONLY_SANDBOX))
+            }),
+            Err(_) => {
+                line.contains(" ERROR codex_core::")
+                    && line.contains("patch rejected:")
+                    && line.contains(CODEX_READ_ONLY_SANDBOX)
             }
-            _ => {}
-        }
-    }
-    sandbox_error || (failed_patches > 0 && applied_patches == 0)
+        })
 }
 
 /// Append the marker line to the backend log and return the exit code the
@@ -250,20 +252,59 @@ mod tests {
     }
 
     #[test]
-    fn codex_failed_patches_without_any_applied_patch_are_a_refusal() {
+    fn claude_one_denied_shell_command_is_not_a_refusal_when_the_shell_ran() {
+        let denied = "Claude requested permissions to use Bash, but you haven't granted it yet.";
+        let ran = claude_transcript("Bash", false, "On branch main\nnothing to commit");
+        let denied_shell = claude_transcript("Bash", true, denied);
+        // A narrowed allow-list let `git status` through and denied another
+        // command; the run looked and rightly changed nothing.
+        assert!(claude_refused_write_tools(&format!("{ran}{denied_shell}")).is_empty());
+        // No shell command got through at all: the run was locked out.
+        assert_eq!(claude_refused_write_tools(&denied_shell), vec!["Bash"]);
+        // A denied edit stays a refusal even when the shell works.
+        let denied_edit = claude_transcript(
+            "Edit",
+            true,
+            "Claude requested permissions to write to /repo/src/lib.rs, but you haven't granted it yet.",
+        );
+        assert_eq!(
+            claude_refused_write_tools(&format!("{ran}{denied_edit}")),
+            vec!["Edit"]
+        );
+    }
+
+    /// The whole output of a real `codex exec --json --sandbox read-only` run
+    /// asked to create a file (codex-cli 0.160.0), ids shortened. It exits 0
+    /// and the stderr line is the only trace of the refusal.
+    #[test]
+    fn codex_refusal_is_recognised_from_the_cli_log_line_of_a_real_run() {
+        let log = concat!(
+            r#"{"type":"thread.started","thread_id":"t"}"#,
+            "\n",
+            r#"{"type":"turn.started"}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"I’ll try to create `probe.txt` with `hello` using the file editing tool."}}"#,
+            "\n",
+            "2026-10-06T15:36:04.664446Z ERROR codex_core::tools::router: error=patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings\n",
+            r#"{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"Could not create `probe.txt`: the file editing tool rejected the write because the sandbox is read-only."}}"#,
+            "\n",
+            r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
+            "\n",
+        );
+        assert!(codex_refused_writes(log));
+    }
+
+    #[test]
+    fn codex_patch_that_merely_failed_is_not_a_refusal() {
+        // Bad context or a conflict fails a patch too; that run is retried.
         let log = concat!(
             r#"{"type":"thread.started","thread_id":"t"}"#,
             "\n",
             r#"{"type":"item.completed","item":{"id":"i1","type":"file_change","changes":[{"path":"src/lib.rs","kind":"update"}],"status":"failed"}}"#,
             "\n",
+            "2026-10-06T15:36:04.664446Z ERROR codex_core::tools::router: error=patch rejected: context did not match\n",
         );
-        assert!(codex_refused_writes(log));
-
-        let recovered = format!(
-            "{log}{}\n",
-            r#"{"type":"item.completed","item":{"id":"i2","type":"file_change","changes":[],"status":"completed"}}"#
-        );
-        assert!(!codex_refused_writes(&recovered));
+        assert!(!codex_refused_writes(log));
     }
 
     #[test]
