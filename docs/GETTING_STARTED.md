@@ -95,7 +95,8 @@ Install the desktop app from the releases page. In **Set up this computer**, sel
 The app opens a PowerShell console and offers to enable WSL2 and install Ubuntu.
 Approve the Windows elevation prompt. If requested, restart Windows and sign in. The setup console reopens automatically.
 Create your Linux user when prompted, then type `exit`. GAH setup continues inside WSL as that user.
-If setup fails, select the terminal setup button again. Existing WSL1 distributions require conversion to WSL2 before setup.
+If setup fails or the console closes before Linux user creation, select the terminal setup button again to continue initialization.
+Existing WSL1 distributions require conversion to WSL2 before setup.
 
 For a worker connected to another central node, use the [Windows tester guide](WINDOWS_TESTER_GUIDE.md).
 That installer also configures the Windows forwarding port and worker startup task.

@@ -20,6 +20,7 @@ $script:enabled = $false
 $script:uid = '1000'
 $script:kernel = '6.6.0-microsoft-standard-WSL2'
 $script:setupExit = 0
+$script:userExit = 0
 $script:answer = 'y'
 $script:reachable = $true
 $script:source = [pscustomobject]@{ IPAddress = '192.168.1.11'; AddressFamily = 2 }
@@ -32,6 +33,7 @@ function wsl.exe {
     if ($args -contains 'uname') { $script:kernel; return }
     if ($args -contains 'id') { $script:uid; return }
     if ($args -contains 'bash') { $global:LASTEXITCODE = $script:setupExit }
+    if ($args.Count -eq 2 -and $args[0] -eq '--distribution') { $global:LASTEXITCODE = $script:userExit }
 }
 function Read-Host { param($Prompt) $script:answer }
 function Start-Process { param($FilePath, $ArgumentList, $Verb, [switch]$Wait, [switch]$PassThru)
@@ -70,6 +72,20 @@ try {
     if ($script:resumeRegistered) { throw 'Successful setup retained RunOnce.' }
     $userLaunch = $script:calls | Where-Object { $_.Count -eq 2 -and $_[0] -eq '--distribution' }
     if (-not $userLaunch) { throw 'Resume skipped Linux user initialization.' }
+
+    # RunOnce may stop after registering Ubuntu but before user creation.
+    # The next app click has no -Resume flag and must still initialize it.
+    [IO.File]::WriteAllText($pending, ($saved | ConvertTo-Json))
+    $script:userExit = 1
+    Assert-Rejected { Invoke-GahWindowsSetup 'ignored' '' '' $true } 'Linux user initialization failed'
+    if (-not (Test-Path $pending)) { throw 'Interrupted initialization erased pending setup.' }
+    $script:userExit = 0
+    $script:calls = @()
+    $retryCommand = '~/.cargo/bin/gah setup --role worker'
+    Invoke-GahWindowsSetup 'Ubuntu' $retryCommand '' $false
+    $userLaunch = $script:calls | Where-Object { $_.Count -eq 2 -and $_[0] -eq '--distribution' }
+    if (-not $userLaunch -or $env:GAH_SCRIPT -cne $retryCommand) { throw 'App retry skipped user initialization or used the stale command.' }
+    if (Test-Path $pending) { throw 'Successful app retry retained pending setup.' }
 
     # A failed native setup keeps the pending request, so the next app click can retry.
     [IO.File]::WriteAllText($pending, ($saved | ConvertTo-Json))

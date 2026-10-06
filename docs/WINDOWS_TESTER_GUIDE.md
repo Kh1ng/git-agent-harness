@@ -46,6 +46,9 @@ Use a fresh x64 Windows computer with the desktop app installed and no WSL distr
 7. Repeat setup once to check that it preserves the distribution and existing configuration.
 
 Record the Windows version, distribution, WSL2 kernel, and setup result. Do not include credentials in the report.
+
+Also close the resumed console before completing Linux user creation, then select the app's terminal setup button again.
+Confirm that it offers Linux user initialization and continues setup without reinstalling Ubuntu.
 If setup fails, select the setup button again. The pending request remains until setup succeeds.
 The request contains no coordinator token. It stores only the distribution, central address, and literal setup command.
 If systemd is disabled, setup requests your Linux password and permission to restart the selected distribution.

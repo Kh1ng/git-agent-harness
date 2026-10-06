@@ -96,6 +96,12 @@ function Invoke-GahWindowsSetup([string]$Name, [string]$Command, [string]$Addres
         $Command = $saved.command
         $Address = $saved.central_url
         $initializeUser = $true
+    } elseif (Test-Path -LiteralPath $pending) {
+        # RunOnce is consumed at sign-in even when setup is interrupted. A
+        # later app click must still offer user initialization for the pending
+        # distribution, while retaining the app's current command and origin.
+        $saved = Get-Content -LiteralPath $pending -Raw | ConvertFrom-Json
+        $initializeUser = $saved.distribution -ceq $Name
     }
     if ($Name -cnotmatch '^[a-zA-Z0-9][a-zA-Z0-9._-]*$' -or -not $Command) { throw 'Invalid or missing desktop setup request.' }
     if ($Name -notin @(Get-GahWslDistributions)) {
