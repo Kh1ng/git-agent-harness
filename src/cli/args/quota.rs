@@ -50,7 +50,7 @@ pub enum QuotaCommands {
         /// refreshes from the Mistral Admin API (`MISTRAL_ADMIN_API_KEY`);
         /// "nous" reads the Nous account API (`NOUS_API_KEY`);
         /// "claude" reads the current native Claude OAuth login;
-        /// "agy" reads the current native Antigravity `/usage` command;
+        /// "agy" and "agy-second" read that account's native Antigravity `/usage` command;
         /// "mistral-dashboard" reads the owner-only dashboard Cookie file.
         #[arg(long, default_value = "codex")]
         backend: String,

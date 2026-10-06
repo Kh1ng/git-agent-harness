@@ -23,7 +23,7 @@ use time::OffsetDateTime;
 mod agy;
 mod identity;
 mod instances;
-pub use agy::refresh_and_store as refresh_agy_and_store;
+pub use agy::{launch as agy_launch, refresh_and_store as refresh_agy_and_store};
 pub(crate) use identity::current_source_records;
 pub use identity::{
     latest_windows_for_backend, latest_windows_for_identity,
@@ -467,22 +467,21 @@ pub fn refresh_stale_quota_observations(
     {
         handles.push(handle);
     }
-    let agy_cmd = profile.agy_path.clone().unwrap_or_else(|| "agy".into());
-    for (backend, home) in [
-        ("agy", None),
-        ("agy-second", profile.agy_second_home.as_deref()),
-    ] {
-        if backend == "agy-second" && home.is_none() {
-            continue;
-        }
+    for (account, home) in agy::accounts(profile) {
         let path = store_path.to_path_buf();
-        let command = agy_cmd.clone();
-        let home = home.map(PathBuf::from);
-        if let Some(handle) = maybe_refresh_backend(store_path, backend, now, move || {
-            refresh_agy_and_store(&command, backend, home.as_deref(), &path)
-        }) {
-            handles.push(handle);
-        }
+        let command = profile
+            .configured_backend_path(account)
+            .unwrap_or("agy")
+            .to_string();
+        let probe = agy::probe_instance(account);
+        let refresh = move || refresh_agy_and_store(&command, account, home.as_deref(), &path);
+        handles.extend(maybe_refresh_backend_instance(
+            store_path,
+            account,
+            Some(&probe),
+            now,
+            refresh,
+        ));
     }
     if crate::usage::nous::configured() {
         if let Some(handle) = maybe_refresh_backend_instance(
@@ -633,14 +632,7 @@ fn maybe_refresh_source(
         .filter(|record| {
             record.backend == backend
                 && record.credential_id.as_deref() == credential_id
-                && (credential_id.is_some()
-                    || record.backend_instance.as_deref() == instance
-                    || (instance.is_none()
-                        && matches!(backend, "agy" | "agy-second")
-                        && record
-                            .backend_instance
-                            .as_deref()
-                            .is_some_and(|id| id.starts_with(&format!("{backend}:")))))
+                && (credential_id.is_some() || record.backend_instance.as_deref() == instance)
         })
         .filter_map(|record| {
             record

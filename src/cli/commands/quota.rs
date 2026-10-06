@@ -92,11 +92,24 @@ pub fn run(command: QuotaCommands) -> Result<()> {
 
             let refreshed = if backend == "claude" {
                 quota_store::refresh_claude_and_store(&path)
-            } else if backend == "agy" {
+            } else if matches!(backend.as_str(), "agy" | "agy-second") {
                 if backend_instance.is_some() || model.is_some() || quota_pool.is_some() {
                     bail!("Antigravity usage reports its own model pools and windows; instance/model/pool overrides are unsupported");
                 }
-                quota_store::refresh_agy_and_store(&codex_cmd, &backend, None, &path)
+                // The account's configured executable and HOME, as the
+                // scheduled refresh uses them; `--command` replaces only the
+                // executable.
+                let (configured, home) = match crate::config::load(None) {
+                    Ok(config) => quota_store::agy_launch(&config, &backend)?,
+                    Err(_) if backend == "agy" => ("agy".to_string(), None),
+                    Err(error) => return Err(error),
+                };
+                let executable = if codex_cmd == backend {
+                    &configured
+                } else {
+                    &codex_cmd
+                };
+                quota_store::refresh_agy_and_store(executable, &backend, home.as_deref(), &path)
             } else if backend == "nous" {
                 let record = crate::usage::nous::refresh()?;
                 quota_store::append(&path, &record)?;
