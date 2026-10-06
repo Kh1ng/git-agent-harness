@@ -208,7 +208,7 @@ test('Watch live opens a read-only view of a running job in the left sidebar and
   await page.goto('/?page=overview&profile=fixture');
   const live = page.getByRole('region', { name: 'Factory Agents Status' });
   // The running job is named by the factory's agent process (its account and model), not "controller".
-  await expect(live).toContainText('Mock-account Gpt-6-sol');
+  await expect(live).toContainText('Mock-account · gpt-6-sol');
   await live.getByRole('button', { name: 'Watch #1381 live' }).click();
   const view = page.getByRole('complementary', { name: 'Running agents' });
   await expect(view.getByRole('heading', { name: /gpt-6-sol on #1381$/ })).toBeVisible();
@@ -232,7 +232,7 @@ test('Watch live opens a read-only view of a running job in the left sidebar and
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
   await view.getByRole('button', { name: 'Copy all output' }).click();
   await expect(view.getByRole('button', { name: 'Copy all output' })).toHaveText('Copied');
-  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  const copied = (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, '\n');
   expect(copied).toContain('gpt-6-sol on #1381');
   expect(copied).toContain('I will trace the loop.');
   expect(copied).toContain('$ cargo test --lib [failed 101]\ntest result: FAILED');
@@ -344,6 +344,6 @@ test('an idle account configured with an alias shows the model the ledger says i
   await page.route('**/api/report/roles**', (route) => route.fulfill({ json: { since: '30d', profile: 'fixture', entries: 0, skipped: 0, harness_errors: 0, cells: [], best_fit: [],
     model_aliases: [{ backend: 'claude', alias: 'sonnet', model: 'claude-sonnet-5-5' }] } }));
   await page.goto('/?page=overview&profile=fixture');
-  await expect(page.getByRole('region', { name: 'Factory Agents Status' })).toContainText('Claude Sonnet-5-5');
+  await expect(page.getByRole('region', { name: 'Factory Agents Status' })).toContainText('Claude · claude-sonnet-5-5');
   await page.unrouteAll({ behavior: 'ignoreErrors' });
 });
