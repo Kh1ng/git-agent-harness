@@ -201,11 +201,11 @@ fn store_quota_check_error_exports() {
 
 #[test]
 fn upgrade_preserves_store_quota_deduplication_in_existing_repository() {
-    for (used, remaining) in [
-        (Some(12.5), None),
-        (Some(12.5), Some(80.0)),
-        (None, Some(87.5)),
-        (None, None),
+    for (used, remaining, expected_remaining) in [
+        (Some(25.0), None, Some(75.0)),
+        (Some(12.5), Some(80.0), Some(80.0)),
+        (None, Some(87.5), Some(87.5)),
+        (None, None, None),
     ] {
         for observed_at in [Some("2026-10-04T08:00:00Z"), None] {
             let temp = tempdir().unwrap();
@@ -248,6 +248,12 @@ fn upgrade_preserves_store_quota_deduplication_in_existing_repository() {
             ));
             legacy["data"]["quota_used_percent"] = raw["quota_used_percent"].clone();
             legacy["data"]["quota_remaining_percent"] = raw["quota_remaining_percent"].clone();
+            if remaining.is_none() {
+                legacy["data"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("quota_remaining_percent");
+            }
             let partition = temp.path().join("raw/quota/2026/10/2026-10-04.jsonl");
             std::fs::create_dir_all(partition.parent().unwrap()).unwrap();
             let original = format!("{}\n", serde_json::to_string(&legacy).unwrap());
@@ -255,6 +261,24 @@ fn upgrade_preserves_store_quota_deduplication_in_existing_repository() {
 
             let mut exporter = TelemetryExporter::new(config.clone()).unwrap();
             exporter.load_exported_ids().unwrap();
+            let mut historical_records = Vec::new();
+            exporter
+                .walk_telemetry_files(|record| {
+                    historical_records.push(record.clone());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(historical_records.len(), 1);
+            let ExportedTelemetryRecord::QuotaObservation(historical) = &historical_records[0]
+            else {
+                panic!("expected historical quota observation");
+            };
+            assert_eq!(
+                historical.quota_remaining_percent, expected_remaining,
+                "historical used-only readings must normalize; explicit remaining wins"
+            );
+            let canonical = serde_json::to_value(historical).unwrap();
+            assert!(canonical.get("quota_used_percent").is_none());
             exporter
                 .export_store_quota_observations(std::slice::from_ref(&store))
                 .unwrap();

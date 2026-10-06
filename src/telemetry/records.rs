@@ -195,6 +195,7 @@ pub struct AttemptUsageRecord {
 /// Credential ids are labels, never secrets; the check error is already
 /// redacted by the store.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(from = "ExportedQuotaObservationRecordRaw")]
 pub struct ExportedQuotaObservationRecord {
     #[serde(flatten)]
     pub base: TelemetryRecord,
@@ -231,6 +232,46 @@ pub struct ExportedQuotaObservationRecord {
     /// Observation source (where this data came from)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_source: Option<String>,
+}
+
+/// Read historical used-only quota readings while keeping new exports canonical.
+#[derive(Deserialize)]
+struct ExportedQuotaObservationRecordRaw {
+    #[serde(flatten)]
+    base: TelemetryRecord,
+    backend: String,
+    backend_instance: Option<String>,
+    credential_id: Option<String>,
+    model: Option<String>,
+    quota_pool: Option<String>,
+    quota_window: Option<String>,
+    quota_remaining_percent: Option<f64>,
+    quota_used_percent: Option<f64>,
+    quota_reset_at: Option<String>,
+    checked_at: Option<String>,
+    check_error: Option<String>,
+    usage_source: Option<String>,
+}
+
+impl From<ExportedQuotaObservationRecordRaw> for ExportedQuotaObservationRecord {
+    fn from(raw: ExportedQuotaObservationRecordRaw) -> Self {
+        Self {
+            base: raw.base,
+            backend: raw.backend,
+            backend_instance: raw.backend_instance,
+            credential_id: raw.credential_id,
+            model: raw.model,
+            quota_pool: raw.quota_pool,
+            quota_window: raw.quota_window,
+            quota_remaining_percent: raw
+                .quota_remaining_percent
+                .or_else(|| raw.quota_used_percent.map(|used| 100.0 - used)),
+            quota_reset_at: raw.quota_reset_at,
+            checked_at: raw.checked_at,
+            check_error: raw.check_error,
+            usage_source: raw.usage_source,
+        }
+    }
 }
 
 /// Task outcome telemetry record
