@@ -1,6 +1,6 @@
 # Native Linux onboarding acceptance — #1320
 
-Status: **not executed**. This checklist does not satisfy acceptance criterion 7.
+Status: **blocked_on_human**. Acceptance criterion 7 requires human execution of this checklist and cannot be satisfied by automated worker tests.
 The browser test's mocked host and screenshots cannot establish native Linux
 authentication, permission prompts, service installation or dashboard completion.
 
