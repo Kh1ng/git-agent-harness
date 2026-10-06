@@ -49,7 +49,8 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            xvfb xauth dbus-x11 at-spi2-core python3-pyatspi imagemagick xdotool tesseract-ocr
 
       - name: Install dependencies
         run: npm ci
@@ -62,7 +63,7 @@ jobs:
       - name: Build shared packages
         run: npm run build:contracts && npm run build:shared
 
-      - name: Build frontendDist stub
+      - name: Build bundled Settings frontend
         working-directory: apps/desktop
         run: npx vite build
 
@@ -73,6 +74,27 @@ jobs:
       - name: Build AppImage
         working-directory: apps/desktop
         run: npx tauri build --bundles appimage
+
+      - name: Test GUI smoke assertions
+        run: python3 -m unittest discover -s scripts/tests -p test_linux_appimage.py
+
+      - name: Validate packaged onboarding (native WebKit under Xvfb)
+        timeout-minutes: 5
+        run: |
+          appimage=$(find apps/desktop/target/release/bundle/appimage -name '*.AppImage' -print -quit)
+          test -n "$appimage"
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1440x1000x24' \
+            env LIBGL_ALWAYS_SOFTWARE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 \
+            /usr/bin/python3 scripts/test-linux-appimage.py "$appimage" \
+            --environment headless --evidence artifacts/linux-appimage-smoke
+
+      - name: Preserve artifact-level GUI proof (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage-gui-smoke
+          path: artifacts/linux-appimage-smoke
+          if-no-files-found: warn
 
       - name: Publish GitHub Release
         env:
