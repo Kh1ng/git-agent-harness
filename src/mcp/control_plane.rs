@@ -10,7 +10,7 @@ use serde_json::Value;
 const DEFAULT_TIMEOUT_SECS: u32 = 300;
 /// A dispatch that waits for completion may hold the request open for the
 /// server's two-hour maximum wait, plus a minute for the response to arrive.
-const DISPATCH_WAIT_TIMEOUT_SECS: u32 = 7_260;
+pub(super) const DISPATCH_WAIT_TIMEOUT_SECS: u32 = 7_260;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {

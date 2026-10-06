@@ -964,6 +964,7 @@ dependencies = [
  "time",
  "tokio",
  "toml",
+ "tower",
  "tungstenite",
  "url",
  "uuid",

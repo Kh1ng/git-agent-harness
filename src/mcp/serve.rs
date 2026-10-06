@@ -117,13 +117,23 @@ pub fn http_router(config: &McpConfig, token: &str, allow_any_host: bool) -> axu
                 tools: tools.clone(),
             })
         },
-        Arc::new(LocalSessionManager::default()),
+        http_session_manager(),
         http_config,
     );
     let expected: [u8; 32] = Sha256::digest(format!("Bearer {token}")).into();
     axum::Router::new().nest_service(HTTP_PATH, service).layer(
         axum::middleware::from_fn_with_state(expected, require_bearer),
     )
+}
+
+/// Keep sessions alive beyond the longest outbound request, including time to
+/// deliver its result. rmcp's idle timer also runs while tool calls are pending.
+fn http_session_manager() -> Arc<LocalSessionManager> {
+    let mut manager = LocalSessionManager::default();
+    manager.session_config.keep_alive = Some(std::time::Duration::from_secs(
+        u64::from(super::control_plane::DISPATCH_WAIT_TIMEOUT_SECS) + 60,
+    ));
+    Arc::new(manager)
 }
 
 async fn require_bearer(
@@ -182,4 +192,124 @@ pub async fn run_http(config: &McpConfig, host: &str, port: u16) -> Result<()> {
     axum::serve(listener, http_router(config, token, !ip.is_loopback()))
         .await
         .context("serving MCP over HTTP")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{to_bytes, Body};
+    use serde_json::{json, Value};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+    use tower::ServiceExt;
+
+    #[derive(Clone)]
+    struct PendingDispatch {
+        started: Arc<Notify>,
+    }
+
+    impl ServerHandler for PendingDispatch {
+        async fn call_tool(
+            &self,
+            request: CallToolRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<CallToolResponse, ErrorData> {
+            assert_eq!(request.name, "gah_dispatch");
+            self.started.notify_one();
+            tokio::time::sleep(Duration::from_secs(u64::from(
+                super::super::control_plane::DISPATCH_WAIT_TIMEOUT_SECS,
+            )))
+            .await;
+            Ok(CallToolResult::success(vec![ContentBlock::text("dispatch completed")]).into())
+        }
+    }
+
+    fn post(message: Value, session: Option<&str>) -> Request {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(HTTP_PATH)
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream");
+        if let Some(session) = session {
+            request = request.header("mcp-session-id", session);
+        }
+        request.body(Body::from(message.to_string())).unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_http_dispatch_survives_default_session_idle_timeout() {
+        let started = Arc::new(Notify::new());
+        let handler = PendingDispatch {
+            started: started.clone(),
+        };
+        let service = StreamableHttpService::new(
+            move || Ok(handler.clone()),
+            http_session_manager(),
+            StreamableHttpServerConfig::default(),
+        );
+        let router = axum::Router::new().nest_service(HTTP_PATH, service);
+        let initialized = router
+            .clone()
+            .oneshot(post(
+                json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{
+                    "protocolVersion":"2025-06-18", "capabilities":{},
+                    "clientInfo":{"name":"test", "version":"1"}
+                }}),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(initialized.status(), StatusCode::OK);
+        let session = initialized.headers()["mcp-session-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        to_bytes(initialized.into_body(), usize::MAX).await.unwrap();
+        let notified = router
+            .clone()
+            .oneshot(post(
+                json!({"jsonrpc":"2.0", "method":"notifications/initialized"}),
+                Some(&session),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(notified.status(), StatusCode::ACCEPTED);
+        let pending = tokio::spawn(async move {
+            let response = router
+                .oneshot(post(
+                    json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{
+                        "name":"gah_dispatch", "arguments":{"waitForCompletion":true}
+                    }}),
+                    Some(&session),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            to_bytes(response.into_body(), usize::MAX).await.unwrap()
+        });
+        started.notified().await;
+        // No further client traffic while the dispatch is pending.
+        tokio::time::advance(Duration::from_secs(301)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!pending.is_finished(), "session expired during dispatch");
+        tokio::time::advance(Duration::from_secs(
+            u64::from(super::super::control_plane::DISPATCH_WAIT_TIMEOUT_SECS) - 301,
+        ))
+        .await;
+        let body = pending.await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        let message: Value = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .find(|message| message["id"] == 2)
+            .expect("dispatch response survived the HTTP session");
+        assert_eq!(
+            message["result"]["content"][0]["text"],
+            "dispatch completed"
+        );
+    }
 }
