@@ -634,12 +634,6 @@ mod tests {
         .unwrap()
     }
 
-    fn sha256_of_bytes(bytes: &[u8]) -> String {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(bytes);
-        digest.iter().map(|byte| format!("{byte:02x}")).collect()
-    }
-
     #[test]
     fn manifest_parses_schema_one_and_rejects_other_schemas() {
         let manifest: ReleaseManifest = serde_json::from_value(serde_json::json!({

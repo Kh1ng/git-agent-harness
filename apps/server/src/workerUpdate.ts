@@ -150,7 +150,7 @@ export class WorkerUpdateService {
       return { started: true, status: view(existing) };
     }
     const active = await this.countClaims();
-    if (active > 0) {
+    if (active !== 0) {
       const armed: WorkerUpdateRecord = {
         ...idleStatus(),
         status: 'waiting',
@@ -176,13 +176,14 @@ export class WorkerUpdateService {
     return true;
   }
 
-  private async countClaims(): Promise<number> {
+  /** Null when the claims cannot be read: callers arm (or stay armed)
+   * instead of launching, so an unreadable claim list never restarts a
+   * worker mid-dispatch. */
+  private async countClaims(): Promise<number | null> {
     try {
       return await (this.deps.countActiveClaims ?? countActiveClaims)();
     } catch {
-      // Claims cannot be read: arm anyway. The drain poll re-checks before
-      // launching, and a failed check there re-arms rather than launches.
-      return 0;
+      return null;
     }
   }
 
@@ -208,7 +209,7 @@ export class WorkerUpdateService {
       return;
     }
     const active = await this.countClaims();
-    if (active > 0) {
+    if (active !== 0) {
       writeState({ ...current, active_dispatches: active });
       return;
     }

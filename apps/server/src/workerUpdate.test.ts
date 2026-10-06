@@ -69,6 +69,23 @@ test('start with active claims arms the update instead of launching it (issue #1
   });
 });
 
+test('unreadable claims arm the update instead of launching it', async () => {
+  await withStatePath(async () => {
+    let spawned = 0;
+    const spawnFn = (() => { spawned += 1; return fakeChildProcess(5152); }) as unknown as typeof spawn;
+    const service = new WorkerUpdateService({
+      spawnFn,
+      countActiveClaims: async () => { throw new Error('gah claims list failed'); }
+    });
+
+    const result = await service.start();
+    assert.equal(result.status.status, 'waiting');
+    assert.equal(result.status.active_dispatches, null);
+    assert.equal(spawned, 0, 'a worker whose claims cannot be read must not launch');
+    service.cancel();
+  });
+});
+
 test('start with no claims launches the updater immediately and records its outcome', async () => {
   await withStatePath(async () => {
     const child = fakeChildProcess(process.pid);
