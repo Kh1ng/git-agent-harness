@@ -113,7 +113,6 @@ fn parse(output: &[u8], account: &str, now: OffsetDateTime) -> Result<Vec<QuotaO
                 model: None,
                 quota_pool: Some(format!("{account}:{pool}")),
                 quota_window: Some(window.into()),
-                quota_used_percent: fraction.map(|fraction| (1.0 - fraction) * 100.0),
                 quota_remaining_percent: fraction.map(|fraction| fraction * 100.0),
                 quota_reset_at: bucket
                     .and_then(|bucket| bucket["reset_time"].as_str())
@@ -203,7 +202,6 @@ mod tests {
         let records = parse(&output, "agy-second", OffsetDateTime::UNIX_EPOCH).unwrap();
         assert_eq!(records.len(), 4);
         assert_eq!(records[0].quota_remaining_percent, Some(0.0));
-        assert_eq!(records[0].quota_used_percent, Some(100.0));
         assert!(records[0].check_error.is_none());
         for unreadable in &records[1..] {
             assert!(unreadable.quota_remaining_percent.is_none());

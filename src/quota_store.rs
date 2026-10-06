@@ -507,22 +507,7 @@ pub fn refresh_stale_quota_observations(
     {
         handles.push(handle);
     }
-    for (account, home) in agy::accounts(profile) {
-        let path = store_path.to_path_buf();
-        let command = profile
-            .configured_backend_path(account)
-            .unwrap_or("agy")
-            .to_string();
-        let probe = agy::probe_instance(account);
-        let refresh = move || refresh_agy_and_store(&command, account, home.as_deref(), &path);
-        handles.extend(maybe_refresh_backend_instance(
-            store_path,
-            account,
-            Some(&probe),
-            now,
-            refresh,
-        ));
-    }
+    handles.extend(agy::refresh_handles(profile, store_path, now));
     if crate::usage::nous::configured() {
         if let Some(handle) = maybe_refresh_backend_instance(
             store_path,

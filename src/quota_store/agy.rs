@@ -24,6 +24,32 @@ pub(super) fn accounts(profile: &crate::config::Profile) -> Vec<(&'static str, O
     std::iter::once(("agy", None)).chain(second).collect()
 }
 
+/// Background refresh threads for each configured Antigravity account.
+pub(super) fn refresh_handles(
+    profile: &crate::config::Profile,
+    store_path: &Path,
+    now: OffsetDateTime,
+) -> Vec<std::thread::JoinHandle<()>> {
+    let mut handles = Vec::new();
+    for (account, home) in accounts(profile) {
+        let path = store_path.to_path_buf();
+        let command = profile
+            .configured_backend_path(account)
+            .unwrap_or("agy")
+            .to_string();
+        let probe = probe_instance(account);
+        let refresh = move || refresh_and_store(&command, account, home.as_deref(), &path);
+        handles.extend(super::maybe_refresh_backend_instance(
+            store_path,
+            account,
+            Some(&probe),
+            now,
+            refresh,
+        ));
+    }
+    handles
+}
+
 /// Executable and HOME for an explicit `gah quota refresh --backend <account>`,
 /// taken from the first profile that configures them.
 pub fn launch(
@@ -73,7 +99,6 @@ fn probe_marker(account: &str, now: OffsetDateTime) -> QuotaObservationRecord {
         model: None,
         quota_pool: None,
         quota_window: None,
-        quota_used_percent: None,
         quota_remaining_percent: None,
         quota_reset_at: None,
         observed_at: None,
