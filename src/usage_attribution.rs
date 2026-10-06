@@ -338,12 +338,17 @@ pub(crate) fn aggregate_attempt_usage(attempts: &[AttemptRecord]) -> LedgerUsage
         .filter(|attempt| usage_has_observation(&attempt.usage))
         .map(|attempt| &attempt.usage)
         .collect::<Vec<_>>();
-    // Keep one closed-set reason on the row; rollups count the canonical
-    // per-attempt reasons individually, including mixed outcomes.
-    aggregated.usage_unknown_reason = attempts
+    // A row reason describes absent usage only when no attempt observed usage.
+    // Rollups retain per-attempt reasons, including mixed outcomes.
+    if !observed
         .iter()
-        .filter_map(|attempt| attempt.usage.usage_unknown_reason)
-        .max();
+        .any(|usage| usage.usage_unknown_reason.is_none())
+    {
+        aggregated.usage_unknown_reason = attempts
+            .iter()
+            .filter_map(|attempt| attempt.usage.usage_unknown_reason)
+            .max();
+    }
     if observed.is_empty() {
         return aggregated;
     }
@@ -543,6 +548,54 @@ mod tests {
             .cost_unknown_reason
             .as_deref()
             .is_some_and(|reason| reason.contains("subscription")));
+    }
+
+    #[test]
+    fn aggregate_mixed_outcomes_keeps_known_usage_without_row_reason() {
+        for reason in [
+            crate::ledger::UsageUnknownReason::BackendNotInvoked,
+            crate::ledger::UsageUnknownReason::UsageArtifactMissing,
+        ] {
+            let attempts = vec![
+                AttemptRecord {
+                    usage: LedgerUsage {
+                        usage_source: Some("backend_launch_failed".into()),
+                        usage_unknown_reason: Some(reason),
+                        ..LedgerUsage::default()
+                    },
+                    ..AttemptRecord::default()
+                },
+                AttemptRecord {
+                    usage: LedgerUsage {
+                        usage_source: Some("fixture".into()),
+                        total_tokens: Some(42),
+                        ..LedgerUsage::default()
+                    },
+                    ..AttemptRecord::default()
+                },
+            ];
+            let aggregate = aggregate_attempt_usage(&attempts);
+            assert_eq!(aggregate.total_tokens, Some(42));
+            assert_eq!(aggregate.usage_unknown_reason, None);
+            assert_eq!(attempts[0].usage.usage_unknown_reason, Some(reason));
+            let mut entry = crate::ledger::LedgerEntry::new(
+                "test",
+                &crate::ledger::test_util::profile(),
+                "vibe",
+                "fix",
+                "task",
+                None,
+                None,
+            );
+            entry.usage = aggregate;
+            entry.attempts = attempts.clone();
+            let persisted = entry.normalized_for_persistence();
+            assert_eq!(persisted.usage.total_tokens, Some(42));
+            assert_eq!(persisted.usage.usage_unknown_reason, None);
+            let unknown = aggregate_attempt_usage(&attempts[..1]);
+            assert_eq!(unknown.total_tokens, None);
+            assert_eq!(unknown.usage_unknown_reason, Some(reason));
+        }
     }
 
     #[test]

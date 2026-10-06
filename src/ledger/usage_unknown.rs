@@ -13,8 +13,12 @@ pub enum UsageUnknownReason {
 }
 
 /// Durable sinks share this boundary so early dispatch/control rows and
-/// attempt records cannot be persisted without a reason for absent usage.
+/// current attempt records carry a reason for absent usage. Historical rows
+/// retain unknown telemetry rather than acquiring inferred facts during import.
 pub(super) fn annotate_unknown_usage(entry: &mut LedgerEntry) {
+    if entry.schema_version < super::LEDGER_SCHEMA_VERSION {
+        return;
+    }
     for attempt in &mut entry.attempts {
         if attempt.usage.usage_source.is_none() && attempt.usage.usage_unknown_reason.is_none() {
             attempt.usage.usage_unknown_reason = Some(
@@ -32,17 +36,12 @@ pub(super) fn annotate_unknown_usage(entry: &mut LedgerEntry) {
             .iter()
             .filter_map(|attempt| attempt.usage.usage_unknown_reason)
             .max()
-            .or(Some(
-                if entry.attempts_started == Some(0) && entry.attempts.is_empty() {
-                    UsageUnknownReason::NoAttemptStarted
-                } else if entry.attempts.is_empty() {
-                    // Dispatch can increment attempts_started before reaching
-                    // the runner, and control rows can have no runner at all.
-                    UsageUnknownReason::BackendNotInvoked
-                } else {
-                    UsageUnknownReason::UsageArtifactMissing
-                },
-            ));
+            .or(match (entry.attempts_started, entry.attempts.is_empty()) {
+                (None, true) => None,
+                (Some(0), true) => Some(UsageUnknownReason::NoAttemptStarted),
+                (Some(_), true) => Some(UsageUnknownReason::BackendNotInvoked),
+                (_, false) => Some(UsageUnknownReason::UsageArtifactMissing),
+            });
     }
 }
 
@@ -88,11 +87,36 @@ mod tests {
             let normalized = entry.normalized_for_persistence();
             assert_eq!(
                 normalized.usage.usage_unknown_reason,
-                Some(UsageUnknownReason::BackendNotInvoked)
+                attempts_started.map(|_| UsageUnknownReason::BackendNotInvoked)
             );
             assert_eq!(normalized.usage.usage_source, None);
             assert_eq!(normalized.usage.total_tokens, None);
             assert_eq!(normalized.usage.requests_count, None);
         }
+    }
+    #[test]
+    fn persistence_preserves_legacy_unknown_usage() {
+        let mut entry = LedgerEntry::new(
+            "test",
+            &crate::ledger::test_util::profile(),
+            "vibe",
+            "fix",
+            "task",
+            None,
+            None,
+        );
+        entry.schema_version = super::super::LEDGER_SCHEMA_VERSION - 1;
+        entry.attempts_started = None;
+        assert_eq!(
+            entry
+                .normalized_for_persistence()
+                .usage
+                .usage_unknown_reason,
+            None
+        );
+        entry.attempts.push(crate::ledger::AttemptRecord::default());
+        let normalized = entry.normalized_for_persistence();
+        assert_eq!(normalized.usage.usage_unknown_reason, None);
+        assert_eq!(normalized.attempts[0].usage.usage_unknown_reason, None);
     }
 }

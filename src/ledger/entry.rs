@@ -465,7 +465,9 @@ pub struct RoutingCandidateDiagnostic {
 // controller reconciliation. Every added field defaults for historical rows.
 // v9 adds canonical per-attempt route identity and safe usage attribution
 // projections. Historical absence remains unknown via additive Option fields.
-pub const LEDGER_SCHEMA_VERSION: u32 = 9;
+// v10 records explicit absent-usage reasons for new rows; older rows retain
+// their unknown telemetry during persistence normalization.
+pub const LEDGER_SCHEMA_VERSION: u32 = 10;
 
 /// Version of the machine-enforced review output and lifecycle policy. Bump
 /// this when an older review opinion, retry budget, or derived human gate must
