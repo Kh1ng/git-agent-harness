@@ -22,6 +22,20 @@ pub struct PacingConfig {
     pub conserve: f64,
     #[serde(default = "default_hard_conserve")]
     pub hard_conserve: f64,
+    /// Seconds the recurring loop rests after a completed pass before it
+    /// reads the provider again. Every pass costs provider API calls in
+    /// proportion to the open issues and pull requests, so raise this when
+    /// the loop shares one API allowance with other loops or tools.
+    #[serde(default = "default_loop_interval_seconds")]
+    pub loop_interval_seconds: u64,
+}
+
+impl PacingConfig {
+    /// The rest between loop passes, kept within 5 seconds to 1 hour so a
+    /// typo can neither hammer the provider nor park the loop for a day.
+    pub fn loop_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.loop_interval_seconds.clamp(5, 3600))
+    }
 }
 
 fn default_aggressive() -> f64 {
@@ -40,6 +54,10 @@ fn default_hard_conserve() -> f64 {
     -20.0
 }
 
+fn default_loop_interval_seconds() -> u64 {
+    30
+}
+
 impl Default for PacingConfig {
     fn default() -> Self {
         Self {
@@ -47,6 +65,7 @@ impl Default for PacingConfig {
             mild: 7.0,
             conserve: -7.0,
             hard_conserve: -20.0,
+            loop_interval_seconds: default_loop_interval_seconds(),
         }
     }
 }
@@ -214,6 +233,7 @@ mod tests {
             mild: 5.0,
             conserve: -5.0,
             hard_conserve: -10.0,
+            ..Default::default()
         };
 
         // Halfway, used 42% (remaining 58%). Target remaining 50%. Delta = 58 - 50 = +8.
@@ -228,5 +248,33 @@ mod tests {
             quota_pace(Some(39.0), Some(3.5), &config).unwrap(),
             PaceBand::AggressiveBurn
         );
+    }
+}
+
+#[cfg(test)]
+mod loop_interval_tests {
+    use super::PacingConfig;
+    use std::time::Duration;
+
+    #[test]
+    fn an_unconfigured_profile_keeps_the_thirty_second_pass_interval() {
+        let pacing: PacingConfig = toml::from_str("").unwrap();
+        assert_eq!(pacing.loop_interval(), Duration::from_secs(30));
+        assert_eq!(
+            PacingConfig::default().loop_interval(),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn the_pass_interval_follows_the_profile_and_stays_within_bounds() {
+        let interval = |seconds: u64| {
+            toml::from_str::<PacingConfig>(&format!("loop_interval_seconds = {seconds}"))
+                .unwrap()
+                .loop_interval()
+        };
+        assert_eq!(interval(120), Duration::from_secs(120));
+        assert_eq!(interval(0), Duration::from_secs(5));
+        assert_eq!(interval(1_000_000), Duration::from_secs(3600));
     }
 }
