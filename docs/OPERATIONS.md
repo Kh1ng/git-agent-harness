@@ -559,7 +559,7 @@ and `GAH_GATEWAY_EMBEDDING_DIMENSIONS`.
 
 **Supported gateway contract.** Validated against
 [`Kh1ng/TencentDB-Agent-Memory`](https://github.com/Kh1ng/TencentDB-Agent-Memory)
-`main` at `a0f993ba1eeda16243a8267ba9d1929074b806f9`. That revision has no
+`main` at `a0f993ba1eeda16243a8267ba9d1929074b806f9` (validation was stub-only; live Ollama validation was not performed). That revision has no
 Ollama-specific embedding code. `MemoryCore/src/config.ts` treats every
 `memory.embedding.provider` other than `none`, `local`, and `qclaw` as a
 remote OpenAI-compatible service. The service is disabled, with only a log

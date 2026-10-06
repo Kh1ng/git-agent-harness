@@ -1068,8 +1068,8 @@ fn colocated_installers_mutate_provider_yaml_safely() {
         let block = &source[start..end];
         let config_path = home.join("tdai-gateway.local.yaml");
 
-        let run = |given: &[(&str, &str)]| {
-            std::fs::write(&config_path, "{\"llm\":{}, \"memory\":{}}").unwrap();
+        let run_with = |initial: &str, given: &[(&str, &str)]| {
+            std::fs::write(&config_path, initial).unwrap();
             let mut envs = vec![
                 ("HOME", home.to_str().unwrap()),
                 ("PATH", path_env.as_str()),
@@ -1097,6 +1097,7 @@ console.log(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[1], 'utf8')))
             assert!(check_output.status.success(), "failed to parse yaml");
             Ok(serde_json::from_slice::<serde_json::Value>(&check_output.stdout).unwrap())
         };
+        let run = |given: &[(&str, &str)]| run_with("{\"llm\":{}, \"memory\":{}}", given);
 
         // The supported MemoryCore contract disables a remote embedding
         // provider unless apiKey, baseUrl, model, and dimensions are all set.
@@ -1192,6 +1193,15 @@ console.log(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[1], 'utf8')))
             openai["memory"]["embedding"]["apiKey"],
             "${TDAI_EMBEDDING_API_KEY}"
         );
+
+        // When the LLM endpoint is unchanged (e.g. from template BM25 moving to openai), the LLM key is preserved.
+        let preserved = run_with(
+            r#"{"llm":{"baseUrl":"https://api.openai.com/v1","apiKey":"my-llm-key"},"memory":{"embedding":{"provider":"none"}}}"#,
+            &[("GAH_GATEWAY_PROVIDER", "openai")],
+        )
+        .unwrap();
+        assert_eq!(preserved["llm"]["apiKey"], "my-llm-key");
+        assert_eq!(preserved["memory"]["embedding"]["provider"], "openai");
 
         // Shell metacharacters in an endpoint reach the YAML verbatim.
         let injection = run(&[

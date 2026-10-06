@@ -277,11 +277,17 @@ if (!Number.isInteger(dimensions) || dimensions <= 0) {
 const doc = yaml.parseDocument(readFileSync(configPath, 'utf8'));
 const existingProvider = doc.getIn(['memory', 'embedding', 'provider']);
 const existingLlmBaseUrl = doc.getIn(['llm', 'baseUrl']);
-const isChanged = existingProvider && (existingProvider !== provider || existingLlmBaseUrl !== baseUrl);
-if (isChanged) {
-  writeFileSync(configPath + '.changed', '1');
+const isLlmChanged = existingLlmBaseUrl && existingLlmBaseUrl !== baseUrl;
+const existingEmbedBaseUrl = doc.getIn(['memory', 'embedding', 'baseUrl']);
+const isEmbedChanged = existingProvider && (existingProvider !== provider || (existingEmbedBaseUrl && existingEmbedBaseUrl !== baseUrl));
+
+if (isLlmChanged) {
+  writeFileSync(configPath + '.llm.changed', '1');
 }
-const existingLlmKey = isChanged ? '' : doc.getIn(['llm', 'apiKey']);
+if (isEmbedChanged) {
+  writeFileSync(configPath + '.embed.changed', '1');
+}
+const existingLlmKey = isLlmChanged ? '' : doc.getIn(['llm', 'apiKey']);
 doc.setIn(['llm', 'baseUrl'], baseUrl);
 doc.setIn(['llm', 'model'], llmModel || defaults.llmModel);
 // Ollama ignores bearer credentials, but the gateway enables generation and
@@ -303,10 +309,15 @@ JAVASCRIPT
     gateway_env_file="$HOME/.config/gah/tdai-gateway.env"
     install -d -m 0700 "$(dirname "$gateway_env_file")"
     
-    creds_changed=0
-    if [ -f "${gateway_local_config:-}.changed" ]; then
-      creds_changed=1
-      rm -f "${gateway_local_config:-}.changed"
+    llm_changed=0
+    if [ -f "${gateway_local_config:-}.llm.changed" ]; then
+      llm_changed=1
+      rm -f "${gateway_local_config:-}.llm.changed"
+    fi
+    embed_changed=0
+    if [ -f "${gateway_local_config:-}.embed.changed" ]; then
+      embed_changed=1
+      rm -f "${gateway_local_config:-}.embed.changed"
     fi
 
     # Preserve model/provider credentials and existing gateway authentication.
@@ -322,16 +333,16 @@ JAVASCRIPT
     if [ -n "${GAH_GATEWAY_LLM_API_KEY:-}" ]; then
       upsert_env_line "$gateway_env_file" TDAI_LLM_API_KEY "$GAH_GATEWAY_LLM_API_KEY" ""
       echo "Wrote the given LLM API key to $gateway_env_file"
-    elif [ "$creds_changed" = "1" ]; then
+    elif [ "$llm_changed" = "1" ]; then
       upsert_env_line "$gateway_env_file" TDAI_LLM_API_KEY "" ""
-      echo "Cleared existing LLM API key due to provider/endpoint change"
+      echo "Cleared existing LLM API key due to LLM endpoint change"
     fi
     if [ -n "${GAH_GATEWAY_EMBEDDING_API_KEY:-}" ]; then
       upsert_env_line "$gateway_env_file" TDAI_EMBEDDING_API_KEY "$GAH_GATEWAY_EMBEDDING_API_KEY" ""
       echo "Wrote the given embedding API key to $gateway_env_file"
-    elif [ "$creds_changed" = "1" ]; then
+    elif [ "$embed_changed" = "1" ]; then
       upsert_env_line "$gateway_env_file" TDAI_EMBEDDING_API_KEY "" ""
-      echo "Cleared existing embedding API key due to provider/endpoint change"
+      echo "Cleared existing embedding API key due to embedding provider/endpoint change"
     fi
     chmod 0600 "$gateway_env_file"
     # gateway-env-setup:end

@@ -111,11 +111,17 @@ if (!Number.isInteger(dimensions) || dimensions <= 0) {
 const doc = yaml.parseDocument(readFileSync(configPath, 'utf8'));
 const existingProvider = doc.getIn(['memory', 'embedding', 'provider']);
 const existingLlmBaseUrl = doc.getIn(['llm', 'baseUrl']);
-const isChanged = existingProvider && (existingProvider !== provider || existingLlmBaseUrl !== baseUrl);
-if (isChanged) {
-  writeFileSync(configPath + '.changed', '1');
+const isLlmChanged = existingLlmBaseUrl && existingLlmBaseUrl !== baseUrl;
+const existingEmbedBaseUrl = doc.getIn(['memory', 'embedding', 'baseUrl']);
+const isEmbedChanged = existingProvider && (existingProvider !== provider || (existingEmbedBaseUrl && existingEmbedBaseUrl !== baseUrl));
+
+if (isLlmChanged) {
+  writeFileSync(configPath + '.llm.changed', '1');
 }
-const existingLlmKey = isChanged ? '' : doc.getIn(['llm', 'apiKey']);
+if (isEmbedChanged) {
+  writeFileSync(configPath + '.embed.changed', '1');
+}
+const existingLlmKey = isLlmChanged ? '' : doc.getIn(['llm', 'apiKey']);
 doc.setIn(['llm', 'baseUrl'], baseUrl);
 doc.setIn(['llm', 'model'], llmModel || defaults.llmModel);
 // Ollama ignores bearer credentials, but the gateway enables generation and
@@ -136,10 +142,15 @@ JAVASCRIPT
       gateway_env="$HOME/.config/gah/tdai-gateway.env"
       export GAH_MACOS_GATEWAY_URL=http://127.0.0.1:8420
       
-      creds_changed=0
-      if [ -f "${gateway_config:-}.changed" ]; then
-        creds_changed=1
-        rm -f "${gateway_config:-}.changed"
+      llm_changed=0
+      if [ -f "${gateway_config:-}.llm.changed" ]; then
+        llm_changed=1
+        rm -f "${gateway_config:-}.llm.changed"
+      fi
+      embed_changed=0
+      if [ -f "${gateway_config:-}.embed.changed" ]; then
+        embed_changed=1
+        rm -f "${gateway_config:-}.embed.changed"
       fi
 
       # Values travel on stdin; preserve existing provider and access credentials.
@@ -150,12 +161,12 @@ JAVASCRIPT
       fi
       if [ -n "${GAH_GATEWAY_LLM_API_KEY:-}" ]; then
         printf '%s' "$GAH_GATEWAY_LLM_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_LLM_API_KEY
-      elif [ "$creds_changed" = "1" ]; then
+      elif [ "$llm_changed" = "1" ]; then
         printf "" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_LLM_API_KEY
       fi
       if [ -n "${GAH_GATEWAY_EMBEDDING_API_KEY:-}" ]; then
         printf "%s" "$GAH_GATEWAY_EMBEDDING_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_EMBEDDING_API_KEY
-      elif [ "$creds_changed" = "1" ]; then
+      elif [ "$embed_changed" = "1" ]; then
         printf "" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_EMBEDDING_API_KEY
       fi
       chmod 0600 "$gateway_env"
