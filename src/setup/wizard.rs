@@ -415,7 +415,7 @@ impl<'a> Setup<'a> {
                 let provider = match self.host.env("GAH_GATEWAY_PROVIDER") {
                     Some(val) => Some(val),
                     None if existing_config && self.options.yes => None,
-                    None if self.options.yes => Some("ollama".to_string()),
+                    None if self.options.yes => bail!("GAH_GATEWAY_PROVIDER must be set when running non-interactively without an existing tdai-gateway.local.yaml"),
                     None => {
                         if existing_config {
                             let opts = [

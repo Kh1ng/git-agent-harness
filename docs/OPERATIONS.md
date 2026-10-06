@@ -577,7 +577,7 @@ To meet that contract, the installer writes:
 | --- | --- | --- |
 | `llm.baseUrl`, `memory.embedding.baseUrl` | endpoint, default `http://127.0.0.1:11434/v1` (Ollama's OpenAI-compatible API) | endpoint, default `https://api.openai.com/v1` |
 | `llm.model` | default `llama3` | default `gpt-4o` |
-| `llm.apiKey` | `ollama` (a non-secret placeholder: Ollama ignores it) | `${TDAI_LLM_API_KEY}` |
+| `llm.apiKey` | `ollama`, or `${TDAI_LLM_API_KEY}` when `GAH_GATEWAY_LLM_API_KEY` is given | `${TDAI_LLM_API_KEY}` when `GAH_GATEWAY_LLM_API_KEY` is given, otherwise empty string or existing value |
 | `memory.embedding.model` | default `nomic-embed-text` | default `text-embedding-3-small` |
 | `memory.embedding.dimensions` | `GAH_GATEWAY_EMBEDDING_DIMENSIONS`, or the known size of the model (`nomic-embed-text` 768) | the same (`text-embedding-3-small` 1536) |
 | `memory.embedding.sendDimensions` | `false` | `true` |
@@ -590,24 +590,6 @@ OpenAI commands that Settings generates prompt privately for an optional
 generation key and the required embedding key. Ollama commands do not
 prompt.
 
-**Validation performed (mocked Ollama backend).** Validated against the `scripts/ollama-api-stub.mjs` backend instead of a live Ollama instance, as the fork's contract could not be retrieved and live validation could not be performed.
-
-The gateway was configured using the installer's `gateway-yaml-mutation` block with `GAH_GATEWAY_PROVIDER=ollama` and `GAH_GATEWAY_ENDPOINT=http://127.0.0.1:11534/v1`. The real gateway was started against the mocked Ollama API.
-
-Sanitized output:
-
-```text
-GET /health   -> {"status":"ok","stores":{"vectorStore":true,"embeddingService":true}}
-POST /capture -> {"l0_recorded":2,"scheduler_notified":true}
-POST /recall  -> {"code":0,"message":"ok","memory_count":0}
-gateway log   -> Using remote embedding (provider=ollama, model=nomic-embed-text)
-                 Background embedding complete: 2/2 vectors updated
-                 [hybrid-embedding] Embedding OK
-```
-
-*(Note: The mocked backend does not yield a non-empty recall due to its simple vector generation).*
-
-Control: with the earlier YAML mutation (no `apiKey` or `dimensions`, no `/v1`), the same gateway reported `"embeddingService":false`.
 
 ### Network exposure (issue #879)
 
