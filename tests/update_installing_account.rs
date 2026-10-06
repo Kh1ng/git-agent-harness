@@ -89,7 +89,12 @@ fn update_installs_selected_assets_and_refreshes_them_without_agent_flags() {
             }
         }
         executable(&bin.join("cargo"), "exit 0");
-        executable(&cargo.join("bin/gah"), "exit 0");
+        // `gah update` finishes with the CLI it installed, so the stand-in
+        // for that install must be a real gah.
+        executable(
+            &cargo.join("bin/gah"),
+            &format!("exec '{}' \"$@\"", env!("CARGO_BIN_EXE_gah")),
+        );
         executable(
             &bin.join("systemctl"),
             "printf '%s\\n' \"$*\" >> \"$GAH_TEST_SYSTEMCTL_LOG\"",

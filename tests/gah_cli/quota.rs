@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn quota_snapshot_signals_the_v3_source_check_contract() {
+    let tmp = test_tempdir();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let cfg = write_real_repo_config(&tmp, &repo, "github");
+    let output = bin()
+        .args([
+            "quota",
+            "snapshot",
+            "--profile",
+            "real",
+            "--json",
+            "--config-path",
+        ])
+        .arg(cfg)
+        .assert()
+        .success();
+    let snapshot: Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(snapshot["schema_version"], 3);
+}
+
+#[test]
 fn native_claude_refresh_cannot_attribute_default_login_to_another_account() {
     let tmp = test_tempdir();
     let path = tmp.path().join("quota.jsonl");
