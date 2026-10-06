@@ -111,10 +111,11 @@ if (!Number.isInteger(dimensions) || dimensions <= 0) {
 const doc = yaml.parseDocument(readFileSync(configPath, 'utf8'));
 const existingProvider = doc.getIn(['memory', 'embedding', 'provider']);
 const existingLlmBaseUrl = doc.getIn(['llm', 'baseUrl']);
-if (existingProvider && (existingProvider !== provider || existingLlmBaseUrl !== baseUrl)) {
+const isChanged = existingProvider && (existingProvider !== provider || existingLlmBaseUrl !== baseUrl);
+if (isChanged) {
   writeFileSync(configPath + '.changed', '1');
 }
-const existingLlmKey = doc.getIn(['llm', 'apiKey']);
+const existingLlmKey = isChanged ? '' : doc.getIn(['llm', 'apiKey']);
 doc.setIn(['llm', 'baseUrl'], baseUrl);
 doc.setIn(['llm', 'model'], llmModel || defaults.llmModel);
 // Ollama ignores bearer credentials, but the gateway enables generation and

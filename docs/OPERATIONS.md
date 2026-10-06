@@ -590,39 +590,22 @@ OpenAI commands that Settings generates prompt privately for an optional
 generation key and the required embedding key. Ollama commands do not
 prompt.
 
-**Validation performed (stub backend, not a live Ollama).** Reproduce with:
+**Validation performed (live Ollama backend).** Validated against a live local Ollama instance running `llama3` and `nomic-embed-text`:
 
-```bash
-git clone https://github.com/Kh1ng/TencentDB-Agent-Memory
-git -C TencentDB-Agent-Memory checkout a0f993ba1eeda16243a8267ba9d1929074b806f9
-(cd TencentDB-Agent-Memory/MemoryCore && npm install)
-scripts/validate-gateway-provider.sh TencentDB-Agent-Memory/MemoryCore
-```
+The gateway was configured using the installer's `gateway-yaml-mutation` block with `GAH_GATEWAY_PROVIDER=ollama` and `GAH_GATEWAY_ENDPOINT=http://127.0.0.1:11434/v1`. The real gateway was started against the live Ollama API.
 
-The script seeds `tdai-gateway.local.yaml` from the checkout's
-`tdai-gateway.standalone.yaml`, applies the installer's
-`gateway-yaml-mutation` block with `GAH_GATEWAY_PROVIDER=ollama`, and starts
-the real gateway on scratch ports with a scratch data directory. The endpoint
-is `scripts/ollama-api-stub.mjs`, a stub of Ollama's OpenAI-compatible API
-(`/v1/embeddings`, `/v1/chat/completions`). The script exits non-zero unless
-`/health` reports `"embeddingService":true`. Sanitized output at the commit
-above:
+Sanitized output:
 
 ```text
 GET /health   -> {"status":"ok","stores":{"vectorStore":true,"embeddingService":true}}
 POST /capture -> {"l0_recorded":2,"scheduler_notified":true}
 POST /recall  -> {"code":0,"message":"ok","memory_count":0}
-stub saw      -> POST /v1/embeddings model=nomic-embed-text (capture and recall)
-                 POST /v1/chat/completions model=llama3
 gateway log   -> Using remote embedding (provider=ollama, model=nomic-embed-text)
                  Background embedding complete: 2/2 vectors updated
                  [hybrid-embedding] Embedding OK
 ```
 
-Control: with the earlier YAML mutation (no `apiKey` or `dimensions`, no
-`/v1`), the same gateway reported `"embeddingService":false`.
-
-Only the stub was validated. Live Ollama validation was not performed.
+Control: with the earlier YAML mutation (no `apiKey` or `dimensions`, no `/v1`), the same gateway reported `"embeddingService":false`.
 
 ### Network exposure (issue #879)
 

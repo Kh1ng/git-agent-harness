@@ -70,6 +70,7 @@ process.stdout.write(JSON.stringify(method === 'GET' ? {default_branch:'trunk'} 
       writeFileSync(log, '');
       const response = await create('gitlab', { title: 'Dashboard MR' });
       assert.equal(response.status, 200);
+      await response.text();
       const recorded = calls();
       assert.deepEqual(recorded[0], { command: 'glab', args: ['api', 'projects/group%2Fsubgroup%2Fproject', '--hostname', 'gitlab.example.test:8443', '--method', 'GET'] });
       assert.ok(recorded[1].args.includes('target_branch=trunk'));
@@ -87,11 +88,13 @@ process.stdout.write(JSON.stringify(method === 'GET' ? {default_branch:'trunk'} 
       writeFileSync(log, '');
       const response = await create('gitlab', { title: 'Draft: Dashboard MR', base: 'main', draft: true });
       assert.equal(response.status, 200);
+      await response.text();
       assert.ok(calls()[0].args.includes('title=Draft: Dashboard MR'));
       writeFileSync(log, '');
       for (const body of [{}, { title: 7 }, { title: ' ' }, { title: 'MR', body: {} }, { title: 'MR', base: [] }, { title: 'MR', draft: 'true' }]) {
         const invalid = await create('gitlab', body);
         assert.equal(invalid.status, 400);
+        await invalid.text();
       }
       assert.deepEqual(calls(), []);
     });
@@ -112,12 +115,14 @@ process.stdout.write(JSON.stringify(method === 'GET' ? {default_branch:'trunk'} 
       writeFileSync(log, '');
       const noDefault = await create('gitlab', { title: 'Dashboard MR' });
       assert.equal(noDefault.status, 502);
+      await noDefault.text();
       assert.equal(calls().length, 1, 'missing default branch must not create an MR');
       assert.ok(calls()[0].args.includes('GET'));
       writeFileSync(mode, '');
       writeFileSync(log, '');
       const response = await create('invalid-host', { title: 'Dashboard MR', base: 'main' });
       assert.equal(response.status, 502);
+      await response.text();
       assert.deepEqual(calls(), []);
     });
   });
