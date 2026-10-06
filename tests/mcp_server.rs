@@ -393,7 +393,7 @@ fn lists_the_same_24_tools_with_their_titles_and_input_schemas() {
     );
     assert_eq!(
         dispatch["properties"]["waitTimeoutSeconds"]["default"],
-        json!(7200)
+        json!(3600)
     );
     assert_eq!(
         tool("gah_route_approval_grant")["inputSchema"]["required"],
@@ -599,7 +599,7 @@ fn every_tool_forwards_its_exact_http_request() {
                 "profile": "gah", "providerKind": "github", "instanceId": "local",
                 "repo": "Kh1ng/git-agent-harness", "mode": "fix", "mr": "1100",
                 "backend": "claude", "model": "sonnet", "retries": 1, "dryRun": true,
-                "waitForCompletion": true, "waitTimeoutSeconds": 7200,
+                "waitForCompletion": true, "waitTimeoutSeconds": 3600,
             })),
         ),
         (
@@ -609,7 +609,7 @@ fn every_tool_forwards_its_exact_http_request() {
             "/api/dispatch",
             Some(json!({
                 "profile": "fixture", "repo": "o/r", "mode": "improve",
-                "waitForCompletion": false, "waitTimeoutSeconds": 7200,
+                "waitForCompletion": false, "waitTimeoutSeconds": 3600,
             })),
         ),
         (
