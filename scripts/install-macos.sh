@@ -24,6 +24,20 @@ case "$role" in central|worker) ;; *) echo "ERROR: unknown GAH_NODE_ROLE='$role'
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# Confirm the entire installer before persisting role, credentials, or gateway
+# settings. The update below reuses this approval rather than prompting again.
+if [ -z "${GAH_INSTALL_CONFIRMED:-}" ]; then
+  echo "Install GAH for role '$role' from $repo_root; configure node settings, credentials, and role services."
+  echo "Gateway mode: ${GAH_GATEWAY_MODE:-none}; agent assets: ${GAH_INSTALL_AGENT:-none}."
+  printf 'Apply these changes? [y/N] '
+  answer=""
+  read -r answer || true
+  case "$answer" in
+    y|Y|yes) ;;
+    *) echo 'Installation cancelled before configuration or installation' >&2; exit 1 ;;
+  esac
+fi
+
 # --bin gah is required: Cargo.toml declares a second [[bin]]
 # (generate-cli-capabilities) with no default-run set, so a bare `cargo run`
 # is ambiguous and errors instead of picking one. The first call builds gah.
@@ -67,7 +81,7 @@ elif [ -n "${GAH_GATEWAY_MODE:-}" ]; then
 fi
 
 bash "$repo_root/scripts/configure-node-role.sh" "$role" "${gah_cli[@]}"
-cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role" ${GAH_INSTALL_CONFIRMED:+--yes} ${GAH_INSTALL_AGENT:+--agent "$GAH_INSTALL_AGENT"}
+cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role" --yes ${GAH_INSTALL_AGENT:+--agent "$GAH_INSTALL_AGENT"}
 
 if [ "$role" = central ] && [ "${GAH_GATEWAY_MODE:-}" = colocated ]; then
   gateway_ready=0

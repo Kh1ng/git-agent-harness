@@ -22,6 +22,20 @@ case "$role" in
 esac
 
 
+# Confirm the entire installer before persisting role, credentials, or gateway
+# settings. The update below reuses this approval rather than prompting again.
+if [ -z "${GAH_INSTALL_CONFIRMED:-}" ]; then
+  echo "Install GAH for role '$role' from $repo_root; configure node settings, credentials, and role services."
+  echo "Gateway mode: ${GAH_GATEWAY_MODE:-none}; agent assets: ${GAH_INSTALL_AGENT:-none}."
+  printf 'Apply these changes? [y/N] '
+  answer=""
+  read -r answer || true
+  case "$answer" in
+    y|Y|yes) ;;
+    *) echo 'Installation cancelled before configuration or installation' >&2; exit 1 ;;
+  esac
+fi
+
 # Fresh installs and routine upgrades use the same Rust update implementation.
 # --bin gah is required: Cargo.toml declares a second [[bin]]
 # (generate-cli-capabilities) with no default-run set, so a bare
@@ -31,7 +45,7 @@ bash "$repo_root/scripts/configure-node-role.sh" "$role" cargo run --locked --bi
 # units it installs survive reboots without a login session. Only central,
 # which already needs sudo here, may prompt; a worker host without root uses
 # `sudo -n`, so it still installs cleanly and only gets a warning.
-cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role" ${GAH_INSTALL_CONFIRMED:+--yes} ${GAH_INSTALL_AGENT:+--agent "$GAH_INSTALL_AGENT"}
+cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role" --yes ${GAH_INSTALL_AGENT:+--agent "$GAH_INSTALL_AGENT"}
 
 # tailscale-dns-guard:start -- extracted verbatim by
 # tests/source_structure.rs::standalone_install_never_touches_tailscale,
