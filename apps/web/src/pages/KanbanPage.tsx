@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, Check, KanbanSquare, X } from 'lucide-react';
-import type { DeviceAgentsSnapshot } from '@git-agent-harness/contracts';
+import type { DeviceAgentsSnapshot, ProviderKind } from '@git-agent-harness/contracts';
+import { generateProviderInstanceId } from '@git-agent-harness/shared';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
 import { useGahStore } from '../store/gahStore.js';
@@ -12,7 +13,7 @@ import { StatusBadge, type StatusTone } from '../components/ui/StatusBadge.js';
 import { ExternalAnchor } from '../components/ExternalAnchor.js';
 import { formatAge, formatDuration } from '../lib/format.js';
 import { usageTone } from '../lib/subscriptionUsage.js';
-import { KANBAN_COLUMNS, buildKanban, whyNotRunning, type KanbanAgent, type KanbanBoard, type KanbanCard, type KanbanGate } from '../lib/kanbanBoard.js';
+import { KANBAN_COLUMNS, backendLabel, buildKanban, whyNotRunning, type KanbanAgent, type KanbanBoard, type KanbanCard, type KanbanGate } from '../lib/kanbanBoard.js';
 
 const KANBAN_REFRESH_MS = 15 * 1000;
 /** Done only ever grows; the board shows the most recent few. */
@@ -43,7 +44,44 @@ function CardLinks({ card, onOpenWork }: { card: KanbanCard; onOpenWork: (workId
   );
 }
 
-function JobCard({ card, now, selected, onSelect, onOpenWork }: { card: KanbanCard; now: number; selected: boolean; onSelect: (key: string) => void; onOpenWork: (workId: string) => void }) {
+/** Handing a Needs you job to an agent the person picks. */
+export type KanbanAssign = {
+  send: (card: KanbanCard, agent: KanbanAgent) => void;
+  /** Why nothing can be assigned right now; null when it can. */
+  unavailable: string | null;
+};
+
+function AssignControl({ card, agents, assign }: { card: KanbanCard; agents: KanbanAgent[]; assign: KanbanAssign }) {
+  const usable = agents.filter((agent) => agent.state !== 'unavailable');
+  const [agentId, setAgentId] = useState<string | null>(null);
+  const [sent, setSent] = useState<string | null>(null);
+  const agent = usable.find((item) => item.id === agentId) ?? usable[0];
+  const blocked = assign.unavailable ?? (agent ? null : 'No agent is available right now');
+  return (
+    <div className="mt-2">
+      <div className="flex items-center gap-1.5">
+        <select aria-label={`Agent for ${card.workId}`} value={agent?.id ?? ''} onChange={(event) => setAgentId(event.target.value)}
+          className="input min-w-0 flex-1 !px-2 !py-1 text-xs">
+          {agents.map((item) => (
+            <option key={item.id} value={item.id} disabled={item.state === 'unavailable'}>
+              {backendLabel(item.backend)}{item.state === 'unavailable' ? ' (unavailable)' : item.state === 'working' ? ' (busy)' : ''}
+            </option>
+          ))}
+        </select>
+        <button type="button" disabled={blocked !== null} title={blocked ?? `Start ${backendLabel(agent!.backend)} on ${card.workId} as a fix job`}
+          onClick={() => { assign.send(card, agent!); setSent(`Sent to ${backendLabel(agent!.backend)}. The Activity feed reports what happens.`); }}
+          className="btn-secondary !min-h-0 shrink-0 !px-2 !py-1 text-xs">
+          Assign
+        </button>
+      </div>
+      {sent && <p role="status" className="mt-1 text-[11px] text-good">{sent}</p>}
+    </div>
+  );
+}
+
+type JobCardProps = { card: KanbanCard; now: number; selected: boolean; onSelect: (key: string) => void; onOpenWork: (workId: string) => void; agents: KanbanAgent[]; assign?: KanbanAssign };
+
+function JobCard({ card, now, selected, onSelect, onOpenWork, agents, assign }: JobCardProps) {
   const facts = [
     card.agent && (card.agentRole === 'working' ? card.agent : `built by ${card.agent}`),
     card.attempts > 0 && `attempt ${card.attempts}`,
@@ -66,6 +104,7 @@ function JobCard({ card, now, selected, onSelect, onOpenWork }: { card: KanbanCa
         </button>
         {facts.length > 0 && <p className="mt-1.5 text-[11px] leading-snug text-muted">{facts.join(' · ')}</p>}
         <CardLinks card={card} onOpenWork={onOpenWork} />
+        {assign && card.column === 'needs_you' && card.workId && <AssignControl card={card} agents={agents} assign={assign} />}
       </article>
     </li>
   );
@@ -132,7 +171,7 @@ function Verdict({ ok, children }: { ok: boolean | null; children: ReactNode }) 
   );
 }
 
-function WhyPanel({ board, card, now, onClose, onOpenWork }: { board: KanbanBoard; card: KanbanCard; now: number; onClose: () => void; onOpenWork: (workId: string) => void }) {
+function WhyPanel({ board, card, now, onClose, onOpenWork, assign }: { board: KanbanBoard; card: KanbanCard; now: number; onClose: () => void; onOpenWork: (workId: string) => void; assign?: KanbanAssign }) {
   const name = card.workId ?? card.title;
   const settled = card.working || card.column === 'done';
   const heading = card.working ? `${name} is running` : card.column === 'done' ? `${name} is done` : `Why isn't ${name} running?`;
@@ -161,7 +200,12 @@ function WhyPanel({ board, card, now, onClose, onOpenWork }: { board: KanbanBoar
             <ul className="mt-1 space-y-1">{board.gates.map((gate) => <Verdict key={`${gate.label}-${gate.detail}`} ok={gate.ok}>{gate.label}: {gate.detail}</Verdict>)}</ul>
             <h4 className="mt-3 text-[11px] font-semibold uppercase tracking-wide text-muted">Each agent</h4>
             {card.job === 'merge' || card.column === 'needs_you'
-              ? <p className="mt-1 text-xs text-secondary">No agent can move this one: it waits for a person.</p>
+              ? (
+                <>
+                  <p className="mt-1 text-xs text-secondary">No agent will pick this one up on its own: it waits for you.{assign && card.workId && ' You can hand it to an agent:'}</p>
+                  {assign && card.workId && <AssignControl key={card.key} card={card} agents={board.agents} assign={assign} />}
+                </>
+              )
               : <ul className="mt-1 space-y-1">{whyNotRunning(board, card).map(({ agent, ok, verdict }) => <Verdict key={agent.id} ok={ok}><span className="text-primary">{agent.name}</span>: {verdict}</Verdict>)}</ul>}
           </>
         )}
@@ -171,7 +215,7 @@ function WhyPanel({ board, card, now, onClose, onOpenWork }: { board: KanbanBoar
 }
 
 /** The board and its side panel, from an already derived board: no fetching here. */
-export function KanbanView({ board, now, onOpenWork }: { board: KanbanBoard; now: number; onOpenWork: (workId: string) => void }) {
+export function KanbanView({ board, now, onOpenWork, assign }: { board: KanbanBoard; now: number; onOpenWork: (workId: string) => void; assign?: KanbanAssign }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const side = useRef<HTMLElement>(null);
   const selected = board.cards.find((card) => card.key === selectedKey) ?? null;
@@ -199,7 +243,7 @@ export function KanbanView({ board, now, onOpenWork }: { board: KanbanBoard; now
                   ? <p className="px-2.5 py-3 text-[11px] text-muted">Nothing here</p>
                   : (
                     <ul className="space-y-2 p-2">
-                      {shown.map((card) => <JobCard key={card.key} card={card} now={now} selected={card.key === selectedKey} onSelect={select} onOpenWork={onOpenWork} />)}
+                      {shown.map((card) => <JobCard key={card.key} card={card} now={now} selected={card.key === selectedKey} onSelect={select} onOpenWork={onOpenWork} agents={board.agents} assign={assign} />)}
                       {cards.length > shown.length && <li className="px-1 text-[11px] text-muted">and {cards.length - shown.length} older</li>}
                     </ul>
                   )}
@@ -209,7 +253,7 @@ export function KanbanView({ board, now, onOpenWork }: { board: KanbanBoard; now
         </div>
         <aside ref={side} className="min-w-0 xl:sticky xl:top-0">
           {selected
-            ? <WhyPanel board={board} card={selected} now={now} onClose={() => setSelectedKey(null)} onOpenWork={onOpenWork} />
+            ? <WhyPanel board={board} card={selected} now={now} onClose={() => setSelectedKey(null)} onOpenWork={onOpenWork} assign={assign} />
             : <AgentsPanel agents={board.agents} onSelectCard={select} />}
         </aside>
       </div>
@@ -238,7 +282,7 @@ type KanbanPageProps = {
 
 /** One page for "what is running, what is not, and why": a job board beside the agents that could do the jobs. */
 export function KanbanPage({ deviceAgents, onOpenWork }: KanbanPageProps) {
-  const { profile: wsProfile, controllerActivity } = useWebSocket();
+  const { profile: wsProfile, controllerActivity, sendMessage, isConnected } = useWebSocket();
   const profileOverride = useUiStore((state) => state.profileOverride);
   const profile = profileOverride ?? wsProfile ?? undefined;
   const status = useGahStore((state) => state.status);
@@ -247,6 +291,8 @@ export function KanbanPage({ deviceAgents, onOpenWork }: KanbanPageProps) {
   const fetchStatus = useGahStore((state) => state.fetchStatus);
   const fetchQuota = useGahStore((state) => state.fetchQuota);
   const fetchLoopStatus = useGahStore((state) => state.fetchLoopStatus);
+  const profiles = useGahStore((state) => state.profiles);
+  const fetchProfiles = useGahStore((state) => state.fetchProfiles);
   const [now, setNow] = useState(Date.now);
 
   const refresh = (force = true) => {
@@ -256,7 +302,7 @@ export function KanbanPage({ deviceAgents, onOpenWork }: KanbanPageProps) {
     void fetchQuota({ profile, since: '7d' });
     if (profile) void fetchLoopStatus(profile, { force });
   };
-  useEffect(() => { refresh(false); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [profile]);
+  useEffect(() => { refresh(false); void fetchProfiles(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [profile]);
   useAutoRefresh(refresh, KANBAN_REFRESH_MS);
   useWsReconnectRefresh(refresh);
 
@@ -270,13 +316,25 @@ export function KanbanPage({ deviceAgents, onOpenWork }: KanbanPageProps) {
     now
   }), [snapshot, quota.data, controllerActivity, deviceAgents.data, loopStatus.data, profile, now]);
 
+  const repo = profiles.data?.find((item) => item.name === profile)?.repo ?? null;
+  // The same socket message the Factory page's dispatch form and the work drawer's Re-dispatch send.
+  const assign: KanbanAssign = {
+    unavailable: !isConnected ? 'Disconnected from the server' : !profile || !repo ? 'Repository details are not available yet' : null,
+    send: (card, agent) => {
+      if (!profile || !repo || !card.workId) return;
+      const backend = agent.backend as ProviderKind;
+      sendMessage({ type: 'session.start', requestId: `kanban_assign_${Date.now()}`, profile, providerKind: backend, instanceId: generateProviderInstanceId(backend, 0), repo, mode: 'fix', backend, target: card.workId });
+      window.setTimeout(() => refresh(), 3000);
+    }
+  };
+
   return (
     <div>
       <PageHeader title="Kanban" description="What is running, what is not, and why." onRefresh={() => refresh()} refreshing={status.loading} lastUpdated={status.fetchedAt} />
       {!snapshot && status.error ? <ErrorState message={status.error} endpoint="/api/status" onRetry={() => refresh()} />
         : !snapshot ? <LoadingState label="Loading the board…" />
           : board.cards.length === 0 && board.agents.length === 0 ? <EmptyState icon={KanbanSquare} title="No jobs yet" description="Issues the factory accepts show up here as soon as it sees them." />
-            : <KanbanView board={board} now={now} onOpenWork={onOpenWork} />}
+            : <KanbanView board={board} now={now} onOpenWork={onOpenWork} assign={assign} />}
     </div>
   );
 }

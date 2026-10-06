@@ -138,3 +138,22 @@ test('a waiting card answers why it is not running, agent by agent', async ({ mo
   await why.getByRole('button', { name: 'All agents' }).click();
   await expect(component.getByRole('region', { name: 'Agents' })).toBeVisible();
 });
+
+test('a Needs you job can be handed to an agent that is available', async ({ mount }) => {
+  const sent: string[] = [];
+  const component = await mount(
+    <KanbanView board={board} now={NOW} onOpenWork={() => {}} assign={{ unavailable: null, send: (card, agent) => sent.push(`${card.workId} -> ${agent.backend}`) }} />
+  );
+  const needsYou = component.getByRole('region', { name: /^Needs you, / });
+  const picker = needsYou.getByRole('combobox', { name: 'Agent for #5' });
+
+  // Codex cannot sign in, so it cannot be chosen.
+  await expect(picker.getByRole('option', { name: 'Codex (unavailable)' })).toBeDisabled();
+  await picker.selectOption({ label: 'Antigravity' });
+  await needsYou.getByRole('button', { name: 'Assign' }).click();
+
+  await expect(needsYou.getByRole('status')).toContainText('Sent to Antigravity');
+  expect(sent).toEqual(['#5 -> agy']);
+  // Only Needs you cards offer it.
+  await expect(component.getByRole('button', { name: 'Assign' })).toHaveCount(1);
+});

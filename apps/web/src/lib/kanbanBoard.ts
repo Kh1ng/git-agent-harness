@@ -103,7 +103,7 @@ export interface KanbanInput {
 }
 
 const BACKEND_LABELS: Record<string, string> = { claude: 'Claude', codex: 'Codex', agy: 'Antigravity', gemini: 'Gemini', opencode: 'OpenCode', vibe: 'Vibe' };
-const backendLabel = (backend: string) => BACKEND_LABELS[backend.toLowerCase()] ?? backend.charAt(0).toUpperCase() + backend.slice(1);
+export const backendLabel = (backend: string) => BACKEND_LABELS[backend.toLowerCase()] ?? backend.charAt(0).toUpperCase() + backend.slice(1);
 /** `Codex · gpt-6.1-sol`: the subscription and the exact model. */
 export const agentLabel = (backend: string, model: string | null | undefined) => `${backendLabel(backend)} · ${model || 'model not reported'}`;
 
