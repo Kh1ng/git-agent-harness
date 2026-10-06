@@ -303,7 +303,6 @@ pub(super) fn parse(
         model: None,
         quota_pool: Some(identity),
         quota_window: Some("vibe-code-included-monthly".into()),
-        quota_used_percent: allowance.as_ref().map(|(used, _)| *used),
         quota_remaining_percent: allowance.as_ref().map(|(used, _)| 100.0 - used),
         quota_reset_at: allowance.map(|(_, reset)| reset),
         observed_at: Some(checked.clone()),

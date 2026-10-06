@@ -153,8 +153,8 @@ test('worker allowances keep node identity, independent instances and central us
     ...central,
     candidates: [
       { ...template, backend: 'claude', provider: 'anthropic', backend_instance: 'claude', model: null, quota_observations: [
-        { backend: 'claude', quota_window: '5-hour', quota_used_percent: 0, quota_remaining_percent: 100, observed_at: new Date().toISOString(), usage_source: 'claude_oauth_usage' },
-        { backend: 'claude', quota_window: 'weekly', quota_used_percent: 78, quota_remaining_percent: 22, observed_at: new Date().toISOString(), usage_source: 'claude_oauth_usage' }
+        { backend: 'claude', quota_window: '5-hour', quota_remaining_percent: 100, observed_at: new Date().toISOString(), usage_source: 'claude_oauth_usage' },
+        { backend: 'claude', quota_window: 'weekly', quota_remaining_percent: 22, observed_at: new Date().toISOString(), usage_source: 'claude_oauth_usage' }
       ] },
       { ...template, backend: 'vibe', provider: 'mistral', backend_instance: 'vibe-second', model: null }
     ]
@@ -183,7 +183,7 @@ test('worker allowances keep node identity, independent instances and central us
 test('observation-only Nous accounts show balances without becoming generic OpenCode routing capacity', async ({ mount, page }) => {
   const quota = JSON.parse(readFileSync(new URL('../../../server/tests/fixtures/gah/responses/quota.json', import.meta.url), 'utf8')) as QuotaSnapshot;
   quota.candidates = [{ ...quota.candidates[0], backend: 'opencode', provider: null, backend_instance: 'opencode', model: null, quota_observations: [] }];
-  quota.quota_checks = [{ backend: 'opencode', provider: 'nous', backend_instance: 'opencode:nous-portal-api', quota_pool: 'nous-portal-api', checked_at: new Date().toISOString(), status: 'data', quota_observations: [{ backend: 'opencode', quota_window: 'subscription-monthly', quota_used_percent: 100, quota_remaining_percent: 0, observed_at: new Date().toISOString(), usage_source: 'nous_portal_account' }] }];
+  quota.quota_checks = [{ backend: 'opencode', provider: 'nous', backend_instance: 'opencode:nous-portal-api', quota_pool: 'nous-portal-api', checked_at: new Date().toISOString(), status: 'data', quota_observations: [{ backend: 'opencode', quota_window: 'subscription-monthly', quota_remaining_percent: 0, observed_at: new Date().toISOString(), usage_source: 'nous_portal_account' }] }];
   await page.route('**/api/cli-router', route => route.fulfill({ json: { settings: { url: null, hasApiKey: false, hasManagementKey: false }, status: 'unconfigured', strategy: 'round-robin', sessionAffinity: false, accounts: [], models: [] } }));
   const component = await mount(<MockStoreProvider statusData={null} quotaData={quota}><WebSocketProvider><QuotaPage /></WebSocketProvider></MockStoreProvider>);
   const nous = component.getByTestId('quota-candidate-opencode-0').filter({ hasText: 'Observed account' });
@@ -261,7 +261,7 @@ for (const width of [390, 1440]) {
     await expect(component.getByRole('progressbar')).toHaveCount(0);
     await component.getByText('Usage and data freshness', { exact: true }).click();
     await expect(component.locator('.stat-tile').filter({ hasText: 'Usage (7d)' }).getByText('1.2k', { exact: true })).toBeVisible();
-    const withAllowance: QuotaSnapshot = { ...quota, quota_checks: [{ ...quota.quota_checks[0], quota_observations: [{ ...quota.quota_checks[0].quota_observations![0], quota_window: 'vibe-code-included-monthly', quota_used_percent: 60, quota_remaining_percent: 40, quota_reset_at: '2026-11-01T00:00:00Z' }] }] };
+    const withAllowance: QuotaSnapshot = { ...quota, quota_checks: [{ ...quota.quota_checks[0], quota_observations: [{ ...quota.quota_checks[0].quota_observations![0], quota_window: 'vibe-code-included-monthly', quota_remaining_percent: 40, quota_reset_at: '2026-11-01T00:00:00Z' }] }] };
     await component.update(<MockStoreProvider statusData={null} quotaData={withAllowance}><WebSocketProvider><QuotaPage /></WebSocketProvider></MockStoreProvider>);
     await expect(dashboard.getByRole('progressbar', { name: 'Vibe Code included monthly allowance: 60% used, 40% remaining' })).toBeVisible();
     await expect(usage.getByText('$12.34', { exact: true })).toBeVisible();
@@ -272,7 +272,7 @@ for (const width of [390, 1440]) {
     await expect(component.getByTestId('quota-candidate-vibe-1').getByRole('progressbar')).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: `test-results/component/mistral-dashboard-${width}.png`, fullPage: true });
-    const allowanceUnavailable: QuotaSnapshot = { ...withAllowance, quota_checks: [{ ...withAllowance.quota_checks[0], quota_observations: [{ ...withAllowance.quota_checks[0].quota_observations![0], quota_used_percent: undefined, quota_remaining_percent: undefined, quota_reset_at: undefined }] }] };
+    const allowanceUnavailable: QuotaSnapshot = { ...withAllowance, quota_checks: [{ ...withAllowance.quota_checks[0], quota_observations: [{ ...withAllowance.quota_checks[0].quota_observations![0], quota_remaining_percent: undefined, quota_reset_at: undefined }] }] };
     await component.update(<MockStoreProvider statusData={null} quotaData={allowanceUnavailable}><WebSocketProvider><QuotaPage /></WebSocketProvider></MockStoreProvider>);
     await expect(usage.getByText('$12.34', { exact: true })).toBeVisible();
     await expect(dashboard.getByText('Monthly allowance reading unavailable', { exact: true })).toBeVisible();
