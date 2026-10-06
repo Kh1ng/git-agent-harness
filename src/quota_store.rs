@@ -85,6 +85,15 @@ pub fn store_path() -> PathBuf {
     if let Ok(path) = std::env::var("GAH_QUOTA_STORE_PATH") {
         return PathBuf::from(path);
     }
+    // Unit tests must never read the operator's real store: the factory's
+    // validation gate runs `cargo test` with the service's XDG_STATE_HOME,
+    // and real quota observations there change routing decisions. Tests
+    // that need observations set GAH_QUOTA_STORE_PATH (QuotaStoreEnvGuard).
+    if cfg!(test) {
+        return std::env::temp_dir()
+            .join(format!("gah-unit-test-quota-store-{}", std::process::id()))
+            .join("quota_observations.jsonl");
+    }
     if let Some(dir) = std::env::var_os("XDG_STATE_HOME") {
         Path::new(&dir).join("gah").join("quota_observations.jsonl")
     } else {
@@ -227,10 +236,6 @@ fn has_ledger_usage_data(usage: &crate::ledger::LedgerUsage) -> bool {
         || usage.requests_count.is_some()
         || usage.estimated_cost_usd.is_some()
         || usage.actual_cost_usd.is_some()
-        || usage.quota_window.is_some()
-        || usage.quota_used_percent.is_some()
-        || usage.quota_remaining_percent.is_some()
-        || usage.quota_reset_at.is_some()
 }
 
 fn has_admin_rate_limits_data(limits: &crate::usage::AdminRateLimits) -> bool {

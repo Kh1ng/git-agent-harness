@@ -396,6 +396,7 @@ export interface NodeRoleStatus {
 export interface StatusSnapshot {
   /** Host role added in #938; absent on older CLIs. */
   node?: NodeRoleStatus;
+  node_capacity?: NodeCapacitySettings;
   schema_version: number;
   review_contract_version: number;
   generated_at: string;
@@ -781,6 +782,9 @@ export interface ProfileSummary {
   manager_wake_autonomy: WakeAutonomyValue | null;
   /** Delivery mode for work results ('pr' | 'handoff'). Defaults to 'pr' if omitted. */
   delivery_mode?: 'pr' | 'handoff';
+  /** Whether an approved change to a persisted or wire contract without
+   * compatibility evidence waits for a human (#1405). Defaults to true. */
+  hold_contract_changes?: boolean;
   /** Effective validation command timeout in seconds for this profile (defaults
    * to 300). If unset in TOML, this is computed and returned as the effective
    * timeout. */
@@ -982,11 +986,29 @@ export interface ConfigSummary {
   /** Which agent CLI is currently acting as the operator's manager across
    * all profiles/projects (null = unset, so no manager wake happens). */
   current_manager: string | null;
+  node_capacity?: NodeCapacitySettings;
   /** Issue #653: notification channel settings (no secrets — credentials
    * live in the environment). Optional while schema-v1 clients may still
    * be connected to an older server. */
   notifications?: NotificationSettingsSummary;
 }
+
+export interface NodeCapacitySettings {
+  worker_memory_mib: number;
+  memory_floor_mib: number;
+}
+
+/** Issue #1380: smallest accepted value for both node-capacity settings, in
+ * MiB. The Rust side enforces the same bound; the Settings form reads it
+ * from here so the limits are not restated per screen. */
+export const NODE_CAPACITY_MIN_MIB = 512;
+
+/** Issue #1380: default node-capacity settings. A `memory_floor_mib` of 0
+ * keeps the adaptive floor of max(2048 MiB, total memory / 6). */
+export const NODE_CAPACITY_DEFAULTS: NodeCapacitySettings = {
+  worker_memory_mib: 4096,
+  memory_floor_mib: 0,
+};
 
 /** Issue #653: notification channel settings projection. */
 export interface NotificationSettingsSummary {
@@ -1170,6 +1192,7 @@ export interface ConfigShowFull {
   schema_version: number;
   config_path: string;
   current_manager: string | null;
+  node_capacity?: NodeCapacitySettings;
   profiles: Record<string, ConfigProfileSummary>;
 }
 
@@ -1177,6 +1200,8 @@ export interface ConfigShowFull {
  * clears the field. */
 export interface ConfigSetData {
   current_manager?: string | null;
+  worker_memory_mib?: number;
+  memory_floor_mib?: number;
   /** Issue #653: none | telegram | discord. Credentials come from the
    * environment (TELEGRAM_BOT_TOKEN / DISCORD_WEBHOOK_URL), never config. */
   notification_channel?: 'none' | 'telegram' | 'discord';
@@ -1229,6 +1254,16 @@ export type HumanRequiredReasonCode =
 
 export type ControllerActivityStatus = 'running' | 'finished' | 'failed';
 
+/** The loop's most recent decision for a profile and why (#1406). */
+export interface LoopDecision {
+  timestamp: string;
+  /** NextAction kind, e.g. `dispatch_ticket`, `human_required`, `no_op`. */
+  kind: string;
+  reason: string;
+  work_id: string | null;
+  reason_code: string | null;
+}
+
 export interface ControllerActivity {
   run_id: string;
   profile: string | null;
@@ -1271,12 +1306,7 @@ export interface LedgerUsage {
   requests_count: number | null;
   estimated_cost_usd: number | null;
   actual_cost_usd: number | null;
-  quota_window: string | null;
-  quota_used_percent: number | null;
-  quota_remaining_percent: number | null;
-  quota_reset_at: string | null;
   token_usage_unknown_reason?: string | null;
-  quota_unknown_reason?: string | null;
   /**
    * Issue #119: provenance-aware per-attempt behavior metrics (tool calls,
    * shell calls, file edits, test runs). `null`/`undefined` means the backend

@@ -596,13 +596,10 @@ pub(super) fn run_backend_with_reserved_route(
 /// produced when `--json` is passed to codex exec). Falls back to the
 /// generic regex-based parser for non-JSONL output from other backends.
 ///
-/// Issue #155: for AGY, also merges in the run-scoped cli.log delta
-/// (quota/reset messages) -- the offset-scoped tail captured by runner,
-/// NOT a fresh read of the whole cli.log, so a single attempt's usage is
-/// never polluted by prior runs or concurrent appends.
+/// Quota exhaustion is handled separately through availability.
 pub(super) fn attempt_usage(
     log_path: &str,
-    agy_cli_log_delta: Option<&str>,
+    _agy_cli_log_delta: Option<&str>,
     attribution: UsageAttribution<'_>,
     transcript_path: Option<&str>,
     claude_path: Option<&str>,
@@ -728,23 +725,12 @@ pub(super) fn attempt_usage(
             }
         }
     }
-    if backend_kind == Some(BackendKind::Openhands) {
-        let openhands_usage = usage::parse_openhands_usage(&text);
-        if openhands_usage.usage_source.is_some() {
-            usage = usage::merge_usage(openhands_usage, usage);
-        }
-    }
     let has_json_lines = text.lines().any(|line| line.trim_start().starts_with('{'));
     if usage.usage_source.is_none() && (backend_kind != Some(BackendKind::Codex) || !has_json_lines)
     {
         // Fall back to the generic regex-based parser for other backends (or
         // for codex running in non-JSON mode).
         usage = usage::parse_generic_usage(&text, "attempt_output_log");
-    }
-
-    if let Some(delta) = agy_cli_log_delta {
-        let agy = usage::parse_agy_cli_log_delta(delta, "agy_cli_log_delta");
-        usage = usage::merge_usage(usage, agy);
     }
 
     if usage.usage_source.is_some() {
