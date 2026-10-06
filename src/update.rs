@@ -187,7 +187,10 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         println!("Installed macOS LaunchAgent: {}", agent.display());
     }
 
-    let factory_enabled = crate::factory::enabled(None)?;
+    // Only a config that turns the module off stops services. A host with no
+    // config at the default path, or one that does not parse, keeps its loops
+    // and still gets its units installed.
+    let factory_disabled = crate::factory::disabled_by_config(None);
     match install_loop_unit_template(&repo)? {
         Some(loop_unit) => println!("Installed loop unit: {}", loop_unit.display()),
         None if cfg!(target_os = "macos") => {
@@ -213,9 +216,18 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         }
         None => println!("systemd not available on this host: skipping watchdog unit install."),
     }
-    if !factory_enabled {
-        crate::factory::apply_services(false)?;
-        println!("Factory automation disabled: loop and watchdog services remain inactive.");
+    if factory_disabled {
+        // A service-control failure must not stop the shared units below from
+        // being installed; `gah loop` refuses to start while the module is off.
+        match crate::factory::apply_services(false) {
+            Ok(()) => println!(
+                "Factory automation disabled: loop and watchdog services remain inactive."
+            ),
+            Err(error) => eprintln!(
+                "warning: factory automation is disabled but its services could not be stopped: {error:#}. \
+                 Run `gah config set --factory-enabled false` again once systemd is reachable."
+            ),
+        }
     }
     match install_quota_refresh_unit_template(&repo)? {
         Some(quota_refresh_units) => {

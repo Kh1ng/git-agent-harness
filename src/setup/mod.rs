@@ -195,7 +195,9 @@ pub fn run(args: Args) -> Result<()> {
             memory: args.memory.unwrap_or(requirements::MemoryMode::Off),
         };
         let mut report = requirements::report(selection, &host);
-        report.factory_enabled = crate::factory::enabled(None)?;
+        // A config that does not load must not fail this read-only check: the
+        // requirements are still worth reporting, with the factory shown off.
+        report.factory_enabled = crate::factory::enabled(None).unwrap_or(false);
         report.factory_ready = report.factory_enabled && report.ready;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&report)?);

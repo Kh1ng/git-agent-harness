@@ -1,7 +1,10 @@
-//! Host-local factory module policy. Missing configuration preserves legacy installs.
+//! Host-local factory module policy.
 use anyhow::{bail, Context, Result};
 use std::process::Command;
 
+/// Whether this host may run factory loops. A config written before the
+/// module existed has no `factory_enabled` key and stays on. No config file
+/// at all is a host that has not been set up, which is off.
 pub fn enabled(config_path: Option<&str>) -> Result<bool> {
     if !crate::config::resolve_config_path(config_path).exists() {
         return Ok(false);
@@ -10,6 +13,15 @@ pub fn enabled(config_path: Option<&str>) -> Result<bool> {
         .defaults
         .factory_enabled
         .unwrap_or(true))
+}
+
+/// True only when a readable config turns the module off. `enabled` is also
+/// false for a missing config and fails for an unreadable one; neither says
+/// the operator switched the factory off, so a caller that stops services on
+/// its own initiative (`gah update`) must ask this instead.
+pub fn disabled_by_config(config_path: Option<&str>) -> bool {
+    crate::config::resolve_config_path(config_path).exists()
+        && matches!(enabled(config_path), Ok(false))
 }
 
 pub fn require_enabled(config_path: Option<&str>) -> Result<()> {
@@ -111,9 +123,16 @@ mod tests {
         let path = dir.path().join("config.toml");
         let path = path.to_str().unwrap();
         assert!(!enabled(Some(path)).unwrap());
+        // Off, but not switched off: `gah update` must leave services alone.
+        assert!(!disabled_by_config(Some(path)));
+        std::fs::write(path, "[defaults\n").unwrap();
+        assert!(enabled(Some(path)).is_err());
+        assert!(!disabled_by_config(Some(path)));
         std::fs::write(path, "[defaults]\n").unwrap();
         assert!(enabled(Some(path)).unwrap());
+        assert!(!disabled_by_config(Some(path)));
         std::fs::write(path, "[defaults]\nfactory_enabled = false\n").unwrap();
+        assert!(disabled_by_config(Some(path)));
         assert!(require_enabled(Some(path)).is_err());
         std::fs::write(path, "[defaults]\nfactory_enabled = true\n").unwrap();
         assert!(require_enabled(Some(path)).is_ok());
