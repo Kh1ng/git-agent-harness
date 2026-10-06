@@ -810,6 +810,8 @@ export interface ProfileSummary {
   /** Concurrent-run caps keyed by `backend/model`; a model without an
    * entry is unlimited. Absent on CLIs that do not report them. */
   max_concurrent_per_model?: Record<string, number>;
+  /** Native reasoning effort per backend; missing on older CLIs. */
+  agent_reasoning_effort?: Record<string, string>;
   /** Absent on CLIs without worker scaling. */
   worker_scaling?: WorkerScalingSettings;
   /** Manager-wake autonomy for this profile (null = unset -> off). */

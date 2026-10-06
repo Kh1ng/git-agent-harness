@@ -683,6 +683,12 @@ pub(super) fn add_request_schemas(manifest: &mut CapabilityManifest) {
     profile_set["required"] = json!(["name"]);
     let scaling_fields = object(&[
         (
+            "agent_effort",
+            "string",
+            false,
+            "Native task reasoning settings, each codex|claude=effort; default clears the override.",
+        ),
+        (
             "agent_model",
             "string",
             false,
@@ -744,7 +750,10 @@ pub(super) fn add_request_schemas(manifest: &mut CapabilityManifest) {
     {
         profile_set["properties"][name] = schema.clone();
     }
-    let profile_set = string_arrays(profile_set, &["agent_model", "max_concurrent"]);
+    let profile_set = string_arrays(
+        profile_set,
+        &["agent_model", "agent_effort", "max_concurrent"],
+    );
     set("profile.set", profile_set);
 
     set(

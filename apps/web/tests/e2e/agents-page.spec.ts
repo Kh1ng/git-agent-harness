@@ -2,6 +2,10 @@ import { expect, test } from '@playwright/test';
 
 const mockUrl = process.env.GAH_MOCK_BASE_URL ?? 'http://127.0.0.1:3774';
 
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: 'wait' });
+});
+
 test.beforeEach(async ({ page, request }) => {
   await request.post(`${mockUrl}/api/mock/reset`);
   let configuredModel = 'gpt-5';
@@ -25,14 +29,14 @@ test.beforeEach(async ({ page, request }) => {
 
 test('model selection shows the exact model and persists routing and capacity', async ({ page, request }) => {
   const picker = page.getByRole('combobox', { name: /^Model for Codex/ }).first();
-  await expect(picker.getByRole('option', { name: 'GPT 6.1 Sol (gpt-6.1-sol)' })).toBeAttached();
+  await expect(picker.getByRole('option', { name: 'GPT 6.1 Sol' })).toBeAttached();
   await picker.selectOption('gpt-6.1-sol');
   await page.getByLabel(/^Limit for Codex/).first().fill('2');
   await page.getByLabel('Base worker capacity').fill('4');
   const mutation = page.waitForRequest((req) => req.method() === 'PATCH' && req.url().endsWith('/api/profiles/fixture'));
-  await page.getByRole('button', { name: 'Save models and limits' }).click();
+  await page.getByRole('button', { name: 'Save agent settings' }).click();
   expect((await mutation).postDataJSON()).toMatchObject({ agent_model: ['codex/gpt-5=gpt-6.1-sol'], max_concurrent: ['codex/gpt-6.1-sol=2'] });
-  await expect(page.getByText('Agent models and limits saved.')).toBeVisible();
+  await expect(page.getByText('Agent settings saved.')).toBeVisible();
   const profiles = await request.get(`${mockUrl}/api/profiles`).then((r) => r.json());
   expect(profiles.find((p: { name: string }) => p.name === 'fixture').max_parallel_workers).toBe(4);
   await page.reload();
@@ -86,8 +90,8 @@ test('an unlisted model is editable and catalog failure keeps the current select
   await expect(picker).toHaveValue('gpt-5');
   await picker.selectOption('__custom__');
   await page.getByRole('textbox', { name: /^Custom model for codex/ }).fill('custom-model');
-  await page.getByRole('button', { name: 'Save models and limits' }).click();
-  await expect(page.getByText('Agent models and limits saved.')).toBeVisible();
+  await page.getByRole('button', { name: 'Save agent settings' }).click();
+  await expect(page.getByText('Agent settings saved.')).toBeVisible();
 });
 
 test('Claude models show versions and context variants while saving exact model values', async ({ page }) => {
@@ -101,6 +105,7 @@ test('Claude models show versions and context variants while saving exact model 
       { id: 'claude-opus-4-6', name: 'Opus', description: 'A pinned version' },
       { id: 'sonnet', name: 'Sonnet', description: 'Sonnet 5 · Efficient for routine tasks' },
       { id: 'haiku', name: 'Haiku', description: 'Haiku 4.5 · Fastest for quick answers' },
+      { id: 'claude-fable-5[1m]', name: 'Fable', description: 'Fable 5' },
     ], reasoningEfforts: [],
   } }));
   await page.route('**/api/report/roles**', (route) => route.fulfill({ json: {
@@ -108,6 +113,7 @@ test('Claude models show versions and context variants while saving exact model 
       { backend: 'claude', alias: 'opus[1m]', model: '<synthetic>' },
       { backend: 'claude', alias: 'opus', model: 'claude-opus-5-5' },
       { backend: 'claude', alias: 'sonnet', model: 'claude-sonnet-4-6' },
+      { backend: 'claude', alias: 'claude-fable-5[1m]', model: 'claude-fable-5-1' },
     ],
   } }));
   await page.reload();
@@ -117,10 +123,54 @@ test('Claude models show versions and context variants while saving exact model 
   await expect(picker.getByRole('option', { name: 'Opus 4.6', exact: true })).toBeAttached();
   await expect(picker.getByRole('option', { name: 'Sonnet 5', exact: true })).toBeAttached();
   await expect(picker.getByRole('option', { name: 'Haiku 4.5', exact: true })).toBeAttached();
+  await expect(picker.getByRole('option', { name: 'Fable 5.1 (1M context)', exact: true })).toBeAttached();
   await expect(picker.getByRole('option', { selected: true })).toHaveText('Opus 5.5 (provider default)');
   await picker.selectOption('claude-opus-4-6');
   const mutation = page.waitForRequest((req) => req.method() === 'PATCH' && req.url().endsWith('/api/profiles/fixture'));
-  await page.getByRole('button', { name: 'Save models and limits' }).click();
+  await page.getByRole('button', { name: 'Save agent settings' }).click();
   expect((await mutation).postDataJSON()).toMatchObject({ agent_model: ['claude/opus=claude-opus-4-6'] });
-  await expect(page.getByText('Agent models and limits saved.')).toBeVisible();
+  await expect(page.getByText('Agent settings saved.')).toBeVisible();
+});
+
+test('Antigravity separates model family from reasoning and saves the exact provider variant', async ({ page }) => {
+  await page.route('**/api/config/effective**', async (route) => {
+    const config = await (await route.fetch()).json();
+    await route.fulfill({ json: { ...config, improve_candidates: [{ backend: 'agy', model: 'Gemini 3.8 Flash (High)', priority: 100 }] } });
+  });
+  await page.route('**/api/manager-chat/models**', (route) => route.fulfill({ json: {
+    models: ['High', 'Medium', 'Low'].map((effort) => ({ id: `gemini-3.8-flash-${effort.toLowerCase()}`, name: `Gemini 3.8 Flash (${effort})` })),
+    reasoningEfforts: ['low', 'medium', 'high'].map((id) => ({ id, name: id })),
+  } }));
+  await page.reload();
+  await page.getByRole('button', { name: 'Models & capacity', exact: true }).click();
+  const picker = page.getByRole('combobox', { name: /^Model for Antigravity/ });
+  await expect(picker.getByRole('option')).toHaveCount(2); // one model + custom entry
+  await expect(picker.getByRole('option', { selected: true })).toHaveText('Gemini 3.8 Flash');
+  const reasoning = page.getByRole('combobox', { name: /^Reasoning for Antigravity/ });
+  await expect(reasoning).toHaveValue('high');
+  await expect(reasoning.getByRole('option')).toHaveText(['Low', 'Medium', 'High']);
+  await reasoning.selectOption('low');
+  await expect(picker).toHaveAttribute('title', /Model ID: gemini-3.8-flash-low/);
+  await page.getByText('Model details', { exact: true }).click();
+  await expect(page.getByText('Provider name: Gemini 3.8 Flash (Low)', { exact: false })).toBeVisible();
+  const mutation = page.waitForRequest((req) => req.method() === 'PATCH' && req.url().endsWith('/api/profiles/fixture'));
+  await page.getByRole('button', { name: 'Save agent settings' }).click();
+  expect((await mutation).postDataJSON()).toMatchObject({ agent_model: ['agy/Gemini 3.8 Flash (High)=Gemini 3.8 Flash (Low)'] });
+});
+
+test('Codex reasoning persists independently of model and uses consistent GPT capitalization', async ({ page }) => {
+  await page.route('**/api/manager-chat/models**', (route) => route.fulfill({ json: {
+    models: [{ id: 'gpt-6.1-sol', name: 'Gpt 6.1 Sol' }], reasoningEfforts: [{ id: 'high', name: 'High' }],
+  } }));
+  await page.reload();
+  await page.getByRole('button', { name: 'Models & capacity', exact: true }).click();
+  await expect(page.getByRole('option', { name: 'GPT 6.1 Sol' })).toBeAttached();
+  await page.getByRole('combobox', { name: /^Reasoning for Codex/ }).selectOption('high');
+  const mutation = page.waitForRequest((req) => req.method() === 'PATCH' && req.url().endsWith('/api/profiles/fixture'));
+  await page.getByRole('button', { name: 'Save agent settings' }).click();
+  expect((await mutation).postDataJSON()).toMatchObject({ agent_effort: ['codex=high'], agent_model: [] });
+  await expect(page.getByText('Agent settings saved.')).toBeVisible();
+  await page.reload();
+  await page.getByRole('button', { name: 'Models & capacity', exact: true }).click();
+  await expect(page.getByRole('combobox', { name: /^Reasoning for Codex/ })).toHaveValue('high');
 });

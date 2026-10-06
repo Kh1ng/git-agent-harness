@@ -966,6 +966,8 @@ export interface ProfileSetOptions {
   hold_contract_changes?: boolean | null;
   /** Model switches for a backend's routing candidates, each `backend/old=new`. */
   agent_model?: string[];
+  /** Native reasoning setting per backend, each backend=effort. */
+  agent_effort?: string[];
   /** Per-model concurrency caps, each `backend/model=count`. */
   max_concurrent?: string[];
   /** Automatic worker scaling: 'on' | 'off'. */
@@ -983,6 +985,7 @@ export interface ProfileSetOptions {
 
 export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   const args = ['profile', 'set', options.name];
+  for (const setting of options.agent_effort ?? []) args.push('--agent-effort', setting);
   
   if (options.display_name) {
     args.push('--display-name', options.display_name);

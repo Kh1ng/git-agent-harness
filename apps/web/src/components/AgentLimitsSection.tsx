@@ -5,9 +5,11 @@ import { gahApi } from '../api/client.js';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
 import { AgentModelSelect, type AgentModelOption } from './AgentModelSelect.js';
 import { agentDisplayName } from './LiveAgentsCard.js';
-import { agentModelLabel, currentAgentModelLabel } from '../lib/agentModelLabel.js';
+import { currentAgentModelLabel } from '../lib/agentModelLabel.js';
+import { agentModelOptions } from '../lib/agentModelOptions.js';
 
 const INPUT_CLASS = 'min-h-11 bg-raised border border-subtle rounded-md px-3 py-2 text-sm text-primary';
+const EFFORT_LABELS: Record<string, string> = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Maximum', ultra: 'Ultra' };
 
 /** `codex/gpt-5` as its backend and model; a model may itself contain `/`. */
 function splitAgent(key: string): { backend: string; model: string } {
@@ -32,8 +34,8 @@ function count(text: string): number | undefined {
  * passes to it: Antigravity is addressed by display name, the others by id.
  * A backend that lists nothing just gets no suggestions.
  */
-function useBackendModels(profile: string, backends: string[]): Record<string, { options: AgentModelOption[]; loading: boolean; failed: boolean }> {
-  const [models, setModels] = useState<Record<string, { options: AgentModelOption[]; loading: boolean; failed: boolean }>>({});
+function useBackendModels(profile: string, backends: string[]): Record<string, { options: AgentModelOption[]; efforts?: { id: string; name: string }[]; loading: boolean; failed: boolean }> {
+  const [models, setModels] = useState<Record<string, { options: AgentModelOption[]; efforts?: { id: string; name: string }[]; loading: boolean; failed: boolean }>>({});
   const wanted = backends.join(',');
   useEffect(() => {
     let cancelled = false;
@@ -44,14 +46,8 @@ function useBackendModels(profile: string, backends: string[]): Record<string, {
     for (const backend of wanted ? wanted.split(',') : []) {
       Promise.all([gahApi.getManagerChatModelsForBackend(profile, backend), aliases])
         .then(([summary, resolvedAliases]) => {
-          const options = summary.models.filter((model) => model.id !== 'default').map((model) => ({
-            value: /^agy(?:[:\-_]|$)/i.test(backend) ? model.name : model.id,
-            label: agentModelLabel(backend, model,
-              resolvedAliases.find((alias) => alias.backend === backend
-                && (alias.alias === model.id || alias.alias === model.id.replace(/\[1m\]$/i, ''))
-                && /^claude-(?:opus|sonnet|haiku|fable)-\d/.test(alias.model))?.model),
-          }));
-          if (!cancelled) setModels((current) => ({ ...current, [backend]: { options, loading: false, failed: false } }));
+          const options = agentModelOptions(backend, summary.models, resolvedAliases);
+          if (!cancelled) setModels((current) => ({ ...current, [backend]: { options, efforts: summary.reasoningEfforts, loading: false, failed: false } }));
         })
         .catch(() => { if (!cancelled) setModels((current) => ({ ...current, [backend]: { options: [], loading: false, failed: true } })); });
     }
@@ -67,7 +63,7 @@ function useBackendModels(profile: string, backends: string[]): Record<string, {
  */
 export function AgentLimitsSection({ selectedName, selected, agents, onSaved }: {
   selectedName: string;
-  selected: Pick<ProfileSummary, 'max_parallel_workers' | 'max_concurrent_per_model'>;
+  selected: Pick<ProfileSummary, 'max_parallel_workers' | 'max_concurrent_per_model' | 'agent_reasoning_effort'>;
   agents: string[];
   /** A model switch changes the routing lists the page shows elsewhere. */
   onSaved?: () => void;
@@ -84,6 +80,7 @@ export function AgentLimitsSection({ selectedName, selected, agents, onSaved }: 
   const [limits, setLimits] = useState<Record<string, string>>({});
   /** Edited model per agent key; an agent absent here keeps its model. */
   const [models, setModels] = useState<Record<string, string>>({});
+  const [efforts, setEfforts] = useState<Record<string, string>>({});
   const [saved, setSaved] = useState(false);
   // Seed once per profile so a refresh after saving keeps in-progress edits.
   const seededProfileRef = useRef<string | null>(null);
@@ -93,6 +90,7 @@ export function AgentLimitsSection({ selectedName, selected, agents, onSaved }: 
     setTotal(selected.max_parallel_workers != null ? String(selected.max_parallel_workers) : '');
     setLimits(Object.fromEntries(Object.entries(caps ?? {}).map(([key, value]) => [key, String(value)])));
     setModels({});
+    setEfforts({});
   }, [selectedName, selected.max_parallel_workers, caps]);
 
   if (!caps) {
@@ -125,6 +123,7 @@ export function AgentLimitsSection({ selectedName, selected, agents, onSaved }: 
     };
     await updateProfile(selectedName, {
       ...(count(total) !== undefined ? { max_parallel_workers: count(total) } : {}),
+      agent_effort: Object.entries(efforts).map(([backend, effort]) => `${backend}=${effort}`),
       agent_model: switches.map((change) => `${change.backend}/${change.from}=${change.to}`),
       // A blank agent sends 0, which removes its cap. Nothing is cleared wholesale, so a
       // server that does not know this field yet leaves the saved caps alone.
@@ -140,9 +139,9 @@ export function AgentLimitsSection({ selectedName, selected, agents, onSaved }: 
 
   return (
     <section className="card-padded" aria-labelledby="agent-limits-title">
-      <h3 id="agent-limits-title" className="text-sm font-semibold text-primary mb-1">Models & worker limits</h3>
+      <h3 id="agent-limits-title" className="text-sm font-semibold text-primary mb-1">Models, reasoning & worker limits</h3>
       <p className="text-xs text-muted mb-3">
-        Choose a model for each account and set how many jobs can run at once. Extra capacity adds to these limits.
+        Choose a model and reasoning amount for each account, then set how many jobs can run at once.
       </p>
       <div className="flex items-center justify-between gap-3 border-b border-subtle pb-2">
         <label htmlFor="agent-limits-total" className="text-sm font-medium text-primary">Base worker capacity</label>
@@ -154,9 +153,15 @@ export function AgentLimitsSection({ selectedName, selected, agents, onSaved }: 
         <ul className="divide-y divide-subtle">
           {keys.map((key) => {
             const { backend, model } = splitAgent(key);
+            const value = models[key] ?? model;
+            const group = suggestions[backend]?.options.find((option) => option.variants?.some((variant) => variant.value === value));
+            const nativeEffort = /^(codex|claude)$/.test(backend) && selected.agent_reasoning_effort !== undefined;
+            const reasoning = group?.variants?.map((variant) => ({ id: variant.effort, name: EFFORT_LABELS[variant.effort] ?? variant.effort }))
+              ?? (nativeEffort ? [{ id: 'default', name: 'Provider default' }, ...(suggestions[backend]?.efforts ?? []).filter((effort) => effort.id !== 'default').map((effort) => ({ ...effort, name: EFFORT_LABELS[effort.id] ?? effort.name }))] : []);
+            const effortValue = group?.variants?.find((variant) => variant.value === value)?.effort ?? efforts[backend] ?? selected.agent_reasoning_effort?.[backend] ?? 'default';
             return (
-              <li key={key} className="grid grid-cols-1 items-start gap-3 py-4 sm:grid-cols-[minmax(0,1fr)_6rem]">
-                <div className="sm:col-span-2"><span className="text-sm font-semibold text-primary">{agentDisplayName(backend)}</span><span className="ml-2 break-all text-xs text-muted">{backend}</span></div>
+              <li key={key} className="grid grid-cols-1 items-start gap-3 py-4 sm:grid-cols-[minmax(0,1fr)_minmax(8rem,0.45fr)_6rem]">
+                <div className="sm:col-span-3"><span className="text-sm font-semibold text-primary">{agentDisplayName(backend)}</span><span className="ml-2 break-all text-xs text-muted">{backend}</span></div>
                 {agents.includes(key) ? (
                   <label className="min-w-0 space-y-1 text-xs text-secondary">Model
                   <AgentModelSelect label={`Model for ${agentLabel(key)}`} value={models[key] ?? model} options={suggestions[backend]?.options ?? []}
@@ -167,6 +172,21 @@ export function AgentLimitsSection({ selectedName, selected, agents, onSaved }: 
                 ) : (
                   <span className="truncate text-sm text-muted" title="Not in the agent pool; only its limit remains">{model} (not in the pool)</span>
                 )}
+                <label className="space-y-1 text-xs text-secondary">Reasoning amount
+                  <select aria-label={`Reasoning for ${agentLabel(key)}`} title={nativeEffort ? 'Applies to all models using this provider in this project, including implementation and review tasks.' : 'Reasoning variants advertised by this provider.'}
+                    value={effortValue} disabled={!agents.includes(key) || reasoning.length === 0} className={`w-full ${INPUT_CLASS}`}
+                    onChange={(event) => {
+                      if (group) {
+                        const variant = group.variants?.find((variant) => variant.effort === event.target.value);
+                        if (variant) setModels((current) => ({ ...current, [key]: variant.value }));
+                      } else setEfforts((current) => ({ ...current, [backend]: event.target.value }));
+                    }}>
+                    {reasoning.length > 0 && !reasoning.some((effort) => effort.id === effortValue)
+                      && <option value={effortValue}>{effortValue} (current)</option>}
+                    {reasoning.length ? reasoning.map((effort) => <option key={effort.id} value={effort.id}>{effort.name}</option>) : <option value="default">Provider default</option>}
+                  </select>
+                  <p className="text-xs text-muted">{nativeEffort ? `Shared by ${agentDisplayName(backend)} models in this project.` : reasoning.length ? 'For this model.' : 'This provider has no separate task reasoning control.'}</p>
+                </label>
                 <label className="space-y-1 text-xs text-secondary">Worker limit<input type="number" min={1} aria-label={`Limit for ${agentLabel(key)}`} value={limits[key] ?? ''} placeholder="No limit"
                   onChange={(e) => setLimits((current) => ({ ...current, [key]: e.target.value }))} className={`w-full tabular-nums ${INPUT_CLASS}`} /></label>
               </li>
@@ -180,11 +200,11 @@ export function AgentLimitsSection({ selectedName, selected, agents, onSaved }: 
       {invalid && <p role="alert" className="mt-2 text-xs text-critical">Limits must be whole numbers of at least 1. Leave an agent blank for no limit.</p>}
       {modelError && <p role="alert" className="mt-2 text-xs text-critical">{modelError}</p>}
       {saveError && <p className="mt-2 text-xs text-critical">Failed to save: {saveError}</p>}
-      {saved && !saveError && <p className="mt-2 text-xs text-green-600">Agent models and limits saved.</p>}
+      {saved && !saveError && <p className="mt-2 text-xs text-green-600">Agent settings saved.</p>}
       <button onClick={save} disabled={saving || invalid || modelError != null}
         className="mt-3 inline-flex min-h-11 items-center gap-1.5 px-3 py-2 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed">
         {saving ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}
-        Save models and limits
+        Save agent settings
       </button>
     </section>
   );

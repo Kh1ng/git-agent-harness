@@ -239,6 +239,8 @@ export interface ProfileUpdateData {
   hold_contract_changes?: boolean;
   /** Model switches for a backend's routing candidates, each `backend/old=new`. */
   agent_model?: string[];
+  /** Native reasoning setting per backend, each backend=effort. */
+  agent_effort?: string[];
   /** Per-model concurrency caps, each `backend/model=count`. */
   max_concurrent?: string[];
   /** Automatic worker scaling: 'on' | 'off'. */

@@ -3,7 +3,9 @@ import type { ManagerModelInfo } from '@git-agent-harness/contracts';
 /** Use the provider's version metadata without turning an alias into a pinned model ID. */
 export function agentModelLabel(backend: string, model: ManagerModelInfo, resolvedModel?: string): string {
   if (!/^claude(?:[:_-]|$)/i.test(backend)) {
-    return model.name === model.id ? model.name : `${model.name} (${model.id})`;
+    const name = model.name.replace(/^gpt(?=[ -])/i, 'GPT');
+    if (/^gpt-/i.test(model.id) && model.name === model.id) return model.id.split('-').map((part, i) => i === 0 ? 'GPT' : part[0].toUpperCase() + part.slice(1)).join(' ');
+    return name;
   }
   const family = /^(?:claude[- ]?)?(opus|sonnet|haiku|fable)(?=$|[- [\d])/i.exec(model.id)
     ?? /^(?:Claude\s+)?(Opus|Sonnet|Haiku|Fable)\b/i.exec(model.name);
@@ -14,9 +16,9 @@ export function agentModelLabel(backend: string, model: ManagerModelInfo, resolv
   let version = idVersion?.replace('-', '.') ?? textVersion.exec(model.name)?.[1]
     ?? textVersion.exec(model.description ?? '')?.[1];
   const resolvedVersion = new RegExp(`^claude-${family[1]}-(\\d{1,2})[.-](\\d{1,2})(?:$|[-\\[])`, 'i').exec(resolvedModel ?? '');
-  // A resolved alias can refine a broad major version; never replace a pinned ID
+  // A resolved alias can refine a broad major version; never replace a pinned minor ID
   // or a newer/specific version supplied by the provider with historical usage.
-  if (!idVersion && resolvedVersion && (!version || version === resolvedVersion[1])) {
+  if ((!idVersion || !/[.-]/.test(idVersion)) && resolvedVersion && (!version || version === resolvedVersion[1])) {
     version = `${resolvedVersion[1]}.${resolvedVersion[2]}`;
   }
   const context = /\[1m\]/i.test(model.id) || /1M context/i.test(model.name) ? ' (1M context)' : '';

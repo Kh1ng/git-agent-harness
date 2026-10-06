@@ -273,6 +273,11 @@ test('profile set args carry worker scaling, a boost, and their clear keys', () 
   );
 });
 
+test('profile set forwards native worker reasoning independently of model switches', () => {
+  assert.deepEqual(buildProfileSetArgs({ name: 'repo', agent_effort: ['codex=high', 'claude=default'] }),
+    ['profile', 'set', 'repo', '--agent-effort', 'codex=high', '--agent-effort', 'claude=default']);
+});
+
 test('profile set emits validation timeout clear exactly once', () => {
   assert.deepEqual(
     buildProfileSetArgs({

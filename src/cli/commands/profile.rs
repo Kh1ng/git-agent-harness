@@ -204,6 +204,7 @@ pub fn run(command: ProfileCommands) -> Result<()> {
             delivery_mode,
             hold_contract_changes,
             agent_model,
+            agent_effort,
             max_concurrent,
             worker_scaling,
             worker_scaling_max_workers,
@@ -424,6 +425,12 @@ pub fn run(command: ProfileCommands) -> Result<()> {
 
             if hold_contract_changes.is_some() || should_clear("hold_contract_changes", &clear) {
                 existing.routing.hold_contract_changes_for_human_review = hold_contract_changes;
+            }
+            for setting in &agent_effort {
+                let (backend, effort) = setting
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("expected backend=effort"))?;
+                existing.set_agent_effort(backend, effort)?;
             }
             for switch in &agent_model {
                 let (backend, from, to) = parse_model_switch(switch)?;

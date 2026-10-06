@@ -1373,7 +1373,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
   app.post('/api/external-approvals/:action', (_req, res) => res.json([]));
   app.post('/api/route-approvals/:action', (_req, res) => res.json([]));
 
-  app.get('/api/profiles', (_req, res) => res.json(state.profiles));
+  app.get('/api/profiles', (_req, res) => res.json(state.profiles.map((profile) => ({ agent_reasoning_effort: {}, ...profile }))));
   app.post('/api/profiles', (req, res) => {
     const required = ['name', 'display_name', 'repo_id', 'provider', 'repo', 'local_path', 'artifact_root'] as const;
     const missing = required.filter((field) => !bodyString(req.body?.[field]));
@@ -1417,6 +1417,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       ...(typeof req.body?.max_parallel_workers === 'number' ? { max_parallel_workers: req.body.max_parallel_workers } : {}),
       ...(typeof req.body?.manager_wake_autonomy === 'string' ? { manager_wake_autonomy: req.body.manager_wake_autonomy } : {}),
       worker_scaling: mockWorkerScaling(current.worker_scaling, req.body ?? {}, clear),
+      agent_reasoning_effort: mockAgentEfforts(current.agent_reasoning_effort, req.body?.agent_effort),
       max_concurrent_per_model: mockModelCaps(mockSwitchedCaps(current.max_concurrent_per_model, req.body?.agent_model), req.body?.max_concurrent, clear),
       ...(typeof req.body?.validation_timeout_seconds === 'number'
         ? { validation_timeout_seconds: req.body.validation_timeout_seconds }
@@ -2098,6 +2099,17 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
 }
 
 /** Mirrors `gah profile set`'s worker scaling and boost flags. */
+function mockAgentEfforts(current: Record<string, string> | undefined, settings: unknown): Record<string, string> {
+  const next = { ...current };
+  if (Array.isArray(settings)) for (const setting of settings) {
+    if (typeof setting !== 'string') continue;
+    const [backend, effort] = setting.split('=');
+    if (effort === 'default') delete next[backend];
+    else if (effort) next[backend] = effort;
+  }
+  return next;
+}
+
 function mockWorkerScaling(
   current: WorkerScalingSettings | undefined,
   body: Record<string, unknown>,

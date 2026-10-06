@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 
+mod agent_effort;
 mod backend_instances;
 mod merge_policy;
 mod node_capacity;

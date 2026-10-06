@@ -852,6 +852,8 @@ pub enum PromptPolicyCommands {
     },
 }
 
+// Clap derives the flat profile flags directly; this command is parsed once.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum ProfileCommands {
     /// List all profiles in config
@@ -1054,6 +1056,9 @@ pub enum ProfileCommands {
         /// The old model's concurrency cap and boost move with it. Repeatable.
         #[arg(long)]
         agent_model: Vec<String>,
+        /// Set native reasoning for a backend: backend=effort.
+        #[arg(long)]
+        agent_effort: Vec<String>,
         /// Cap one model's concurrent runs: `backend/model=count`, or remove
         /// its cap with a count of 0. Repeat for several models;
         /// `--clear max_concurrent_per_model` removes every cap.
