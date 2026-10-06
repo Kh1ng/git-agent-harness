@@ -87,6 +87,33 @@ pub(super) fn install_selected_agent_assets(
     Ok(())
 }
 
+/// Print the plan and, unless `--yes`, ask before changing anything.
+pub(super) fn confirm(plan: &[String], args: &super::UpdateArgs, repo: &Path) -> Result<()> {
+    for change in plan {
+        println!("  - {change}");
+    }
+    if args.restart_server {
+        println!("  - Restart control-plane service {}", args.server_service);
+    }
+    if args.pull {
+        println!(
+            "  - Fetch origin and pull --ff-only into {}",
+            repo.display()
+        );
+    }
+    if !args.yes {
+        use std::io::Write;
+        print!("Apply these changes? [y/N] ");
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            bail!("Update cancelled before installation");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{agents_to_refresh, install_selected_agent_assets};
