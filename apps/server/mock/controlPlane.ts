@@ -52,6 +52,7 @@ import type {
   ReportData,
   ReportSeriesData,
   ServerMessage,
+  Session,
   Skill,
   SkillBindingSummary,
   StatusSnapshot,
@@ -197,6 +198,7 @@ interface MockState {
   skillBindings: Record<string, string[]>;
   skillObservations: Record<string, { id: string; version: string }[]>;
   loopRunning: boolean;
+  workerSessions: Session[];
   adminUpdate: AdminUpdateState;
   gitPrs: ChatPrSummary[];
   /** Published descriptions by PR number, so description edits round-trip. */
@@ -586,6 +588,7 @@ function createState(scenario: MockScenarioName, reset: number, previewOrigin?: 
     skillBindings: {},
     skillObservations: { ['fixture\0codex']: [{ id: 'gah-manager', version: '1.0.0' }] },
     loopRunning: true,
+    workerSessions: [],
     adminUpdate: structuredClone(MOCK_ADMIN_IDLE),
     gitPrs: structuredClone(MOCK_PRS),
     gitPrBodies: {},
@@ -1562,6 +1565,20 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
     res.json({ ...MOCK_PROFILE_CONFIG, profile: bodyString(req.query.profile) ?? 'fixture' } satisfies SettingsConfigProfileSummary);
   });
   app.get('/api/loop/status', (_req, res) => res.json({ running: state.loopRunning, ...(state.loopRunning ? { pid: 998 } : {}) }));
+  app.post('/api/dispatch', (req, res) => {
+    const profile = state.profiles.find((profile) => profile.name === bodyString(req.body?.profile));
+    if (!profile || !bodyString(req.body?.mode)) return jsonError(res, 400, 'Invalid dispatch', 'Profile and mode are required');
+    if (profile.provider !== 'github' && profile.provider !== 'gitlab') return jsonError(res, 400, 'Invalid provider', 'A GitHub or GitLab project is required');
+    const session: Session = {
+      id: `mock-worker-${state.workerSessions.length + 1}`, providerKind: profile.provider,
+      instanceId: bodyString(req.body?.instanceId) ?? `${profile.provider}-0`, repo: profile.repo,
+      mode: req.body.mode, backend: bodyString(req.body?.backend), model: bodyString(req.body?.model),
+      target: bodyString(req.body?.target), status: 'running', startedAt: new Date(FIXED_NOW).toISOString()
+    };
+    state.workerSessions.push(session);
+    broadcast({ type: 'session.started', session });
+    res.json({ session });
+  });
   app.post('/api/loop/start', (_req, res) => {
     if (state.loopRunning) return res.status(409).json({ started: false, alreadyRunning: true, pid: 998 });
     state.loopRunning = true;
@@ -2040,7 +2057,7 @@ export function createMockControlPlane(options: MockControlPlaneOptions = {}) {
       type: 'server.welcome',
       serverVersion: '0.0.0-mock',
       serverProviderCatalog: { providers: [] },
-      sessions: [],
+      sessions: state.workerSessions,
       providers: {},
       profile: 'fixture',
       mergeRequests: [],
