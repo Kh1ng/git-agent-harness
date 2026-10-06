@@ -33,18 +33,23 @@ if [ "$role" = central ]; then
   case "${GAH_GATEWAY_MODE:-}" in
     colocated)
       : "${GAH_GATEWAY_MEMORYCORE_PATH:?GAH_GATEWAY_MODE=colocated requires GAH_GATEWAY_MEMORYCORE_PATH}"
-      : "${GAH_GATEWAY_LLM_API_KEY:?GAH_GATEWAY_MODE=colocated requires GAH_GATEWAY_LLM_API_KEY}"
       [ -f "$GAH_GATEWAY_MEMORYCORE_PATH/src/gateway/server.ts" ] || { echo 'ERROR: GAH_GATEWAY_MEMORYCORE_PATH is not a MemoryCore checkout.' >&2; exit 1; }
       gateway_config="$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.local.yaml"
       if [ ! -f "$gateway_config" ]; then
         cp "$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.standalone.yaml" "$gateway_config"
       fi
-      gateway_api_key="${GAH_GATEWAY_API_KEY:-$(openssl rand -hex 24)}"
-      export GAH_MACOS_GATEWAY_URL=http://127.0.0.1:8420 GAH_MACOS_GATEWAY_KEY="$gateway_api_key"
-      # Values travel on stdin; the file is written with mode 0600.
       gateway_env="$HOME/.config/gah/tdai-gateway.env"
-      printf '%s' "$GAH_MACOS_GATEWAY_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_GATEWAY_API_KEY
-      printf '%s' "$GAH_GATEWAY_LLM_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_LLM_API_KEY
+      export GAH_MACOS_GATEWAY_URL=http://127.0.0.1:8420
+      # Values travel on stdin; preserve existing provider and access credentials.
+      if [ -n "${GAH_GATEWAY_API_KEY:-}" ]; then
+        printf '%s' "$GAH_GATEWAY_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_GATEWAY_API_KEY
+      elif ! "${gah_cli[@]}" installer env-has --file "$gateway_env" TDAI_GATEWAY_API_KEY >/dev/null 2>&1; then
+        openssl rand -hex 24 | tr -d '\n' | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_GATEWAY_API_KEY
+      fi
+      if [ -n "${GAH_GATEWAY_LLM_API_KEY:-}" ]; then
+        printf '%s' "$GAH_GATEWAY_LLM_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_LLM_API_KEY
+      fi
+      chmod 0600 "$gateway_env"
       ;;
     remote)
       : "${GAH_GATEWAY_URL:?GAH_GATEWAY_MODE=remote requires GAH_GATEWAY_URL on macOS}"
@@ -72,7 +77,7 @@ cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role"
 if [ "$role" = central ] && [ "${GAH_GATEWAY_MODE:-}" = colocated ]; then
   gateway_ready=0
   for _ in $(seq 1 15); do
-    if curl -fsS -m 2 -H "Authorization: Bearer $GAH_MACOS_GATEWAY_KEY" http://127.0.0.1:8420/health >/dev/null 2>&1; then
+    if curl -fsS -m 2 http://127.0.0.1:8420/health >/dev/null 2>&1; then
       gateway_ready=1
       break
     fi

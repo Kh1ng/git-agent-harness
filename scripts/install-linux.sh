@@ -173,7 +173,6 @@ case "${GAH_GATEWAY_MODE:-}" in
     ;;
   colocated)
     : "${GAH_GATEWAY_MEMORYCORE_PATH:?GAH_GATEWAY_MODE=colocated requires GAH_GATEWAY_MEMORYCORE_PATH (path to a TencentDB-Agent-Memory/MemoryCore checkout)}"
-    : "${GAH_GATEWAY_LLM_API_KEY:?GAH_GATEWAY_MODE=colocated requires GAH_GATEWAY_LLM_API_KEY (an OpenAI-compatible API key for the gateways own LLM calls)}"
     if [ ! -f "$GAH_GATEWAY_MEMORYCORE_PATH/src/gateway/server.ts" ]; then
       echo "ERROR: $GAH_GATEWAY_MEMORYCORE_PATH doesn't look like a TencentDB-Agent-Memory/MemoryCore checkout (missing src/gateway/server.ts)." >&2
       exit 1
@@ -189,19 +188,17 @@ case "${GAH_GATEWAY_MODE:-}" in
 
     gateway_env_file="$HOME/.config/gah/tdai-gateway.env"
     install -d -m 0700 "$(dirname "$gateway_env_file")"
-    gateway_api_key="${GAH_GATEWAY_API_KEY:-}"
-    if [ -z "$gateway_api_key" ] && [ -f "$gateway_env_file" ]; then
-      gateway_api_key="$(sed -n 's/^TDAI_GATEWAY_API_KEY=//p' "$gateway_env_file" | head -1)"
+    # Preserve model/provider credentials and existing gateway authentication.
+    if [ -n "${GAH_GATEWAY_API_KEY:-}" ]; then
+      upsert_env_line "$gateway_env_file" TDAI_GATEWAY_API_KEY "$GAH_GATEWAY_API_KEY" ""
+    elif ! "$(command -v gah || echo "$HOME/.cargo/bin/gah")" installer env-has --file "$gateway_env_file" TDAI_GATEWAY_API_KEY >/dev/null 2>&1; then
+      upsert_env_line "$gateway_env_file" TDAI_GATEWAY_API_KEY "$(openssl rand -hex 24)" ""
     fi
-    if [ -z "$gateway_api_key" ]; then
-      gateway_api_key="$(openssl rand -hex 24)"
+    if [ -n "${GAH_GATEWAY_LLM_API_KEY:-}" ]; then
+      upsert_env_line "$gateway_env_file" TDAI_LLM_API_KEY "$GAH_GATEWAY_LLM_API_KEY" ""
     fi
-    {
-      printf 'TDAI_GATEWAY_API_KEY=%s\n' "$gateway_api_key"
-      printf 'TDAI_LLM_API_KEY=%s\n' "$GAH_GATEWAY_LLM_API_KEY"
-    } > "$gateway_env_file"
     chmod 0600 "$gateway_env_file"
-    echo "Wrote $gateway_env_file"
+    echo "Preserved gateway configuration in $gateway_env_file"
 
     node_dir="$(dirname "$(command -v node)")"
     gateway_unit_dst="$HOME/.config/systemd/user/tdai-memory-gateway.service"
@@ -230,7 +227,7 @@ JAVASCRIPT
     echo "Waiting for co-located gateway to come up..."
     gateway_ready=0
     for _ in $(seq 1 15); do
-      if curl -fsS -m 2 -H "Authorization: Bearer $gateway_api_key" http://127.0.0.1:8420/health >/dev/null 2>&1; then
+      if curl -fsS -m 2 http://127.0.0.1:8420/health >/dev/null 2>&1; then
         gateway_ready=1
         break
       fi

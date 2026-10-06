@@ -435,7 +435,6 @@ the hand-deployment this replaces:
 ```bash
 GAH_GATEWAY_MODE=colocated \
 GAH_GATEWAY_MEMORYCORE_PATH=/path/to/TencentDB-Agent-Memory/MemoryCore \
-GAH_GATEWAY_LLM_API_KEY=<openai-compatible-key> \
 scripts/install.sh
 ```
 
@@ -443,11 +442,31 @@ This seeds `tdai-gateway.local.yaml` from the checkout's tracked
 `tdai-gateway.standalone.yaml` template if one doesn't already exist
 (OpenAI-compatible LLM, embedding off / BM25-only recall — edit that file
 directly for a different LLM/embedding backend, e.g. a local LiteLLM
-proxy), generates a `TDAI_GATEWAY_API_KEY` if none was given, writes both
-into `~/.config/gah/tdai-gateway.env` (`chmod 600`), installs
+proxy). Model keys are not required by the installer; configure them only
+when the selected backend requires credentials. `GAH_GATEWAY_LLM_API_KEY`
+optionally updates the generation credential. The installer preserves existing
+provider credentials and gateway authentication, generates a
+`TDAI_GATEWAY_API_KEY` only if none exists, and stores credentials
+in `~/.config/gah/tdai-gateway.env` (`chmod 600`), installs
 the platform service, and enables it. Linux installs the tracked systemd
 unit. macOS generates a launchd agent from the same settings. The installer
 waits for `GET /health`. A broken gateway stops the install with an error.
+
+Provider compatibility evidence for #1319 (2026-10-06): the public
+[MemoryCore gateway loader](https://github.com/TencentCloud/TencentDB-Agent-Memory/blob/feat/server_team/MemoryCore/src/gateway/config.ts)
+reads embedding settings under `memory.embedding` (with a legacy top-level
+`embedding` override), generation under `llm`, and gateway access authentication
+from `TDAI_GATEWAY_API_KEY`. Its
+[memory parser](https://github.com/TencentCloud/TencentDB-Agent-Memory/blob/feat/server_team/MemoryCore/src/config.ts)
+currently disables `local` and requires credentials for remote embeddings.
+This does **not** verify the Kh1ng fork's Ollama contract: that fork was
+unavailable during validation (GitHub DNS failed in the worker).
+No substitute model credential was supplied and no live provider validation
+was completed. Regression fixtures verify only installer credential
+preservation and absence of the CLI generation-key prompt, not embedding
+success. Provider selection in CLI/GUI and a live Ollama validation still
+require the supported fork's configuration contract; this evidence is
+incomplete and requires human review.
 
 Bound to loopback by default; widen with `gah network-expose` (above) if
 another node needs to reach it, matching the guidance in the checked-in

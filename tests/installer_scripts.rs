@@ -758,3 +758,61 @@ fn the_desktop_app_install_replaces_the_old_app_and_cleans_up() {
         "staging and backups are removed: {leftovers:?}"
     );
 }
+
+#[test]
+fn colocated_installers_preserve_credentials_without_a_generation_key() {
+    for platform in ["linux", "macos"] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let bin = temp.path().join("bin");
+        executable(&bin.join("gah"), "exec \"$GAH_TEST_BIN\" \"$@\"\n");
+        executable(
+            &bin.join("cargo"),
+            "while [ \"$1\" != -- ]; do shift; done; shift\nexec \"$GAH_TEST_BIN\" \"$@\"\n",
+        );
+        let file = home.join(".config/gah/tdai-gateway.env");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        // Credential canaries are fixtures, never supplied to a provider.
+        let before = "TDAI_GATEWAY_API_KEY=\"access-canary\"\nTDAI_LLM_API_KEY=\"generation-canary\"\nTDAI_EMBEDDING_API_KEY=\"embedding-canary\"\n";
+        std::fs::write(&file, before).unwrap();
+        let source = script(&format!("install-{platform}.sh"));
+        let block = if platform == "linux" {
+            let start = source.find("    gateway_env_file=\"").unwrap();
+            let end = source[start..].find("    node_dir=").unwrap() + start;
+            format!(
+                "{}\n{}",
+                &source[source.find("upsert_env_line() {").unwrap()
+                    ..source.find("# Used by both").unwrap()],
+                &source[start..end]
+            )
+        } else {
+            let start = source.find("      gateway_env=\"").unwrap();
+            let end = source[start..].find("      ;;").unwrap() + start;
+            format!(
+                "gah_cli=(cargo run --locked -q --bin gah --)\n{}",
+                &source[start..end]
+            )
+        };
+        let run = || {
+            bash(
+                &["-euc", &block],
+                &[
+                    ("HOME", home.to_str().unwrap()),
+                    ("PATH", &format!("{}:/usr/bin:/bin", bin.display())),
+                    ("GAH_TEST_BIN", GAH),
+                ],
+                true,
+            )
+        };
+        let output = run();
+        assert!(output.status.success(), "{platform}: {}", text(&output));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        assert_eq!(mode(&file), 0o600);
+        std::fs::remove_file(&file).unwrap();
+        let output = run();
+        assert!(output.status.success(), "{platform}: {}", text(&output));
+        assert!(!sourced(&file, "TDAI_GATEWAY_API_KEY").is_empty());
+        assert!(sourced(&file, "TDAI_LLM_API_KEY").is_empty());
+        assert_eq!(mode(&file), 0o600);
+    }
+}

@@ -405,15 +405,16 @@ impl<'a> Setup<'a> {
                         bail!("`npm install` failed in {}.", path.display());
                     }
                 }
-                let llm = self.secret_from(
-                    "GAH_GATEWAY_LLM_API_KEY",
-                    "OpenAI-compatible API key for the memory gateway (hidden)",
-                )?;
+                // Model credentials belong to the selected gateway backend. A
+                // configured local gateway may not need any generation API key.
                 env.0.extend([
                     ("GAH_GATEWAY_MODE", "colocated".to_string()),
                     ("GAH_GATEWAY_MEMORYCORE_PATH", path.display().to_string()),
-                    ("GAH_GATEWAY_LLM_API_KEY", llm),
                 ]);
+                if let Some(key) = self.host.env("GAH_GATEWAY_LLM_API_KEY") {
+                    env.0.push(("GAH_GATEWAY_LLM_API_KEY", key));
+                }
+                self.prompter.say("Embedding and optional generation models are configured in MemoryCore's tdai-gateway.local.yaml; gateway access uses a separate TDAI_GATEWAY_API_KEY.");
             }
         }
         Ok(mode)
@@ -788,6 +789,40 @@ mod tests {
             .with_path(crate::setup::requirements::SYSTEMD_RUNNING)
             .with_path(crate::setup::requirements::linger_path("testuser"))
             .with("tailscale version", true, "1.76.0")
+    }
+
+    #[test]
+    fn colocated_memory_preserves_backend_configuration_without_model_key_prompt() {
+        let path = PathBuf::from("/memory");
+        let host = ready_host()
+            .with_path(path.join("src/gateway/server.ts"))
+            .with_path(path.join("node_modules"));
+        let mut prompter = Script::default();
+        let mut effects = Recorder::default();
+        let mut setup = Setup {
+            host: &host,
+            prompter: &mut prompter,
+            effects: &mut effects,
+            options: Options {
+                memory: Some(MemoryMode::Colocated),
+                memorycore: Some(path),
+                ..Default::default()
+            },
+        };
+        let mut env = InstallEnv::default();
+        assert_eq!(
+            setup.memory_settings(&mut env).unwrap(),
+            MemoryMode::Colocated
+        );
+        assert!(prompter.asked.is_empty());
+        assert!(effects.commands.is_empty());
+        assert!(env
+            .0
+            .contains(&("GAH_GATEWAY_MEMORYCORE_PATH", "/memory".into())));
+        assert!(!env
+            .0
+            .iter()
+            .any(|(key, _)| *key == "GAH_GATEWAY_LLM_API_KEY"));
     }
 
     #[test]

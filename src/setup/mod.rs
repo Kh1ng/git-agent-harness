@@ -164,7 +164,7 @@ pub struct Args {
     /// Memory gateway address (remote memory). The key comes from GAH_GATEWAY_API_KEY.
     #[arg(long)]
     gateway_url: Option<String>,
-    /// MemoryCore checkout (colocated memory). The LLM key comes from GAH_GATEWAY_LLM_API_KEY.
+    /// MemoryCore checkout (colocated memory). Optional generation credentials come from GAH_GATEWAY_LLM_API_KEY.
     #[arg(long)]
     memorycore: Option<PathBuf>,
     /// The git-agent-harness checkout to build (default: the one this gah came from).
