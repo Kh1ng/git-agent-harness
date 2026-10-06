@@ -24,8 +24,51 @@ async function listen(server: http.Server): Promise<string> {
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
-test('relay preserves scoped dashboard consumption and rejects invalid or credential-bearing metadata', async t => {
-  const directory = mkdtempSync(join(tmpdir(), 'gah-quota-dashboard-'));
+/** #1336: worker snapshots now carry `auth_required` and `not_configured`
+ * source checks (and an optional `checked_at`/`failing_since`); central's
+ * relay must pass them through instead of dropping the worker as
+ * unavailable. */
+test('relay accepts auth_required and not_configured quota source checks', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'gah-quota-auth-required-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const worker = http.createServer((_req, res) => {
+    const snapshot = quota();
+    snapshot.quota_checks = [
+      {
+        backend: 'claude',
+        backend_instance: 'claude',
+        provider: 'anthropic',
+        checked_at: '2026-10-04T08:30:00Z',
+        status: 'auth_required',
+        failing_since: '2026-10-02T08:00:00Z',
+        error: 'auth_required: Claude OAuth login expired; run claude auth login'
+      },
+      {
+        backend: 'vibe',
+        provider: 'mistral',
+        status: 'not_configured',
+        error: 'no Mistral Admin API allowance source on this node'
+      }
+    ];
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(snapshot));
+  });
+  t.after(() => { worker.closeAllConnections(); worker.close(); });
+  const registry = new RegistryService(join(directory, 'registry.json'));
+  registry.registerNode({ node_id: 'worker', display_name: 'Worker', advertised_url: await listen(worker),
+    version: '0.1.2', schema_digest: COORDINATOR_SCHEMA_DIGEST, transport_mode: 'loopback', secret_ref: 'env:UNUSED', profiles: ['gah'] });
+  const node = (await registry.getNodeQuotas('gah', '7d')).nodes[0];
+  assert.equal(node.state, 'available');
+  assert.equal(node.quota?.quota_checks.length, 2);
+  const auth = node.quota?.quota_checks.find((check) => check.backend === 'claude');
+  assert.equal(auth?.status, 'auth_required');
+  assert.equal(auth?.failing_since, '2026-10-02T08:00:00Z');
+  const missing = node.quota?.quota_checks.find((check) => check.backend === 'vibe');
+  assert.equal(missing?.status, 'not_configured');
+  assert.equal(missing?.checked_at, undefined);
+});
+
+test('relay preserves scoped dashboard consumption and rejects invalid or credential-bearing metadata', async t => {  const directory = mkdtempSync(join(tmpdir(), 'gah-quota-dashboard-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const usage: AccountUsageObservation = {
     account_id: 'customer-test', workspace_id: null, period_start: '2026-10-01T00:00:00.066000+00:00', period_end: '2026-10-03T00:00:00+00:00', currency: 'USD',

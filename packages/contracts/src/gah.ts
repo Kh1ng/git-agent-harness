@@ -501,6 +501,16 @@ export interface QuotaCandidateStatus {
   quota_observations?: QuotaObservation[];
 }
 
+export type QuotaCheckStatus =
+  | 'data'
+  | 'no_data'
+  | 'failed'
+  /** #1336: the source's latest check says it needs a login or key. */
+  | 'auth_required'
+  /** #1336: a configured candidate expects this allowance source, but the
+   * node holds no credential for it, so no check can ever run there. */
+  | 'not_configured';
+
 export interface QuotaCheck {
   credential_id?: string | null;
   backend: string;
@@ -508,10 +518,16 @@ export interface QuotaCheck {
   backend_instance?: string | null;
   model?: string | null;
   quota_pool?: string | null;
-  checked_at: string;
-  status: 'data' | 'no_data' | 'failed';
+  /** When the check last ran. Absent only for a `not_configured` source,
+   * which has never been checked on that node (#1336). */
+  checked_at?: string | null;
+  status: QuotaCheckStatus;
   quota_observations?: QuotaObservation[];
   error?: string | null;
+  /** #1336: start of the current run of consecutive auth_required
+   * failures; repeat refresh markers keep this one timestamp so the whole
+   * run stays a single "how long has it been failing". */
+  failing_since?: string | null;
 }
 
 export interface QuotaSnapshot {

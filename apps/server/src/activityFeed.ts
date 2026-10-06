@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { DEFAULT_ACTIVITY_NOTIFICATION_PREFERENCES, notifiableActivity, type ActivityNotificationPreferences, type ActivityEvent, type ControllerEvent, type DeliveryReceipt, type GatewayHealthSummary, type QuotaSnapshot } from '@git-agent-harness/contracts';
+import { DEFAULT_ACTIVITY_NOTIFICATION_PREFERENCES, notifiableActivity, type ActivityNotificationPreferences, type ActivityEvent, type ControllerEvent, type DeliveryReceipt, type GatewayHealthSummary, type QuotaCheck, type QuotaSnapshot } from '@git-agent-harness/contracts';
 import { controllerDispatchSucceeded } from './controllerActivity.js';
 import { redactTextSecrets } from './managerChat/redactText.js';
 
@@ -151,8 +151,36 @@ export function activityFromNode(transition: {
   };
 }
 
+/** One operator-stable identity for a quota source: backend, credential,
+ * instance, pool and model stay distinct facts and are never collapsed. */
+function quotaSourceKey(check: Pick<QuotaCheck, 'backend' | 'credential_id' | 'backend_instance' | 'quota_pool' | 'model'>): unknown {
+  return [check.credential_id ?? null, check.backend, check.backend_instance ?? null, check.quota_pool ?? null, check.model ?? null];
+}
+
 export function activitiesFromQuota(snapshot: QuotaSnapshot): ActivityEvent[] {
   const events: ActivityEvent[] = [];
+  // #1336: an expired provider login silently disables a quota source; the
+  // operator must hear about it once per failure streak. The event id is
+  // seeded with the streak's start, so every 30-minute re-marking of the
+  // same expired login dedupes to one notification, while a fresh failure
+  // after a successful check announces again. A successful check produces
+  // no event, which is what clears the condition.
+  for (const check of snapshot.quota_checks) {
+    if (check.status !== 'auth_required') continue;
+    const failingSince = check.failing_since ?? check.checked_at ?? snapshot.generated_at;
+    const identity = [check.backend, check.backend_instance, check.credential_id]
+      .filter(part => part != null && part !== '')
+      .join('/');
+    events.push({
+      id: stableId('quota_auth', { source: quotaSourceKey(check), failingSince }),
+      occurredAt: failingSince,
+      profile: snapshot.profile.profile,
+      kind: 'action_required',
+      severity: 'warning',
+      title: `${identity} quota source needs login`,
+      message: `${check.error ?? 'Its login expired.'} Failing since ${new Date(failingSince).toISOString()}.`,
+    });
+  }
   for (const candidate of snapshot.candidates) {
     for (const observation of candidate.quota_observations ?? []) {
       const remaining = observation.quota_remaining_percent;

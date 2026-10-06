@@ -11,6 +11,19 @@ pub enum QuotaCheckStatus {
     Data,
     NoData,
     Failed,
+    /// #1336: the source's latest check says it needs a login. The
+    /// provider's redacted remediation rides `error`, and `failing_since`
+    /// dates the current streak so repeat markers stay one condition.
+    AuthRequired,
+    /// #1336: a configured candidate expects this allowance source, but the
+    /// node holds no credential for it, so no check can ever run here.
+    NotConfigured,
+}
+
+/// #1336: a quota check error class meaning "the provider needs a login or
+/// key before this source can report anything".
+pub(crate) fn is_auth_required(error: Option<&str>) -> bool {
+    error.is_some_and(|error| error.starts_with("auth_required:"))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,13 +39,79 @@ pub struct QuotaCheck {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_pool: Option<String>,
-    pub checked_at: String,
+    /// When the check last ran. Absent only for a `not_configured` source,
+    /// which has never been checked on this node (#1336).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<String>,
     pub status: QuotaCheckStatus,
     /// Account readings remain visible even when no routing candidate uses them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quota_observations: Vec<super::QuotaObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// #1336: start of the current run of consecutive `auth_required`
+    /// failures. Every refresh tick re-marks the same expired login; this
+    /// timestamp keeps the whole run one "how long has it been failing".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failing_since: Option<String>,
+}
+
+/// #1336: node-local credentials behind gated allowance sources. `false`
+/// means no check for that source can ever run on this node, so a candidate
+/// expecting it must be shown "not configured", not absent.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SourceConfiguration {
+    /// `MISTRAL_ADMIN_API_KEY` is present (Vibe allowance source).
+    pub vibe_admin: bool,
+    /// A Mistral dashboard cookie is configured (dashboard allowance source).
+    pub mistral_dashboard: bool,
+    /// Nous Portal access exists: `NOUS_API_KEY` or a Hermes sign-in.
+    pub nous_portal: bool,
+}
+
+/// #1336: an allowance source a configured `included_in_quota` candidate
+/// expects readings from. Sources whose credentials are absent on this node
+/// are never refreshed and never recorded, so without this expectation they
+/// would silently vanish from the snapshot instead of reporting that they
+/// are not configured here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExpectedQuotaSource {
+    pub backend: String,
+    pub credential_id: Option<String>,
+    /// Required instance label; `None` accepts any recorded instance.
+    pub backend_instance: Option<String>,
+    /// Billing/subscription service behind the source, when known.
+    pub provider: Option<String>,
+    /// Fixed, secret-free remediation shown with "not configured".
+    pub detail: String,
+}
+
+impl ExpectedQuotaSource {
+    /// Whether a check row proves this expected source exists on the node.
+    fn satisfied_by(&self, check: &QuotaCheck) -> bool {
+        check.credential_id == self.credential_id
+            && check.backend == self.backend
+            && self
+                .backend_instance
+                .as_deref()
+                .is_none_or(|instance| check.backend_instance.as_deref() == Some(instance))
+    }
+
+    fn not_configured_check(&self) -> QuotaCheck {
+        QuotaCheck {
+            backend: self.backend.clone(),
+            credential_id: self.credential_id.clone(),
+            provider: self.provider.clone(),
+            backend_instance: self.backend_instance.clone(),
+            model: None,
+            quota_pool: None,
+            checked_at: None,
+            status: QuotaCheckStatus::NotConfigured,
+            quota_observations: Vec::new(),
+            error: Some(self.detail.clone()),
+            failing_since: None,
+        }
+    }
 }
 
 pub(super) fn build_freshness(
@@ -67,9 +146,24 @@ fn check_timestamp(record: &QuotaObservationRecord) -> Option<String> {
         .or_else(|| record.observed_at.clone())
 }
 
-pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<QuotaCheck> {
+pub(super) fn build_quota_checks(
+    records: &[QuotaObservationRecord],
+    expected: &[ExpectedQuotaSource],
+) -> Vec<QuotaCheck> {
+    type SourceKey = (
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let current = crate::quota_store::current_source_records(records);
     let mut latest = BTreeMap::new();
-    for record in crate::quota_store::current_source_records(records) {
+    // #1336: every check for one source, so the current auth_required run
+    // can be dated from its first marker instead of its latest one.
+    let mut history: BTreeMap<SourceKey, Vec<(OffsetDateTime, String, &QuotaObservationRecord)>> =
+        BTreeMap::new();
+    for record in current {
         if record.backend == "vibe"
             && record.credential_id.is_none()
             && record.account_usage.is_none()
@@ -89,13 +183,17 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
         let Ok(parsed) = OffsetDateTime::parse(&checked_at, &Rfc3339) else {
             continue;
         };
-        let key = (
+        let key: SourceKey = (
             record.credential_id.clone(),
             record.backend.clone(),
             record.backend_instance.clone(),
             record.model.clone(),
             record.quota_pool.clone(),
         );
+        history
+            .entry(key.clone())
+            .or_default()
+            .push((parsed, checked_at.clone(), record));
         if latest
             .get(&key)
             .is_none_or(|(_, _, current)| parsed >= *current)
@@ -103,80 +201,144 @@ pub(super) fn build_quota_checks(records: &[QuotaObservationRecord]) -> Vec<Quot
             latest.insert(key, (record, checked_at, parsed));
         }
     }
-    latest
+    let mut checks: Vec<QuotaCheck> = latest
         .into_iter()
-        .map(
-            |(
-                (credential_id, backend, backend_instance, model, quota_pool),
-                (record, checked_at, _),
-            )| {
-                let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
-                    &backend,
-                    model.as_deref(),
-                    quota_pool.as_deref(),
-                );
-                if let Some(instance) = &backend_instance {
-                    identity.backend_instance = instance.clone();
-                }
-                // Exact scope prevents a broad legacy reading from being
-                // presented as a verified balance for a named account.
-                let scoped: Vec<_> = records
-                    .iter()
-                    .filter(|reading| {
-                        reading.backend == backend
-                            && reading.credential_id == credential_id
-                            && reading.backend_instance == backend_instance
-                            && reading.model == model
-                            && reading.quota_pool == quota_pool
-                    })
-                    .cloned()
-                    .collect();
-                let quota_observations =
-                    super::aggregate_observations(None, None, &scoped, &identity);
-                let has_data = record.quota_window.is_some()
-                    || record.quota_used_percent.is_some()
-                    || record.quota_remaining_percent.is_some()
-                    || record.quota_reset_at.is_some()
-                    || record.mistral_admin.is_some()
-                    || record.account_usage.is_some();
-                let status = if record.check_error.is_some() {
-                    QuotaCheckStatus::Failed
-                } else if has_data {
-                    QuotaCheckStatus::Data
+        .map(|(key, (record, checked_at, _))| {
+            let (credential_id, backend, backend_instance, model, quota_pool) = key;
+            let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+                &backend,
+                model.as_deref(),
+                quota_pool.as_deref(),
+            );
+            if let Some(instance) = &backend_instance {
+                identity.backend_instance = instance.clone();
+            }
+            // Exact scope prevents a broad legacy reading from being
+            // presented as a verified balance for a named account.
+            let scoped: Vec<_> = records
+                .iter()
+                .filter(|reading| {
+                    reading.backend == backend
+                        && reading.credential_id == credential_id
+                        && reading.backend_instance == backend_instance
+                        && reading.model == model
+                        && reading.quota_pool == quota_pool
+                })
+                .cloned()
+                .collect();
+            let quota_observations = super::aggregate_observations(None, None, &scoped, &identity);
+            let has_data = record.quota_window.is_some()
+                || record.quota_used_percent.is_some()
+                || record.quota_remaining_percent.is_some()
+                || record.quota_reset_at.is_some()
+                || record.mistral_admin.is_some()
+                || record.account_usage.is_some();
+            let status = if is_auth_required(record.check_error.as_deref()) {
+                QuotaCheckStatus::AuthRequired
+            } else if record.check_error.is_some() {
+                QuotaCheckStatus::Failed
+            } else if has_data {
+                QuotaCheckStatus::Data
+            } else {
+                QuotaCheckStatus::NoData
+            };
+            let failing_since = if status == QuotaCheckStatus::AuthRequired {
+                auth_required_since(
+                    history
+                        .get(&(
+                            credential_id.clone(),
+                            backend.clone(),
+                            backend_instance.clone(),
+                            model.clone(),
+                            quota_pool.clone(),
+                        ))
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                )
+            } else {
+                None
+            };
+            QuotaCheck {
+                credential_id,
+                provider: if let Some(provider) = record
+                    .usage_source
+                    .as_deref()
+                    .and_then(|source| source.strip_prefix("credential_api:"))
+                {
+                    Some(provider.into())
+                } else if record.usage_source.as_deref() == Some("nous_portal_account") {
+                    Some("nous".into())
                 } else {
-                    QuotaCheckStatus::NoData
-                };
-                QuotaCheck {
-                    credential_id,
-                    provider: if let Some(provider) = record
-                        .usage_source
-                        .as_deref()
-                        .and_then(|source| source.strip_prefix("credential_api:"))
-                    {
-                        Some(provider.into())
-                    } else if record.usage_source.as_deref() == Some("nous_portal_account") {
-                        Some("nous".into())
-                    } else {
-                        super::quota_provider(&backend, model.as_deref())
-                    },
-                    backend,
-                    backend_instance,
-                    model,
-                    quota_pool,
-                    checked_at,
-                    status,
-                    quota_observations,
-                    error: record.check_error.as_deref().map(crate::redact::redact),
-                }
-            },
-        )
-        .collect()
+                    super::quota_provider(&backend, model.as_deref())
+                },
+                backend,
+                backend_instance,
+                model,
+                quota_pool,
+                checked_at: Some(checked_at),
+                status,
+                quota_observations,
+                error: record.check_error.as_deref().map(crate::redact::redact),
+                failing_since,
+            }
+        })
+        .collect();
+    // #1336: a configured candidate can expect an allowance source this
+    // node has no credential for; nothing ever checks it, so surface it as
+    // not configured rather than letting it disappear.
+    for source in expected {
+        if checks.iter().any(|check| source.satisfied_by(check)) {
+            continue;
+        }
+        checks.push(source.not_configured_check());
+    }
+    checks.sort_by(|left, right| {
+        left.credential_id
+            .cmp(&right.credential_id)
+            .then_with(|| left.backend.cmp(&right.backend))
+            .then_with(|| left.backend_instance.cmp(&right.backend_instance))
+            .then_with(|| left.model.cmp(&right.model))
+            .then_with(|| left.quota_pool.cmp(&right.quota_pool))
+    });
+    checks
+}
+
+/// #1336: earliest check in the current run of consecutive `auth_required`
+/// failures for one source, so "needs login" reports how long the login has
+/// actually been failing instead of when the latest marker landed.
+fn auth_required_since(
+    history: &[(OffsetDateTime, String, &QuotaObservationRecord)],
+) -> Option<String> {
+    let mut sorted = history.to_vec();
+    sorted.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.checked_at.cmp(&right.2.checked_at))
+    });
+    sorted
+        .iter()
+        .rev()
+        .take_while(|(_, _, record)| is_auth_required(record.check_error.as_deref()))
+        .last()
+        .map(|(_, checked_at, _)| checked_at.clone())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::quota_snapshot::{QuotaCandidateStatus, QuotaObservation, UsageSummary};
+
+    fn expected_vibe_admin_source() -> ExpectedQuotaSource {
+        ExpectedQuotaSource {
+            backend: "vibe".into(),
+            credential_id: None,
+            backend_instance: None,
+            provider: Some("mistral".into()),
+            detail: "no Mistral Admin API allowance source on this node".into(),
+        }
+    }
+
     #[test]
     fn an_unconfigured_admin_auth_method_does_not_poison_the_connected_dashboard() {
         let now = Some("2026-10-03T04:00:00Z");
@@ -185,11 +347,145 @@ mod tests {
         dashboard.usage_source = Some("mistral_dashboard".into());
         let mut admin = record("vibe", None, now, QuotaCheckStatus::Failed);
         admin.check_error = Some("auth_required: MISTRAL_ADMIN_API_KEY is not configured".into());
-        let checks = build_quota_checks(&[dashboard.clone(), admin.clone()]);
+        let checks = build_quota_checks(&[dashboard.clone(), admin.clone()], &[]);
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].backend, "mistral-dashboard");
         admin.credential_id = Some("named-admin".into());
-        assert_eq!(build_quota_checks(&[dashboard, admin]).len(), 2);
+        assert_eq!(build_quota_checks(&[dashboard, admin], &[]).len(), 2);
+    }
+
+    /// #1336: the store may still hold the pre-fix Vibe markers; with a
+    /// configured candidate expecting the source, the snapshot must show it
+    /// as not configured instead of dropping it silently.
+    #[test]
+    fn an_expected_source_with_only_stale_unconfigured_markers_shows_not_configured() {
+        let now = Some("2026-10-03T04:00:00Z");
+        let mut dashboard = record("mistral-dashboard", now, now, QuotaCheckStatus::Data);
+        dashboard.backend_instance = Some("mistral-dashboard:verified".into());
+        dashboard.usage_source = Some("mistral_dashboard".into());
+        let mut marker = record("vibe", None, None, QuotaCheckStatus::Failed);
+        marker.checked_at = Some("2026-10-01T04:00:00Z".into());
+        marker.check_error = Some("auth_required: MISTRAL_ADMIN_API_KEY is not configured".into());
+
+        let checks = build_quota_checks(&[dashboard, marker], &[expected_vibe_admin_source()]);
+        let vibe = checks
+            .iter()
+            .find(|check| check.backend == "vibe")
+            .expect("expected source stays visible");
+        assert_eq!(vibe.status, QuotaCheckStatus::NotConfigured);
+        assert_eq!(vibe.checked_at, None);
+        assert_eq!(vibe.failing_since, None);
+        assert_eq!(
+            vibe.error.as_deref(),
+            Some("no Mistral Admin API allowance source on this node")
+        );
+        assert_eq!(vibe.provider.as_deref(), Some("mistral"));
+    }
+
+    /// #1336: a source that does report must not be duplicated by the
+    /// expectation, and a satisfied expectation produces no extra row.
+    #[test]
+    fn an_expected_source_with_records_is_not_duplicated() {
+        let mut reading = record("vibe", None, None, QuotaCheckStatus::Data);
+        reading.checked_at = Some("2026-10-03T04:00:00Z".into());
+        let checks = build_quota_checks(&[reading], &[expected_vibe_admin_source()]);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, QuotaCheckStatus::Data);
+    }
+
+    /// #1336 acceptance: an auth_required latest check surfaces as
+    /// "needs login" with the provider's remediation text and the start of
+    /// the failing streak, not the latest 30-minute marker.
+    #[test]
+    fn auth_required_check_keeps_remediation_and_streak_start() {
+        let mut ok = record("claude", None, None, QuotaCheckStatus::Data);
+        ok.backend_instance = Some("claude".into());
+        ok.checked_at = Some("2026-10-01T08:00:00Z".into());
+        ok.observed_at = Some("2026-10-01T08:00:00Z".into());
+        let mut first = auth_marker("claude", "2026-10-02T08:00:00Z");
+        let mut latest = auth_marker("claude", "2026-10-02T08:30:00Z");
+        for record in [&mut first, &mut latest] {
+            record.backend_instance = Some("claude".into());
+        }
+        let records = vec![ok, first, latest];
+
+        let checks = build_quota_checks(&records, &[]);
+        assert_eq!(checks.len(), 1);
+        let check = &checks[0];
+        assert_eq!(check.status, QuotaCheckStatus::AuthRequired);
+        assert_eq!(
+            check.error.as_deref(),
+            Some("auth_required: Claude OAuth login expired; run claude auth login")
+        );
+        assert_eq!(check.checked_at.as_deref(), Some("2026-10-02T08:30:00Z"));
+        assert_eq!(check.failing_since.as_deref(), Some("2026-10-02T08:00:00Z"));
+    }
+
+    /// #1336: the streak restarts after a successful check and after a
+    /// non-auth failure, so a fresh expiry reads as a fresh condition.
+    #[test]
+    fn failing_streak_restarts_after_success_and_after_other_failures() {
+        let mut success = record("claude", None, None, QuotaCheckStatus::Data);
+        success.checked_at = Some("2026-10-01T08:00:00Z".into());
+        success.observed_at = Some("2026-10-01T08:00:00Z".into());
+        let first_run = auth_marker("claude", "2026-10-02T08:00:00Z");
+        let mut restored = record("claude", None, None, QuotaCheckStatus::Data);
+        restored.checked_at = Some("2026-10-02T09:00:00Z".into());
+        restored.observed_at = Some("2026-10-02T09:00:00Z".into());
+        let second_run = auth_marker("claude", "2026-10-03T08:00:00Z");
+        let mut transient = record("claude", None, None, QuotaCheckStatus::Failed);
+        transient.checked_at = Some("2026-10-03T08:30:00Z".into());
+        transient.check_error = Some("network unreachable".into());
+        let third_run = auth_marker("claude", "2026-10-03T09:00:00Z");
+
+        let checks = build_quota_checks(
+            &[
+                success, first_run, restored, second_run, transient, third_run,
+            ],
+            &[],
+        );
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, QuotaCheckStatus::AuthRequired);
+        assert_eq!(
+            checks[0].failing_since.as_deref(),
+            Some("2026-10-03T09:00:00Z")
+        );
+    }
+
+    /// #1336 acceptance: a configured-but-missing source appears as not
+    /// configured when the node never wrote any record for it.
+    #[test]
+    fn a_configured_but_missing_source_appears_not_configured() {
+        let checks = build_quota_checks(&[], &[expected_vibe_admin_source()]);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, QuotaCheckStatus::NotConfigured);
+        assert_eq!(checks[0].backend, "vibe");
+        assert_eq!(checks[0].checked_at, None);
+        // Unknown stays unknown: no check ever ran, so no timestamp exists.
+        assert_eq!(checks[0].failing_since, None);
+    }
+
+    /// A named sibling source must not satisfy an ambient expectation.
+    #[test]
+    fn an_expected_ambient_source_is_not_satisfied_by_named_records() {
+        let mut named = record("vibe", None, None, QuotaCheckStatus::Data);
+        named.checked_at = Some("2026-10-03T04:00:00Z".into());
+        named.credential_id = Some("named-admin".into());
+        let checks = build_quota_checks(&[named], &[expected_vibe_admin_source()]);
+        let statuses: Vec<_> = checks
+            .iter()
+            .map(|check| (check.backend.as_str(), check.status))
+            .collect();
+        assert!(statuses.contains(&("vibe", QuotaCheckStatus::Data)));
+        assert!(statuses.contains(&("vibe", QuotaCheckStatus::NotConfigured)));
+    }
+
+    fn auth_marker(backend: &str, checked_at: &str) -> QuotaObservationRecord {
+        let mut record = record(backend, None, None, QuotaCheckStatus::Failed);
+        record.checked_at = Some(checked_at.into());
+        record.check_error =
+            Some("auth_required: Claude OAuth login expired; run claude auth login".into());
+        record
     }
 
     fn record(
@@ -258,7 +554,7 @@ mod tests {
         }];
 
         let freshness = build_freshness(None, &candidates, &account_quota);
-        let checks = build_quota_checks(&account_quota);
+        let checks = build_quota_checks(&account_quota, &[]);
 
         assert_eq!(
             freshness.quota_checked_at.as_deref(),
@@ -269,7 +565,10 @@ mod tests {
             Some("2026-08-22T19:47:14Z")
         );
         assert_eq!(checks[0].status, QuotaCheckStatus::NoData);
-        assert_eq!(checks[0].checked_at, "2026-08-29T08:25:01Z");
+        assert_eq!(
+            checks[0].checked_at.as_deref(),
+            Some("2026-08-29T08:25:01Z")
+        );
     }
 
     #[test]
@@ -301,7 +600,7 @@ mod tests {
             ),
         ];
 
-        let checks = build_quota_checks(&records);
+        let checks = build_quota_checks(&records, &[]);
         let status = |backend| {
             checks
                 .iter()
@@ -333,7 +632,7 @@ mod tests {
         );
         second.backend_instance = Some("vibe-2".into());
         second.quota_pool = Some("vibe-2-monthly".into());
-        let checks = build_quota_checks(&[first, second]);
+        let checks = build_quota_checks(&[first, second], &[]);
         assert_eq!(checks.len(), 2);
         assert_eq!(checks[0].backend_instance.as_deref(), Some("vibe-1"));
         assert_eq!(checks[0].status, QuotaCheckStatus::Data);
@@ -361,7 +660,7 @@ mod tests {
             QuotaCheckStatus::Data,
         );
         let mut records = vec![first.clone(), broad];
-        let checks = build_quota_checks(&records);
+        let checks = build_quota_checks(&records, &[]);
         let nous = checks
             .iter()
             .find(|check| check.provider.as_deref() == Some("nous"))
@@ -378,7 +677,7 @@ mod tests {
         failure.quota_remaining_percent = None;
         failure.check_error = Some("credential expired".into());
         records.push(failure);
-        let checks = build_quota_checks(&records);
+        let checks = build_quota_checks(&records, &[]);
         let nous = checks
             .iter()
             .find(|check| check.provider.as_deref() == Some("nous"))
