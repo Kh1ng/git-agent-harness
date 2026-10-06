@@ -10,6 +10,7 @@ import {
   findGahBinary,
   loopSystemctlArgs,
   runDispatchCancellable,
+  runConfigShow,
   runDoctor,
   runPromptPolicyMutation,
   runQuota,
@@ -122,6 +123,22 @@ test('config set args deduplicate clear values and use the CLI config flag', () 
       '/tmp/gah-config.toml',
     ],
   );
+});
+
+test('node capacity fields travel through config set arguments', () => {
+  assert.deepEqual(buildConfigSetArgs({ worker_memory_mib: 1536, memory_floor_mib: 768 }), [
+    'config', 'set', '--worker-memory-mib', '1536', '--memory-floor-mib', '768',
+  ]);
+});
+
+test('node capacity fields survive the config API read projection', async () => {
+  const restore = pinFakeGah(`printf '%s\\n' '{"current_manager":null,"node_capacity":{"worker_memory_mib":1536,"memory_floor_mib":768}}'`);
+  try {
+    const config = await runConfigShow();
+    assert.deepEqual(config.node_capacity, { worker_memory_mib: 1536, memory_floor_mib: 768 });
+  } finally {
+    restore();
+  }
 });
 
 test('profile add args map required and optional fields without spawning gah', () => {
