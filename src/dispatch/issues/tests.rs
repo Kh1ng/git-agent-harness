@@ -1458,3 +1458,27 @@ fn scan_available_tickets_excludes_issue_already_archived_locally() {
         "expected locally-archived TICKET-101 issue to be excluded, got {candidates:?}"
     );
 }
+
+#[test]
+fn strip_markdown_section_removes_only_the_named_section() {
+    let body =
+        "intro\n\n## Keep\n- kept line\n\n## Drop\n- dropped line\n\n## Keep too\n- also kept\n";
+
+    let stripped = strip_markdown_section(body, "Drop");
+
+    assert_eq!(
+        stripped,
+        "intro\n\n## Keep\n- kept line\n\n## Keep too\n- also kept\n"
+    );
+}
+
+#[test]
+fn strip_markdown_section_handles_absent_and_trailing_sections() {
+    let untouched = "## Keep\n- kept line\n";
+    assert_eq!(strip_markdown_section(untouched, "Drop"), untouched);
+
+    let trailing = "## Keep\n- kept line\n\n## Drop\n- dropped line\n";
+    let expected = "## Keep\n- kept line\n\n";
+    assert_eq!(strip_markdown_section(trailing, "Drop"), expected);
+    assert_eq!(strip_markdown_section(trailing, "drop"), expected);
+}
