@@ -18,17 +18,7 @@
       "predicted_average_cost_usd": null,
       "predicted_average_duration_seconds": null,
       "predicted_difficulty_match_rate": null,
-      "quota_observations": [
-        {
-          "backend": "openhands",
-          "backend_instance": "codex",
-          "model": "gpt-5.4-mini",
-          "quota_remaining_percent": 75.0,
-          "quota_reset_at": "2026-07-20T00:00:00Z",
-          "quota_window": "weekly",
-          "usage_source": "codex_session"
-        }
-      ],
+      "quota_observations": [],
       "reasoning_tokens": 10,
       "requests_count": 1,
       "requests_per_success": 1.0,

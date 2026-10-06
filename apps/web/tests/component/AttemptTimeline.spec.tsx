@@ -81,11 +81,7 @@ const baseUsage: LedgerUsage = {
   requests_count: 3,
   estimated_cost_usd: 1.23,
   actual_cost_usd: 1.1,
-  quota_window: '2026-07-22T14:00:00Z/2026-07-22T15:00:00Z',
-  quota_remaining_percent: 0.38,
-  quota_reset_at: '2026-07-22T15:00:00Z',
   token_usage_unknown_reason: null,
-  quota_unknown_reason: null,
   behavior_metrics: {
     tool_calls: { count: 4, quality: 'provider_reported' },
     shell_calls: { count: 2, quality: 'provider_reported' },

@@ -355,41 +355,25 @@ pub fn parse_admin_rate_limit(json: &str) -> AdminRateLimits {
     }
 }
 
-/// Parse `GET /v1/admin/spend-limit` (`LimitsOUT`) into a `LedgerUsage`
-/// carrying `quota_used_percent`/`quota_remaining_percent`.
+/// Parse `GET /v1/admin/spend-limit` (`LimitsOUT`) into the account's
+/// remaining quota percentage.
 ///
 /// `total_usage`/`usage_limit` give an exact ratio when both are present.
 /// When the API only asserts `monthly_limit_reached: true` with no numeric
-/// breakdown, that boolean *is* the evidence -- it directly means 100% used,
-/// not an inferred fabrication. `monthly_limit_reached: false` with no
-/// numbers stays unknown (anywhere from 0-99% is still consistent with
-/// "not yet reached").
-pub fn parse_admin_spend_limit(json: &str) -> LedgerUsage {
-    let Ok(root) = serde_json::from_str::<Value>(json) else {
-        return LedgerUsage::default();
-    };
-    let Some(completion) = root.get("limits").and_then(|l| l.get("completion")) else {
-        return LedgerUsage::default();
-    };
-
-    let total_usage = completion.get("total_usage").and_then(Value::as_f64);
-    let usage_limit = completion.get("usage_limit").and_then(Value::as_f64);
-    let monthly_limit_reached = completion
-        .get("monthly_limit_reached")
-        .and_then(Value::as_bool);
-
-    let quota_remaining_percent =
-        admin_spend_limit_quota_remaining_percent(total_usage, usage_limit, monthly_limit_reached);
-
-    if quota_remaining_percent.is_none() {
-        return LedgerUsage::default();
-    }
-
-    LedgerUsage {
-        usage_source: Some("mistral_admin_spend_limit".to_string()),
-        quota_remaining_percent,
-        ..LedgerUsage::default()
-    }
+/// breakdown, that boolean *is* the evidence -- it directly means nothing
+/// remains, not an inferred fabrication. `monthly_limit_reached: false` with
+/// no numbers stays unknown (anywhere from 1-100% remaining is still
+/// consistent with "not yet reached").
+pub fn parse_admin_spend_limit(json: &str) -> Option<f64> {
+    let root = serde_json::from_str::<Value>(json).ok()?;
+    let completion = root.get("limits")?.get("completion")?;
+    admin_spend_limit_quota_remaining_percent(
+        completion.get("total_usage").and_then(Value::as_f64),
+        completion.get("usage_limit").and_then(Value::as_f64),
+        completion
+            .get("monthly_limit_reached")
+            .and_then(Value::as_bool),
+    )
 }
 
 fn admin_spend_limit_quota_remaining_percent(
@@ -414,8 +398,7 @@ pub fn admin_spend_limit_to_quota_observation(
     backend: &str,
     model: Option<&str>,
 ) -> Option<QuotaObservationRecord> {
-    let usage = parse_admin_spend_limit(json);
-    usage.usage_source.as_ref()?;
+    let remaining_percent = parse_admin_spend_limit(json)?;
     Some(QuotaObservationRecord {
         backend: backend.to_string(),
         backend_instance: None,
@@ -423,14 +406,14 @@ pub fn admin_spend_limit_to_quota_observation(
         model: model.map(|m| m.to_string()),
         quota_pool: None,
         quota_window: Some("monthly".to_string()),
-        quota_remaining_percent: usage.quota_remaining_percent,
+        quota_remaining_percent: Some(remaining_percent),
         quota_reset_at: None,
         observed_at: time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
             .ok(),
         checked_at: None,
         check_error: None,
-        usage_source: usage.usage_source,
+        usage_source: Some("mistral_admin_spend_limit".to_string()),
         mistral_admin: None,
         account_usage: None,
     })
@@ -606,7 +589,7 @@ mod tests {
     #[test]
     fn spend_limit_not_reached_with_no_numbers_stays_unknown() {
         let usage = parse_admin_spend_limit(SPEND_LIMIT_DOCS);
-        assert!(usage.usage_source.is_none());
+        assert_eq!(usage, None);
     }
 
     #[test]
@@ -637,7 +620,7 @@ mod tests {
             parse_admin_rate_limit("not json"),
             AdminRateLimits::default()
         );
-        assert!(parse_admin_spend_limit("not json").usage_source.is_none());
+        assert!(parse_admin_spend_limit("not json").is_none());
     }
 
     fn write_fake_curl(dir: &std::path::Path, body: &str) {

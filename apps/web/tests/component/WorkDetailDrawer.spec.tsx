@@ -17,8 +17,8 @@ const entry = {
   session_dir: '/tmp/session', duration_seconds: 12, backend_exit_code: 0, validation_result: 'passed', commit_attempted: true, commit_created: true, push_attempted: true,
   push_succeeded: true, mr_attempted: true, mr_created: true, mr_url: 'https://github.com/example/repo/pull/42', files_changed: 1, insertions: 2, deletions: 0,
   error_summary: null, dispatch_reason: 'initial', attempts: [], usage: { usage_source: 'backend_reported', input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0,
-    total_tokens: 15, requests_count: 1, estimated_cost_usd: 0.01, actual_cost_usd: null, quota_window: null, quota_remaining_percent: null,
-    quota_reset_at: null, provider: 'openai', actual_model: 'gpt-5', actual_model_unknown_reason: null, provider_unknown_reason: null, account_label: null, auth_source_label: null,
+    total_tokens: 15, requests_count: 1, estimated_cost_usd: 0.01, actual_cost_usd: null,
+    provider: 'openai', actual_model: 'gpt-5', actual_model_unknown_reason: null, provider_unknown_reason: null, account_label: null, auth_source_label: null,
     quota_pool: null, pricing_source: null, pricing_version: null, cost_unknown_reason: null, observed_at: null },
 } as LedgerEntry;
 

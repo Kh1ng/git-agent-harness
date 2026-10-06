@@ -1,5 +1,3 @@
-mod usage_compat;
-
 use super::resources::AttemptResourceUsage;
 use crate::config::Profile;
 use crate::routing::RoutingRuntimeState;
@@ -288,7 +286,6 @@ pub struct ExternalApprovalRecord {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
-#[serde(from = "usage_compat::LedgerUsageRaw")]
 pub struct LedgerUsage {
     pub usage_source: Option<String>,
     /// Normalized accounting class. This is explicit even when the backend
@@ -342,16 +339,10 @@ pub struct LedgerUsage {
     pub requests_count: Option<u64>,
     pub estimated_cost_usd: Option<f64>,
     pub actual_cost_usd: Option<f64>,
-    pub quota_window: Option<String>,
-    pub quota_remaining_percent: Option<f64>,
-    pub quota_reset_at: Option<String>,
     /// Exact token counters were not exposed for this execution. Distinct
     /// from zero tokens, which must only be recorded when the backend says 0.
     #[serde(default)]
     pub token_usage_unknown_reason: Option<String>,
-    /// Quota state was unavailable for a quota-backed execution.
-    #[serde(default)]
-    pub quota_unknown_reason: Option<String>,
     /// Issue #119: provenance-aware per-attempt behavior metrics (tool calls,
     /// shell calls, file edits, test runs). Optional so historical ledger
     /// lines without this key deserialize as `None` (unknown), never zero.
