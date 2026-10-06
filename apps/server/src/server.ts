@@ -2741,9 +2741,9 @@ export function createServer(
     res.json(state);
   });
 
-  // macOS central mode serves the same built web app as every other control
-  // surface. Linux keeps using its configured Caddy/static root unless this
-  // explicit path is set by the service owner.
+  // The server serves the built web app itself. The entry point (bin.ts)
+  // resolves the root: the service owner's GAH_WEB_ROOT, else the checkout's
+  // build; empty means another web server serves the dashboard.
   const webRoot = process.env.GAH_WEB_ROOT;
   if (webRoot) {
     const absoluteWebRoot = resolve(webRoot);

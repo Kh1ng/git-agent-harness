@@ -213,6 +213,9 @@ pub fn runner_kind_for_backend(backend: &str) -> &str {
 
 /// A selected key is subject to the same work-scoped external approval as
 /// keys from the profile's environment file. Missing work context fails closed.
+/// The Claude subscription token (#1352) is gated only when an operator lists
+/// `CLAUDE_CODE_OAUTH_TOKEN` in a scope; an `ANTHROPIC_API_KEY` scope never
+/// covers it.
 pub fn authorize_credential_env(
     cfg: &crate::config::GahConfig,
     profile_name: &str,

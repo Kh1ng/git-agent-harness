@@ -25,6 +25,8 @@ mod routing_policy;
 mod worker_scaling;
 use routing_policy::merge_routing_policy;
 pub use routing_policy::{CandidateConfig, RoutingPolicy, TaskRoutingRule};
+mod default_paths;
+pub use default_paths::{default_config_dir, default_data_root, effective_worktree_base};
 pub use worker_scaling::WorkerScaling;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -395,12 +397,6 @@ pub fn canonical_backend_name(name: &str) -> &str {
     } else {
         name
     }
-}
-
-pub fn default_config_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    home.map_or_else(|| PathBuf::from("/root"), PathBuf::from)
-        .join(".config/gah")
 }
 
 pub fn default_config_path() -> PathBuf {

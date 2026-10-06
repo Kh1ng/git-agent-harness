@@ -264,8 +264,17 @@ fn declining_installers_disclose_effects_before_confirmation_and_preserve_files(
                         assert!(plan.contains(effect), "missing {effect}: {stdout}");
                     }
                     if role == "central" {
+                        // #1327: the dashboard is copied into /var/www/gah
+                        // only where an earlier install created it;
+                        // otherwise gah-server serves the checkout's build.
+                        let legacy_root = Path::new("/var/www/gah").is_dir();
+                        assert_eq!(plan.contains("/var/www/gah"), legacy_root, "{stdout}");
+                        assert_eq!(
+                            plan.contains("gah-server serves it"),
+                            !legacy_root,
+                            "{stdout}"
+                        );
                         for effect in [
-                            "/var/www/gah",
                             "/etc/systemd/system/gah-server.service",
                             "gah-prune.service/timer",
                             "/etc/gah/server.env",
