@@ -39,15 +39,16 @@ fn operator_home() -> Option<String> {
 fn standard_home_path_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        // A home path must start at a path-start boundary: start of text,
-        // whitespace, or one of ` " ' ( < = :. Without it the filter also
-        // rewrites repo-relative paths such as app/home/page.tsx,
-        // src/root.rs, and Controllers/Users/Index.cshtml. file:///home/...
-        // still carries a local path, so file:// is an allowed lead. The
-        // leading token is captured (the regex engine has no lookahead) and
-        // restored by the replacer.
+        // The /home, /Users, and /root roots plus optional descendants. The
+        // username and descendant classes stop at characters that cannot
+        // appear in a path component, so trailing markdown such as ](x) or
+        // ** survives a redaction. Path-start and path-end boundaries are
+        // checked in `redact_home_paths`, not here: without the boundary
+        // check the filter rewrites repo-relative paths such as
+        // app/home/page.tsx, src/root.rs, and Controllers/Users/Index.cshtml,
+        // and `/root\b` also matched `/root-cause`.
         regex::Regex::new(
-            r#"(?P<lead>^|[\s`"'(<=:]|file://)(?:/home/[^/\s`"'<>]+|/Users/[^/\s`"'<>]+|/root\b)(?:/[^\s`"'<>]*)?"#,
+            r#"(?:/home/[^/\s`"'<>,;:)\]!?*|{}]+|/Users/[^/\s`"'<>,;:)\]!?*|{}]+|/root)(?:/[^\s`"'<>,;:)\]!?*|{}]*)?"#,
         )
         .expect("valid home path regex")
     })
@@ -61,20 +62,55 @@ fn configured_home_path_re(home: &str) -> Option<regex::Regex> {
     if home.is_empty() {
         return None;
     }
-    // Match the home itself or descendants only: the home must be followed by
-    // a `/`, a `\`, or a character that cannot continue a path component, so
-    // a sibling such as /srv/gah-operator-tools is left alone. The home must
-    // also start at a path-start boundary (start of text, whitespace, or one
-    // of ` " ' ( < = :) so a short home such as /app does not rewrite
-    // repo-relative paths like src/app/page.tsx; file:// stays an allowed
-    // lead to keep file://<home>/... URLs redacted. The lead and trailing
-    // characters are captured (regex has no lookahead) and restored by the
-    // replacer.
+    // The home itself plus an optional descendant; descendants accept either
+    // separator so a Windows home redacts backslash paths. Path-start and
+    // path-end boundaries are checked in `redact_home_paths`, not here.
+    // Capturing the boundary characters (an earlier design) consumed the
+    // boundary between two adjacent paths, publishing the second one
+    // unredacted, and skipped paths behind characters outside the capture
+    // set.
     regex::Regex::new(&format!(
-        r#"(?P<lead>^|[\s`"'(<=:]|file://){}(?:[/\\][^\s`"'<>]*|(?P<end>[\s`"'<>,;:)\]!?]|$))"#,
+        r#"{}(?:[/\\][^\s`"'<>,;:)\]!?*|{{}}]*)?"#,
         regex::escape(home)
     ))
     .ok()
+}
+
+/// Replace every match with `[local path removed]` unless the characters
+/// around the match show it sits inside a longer path. The regex engine has
+/// no lookaround, so the boundary check runs here instead. A match is a
+/// path start only at the start of the text, after a character that cannot
+/// continue a path name or separate path components, or after a `file://`
+/// prefix, which keeps file:///home/... URLs redacted; it is a path end only
+/// when the following character cannot continue a path name, which keeps
+/// sibling prefixes such as /srv/gah-operator-tools intact. Boundary
+/// characters are never consumed, so a redaction never eats the boundary
+/// between two adjacent paths.
+fn redact_home_paths(re: &regex::Regex, text: &str) -> String {
+    fn continues_path_name(c: char) -> bool {
+        c.is_alphanumeric() || matches!(c, '_' | '.' | '-' | '~')
+    }
+    let mut published = String::with_capacity(text.len());
+    let mut offset = 0;
+    for path in re.find_iter(text) {
+        let leading = text[..path.start()].chars().next_back();
+        let path_start = path.start() == 0
+            || text[..path.start()].ends_with("file://")
+            || leading.is_some_and(|c| !(continues_path_name(c) || c == '/'));
+        let path_end = text[path.end()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !continues_path_name(c));
+        published.push_str(&text[offset..path.start()]);
+        if path_start && path_end {
+            published.push_str("[local path removed]");
+        } else {
+            published.push_str(path.as_str());
+        }
+        offset = path.end();
+    }
+    published.push_str(&text[offset..]);
+    published
 }
 
 /// Keep machine-local home paths out of provider-visible text, including
@@ -90,25 +126,12 @@ pub(super) fn publication_body(body: &str) -> String {
         regex::Regex::new(r#"(?i)https?://[^\s`"'<>]+"#).expect("valid web URL regex")
     });
     let home_re = operator_home().as_deref().and_then(configured_home_path_re);
-    let redact_paths = |text: &str| {
-        let text = match &home_re {
-            Some(re) => re.replace_all(text, |caps: &regex::Captures| {
-                format!(
-                    "{}[local path removed]{}",
-                    caps.name("lead").map_or("", |m| m.as_str()),
-                    caps.name("end").map_or("", |m| m.as_str())
-                )
-            }),
-            None => std::borrow::Cow::Borrowed(text),
+    let redact_paths = |segment: &str| {
+        let after_configured = match &home_re {
+            Some(re) => redact_home_paths(re, segment),
+            None => segment.to_owned(),
         };
-        standard_home_path_re()
-            .replace_all(&text, |caps: &regex::Captures| {
-                format!(
-                    "{}[local path removed]",
-                    caps.name("lead").map_or("", |m| m.as_str())
-                )
-            })
-            .into_owned()
+        redact_home_paths(standard_home_path_re(), &after_configured)
     };
     let mut published = String::with_capacity(redacted.len());
     let mut offset = 0;

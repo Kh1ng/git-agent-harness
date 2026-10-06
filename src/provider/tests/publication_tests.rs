@@ -97,7 +97,7 @@ fn provider_publication_bodies_preserve_web_urls_with_home_like_paths() {
 
 #[test]
 fn provider_publication_bodies_preserve_repo_relative_paths() {
-    let body = "Updated `app/home/page.tsx`, edited src/root.rs and crates/root/lib.rs, see Controllers/Users/Index.cshtml and ios/Users/List.swift; artifacts /home/operator/.local/share/gah/artifacts/session-123";
+    let body = "Updated `app/home/page.tsx`, edited src/root.rs and crates/root/lib.rs, see Controllers/Users/Index.cshtml and ios/Users/List.swift; analysis /root-cause.md and /root.x stay; artifacts /home/operator/.local/share/gah/artifacts/session-123";
 
     let published = crate::provider::publication_body(body);
 
@@ -109,6 +109,8 @@ fn provider_publication_bodies_preserve_repo_relative_paths() {
         "{published}"
     );
     assert!(published.contains("ios/Users/List.swift"), "{published}");
+    assert!(published.contains("/root-cause.md"), "{published}");
+    assert!(published.contains("/root.x"), "{published}");
     assert!(published.contains("[local path removed]"), "{published}");
     assert!(!published.contains("/home/operator"), "{published}");
 }
@@ -124,6 +126,29 @@ fn provider_publication_bodies_preserve_repo_relative_paths_for_a_configured_hom
         published,
         "changed src/app/page.tsx and templates/app/home/page.tsx; state [local path removed]"
     );
+}
+
+#[test]
+fn provider_publication_bodies_redact_home_paths_behind_markdown_punctuation() {
+    let body =
+        "[/home/ramrod/.local/share/gah](x) **/home/op/x** |/home/op/x| {/home/op/x} a,/home/op/x";
+
+    let published = crate::provider::publication_body(body);
+
+    assert_eq!(
+        published,
+        "[[local path removed]](x) **[local path removed]** |[local path removed]| {[local path removed]} a,[local path removed]"
+    );
+}
+
+#[test]
+fn provider_publication_bodies_redact_adjacent_configured_home_paths() {
+    let _guard = HomeOverride::set("/srv/op".to_string());
+    let body = "home /srv/op /srv/op/secret.log";
+
+    let published = crate::provider::publication_body(body);
+
+    assert_eq!(published, "home [local path removed] [local path removed]");
 }
 
 #[test]
