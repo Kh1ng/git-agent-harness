@@ -107,7 +107,7 @@ test('the routing editor sets the routine reviewer from an account picker', asyn
 
   await page.getByRole('button', { name: 'Set reviewer' }).click();
   await page.getByLabel('Account').selectOption('backend:opencode');
-  await page.getByLabel('Model').fill('tak-mistral-vibe/zai-glm-5-3');
+  await page.getByLabel('Model', { exact: true }).fill('tak-mistral-vibe/zai-glm-5-3');
   await page.getByRole('button', { name: 'Set reviewer' }).click();
 
   await expect.poll(() => calls.length).toBe(1);
@@ -160,7 +160,7 @@ test('the routing editor sends the named account, and remove and reorder name th
 
   await page.getByRole('button', { name: '+ Add candidate' }).first().click();
   await page.getByLabel('Account').selectOption('instance:tak-vibe');
-  await page.getByLabel('Model').fill('zai-glm-5-3');
+  await page.getByLabel('Model', { exact: true }).fill('zai-glm-5-3');
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await expect.poll(() => calls.length).toBe(3);
   expect(calls[2]).toMatchObject({
