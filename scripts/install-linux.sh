@@ -181,19 +181,37 @@ case "${GAH_GATEWAY_MODE:-}" in
     gateway_local_config="$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.local.yaml"
     if [ ! -f "$gateway_local_config" ]; then
       cp "$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.standalone.yaml" "$gateway_local_config"
+      # gateway-yaml-mutation:start
       if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
-        if [ "$GAH_GATEWAY_PROVIDER" = "ollama" ]; then
-          sed "s|baseUrl: \"https://api.openai.com/v1\"|baseUrl: \"${GAH_GATEWAY_ENDPOINT:-http://127.0.0.1:11434}\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
-          sed "s|model: \"gpt-4o\"|model: \"${GAH_GATEWAY_LLM_MODEL:-llama3}\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
-          sed "s|provider: \"none\"|provider: \"ollama\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
-          sed "s|model: \"text-embedding-3-small\"|model: \"${GAH_GATEWAY_EMBEDDING_MODEL:-nomic-embed-text}\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
-        elif [ "$GAH_GATEWAY_PROVIDER" = "openai" ]; then
-          sed "s|baseUrl: \"https://api.openai.com/v1\"|baseUrl: \"${GAH_GATEWAY_ENDPOINT:-https://api.openai.com/v1}\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
-          sed "s|model: \"gpt-4o\"|model: \"${GAH_GATEWAY_LLM_MODEL:-gpt-4o}\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
-          sed "s|provider: \"none\"|provider: \"openai\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
-          sed "s|model: \"text-embedding-3-small\"|model: \"${GAH_GATEWAY_EMBEDDING_MODEL:-text-embedding-3-small}\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
-        fi
+        node --input-type=module - "$GAH_GATEWAY_MEMORYCORE_PATH" "$gateway_local_config" "$GAH_GATEWAY_PROVIDER" "${GAH_GATEWAY_ENDPOINT:-}" "${GAH_GATEWAY_LLM_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_MODEL:-}" <<'JAVASCRIPT'
+import { readFileSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { resolve } from 'node:path';
+const require = createRequire(resolve(process.argv[2], 'package.json'));
+const yaml = require('yaml');
+const configPath = process.argv[3];
+const provider = process.argv[4];
+const endpoint = process.argv[5];
+const llmModel = process.argv[6];
+const embedModel = process.argv[7];
+const doc = yaml.parseDocument(readFileSync(configPath, 'utf8'));
+if (provider === 'ollama') {
+  doc.setIn(['llm', 'baseUrl'], endpoint || 'http://127.0.0.1:11434');
+  doc.setIn(['llm', 'model'], llmModel || 'llama3');
+  doc.setIn(['embedding', 'provider'], 'ollama');
+  doc.setIn(['embedding', 'baseUrl'], endpoint || 'http://127.0.0.1:11434');
+  doc.setIn(['embedding', 'model'], embedModel || 'nomic-embed-text');
+} else if (provider === 'openai') {
+  doc.setIn(['llm', 'baseUrl'], endpoint || 'https://api.openai.com/v1');
+  doc.setIn(['llm', 'model'], llmModel || 'gpt-4o');
+  doc.setIn(['embedding', 'provider'], 'openai');
+  doc.setIn(['embedding', 'baseUrl'], endpoint || 'https://api.openai.com/v1');
+  doc.setIn(['embedding', 'model'], embedModel || 'text-embedding-3-small');
+}
+writeFileSync(configPath, String(doc));
+JAVASCRIPT
       fi
+      # gateway-yaml-mutation:end
       echo "Seeded $gateway_local_config from the tracked standalone template (OpenAI-compatible LLM, embedding off / BM25-only -- edit directly for a different backend)"
     else
       echo "Preserving existing $gateway_local_config"

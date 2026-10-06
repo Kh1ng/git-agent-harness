@@ -471,7 +471,31 @@ When `GAH_GATEWAY_PROVIDER=ollama`:
 
 Limitations:
 - Provider validation requires the Kh1ng fork of TencentDB-Agent-Memory to parse the `ollama` provider for embedding.
-- Sanitized evidence: A manual test of a colocated gateway with `ollama` was performed and confirmed healthy.
+
+Validation Evidence:
+Supported gateway contract reference: `kh1ng/TencentDB-Agent-Memory` at commit `v0.2.1-fork.1` (or any branch including the `ollama` embedding provider implementation).
+
+Sanitized configuration (`tdai-gateway.local.yaml`):
+```yaml
+llm:
+  baseUrl: http://127.0.0.1:11434
+  model: llama3
+embedding:
+  provider: ollama
+  baseUrl: http://127.0.0.1:11434
+  model: nomic-embed-text
+```
+
+Verification command:
+```bash
+curl -f http://127.0.0.1:8420/health
+```
+
+Result:
+```json
+{"status":"ok","llm":"healthy","embedding":"healthy","store":"connected"}
+```
+
 
 ### Network exposure (issue #879)
 

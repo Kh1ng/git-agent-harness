@@ -1,0 +1,7 @@
+llm:
+  baseUrl: "http://127.0.0.1:11434"
+  model: "gpt-4o"
+embedding:
+  provider: "ollama"
+  baseUrl: "https://api.openai.com/v1"
+  model: "text-embedding-3-small"

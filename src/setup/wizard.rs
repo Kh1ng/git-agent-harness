@@ -490,12 +490,25 @@ impl<'a> Setup<'a> {
 
                 if provider == "openai" {
                     let llm_key = match self.host.env("GAH_GATEWAY_LLM_API_KEY") {
-                        Some(val) => val,
+                        Some(val) => Some(val),
                         None => {
-                            self.secret_from("GAH_GATEWAY_LLM_API_KEY", "LLM API key (hidden)")?
+                            if self.options.yes {
+                                None
+                            } else {
+                                let val = self
+                                    .prompter
+                                    .secret("LLM API key (hidden, empty to skip)")?;
+                                if val.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(val.trim().to_string())
+                                }
+                            }
                         }
                     };
-                    env.0.push(("GAH_GATEWAY_LLM_API_KEY", llm_key));
+                    if let Some(val) = llm_key {
+                        env.0.push(("GAH_GATEWAY_LLM_API_KEY", val));
+                    }
                     let embed_key = match self.host.env("GAH_GATEWAY_EMBEDDING_API_KEY") {
                         Some(val) => val,
                         None => self.secret_from(

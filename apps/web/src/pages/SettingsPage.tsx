@@ -250,6 +250,7 @@ export function SettingsPage() {
         {openSections.has('memory') && <SettingsSectionPanel id="memory">
           <GatewaySettingsSection configuredProfiles={configuredProfiles} />
           <GatewaySetupSection />
+          <ColocatedProviderSection />
         </SettingsSectionPanel>}
 
       </div>
@@ -1380,6 +1381,64 @@ export function AdminUpdateSection() {
         </div>
       )}
       {error && <p className="text-xs text-critical">{error}</p>}
+    </section>
+  );
+}
+
+export function ColocatedProviderSection() {
+  const [provider, setProvider] = useState<'none' | 'openai' | 'ollama'>('none');
+  const [providerEndpoint, setProviderEndpoint] = useState('');
+  const [llmModel, setLlmModel] = useState('');
+  const [embeddingModel, setEmbeddingModel] = useState('');
+  const [memoryCorePath, setMemoryCorePath] = useState('~/TencentDB-Agent-Memory/MemoryCore');
+  const [copied, setCopied] = useState(false);
+
+  const command = `GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH=${memoryCorePath} GAH_GATEWAY_PROVIDER=${provider} ${providerEndpoint ? `GAH_GATEWAY_ENDPOINT=${providerEndpoint} ` : ''}${llmModel ? `GAH_GATEWAY_LLM_MODEL=${llmModel} ` : ''}${embeddingModel ? `GAH_GATEWAY_EMBEDDING_MODEL=${embeddingModel} ` : ''}scripts/install.sh`;
+
+  const copyCommand = () => {
+    navigator.clipboard.writeText(command).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  return (
+    <section className="card-padded max-w-2xl mt-5">
+      <h3 className="text-sm font-semibold text-primary mb-1">Colocated Gateway Provider</h3>
+      <p className="text-xs text-muted mb-3">
+        Generate a command to configure the local memory gateway's LLM and embedding provider. Run this on this central node.
+      </p>
+      <label className="block text-xs text-secondary mb-2">MemoryCore Path
+        <input type="text" className="input w-full mt-1 min-h-11" value={memoryCorePath} onChange={(e) => setMemoryCorePath(e.target.value)} />
+      </label>
+      <label className="block text-xs text-secondary mb-2">Provider
+        <select className="input w-full mt-1 min-h-11" value={provider} onChange={(e) => setProvider(e.target.value as any)}>
+          <option value="none">None (keep current)</option>
+          <option value="openai">OpenAI / Compatible</option>
+          <option value="ollama">Ollama (local, unmetered)</option>
+        </select>
+      </label>
+      {provider !== 'none' && <>
+        <label className="block text-xs text-secondary mb-2">API Endpoint
+          <input type="text" className="input w-full mt-1 min-h-11" value={providerEndpoint} onChange={(e) => setProviderEndpoint(e.target.value)} placeholder={provider === 'ollama' ? 'http://127.0.0.1:11434' : 'https://api.openai.com/v1'} />
+        </label>
+        <label className="block text-xs text-secondary mb-2">LLM Model
+          <input type="text" className="input w-full mt-1 min-h-11" value={llmModel} onChange={(e) => setLlmModel(e.target.value)} placeholder={provider === 'ollama' ? 'llama3' : 'gpt-4o'} />
+        </label>
+        <label className="block text-xs text-secondary mb-2">Embedding Model
+          <input type="text" className="input w-full mt-1 min-h-11" value={embeddingModel} onChange={(e) => setEmbeddingModel(e.target.value)} placeholder={provider === 'ollama' ? 'nomic-embed-text' : 'text-embedding-3-small'} />
+        </label>
+      </>}
+      {provider !== 'none' && (
+        <div className="flex items-start gap-2 mt-3">
+          <pre className="flex-1 bg-raised border border-subtle rounded-md px-3 py-2 text-xs text-primary font-mono whitespace-pre-wrap break-all">
+            {command}
+          </pre>
+          <button onClick={copyCommand} className="text-muted hover:text-primary mt-1 shrink-0" title="Copy">
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+          </button>
+        </div>
+      )}
     </section>
   );
 }
