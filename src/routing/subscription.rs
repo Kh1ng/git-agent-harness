@@ -45,9 +45,7 @@ pub fn capacity(
         if reset.is_some_and(|reset| reset <= now) {
             continue;
         }
-        let remaining = record
-            .quota_remaining_percent
-            .or_else(|| record.quota_used_percent.map(|used| 100.0 - used));
+        let remaining = record.quota_remaining_percent;
         let Some(remaining) =
             remaining.filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
         else {

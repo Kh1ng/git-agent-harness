@@ -661,9 +661,8 @@ fn route_candidates(
 }
 
 /// Derives quota_pace()'s two inputs from the latest quota_store observation
-/// for this exact identity. `quota_used_percent` is preferred; falls back to
-/// deriving it from `quota_remaining_percent` when only that was recorded
-/// (vibe's Mistral Admin spend-limit reading uses remaining, not used).
+/// for this exact identity. The used percentage is derived from
+/// `quota_remaining_percent` to compute the pacing budget.
 /// `quota_days_remaining` is quota_pace()'s "days until the quota window
 /// resets", derived from `quota_reset_at` relative to `now`. Only fresh,
 /// current weekly budgets belong in the weekly pacing formula.
@@ -712,11 +711,9 @@ fn live_quota_pacing_inputs(
     else {
         return (None, None);
     };
-    let usage_percent = record.quota_used_percent.or_else(|| {
-        record
-            .quota_remaining_percent
-            .map(|remaining| (100.0 - remaining).clamp(0.0, 100.0))
-    });
+    let usage_percent = record
+        .quota_remaining_percent
+        .map(|remaining| (100.0 - remaining).clamp(0.0, 100.0));
     let days_remaining = record
         .quota_reset_at
         .as_deref()
