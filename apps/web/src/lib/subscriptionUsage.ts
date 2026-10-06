@@ -70,9 +70,7 @@ export function parseWindow(name: string | null | undefined): { label: string; w
 }
 
 function usedPercent(observation: QuotaObservation): number | null {
-  const used = observation.quota_used_percent;
   const remaining = observation.quota_remaining_percent;
-  if (typeof used === 'number' && Number.isFinite(used)) return Math.min(100, Math.max(0, used));
   if (typeof remaining === 'number' && Number.isFinite(remaining)) return 100 - Math.min(100, Math.max(0, remaining));
   return null;
 }
@@ -195,7 +193,10 @@ export function busySubscriptionIds(input: {
     if (match) busy.add(match.id);
   }
   for (const agent of input.factoryAgents ?? []) {
-    const match = byBackend(agent.tool);
+    // One CLI can draw on several subscriptions: Antigravity bills Gemini and Claude
+    // models to separate allowances. The model the process was started with says which.
+    const match = input.subscriptions.find((usage) => usage.backend === agent.tool && !!agent.model && usage.model === agent.model)
+      ?? byBackend(agent.tool);
     if (match) busy.add(match.id);
   }
   const recent = input.recentLedger;

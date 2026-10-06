@@ -590,7 +590,6 @@ fn execution_identity_golden_legacy_unknown() {
     assert_eq!(usage.backend_instance, None);
     assert_eq!(usage.provider, None);
     assert_eq!(usage.actual_model, None);
-    assert_eq!(usage.quota_window, None);
     assert_eq!(usage.cost_unknown_reason, None);
 }
 

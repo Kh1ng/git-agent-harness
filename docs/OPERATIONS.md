@@ -20,6 +20,39 @@ a summary.
 
 ## 1. Deployment
 
+### Node memory admission
+
+`gah loop` reserves 4096 MiB for each implementation, fix, retry, or escalation
+worker and keeps a free-memory floor of `max(2048 MiB, total memory / 6)`.
+The critical-memory and memory PSI checks always apply. Operators can set
+these global defaults in Settings → Node memory capacity or in TOML:
+
+```toml
+[defaults.node_capacity]
+worker_memory_mib = 4096
+memory_floor_mib = 0
+```
+
+`memory_floor_mib = 0` (or an omitted value) keeps the adaptive floor. An
+explicit floor must be at least 512 MiB; the worker reservation must also be
+at least 512 MiB. Lowering either value raises the risk of running out of
+memory. The loop reloads these settings each iteration and announces them
+when they change; `gah status` reports them. CPU, review, and PM reservations
+are unchanged.
+
+Validation is layered so a bad value can never lock you out of the config:
+
+- Saving (`gah config set`, Settings page) rejects values below 512 MiB, and
+  rejects values this node can never admit -- a worker reservation plus the
+  memory floor larger than total node memory defers every implementation
+  worker forever. The node check is skipped when total memory cannot be
+  read (e.g. the config is written for another machine).
+- Loading never fails on invalid values: they are ignored with a warning and
+  the defaults apply until the config is fixed, so every repair path
+  (`gah config set`, `gah status`, Settings) keeps working.
+- The loop logs a warning at startup when the settings can never be admitted
+  on this node, instead of leaving the fact buried in deferral logs.
+
 ### Deterministic CLI/control-plane update
 
 Do not assume a `cargo build --release` updates the `gah` command on PATH. A
@@ -28,11 +61,26 @@ host can have a stale Cargo-installed binary at `$CARGO_HOME/bin/gah` while
 control plane:
 
 ```bash
-gah update --repo /path/to/git-agent-harness --restart-server
+gah update --pull --repo /path/to/git-agent-harness --restart-server
 ```
 
-It refuses a dirty or non-default-branch checkout, pulls with `--ff-only`,
-replaces the actual Cargo-installed CLI with `cargo install --path . --force`,
+`--pull` fetches and fast-forwards before installation. The command prints an
+installation plan and asks for confirmation; pass `--yes` for unattended
+updates. Omit `--pull` when reinstalling the current checkout, such as after
+changing the node role.
+Without `--pull`, it builds the current branch and working tree, including
+uncommitted changes.
+
+For unattended first installs, run `GAH_INSTALL_CONFIRMED=1 scripts/install.sh`
+with the desired role and configuration environment variables. This accepts
+the installer confirmation before it writes configuration or installs services.
+For unattended updates, use `gah update --pull --yes --repo /path/to/git-agent-harness`.
+Updates refresh existing GAH OpenCode agent files and quota-refresh units even
+when `--agent` is omitted; use `--agent` to install additional integrations.
+
+With `--pull`, it refuses a dirty or non-default-branch checkout and pulls
+with `--ff-only`. It replaces the actual Cargo-installed CLI with
+`cargo install --path . --bin gah --force --locked`,
 installs the lockfile-pinned Node dependencies, builds `apps/server`, and
 installs/reloads the `gah-loop@.service` user-unit template. On a central
 node it also reinstalls the system-level `gah-server.service` unit from the
@@ -71,7 +119,7 @@ scripts/install.sh
 ### Upgrade procedure
 
 ```bash
-gah update --repo /path/to/git-agent-harness --restart-server
+gah update --pull --repo /path/to/git-agent-harness --restart-server
 ```
 
 The updater never starts or restarts a recurring `gah loop`; with
@@ -167,7 +215,7 @@ system service. The user units (`gah-loop@`, `gah-prune`,
 verbatim. Then enable the service:
 
 ```bash
-gah update --role central
+gah update --pull --role central
 sudo systemctl enable --now gah-server
 ```
 
@@ -257,7 +305,7 @@ Start/Stop buttons manage `gah-loop@<profile>` rather than creating a detached
 process:
 
 ```bash
-gah update --repo /path/to/git-agent-harness
+gah update --pull --repo /path/to/git-agent-harness
 systemctl --user start gah-loop@gah
 ```
 
@@ -292,10 +340,38 @@ source checkout alone does not change an already-installed loop service.
 After upgrading, rebuild/install and restart the affected user units:
 
 ```bash
-gah update --repo /path/to/git-agent-harness
+gah update --pull --repo /path/to/git-agent-harness
 systemctl --user restart gah-loop@gah gah-loop@sportsball
 journalctl --user -u gah-loop@gah -u gah-loop@sportsball -n 100 --no-pager
 ```
+
+### Scaling workers past the baseline
+
+`max_parallel_workers` and `max_concurrent_per_model` are the baseline. A
+profile's `[profiles.<name>.worker_scaling]` section lets the loop grow past
+both, and the dashboard exposes it under Settings, Factory, Worker scaling.
+
+Automatic scaling (`enabled = true`) gives a capped model `extra_per_model`
+more concurrent runs (default 1) while every fresh quota window of its
+subscription, the five-hour one included, has at least
+`min_remaining_percent` left (default 50). A model with no fresh quota
+reading is never scaled, and the highest-priority candidate is scaled first.
+The total stops at `max_workers`, which defaults to twice the baseline.
+
+A manual boost adds workers outright, for one model or for every capped
+model, until an optional expiry:
+
+```bash
+gah profile set gah --worker-scaling on --worker-scaling-max-workers 6
+gah profile set gah --boost-workers 2 --boost-model codex/gpt-5 --boost-hours 3
+gah profile set gah --clear worker_boost
+```
+
+A boost is explicit, so `max_workers` does not limit it. Neither source
+bypasses the pressure gate above: memory and CPU still decide whether an
+extra worker starts. The loop applies changes on its next iteration and logs
+the worker count when it changes; `gah status --json` reports the result and
+the reason for each grant or refusal as `worker_limits`.
 
 Set `max_open_managed_mrs` per profile to bound implementation intake. It
 defaults to `max_parallel_workers`; at the limit GAH keeps reviewing, fixing,
@@ -1212,6 +1288,7 @@ and what to do:
 | `harness_error`      | GAH/config bug: a validation command couldn't run, bad config | Stops work. Fix config / validation command; `gah doctor --validate`. Not the model's fault — do not escalate. |
 | `environment_error`  | Baseline already red; failure identical to baseline           | Stops work. Fix the environment (missing tool, broken dep). Do not escalate the model. |
 | `backend_error`      | Backend runtime failure (nonzero exit, empty output, quota/auth) | Reroute, not escalate. Check `gah availability`; if a quota/auth block is stale, `gah availability clear`. Never treat empty output as success. |
+| `config_error`       | The runner itself rejected the configured model before the agent ran | Stops work as human-required; never retried or rerouted. Fix the candidate's model in config and confirm with `gah doctor --validate`. |
 | `agent_no_progress`  | Failure byte-identical across attempts                        | The agent's edits aren't affecting the error — usually env/config, not the model. Investigate before re-dispatching. |
 | `agent_failure`      | Real, changing validation failures                            | Genuine agent-capability miss. This is the only class where capability escalation to a stronger backend is appropriate (`--escalate`, or the loop's Escalate action). |
 | `validation_failure` | Validation never passed after all retries                     | Inspect the session diff/logs; consider `--escalate` or a manual fix. |

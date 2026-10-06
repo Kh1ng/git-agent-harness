@@ -10,6 +10,7 @@ import {
   findGahBinary,
   loopSystemctlArgs,
   runDispatchCancellable,
+  runConfigShow,
   runDoctor,
   runPromptPolicyMutation,
   runQuota,
@@ -124,6 +125,22 @@ test('config set args deduplicate clear values and use the CLI config flag', () 
   );
 });
 
+test('node capacity fields travel through config set arguments', () => {
+  assert.deepEqual(buildConfigSetArgs({ worker_memory_mib: 1536, memory_floor_mib: 768 }), [
+    'config', 'set', '--worker-memory-mib', '1536', '--memory-floor-mib', '768',
+  ]);
+});
+
+test('node capacity fields survive the config API read projection', async () => {
+  const restore = pinFakeGah(`printf '%s\\n' '{"current_manager":null,"node_capacity":{"worker_memory_mib":1536,"memory_floor_mib":768}}'`);
+  try {
+    const config = await runConfigShow();
+    assert.deepEqual(config.node_capacity, { worker_memory_mib: 1536, memory_floor_mib: 768 });
+  } finally {
+    restore();
+  }
+});
+
 test('profile add args map required and optional fields without spawning gah', () => {
   assert.deepEqual(
     buildProfileAddArgs({
@@ -205,6 +222,45 @@ test('profile set args map fields and emit each clear key once', () => {
       'other',
       '--config',
       '/tmp/gah-config.toml',
+    ],
+  );
+});
+
+test('profile set args carry worker scaling, a boost, and their clear keys', () => {
+  assert.deepEqual(
+    buildProfileSetArgs({
+      name: 'api-worker',
+      worker_scaling: 'on',
+      worker_scaling_max_workers: 6,
+      worker_scaling_extra_per_model: 0,
+      worker_scaling_min_remaining_percent: 40,
+      boost_workers: 2,
+      boost_model: 'codex/gpt-5',
+      boost_hours: 1.5,
+      clear: ['worker_boost', 'worker_scaling_max_workers'],
+    }),
+    [
+      'profile',
+      'set',
+      'api-worker',
+      '--worker-scaling',
+      'on',
+      '--worker-scaling-max-workers',
+      '6',
+      '--worker-scaling-extra-per-model',
+      '0',
+      '--worker-scaling-min-remaining-percent',
+      '40',
+      '--boost-workers',
+      '2',
+      '--boost-model',
+      'codex/gpt-5',
+      '--boost-hours',
+      '1.5',
+      '--clear',
+      'worker_boost',
+      '--clear',
+      'worker_scaling_max_workers',
     ],
   );
 });

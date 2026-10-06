@@ -39,7 +39,7 @@ fn dashboard_consumption_joins_prices_and_uses_api_calls_not_event_counts() {
         record.quota_window.as_deref(),
         Some("vibe-code-included-monthly")
     );
-    assert_eq!(record.quota_used_percent, Some(60.0));
+    assert_eq!(record.quota_remaining_percent, Some(40.0));
     let usage = record.account_usage.unwrap();
     assert_eq!(usage.requests, Some(4));
     assert_eq!(usage.input_tokens, Some(300));
@@ -152,7 +152,7 @@ fn absent_vibe_budget_clears_old_allowance_without_using_api_budget() {
         Some(&serde_json::to_vec(&budget).unwrap()),
     )
     .unwrap();
-    assert!(record.quota_used_percent.is_none());
+    assert!(record.quota_remaining_percent.is_none());
     assert!(record.quota_reset_at.is_none());
     assert!(record.account_usage.is_some());
     let previous = parsed(
@@ -171,7 +171,7 @@ fn absent_vibe_budget_clears_old_allowance_without_using_api_budget() {
     let readings = [previous, record];
     let latest = quota_store::latest_windows_for_identity(&readings, &identity);
     assert_eq!(latest.len(), 1);
-    assert!(latest[0].quota_used_percent.is_none());
+    assert!(latest[0].quota_remaining_percent.is_none());
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn fixed_reads_use_utc_month_and_preserve_usage_when_budget_fails() {
     .unwrap();
     assert_eq!(endpoints.len(), 4);
     assert!(record.account_usage.is_some());
-    assert!(record.quota_used_percent.is_none());
+    assert!(record.quota_remaining_percent.is_none());
 }
 
 #[test]

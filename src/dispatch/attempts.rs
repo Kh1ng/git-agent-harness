@@ -591,29 +591,34 @@ pub(super) fn run_backend_with_reserved_route(
 /// produced when `--json` is passed to codex exec). Falls back to the
 /// generic regex-based parser for non-JSONL output from other backends.
 ///
-/// Issue #155: for AGY, also merges in the run-scoped cli.log delta
-/// (quota/reset messages) -- the offset-scoped tail captured by runner,
-/// NOT a fresh read of the whole cli.log, so a single attempt's usage is
-/// never polluted by prior runs or concurrent appends.
+/// Quota exhaustion is handled separately through availability.
 pub(super) fn attempt_usage(
     log_path: &str,
-    agy_cli_log_delta: Option<&str>,
+    _agy_cli_log_delta: Option<&str>,
     attribution: UsageAttribution<'_>,
     transcript_path: Option<&str>,
     claude_path: Option<&str>,
 ) -> crate::ledger::LedgerUsage {
-    let text = match fs::read_to_string(log_path) {
-        Ok(t) => t,
-        Err(_) => {
-            return normalize_attempt_usage(
-                crate::ledger::LedgerUsage::default(),
-                attribution,
-                true,
-            );
-        }
-    };
+    let text = fs::read_to_string(log_path).unwrap_or_default();
     let behavior_metrics = crate::telemetry::extractor::parse_structured_behavior_events(&text);
+    // A selected artifact that exists but yields no usage is different from
+    // an absent run-scoped artifact. Do not consult cumulative Vibe sessions.
+    let backend_kind = crate::usage_attribution::backend_kind_of(attribution.backend);
+    let has_structured_artifact = matches!(
+        backend_kind,
+        Some(BackendKind::Claude | BackendKind::Vibe | BackendKind::Opencode)
+    );
+    let artifact_exists = transcript_path.is_some_and(|path| std::path::Path::new(path).exists())
+        || (!has_structured_artifact && std::path::Path::new(log_path).exists());
+    let artifact_reason = if artifact_exists {
+        crate::ledger::UsageUnknownReason::UsageArtifactUnparsed
+    } else {
+        crate::ledger::UsageUnknownReason::UsageArtifactMissing
+    };
     let finalize = |mut usage: crate::ledger::LedgerUsage| {
+        if usage.usage_source.is_none() {
+            usage.usage_unknown_reason = Some(artifact_reason);
+        }
         if let Some(metrics) = &behavior_metrics {
             usage = usage::merge_usage(
                 usage,
@@ -623,9 +628,13 @@ pub(super) fn attempt_usage(
                 },
             );
         }
-        normalize_attempt_usage(usage, attribution, true)
+        let missing_vibe = backend_kind == Some(BackendKind::Vibe) && usage.usage_source.is_none();
+        let mut usage = normalize_attempt_usage(usage, attribution, true);
+        if missing_vibe {
+            usage.requests_count = None;
+        }
+        usage
     };
-    let backend_kind = crate::usage_attribution::backend_kind_of(attribution.backend);
 
     // Claude Code: prefer the structured session transcript for real
     // per-attempt token/cost usage (issue #153). Never scrape stdout text.
@@ -688,6 +697,7 @@ pub(super) fn attempt_usage(
                 }
             }
         }
+        return finalize(crate::ledger::LedgerUsage::default());
     }
 
     // OpenCode persists exact per-session model and token counters in its
@@ -723,23 +733,12 @@ pub(super) fn attempt_usage(
             }
         }
     }
-    if backend_kind == Some(BackendKind::Openhands) {
-        let openhands_usage = usage::parse_openhands_usage(&text);
-        if openhands_usage.usage_source.is_some() {
-            usage = usage::merge_usage(openhands_usage, usage);
-        }
-    }
     let has_json_lines = text.lines().any(|line| line.trim_start().starts_with('{'));
     if usage.usage_source.is_none() && (backend_kind != Some(BackendKind::Codex) || !has_json_lines)
     {
         // Fall back to the generic regex-based parser for other backends (or
         // for codex running in non-JSON mode).
         usage = usage::parse_generic_usage(&text, "attempt_output_log");
-    }
-
-    if let Some(delta) = agy_cli_log_delta {
-        let agy = usage::parse_agy_cli_log_delta(delta, "agy_cli_log_delta");
-        usage = usage::merge_usage(usage, agy);
     }
 
     if usage.usage_source.is_some() {
@@ -1379,6 +1378,14 @@ fn mark_backend_unavailable_from_output_for_identity_at(
     // model, so we must NOT mark it as unavailable.
     if parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded {
         return Ok(Some(parsed));
+    }
+    // Output also carries the agent's own work, which can quote login-failure
+    // text from the repository it is editing, and a login block never
+    // expires. The backend's own login check overrules such a match.
+    if parsed.kind == crate::quota_parser::FailureKind::AuthenticationError
+        && crate::auth_health::login_confirmed(identity)
+    {
+        return Ok(None);
     }
 
     let parsed_unavailable_until = if let Some(reset_at) = parsed.reset_at.as_deref() {

@@ -27,7 +27,7 @@
     "last_success_at": null,
     "record_count": 0,
     "retry_pending": false,
-    "schema_version": 10,
+    "schema_version": 11,
     "status": "never_run"
   },
   "fix_attempt_counts": {},
@@ -88,6 +88,10 @@
     "central_url": null,
     "role": "central"
   },
+  "node_capacity": {
+    "memory_floor_mib": 0,
+    "worker_memory_mib": 4096
+  },
   "observations": {
     "availability": {
       "status": "ok"
@@ -130,5 +134,9 @@
   "review_held_work_ids": [],
   "schema_version": 1,
   "skill_inventory": [],
-  "work_waypoint_evidence": {}
+  "work_waypoint_evidence": {},
+  "worker_limits": {
+    "baseline_workers": 1,
+    "workers": 1
+  }
 }

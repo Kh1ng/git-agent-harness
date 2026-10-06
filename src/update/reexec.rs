@@ -39,7 +39,13 @@ fn argv(args: &UpdateArgs, repo: &Path) -> Vec<OsString> {
         repo.into(),
         "--role".into(),
         role.into(),
+        // The previous binary already showed the plan and got consent, and
+        // already pulled; the re-run must neither prompt nor pull again.
+        "--yes".into(),
     ];
+    if !args.agents.is_empty() {
+        out.extend(["--agent".into(), args.agents.join(",").into()]);
+    }
     if args.restart_server {
         out.push("--restart-server".into());
     }
@@ -58,6 +64,9 @@ mod tests {
     fn repeats_the_same_update_request() {
         let args = UpdateArgs {
             repo: None,
+            pull: true,
+            agents: vec!["claude".into(), "codex".into()],
+            yes: false,
             role: HostRole::Central,
             restart_server: true,
             server_service: "gah-server.service".into(),
@@ -74,6 +83,9 @@ mod tests {
                 "/srv/gah",
                 "--role",
                 "central",
+                "--yes",
+                "--agent",
+                "claude,codex",
                 "--restart-server",
                 "--server-service",
                 "gah-server.service"

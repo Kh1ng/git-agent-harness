@@ -190,6 +190,16 @@ pub enum Commands {
         /// Repository checkout to update (defaults to the current checkout).
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Fetch and fast-forward the checkout before building (opt-in).
+        #[arg(long)]
+        pull: bool,
+        /// Agent integrations to install; existing assets are also refreshed.
+        /// Repeat or use comma-separated names.
+        #[arg(long, value_delimiter = ',', value_parser = ["claude", "codex", "opencode", "vibe"])]
+        agent: Vec<String>,
+        /// Accept the printed installation plan without prompting.
+        #[arg(long)]
+        yes: bool,
         /// "central" (builds/serves the control plane, default) or "worker"
         /// (CLI + dispatch loop only -- never builds apps/server or touches
         /// gah-server.service).
@@ -585,6 +595,16 @@ pub enum ConfigCommands {
         /// Telegram chat id for the telegram channel (non-secret).
         #[arg(long)]
         telegram_chat_id: Option<String>,
+        /// Issue #1380: memory reservation (MiB) per implementation,
+        /// fix, retry, or escalation worker. At least 512; the default
+        /// is 4096.
+        #[arg(long)]
+        worker_memory_mib: Option<u64>,
+        /// Issue #1380: free-memory floor (MiB) the node must keep.
+        /// 0 (the default) keeps the adaptive max(2048 MiB, total / 6);
+        /// an explicit floor must be at least 512.
+        #[arg(long)]
+        memory_floor_mib: Option<u64>,
     },
     /// Issue #149: ordered routing-candidate editing for a profile. The
     /// lists are `pm` / `improve` / `review` / `escalatory`. Every mutation
@@ -713,7 +733,7 @@ pub enum RoutingCandidateCommands {
     Add {
         #[arg(long)]
         profile: String,
-        /// Which ordered list: pm | improve | review | escalatory.
+        /// Which ordered list: pm | improve | review | escalatory | routine (single reviewer; add replaces it).
         #[arg(long)]
         list: String,
         #[arg(long)]
@@ -950,7 +970,6 @@ pub enum ProfileCommands {
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         validation_timeout_seconds: Option<u64>,
         /// Manager-wake autonomy for this profile: off | review_only | full.
-        /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         manager_wake_autonomy: Option<String>,
         /// Delivery mode for work results: pr (default) | handoff.
@@ -1030,14 +1049,33 @@ pub enum ProfileCommands {
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         validation_timeout_seconds: Option<u64>,
         /// Manager-wake autonomy for this profile: off | review_only | full.
-        /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         manager_wake_autonomy: Option<String>,
         /// Delivery mode for work results: pr | handoff.
         #[arg(long)]
         delivery_mode: Option<String>,
+        /// Automatic worker scaling from quota headroom: on | off (see `WorkerScaling`).
+        #[arg(long)]
+        worker_scaling: Option<String>,
+        /// Most workers automatic scaling may reach (default: twice the baseline).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        worker_scaling_max_workers: Option<u32>,
+        /// Extra concurrent runs a model gets while it has quota headroom.
+        #[arg(long)]
+        worker_scaling_extra_per_model: Option<u32>,
+        /// Percent every fresh quota window must still have for a model to scale.
+        #[arg(long)]
+        worker_scaling_min_remaining_percent: Option<f64>,
+        /// Add this many workers now; replaces an earlier boost (`--clear worker_boost` ends it).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        boost_workers: Option<u32>,
+        /// Give the boost to one `backend/model` instead of every capped model.
+        #[arg(long, requires = "boost_workers")]
+        boost_model: Option<String>,
+        /// End the boost after this many hours (default: until cleared).
+        #[arg(long, requires = "boost_workers")]
+        boost_hours: Option<f64>,
         /// Hold approved schema/API contract changes for human review.
-        /// Exposed in the dashboard Settings UI.
         #[arg(long)]
         hold_contract_changes: Option<bool>,
         /// Clear the specified field(s) - for fields that support it

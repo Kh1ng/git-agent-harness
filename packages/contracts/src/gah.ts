@@ -396,6 +396,7 @@ export interface NodeRoleStatus {
 export interface StatusSnapshot {
   /** Host role added in #938; absent on older CLIs. */
   node?: NodeRoleStatus;
+  node_capacity?: NodeCapacitySettings;
   schema_version: number;
   review_contract_version: number;
   generated_at: string;
@@ -448,6 +449,9 @@ export interface StatusSnapshot {
    * before commit/push. */
   generated_artifact_deny_patterns: string[];
   max_parallel_workers: number;
+  /** How `max_parallel_workers` was reached from the configured baseline.
+   * Absent on CLIs without worker scaling. */
+  worker_limits?: WorkerLimits;
   open_managed_mr_count: number;
   inflight_implementation_count: number;
   implementation_intake_paused: boolean;
@@ -470,6 +474,7 @@ export interface StatusSnapshot {
 // ---------------------------------------------------------------------------
 
 export interface QuotaUsageSummary {
+  usage_unknown_reasons?: Partial<Record<UsageUnknownReason, number>>;
   entries: number;
   attempts: number;
   validation_pass: number;
@@ -579,6 +584,7 @@ export interface AccountUsageObservation {
   models: AccountUsageModel[];
 }
 
+/** Shared quota store record used by quota list and snapshot observations. */
 export interface QuotaObservation {
   credential_id?: string | null;
   backend_instance?: string | null;
@@ -586,17 +592,30 @@ export interface QuotaObservation {
   backend: string;
   model?: string | null;
   quota_window?: string | null;
-  quota_used_percent?: number | null;
   quota_remaining_percent?: number | null;
   quota_reset_at?: string | null;
   observed_at?: string | null;
   /** When the check ran, on store-derived report rows (#1339). */
   checked_at?: string | null;
+  check_error?: string | null;
   usage_source?: string | null;
   account_usage?: AccountUsageObservation | null;
+  mistral_admin?: {
+    workspace_usage?: LedgerUsage | null;
+    billing?: LedgerUsage | null;
+    rate_limits?: {
+      requests_per_second: number | null;
+      model_limits: {
+        model: string;
+        tokens_per_minute: number | null;
+        tokens_per_month: number | null;
+      }[];
+    } | null;
+  } | null;
 }
 
 export interface BackendModelComparison {
+  usage_unknown_reasons?: Partial<Record<UsageUnknownReason, number>>;
   backend_or_model: string;
   is_model: boolean;
   entries: number;
@@ -753,6 +772,29 @@ export interface ReportSeriesData {
  * `WakeAutonomy` in src/config.rs (serde snake_case). */
 export type WakeAutonomyValue = 'off' | 'review_only' | 'full';
 
+/** Growth past a profile's baseline worker count: automatic while a
+ * subscription has quota headroom, and manual through a boost. */
+export interface WorkerScalingSettings {
+  enabled: boolean;
+  /** Ceiling for automatic scaling; unset means twice the baseline. */
+  max_workers?: number;
+  extra_per_model: number;
+  min_remaining_percent: number;
+  boost_workers?: number;
+  /** `backend/model`; unset boosts every capped model. */
+  boost_model?: string;
+  /** RFC 3339 expiry; unset lasts until cleared. */
+  boost_until?: string;
+}
+
+export interface WorkerLimits {
+  baseline_workers: number;
+  workers: number;
+  extra_per_model?: Record<string, number>;
+  /** One operator-readable line per grant or refusal. */
+  notes?: string[];
+}
+
 export interface ProfileSummary {
   name: string;
   display_name: string;
@@ -777,6 +819,8 @@ export interface ProfileSummary {
   max_parallel_workers: number | null;
   /** Effective maximum open managed PRs/MRs for the profile. */
   max_open_managed_mrs: number;
+  /** Absent on CLIs without worker scaling. */
+  worker_scaling?: WorkerScalingSettings;
   /** Manager-wake autonomy for this profile (null = unset -> off). */
   manager_wake_autonomy: WakeAutonomyValue | null;
   /** Delivery mode for work results ('pr' | 'handoff'). Defaults to 'pr' if omitted. */
@@ -933,24 +977,6 @@ export interface WorkClaimDetail {
   is_stale: boolean;
 }
 
-/** Issue #519: one row of `gah quota list --json` (HTTP adapter
- * GET /api/quota/list). Persisted observations, distinct from the computed
- * snapshot GET /api/quota returns. */
-export interface QuotaListRecord {
-  backend: string;
-  backend_instance?: string | null;
-  model?: string | null;
-  quota_pool?: string | null;
-  quota_window?: string | null;
-  quota_used_percent?: number | null;
-  quota_remaining_percent?: number | null;
-  quota_reset_at?: string | null;
-  observed_at?: string | null;
-  checked_at?: string | null;
-  check_error?: string | null;
-  usage_source?: string | null;
-}
-
 /** Issue #519: the remote projection of `gah external-approval inspect --json`.
  * The CLI's local `ledger_path` field is deliberately dropped at the server
  * boundary — remote callers never learn local filesystem layout. */
@@ -985,11 +1011,29 @@ export interface ConfigSummary {
   /** Which agent CLI is currently acting as the operator's manager across
    * all profiles/projects (null = unset, so no manager wake happens). */
   current_manager: string | null;
+  node_capacity?: NodeCapacitySettings;
   /** Issue #653: notification channel settings (no secrets — credentials
    * live in the environment). Optional while schema-v1 clients may still
    * be connected to an older server. */
   notifications?: NotificationSettingsSummary;
 }
+
+export interface NodeCapacitySettings {
+  worker_memory_mib: number;
+  memory_floor_mib: number;
+}
+
+/** Issue #1380: smallest accepted value for both node-capacity settings, in
+ * MiB. The Rust side enforces the same bound; the Settings form reads it
+ * from here so the limits are not restated per screen. */
+export const NODE_CAPACITY_MIN_MIB = 512;
+
+/** Issue #1380: default node-capacity settings. A `memory_floor_mib` of 0
+ * keeps the adaptive floor of max(2048 MiB, total memory / 6). */
+export const NODE_CAPACITY_DEFAULTS: NodeCapacitySettings = {
+  worker_memory_mib: 4096,
+  memory_floor_mib: 0,
+};
 
 /** Issue #653: notification channel settings projection. */
 export interface NotificationSettingsSummary {
@@ -1173,6 +1217,7 @@ export interface ConfigShowFull {
   schema_version: number;
   config_path: string;
   current_manager: string | null;
+  node_capacity?: NodeCapacitySettings;
   profiles: Record<string, ConfigProfileSummary>;
 }
 
@@ -1180,6 +1225,8 @@ export interface ConfigShowFull {
  * clears the field. */
 export interface ConfigSetData {
   current_manager?: string | null;
+  worker_memory_mib?: number;
+  memory_floor_mib?: number;
   /** Issue #653: none | telegram | discord. Credentials come from the
    * environment (TELEGRAM_BOT_TOKEN / DISCORD_WEBHOOK_URL), never config. */
   notification_channel?: 'none' | 'telegram' | 'discord';
@@ -1257,8 +1304,15 @@ export interface ControllerActivity {
 // gah ledger work <id> --json (src/ledger.rs LedgerEntry, full shape)
 // ---------------------------------------------------------------------------
 
+export type UsageUnknownReason =
+  | 'no_attempt_started'
+  | 'backend_not_invoked'
+  | 'usage_artifact_missing'
+  | 'usage_artifact_unparsed';
+
 export interface LedgerUsage {
   usage_source: string | null;
+  usage_unknown_reason?: UsageUnknownReason | null;
   usage_classification?: 'quota_backed' | 'api_key_backed' | 'local_unmetered' | 'unknown' | 'mixed' | 'mixed_or_unknown' | null;
   /** Safe logical execution instance, optionally qualified by quota pool. */
   backend_instance?: string | null;
@@ -1284,12 +1338,7 @@ export interface LedgerUsage {
   requests_count: number | null;
   estimated_cost_usd: number | null;
   actual_cost_usd: number | null;
-  quota_window: string | null;
-  quota_used_percent: number | null;
-  quota_remaining_percent: number | null;
-  quota_reset_at: string | null;
   token_usage_unknown_reason?: string | null;
-  quota_unknown_reason?: string | null;
   /**
    * Issue #119: provenance-aware per-attempt behavior metrics (tool calls,
    * shell calls, file edits, test runs). `null`/`undefined` means the backend
@@ -1453,6 +1502,7 @@ export interface LedgerEntry {
 // ---------------------------------------------------------------------------
 
 export interface LedgerSummary {
+  usage_unknown_reasons?: Partial<Record<UsageUnknownReason, number>>;
   ledger_path: string;
   entries: number;
   success: number;
@@ -1492,6 +1542,7 @@ export interface LedgerSummary {
 
 /** `ledger::summary::GroupSummary`; unknown observations remain null. */
 export interface LedgerGroupSummary {
+  usage_unknown_reasons?: Partial<Record<UsageUnknownReason, number>>;
   group_key: string;
   entries: number;
   attempts: number;

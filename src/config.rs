@@ -6,8 +6,10 @@ use std::{collections::HashMap, path::PathBuf};
 
 mod backend_instances;
 mod merge_policy;
+mod node_capacity;
 pub use backend_instances::*;
 pub use merge_policy::MergePolicy;
+pub use node_capacity::NodeCapacitySettings;
 mod backend_paths;
 mod issue_intake;
 pub use issue_intake::IssueIntakeMode;
@@ -20,8 +22,12 @@ pub use autonomy::WakeAutonomy;
 mod external_credential_scopes;
 pub use external_credential_scopes::ExternalCredentialScope;
 mod routing_policy;
+mod worker_scaling;
 use routing_policy::merge_routing_policy;
 pub use routing_policy::{CandidateConfig, RoutingPolicy, TaskRoutingRule};
+mod default_paths;
+pub use default_paths::{default_config_dir, default_data_root, effective_worktree_base};
+pub use worker_scaling::WorkerScaling;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GahConfig {
@@ -42,6 +48,7 @@ pub struct Defaults {
     pub llm_model_local: String,
     pub llm_model_cloud: String,
     pub routing: RoutingPolicy,
+    pub node_capacity: NodeCapacitySettings,
     /// Which agent CLI ("claude" | "codex" | "hermes") is currently acting
     /// as the operator's manager across all profiles/projects. Read by the
     /// manager-wake feature (`Profile::manager_wake_autonomy`) to decide
@@ -251,6 +258,9 @@ pub struct Profile {
     /// implementation intake pauses. Defaults to `max_parallel_workers`.
     #[serde(default)]
     pub max_open_managed_mrs: Option<u32>,
+    /// Automatic and manual growth past the two limits above.
+    #[serde(default, skip_serializing_if = "WorkerScaling::is_default")]
+    pub worker_scaling: WorkerScaling,
     /// HOME override for the `agy-second` backend name only -- a distinct
     /// authenticated Antigravity account/quota pool from the default `agy`
     /// backend, which otherwise runs under the process's real $HOME. Same
@@ -389,12 +399,6 @@ pub fn canonical_backend_name(name: &str) -> &str {
     }
 }
 
-pub fn default_config_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    home.map_or_else(|| PathBuf::from("/root"), PathBuf::from)
-        .join(".config/gah")
-}
-
 pub fn default_config_path() -> PathBuf {
     default_config_dir().join("config.toml")
 }
@@ -518,6 +522,9 @@ pub fn load(config_path: Option<&str>) -> Result<GahConfig> {
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let mut cfg: GahConfig =
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    // Invalid values must not lock the operator out of the config; the
+    // rationale lives on NodeCapacitySettings::sanitized.
+    cfg.defaults.node_capacity = cfg.defaults.node_capacity.sanitized();
     if let Some(canonical_routing) = load_canonical_routing()? {
         cfg.defaults.routing = merge_routing_policy(canonical_routing, cfg.defaults.routing);
     }
@@ -548,6 +555,7 @@ pub fn get_profile<'a>(config: &'a GahConfig, name: &str) -> Result<&'a Profile>
 
 /// Save the config back to the TOML file
 pub fn save(config: &GahConfig, path: Option<&str>) -> Result<()> {
+    config.defaults.node_capacity.validate()?;
     let target_path = resolve_config_path(path);
 
     // Ensure parent directory exists
@@ -646,6 +654,7 @@ pub mod tests {
             hermes_idle_timeout_seconds: None,
             max_parallel_workers: None,
             max_open_managed_mrs: None,
+            worker_scaling: Default::default(),
             notify_command: None,
             policy_path: None,
             env_file: None,
@@ -669,63 +678,13 @@ pub mod tests {
 
     fn gitlab_profile(api_base: Option<&str>) -> Profile {
         Profile {
-            manager_wake_autonomy: crate::config::WakeAutonomy::default(),
-            delivery_mode: crate::config::DeliveryMode::default(),
-            prune_older_than_days: None,
-            chat_session_idle_days: None,
             display_name: "Test".into(),
             repo_id: "test".into(),
             provider: "gitlab".into(),
             repo: "group/repo".into(),
-            local_path: "/tmp/repo".into(),
-            artifact_root: "/tmp/artifacts".into(),
-            default_target_branch: "main".into(),
             provider_api_base: api_base.map(str::to_string),
             provider_project_id: Some("42".into()),
-            oh_profile: None,
-            openhands_args: vec![],
-            codex_args: vec![],
-            codex_path: None,
-            claude_args: vec![],
-            claude_path: None,
-            agy_path: None,
-            vibe_args: vec![],
-            vibe_path: None,
-            opencode_args: vec![],
-            opencode_path: None,
-            hermes_args: vec![],
-            hermes_path: None,
-            agy_second_home: None,
-            agy_print_timeout_seconds: std::collections::HashMap::new(),
-            agy_idle_timeout_seconds: None,
-            opencode_idle_timeout_seconds: None,
-            opencode_idle_timeout_seconds_by_model: std::collections::HashMap::new(),
-            max_concurrent_per_model: std::collections::HashMap::new(),
-            openhands_idle_timeout_seconds: None,
-            vibe_idle_timeout_seconds: None,
-            codex_idle_timeout_seconds: None,
-            claude_idle_timeout_seconds: None,
-            hermes_idle_timeout_seconds: None,
-            max_parallel_workers: None,
-            max_open_managed_mrs: None,
-            notify_command: None,
-            policy_path: None,
-            env_file: None,
-            env_file_prod: None,
-            validation_commands: vec![],
-            auto_fix_commands: vec![],
-            test_file_patterns: vec![],
-            known_baseline_failure_markers: vec![],
-            model_improve: None,
-            model_pm: None,
-            model_review: None,
-            review_timeout_seconds: None,
-            review_hard_timeout_seconds: None,
-            validation_timeout_seconds: None,
-            routing: RoutingPolicy::default(),
-            publishing: Default::default(),
-            external_credential_scopes: std::collections::HashMap::new(),
-            pacing: Default::default(),
+            ..test_profile_for_notifications()
         }
     }
 
@@ -1378,16 +1337,9 @@ improve_backend = "agy"
         assert!(effective.allow_review_fallback);
     }
 
-    #[test]
-    fn canonical_backend_name_merges_cloud_coder_alias_into_openhands() {
-        // Live-observed: --backend openhands and --backend cloud-coder both
-        // run the identical OpenHands executable (runner::backend_command_name),
-        // but nothing canonicalized the raw CLI string before it reached the
-        // ledger/quota page, producing two separate cards for one backend.
-        assert_eq!(canonical_backend_name("cloud-coder"), "openhands");
-        assert_eq!(canonical_backend_name("openhands"), "openhands");
-    }
-
+    // The cloud-coder → openhands merge is asserted against the same
+    // public function in tests/execution_identity.rs; only the
+    // pass-through cases are unit-tested here.
     #[test]
     fn canonical_backend_name_leaves_other_backends_and_auto_untouched() {
         // "auto" must NOT be rewritten here: its effective backend is
