@@ -556,10 +556,20 @@ fn aggregate_observations(
 ) -> Vec<crate::quota_store::QuotaObservationRecord> {
     let mut out = Vec::new();
     if let Some(group) = backend_group {
-        out.extend(group.quota_observations.iter().cloned());
+        out.extend(
+            group
+                .quota_observations
+                .iter()
+                .map(convert_group_observation),
+        );
     }
     if let Some(group) = model_group {
-        out.extend(group.quota_observations.iter().cloned());
+        out.extend(
+            group
+                .quota_observations
+                .iter()
+                .map(convert_group_observation),
+        );
     }
     for account in quota_store::latest_windows_for_identity(account_quota, identity) {
         out.push((*account).clone());
@@ -618,6 +628,17 @@ fn aggregate_observations(
 /// pool and credential are `None`) exactly as the former ledger summary
 /// type did: a broad ledger aggregate has no verified source identity and
 /// must not present itself as one account's balance.
+fn convert_group_observation(
+    observation: &quota_store::QuotaObservationRecord,
+) -> quota_store::QuotaObservationRecord {
+    let mut observation = observation.clone();
+    observation.backend_instance = None;
+    observation.quota_pool = None;
+    observation.credential_id = None;
+    observation.account_usage = None;
+    observation
+}
+
 fn summarize_groups(groups: Vec<ledger::summary::GroupSummary>) -> UsageSummary {
     let mut summary = UsageSummary::default();
     for group in groups {

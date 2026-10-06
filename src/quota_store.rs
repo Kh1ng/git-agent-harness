@@ -149,23 +149,6 @@ pub fn store_path() -> PathBuf {
     }
 }
 
-fn normalize_quota_percent(val: &mut serde_json::Value) {
-    if let Some(obj) = val.as_object_mut() {
-        if obj
-            .get("quota_remaining_percent")
-            .is_none_or(serde_json::Value::is_null)
-        {
-            if let Some(used) = obj.get("quota_used_percent").and_then(|v| v.as_f64()) {
-                obj.insert(
-                    "quota_remaining_percent".to_string(),
-                    serde_json::json!(100.0 - used),
-                );
-            }
-        }
-        obj.remove("quota_used_percent");
-    }
-}
-
 /// Load readable records, skipping malformed JSONL lines. A missing file is
 /// an empty list; other read failures are returned to the caller.
 pub fn load(state_path: &Path) -> Result<Vec<QuotaObservationRecord>> {
@@ -182,11 +165,10 @@ pub fn load(state_path: &Path) -> Result<Vec<QuotaObservationRecord>> {
         // Skip only the malformed line, not the whole file: one corrupt JSONL
         // record (e.g. a partial write) must not discard every valid
         // observation before/after it. Mirrors availability.rs's resilience.
-        let mut val = match serde_json::from_str::<serde_json::Value>(line) {
+        let val = match serde_json::from_str::<serde_json::Value>(line) {
             Ok(val) => val,
             Err(_) => continue,
         };
-        normalize_quota_percent(&mut val);
         match serde_json::from_value::<QuotaObservationRecord>(val) {
             Ok(mut rec) => {
                 rec.backend = crate::config::canonical_backend_name(&rec.backend).to_string();
@@ -230,8 +212,7 @@ pub fn parse_external_observation(input: &str) -> Result<QuotaObservationRecord>
     if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
         anyhow::bail!("unsupported quota observation field");
     }
-    let mut val = value;
-    normalize_quota_percent(&mut val);
+    let val = value;
     let mut record: QuotaObservationRecord = serde_json::from_value(val)
         .map_err(|_| anyhow::anyhow!("invalid quota observation schema"))?;
     if let Some(usage) = &record.account_usage {
