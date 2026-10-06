@@ -295,7 +295,7 @@ export function buildKanban(input: KanbanInput): KanbanBoard {
     const lastRun = cardRuns.find((run) => run.status !== 'running');
     const claim = claimByKey.get(key);
     const blocker = blockerByKey.get(key);
-    const fixUsed = mergeRequest ? status?.fix_attempt_counts[mergeRequest.branch] ?? 0 : 0;
+    const fixUsed = mergeRequest ? status?.fix_attempt_counts?.[mergeRequest.branch] ?? 0 : 0;
     const processes = agentsOnCard.get(key) ?? [];
     const skipped = lastRun?.status === 'failed' ? parseSkipped(lastRun.outcome) : [];
     const lastOutcome = lastRun?.status === 'failed' ? plainOutcome(lastRun) : null;
@@ -494,7 +494,7 @@ function buildAgents(input: KanbanInput, cards: KanbanCard[], factoryAgents: Dev
     }
     // The model on the running process is the exact one; a route only names what was configured.
     agent.name = agentLabel(agent.backend, agent.jobs.find((job) => job.model)?.model ?? agent.models.join(', '));
-    const constraint = status?.constraints.find((item) => item.backend === agent.backend && item.reason);
+    const constraint = status?.constraints?.find((item) => item.backend === agent.backend && item.reason);
     const takeable = idleCards.filter((card) => canDo(agent, card.job!));
     if (agent.jobs.length) {
       agent.state = 'working';
