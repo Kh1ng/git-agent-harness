@@ -139,7 +139,7 @@ pub fn run(command: QuotaCommands) -> Result<()> {
 
             match refreshed {
                 Ok(Some(rec)) => {
-                    if is_vibe_admin && rec.quota_used_percent.is_none() {
+                    if is_vibe_admin && rec.quota_remaining_percent.is_none() {
                         println!(
                             "Recorded Mistral Admin account data without a spend-limit reading (workspace/billing/rate-limit data saved; nothing fabricated)."
                         );
@@ -219,11 +219,10 @@ pub fn run(command: QuotaCommands) -> Result<()> {
             } else {
                 for rec in &records {
                     println!(
-                        "{} {}/{}: used={:?}% remaining={:?}% window={:?} reset={:?} ({})",
+                        "{} {}/{}: remaining={:?}% window={:?} reset={:?} ({})",
                         rec.observed_at.as_deref().unwrap_or(""),
                         rec.backend,
                         rec.model.as_deref().unwrap_or(""),
-                        rec.quota_used_percent,
                         rec.quota_remaining_percent,
                         rec.quota_window,
                         rec.quota_reset_at,
