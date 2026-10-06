@@ -242,7 +242,7 @@ fn report_trend_aggregates_tokens_from_attempt_usage() {
 }
 
 #[test]
-fn report_preserves_unknown_and_exposes_quota_observations() {
+fn report_preserves_unknown_and_ignores_historical_ledger_quota() {
     let mut ledger = TestLedger::new();
     ledger = ledger.with_entry(usage_entry(
         "claude",
@@ -278,13 +278,7 @@ fn report_preserves_unknown_and_exposes_quota_observations() {
     assert_eq!(agy_second["input_tokens"], serde_json::Value::Null);
     assert_eq!(agy_second["actual_cost_usd"], serde_json::Value::Null);
 
-    let quota = &claude["quota_observations"][0];
-    assert_eq!(quota["backend"], "claude");
-    assert_eq!(quota["quota_window"], "weekly");
-    assert_eq!(quota["quota_remaining_percent"], 38.0);
-    assert_eq!(quota["quota_reset_at"], "2026-01-12T00:00:00Z");
-    assert_eq!(quota["observed_at"], "2026-01-02T03:04:05Z");
-    assert_eq!(quota["usage_source"], "subscription_status");
+    assert!(claude["quota_observations"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -311,7 +305,7 @@ fn parse_generic_usage_rejects_partial_word_matches() {
 }
 
 #[test]
-fn quota_observations_select_latest_timestamp_with_timezone_offsets() {
+fn report_ignores_historical_per_attempt_quota_observations() {
     // Test that RFC3339 timestamps with different timezone offsets are compared correctly
     // This is an adversarial test for the timestamp comparison logic
     let attempts = vec![
@@ -357,16 +351,11 @@ fn quota_observations_select_latest_timestamp_with_timezone_offsets() {
         .unwrap();
 
     let quota_observations = claude["quota_observations"].as_array().unwrap();
-    assert_eq!(quota_observations.len(), 1); // Only one quota observation should be kept
-
-    // The latest timestamp should be 2026-01-01T10:00:00Z (which is 15:00:00+05:00)
-    // over 2026-01-01T12:00:00+05:00 (which is 07:00:00Z), so we should see the 45.0 value
-    assert_eq!(quota_observations[0]["quota_remaining_percent"], 45.0);
-    assert_eq!(quota_observations[0]["observed_at"], "2026-01-01T10:00:00Z");
+    assert!(quota_observations.is_empty());
 }
 
 #[test]
-fn successful_agy_execution_captures_quota_telemetry() {
+fn successful_agy_execution_captures_usage_without_per_attempt_quota() {
     let mut harness = ScenarioHarness::new("github").with_config_append(
         "[profiles.test.publishing]\nallow_pull_request_creation = false\nallow_commit_message_generation = false\n",
     );
@@ -398,7 +387,7 @@ fn successful_agy_execution_captures_quota_telemetry() {
     let attempt_usage = &entry["attempts"][0]["usage"];
     assert_eq!(attempt_usage["usage_classification"], "quota_backed");
     assert_eq!(attempt_usage["requests_count"], 1);
-    assert_eq!(attempt_usage["quota_window"], "AGY individual quota");
+    assert!(attempt_usage.get("quota_window").is_none());
     assert_eq!(attempt_usage["input_tokens"], 500);
     assert_eq!(attempt_usage["output_tokens"], 120);
     assert_eq!(attempt_usage["reasoning_tokens"], 17);
@@ -413,7 +402,7 @@ fn successful_agy_execution_captures_quota_telemetry() {
     assert_eq!(top_usage["backend_instance"], "agy");
     assert_eq!(top_usage["provider"], "google");
     assert_eq!(top_usage["requests_count"], 1);
-    assert_eq!(top_usage["quota_window"], "AGY individual quota");
+    assert!(top_usage.get("quota_window").is_none());
     assert_eq!(top_usage["input_tokens"], 500);
     assert_eq!(top_usage["output_tokens"], 120);
     assert_eq!(top_usage["reasoning_tokens"], 17);

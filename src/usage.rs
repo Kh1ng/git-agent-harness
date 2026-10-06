@@ -33,14 +33,6 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
         &["estimated_cost_usd", "estimated cost usd", "cost usd"],
     );
     let actual_cost_usd = find_f64(text, &["actual_cost_usd", "actual cost usd"]);
-    let quota_used_percent = find_f64(text, &["quota_used_percent", "quota used percent"]);
-    let quota_remaining_percent = find_f64(
-        text,
-        &["quota_remaining_percent", "quota remaining percent"],
-    );
-    let quota_window = find_string_after(text, &["quota_window", "quota window"]);
-    let quota_reset_at = find_string_after(text, &["quota_reset_at", "quota reset at"]);
-
     let mut usage = LedgerUsage {
         input_tokens,
         output_tokens,
@@ -51,10 +43,6 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
         requests_count,
         estimated_cost_usd,
         actual_cost_usd,
-        quota_used_percent,
-        quota_remaining_percent,
-        quota_window,
-        quota_reset_at,
         ..LedgerUsage::default()
     };
 
@@ -81,113 +69,10 @@ pub fn parse_generic_usage(text: &str, source_hint: &str) -> LedgerUsage {
         || usage.cache_read_tokens.is_some()
         || usage.cache_write_tokens.is_some()
         || usage.requests_count.is_some()
-        || usage.quota_used_percent.is_some()
-        || usage.quota_remaining_percent.is_some()
-        || usage.quota_window.is_some()
-        || usage.quota_reset_at.is_some()
     {
         usage.usage_source = Some(source_hint.to_string());
     }
     usage
-}
-
-/// Parse quota-limit headers surfaced by OpenHands when its LLM backend
-/// runs through a proxy that exposes `x-ratelimit-*` metadata.
-///
-/// The proxy/upstream does not give us a single canonical "percentage
-/// used" field, so we summarize the most constrained bucket we can see:
-/// choose the bucket with the smallest remaining percentage and convert
-/// it into the same quota fields the rest of the harness already knows
-/// how to display.
-///
-/// Returns an empty usage record when no recognizable rate-limit headers
-/// are present.
-pub fn parse_openhands_usage(text: &str) -> LedgerUsage {
-    #[derive(Debug)]
-    struct Bucket {
-        label: &'static str,
-        used_percent: f64,
-        remaining_percent: f64,
-        reset_at: Option<String>,
-    }
-
-    let mut buckets = Vec::new();
-
-    let candidates = [
-        (
-            "tokens 1h",
-            &[
-                "x-ratelimit-limit-tokens-1h",
-                "x-ratelimit-remaining-tokens-1h",
-                "x-ratelimit-reset-tokens-1h",
-            ][..],
-        ),
-        (
-            "requests 1h",
-            &[
-                "x-ratelimit-limit-requests-1h",
-                "x-ratelimit-remaining-requests-1h",
-                "x-ratelimit-reset-requests-1h",
-            ][..],
-        ),
-        (
-            "tokens",
-            &[
-                "x-ratelimit-limit-tokens",
-                "x-ratelimit-remaining-tokens",
-                "x-ratelimit-reset-tokens",
-            ][..],
-        ),
-        (
-            "requests",
-            &[
-                "x-ratelimit-limit-requests",
-                "x-ratelimit-remaining-requests",
-                "x-ratelimit-reset-requests",
-            ][..],
-        ),
-    ];
-
-    for (label, keys) in candidates {
-        let Some(limit) = find_header_u64(text, &[keys[0]]) else {
-            continue;
-        };
-        let Some(remaining) = find_header_u64(text, &[keys[1]]) else {
-            continue;
-        };
-        if limit == 0 || remaining > limit {
-            continue;
-        }
-
-        let used_percent = ((limit - remaining) as f64 / limit as f64) * 100.0;
-        let remaining_percent = (remaining as f64 / limit as f64) * 100.0;
-        let reset_at = find_header_u64(text, &[keys[2]])
-            .or_else(|| find_header_u64(text, &["retry-after"]))
-            .map(|seconds| format!("in {seconds}s"));
-
-        buckets.push(Bucket {
-            label,
-            used_percent,
-            remaining_percent,
-            reset_at,
-        });
-    }
-
-    let Some(bucket) = buckets
-        .into_iter()
-        .min_by(|a, b| a.remaining_percent.total_cmp(&b.remaining_percent))
-    else {
-        return LedgerUsage::default();
-    };
-
-    LedgerUsage {
-        usage_source: Some("openhands_rate_limit_headers".to_string()),
-        quota_window: Some(bucket.label.to_string()),
-        quota_used_percent: Some(bucket.used_percent),
-        quota_remaining_percent: Some(bucket.remaining_percent),
-        quota_reset_at: bucket.reset_at,
-        ..LedgerUsage::default()
-    }
 }
 
 /// Parse the run-scoped OpenCode session snapshot written by `runner`.
@@ -255,57 +140,6 @@ pub fn parse_opencode_session_metadata(metadata_json: &str) -> LedgerUsage {
         pricing_version: actual_cost_usd.map(|_| "provider_reported".to_string()),
         ..LedgerUsage::default()
     }
-}
-
-/// #155 (TICKET-066 / #151): parse AGY's own quota/reset messages from a
-/// **run-scoped cli.log delta** (the bytes `runner` captured between the
-/// pre-run byte offset and the post-run position -- never a fresh read of
-/// the whole log).
-///
-/// AGY emits real lines such as:
-///   "RESOURCE_EXHAUSTED: ... Individual quota reached ..."
-///   "Quota exceeded. Resets in 16m44s."
-///   "Your quota resets at 2026-07-10 12:34:56 UTC."
-///   "Daily limit reached. Resets in 3h12m."
-///
-/// We extract the human-facing reset description only. We deliberately do
-/// **not** invent `quota_used_percent`: per the owner's explicit spec it
-/// stays `None` unless a real AGY endpoint exposes an exact percentage
-/// (none has been discovered). Fabricating a percentage would be a worse
-/// bug than leaving it unknown.
-///
-/// An empty/absent delta yields an all-`None` `LedgerUsage` (unknown,
-/// never fabricated zero) so the caller can merge it safely.
-pub fn parse_agy_cli_log_delta(delta: &str, source_hint: &str) -> LedgerUsage {
-    let mut usage = LedgerUsage::default();
-
-    // AGY-wide exhaustion / quota-exceeded signals.
-    let quota_exhausted = delta.contains("RESOURCE_EXHAUSTED")
-        || delta.contains("Individual quota reached")
-        || delta.contains("Quota exceeded")
-        || delta.contains("quota has been reached")
-        || delta.contains("quota reached");
-    usage.quota_window = if quota_exhausted {
-        Some("AGY individual quota".to_string())
-    } else {
-        None
-    };
-
-    // Reset description. Prefer an explicit timestamp; otherwise capture the
-    // "Resets in <dur>" relative form. Real AGY lines ("Resets in 16m44s.",
-    // "Your quota resets at 2026-07-10 12:34:56 UTC.") do NOT use a `:`
-    // separator, so we use a tolerant finder that accepts an optional `:`/`:`
-    // and bounds the capture. Never synthesize a percentage.
-    if let Some(ts) = agy_find_after(delta, &["resets at", "resets:"]) {
-        usage.quota_reset_at = Some(ts);
-    } else if let Some(dur) = agy_find_after(delta, &["resets in", "reset in"]) {
-        usage.quota_reset_at = Some(format!("in {dur}"));
-    }
-
-    if usage.quota_window.is_some() || usage.quota_reset_at.is_some() {
-        usage.usage_source = Some(source_hint.to_string());
-    }
-    usage
 }
 
 /// Parse AGY's structured `--output-format json` / `stream-json` result.
@@ -500,33 +334,8 @@ fn agy_usage_from_result(value: &Value) -> LedgerUsage {
     usage
 }
 
-/// Like `find_string_after`, but tolerant of AGY's separator-less style
-/// ("Resets in 16m44s" / "quota resets at 2026-...") where the value follows
-/// the keyword with only optional whitespace (an optional `:`/`=` is allowed).
-/// Reuses the same length/shape guards as the generic version.
-fn agy_find_after(text: &str, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        // Stop at the first period (a reset description "...resets at X." is
-        // one sentence) so we don't swallow the rest of the log line. The
-        // generic `find_string_after`'s `[^\n\r]+` would grab everything to
-        // end-of-line, which is too greedy for AGY's prose-style messages.
-        let re = Regex::new(&format!(
-            r"(?i)\b{}\b\s*:?\s*([^.\n\r]{{1,{}}})",
-            regex::escape(key),
-            MAX_QUOTA_CAPTURE_LEN
-        ))
-        .ok()?;
-        re.captures(text)
-            .and_then(|caps| caps.get(1))
-            .map(|m| m.as_str().trim().trim_matches('"').to_string())
-            .filter(|value| looks_like_quota_value(value))
-    })
-}
-
 /// Merge `other` into `base`, keeping the first `Some` value for each field
-/// (so the generic stdout parse wins over the cli.log delta when both
-/// report the same field, and the delta fills in quota/reset info the
-/// stdout parse doesn't have). Returns a new `LedgerUsage`.
+/// Returns a new `LedgerUsage`.
 pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
     LedgerUsage {
         usage_unknown_reason: base.usage_unknown_reason.or(other.usage_unknown_reason),
@@ -558,16 +367,9 @@ pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
         requests_count: base.requests_count.or(other.requests_count),
         estimated_cost_usd: base.estimated_cost_usd.or(other.estimated_cost_usd),
         actual_cost_usd: base.actual_cost_usd.or(other.actual_cost_usd),
-        quota_used_percent: base.quota_used_percent.or(other.quota_used_percent),
-        quota_remaining_percent: base
-            .quota_remaining_percent
-            .or(other.quota_remaining_percent),
-        quota_window: base.quota_window.or(other.quota_window),
-        quota_reset_at: base.quota_reset_at.or(other.quota_reset_at),
         token_usage_unknown_reason: base
             .token_usage_unknown_reason
             .or(other.token_usage_unknown_reason),
-        quota_unknown_reason: base.quota_unknown_reason.or(other.quota_unknown_reason),
         behavior_metrics: merge_behavior_metrics(base.behavior_metrics, other.behavior_metrics),
         usage_source: match (base.usage_source, other.usage_source) {
             (Some(a), Some(b)) => Some(format!("{a}+{b}")),
@@ -639,19 +441,6 @@ fn find_f64(text: &str, keys: &[&str]) -> Option<f64> {
         re.captures(text)
             .and_then(|caps| caps.get(1))
             .and_then(|m| m.as_str().parse::<f64>().ok())
-    })
-}
-
-fn find_header_u64(text: &str, keys: &[&str]) -> Option<u64> {
-    keys.iter().find_map(|key| {
-        let re = Regex::new(&format!(
-            r#"(?i)"?{}\b"?\s*[:=]\s*"?([0-9]+)"?"#,
-            regex::escape(key)
-        ))
-        .ok()?;
-        re.captures(text)
-            .and_then(|caps| caps.get(1))
-            .and_then(|m| m.as_str().parse::<u64>().ok())
     })
 }
 
@@ -765,47 +554,6 @@ pub fn parse_codex_transcript_attribution(transcript: &str) -> LedgerUsage {
     usage
 }
 
-/// A real quota-window/quota-reset-at value is a short human string ("weekly",
-/// "5h", an ISO timestamp). `[^\n\r]+` alone is unbounded and backend log
-/// text is not always newline-delimited per logical line (e.g. a diff or
-/// source snippet dumped with literal `\n` escapes rather than real
-/// newline bytes) -- if that text happens to contain the literal substring
-/// "quota_window" (a backend session working on this very field, dogfooding
-/// GAH on itself, will print exactly that), this used to capture hundreds
-/// of bytes of unrelated source code as the "value". Bound the capture and
-/// reject anything that still looks code-shaped rather than data-shaped.
-const MAX_QUOTA_STRING_LEN: usize = 64;
-/// Regex capture bound, deliberately larger than MAX_QUOTA_STRING_LEN so an
-/// overly-long value is actually captured (and then rejected by
-/// `looks_like_quota_value`'s length check) instead of being silently
-/// truncated down to a length that passes.
-const MAX_QUOTA_CAPTURE_LEN: usize = 256;
-
-fn looks_like_quota_value(s: &str) -> bool {
-    if s.is_empty() || s.len() > MAX_QUOTA_STRING_LEN {
-        return false;
-    }
-    !["{", "}", "<", ">", "::", "#[", "\\n", "pub ", "fn "]
-        .iter()
-        .any(|marker| s.contains(marker))
-}
-
-fn find_string_after(text: &str, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        // Use word boundaries to prevent matching partial words
-        let re = Regex::new(&format!(
-            r"(?i)\b{}\b\s*[:=]\s*([^\n\r]{{1,{}}})",
-            regex::escape(key),
-            MAX_QUOTA_CAPTURE_LEN
-        ))
-        .ok()?;
-        re.captures(text)
-            .and_then(|caps| caps.get(1))
-            .map(|m| m.as_str().trim().trim_matches('"').to_string())
-            .filter(|value| looks_like_quota_value(value))
-    })
-}
-
 /// Account windows from Codex app-server `account/rateLimits/read`: one record
 /// per window present. `primary` and `secondary` are independent limits (for
 /// example 5-hour and weekly), so neither may stand in for the other. Empty
@@ -902,13 +650,11 @@ pub fn refresh_codex_quota(
 mod tests {
     use super::codex_rate_limit_windows;
     use super::extract_agy_output_summary;
-    use super::parse_agy_cli_log_delta;
     use super::parse_agy_output_json;
     use super::parse_codex_exec_json;
     use super::parse_codex_transcript_attribution;
     use super::parse_generic_usage;
     use super::parse_opencode_session_metadata;
-    use super::parse_openhands_usage;
     use super::parse_vibe_session_metadata;
     use super::{merge_usage, LedgerUsage};
     use crate::ledger::{AttemptBehaviorMetrics, BehaviorMetric, BehaviorMetricQuality};
@@ -1071,6 +817,54 @@ mod tests {
         assert!(codex_windows(r#"{"rateLimits":{"primary":{},"secondary":null}}"#).is_empty());
     }
 
+    #[test]
+    fn historical_quota_keys_deserialize_but_are_not_written_or_merged() {
+        let historical = serde_json::json!({
+            "input_tokens": 10,
+            "quota_window": "AGY individual quota",
+            "quota_used_percent": 25.0,
+            "quota_remaining_percent": 75.0,
+            "quota_reset_at": "in 16m44s",
+            "quota_unknown_reason": "legacy unknown"
+        });
+        let usage: LedgerUsage = serde_json::from_value(historical).unwrap();
+        let merged = merge_usage(
+            usage,
+            LedgerUsage {
+                output_tokens: Some(20),
+                ..LedgerUsage::default()
+            },
+        );
+        let written = serde_json::to_value(merged).unwrap();
+        assert_eq!(written["input_tokens"], 10);
+        assert_eq!(written["output_tokens"], 20);
+        for key in [
+            "quota_window",
+            "quota_used_percent",
+            "quota_remaining_percent",
+            "quota_reset_at",
+            "quota_unknown_reason",
+        ] {
+            assert!(
+                written.get(key).is_none(),
+                "retired key {key} must not be written"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_parser_ignores_quota_text_and_headers() {
+        for text in [
+            "quota_window: weekly\nquota_used_percent: 25\nquota_remaining_percent: 75\nquota_reset_at: 2026-01-12T00:00:00Z",
+            "quota_window: Option<String>,\\n pub quota_used_percent: Option<f64>",
+            "x-ratelimit-limit-requests-1h: 800\nx-ratelimit-remaining-requests-1h: 0\nx-ratelimit-reset-requests-1h: 3100",
+            include_str!("../tests/fixtures/quota-logs/agy_individual_quota_reached.txt"),
+        ] {
+            let usage = parse_generic_usage(text, "generic");
+            assert_eq!(serde_json::to_value(usage).unwrap(), serde_json::to_value(LedgerUsage::default()).unwrap());
+        }
+    }
+
     // ── Existing generic parser tests ────────────────────────────────────
 
     #[test]
@@ -1083,85 +877,6 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(20));
         assert_eq!(usage.total_tokens, Some(30));
         assert_eq!(usage.estimated_cost_usd, Some(0.12));
-        assert_eq!(usage.quota_window.as_deref(), Some("weekly"));
-    }
-
-    #[test]
-    fn rejects_code_shaped_text_masquerading_as_a_quota_value() {
-        // Regression: a backend session dogfooding GAH's own quota_window
-        // field printed its own source (with literal `\n` escapes, not real
-        // newline bytes, so it reads as one line to the parser) and the old
-        // unbounded `[^\n\r]+` capture grabbed hundreds of bytes of it.
-        let text = "quota_window: Option<String>,\\n    pub quota_used_percent: Option<f64>,\\n}";
-        let usage = parse_generic_usage(text, "generic");
-        assert_eq!(usage.quota_window, None);
-    }
-
-    #[test]
-    fn rejects_overly_long_captures_even_without_code_markers() {
-        let long_value = "x".repeat(200);
-        let text = format!("quota_reset_at: {}", long_value);
-        let usage = parse_generic_usage(&text, "generic");
-        assert_eq!(usage.quota_reset_at, None);
-    }
-
-    // --- #155: AGY cli.log delta parsing (TICKET-066 / #151) -----------------
-
-    #[test]
-    fn agy_delta_parses_relative_reset_when_quota_exhausted() {
-        // Real AGY lines do NOT use a `:` separator ("Resets in 16m44s.").
-        let delta = "ERROR: RESOURCE_EXHAUSTED: Individual quota reached for this account.\nQuota exceeded. Resets in 16m44s.";
-        let usage = parse_agy_cli_log_delta(delta, "agy_cli_log_delta");
-        assert_eq!(usage.quota_window.as_deref(), Some("AGY individual quota"));
-        assert_eq!(usage.quota_reset_at.as_deref(), Some("in 16m44s"));
-        // Critical spec point: percentage is never fabricated.
-        assert_eq!(usage.quota_used_percent, None);
-        assert_eq!(usage.usage_source.as_deref(), Some("agy_cli_log_delta"));
-    }
-
-    #[test]
-    fn agy_delta_parses_explicit_reset_timestamp() {
-        let delta = "Your quota resets at 2026-07-10 12:34:56 UTC. Please try again after that.";
-        let usage = parse_agy_cli_log_delta(delta, "agy_cli_log_delta");
-        assert_eq!(
-            usage.quota_reset_at.as_deref(),
-            Some("2026-07-10 12:34:56 UTC")
-        );
-        assert_eq!(usage.quota_used_percent, None);
-    }
-
-    #[test]
-    fn agy_delta_leaves_percentage_unknown_when_absent() {
-        // Even when other quota signals are present, percentage stays None.
-        let delta = "Quota exceeded. Daily limit reached. Resets in 3h12m. You have used 80% of your quota.";
-        let usage = parse_agy_cli_log_delta(delta, "agy_cli_log_delta");
-        assert!(usage.quota_window.is_some());
-        assert!(usage.quota_reset_at.is_some());
-        // The free-text "80%" is NOT a structured percentage source; we must
-        // not guess/estimate a number from prose.
-        assert_eq!(usage.quota_used_percent, None);
-    }
-
-    #[test]
-    fn agy_delta_is_empty_not_zero_for_non_quota_runs() {
-        // A successful AGY run with no quota signal must report unknown,
-        // never a fabricated zero.
-        let delta = "agent started\nmade some edits\nagent finished";
-        let usage = parse_agy_cli_log_delta(delta, "agy_cli_log_delta");
-        assert_eq!(usage.quota_window, None);
-        assert_eq!(usage.quota_reset_at, None);
-        assert_eq!(usage.quota_used_percent, None);
-        assert_eq!(usage.usage_source, None);
-    }
-
-    #[test]
-    fn agy_delta_empty_string_yields_all_unknown() {
-        let usage = parse_agy_cli_log_delta("", "agy_cli_log_delta");
-        assert_eq!(usage.quota_window, None);
-        assert_eq!(usage.quota_reset_at, None);
-        assert_eq!(usage.quota_used_percent, None);
-        assert_eq!(usage.input_tokens, None);
-        assert_eq!(usage.usage_source, None);
     }
 
     #[test]
@@ -1191,49 +906,6 @@ mod tests {
             extract_agy_output_summary(output).as_deref(),
             Some("Implemented the fix.")
         );
-    }
-
-    #[test]
-    fn openhands_rate_limit_headers_extract_percentage_and_reset() {
-        let text = r#"
-            x-ratelimit-limit-requests-1h: 800
-            x-ratelimit-remaining-requests-1h: 0
-            x-ratelimit-reset-requests-1h: 3100
-        "#;
-        let usage = parse_openhands_usage(text);
-        assert_eq!(
-            usage.usage_source.as_deref(),
-            Some("openhands_rate_limit_headers")
-        );
-        assert_eq!(usage.quota_window.as_deref(), Some("requests 1h"));
-        assert_eq!(usage.quota_used_percent, Some(100.0));
-        assert_eq!(usage.quota_remaining_percent, Some(0.0));
-        assert_eq!(usage.quota_reset_at.as_deref(), Some("in 3100s"));
-    }
-
-    #[test]
-    fn openhands_rate_limit_headers_choose_most_constrained_bucket() {
-        let text = r#"
-            {"x-ratelimit-limit-requests-1h":"800","x-ratelimit-remaining-requests-1h":"600"}
-            {"x-ratelimit-limit-tokens-1h":"10000","x-ratelimit-remaining-tokens-1h":"1000"}
-        "#;
-        let usage = parse_openhands_usage(text);
-        assert_eq!(
-            usage.usage_source.as_deref(),
-            Some("openhands_rate_limit_headers")
-        );
-        assert_eq!(usage.quota_window.as_deref(), Some("tokens 1h"));
-        assert_eq!(usage.quota_used_percent, Some(90.0));
-        assert_eq!(usage.quota_remaining_percent, Some(10.0));
-    }
-
-    #[test]
-    fn openhands_usage_returns_empty_without_headers() {
-        let usage = parse_openhands_usage("agent started\nmade progress\nfinished");
-        assert_eq!(usage.usage_source, None);
-        assert_eq!(usage.quota_window, None);
-        assert_eq!(usage.quota_used_percent, None);
-        assert_eq!(usage.quota_remaining_percent, None);
     }
 
     // ── Issue #119: behavior_metrics merge (non-blocking finding) ──────────
