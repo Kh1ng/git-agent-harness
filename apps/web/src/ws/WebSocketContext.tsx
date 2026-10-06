@@ -230,7 +230,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           switch (message.type) {
             case 'workers.snapshot': {
               const current = useGahStore.getState().status;
-              if (!current.loading && current.data?.profile.profile === message.profile) useGahStore.setState({ status: { ...current, data: { ...current.data, running_workers: message.workers } } });
+              if (current.data?.profile.profile === message.profile) useGahStore.setState({ status: { ...current, data: { ...current.data, running_workers: message.workers } } });
               break;
             }
             case 'activity.replay': {

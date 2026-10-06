@@ -85,8 +85,6 @@ export function App() {
   const fetchStatus = useGahStore(state => state.fetchStatus);
   useEffect(() => {
     void fetchStatus(activeProfile, { force: true });
-    const timer = window.setInterval(() => { if (!document.hidden) void fetchStatus(activeProfile, { force: true }); }, 5000);
-    return () => window.clearInterval(timer);
   }, [activeProfile, fetchStatus, reconnectSeq, activityRevision]);
 
   // The device's agent processes: what the factory is running right now, and what runs beside it.
