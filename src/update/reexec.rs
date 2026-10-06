@@ -70,6 +70,8 @@ mod tests {
             role: HostRole::Central,
             restart_server: true,
             server_service: "gah-server.service".into(),
+            from_release: false,
+            release_manifest: None,
         };
         let argv: Vec<String> = argv(&args, Path::new("/srv/gah"))
             .into_iter()

@@ -38,7 +38,9 @@
             "allow-credential-refresh",
             "allow-credential-instances",
             "allow-credential-bind",
-            "allow-credential-add-instance"
+            "allow-credential-add-instance",
+            "allow-desktop-update-status",
+            "allow-desktop-apply-update"
           ],
           "local": true
         },

@@ -2,19 +2,9 @@
 
 use anyhow::Result;
 
-use std::path::PathBuf;
-
 use crate::{update as update_module, update::UpdateArgs};
 
-pub struct Args {
-    pub repo: Option<PathBuf>,
-    pub pull: bool,
-    pub agent: Vec<String>,
-    pub yes: bool,
-    pub role: String,
-    pub restart_server: bool,
-    pub server_service: String,
-}
+pub use crate::cli::args::UpdateArgs as Args;
 
 pub fn run(args: Args) -> Result<()> {
     update_module::run(UpdateArgs {
@@ -25,5 +15,7 @@ pub fn run(args: Args) -> Result<()> {
         role: update_module::HostRole::parse(&args.role)?,
         restart_server: args.restart_server,
         server_service: args.server_service,
+        from_release: args.from_release,
+        release_manifest: args.release_manifest,
     })
 }

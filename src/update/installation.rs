@@ -4,6 +4,19 @@ use anyhow::{bail, Result};
 use std::env;
 use std::path::Path;
 
+/// `npm ci` arguments shared by the source build path and the release
+/// path's dependency-drift reinstall (issue #1416): the release bundle
+/// normally ships prebuilt `dist/` output, but when its lockfile differs
+/// from the checkout's the installed node_modules must be refreshed too.
+pub(super) const NPM_CI_ARGS: &[&str] = &[
+    "ci",
+    "--include=dev",
+    "--legacy-peer-deps",
+    "--prefer-offline",
+    "--no-audit",
+    "--no-fund",
+];
+
 /// Enumerate installation effects before confirmation, shared with setup.
 pub fn installation_plan(role: HostRole, agents: &[String]) -> Result<Vec<String>> {
     for agent in agents {

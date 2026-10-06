@@ -17,10 +17,12 @@ use std::process::Command;
 mod installation;
 mod launch_agent;
 mod reexec;
+mod release;
 mod units;
 pub use installation::installation_plan;
 #[cfg(test)]
 use installation::quota_refresh_selected;
+use installation::NPM_CI_ARGS;
 use installation::{agents_to_refresh, install_selected_agent_assets};
 use launch_agent::install_macos_launch_agent;
 
@@ -34,6 +36,12 @@ pub struct UpdateArgs {
     pub role: HostRole,
     pub restart_server: bool,
     pub server_service: String,
+    /// Issue #1416: install published release artifacts instead of
+    /// rebuilding from source. The checkout stays the deployment root.
+    pub from_release: bool,
+    /// Explicit manifest (edge-manifest.json) URL or local path; defaults
+    /// to the edge feed derived from the checkout's origin remote.
+    pub release_manifest: Option<String>,
 }
 
 pub fn run(args: UpdateArgs) -> Result<()> {
@@ -47,12 +55,29 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     // Set when this process is the newly installed CLI finishing an update
     // the previous binary started; the plan was already accepted.
     let resumed = env::var_os(reexec::ENV).is_some();
+    let config_home = user_config_home()?;
+    let agents = agents_to_refresh(&config_home, &args.agents);
+
+    if args.from_release {
+        if args.restart_server {
+            ensure_no_running_loop_before_server_restart()?;
+        }
+        // Agent integrations and their quota units come from the checkout
+        // on both update paths.
+        install_selected_agent_assets(&repo, &config_home, &agents)?;
+        return release::run_release(release::ReleaseArgs {
+            repo,
+            role: args.role,
+            restart_server: args.restart_server,
+            server_service: args.server_service,
+            manifest: args.release_manifest,
+        });
+    }
+
     if args.pull && !resumed {
         ensure_default_branch_checkout(&repo)?;
         ensure_clean(&repo)?;
     }
-    let config_home = user_config_home()?;
-    let agents = agents_to_refresh(&config_home, &args.agents);
     let plan = installation_plan(args.role, &agents)?;
     if !resumed {
         installation::confirm(&plan, &args, &repo)?;
@@ -114,36 +139,14 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     install_selected_agent_assets(&repo, &config_home, &agents)?;
 
     if cfg!(target_os = "macos") && args.role == HostRole::Worker {
-        run_command(
-            &repo,
-            "npm",
-            &[
-                "ci",
-                "--include=dev",
-                "--legacy-peer-deps",
-                "--prefer-offline",
-                "--no-audit",
-                "--no-fund",
-            ],
-        )?;
+        run_command(&repo, "npm", NPM_CI_ARGS)?;
     }
 
     if matches!(args.role, HostRole::Central | HostRole::Standalone) {
         // The control-plane server is part of the MVP; web/desktop/mobile
         // clients intentionally have independent release workflows. A
         // worker node dispatches jobs only and never serves this.
-        run_command(
-            &repo,
-            "npm",
-            &[
-                "ci",
-                "--include=dev",
-                "--legacy-peer-deps",
-                "--prefer-offline",
-                "--no-audit",
-                "--no-fund",
-            ],
-        )?;
+        run_command(&repo, "npm", NPM_CI_ARGS)?;
         run_command(&repo, "npm", &["run", "build:server"])?;
         if !repo.join("apps/server/dist/bin.js").is_file() {
             bail!("server build did not produce apps/server/dist/bin.js");
@@ -218,10 +221,24 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         println!("Role is 'worker': skipping control-plane server build on this host.");
     }
 
+    finish_update(&repo, args.role, &args.server_service, args.restart_server)
+}
+
+/// The shared tail of both update paths (source and release, issue #1416):
+/// macOS service definitions, the systemd user units that must stay in
+/// lockstep with the installed CLI, and the optional control-plane restart.
+/// Which artifacts got installed differs per path; what must happen to the
+/// host afterward does not.
+fn finish_update(
+    repo: &Path,
+    role: HostRole,
+    server_service: &str,
+    restart_server: bool,
+) -> Result<()> {
     if cfg!(target_os = "macos") {
         let script = repo.join("scripts/install-macos-desktop.sh");
         run_command(
-            &repo,
+            repo,
             "bash",
             &[
                 script.to_string_lossy().as_ref(),
@@ -230,11 +247,11 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         )?;
     }
 
-    if let Some(agent) = install_macos_launch_agent(&repo, args.role)? {
+    if let Some(agent) = install_macos_launch_agent(repo, role)? {
         println!("Installed macOS LaunchAgent: {}", agent.display());
     }
 
-    match install_loop_unit_template(&repo)? {
+    match install_loop_unit_template(repo)? {
         Some(loop_unit) => println!("Installed loop unit: {}", loop_unit.display()),
         None if cfg!(target_os = "macos") => {
             println!("macOS worker lifecycle is owned by its LaunchAgent.")
@@ -245,7 +262,7 @@ pub fn run(args: UpdateArgs) -> Result<()> {
              uses for supervised long-running processes."
         ),
     }
-    match install_watchdog_unit_template(&repo)? {
+    match install_watchdog_unit_template(repo)? {
         Some(watchdog_units) => {
             for unit in &watchdog_units {
                 println!("Installed watchdog unit: {}", unit.display());
@@ -260,29 +277,20 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         None => println!("systemd not available on this host: skipping watchdog unit install."),
     }
 
-    if args.restart_server && cfg!(target_os = "macos") {
+    if restart_server && cfg!(target_os = "macos") {
         let script = repo.join("scripts/macos-launchd.sh");
         run_command(
-            &repo,
+            repo,
             "bash",
             &[script.to_string_lossy().as_ref(), "start", "central"],
         )?;
         println!("Restarted macOS control-plane LaunchAgent.");
-    } else if args.restart_server {
-        run_command(&repo, "sudo", &["systemctl", "daemon-reload"])?;
-        run_command(
-            &repo,
-            "sudo",
-            &["systemctl", "restart", &args.server_service],
-        )?;
-        run_command(
-            &repo,
-            "systemctl",
-            &["is-active", "--quiet", &args.server_service],
-        )?;
-        println!("Restarted service: {}", args.server_service);
-    } else if matches!(args.role, HostRole::Central | HostRole::Standalone)
-        && !cfg!(target_os = "macos")
+    } else if restart_server {
+        run_command(repo, "sudo", &["systemctl", "daemon-reload"])?;
+        run_command(repo, "sudo", &["systemctl", "restart", server_service])?;
+        run_command(repo, "systemctl", &["is-active", "--quiet", server_service])?;
+        println!("Restarted service: {}", server_service);
+    } else if matches!(role, HostRole::Central | HostRole::Standalone) && !cfg!(target_os = "macos")
     {
         println!(
             "Server not restarted; pass --restart-server when this host serves the control plane."
@@ -403,7 +411,13 @@ fn user_config_home() -> Result<PathBuf> {
 }
 
 fn copy_opencode_agent_configs(repo: &Path, config_home: &Path) -> Result<[PathBuf; 2]> {
-    let source_dir = repo.join("packaging/opencode/agents");
+    copy_opencode_agent_configs_from(&repo.join("packaging/opencode/agents"), config_home)
+}
+
+/// Issue #1416: the release path passes the extracted bundle's copy of
+/// `packaging/opencode/agents` here instead of the (possibly stale)
+/// checkout's, because release mode never runs `git pull`.
+fn copy_opencode_agent_configs_from(source_dir: &Path, config_home: &Path) -> Result<[PathBuf; 2]> {
     let target_dir = config_home.join("opencode/agents");
     create_dir_all(&target_dir)
         .with_context(|| format!("creating OpenCode agent directory {}", target_dir.display()))?;
@@ -567,6 +581,16 @@ fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
     let Some(root_path) = resolve_web_deploy_root(env::var_os("GAH_WEB_DEPLOY_ROOT"))? else {
         return Ok(None);
     };
+    deploy_web_dist(repo, &dist, root_path)
+}
+
+/// Issue #1416: the release path calls this directly with the freshly
+/// extracted `apps/web/dist` instead of building it -- same deploy ordering
+/// and pruning, no npm.
+fn deploy_web_dist(repo: &Path, dist: &Path, root_path: PathBuf) -> Result<Option<PathBuf>> {
+    if !dist.join("index.html").is_file() {
+        bail!("web build did not produce apps/web/dist/index.html");
+    }
     let root = root_path
         .to_str()
         .context("GAH_WEB_DEPLOY_ROOT is not UTF-8")?;
@@ -616,7 +640,7 @@ fn deploy_web_ui(repo: &Path) -> Result<Option<PathBuf>> {
 
     // 3. Prune stale hashed assets. Best-effort: a prune hiccup must not
     //    fail the whole update after the new page is already live.
-    prune_stale_web_assets(repo, &root_path, &dist);
+    prune_stale_web_assets(repo, &root_path, dist);
 
     Ok(Some(root_path))
 }
@@ -1244,6 +1268,8 @@ mod tests {
             role: HostRole::Worker,
             restart_server: true,
             server_service: "gah-server.service".into(),
+            from_release: false,
+            release_manifest: None,
         })
         .unwrap_err();
         assert!(err.to_string().contains("--role central"));
