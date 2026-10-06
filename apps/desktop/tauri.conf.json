@@ -33,6 +33,7 @@
             "allow-onboarding-install-cli",
             "allow-onboarding-agent-login",
             "allow-onboarding-run",
+            "allow-onboarding-factory",
             "allow-open-setup-terminal",
             "allow-mistral-login-start",
             "allow-mistral-login-finish",

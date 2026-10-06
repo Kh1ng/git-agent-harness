@@ -913,6 +913,7 @@ fn main() {
             onboarding::onboarding_install_cli,
             onboarding::onboarding_agent_login,
             onboarding::onboarding_run,
+            onboarding::onboarding_factory,
             mistral_login::mistral_login_start,
             mistral_login::mistral_login_finish,
             credentials::credential_list,

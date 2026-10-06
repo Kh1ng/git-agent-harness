@@ -267,3 +267,34 @@ pub async fn onboarding_run(
         Ok(settings.central_url)
     }).await.map_err(|e| e.to_string())?
 }
+
+/// Configure an optional factory without enabling autonomous dispatch.
+#[tauri::command]
+pub async fn onboarding_factory(
+    window: tauri::WebviewWindow,
+    profile: String,
+    repo: String,
+    local_path: String,
+    provider: String,
+) -> Result<(), String> {
+    super::local_only(&window)?;
+    let args = super::onboarding_choices::factory_args(&profile, &repo, &local_path, &provider)?;
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut cmd = super::wsl_command(&super::read_settings());
+        cmd.args([
+            "--exec",
+            "bash",
+            "-lc",
+            "exec ~/.cargo/bin/gah \"$@\"",
+            "gah",
+        ]);
+        cmd
+    };
+    #[cfg(not(windows))]
+    let mut cmd = host_command(super::installed_gah()?.to_string_lossy().as_ref());
+    cmd.args(args);
+    tauri::async_runtime::spawn_blocking(move || stream(cmd, &window))
+        .await
+        .map_err(|e| e.to_string())?
+}

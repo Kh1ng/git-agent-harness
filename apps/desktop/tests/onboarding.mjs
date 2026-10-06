@@ -31,6 +31,8 @@ try {
         if (command === 'owner_credential_status') return { saved: false };
         if (command === 'node_role_status') return { role: 'central', running: false, supported: false };
         if (command === 'credential_list') return [];
+        if (command === 'open_setup_terminal') return args.standalone ? 'http://127.0.0.1:3773' : '';
+        if (command === 'setup_check' && window.cliMissing) return { installed: false, report: null };
         if (command === 'setup_check') return { installed: true, report: { ready: false, requirements: [{ id: 'provider_login', label: 'Repository login', why: 'Authenticate before setup', optional: false, status: { state: 'not_logged_in' }, action: { command: 'gh auth login', sudo: false } }] } };
         if (command === 'onboarding_run') {
           const failed = ++window.attempt === 1;
@@ -46,6 +48,13 @@ try {
   });
   await page.goto('http://gah.test/');
   await page.locator('#setup-state').filter({ hasText: 'required' }).waitFor();
+  await page.selectOption('#setup-factory', 'configure');
+  await page.fill('#factory-profile', 'test-project');
+  await page.fill('#factory-repo', 'owner/project');
+  await page.fill('#factory-path', '/tmp/test-checkout');
+  await page.locator('#setup-factory-configure').click();
+  await page.locator('#setup-state').filter({ hasText: 'Factory profile configured' }).waitFor();
+  assert.ok((await page.evaluate(() => window.calls)).some(call => call.command === 'onboarding_factory' && call.args.profile === 'test-project'));
   await page.selectOption('#setup-agent', 'codex');
   await page.locator('#setup-standalone').click();
   await page.locator('#setup-state').filter({ hasText: 'Permission was denied' }).waitFor();
@@ -74,6 +83,17 @@ try {
   await page.waitForFunction(() => document.querySelector('#setup-repository-login').disabled);
   assert.equal(await page.locator('#setup-repository-login').isDisabled(), true);
   assert.equal((await page.evaluate(() => window.calls)).filter(call => call.command === 'onboarding_login').length, loginCount);
+  for (const userAgent of ['Macintosh', 'Windows']) {
+    await page.context().addInitScript(ua => Object.defineProperty(navigator, 'userAgent', { get: () => ua }), userAgent);
+    await page.reload();
+    await page.locator('#setup-standalone').filter({ hasText: 'Open setup in terminal' }).waitFor();
+    await page.evaluate(() => { window.cliMissing = true; });
+    await page.locator('#setup-refresh').click();
+    await page.locator('#setup-standalone').click();
+    await page.waitForFunction(() => window.calls.some(call => call.command === 'open_setup_terminal'));
+    assert.equal(await page.inputValue('#central-url'), 'http://127.0.0.1:3773');
+    assert.ok(!(await page.evaluate(() => window.calls)).some(call => call.command === 'onboarding_run'));
+  }
   assert.deepEqual(errors, []);
   console.log('GUI failure/retry, explicit choices, local completion, missing-package login blocking and terminal-free workflow passed (mocked host).');
 } finally { await browser.close(); }

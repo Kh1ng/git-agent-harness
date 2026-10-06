@@ -100,3 +100,64 @@ mod tests {
         assert!(choice.args().is_err());
     }
 }
+
+/// Restrict values interpolated by the legacy `gah init` TOML renderer.
+pub fn factory_args(
+    profile: &str,
+    repo: &str,
+    local_path: &str,
+    provider: &str,
+) -> Result<Vec<String>, String> {
+    if profile.is_empty()
+        || !profile
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c))
+        || !["github", "gitlab"].contains(&provider)
+        || repo.split('/').count() < 2
+        || repo.split('/').any(|p| p.is_empty())
+        || !repo
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_./-".contains(c))
+        || !local_path.starts_with('/')
+        || local_path
+            .chars()
+            .any(|c| c.is_control() || "\"\\".contains(c))
+    {
+        return Err("Enter a simple profile name, owner/repository and absolute checkout path without quotes or backslashes.".into());
+    }
+    Ok([
+        "init",
+        "--profile",
+        profile,
+        "--display-name",
+        profile,
+        "--provider",
+        provider,
+        "--repo",
+        repo,
+        "--local-path",
+        local_path,
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect())
+}
+
+#[cfg(test)]
+mod factory_tests {
+    use super::factory_args;
+    #[test]
+    fn validates_factory_profile_and_toml_values() {
+        let args = factory_args("project", "owner/repo", "/tmp/my checkout", "github").unwrap();
+        assert_eq!(args[0], "init");
+        assert_eq!(args.last().unwrap(), "/tmp/my checkout");
+        for (profile, repo, path) in [
+            ("bad.name", "owner/repo", "/tmp/repo"),
+            ("project", "repo", "/tmp/repo"),
+            ("project", "owner/repo", "relative"),
+            ("project", "owner/repo", "/tmp/\"injection"),
+        ] {
+            assert!(factory_args(profile, repo, path, "github").is_err());
+        }
+    }
+}

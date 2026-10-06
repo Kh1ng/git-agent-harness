@@ -18,6 +18,7 @@ const launchWindow = document.querySelector<HTMLInputElement>('#launch-window')!
 const tray = document.querySelector<HTMLInputElement>('#show-tray')!;
 const ownerToken = document.querySelector<HTMLInputElement>('#owner-token')!;
 const ownerState = document.querySelector<HTMLElement>('#owner-state')!;
+const nativeOnboarding = !navigator.userAgent.includes('Mac') && !navigator.userAgent.includes('Windows');
 const isMac = navigator.userAgent.includes('Mac');
 const showMistralLogin = bindMistralLogin(document.querySelector<HTMLElement>('#mistral-section')!, command => invoke<MistralLoginResult>(command));
 const showProviderConnection = bindProviderConnections(document.querySelector<HTMLElement>('#provider-connections')!, invoke);
@@ -136,7 +137,13 @@ async function refreshSetup(): Promise<boolean> {
   list.hidden = list.childElementCount === 0;
   button.hidden = false;
   button.dataset.setupUnavailable = String(!result.installed);
-  button.disabled = !result.installed;
+  button.disabled = nativeOnboarding && !result.installed;
+  if (!nativeOnboarding) {
+    button.dataset.setupUnavailable = 'false';
+    button.textContent = 'Open setup in terminal';
+    state.textContent = 'Complete setup in the terminal, then select Check again and Save and connect. Windows setup runs in your selected WSL distribution.';
+    for (const id of ['setup-install-cli', 'setup-agent-login', 'setup-repository-login']) document.querySelector<HTMLElement>(`#${id}`)!.hidden = true;
+  }
   return !pending;
 }
 
@@ -241,6 +248,11 @@ document.querySelector('#setup-refresh')!.addEventListener('click', () => {
 document.querySelector('#setup-standalone')!.addEventListener('click', () => {
   void performSetup(async () => {
     const state = document.querySelector('#setup-state')!;
+    if (!nativeOnboarding) {
+      central.value = await invoke<string>('open_setup_terminal', { standalone: setupChoices().role === 'standalone' });
+      state.textContent = 'Finish setup in the terminal, then select Check again and Save and connect.';
+      return;
+    }
     state.textContent = 'Checking prerequisites and installing your selected configuration… Native permission dialogs may appear. The first build can take several minutes.';
     const key = document.querySelector<HTMLInputElement>('#setup-gateway-key')!;
     try {
@@ -314,4 +326,19 @@ void perform(async () => {
   nodeRole = role.role;
   // On Windows, setup and gah live in the selected WSL distribution.
   await refreshSetup();
+});
+
+document.querySelector('#setup-factory')!.addEventListener('change', () => {
+  document.querySelector<HTMLElement>('#factory-config')!.hidden = document.querySelector<HTMLSelectElement>('#setup-factory')!.value === 'off';
+});
+document.querySelector('#setup-factory-configure')!.addEventListener('click', () => {
+  void performSetup(async () => {
+    await invoke('onboarding_factory', {
+      profile: document.querySelector<HTMLInputElement>('#factory-profile')!.value.trim(),
+      repo: document.querySelector<HTMLInputElement>('#factory-repo')!.value.trim(),
+      localPath: document.querySelector<HTMLInputElement>('#factory-path')!.value.trim(),
+      provider: setupChoices().provider,
+    });
+    document.querySelector('#setup-state')!.textContent = 'Factory profile configured. Review its backend and dispatch settings in the dashboard before starting work.';
+  });
 });

@@ -37,7 +37,12 @@ pub(crate) fn repository_tool_installed(program: &str) -> bool {
     return output.is_ok_and(|output| output.status.success());
     // `which` is not guaranteed on minimal Linux images, so search PATH here.
     #[cfg(not(any(windows, target_os = "macos")))]
-    return std::env::var_os("PATH").is_some_and(|paths| path_has_executable(&paths, program));
+    return super::onboarding::host_command(program)
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+        .or_else(|| std::env::var_os("PATH"))
+        .is_some_and(|paths| path_has_executable(&paths, program));
     #[cfg(target_os = "macos")]
     super::open_project::which(program).is_some()
 }

@@ -21,6 +21,7 @@ fn main() {
             "onboarding_install_cli",
             "onboarding_agent_login",
             "onboarding_run",
+            "onboarding_factory",
             "open_setup_terminal",
             "mistral_login_start",
             "mistral_login_finish",

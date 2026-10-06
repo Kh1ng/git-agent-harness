@@ -107,7 +107,16 @@
         <input id="setup-gateway" type="url" placeholder="https://memory.example.com" />
         <label for="setup-gateway-key">Memory gateway API key</label>
         <input id="setup-gateway-key" type="password" autocomplete="off" />
-        <p>Local gateway and embedding-provider configuration: <a href="https://github.com/Kh1ng/git-agent-harness/issues/1319">#1319</a>. Factory modules are optional and configured from the dashboard after setup: <a href="https://github.com/Kh1ng/git-agent-harness/issues/1317">#1317</a>.</p>
+        <p>Local gateway and embedding-provider configuration: <a href="https://github.com/Kh1ng/git-agent-harness/issues/1319">#1319</a>. Factory module lifecycle tracking: <a href="https://github.com/Kh1ng/git-agent-harness/issues/1317">#1317</a>.</p>
+        <label for="setup-factory">Factory (optional)</label>
+        <select id="setup-factory"><option value="off">Skip factory configuration</option><option value="configure">Configure a factory profile</option></select>
+        <div id="factory-config" hidden>
+          <p>After installing GAH, create a factory profile for an existing local checkout. This does not start dispatching work.</p>
+          <label for="factory-profile">Profile name</label><input id="factory-profile" placeholder="my-project" />
+          <label for="factory-repo">Repository (owner/name)</label><input id="factory-repo" placeholder="owner/project" />
+          <label for="factory-path">Absolute checkout path (WSL path on Windows)</label><input id="factory-path" />
+          <button id="setup-factory-configure" type="button">Configure factory profile</button>
+        </div>
         <p>Official installation guides:
           <a href="https://cli.github.com/">GitHub CLI</a> · <a href="https://gitlab.com/gitlab-org/cli#installation">GitLab CLI</a> ·
           <a href="https://git-scm.com/downloads">Git</a> · <a href="https://rustup.rs/">Rust</a> · <a href="https://nodejs.org/en/download">Node.js</a> ·
