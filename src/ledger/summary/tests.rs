@@ -927,3 +927,42 @@ fn legacy_fixture_grouped_summary_separates_unknown() {
     assert_eq!(group.attempts_started_unknown, 1);
     assert_eq!(group.attempts_completed_unknown, 1);
 }
+
+#[test]
+fn historical_used_percent_survives_ledger_loading_and_summary() {
+    for (remaining, expected) in [
+        (None, Some(75.0)),
+        (Some(serde_json::Value::Null), Some(75.0)),
+        (Some(serde_json::json!(60.0)), Some(60.0)),
+    ] {
+        let (_tmp, cfg) = test_config();
+        let entry = LedgerEntry::new("test", &profile(), "codex", "improve", "legacy", None, None);
+        let mut value = serde_json::to_value(entry).unwrap();
+        // A percentage alone must count as an observation, even without a window.
+        value["usage"] = serde_json::json!({"quota_used_percent": 25});
+        if let Some(remaining) = remaining {
+            value["usage"]["quota_remaining_percent"] = remaining;
+        }
+        std::fs::write(cfg.defaults.ledger_path(), format!("{value}\n")).unwrap();
+
+        let entries = crate::ledger::read_entries(&cfg).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].usage.quota_remaining_percent, expected);
+        assert!(entries[0].usage.total_tokens.is_none());
+        let serialized = serde_json::to_value(&entries[0].usage).unwrap();
+        assert!(serialized.get("quota_used_percent").is_none());
+        let grouped = super::build_grouped_summary(
+            &entries,
+            |entry| entry.effective_backend.clone(),
+            |observed| observed.backend.to_string(),
+            |backend, _model, _difficulty| backend.to_string(),
+        )
+        .unwrap();
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].quota_observations.len(), 1);
+        assert_eq!(
+            grouped[0].quota_observations[0].quota_remaining_percent,
+            expected
+        );
+    }
+}

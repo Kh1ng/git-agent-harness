@@ -20,6 +20,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+#[cfg(test)]
+mod compatibility_tests;
 mod identity;
 mod instances;
 pub(crate) use identity::current_source_records;
@@ -140,7 +142,10 @@ pub fn store_path() -> PathBuf {
 
 fn normalize_quota_percent(val: &mut serde_json::Value) {
     if let Some(obj) = val.as_object_mut() {
-        if obj.get("quota_remaining_percent").is_none() {
+        if obj
+            .get("quota_remaining_percent")
+            .is_none_or(serde_json::Value::is_null)
+        {
             if let Some(used) = obj.get("quota_used_percent").and_then(|v| v.as_f64()) {
                 obj.insert(
                     "quota_remaining_percent".to_string(),

@@ -1,3 +1,5 @@
+mod usage_compat;
+
 use super::resources::AttemptResourceUsage;
 use crate::config::Profile;
 use crate::routing::RoutingRuntimeState;
@@ -286,6 +288,7 @@ pub struct ExternalApprovalRecord {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
+#[serde(from = "usage_compat::LedgerUsageRaw")]
 pub struct LedgerUsage {
     pub usage_source: Option<String>,
     /// Normalized accounting class. This is explicit even when the backend
