@@ -3,17 +3,18 @@ import { useState } from 'react';
 export interface AgentModelOption { value: string; label: string }
 
 /** Native keyboard/touch selection, with an explicit escape hatch for unlisted models. */
-export function AgentModelSelect({ value, options, label, onChange, loading, failed }: {
+export function AgentModelSelect({ value, options, label, onChange, loading, failed, currentLabel }: {
   value: string;
   options: AgentModelOption[];
   label: string;
   onChange: (value: string) => void;
   loading?: boolean;
   failed?: boolean;
+  currentLabel?: string;
 }) {
   const [custom, setCustom] = useState(false);
   const choices = options.some((option) => option.value === value)
-    ? options : [{ value, label: value || 'Choose a model' }, ...options];
+    ? options : [{ value, label: currentLabel || value || 'Choose a model' }, ...options];
   const inputClass = 'w-full min-w-0 rounded-md border border-subtle bg-raised px-3 py-2.5 text-sm text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent';
   return <div className="min-w-0 space-y-2">
     <select aria-label={label} value={custom ? '__custom__' : value} className={inputClass}

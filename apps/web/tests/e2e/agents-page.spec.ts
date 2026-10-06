@@ -89,3 +89,31 @@ test('an unlisted model is editable and catalog failure keeps the current select
   await page.getByRole('button', { name: 'Save models and limits' }).click();
   await expect(page.getByText('Agent models and limits saved.')).toBeVisible();
 });
+
+test('Claude models show versions and context variants while saving exact model values', async ({ page }) => {
+  await page.route('**/api/config/effective**', async (route) => {
+    const config = await (await route.fetch()).json();
+    await route.fulfill({ json: { ...config, improve_candidates: [{ backend: 'claude', model: 'opus', priority: 100 }] } });
+  });
+  await page.route('**/api/manager-chat/models**', (route) => route.fulfill({ json: {
+    models: [
+      { id: 'opus[1m]', name: 'Opus (1M context)', description: 'Opus 5.5 with 1M context · Best for complex tasks' },
+      { id: 'claude-opus-4-6', name: 'Opus', description: 'A pinned version' },
+      { id: 'sonnet', name: 'Sonnet', description: 'Sonnet 5 · Efficient for routine tasks' },
+      { id: 'haiku', name: 'Haiku', description: 'Haiku 4.5 · Fastest for quick answers' },
+    ], reasoningEfforts: [],
+  } }));
+  await page.reload();
+  await page.getByRole('button', { name: 'Models & capacity', exact: true }).click();
+  const picker = page.getByRole('combobox', { name: /^Model for Claude/ });
+  await expect(picker.getByRole('option', { name: 'Opus 5.5 (1M context)', exact: true })).toBeAttached();
+  await expect(picker.getByRole('option', { name: 'Opus 4.6', exact: true })).toBeAttached();
+  await expect(picker.getByRole('option', { name: 'Sonnet 5', exact: true })).toBeAttached();
+  await expect(picker.getByRole('option', { name: 'Haiku 4.5', exact: true })).toBeAttached();
+  await expect(picker.getByRole('option', { selected: true })).toHaveText('Opus 5.5 (provider default)');
+  await picker.selectOption('claude-opus-4-6');
+  const mutation = page.waitForRequest((req) => req.method() === 'PATCH' && req.url().endsWith('/api/profiles/fixture'));
+  await page.getByRole('button', { name: 'Save models and limits' }).click();
+  expect((await mutation).postDataJSON()).toMatchObject({ agent_model: ['claude/opus=claude-opus-4-6'] });
+  await expect(page.getByText('Agent models and limits saved.')).toBeVisible();
+});

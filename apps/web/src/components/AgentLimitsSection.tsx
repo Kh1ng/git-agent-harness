@@ -5,6 +5,7 @@ import { gahApi } from '../api/client.js';
 import type { ProfileSummary } from '@git-agent-harness/contracts';
 import { AgentModelSelect, type AgentModelOption } from './AgentModelSelect.js';
 import { agentDisplayName } from './LiveAgentsCard.js';
+import { agentModelLabel, currentAgentModelLabel } from '../lib/agentModelLabel.js';
 
 const INPUT_CLASS = 'min-h-11 bg-raised border border-subtle rounded-md px-3 py-2 text-sm text-primary';
 
@@ -42,7 +43,7 @@ function useBackendModels(profile: string, backends: string[]): Record<string, {
         .then((summary) => {
           const options = summary.models.filter((model) => model.id !== 'default').map((model) => ({
             value: /^agy(?:[:\-_]|$)/i.test(backend) ? model.name : model.id,
-            label: model.name === model.id ? model.name : `${model.name} (${model.id})`,
+            label: agentModelLabel(backend, model),
           }));
           if (!cancelled) setModels((current) => ({ ...current, [backend]: { options, loading: false, failed: false } }));
         })
@@ -153,6 +154,7 @@ export function AgentLimitsSection({ selectedName, selected, agents, onSaved }: 
                 {agents.includes(key) ? (
                   <label className="min-w-0 space-y-1 text-xs text-secondary">Model
                   <AgentModelSelect label={`Model for ${agentLabel(key)}`} value={models[key] ?? model} options={suggestions[backend]?.options ?? []}
+                    currentLabel={currentAgentModelLabel(backend, models[key] ?? model, suggestions[backend]?.options ?? [])}
                     loading={suggestions[backend]?.loading} failed={suggestions[backend]?.failed}
                     onChange={(value) => setModels((current) => ({ ...current, [key]: value }))} />
                   </label>
