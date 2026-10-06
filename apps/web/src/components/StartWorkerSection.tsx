@@ -6,6 +6,7 @@ import { useBackendModels } from './AgentLimitsSection.js';
 import { AgentModelSelect } from './AgentModelSelect.js';
 import { agentDisplayName } from './LiveAgentsCard.js';
 import { currentAgentModelLabel } from '../lib/agentModelLabel.js';
+import { taskReasoningEfforts } from '../lib/agentModelOptions.js';
 
 const INPUT = 'w-full min-h-11 rounded-md border border-subtle bg-raised px-3 py-2 text-sm text-primary';
 const EFFORT_NAMES: Record<string, string> = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Maximum', ultra: 'Ultra' };
@@ -28,7 +29,7 @@ export function StartWorkerSection({ profile, agents, tickets, sessions, onActiv
   const group = catalog?.options.find((option) => option.variants?.some((variant) => variant.value === model));
   const native = backend === 'codex' || backend === 'claude';
   const reasoning = group?.variants?.map((variant) => ({ id: variant.effort, name: EFFORT_NAMES[variant.effort] ?? variant.effort }))
-    ?? (native ? [{ id: 'default', name: 'Provider default' }, ...(catalog?.efforts ?? []).filter((effort) => effort.id !== 'default').map((effort) => ({ ...effort, name: EFFORT_NAMES[effort.id] ?? effort.name }))] : []);
+    ?? (native ? [{ id: 'default', name: 'Provider default' }, ...taskReasoningEfforts(backend, catalog?.efforts).filter((effort) => effort.id !== 'default').map((effort) => ({ ...effort, name: EFFORT_NAMES[effort.id] ?? effort.name }))] : []);
   const effort = group?.variants?.find((variant) => variant.value === model)?.effort ?? efforts[backend] ?? profile.agent_reasoning_effort?.[backend] ?? 'default';
   const available = tickets.filter((ticket) => !ticket.has_active_claim && !ticket.has_active_mr && !ticket.human_required && ticket.execution_policy.dispatchable_now
     && !sessions.some((session) => session.target === ticket.ticket_path && (session.status === 'starting' || session.status === 'running')));
@@ -76,6 +77,7 @@ export function StartWorkerSection({ profile, agents, tickets, sessions, onActiv
           {reasoning.length ? reasoning.map((choice) => <option key={choice.id} value={choice.id}>{choice.name}</option>) : <option value="default">Provider default</option>}
         </select>
         {native && <p className="text-xs text-muted">For this worker only. Saved agent settings stay unchanged.</p>}
+        {backend === 'claude' && <p className="text-xs text-muted">Available levels depend on the model.</p>}
       </label>
     </div>
     <label className="mt-4 block space-y-1 text-xs text-secondary">Queued job

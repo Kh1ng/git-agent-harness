@@ -127,10 +127,13 @@ test('Claude models show versions and context variants while saving exact model 
   await expect(picker.getByRole('option', { name: 'Haiku 4.5', exact: true })).toBeAttached();
   await expect(picker.getByRole('option', { name: 'Fable 5.1 (1M context)', exact: true })).toBeAttached();
   await expect(picker.getByRole('option', { selected: true })).toHaveText('Opus 5.5 (provider default)');
+  await expect(page.getByRole('combobox', { name: 'Worker reasoning level' }).getByRole('option')).toHaveText(['Provider default', 'Low', 'Medium', 'High', 'Extra high', 'Maximum']);
+  await page.getByRole('combobox', { name: 'Worker reasoning level' }).selectOption('high');
+  await page.getByRole('combobox', { name: /^Reasoning for Claude/ }).selectOption('high');
   await picker.selectOption('claude-opus-4-6');
   const mutation = page.waitForRequest((req) => req.method() === 'PATCH' && req.url().endsWith('/api/profiles/fixture'));
   await page.getByRole('button', { name: 'Save agent settings' }).click();
-  expect((await mutation).postDataJSON()).toMatchObject({ agent_model: ['claude/opus=claude-opus-4-6'] });
+  expect((await mutation).postDataJSON()).toMatchObject({ agent_model: ['claude/opus=claude-opus-4-6'], agent_effort: ['claude=high'] });
   await expect(page.getByText('Agent settings saved.')).toBeVisible();
 });
 

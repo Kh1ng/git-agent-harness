@@ -6,7 +6,7 @@ import type { ProfileSummary } from '@git-agent-harness/contracts';
 import { AgentModelSelect, type AgentModelOption } from './AgentModelSelect.js';
 import { agentDisplayName } from './LiveAgentsCard.js';
 import { currentAgentModelLabel } from '../lib/agentModelLabel.js';
-import { agentModelOptions } from '../lib/agentModelOptions.js';
+import { agentModelOptions, taskReasoningEfforts } from '../lib/agentModelOptions.js';
 
 const INPUT_CLASS = 'min-h-11 bg-raised border border-subtle rounded-md px-3 py-2 text-sm text-primary';
 const EFFORT_LABELS: Record<string, string> = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Maximum', ultra: 'Ultra' };
@@ -157,7 +157,7 @@ export function AgentLimitsSection({ selectedName, selected, agents, onSaved }: 
             const group = suggestions[backend]?.options.find((option) => option.variants?.some((variant) => variant.value === value));
             const nativeEffort = /^(codex|claude)$/.test(backend) && selected.agent_reasoning_effort !== undefined;
             const reasoning = group?.variants?.map((variant) => ({ id: variant.effort, name: EFFORT_LABELS[variant.effort] ?? variant.effort }))
-              ?? (nativeEffort ? [{ id: 'default', name: 'Provider default' }, ...(suggestions[backend]?.efforts ?? []).filter((effort) => effort.id !== 'default').map((effort) => ({ ...effort, name: EFFORT_LABELS[effort.id] ?? effort.name }))] : []);
+              ?? (nativeEffort ? [{ id: 'default', name: 'Provider default' }, ...taskReasoningEfforts(backend, suggestions[backend]?.efforts).filter((effort) => effort.id !== 'default').map((effort) => ({ ...effort, name: EFFORT_LABELS[effort.id] ?? effort.name }))] : []);
             const effortValue = group?.variants?.find((variant) => variant.value === value)?.effort ?? efforts[backend] ?? selected.agent_reasoning_effort?.[backend] ?? 'default';
             return (
               <li key={key} className="grid grid-cols-1 items-start gap-3 py-4 sm:grid-cols-[minmax(0,1fr)_minmax(8rem,0.45fr)_6rem]">

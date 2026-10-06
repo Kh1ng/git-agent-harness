@@ -2,6 +2,14 @@ import type { ManagerModelInfo } from '@git-agent-harness/contracts';
 import type { AgentModelOption } from '../components/AgentModelSelect.js';
 import { agentModelLabel } from './agentModelLabel.js';
 
+export function taskReasoningEfforts(backend: string, advertised: { id: string; name: string }[] = []): { id: string; name: string }[] {
+  // Claude's ACP chat catalog can omit effort even though task dispatch uses
+  // the native --effort flag. CLI levels: code.claude.com/docs/en/model-config.
+  return backend === 'claude' && advertised.length === 0
+    ? ['low', 'medium', 'high', 'xhigh', 'max'].map((id) => ({ id, name: id }))
+    : advertised;
+}
+
 export function agentModelOptions(backend: string, models: ManagerModelInfo[], aliases: { backend: string; alias: string; model: string }[]): AgentModelOption[] {
   const options: AgentModelOption[] = [];
   for (const model of models.filter((model) => model.id !== 'default')) {
