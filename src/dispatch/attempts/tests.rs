@@ -44,7 +44,7 @@ fn attempt_usage_parses_real_log_file() {
     let usage = attempt_usage(
         path.to_str().unwrap(),
         None,
-        UsageAttribution::backend(Some("vibe"), None),
+        UsageAttribution::backend(Some("hermes"), None),
         None,
         None,
     );
@@ -62,6 +62,10 @@ fn attempt_usage_attributes_missing_artifact_without_fabricating_tokens() {
         None,
     );
     assert_eq!(usage.input_tokens, None);
+    assert_eq!(
+        usage.usage_unknown_reason,
+        Some(crate::ledger::UsageUnknownReason::UsageArtifactMissing)
+    );
     assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
     assert_eq!(usage.provider.as_deref(), Some("openai"));
     assert_eq!(usage.usage_classification.as_deref(), Some("quota_backed"));
@@ -82,7 +86,11 @@ fn attempt_usage_is_empty_when_log_has_no_usage_info() {
     );
     assert_eq!(usage.input_tokens, None);
     assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
-    assert_eq!(usage.requests_count, Some(1));
+    assert_eq!(usage.requests_count, None);
+    assert_eq!(
+        usage.usage_unknown_reason,
+        Some(crate::ledger::UsageUnknownReason::UsageArtifactMissing)
+    );
     assert_eq!(usage.usage_classification, Some("quota_backed".to_string()));
 }
 #[test]
@@ -1391,6 +1399,9 @@ mod build_cache_tests;
 #[cfg(test)]
 #[path = "external_env_tests.rs"]
 mod external_env_tests;
+#[cfg(test)]
+#[path = "usage_unknown_tests.rs"]
+mod usage_unknown_tests;
 
 #[test]
 fn agy_individual_quota_fixture_persists_identity_cooldown_with_eta_ceiling() {

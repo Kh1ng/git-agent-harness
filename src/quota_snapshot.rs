@@ -16,6 +16,8 @@ pub use checks::{QuotaCheck, QuotaCheckStatus};
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UsageSummary {
     pub entries: usize,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty", default)]
+    pub usage_unknown_reasons: std::collections::BTreeMap<ledger::UsageUnknownReason, usize>,
     pub attempts: usize,
     pub validation_pass: usize,
     pub success_rate: Option<f64>,
@@ -564,6 +566,7 @@ fn aggregate_usage(
     group
         .map(|g| UsageSummary {
             entries: g.entries,
+            usage_unknown_reasons: g.usage_unknown_reasons.clone(),
             attempts: g.attempts,
             validation_pass: g.validation_pass,
             success_rate: g.success_rate,
@@ -690,6 +693,9 @@ fn summarize_groups(groups: Vec<ledger::summary::GroupSummary>) -> UsageSummary 
     let mut summary = UsageSummary::default();
     for group in groups {
         summary.entries += group.entries;
+        for (reason, count) in group.usage_unknown_reasons {
+            *summary.usage_unknown_reasons.entry(reason).or_default() += count;
+        }
         summary.attempts += group.attempts;
         summary.validation_pass += group.validation_pass;
         if let Some(tokens) = group.total_tokens {

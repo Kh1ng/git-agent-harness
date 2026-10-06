@@ -190,6 +190,16 @@ pub enum Commands {
         /// Repository checkout to update (defaults to the current checkout).
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Fetch and fast-forward the checkout before building (opt-in).
+        #[arg(long)]
+        pull: bool,
+        /// Agent integrations to install; existing assets are also refreshed.
+        /// Repeat or use comma-separated names.
+        #[arg(long, value_delimiter = ',', value_parser = ["claude", "codex", "opencode", "vibe"])]
+        agent: Vec<String>,
+        /// Accept the printed installation plan without prompting.
+        #[arg(long)]
+        yes: bool,
         /// "central" (builds/serves the control plane, default) or "worker"
         /// (CLI + dispatch loop only -- never builds apps/server or touches
         /// gah-server.service).

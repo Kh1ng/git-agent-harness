@@ -46,6 +46,7 @@ pub fn request_with_idempotency_key(
     }
     let mut cmd = Command::new("curl");
     cmd.args([
+        "-q",
         "-sS",
         "--max-time",
         &timeout_secs.to_string(),

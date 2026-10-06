@@ -993,3 +993,26 @@ fn the_http_listener_refuses_to_start_without_a_token_or_with_a_non_literal_host
     assert!(!named_host.status.success());
     assert!(String::from_utf8_lossy(&named_host.stderr).contains("invalid bind host"));
 }
+
+#[test]
+fn outbound_requests_ignore_curl_user_configuration() {
+    let control_plane = FakeControlPlane::start();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join(".curlrc"), "retry = 3\nretry-all-errors").unwrap();
+    let mut client = StdioClient::connect(&[
+        ("GAH_SERVER_URL", &control_plane.url),
+        ("HOME", home.path().to_str().unwrap()),
+        ("CURL_HOME", home.path().to_str().unwrap()),
+    ]);
+    control_plane.reply_with(500, "transient error");
+    let result = client.call("gah_status", json!({}));
+    assert!(is_error(&result));
+
+    // If .curlrc was loaded, curl would have retried 3 times, meaning 4 requests total.
+    // With -q, it should ignore .curlrc and only send 1 request.
+    assert_eq!(
+        control_plane.requests().len(),
+        1,
+        "curl should not retry based on .curlrc"
+    );
+}
