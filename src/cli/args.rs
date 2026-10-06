@@ -8,7 +8,9 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 mod quota;
+mod update;
 pub use quota::{CredentialCommands, QuotaCommands};
+pub use update::UpdateArgs;
 
 #[derive(Parser)]
 #[command(name = "gah", version, about = "git agent harness")]
@@ -186,31 +188,7 @@ pub enum Commands {
         json: bool,
     },
     /// Update the installed CLI and control-plane server deterministically.
-    Update {
-        /// Repository checkout to update (defaults to the current checkout).
-        #[arg(long)]
-        repo: Option<PathBuf>,
-        /// Fetch and fast-forward the checkout before building (opt-in).
-        #[arg(long)]
-        pull: bool,
-        /// Agent integrations to install; existing assets are also refreshed.
-        /// Repeat or use comma-separated names.
-        #[arg(long, value_delimiter = ',', value_parser = ["claude", "codex", "opencode", "vibe"])]
-        agent: Vec<String>,
-        /// Accept the printed installation plan without prompting.
-        #[arg(long)]
-        yes: bool,
-        /// "central" (builds/serves the control plane, default) or "worker"
-        /// (CLI + dispatch loop only -- never builds apps/server or touches
-        /// gah-server.service).
-        #[arg(long, default_value = "central")]
-        role: String,
-        /// Restart the system-wide control-plane service after a successful build.
-        #[arg(long, default_value_t = false)]
-        restart_server: bool,
-        #[arg(long, default_value = "gah-server.service")]
-        server_service: String,
-    },
+    Update(UpdateArgs),
     /// Create or print a starter GAH config/profile
     Init {
         #[arg(long)]

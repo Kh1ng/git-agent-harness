@@ -20,6 +20,169 @@ fn quota_provider_identifies_the_billed_service_instead_of_the_harness() {
         None
     );
 }
+
+// -- #1336: expected allowance sources ----------------------------------
+
+fn source_configuration(
+    vibe_admin: bool,
+    mistral_dashboard: bool,
+    nous_portal: bool,
+) -> checks::SourceConfiguration {
+    checks::SourceConfiguration {
+        vibe_admin,
+        mistral_dashboard,
+        nous_portal,
+    }
+}
+
+/// #1336 acceptance: a Vibe candidate opted into quota with no Vibe
+/// allowance source on the node expects the Mistral Admin source, which
+/// then surfaces as "not configured" instead of disappearing.
+#[test]
+fn a_vibe_candidate_without_an_allowance_source_expects_one() {
+    let routing = RoutingPolicy {
+        pm_candidates: Some(vec![CandidateConfig {
+            backend: "vibe".to_string(),
+            model: Some("mistral-medium".to_string()),
+            included_in_quota: true,
+            ..CandidateConfig::default()
+        }]),
+        ..RoutingPolicy::default()
+    };
+    let expected = expected_quota_sources(&routing, &source_configuration(false, true, true));
+    assert_eq!(expected.len(), 1);
+    assert_eq!(expected[0].backend, "vibe");
+    assert_eq!(expected[0].credential_id, None);
+    assert_eq!(expected[0].backend_instance, None);
+    assert_eq!(expected[0].provider.as_deref(), Some("mistral"));
+    assert!(expected[0].detail.contains("MISTRAL_ADMIN_API_KEY"));
+
+    // A configured credential checks the source on schedule; the snapshot's
+    // check row already reports its outcome, so nothing is synthesized.
+    assert!(expected_quota_sources(&routing, &source_configuration(true, true, true)).is_empty());
+    // A candidate that never opted into quota has no allowance expectation.
+    let routing = RoutingPolicy {
+        pm_candidates: Some(vec![CandidateConfig {
+            backend: "vibe".to_string(),
+            ..CandidateConfig::default()
+        }]),
+        ..RoutingPolicy::default()
+    };
+    assert!(expected_quota_sources(&routing, &source_configuration(false, true, true)).is_empty());
+}
+
+/// Named sources own their candidate's readings and refresh through their
+/// own credential lifecycle; an ambient expectation must not appear for
+/// them.
+#[test]
+fn credential_bound_candidates_expect_no_ambient_source() {
+    let mut routing = RoutingPolicy {
+        pm_candidates: Some(vec![CandidateConfig {
+            backend: "vibe".to_string(),
+            quota_pool: Some("vibe-monthly".to_string()),
+            included_in_quota: true,
+            ..CandidateConfig::default()
+        }]),
+        ..RoutingPolicy::default()
+    };
+    routing
+        .quota_sources
+        .insert("vibe-monthly".to_string(), "mistral-console".to_string());
+    assert!(
+        expected_quota_sources(&routing, &source_configuration(false, true, true)).is_empty(),
+        "a named quota source owns the readings"
+    );
+}
+
+#[test]
+fn a_nous_portal_candidate_without_credentials_expects_the_portal_source() {
+    let routing = RoutingPolicy {
+        pm_candidates: Some(vec![CandidateConfig {
+            backend: "opencode".to_string(),
+            model: Some("nous-portal/deepseek/deepseek-v4".to_string()),
+            included_in_quota: true,
+            ..CandidateConfig::default()
+        }]),
+        ..RoutingPolicy::default()
+    };
+    let expected = expected_quota_sources(&routing, &source_configuration(true, true, false));
+    assert_eq!(expected.len(), 1);
+    assert_eq!(expected[0].backend, "opencode");
+    assert_eq!(
+        expected[0].backend_instance.as_deref(),
+        Some("opencode:nous-portal-api")
+    );
+    assert_eq!(expected[0].provider.as_deref(), Some("nous"));
+
+    // A non-Nous opencode candidate expects nothing.
+    let routing = RoutingPolicy {
+        pm_candidates: Some(vec![CandidateConfig {
+            backend: "opencode".to_string(),
+            model: Some("glm-5".to_string()),
+            included_in_quota: true,
+            ..CandidateConfig::default()
+        }]),
+        ..RoutingPolicy::default()
+    };
+    assert!(expected_quota_sources(&routing, &source_configuration(true, true, false)).is_empty());
+}
+
+// -- #1336: human snapshot output ----------------------------------------
+
+fn check(backend: &str, status: QuotaCheckStatus) -> QuotaCheck {
+    QuotaCheck {
+        backend: backend.to_string(),
+        credential_id: None,
+        provider: None,
+        backend_instance: None,
+        model: None,
+        quota_pool: None,
+        checked_at: None,
+        status,
+        quota_observations: Vec::new(),
+        error: None,
+        failing_since: None,
+    }
+}
+
+#[test]
+fn snapshot_lines_label_needs_login_not_configured_and_failing_since() {
+    let mut auth = check("claude", QuotaCheckStatus::AuthRequired);
+    auth.backend_instance = Some("claude".to_string());
+    auth.checked_at = Some("2026-10-04T08:30:00Z".to_string());
+    auth.failing_since = Some("2026-10-02T08:00:00Z".to_string());
+    auth.error =
+        Some("auth_required: Claude OAuth login expired; run claude auth login".to_string());
+    assert_eq!(
+        format_check_line(&auth),
+        "  - claude: needs login (failing since 2026-10-02T08:00:00Z): auth_required: Claude OAuth login expired; run claude auth login"
+    );
+
+    let missing = check("vibe", QuotaCheckStatus::NotConfigured);
+    assert_eq!(format_check_line(&missing), "  - vibe: not configured");
+
+    let ok = check("codex", QuotaCheckStatus::Data);
+    let mut ok = ok;
+    ok.checked_at = Some("2026-10-04T08:30:00Z".to_string());
+    assert_eq!(
+        format_check_line(&ok),
+        "  - codex: ok (checked 2026-10-04T08:30:00Z)"
+    );
+}
+
+#[test]
+fn snapshot_check_lines_keep_credential_instance_pool_and_model_distinct() {
+    let mut named = check("opencode", QuotaCheckStatus::NotConfigured);
+    named.credential_id = Some("mistral-console".to_string());
+    named.backend_instance = Some("opencode:nous-portal-api".to_string());
+    named.quota_pool = Some("nous-portal-api".to_string());
+    named.model = Some("nous-portal/deepseek/deepseek-v4".to_string());
+    assert_eq!(
+        check_source_label(&named),
+        "opencode / credential mistral-console / opencode:nous-portal-api / pool nous-portal-api / model nous-portal/deepseek/deepseek-v4"
+    );
+}
+
 use crate::availability::{BlockScope, Reason, ScopeStatus, Source};
 use crate::config::tests::test_profile_for_notifications;
 
@@ -689,6 +852,36 @@ fn build_candidates_falls_back_to_default_backend_when_none_configured() {
         candidates[0].eligible_now,
         "no availability record for this scope must default to eligible, not blocked"
     );
+}
+
+#[test]
+fn build_candidates_lists_allow_list_entries_under_their_job_kind() {
+    let routing = RoutingPolicy {
+        default_backend: Some("vibe".to_string()),
+        allowed_models: [(
+            "review".to_string(),
+            vec![CandidateConfig {
+                backend: "claude".to_string(),
+                model: Some("opus".to_string()),
+                ..CandidateConfig::default()
+            }],
+        )]
+        .into(),
+        ..RoutingPolicy::default()
+    };
+    let profile = test_profile_for_notifications();
+    let candidates = build_candidates(
+        &routing,
+        &profile,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &[],
+    );
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].backend, "claude");
+    assert_eq!(candidates[0].modes, vec!["review"]);
 }
 
 #[test]

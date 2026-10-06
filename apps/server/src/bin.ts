@@ -28,6 +28,8 @@ import { apnsFromEnvironment } from './apns.js';
 import { channelDelivery, commandDelivery, deliverToAll } from './notifyDelivery.js';
 import { AuthHealthMonitor, AuthHealthProber, configureChatAuthHealth } from './authHealth.js';
 import { LoginRepairBroker, LoginRepairs, loadProviderKeys } from './loginRepair.js';
+import { WorkerUpdateBroker } from './workerUpdateBroker.js';
+import { WorkerUpdateService } from './workerUpdate.js';
 import { createCliRouterQuotaObserver } from './cliRouter.js';
 import { startQuotaRefreshScheduler } from './quotaRefreshScheduler.js';
 
@@ -97,6 +99,14 @@ async function main() {
 
   const cliRouterQuotaObserver = node.role === 'central' ? createCliRouterQuotaObserver() : undefined;
 
+  // Issue #1416: a worker runs release updates on central's instruction;
+  // central brokers the fleet's updates and sweeps opted-in nodes.
+  const workerUpdates = node.role === 'worker' ? new WorkerUpdateService() : undefined;
+  const workerUpdateBroker = node.role === 'central'
+    ? new WorkerUpdateBroker({ localNodeId: coordinatorIdentity.node_id, registry: registryService })
+    : undefined;
+  let stopWorkerAutoUpdate: (() => void) | undefined;
+
   // A central or standalone node serves the dashboard itself unless the
   // operator pointed GAH_WEB_ROOT elsewhere or emptied it (#1327). A worker
   // has no dashboard.
@@ -116,6 +126,8 @@ async function main() {
     authHealthMonitor,
     loginRepairs,
     loginRepairBroker,
+    workerUpdates,
+    workerUpdateBroker,
     cliRouterQuotaObserver
   });
   
@@ -175,6 +187,18 @@ async function main() {
   // goes dark. No-op when no nodes are registered.
   if (node.role === 'central') registryService.startLivenessScheduler();
 
+  // Issue #1416: opted-in nodes update themselves whenever central sees
+  // them behind; the sweep is quiet when nothing is eligible.
+  if (workerUpdateBroker) {
+    const timer = setInterval(() => {
+      workerUpdateBroker!.autoUpdateSweep().catch((error) => {
+        console.error(`Worker auto-update sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }, 5 * 60_000);
+    timer.unref?.();
+    stopWorkerAutoUpdate = () => clearInterval(timer);
+  }
+
   // Chat maintenance scheduler (#1036): settles chat sessions whose branch's
   // PR merged/closed (or whose issue closed) on a bounded interval instead
   // of only at the daily prune, so "the work shipped" is visible while it
@@ -216,6 +240,7 @@ async function main() {
     logLifecycle('Shutting down...');
     registryService.stopLivenessScheduler();
     stopChatMaintenanceScheduler();
+    stopWorkerAutoUpdate?.();
     authHealthProber.stop();
     server.close();
     stopRouterQuotaRefresh?.();
