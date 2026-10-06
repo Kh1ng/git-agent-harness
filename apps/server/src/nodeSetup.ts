@@ -32,35 +32,59 @@ export function windowsSetupCommand(centralUrl: string, role: string, token: str
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
+export const DEFAULT_MEMORYCORE_PATH = '~/TencentDB-Agent-Memory/MemoryCore';
+
+/**
+ * Quote a path for the destination shell. A leading `~` expands there, to the
+ * destination user's home, never to this central server's home directory.
+ */
+export function destinationPath(path: string): string {
+  if (path === '~') return '"$HOME"';
+  if (path.startsWith('~/')) return `"$HOME"/${shellQuote(path.slice(2))}`;
+  return shellQuote(path);
+}
+
+/** Read a credential from the terminal, because curl owns stdin; it stays out of the pasted command. */
+function credentialPrompt(variable: string, label: string, required: boolean): string {
+  const read = `read -rsp ${shellQuote(label)} ${variable} </dev/tty; printf "\\n"; `;
+  return required
+    ? `${read}test -n "$${variable}"; export ${variable}; `
+    : `${read}if [ -n "$${variable}" ]; then export ${variable}; fi; `;
+}
+
 /** Generate a Unix bootstrap command without exporting stored gateway or coordinator secrets. */
 export function unixSetupCommand(os: string, role: string, centralUrl: string, gatewayUrl?: string, provider?: string, providerEndpoint?: string, llmModel?: string, embeddingModel?: string, memoryCorePath?: string): string {
   if (!['linux', 'macos'].includes(os)) throw new Error('Choose Linux, macOS, or Windows.');
   if (!['central', 'standalone', 'worker'].includes(role)) throw new Error('Choose central, standalone, or worker.');
   if (os === 'macos' && (role === 'central' || role === 'standalone')) throw new Error('macOS central installation is not available yet. Choose a macOS worker or a Linux central node.');
   const settings = [`GAH_NODE_ROLE=${shellQuote(role)}`];
-  let credential = '';
+  const prompts: string[] = [];
   if (role === 'worker') {
     if (gatewayUrl) throw new Error('Workers use the central memory relay. Configure the gateway on the central node.');
     settings.push(`GAH_CENTRAL_URL=${shellQuote(remoteOrigin(centralUrl))}`);
-    credential = 'COORDINATOR_TOKEN';
+    prompts.push(credentialPrompt('COORDINATOR_TOKEN', 'Central access token: ', true));
   } else if (gatewayUrl) {
     settings.push('GAH_GATEWAY_MODE=remote', `GAH_GATEWAY_URL=${shellQuote(remoteOrigin(gatewayUrl))}`);
-    credential = 'GAH_GATEWAY_API_KEY';
-  } else if (role === 'central' || role === 'standalone') {
-    if (provider) {
-      settings.push('GAH_GATEWAY_MODE=colocated');
-      const defaultPath = require('node:os').homedir() + '/TencentDB-Agent-Memory/MemoryCore';
-      const targetPath = memoryCorePath?.startsWith('~/') ? require('node:os').homedir() + memoryCorePath.slice(1) : (memoryCorePath || defaultPath);
-      settings.push(`GAH_GATEWAY_MEMORYCORE_PATH=${shellQuote(targetPath)}`);
-      settings.push(`GAH_GATEWAY_PROVIDER=${shellQuote(provider)}`);
-      if (providerEndpoint) settings.push(`GAH_GATEWAY_ENDPOINT=${shellQuote(providerEndpoint)}`);
-      if (llmModel) settings.push(`GAH_GATEWAY_LLM_MODEL=${shellQuote(llmModel)}`);
-      if (embeddingModel) settings.push(`GAH_GATEWAY_EMBEDDING_MODEL=${shellQuote(embeddingModel)}`);
+    prompts.push(credentialPrompt('GAH_GATEWAY_API_KEY', 'Gateway API key: ', true));
+  } else if (provider) {
+    if (provider !== 'openai' && provider !== 'ollama') throw new Error('Choose OpenAI or Ollama for the colocated memory gateway.');
+    settings.push(
+      'GAH_GATEWAY_MODE=colocated',
+      `GAH_GATEWAY_MEMORYCORE_PATH=${destinationPath(memoryCorePath?.trim() || DEFAULT_MEMORYCORE_PATH)}`,
+      `GAH_GATEWAY_PROVIDER=${shellQuote(provider)}`,
+    );
+    if (providerEndpoint) settings.push(`GAH_GATEWAY_ENDPOINT=${shellQuote(providerEndpoint)}`);
+    if (llmModel) settings.push(`GAH_GATEWAY_LLM_MODEL=${shellQuote(llmModel)}`);
+    if (embeddingModel) settings.push(`GAH_GATEWAY_EMBEDDING_MODEL=${shellQuote(embeddingModel)}`);
+    if (provider === 'openai') {
+      // Generation is optional; the authenticated embedding backend needs its key.
+      prompts.push(
+        credentialPrompt('GAH_GATEWAY_LLM_API_KEY', 'LLM API key (hidden, empty to skip): ', false),
+        credentialPrompt('GAH_GATEWAY_EMBEDDING_API_KEY', 'Embedding API key (hidden): ', true),
+      );
     }
   }
-  // Read from the terminal, because curl owns stdin. The credential stays out of the pasted command.
-  const prompt = credential ? `read -rsp ${shellQuote(credential === 'COORDINATOR_TOKEN' ? 'Central access token: ' : 'Gateway API key: ')} ${credential} </dev/tty; printf "\\n"; test -n "$${credential}"; export ${credential}; ` : '';
-  return `bash -c ${shellQuote(`set -euo pipefail; ${prompt}curl -fsSL https://raw.githubusercontent.com/${repo}/main/scripts/bootstrap.sh | ${settings.join(' ')} bash`)}`;
+  return `bash -c ${shellQuote(`set -euo pipefail; ${prompts.join('')}curl -fsSL https://raw.githubusercontent.com/${repo}/main/scripts/bootstrap.sh | ${settings.join(' ')} bash`)}`;
 }
 
 export function isSupportedWindowsInstaller(name: string): boolean {

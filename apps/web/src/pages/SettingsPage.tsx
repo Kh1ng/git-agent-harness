@@ -1149,7 +1149,7 @@ export function AddNodeSection() {
                 <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={memoryCorePath} onChange={(event) => { setMemoryCorePath(event.target.value); setCommand(''); }} placeholder="~/TencentDB-Agent-Memory/MemoryCore" />
               </label>
               <label className="block text-xs text-secondary mb-2">API Endpoint
-                <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={providerEndpoint} onChange={(event) => { setProviderEndpoint(event.target.value); setCommand(''); }} placeholder={provider === 'ollama' ? 'http://127.0.0.1:11434' : 'https://api.openai.com/v1'} />
+                <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={providerEndpoint} onChange={(event) => { setProviderEndpoint(event.target.value); setCommand(''); }} placeholder={provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : 'https://api.openai.com/v1'} />
               </label>
               <label className="block text-xs text-secondary mb-2">LLM Model
                 <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={llmModel} onChange={(event) => { setLlmModel(event.target.value); setCommand(''); }} placeholder={provider === 'ollama' ? 'llama3' : 'gpt-4o'} />
@@ -1398,11 +1398,15 @@ export function ColocatedProviderSection() {
   const [copied, setCopied] = useState(false);
 
   const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
-  let prompt = '';
-  if (provider === 'openai') {
-    prompt = `read -rsp 'LLM API key (hidden, empty to skip): ' GAH_GATEWAY_LLM_API_KEY </dev/tty; printf '\\n'; test -n "$GAH_GATEWAY_LLM_API_KEY" && export GAH_GATEWAY_LLM_API_KEY; read -rsp 'Embedding API key (hidden): ' GAH_GATEWAY_EMBEDDING_API_KEY </dev/tty; printf '\\n'; export GAH_GATEWAY_EMBEDDING_API_KEY; `;
-  }
-  const command = `${prompt}GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH=${shellQuote(memoryCorePath)} GAH_GATEWAY_PROVIDER=${shellQuote(provider)} ${providerEndpoint ? `GAH_GATEWAY_ENDPOINT=${shellQuote(providerEndpoint)} ` : ''}${llmModel ? `GAH_GATEWAY_LLM_MODEL=${shellQuote(llmModel)} ` : ''}${embeddingModel ? `GAH_GATEWAY_EMBEDDING_MODEL=${shellQuote(embeddingModel)} ` : ''}scripts/install.sh`;
+  // A quoted `~` never expands; let the shell that runs the command resolve the home directory.
+  const destinationPath = (path: string): string => path === '~' ? '"$HOME"'
+    : path.startsWith('~/') ? `"$HOME"/${shellQuote(path.slice(2))}` : shellQuote(path);
+  // Credentials are read privately on the node and never appear in the command text.
+  // Generation is optional; the authenticated OpenAI embedding backend needs its key.
+  const prompt = provider === 'openai'
+    ? `read -rsp 'LLM API key (hidden, empty to skip): ' GAH_GATEWAY_LLM_API_KEY </dev/tty; printf '\\n'; if [ -n "$GAH_GATEWAY_LLM_API_KEY" ]; then export GAH_GATEWAY_LLM_API_KEY; fi; read -rsp 'Embedding API key (hidden): ' GAH_GATEWAY_EMBEDDING_API_KEY </dev/tty; printf '\\n'; test -n "$GAH_GATEWAY_EMBEDDING_API_KEY" && export GAH_GATEWAY_EMBEDDING_API_KEY && `
+    : '';
+  const command = `${prompt}GAH_GATEWAY_MODE=colocated GAH_GATEWAY_MEMORYCORE_PATH=${destinationPath(memoryCorePath.trim() || '~/TencentDB-Agent-Memory/MemoryCore')} GAH_GATEWAY_PROVIDER=${shellQuote(provider)} ${providerEndpoint ? `GAH_GATEWAY_ENDPOINT=${shellQuote(providerEndpoint)} ` : ''}${llmModel ? `GAH_GATEWAY_LLM_MODEL=${shellQuote(llmModel)} ` : ''}${embeddingModel ? `GAH_GATEWAY_EMBEDDING_MODEL=${shellQuote(embeddingModel)} ` : ''}scripts/install.sh`;
 
   const copyCommand = () => {
     navigator.clipboard.writeText(command).then(() => {
@@ -1429,7 +1433,7 @@ export function ColocatedProviderSection() {
       </label>
       {provider !== 'none' && <>
         <label className="block text-xs text-secondary mb-2">API Endpoint
-          <input type="text" className="input w-full mt-1 min-h-11" value={providerEndpoint} onChange={(e) => setProviderEndpoint(e.target.value)} placeholder={provider === 'ollama' ? 'http://127.0.0.1:11434' : 'https://api.openai.com/v1'} />
+          <input type="text" className="input w-full mt-1 min-h-11" value={providerEndpoint} onChange={(e) => setProviderEndpoint(e.target.value)} placeholder={provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : 'https://api.openai.com/v1'} />
         </label>
         <label className="block text-xs text-secondary mb-2">LLM Model
           <input type="text" className="input w-full mt-1 min-h-11" value={llmModel} onChange={(e) => setLlmModel(e.target.value)} placeholder={provider === 'ollama' ? 'llama3' : 'gpt-4o'} />

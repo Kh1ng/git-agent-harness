@@ -194,3 +194,45 @@ test('Unix bootstrap commands select supported roles, quote origins, and prompt 
     ['linux', 'central', '', 'https://user:secret@gateway.test'], ['linux', 'central', '', 'https://gateway.test/path'],
   ]) assert.throws(() => unixSetupCommand(args[0], args[1], args[2], args[3]));
 });
+
+test('Colocated Unix commands expand MemoryCore on the destination and prompt for provider credentials', async () => {
+  const { mkdtempSync, writeFileSync, chmodSync } = await import('node:fs');
+  const { tmpdir, homedir } = await import('node:os');
+  const { join } = await import('node:path');
+  const stubs = mkdtempSync(join(tmpdir(), 'gah-node-setup-'));
+  // The stub bootstrap reports what the destination installer would receive.
+  writeFileSync(join(stubs, 'curl'), `#!/bin/sh
+cat <<'SCRIPT'
+printf 'path=%s\\n' "$GAH_GATEWAY_MEMORYCORE_PATH"
+printf 'provider=%s\\n' "$GAH_GATEWAY_PROVIDER"
+printf 'llm=%s\\n' "\${GAH_GATEWAY_LLM_API_KEY-<unset>}"
+printf 'embedding=%s\\n' "\${GAH_GATEWAY_EMBEDDING_API_KEY-<unset>}"
+SCRIPT
+`);
+  chmodSync(join(stubs, 'curl'), 0o755);
+  // Terminal prompts read stdin here so the test can answer them.
+  const run = (command: string, input = '') => execFileSync('bash', ['-c', command.replaceAll('</dev/tty', '')], {
+    input, encoding: 'utf8', env: { PATH: `${stubs}:${process.env.PATH}`, HOME: '/destination/home' },
+  });
+
+  const ollama = unixSetupCommand('linux', 'central', '', undefined, 'ollama', '', '', '', '~/TencentDB-Agent-Memory/MemoryCore');
+  execFileSync('bash', ['-n', '-c', ollama]);
+  assert.ok(!ollama.includes('read -rsp'), 'Ollama needs no credential prompt');
+  assert.ok(!ollama.includes(homedir()), 'the central server home never reaches the command');
+  assert.match(run(ollama), /^path=\/destination\/home\/TencentDB-Agent-Memory\/MemoryCore\nprovider=ollama\nllm=<unset>\nembedding=<unset>\n$/);
+  assert.match(run(unixSetupCommand('linux', 'standalone', '', undefined, 'ollama')), /^path=\/destination\/home\/TencentDB-Agent-Memory\/MemoryCore\n/);
+  assert.match(run(unixSetupCommand('linux', 'central', '', undefined, 'ollama', '', '', '', "/srv/it's here")), /^path=\/srv\/it's here\n/);
+
+  const openai = unixSetupCommand('linux', 'central', '', undefined, 'openai', 'https://api.openai.com/v1', 'gpt-4o', 'text-embedding-3-small');
+  execFileSync('bash', ['-n', '-c', openai]);
+  assert.match(openai, /read -rsp .*LLM API key.* GAH_GATEWAY_LLM_API_KEY/);
+  assert.match(openai, /read -rsp .*Embedding API key.* GAH_GATEWAY_EMBEDDING_API_KEY/);
+  assert.ok(!openai.includes('generation-canary') && !openai.includes('embedding-canary'));
+  assert.match(run(openai, 'generation-canary\nembedding-canary\n'), /provider=openai\nllm=generation-canary\nembedding=embedding-canary\n$/);
+  // Generation is optional; an empty answer leaves the variable unexported.
+  assert.match(run(openai, '\nembedding-canary\n'), /llm=<unset>\nembedding=embedding-canary\n$/);
+  // The embedding key is required: an empty answer stops before installing.
+  assert.throws(() => run(openai, 'generation-canary\n\n'));
+
+  assert.throws(() => unixSetupCommand('linux', 'central', '', undefined, 'constructor'));
+});

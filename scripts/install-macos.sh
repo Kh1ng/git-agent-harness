@@ -24,6 +24,43 @@ case "$role" in central|worker) ;; *) echo "ERROR: unknown GAH_NODE_ROLE='$role'
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# Confirm the entire installer before persisting role, credentials, or gateway
+# settings. The update below reuses this approval rather than prompting again.
+if [ -z "${GAH_INSTALL_CONFIRMED:-}" ]; then
+  echo "Install GAH for role '$role' from $repo_root; configure node settings, credentials, and role services."
+  echo "Gateway mode: ${GAH_GATEWAY_MODE:-none}; agent assets: ${GAH_INSTALL_AGENT:-none}."
+  echo '  - Persist node role and optional central URL in GAH configuration; write worker coordinator credentials to ~/.config/gah/gah-loop.env when supplied.'
+  echo '  - Install only gah into $CARGO_HOME/bin (default ~/.cargo/bin); build dependencies and outputs in the checkout.'
+  echo '  - Install npm dependencies and build the role server; install the desktop app under ~/Applications and role LaunchAgents under ~/Library/LaunchAgents (replace old role agents).'
+  if [ "$role" = central ]; then
+    echo '  - Build MCP and web UI in the checkout; start the central server LaunchAgent.'
+    case "${GAH_GATEWAY_MODE:-}" in
+      remote|colocated)
+        echo '  - Store gateway credentials in ~/.config/gah/tdai-gateway.env and gateway URL in ~/.config/gah/server.env.'
+        if [ "$GAH_GATEWAY_MODE" = colocated ]; then
+          echo "  - Seed ${GAH_GATEWAY_MEMORYCORE_PATH:-<MemoryCore checkout>}/tdai-gateway.local.yaml if absent; install and start the memory-gateway LaunchAgent."
+        else
+          echo '  - Check remote gateway reachability and authentication.'
+        fi
+        ;;
+    esac
+  else
+    echo '  - Configure worker identity and desktop settings under ~/.local/share/gah/worker and ~/.config/gah; install the worker LaunchAgent stopped until a profile is configured.'
+  fi
+  echo '  - Enable Tailscale accept-dns when Tailscale is installed.'
+  case "${GAH_INSTALL_AGENT:-}" in
+    opencode) echo '  - Install OpenCode files in the user config directory opencode/agents/.' ;;
+    codex|vibe) echo '  - Install and enable user gah-quota-refresh.service/timer where systemd is available.' ;;
+  esac
+  printf 'Apply these changes? [y/N] '
+  answer=""
+  read -r answer || true
+  case "$answer" in
+    y|Y|yes) ;;
+    *) echo 'Installation cancelled before configuration or installation' >&2; exit 1 ;;
+  esac
+fi
+
 # --bin gah is required: Cargo.toml declares a second [[bin]]
 # (generate-cli-capabilities) with no default-run set, so a bare `cargo run`
 # is ambiguous and errors instead of picking one. The first call builds gah.
@@ -40,31 +77,49 @@ if [ "$role" = central ]; then
       fi
       # gateway-yaml-mutation:start
       if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
-          node --input-type=module - "$GAH_GATEWAY_MEMORYCORE_PATH" "$gateway_config" "$GAH_GATEWAY_PROVIDER" "${GAH_GATEWAY_ENDPOINT:-}" "${GAH_GATEWAY_LLM_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_MODEL:-}" <<'JAVASCRIPT'
+          node --input-type=module - "$GAH_GATEWAY_MEMORYCORE_PATH" "$gateway_config" "$GAH_GATEWAY_PROVIDER" "${GAH_GATEWAY_ENDPOINT:-}" "${GAH_GATEWAY_LLM_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_DIMENSIONS:-}" "${GAH_GATEWAY_EMBEDDING_API_KEY:+given}" <<'JAVASCRIPT'
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 const require = createRequire(resolve(process.argv[2], 'package.json'));
 const yaml = require('yaml');
-const configPath = process.argv[3];
-const provider = process.argv[4];
-const endpoint = process.argv[5];
-const llmModel = process.argv[6];
-const embedModel = process.argv[7];
-const doc = yaml.parseDocument(readFileSync(configPath, 'utf8'));
-if (provider === 'ollama') {
-  doc.setIn(['llm', 'baseUrl'], endpoint || 'http://127.0.0.1:11434');
-  doc.setIn(['llm', 'model'], llmModel || 'llama3');
-  doc.setIn(['memory', 'embedding', 'provider'], 'ollama');
-  doc.setIn(['memory', 'embedding', 'baseUrl'], endpoint || 'http://127.0.0.1:11434');
-  doc.setIn(['memory', 'embedding', 'model'], embedModel || 'nomic-embed-text');
-} else if (provider === 'openai') {
-  doc.setIn(['llm', 'baseUrl'], endpoint || 'https://api.openai.com/v1');
-  doc.setIn(['llm', 'model'], llmModel || 'gpt-4o');
-  doc.setIn(['memory', 'embedding', 'provider'], 'openai');
-  doc.setIn(['memory', 'embedding', 'baseUrl'], endpoint || 'https://api.openai.com/v1');
-  doc.setIn(['memory', 'embedding', 'model'], embedModel || 'text-embedding-3-small');
+const [configPath, provider, endpoint, llmModel, embedModel, dimensionsArg, embeddingKeyGiven] = process.argv.slice(3);
+// Supported contract (Kh1ng/TencentDB-Agent-Memory MemoryCore src/config.ts):
+// every embedding provider except none/local/qclaw is an OpenAI-compatible
+// service that requests `${baseUrl}/embeddings` and is disabled unless
+// apiKey, baseUrl, model, and dimensions are all set.
+const providers = {
+  ollama: { baseUrl: 'http://127.0.0.1:11434/v1', llmModel: 'llama3', embedModel: 'nomic-embed-text' },
+  openai: { baseUrl: 'https://api.openai.com/v1', llmModel: 'gpt-4o', embedModel: 'text-embedding-3-small' },
+};
+const defaults = Object.hasOwn(providers, provider) ? providers[provider] : undefined;
+if (!defaults) {
+  console.error(`ERROR: GAH_GATEWAY_PROVIDER must be openai or ollama, not '${provider}'.`);
+  process.exit(1);
 }
+const knownDimensions = new Map([
+  ['nomic-embed-text', 768], ['mxbai-embed-large', 1024], ['all-minilm', 384],
+  ['text-embedding-3-small', 1536], ['text-embedding-3-large', 3072], ['text-embedding-ada-002', 1536],
+]);
+const baseUrl = endpoint || defaults.baseUrl;
+const model = embedModel || defaults.embedModel;
+const dimensions = dimensionsArg ? Number(dimensionsArg) : knownDimensions.get(model);
+if (!Number.isInteger(dimensions) || dimensions <= 0) {
+  console.error(`ERROR: set GAH_GATEWAY_EMBEDDING_DIMENSIONS to the vector size of embedding model '${model}'.`);
+  process.exit(1);
+}
+const doc = yaml.parseDocument(readFileSync(configPath, 'utf8'));
+doc.setIn(['llm', 'baseUrl'], baseUrl);
+doc.setIn(['llm', 'model'], llmModel || defaults.llmModel);
+// Ollama ignores bearer credentials, but the gateway enables generation and
+// embedding only with a non-empty key. The literal placeholder is not a
+// secret; TDAI_LLM_API_KEY still overrides llm.apiKey when it is set.
+doc.setIn(['llm', 'apiKey'], provider === 'ollama' ? 'ollama' : '${TDAI_LLM_API_KEY}');
+doc.setIn(['memory', 'embedding', 'provider'], provider);
+doc.setIn(['memory', 'embedding', 'baseUrl'], baseUrl);
+doc.setIn(['memory', 'embedding', 'model'], model);
+doc.setIn(['memory', 'embedding', 'dimensions'], dimensions);
+doc.setIn(['memory', 'embedding', 'apiKey'], provider === 'ollama' && !embeddingKeyGiven ? 'ollama' : '${TDAI_EMBEDDING_API_KEY}');
 writeFileSync(configPath, String(doc));
 JAVASCRIPT
       fi
@@ -108,7 +163,7 @@ elif [ -n "${GAH_GATEWAY_MODE:-}" ]; then
 fi
 
 bash "$repo_root/scripts/configure-node-role.sh" "$role" "${gah_cli[@]}"
-cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role"
+cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role" --yes ${GAH_INSTALL_AGENT:+--agent "$GAH_INSTALL_AGENT"}
 
 if [ "$role" = central ] && [ "${GAH_GATEWAY_MODE:-}" = colocated ]; then
   gateway_ready=0
@@ -130,7 +185,7 @@ fi
 
 gateway_env_file="$HOME/.config/gah/gah-loop.env"
 
-echo "GAH installed. Update with: gah update --repo $repo_root --role $role"
+echo "GAH installed. Update with: gah update --pull --repo $repo_root --role $role"
 if [ "$role" = worker ] && [ -f "$gateway_env_file" ]; then
   echo "Worker credentials are in $gateway_env_file; launchd loads them when the desktop starts the worker."
 fi

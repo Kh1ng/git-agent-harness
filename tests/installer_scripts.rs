@@ -126,7 +126,12 @@ esac
         let log = home.join("commands.log");
         let path = format!("{}:/usr/bin:/bin", bin.display());
         let output = bash(
-            &[scripts.join("install.sh").to_str().unwrap()],
+            &[
+                "-c",
+                "printf 'yes\\n' | bash \"$1\"",
+                "install-test",
+                scripts.join("install.sh").to_str().unwrap(),
+            ],
             &[
                 ("HOME", home.to_str().unwrap()),
                 ("PATH", &path),
@@ -134,6 +139,10 @@ esac
                 ("GAH_TEST_LOG", log.to_str().unwrap()),
                 ("GAH_TEST_BIN", GAH),
                 ("GAH_NODE_ROLE", "worker"),
+                (
+                    "GAH_INSTALL_CONFIRMED",
+                    if os == "Linux" { "1" } else { "" },
+                ),
                 ("GAH_CENTRAL_URL", "https://central.test"),
                 ("COORDINATOR_TOKEN", "installer-test-token"),
             ],
@@ -145,7 +154,9 @@ esac
         let calls: Vec<&str> = calls.lines().collect();
         assert_eq!(calls.len(), 2, "{os}: {calls:?}");
         assert!(
-            calls[0].starts_with("config set") && calls[1].starts_with("update"),
+            calls[0].starts_with("config set")
+                && calls[1].starts_with("update")
+                && calls[1].ends_with("--yes"),
             "{calls:?}"
         );
         let credential = home.join(".config/gah/gah-loop.env");
@@ -155,6 +166,143 @@ esac
         );
         assert_eq!(mode(&credential), 0o600);
         assert!(!home.join(".config/systemd").exists());
+    }
+}
+
+#[test]
+fn declining_installers_disclose_effects_before_confirmation_and_preserve_files() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    for installer in ["install-linux.sh", "install-macos.sh"] {
+        for role in ["worker", "central"] {
+            for answer in ["n\n", ""] {
+                let temp = tempfile::tempdir().unwrap();
+                let home = temp.path().join("home");
+                let config = home.join(".config/gah");
+                std::fs::create_dir_all(&config).unwrap();
+                for file in [
+                    "config.toml",
+                    "gah-loop.env",
+                    "tdai-gateway.env",
+                    "server.env",
+                ] {
+                    std::fs::write(config.join(file), "existing settings\n").unwrap();
+                }
+                let memory = temp.path().join("MemoryCore");
+                std::fs::create_dir_all(memory.join("src/gateway")).unwrap();
+                std::fs::write(memory.join("src/gateway/server.ts"), "").unwrap();
+                std::fs::write(memory.join("tdai-gateway.standalone.yaml"), "template").unwrap();
+                let bin = temp.path().join("bin");
+                let log = temp.path().join("commands.log");
+                executable(&bin.join("uname"), "echo Darwin\n");
+                for command in ["cargo", "sudo", "curl", "openssl", "systemctl", "tailscale"] {
+                    executable(
+                        &bin.join(command),
+                        "echo forbidden >> \"$GAH_TEST_LOG\"; exit 99\n",
+                    );
+                }
+                let mut child = Command::new("bash")
+                    .arg(repo().join("scripts").join(installer))
+                    .env_clear()
+                    .env("HOME", &home)
+                    .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                    .env("GAH_TEST_LOG", &log)
+                    .env("GAH_NODE_ROLE", role)
+                    .env("GAH_INSTALL_AGENT", "codex")
+                    .env("COORDINATOR_TOKEN", "new-token")
+                    .env("GAH_CENTRAL_URL", "https://central.test")
+                    .env(
+                        "GAH_GATEWAY_MODE",
+                        if role == "central" { "colocated" } else { "" },
+                    )
+                    .env("GAH_GATEWAY_MEMORYCORE_PATH", &memory)
+                    .env("GAH_GATEWAY_LLM_API_KEY", "new-key")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(answer.as_bytes())
+                    .unwrap();
+                let output = child.wait_with_output().unwrap();
+                assert!(
+                    !output.status.success(),
+                    "{installer} {role}: {}",
+                    text(&output)
+                );
+                assert!(
+                    text(&output).contains("Installation cancelled before configuration"),
+                    "{}",
+                    text(&output)
+                );
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let plan = stdout.split_once("Apply these changes? [y/N]").unwrap().0;
+                for effect in [
+                    "$CARGO_HOME/bin",
+                    "node role",
+                    "gah-loop.env",
+                    "accept-dns",
+                    "gah-quota-refresh.service/timer",
+                ] {
+                    assert!(
+                        plan.contains(effect),
+                        "missing {effect} before approval: {stdout}"
+                    );
+                }
+                if installer == "install-linux.sh" {
+                    for effect in [
+                        "gah-loop@.service",
+                        "gah-watchdog.service/timer",
+                        "lingering",
+                        "loginctl/sudo",
+                    ] {
+                        assert!(plan.contains(effect), "missing {effect}: {stdout}");
+                    }
+                    if role == "central" {
+                        for effect in [
+                            "/var/www/gah",
+                            "/etc/systemd/system/gah-server.service",
+                            "gah-prune.service/timer",
+                            "/etc/gah/server.env",
+                            "tdai-memory-gateway.service",
+                            "tdai-gateway.local.yaml",
+                            "tdai-gateway.env",
+                        ] {
+                            assert!(plan.contains(effect), "missing {effect}: {stdout}");
+                        }
+                    } else {
+                        assert!(!plan.contains("/var/www/gah"));
+                        assert!(!plan.contains("/etc/systemd/system/gah-server.service"));
+                    }
+                } else {
+                    assert!(plan.contains("~/Applications"));
+                    assert!(plan.contains("~/Library/LaunchAgents"));
+                    if role == "central" {
+                        assert!(plan.contains("memory-gateway LaunchAgent"));
+                        assert!(plan.contains("tdai-gateway.env"));
+                    }
+                }
+                assert!(!log.exists(), "cancellation must precede external commands");
+                assert!(!memory.join("tdai-gateway.local.yaml").exists());
+                assert_eq!(std::fs::read_dir(&config).unwrap().count(), 4);
+                for file in [
+                    "config.toml",
+                    "gah-loop.env",
+                    "tdai-gateway.env",
+                    "server.env",
+                ] {
+                    assert_eq!(
+                        std::fs::read_to_string(config.join(file)).unwrap(),
+                        "existing settings\n"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -832,85 +980,153 @@ fn colocated_installers_preserve_credentials_without_a_generation_key() {
 }
 #[test]
 fn colocated_installers_mutate_provider_yaml_safely() {
-    for platform in ["linux", "macos"] {
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
-        let bin = temp.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::create_dir_all(home.join("MemoryCore")).unwrap();
-        std::fs::write(
-            home.join("MemoryCore/package.json"),
-            "{\"name\":\"MemoryCore\"}",
-        )
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let memory_core = home.join("MemoryCore");
+    std::fs::create_dir_all(&memory_core).unwrap();
+    std::fs::write(
+        memory_core.join("package.json"),
+        "{\"name\":\"MemoryCore\"}",
+    )
+    .unwrap();
+    // The installer resolves `yaml` from the MemoryCore checkout; pin the
+    // version the supported MemoryCore fork declares (^2.8.3).
+    let npm_output = Command::new("npm")
+        .args([
+            "install",
+            "--no-audit",
+            "--no-fund",
+            "--no-save",
+            "yaml@2.8.3",
+        ])
+        .current_dir(&memory_core)
+        .output()
         .unwrap();
+    assert!(
+        npm_output.status.success(),
+        "npm install yaml failed: {}",
+        text(&npm_output)
+    );
+    let memory_core_path = memory_core.to_string_lossy().into_owned();
+    let path_env = format!(
+        "/usr/bin:/bin:{}",
+        std::env::var("PATH").unwrap_or_default()
+    );
 
-        let npm_output = std::process::Command::new("npm")
-            .args(["install", "yaml"])
-            .current_dir(home.join("MemoryCore"))
-            .output()
-            .unwrap();
-        assert!(npm_output.status.success(), "npm install yaml failed");
-
+    for platform in ["linux", "macos"] {
         let source = script(&format!("install-{platform}.sh"));
         let start = source.find("# gateway-yaml-mutation:start\n").unwrap();
         let end = source[start..].find("# gateway-yaml-mutation:end").unwrap() + start;
         let block = &source[start..end];
+        let config_path = home.join("tdai-gateway.local.yaml");
 
-        let run = |provider: &str, endpoint: &str, llm: &str, embed: &str| {
-            let memory_core_path = home.join("MemoryCore").to_string_lossy().into_owned();
-            let path_env = format!("{}:/usr/bin:/bin:/usr/local/bin", bin.display());
-            let config_path = home.join("tdai-gateway.local.yaml");
-            std::fs::write(
-                &config_path,
-                "{\"llm\":{}, \"embedding\":{}, \"memory\":{}}",
-            )
-            .unwrap();
-            let envs = vec![
+        let run = |given: &[(&str, &str)]| {
+            std::fs::write(&config_path, "{\"llm\":{}, \"memory\":{}}").unwrap();
+            let mut envs = vec![
                 ("HOME", home.to_str().unwrap()),
                 ("PATH", path_env.as_str()),
                 ("GAH_GATEWAY_MEMORYCORE_PATH", memory_core_path.as_str()),
-                ("GAH_GATEWAY_PROVIDER", provider),
-                ("GAH_GATEWAY_ENDPOINT", endpoint),
-                ("GAH_GATEWAY_LLM_MODEL", llm),
-                ("GAH_GATEWAY_EMBEDDING_MODEL", embed),
                 ("gateway_local_config", config_path.to_str().unwrap()),
                 ("gateway_config", config_path.to_str().unwrap()),
             ];
+            envs.extend(given);
             let output = bash(&["-euc", block], &envs, true);
-            assert!(output.status.success(), "{platform}: {}", text(&output));
-
+            if !output.status.success() {
+                return Err(text(&output));
+            }
             let print_json = r#"
 const yaml = require('yaml');
 const fs = require('fs');
 console.log(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[1], 'utf8'))));
 "#;
-            let check_output = std::process::Command::new("node")
+            let check_output = Command::new("node")
                 .arg("-e")
                 .arg(print_json)
                 .arg(&config_path)
-                .current_dir(home.join("MemoryCore"))
+                .current_dir(&memory_core)
                 .output()
                 .unwrap();
             assert!(check_output.status.success(), "failed to parse yaml");
-            let json: serde_json::Value = serde_json::from_slice(&check_output.stdout).unwrap();
-            json
+            Ok(serde_json::from_slice::<serde_json::Value>(&check_output.stdout).unwrap())
         };
 
-        // Test ollama with explicit values
-        let ollama = run("ollama", "http://test:11434", "my-llama", "my-embed");
-        assert_eq!(ollama["llm"]["baseUrl"], "http://test:11434");
-        assert_eq!(ollama["llm"]["model"], "my-llama");
+        // The supported MemoryCore contract disables a remote embedding
+        // provider unless apiKey, baseUrl, model, and dimensions are all set.
+        let complete = |json: &serde_json::Value| {
+            let embedding = &json["memory"]["embedding"];
+            for field in ["apiKey", "baseUrl", "model"] {
+                assert!(
+                    embedding[field].as_str().is_some_and(|v| !v.is_empty()),
+                    "{platform}: embedding.{field} missing: {json}"
+                );
+            }
+            assert!(embedding["dimensions"].as_u64().is_some_and(|d| d > 0));
+        };
+
+        // Ollama defaults use its OpenAI-compatible /v1 API and a
+        // non-secret placeholder key, because Ollama ignores credentials.
+        let ollama = run(&[("GAH_GATEWAY_PROVIDER", "ollama")]).unwrap();
+        complete(&ollama);
+        assert_eq!(ollama["llm"]["baseUrl"], "http://127.0.0.1:11434/v1");
+        assert_eq!(ollama["llm"]["model"], "llama3");
+        assert_eq!(ollama["llm"]["apiKey"], "ollama");
         assert_eq!(ollama["memory"]["embedding"]["provider"], "ollama");
         assert_eq!(
             ollama["memory"]["embedding"]["baseUrl"],
-            "http://test:11434"
+            "http://127.0.0.1:11434/v1"
         );
-        assert_eq!(ollama["memory"]["embedding"]["model"], "my-embed");
+        assert_eq!(ollama["memory"]["embedding"]["model"], "nomic-embed-text");
+        assert_eq!(ollama["memory"]["embedding"]["dimensions"], 768);
+        assert_eq!(ollama["memory"]["embedding"]["apiKey"], "ollama");
 
-        // Test openai with defaults
-        let openai = run("openai", "", "", "");
+        // Explicit values, a custom model with explicit dimensions, and a
+        // given embedding key, which the gateway reads from its env file.
+        let custom = run(&[
+            ("GAH_GATEWAY_PROVIDER", "ollama"),
+            ("GAH_GATEWAY_ENDPOINT", "http://test:11434/v1"),
+            ("GAH_GATEWAY_LLM_MODEL", "my-llama"),
+            ("GAH_GATEWAY_EMBEDDING_MODEL", "my-embed"),
+            ("GAH_GATEWAY_EMBEDDING_DIMENSIONS", "512"),
+            ("GAH_GATEWAY_EMBEDDING_API_KEY", "embedding-canary"),
+        ])
+        .unwrap();
+        complete(&custom);
+        assert_eq!(custom["llm"]["baseUrl"], "http://test:11434/v1");
+        assert_eq!(custom["llm"]["model"], "my-llama");
+        assert_eq!(custom["memory"]["embedding"]["model"], "my-embed");
+        assert_eq!(custom["memory"]["embedding"]["dimensions"], 512);
+        assert_eq!(
+            custom["memory"]["embedding"]["apiKey"],
+            "${TDAI_EMBEDDING_API_KEY}"
+        );
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !written.contains("embedding-canary"),
+            "{platform}: {written}"
+        );
+
+        // An unknown model without dimensions fails instead of guessing.
+        let unknown = run(&[
+            ("GAH_GATEWAY_PROVIDER", "ollama"),
+            ("GAH_GATEWAY_EMBEDDING_MODEL", "my-embed"),
+        ])
+        .unwrap_err();
+        assert!(
+            unknown.contains("GAH_GATEWAY_EMBEDDING_DIMENSIONS"),
+            "{platform}: {unknown}"
+        );
+        let invalid = run(&[("GAH_GATEWAY_PROVIDER", "constructor")]).unwrap_err();
+        assert!(
+            invalid.contains("openai or ollama"),
+            "{platform}: {invalid}"
+        );
+
+        // OpenAI defaults reference the stored credentials, never literals.
+        let openai = run(&[("GAH_GATEWAY_PROVIDER", "openai")]).unwrap();
+        complete(&openai);
         assert_eq!(openai["llm"]["baseUrl"], "https://api.openai.com/v1");
         assert_eq!(openai["llm"]["model"], "gpt-4o");
+        assert_eq!(openai["llm"]["apiKey"], "${TDAI_LLM_API_KEY}");
         assert_eq!(openai["memory"]["embedding"]["provider"], "openai");
         assert_eq!(
             openai["memory"]["embedding"]["baseUrl"],
@@ -920,16 +1136,20 @@ console.log(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[1], 'utf8')))
             openai["memory"]["embedding"]["model"],
             "text-embedding-3-small"
         );
-
-        // Test sed injection via query param on endpoint (issue #1319 regression)
-        let ollama_injection = run(
-            "ollama",
-            "https://example.test/v1?a=1&b=2",
-            "llama3",
-            "nomic-embed-text",
-        );
+        assert_eq!(openai["memory"]["embedding"]["dimensions"], 1536);
         assert_eq!(
-            ollama_injection["llm"]["baseUrl"],
+            openai["memory"]["embedding"]["apiKey"],
+            "${TDAI_EMBEDDING_API_KEY}"
+        );
+
+        // Shell metacharacters in an endpoint reach the YAML verbatim.
+        let injection = run(&[
+            ("GAH_GATEWAY_PROVIDER", "ollama"),
+            ("GAH_GATEWAY_ENDPOINT", "https://example.test/v1?a=1&b=2"),
+        ])
+        .unwrap();
+        assert_eq!(
+            injection["llm"]["baseUrl"],
             "https://example.test/v1?a=1&b=2"
         );
     }

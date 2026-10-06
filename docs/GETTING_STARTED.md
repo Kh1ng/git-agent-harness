@@ -176,6 +176,7 @@ they stay out of shell history and process lists.
 | `COORDINATOR_TOKEN` | a worker's access token for its central node |
 | `GAH_GATEWAY_API_KEY` | a remote memory gateway's key |
 | `GAH_GATEWAY_LLM_API_KEY` | optional generation credential for the colocated gateway |
+| `GAH_GATEWAY_EMBEDDING_API_KEY` | the colocated gateway's embedding credential (required for `openai`) |
 
 With the paste line, set `GAH_YES=1` and the `GAH_NODE_ROLE`,
 `GAH_CENTRAL_URL`, and `GAH_GATEWAY_*` variables on the `bash` side of the

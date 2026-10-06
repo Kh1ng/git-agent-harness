@@ -61,11 +61,26 @@ host can have a stale Cargo-installed binary at `$CARGO_HOME/bin/gah` while
 control plane:
 
 ```bash
-gah update --repo /path/to/git-agent-harness --restart-server
+gah update --pull --repo /path/to/git-agent-harness --restart-server
 ```
 
-It refuses a dirty or non-default-branch checkout, pulls with `--ff-only`,
-replaces the actual Cargo-installed CLI with `cargo install --path . --force`,
+`--pull` fetches and fast-forwards before installation. The command prints an
+installation plan and asks for confirmation; pass `--yes` for unattended
+updates. Omit `--pull` when reinstalling the current checkout, such as after
+changing the node role.
+Without `--pull`, it builds the current branch and working tree, including
+uncommitted changes.
+
+For unattended first installs, run `GAH_INSTALL_CONFIRMED=1 scripts/install.sh`
+with the desired role and configuration environment variables. This accepts
+the installer confirmation before it writes configuration or installs services.
+For unattended updates, use `gah update --pull --yes --repo /path/to/git-agent-harness`.
+Updates refresh existing GAH OpenCode agent files and quota-refresh units even
+when `--agent` is omitted; use `--agent` to install additional integrations.
+
+With `--pull`, it refuses a dirty or non-default-branch checkout and pulls
+with `--ff-only`. It replaces the actual Cargo-installed CLI with
+`cargo install --path . --bin gah --force --locked`,
 installs the lockfile-pinned Node dependencies, builds `apps/server`, and
 installs/reloads the `gah-loop@.service` user-unit template. On a central
 node it also reinstalls the system-level `gah-server.service` unit from the
@@ -104,7 +119,7 @@ scripts/install.sh
 ### Upgrade procedure
 
 ```bash
-gah update --repo /path/to/git-agent-harness --restart-server
+gah update --pull --repo /path/to/git-agent-harness --restart-server
 ```
 
 The updater never starts or restarts a recurring `gah loop`; with
@@ -200,7 +215,7 @@ system service. The user units (`gah-loop@`, `gah-prune`,
 verbatim. Then enable the service:
 
 ```bash
-gah update --role central
+gah update --pull --role central
 sudo systemctl enable --now gah-server
 ```
 
@@ -290,7 +305,7 @@ Start/Stop buttons manage `gah-loop@<profile>` rather than creating a detached
 process:
 
 ```bash
-gah update --repo /path/to/git-agent-harness
+gah update --pull --repo /path/to/git-agent-harness
 systemctl --user start gah-loop@gah
 ```
 
@@ -325,7 +340,7 @@ source checkout alone does not change an already-installed loop service.
 After upgrading, rebuild/install and restart the affected user units:
 
 ```bash
-gah update --repo /path/to/git-agent-harness
+gah update --pull --repo /path/to/git-agent-harness
 systemctl --user restart gah-loop@gah gah-loop@sportsball
 journalctl --user -u gah-loop@gah -u gah-loop@sportsball -n 100 --no-pager
 ```
@@ -460,56 +475,83 @@ Re-running `scripts/install.sh` with different `GAH_GATEWAY_*` values updates
 only the gateway keys. The installer does not change an existing `HOST`
 value.
 
-### Provider Configuration and Validation (issue #1319)
+### Provider configuration and validation (issue #1319)
 
-To support local embedding with Ollama, the installer parses `GAH_GATEWAY_PROVIDER` (either `openai` or `ollama`) and mutates `tdai-gateway.local.yaml` to configure the chosen backend, endpoint, and models for both LLM and embedding.
+`GAH_GATEWAY_PROVIDER=openai|ollama` makes the installer write the selected
+backend into `tdai-gateway.local.yaml`. Optional overrides:
+`GAH_GATEWAY_ENDPOINT`, `GAH_GATEWAY_LLM_MODEL`, `GAH_GATEWAY_EMBEDDING_MODEL`,
+and `GAH_GATEWAY_EMBEDDING_DIMENSIONS`.
 
-When `GAH_GATEWAY_PROVIDER=ollama`:
-- `llm.baseUrl` and `embedding.baseUrl` point to the Ollama endpoint (e.g. `http://127.0.0.1:11434`)
-- `llm.model` is set to the selected LLM (e.g. `llama3`)
-- `embedding.provider` is set to `ollama` and `embedding.model` is set to the selected embedding model (e.g. `nomic-embed-text`)
+**Supported gateway contract.** Validated against
+[`Kh1ng/TencentDB-Agent-Memory`](https://github.com/Kh1ng/TencentDB-Agent-Memory)
+`main` at `a0f993ba1eeda16243a8267ba9d1929074b806f9`. That revision has no
+Ollama-specific embedding code. `MemoryCore/src/config.ts` treats every
+`memory.embedding.provider` other than `none`, `local`, and `qclaw` as a
+remote OpenAI-compatible service. The service is disabled, with only a log
+line, unless `apiKey`, `baseUrl`, `model`, and `dimensions` are all set.
+`src/core/store/embedding.ts` posts to `${baseUrl}/embeddings`. The
+generation LLM is enabled only with a non-empty `llm.apiKey`;
+`TDAI_LLM_API_KEY` overrides it. String values of the form
+`"${VAR}"` expand from the gateway environment, which the service loads from
+`~/.config/gah/tdai-gateway.env`. `GET /health` reports
+`stores.embeddingService` (`true` only when embedding is enabled).
 
-Limitations:
-- Provider validation requires the Kh1ng fork of TencentDB-Agent-Memory to parse the `ollama` provider for embedding.
+To meet that contract, the installer writes:
 
-Validation Evidence:
-Supported gateway contract reference: `kh1ng/TencentDB-Agent-Memory` at commit `a0f993ba1eeda16243a8267ba9d1929074b806f9` (or any branch including the `ollama` embedding provider implementation).
+| Field | `ollama` | `openai` |
+| --- | --- | --- |
+| `llm.baseUrl`, `memory.embedding.baseUrl` | endpoint, default `http://127.0.0.1:11434/v1` (Ollama's OpenAI-compatible API) | endpoint, default `https://api.openai.com/v1` |
+| `llm.model` | default `llama3` | default `gpt-4o` |
+| `llm.apiKey` | `ollama` (a non-secret placeholder: Ollama ignores it) | `${TDAI_LLM_API_KEY}` |
+| `memory.embedding.model` | default `nomic-embed-text` | default `text-embedding-3-small` |
+| `memory.embedding.dimensions` | `GAH_GATEWAY_EMBEDDING_DIMENSIONS`, or the known size of the model (`nomic-embed-text` 768) | the same (`text-embedding-3-small` 1536) |
+| `memory.embedding.apiKey` | `ollama`, or `${TDAI_EMBEDDING_API_KEY}` when `GAH_GATEWAY_EMBEDDING_API_KEY` is given | `${TDAI_EMBEDDING_API_KEY}` |
 
-Sanitized configuration (`tdai-gateway.local.yaml`):
-```yaml
-llm:
-  baseUrl: http://127.0.0.1:11434
-  model: llama3
-memory:
-  embedding:
-    provider: ollama
-    baseUrl: http://127.0.0.1:11434
-    model: nomic-embed-text
+If the embedding model's size is unknown and
+`GAH_GATEWAY_EMBEDDING_DIMENSIONS` is unset, the installer stops. It does not
+guess. Credentials go only to `tdai-gateway.env`, never into the YAML. The
+OpenAI commands that Settings generates prompt privately for an optional
+generation key and the required embedding key. Ollama commands do not
+prompt.
+
+**Validation performed.** The gateway at the commit above ran with
+`tdai-gateway.standalone.yaml` as the template. The installer's
+`gateway-yaml-mutation` block applied
+`GAH_GATEWAY_PROVIDER=ollama` and set the endpoint to a local stub of Ollama's
+OpenAI-compatible API (`/v1/embeddings`, `/v1/chat/completions`). The test
+did not use a live Ollama server. Sanitized results:
+
+```text
+GET /health   -> {"status":"ok","stores":{"vectorStore":true,"embeddingService":true}}
+POST /capture -> {"l0_recorded":2,"scheduler_notified":true}
+POST /recall  -> {"code":0,"message":"ok","memory_count":0}
+stub saw      -> POST /v1/embeddings model=nomic-embed-text dimensions=768 (capture and recall)
+                 POST /v1/chat/completions model=llama3
+gateway log   -> Using remote embedding (provider=ollama, model=nomic-embed-text)
+                 [recall] [hybrid-embedding] Embedding OK, dims=768
 ```
 
-Verification command:
+Control: with the earlier YAML mutation (no `apiKey` or `dimensions`, no
+`/v1`), the same gateway reported `"embeddingService":false`.
+
+**Reproduce against a live Ollama** on the central node. Use your own
+gateway key, and keep it out of shared logs:
+
 ```bash
-curl -f http://127.0.0.1:8420/health
+ollama pull llama3 && ollama pull nomic-embed-text
+GAH_GATEWAY_MODE=colocated GAH_GATEWAY_PROVIDER=ollama \
+GAH_GATEWAY_MEMORYCORE_PATH="$HOME/TencentDB-Agent-Memory/MemoryCore" \
+scripts/install.sh
+curl -fsS http://127.0.0.1:8420/health        # expect "embeddingService":true
+set -a; . ~/.config/gah/tdai-gateway.env; set +a
+curl -fsS -H "Authorization: Bearer $TDAI_GATEWAY_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"query":"operator setup check","session_key":"gah:setup"}' \
+  http://127.0.0.1:8420/recall                  # expect "code":0
+journalctl --user -u tdai-memory-gateway | grep -i 'embedding'   # no "Embedding has been disabled"
 ```
 
-Result:
-```json
-{"status":"ok","llm":"healthy","embedding":"healthy","store":"connected"}
-```
-
-Embedding Operation Verification:
-```bash
-curl -X POST http://127.0.0.1:8420/recall \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer test-key" \
-  -d '{"query":"operator setup check","session_key":"gah:setup"}'
-```
-
-Result (verifies actual embedding execution against the Ollama backend):
-```json
-{"results":[],"status":"success"}
-```
-
+This change was not validated against a live Ollama server. Use the
+procedure above as the acceptance check on a real node.
 
 ### Network exposure (issue #879)
 
