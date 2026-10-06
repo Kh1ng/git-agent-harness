@@ -1,3 +1,4 @@
+import { runningWorkers } from './runningWorkers.js';
 import express from 'express';
 import type { ActivityEvent, ActivityKind, NodeRoleStatus } from '@git-agent-harness/contracts';
 import { workerRouteGuard, validateNodeRole } from './nodeRole.js';
@@ -1168,6 +1169,7 @@ export function createServer(
       const identity = getCoordinatorIdentity(undefined, coordinatorPort);
       const enriched = {
         ...status,
+        running_workers: runningWorkers(status, nodes, identity.node_id),
         node,
         node_id: identity.node_id,
         display_name: identity.display_name,

@@ -557,6 +557,15 @@ pub(super) fn run_backend_with_reserved_route(
             }
         }
     };
+    let _worker_observation = crate::running_workers::InvocationGuard::start(
+        session_dir,
+        identity,
+        worktree::git(&["branch", "--show-current"], wt)
+            .ok()
+            .map(|s| s.trim().to_string()),
+        work_id,
+        crate::central_claims::DEFAULT_LEASE_SECONDS,
+    );
     let result = runner::for_kind(backend_kind).run(&runner::RunContext {
         executable: &executable,
         worktree: wt,

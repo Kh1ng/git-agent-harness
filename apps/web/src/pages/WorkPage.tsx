@@ -1,3 +1,4 @@
+import { RunningWorkersRoster } from '../components/RunningWorkersRoster.js';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronRight, ListChecks, Rocket } from 'lucide-react';
 import { ExternalAnchor } from '../components/ExternalAnchor';
@@ -271,7 +272,7 @@ export function WorkPage({ sessions, onSelectSession, onOpenWork }: WorkPageProp
   const queuedSessions = sessions.filter((s) => s.status === 'starting');
   const recentSessions = sessions.filter((s) => ['stopped', 'error'].includes(s.status)).slice(0, 5);
   const issueIntakeRejections = status.data?.issue_intake_rejections ?? [];
-  const activeClaims = status.data?.active_claims ?? [];
+  const workers = status.data?.running_workers ?? [];
   const heldWorkIds = new Set(status.data?.review_held_work_ids ?? []);
   const usageByWorkKey = new Map(factoryData.usageTickets.map((row) => [workKey(row.ticket), row]));
   const waypointCounts = new Map(WAYPOINTS.map((waypoint) => [waypoint.key, 0]));
@@ -286,8 +287,7 @@ export function WorkPage({ sessions, onSelectSession, onOpenWork }: WorkPageProp
     const key = workKey(ticket.work_id ?? ticket.normalized_work_identity ?? ticket.ticket_path);
     if (ticket.execution_policy?.dispatchable_now && ticket.prior_attempt_count === 0 && !ticket.has_active_claim && !ticket.has_active_mr && !ticket.human_required && !inactiveSessionKeys.has(key)) queuedWork.add(key);
   }
-  const runningWork = new Set(activeSessions.map(sessionWorkKey));
-  for (const claim of activeClaims) runningWork.add(workKey(claim.work_id));
+
   const reviewWork = new Map<string, { workId: string; title: string | null; url: string | null; reasons: Set<string> }>();
   const addReviewWork = (workId: string, reason: string, title: string | null = null, url: string | null = null) => {
     const key = workKey(workId);
@@ -310,7 +310,7 @@ export function WorkPage({ sessions, onSelectSession, onOpenWork }: WorkPageProp
   const shippedWork = new Set((status.data?.merge_requests ?? []).filter(mergeRequest => mergeRequest.merged).map(mergeRequest => workKey(mergeRequest.work_id ?? mergeRequest.id ?? mergeRequest.branch)));
   const factoryCounts = {
     queued: queuedWork.size,
-    running: runningWork.size,
+    running: workers.length,
     review: reviewWork.size,
     shipped: shippedWork.size
   };
@@ -350,15 +350,6 @@ export function WorkPage({ sessions, onSelectSession, onOpenWork }: WorkPageProp
     }
   };
 
-  const formatClaimAge = (ageSeconds: number): string => {
-    const minutes = Math.floor(ageSeconds / 60);
-    const seconds = ageSeconds % 60;
-    if (minutes > 0) {
-      return `${minutes}m ${seconds}s`;
-    }
-    return `${seconds}s`;
-  };
-
   return (
     <div className="space-y-6">
       <PageHeader
@@ -386,7 +377,7 @@ export function WorkPage({ sessions, onSelectSession, onOpenWork }: WorkPageProp
           <div className="card-padded col-span-2 sm:col-span-1">
             <dt className="text-xs text-muted">Capacity</dt>
             <dd className="mt-1 text-xl font-semibold tabular-nums text-primary">
-              {status.data?.inflight_implementation_count ?? activeSessions.length}/{status.data?.max_parallel_workers ?? '—'}
+              {workers.length}/{status.data?.max_parallel_workers ?? '—'}
             </dd>
           </div>
           <div className="card-padded">
@@ -443,7 +434,7 @@ export function WorkPage({ sessions, onSelectSession, onOpenWork }: WorkPageProp
       </section>
 
       <section>
-        <h3 className="text-sm font-semibold text-primary mb-3">Running sessions ({activeSessions.length})</h3>
+        <h3 className="text-sm font-semibold text-primary mb-3">Dashboard sessions</h3>
         {activeSessions.length === 0 ? (
           <EmptyState icon={ListChecks} title="No running sessions" />
         ) : (
@@ -471,40 +462,7 @@ export function WorkPage({ sessions, onSelectSession, onOpenWork }: WorkPageProp
         </section>
       )}
 
-      <section>
-        <h3 className="text-sm font-semibold text-primary mb-3">
-          Active durable claims ({activeClaims.length})
-        </h3>
-        {activeClaims.length === 0 ? (
-          <EmptyState icon={ListChecks} title="No active claims" description="No in-flight claims are being tracked." />
-        ) : (
-          <div className="card overflow-x-auto">
-            <table className="table-base min-w-[720px]">
-              <thead>
-                <tr>
-                  <th>Work ID</th>
-                  <th>Owner PID / Scope</th>
-                  <th>Hostname</th>
-                  <th>Claim age</th>
-                </tr>
-              </thead>
-              <tbody>
-                {activeClaims.map((claim) => (
-                  <tr key={`${claim.scope}-${claim.work_id}-${claim.pid}`}>
-                    <td className="text-primary font-mono text-xs">{claim.work_id}</td>
-                    <td>
-                      <span className="font-mono text-xs text-muted mr-2">{claim.pid}</span>
-                      <span className="font-mono text-xs">{claim.scope}</span>
-                    </td>
-                    <td>{claim.hostname}</td>
-                    <td>{formatClaimAge(claim.age_seconds)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+      <RunningWorkersRoster workers={workers} onOpenWork={onOpenWork} />
 
       {recentSessions.length > 0 && (
         <section>

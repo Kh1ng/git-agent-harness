@@ -4,6 +4,7 @@ import { resolve, dirname, sep } from 'node:path';
 import crypto from 'node:crypto';
 import { hostname, networkInterfaces } from 'node:os';
 import type {
+  RunningWorker,
   DoctorSnapshot,
   RegisteredNode,
   NodeSummary,
@@ -220,6 +221,7 @@ function emptyNodeObservation(
     availability: [],
     recent_ledger: null,
     active_claims: [],
+    running_workers: [],
     active_work: [],
     event_cursor: null,
     resource_pressure: {
@@ -617,9 +619,11 @@ export class RegistryService {
     if (this.nodes.get(node.node_id) === node && this.observationRequests.get(node.node_id) === sequence) {
       this.persistObservation(node, nowIso(result.timestamp), result.state, result.last_seen_at, result.error);
       // A scoped dispatch must not replace the fleet-wide observation.
-      if (!profile) this.observations.set(node.node_id, result.snapshot ?? emptyNodeObservation(
-        node, nowIso(result.timestamp), result.state, result.last_seen_at, result.error
-      ));
+      if (!profile) {
+        const observation = result.snapshot ?? emptyNodeObservation(node, nowIso(result.timestamp), result.state, result.last_seen_at, result.error);
+        if (!result.snapshot) observation.running_workers = (this.observations.get(node.node_id)?.running_workers ?? []).map(worker => ({ ...worker, state: 'stale' }));
+        this.observations.set(node.node_id, observation);
+      }
     }
     return result;
   }
@@ -805,6 +809,7 @@ export class RegistryService {
       availability: Array.isArray(payload.availability) ? payload.availability : [],
       auth_health: parseNodeAuthHealth(payload.auth_health),
       recent_ledger: payload.recent_ledger ?? null,
+      running_workers: Array.isArray(payload.running_workers) ? payload.running_workers.map((worker: RunningWorker) => ({ ...worker, node_id: node.node_id })) : [],
       active_claims: Array.isArray(payload.active_claims) ? payload.active_claims : [],
       active_work: dedupeNodeWorkItems(node.node_id, Array.isArray(payload.active_claims) ? payload.active_claims : []),
       event_cursor: typeof payload.event_cursor === 'string'

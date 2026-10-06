@@ -361,11 +361,10 @@ export function NodesPage() {
         <Resources observation={health.snapshot ?? undefined} />
       </div>}
       <NodeReadiness key={`${selected.node_id}:${selected.advertised_url}:${selected.profiles?.join(',')}`} nodeId={selected.node_id} profiles={selected.profiles ?? []} />
-      <h4 className="font-medium text-primary">Observed local claims</h4>
-      <p className="text-sm text-secondary">{observationLabel(observation)} · observed {age(observation?.observed_at)}{observation?.profile ? ` · profile ${observation.profile}` : ''}</p>
-      {!observation || (observation.state !== 'healthy' && observation.state !== 'stale') ? <p className="text-sm text-secondary">Local claims are unknown until the node returns a status snapshot.</p>
-        : observation.active_claims.length === 0 ? <p className="text-sm text-secondary">No local claims reported in this observation.</p>
-        : <ul className="space-y-1 text-sm text-primary">{observation.active_claims.map((claim) => <li key={`${claim.work_id}:${claim.pid}`}>{claim.work_id} · {claim.scope} · PID {claim.pid} · claimed {age(claim.claimed_at)}</li>)}</ul>}
+      <h4 className="font-medium text-primary">Observed running workers</h4>
+      <p className="text-sm text-secondary">{observationLabel(observation)} · observed {age(observation?.observed_at)}</p>
+      <a href={`?page=work${observation?.profile ? `&profile=${encodeURIComponent(observation.profile)}` : ''}#running-workers`} className="text-accent">Open worker roster</a>
+      {(observation?.running_workers ?? []).map(worker => <p className="text-sm break-words" key={`${worker.run_id}:${worker.attempt}`}>{worker.work_id ?? 'Unknown work'} · {worker.state} · {worker.runner} · {worker.model ?? 'Unknown model'}</p>)}
       <h4 className="font-medium text-primary">Central leases</h4>
       {leases.length === 0 ? <p className="text-sm text-secondary">No active central leases at the last refresh.</p>
         : <ul className="space-y-2 text-sm text-primary">{leases.map((lease) => <li key={`${lease.profile}:${lease.work_id}`}>{lease.profile} / {lease.work_id} · renewed {age(lease.renewed_at)} · expires {new Date(lease.expires_at).toLocaleString()}</li>)}</ul>}

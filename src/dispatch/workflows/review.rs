@@ -596,6 +596,13 @@ pub(in crate::dispatch) fn review(
                 ledger.work_id.as_deref(),
                 attempt_env_vars,
             );
+            let worker_observation = crate::running_workers::InvocationGuard::start(
+                &attempt_session,
+                &route.identity,
+                Some(target.source_branch.clone()),
+                ledger.work_id.as_deref(),
+                crate::central_claims::DEFAULT_LEASE_SECONDS,
+            );
             let attempt = runner::run_review_backend_for_identity(
                 profile,
                 &route.identity,
@@ -607,6 +614,7 @@ pub(in crate::dispatch) fn review(
             // The slot covers the backend invocation itself. Release it before
             // parsing/rerouting so another worker can use the reviewer as soon as
             // capacity is genuinely free.
+            drop(worker_observation);
             drop(review_slot);
             if !matches!(
                 &attempt.outcome,

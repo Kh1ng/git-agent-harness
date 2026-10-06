@@ -54,6 +54,7 @@ pub mod redact;
 pub mod report;
 pub mod routing;
 pub mod runner;
+pub mod running_workers;
 pub mod server;
 pub mod setup;
 pub mod skill_bindings;
