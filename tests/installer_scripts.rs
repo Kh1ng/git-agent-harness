@@ -777,8 +777,8 @@ fn colocated_installers_preserve_credentials_without_a_generation_key() {
         std::fs::write(&file, before).unwrap();
         let source = script(&format!("install-{platform}.sh"));
         let block = if platform == "linux" {
-            let start = source.find("    gateway_env_file=\"").unwrap();
-            let end = source[start..].find("    node_dir=").unwrap() + start;
+            let start = source.find("# gateway-env-setup:start\n").unwrap();
+            let end = source[start..].find("# gateway-env-setup:end").unwrap() + start;
             format!(
                 "{}\n{}",
                 &source[source.find("upsert_env_line() {").unwrap()
@@ -786,8 +786,8 @@ fn colocated_installers_preserve_credentials_without_a_generation_key() {
                 &source[start..end]
             )
         } else {
-            let start = source.find("      gateway_env=\"").unwrap();
-            let end = source[start..].find("      ;;").unwrap() + start;
+            let start = source.find("# gateway-env-setup:start\n").unwrap();
+            let end = source[start..].find("# gateway-env-setup:end").unwrap() + start;
             format!(
                 "gah_cli=(cargo run --locked -q --bin gah --)\n{}",
                 &source[start..end]

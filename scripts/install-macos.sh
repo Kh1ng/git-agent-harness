@@ -37,7 +37,21 @@ if [ "$role" = central ]; then
       gateway_config="$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.local.yaml"
       if [ ! -f "$gateway_config" ]; then
         cp "$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.standalone.yaml" "$gateway_config"
+        if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
+          if [ "$GAH_GATEWAY_PROVIDER" = "ollama" ]; then
+            sed "s|baseUrl: \"https://api.openai.com/v1\"|baseUrl: \"${GAH_GATEWAY_ENDPOINT:-http://127.0.0.1:11434}\"|g" "$gateway_config" > "$gateway_config.tmp" && mv "$gateway_config.tmp" "$gateway_config"
+            sed "s|model: \"gpt-4o\"|model: \"${GAH_GATEWAY_LLM_MODEL:-llama3}\"|g" "$gateway_config" > "$gateway_config.tmp" && mv "$gateway_config.tmp" "$gateway_config"
+            sed "s|provider: \"none\"|provider: \"ollama\"|g" "$gateway_config" > "$gateway_config.tmp" && mv "$gateway_config.tmp" "$gateway_config"
+            sed "s|model: \"text-embedding-3-small\"|model: \"${GAH_GATEWAY_EMBEDDING_MODEL:-nomic-embed-text}\"|g" "$gateway_config" > "$gateway_config.tmp" && mv "$gateway_config.tmp" "$gateway_config"
+          elif [ "$GAH_GATEWAY_PROVIDER" = "openai" ]; then
+            sed "s|baseUrl: \"https://api.openai.com/v1\"|baseUrl: \"${GAH_GATEWAY_ENDPOINT:-https://api.openai.com/v1}\"|g" "$gateway_config" > "$gateway_config.tmp" && mv "$gateway_config.tmp" "$gateway_config"
+            sed "s|model: \"gpt-4o\"|model: \"${GAH_GATEWAY_LLM_MODEL:-gpt-4o}\"|g" "$gateway_config" > "$gateway_config.tmp" && mv "$gateway_config.tmp" "$gateway_config"
+            sed "s|provider: \"none\"|provider: \"openai\"|g" "$gateway_config" > "$gateway_config.tmp" && mv "$gateway_config.tmp" "$gateway_config"
+            sed "s|model: \"text-embedding-3-small\"|model: \"${GAH_GATEWAY_EMBEDDING_MODEL:-text-embedding-3-small}\"|g" "$gateway_config" > "$gateway_config.tmp" && mv "$gateway_config.tmp" "$gateway_config"
+          fi
+        fi
       fi
+      # gateway-env-setup:start
       gateway_env="$HOME/.config/gah/tdai-gateway.env"
       export GAH_MACOS_GATEWAY_URL=http://127.0.0.1:8420
       # Values travel on stdin; preserve existing provider and access credentials.
@@ -49,7 +63,11 @@ if [ "$role" = central ]; then
       if [ -n "${GAH_GATEWAY_LLM_API_KEY:-}" ]; then
         printf '%s' "$GAH_GATEWAY_LLM_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_LLM_API_KEY
       fi
+      if [ -n "${GAH_GATEWAY_EMBEDDING_API_KEY:-}" ]; then
+        printf "%s" "$GAH_GATEWAY_EMBEDDING_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_EMBEDDING_API_KEY
+      fi
       chmod 0600 "$gateway_env"
+      # gateway-env-setup:end
       ;;
     remote)
       : "${GAH_GATEWAY_URL:?GAH_GATEWAY_MODE=remote requires GAH_GATEWAY_URL on macOS}"

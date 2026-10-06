@@ -1082,6 +1082,10 @@ export function AddNodeSection() {
   const [os, setOs] = useState<'windows' | 'linux' | 'macos'>('windows');
   const [role, setRole] = useState<'desktop' | 'worker' | 'both' | 'central' | 'standalone'>('both');
   const [gatewayUrl, setGatewayUrl] = useState('');
+  const [provider, setProvider] = useState<'none' | 'openai' | 'ollama'>('none');
+  const [providerEndpoint, setProviderEndpoint] = useState('');
+  const [llmModel, setLlmModel] = useState('');
+  const [embeddingModel, setEmbeddingModel] = useState('');
   const osName = { windows: 'Windows', linux: 'Linux', macos: 'macOS' }[os];
   const [command, setCommand] = useState('');
   const [error, setError] = useState('');
@@ -1090,7 +1094,10 @@ export function AddNodeSection() {
   const reveal = async () => {
     setBusy(true); setError(''); setCommand(''); setCopied(false);
     try {
-      setCommand((await gahApi.getNodeSetupCommand({ os, centralUrl, role, ...((role === 'central' || role === 'standalone') && gatewayUrl ? { gatewayUrl } : {}) })).command);
+      const gatewayOpts = (role === 'central' || role === 'standalone') 
+        ? (gatewayUrl ? { gatewayUrl } : (provider === 'none' ? {} : { provider, providerEndpoint, llmModel, embeddingModel }))
+        : {};
+      setCommand((await gahApi.getNodeSetupCommand({ os, centralUrl, role, ...gatewayOpts })).command);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setBusy(false); }
   };
@@ -1121,9 +1128,34 @@ export function AddNodeSection() {
           </>}
         </select>
       </label>
-      {(role === 'central' || role === 'standalone') && <label className="block text-xs text-secondary mb-3">Remote memory gateway (optional)
-        <input disabled={busy} type="url" className="input w-full mt-1 min-h-11" value={gatewayUrl} onChange={(event) => { setGatewayUrl(event.target.value); setCommand(''); }} placeholder="https://memory.example.com" />
-      </label>}
+      {(role === 'central' || role === 'standalone') && <>
+        <label className="block text-xs text-secondary mb-3">Remote memory gateway (optional)
+          <input disabled={busy} type="url" className="input w-full mt-1 min-h-11" value={gatewayUrl} onChange={(event) => { setGatewayUrl(event.target.value); setCommand(''); }} placeholder="https://memory.example.com" />
+        </label>
+        {!gatewayUrl && (
+          <div className="pl-4 border-l-2 border-subtle mb-3">
+            <p className="text-xs font-semibold text-primary mb-2">Colocated Gateway Provider</p>
+            <label className="block text-xs text-secondary mb-2">Provider
+              <select disabled={busy} className="input w-full mt-1 min-h-11" value={provider} onChange={(event) => { setProvider(event.target.value as any); setCommand(''); }}>
+                <option value="none">None (skip memory gateway)</option>
+                <option value="openai">OpenAI / Compatible</option>
+                <option value="ollama">Ollama (local, unmetered)</option>
+              </select>
+            </label>
+            {provider !== 'none' && <>
+              <label className="block text-xs text-secondary mb-2">API Endpoint
+                <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={providerEndpoint} onChange={(event) => { setProviderEndpoint(event.target.value); setCommand(''); }} placeholder={provider === 'ollama' ? 'http://127.0.0.1:11434' : 'https://api.openai.com/v1'} />
+              </label>
+              <label className="block text-xs text-secondary mb-2">LLM Model
+                <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={llmModel} onChange={(event) => { setLlmModel(event.target.value); setCommand(''); }} placeholder={provider === 'ollama' ? 'llama3' : 'gpt-4o'} />
+              </label>
+              <label className="block text-xs text-secondary mb-2">Embedding Model
+                <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={embeddingModel} onChange={(event) => { setEmbeddingModel(event.target.value); setCommand(''); }} placeholder={provider === 'ollama' ? 'nomic-embed-text' : 'text-embedding-3-small'} />
+              </label>
+            </>}
+          </div>
+        )}
+      </>}
       {os === 'windows' ? <p className="text-xs text-muted mb-3">For remote access, save your token in Central access token above first. The generated command contains that token; use it only on a computer you trust.</p>
         : <p className="text-xs text-muted mb-3">Run in Terminal. The command installs from GitHub and prompts privately for any required token. First installation compiles GAH and can take several minutes.</p>}
       {os === 'macos' && <p className="text-xs text-muted mb-3">macOS installs the worker CLI. Run its loop in Terminal; automatic startup and central server installation are not available yet.</p>}

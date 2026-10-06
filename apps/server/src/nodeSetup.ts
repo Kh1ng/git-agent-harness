@@ -33,7 +33,7 @@ export function windowsSetupCommand(centralUrl: string, role: string, token: str
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
 /** Generate a Unix bootstrap command without exporting stored gateway or coordinator secrets. */
-export function unixSetupCommand(os: string, role: string, centralUrl: string, gatewayUrl?: string): string {
+export function unixSetupCommand(os: string, role: string, centralUrl: string, gatewayUrl?: string, provider?: string, providerEndpoint?: string, llmModel?: string, embeddingModel?: string): string {
   if (!['linux', 'macos'].includes(os)) throw new Error('Choose Linux, macOS, or Windows.');
   if (!['central', 'standalone', 'worker'].includes(role)) throw new Error('Choose central, standalone, or worker.');
   if (os === 'macos' && (role === 'central' || role === 'standalone')) throw new Error('macOS central installation is not available yet. Choose a macOS worker or a Linux central node.');
@@ -46,6 +46,14 @@ export function unixSetupCommand(os: string, role: string, centralUrl: string, g
   } else if (gatewayUrl) {
     settings.push('GAH_GATEWAY_MODE=remote', `GAH_GATEWAY_URL=${shellQuote(remoteOrigin(gatewayUrl))}`);
     credential = 'GAH_GATEWAY_API_KEY';
+  } else if (role === 'central' || role === 'standalone') {
+    if (provider) {
+      settings.push('GAH_GATEWAY_MODE=colocated');
+      settings.push(`GAH_GATEWAY_PROVIDER=${shellQuote(provider)}`);
+      if (providerEndpoint) settings.push(`GAH_GATEWAY_ENDPOINT=${shellQuote(providerEndpoint)}`);
+      if (llmModel) settings.push(`GAH_GATEWAY_LLM_MODEL=${shellQuote(llmModel)}`);
+      if (embeddingModel) settings.push(`GAH_GATEWAY_EMBEDDING_MODEL=${shellQuote(embeddingModel)}`);
+    }
   }
   // Read from the terminal, because curl owns stdin. The credential stays out of the pasted command.
   const prompt = credential ? `read -rsp ${shellQuote(credential === 'COORDINATOR_TOKEN' ? 'Central access token: ' : 'Gateway API key: ')} ${credential} </dev/tty; printf "\\n"; test -n "$${credential}"; export ${credential}; ` : '';
@@ -76,7 +84,7 @@ export function nodeSetupRouter(): Router {
   router.post('/command', (req, res) => {
     try {
       if (req.body.os && req.body.os !== 'windows') {
-        return res.json({ command: unixSetupCommand(req.body.os, req.body.role, req.body.centralUrl, req.body.gatewayUrl) });
+        return res.json({ command: unixSetupCommand(req.body.os, req.body.role, req.body.centralUrl, req.body.gatewayUrl, req.body.provider, req.body.providerEndpoint, req.body.llmModel, req.body.embeddingModel) });
       }
       if (req.body.role !== 'desktop' && process.env.GAH_ALLOW_INSECURE_HTTP !== '1') {
         return res.status(409).json({ message: 'WSL worker enrollment currently uses trusted LAN transport. Set GAH_ALLOW_INSECURE_HTTP=1 on the central server for a trusted LAN/VPN, or install the desktop only.' });

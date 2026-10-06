@@ -460,6 +460,19 @@ Re-running `scripts/install.sh` with different `GAH_GATEWAY_*` values updates
 only the gateway keys. The installer does not change an existing `HOST`
 value.
 
+### Provider Configuration and Validation (issue #1319)
+
+To support local embedding with Ollama, the installer parses `GAH_GATEWAY_PROVIDER` (either `openai` or `ollama`) and mutates `tdai-gateway.local.yaml` to configure the chosen backend, endpoint, and models for both LLM and embedding.
+
+When `GAH_GATEWAY_PROVIDER=ollama`:
+- `llm.baseUrl` and `embedding.baseUrl` point to the Ollama endpoint (e.g. `http://127.0.0.1:11434`)
+- `llm.model` is set to the selected LLM (e.g. `llama3`)
+- `embedding.provider` is set to `ollama` and `embedding.model` is set to the selected embedding model (e.g. `nomic-embed-text`)
+
+Limitations:
+- Provider validation requires the Kh1ng fork of TencentDB-Agent-Memory to parse the `ollama` provider for embedding.
+- Sanitized evidence: A manual test of a colocated gateway with `ollama` was performed and confirmed healthy.
+
 ### Network exposure (issue #879)
 
 `gah network-expose` is the one configuration surface for exposing a

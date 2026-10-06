@@ -320,7 +320,7 @@ export interface GahDataSource {
   setManagerChatBackend(profile: string, backendId: string): Promise<{ success: boolean }>;
   getGatewaySettings(): Promise<GatewaySettingsSummary>;
   revealGatewayBootstrapCommand(): Promise<GatewayBootstrapCommand>;
-  getNodeSetupCommand(data: { os: 'windows' | 'linux' | 'macos'; centralUrl: string; role: 'desktop' | 'worker' | 'both' | 'central' | 'standalone'; gatewayUrl?: string }): Promise<{ command: string }>;
+  getNodeSetupCommand(data: { os: 'windows' | 'linux' | 'macos'; centralUrl: string; role: 'desktop' | 'worker' | 'both' | 'central' | 'standalone'; gatewayUrl?: string; provider?: string; providerEndpoint?: string; llmModel?: string; embeddingModel?: string }): Promise<{ command: string }>;
   updateGatewaySettings(data: GatewaySettingsUpdate): Promise<GatewaySettingsSummary>;
   getSkills(): Promise<{ skills: SkillSummary[] }>;
   getSkill(id: string, version: string): Promise<Skill>;

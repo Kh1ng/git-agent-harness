@@ -181,11 +181,25 @@ case "${GAH_GATEWAY_MODE:-}" in
     gateway_local_config="$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.local.yaml"
     if [ ! -f "$gateway_local_config" ]; then
       cp "$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.standalone.yaml" "$gateway_local_config"
+      if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
+        if [ "$GAH_GATEWAY_PROVIDER" = "ollama" ]; then
+          sed "s|baseUrl: \"https://api.openai.com/v1\"|baseUrl: \"${GAH_GATEWAY_ENDPOINT:-http://127.0.0.1:11434}\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
+          sed "s|model: \"gpt-4o\"|model: \"${GAH_GATEWAY_LLM_MODEL:-llama3}\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
+          sed "s|provider: \"none\"|provider: \"ollama\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
+          sed "s|model: \"text-embedding-3-small\"|model: \"${GAH_GATEWAY_EMBEDDING_MODEL:-nomic-embed-text}\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
+        elif [ "$GAH_GATEWAY_PROVIDER" = "openai" ]; then
+          sed "s|baseUrl: \"https://api.openai.com/v1\"|baseUrl: \"${GAH_GATEWAY_ENDPOINT:-https://api.openai.com/v1}\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
+          sed "s|model: \"gpt-4o\"|model: \"${GAH_GATEWAY_LLM_MODEL:-gpt-4o}\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
+          sed "s|provider: \"none\"|provider: \"openai\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
+          sed "s|model: \"text-embedding-3-small\"|model: \"${GAH_GATEWAY_EMBEDDING_MODEL:-text-embedding-3-small}\"|g" "$gateway_local_config" > "$gateway_local_config.tmp" && mv "$gateway_local_config.tmp" "$gateway_local_config"
+        fi
+      fi
       echo "Seeded $gateway_local_config from the tracked standalone template (OpenAI-compatible LLM, embedding off / BM25-only -- edit directly for a different backend)"
     else
       echo "Preserving existing $gateway_local_config"
     fi
 
+    # gateway-env-setup:start
     gateway_env_file="$HOME/.config/gah/tdai-gateway.env"
     install -d -m 0700 "$(dirname "$gateway_env_file")"
     # Preserve model/provider credentials and existing gateway authentication.
@@ -200,9 +214,14 @@ case "${GAH_GATEWAY_MODE:-}" in
     fi
     if [ -n "${GAH_GATEWAY_LLM_API_KEY:-}" ]; then
       upsert_env_line "$gateway_env_file" TDAI_LLM_API_KEY "$GAH_GATEWAY_LLM_API_KEY" ""
+    fi
+    if [ -n "${GAH_GATEWAY_EMBEDDING_API_KEY:-}" ]; then
+      upsert_env_line "$gateway_env_file" TDAI_EMBEDDING_API_KEY "$GAH_GATEWAY_EMBEDDING_API_KEY" ""
+      echo "Wrote the given Embedding API key to $gateway_env_file"
       echo "Wrote the given LLM API key to $gateway_env_file"
     fi
     chmod 0600 "$gateway_env_file"
+    # gateway-env-setup:end
 
     node_dir="$(dirname "$(command -v node)")"
     gateway_unit_dst="$HOME/.config/systemd/user/tdai-memory-gateway.service"

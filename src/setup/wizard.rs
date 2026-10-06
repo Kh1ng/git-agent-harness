@@ -411,10 +411,109 @@ impl<'a> Setup<'a> {
                     ("GAH_GATEWAY_MODE", "colocated".to_string()),
                     ("GAH_GATEWAY_MEMORYCORE_PATH", path.display().to_string()),
                 ]);
-                if let Some(key) = self.host.env("GAH_GATEWAY_LLM_API_KEY") {
-                    env.0.push(("GAH_GATEWAY_LLM_API_KEY", key));
+                let provider = match self.host.env("GAH_GATEWAY_PROVIDER") {
+                    Some(val) => val,
+                    None if self.options.yes => "openai".to_string(),
+                    None => {
+                        let opts = [
+                            "OpenAI / Compatible".to_string(),
+                            "Ollama (local, unmetered)".to_string(),
+                        ];
+                        match self.ask_choice(
+                            "Select the model provider for MemoryCore",
+                            &opts,
+                            0,
+                        )? {
+                            1 => "ollama".to_string(),
+                            _ => "openai".to_string(),
+                        }
+                    }
+                };
+                env.0.push(("GAH_GATEWAY_PROVIDER", provider.clone()));
+
+                let (default_endpoint, default_llm, default_embed) = match provider.as_str() {
+                    "ollama" => ("http://127.0.0.1:11434", "llama3", "nomic-embed-text"),
+                    _ => (
+                        "https://api.openai.com/v1",
+                        "gpt-4o",
+                        "text-embedding-3-small",
+                    ),
+                };
+
+                let endpoint = match self.host.env("GAH_GATEWAY_ENDPOINT") {
+                    Some(val) => val,
+                    None if self.options.yes => default_endpoint.to_string(),
+                    None => {
+                        let text = self
+                            .prompter
+                            .text(&format!("API Endpoint (default: {default_endpoint})"), None)?;
+                        if text.is_empty() {
+                            default_endpoint.to_string()
+                        } else {
+                            text
+                        }
+                    }
+                };
+                env.0.push(("GAH_GATEWAY_ENDPOINT", endpoint));
+
+                let llm_model = match self.host.env("GAH_GATEWAY_LLM_MODEL") {
+                    Some(val) => val,
+                    None if self.options.yes => default_llm.to_string(),
+                    None => {
+                        let text = self
+                            .prompter
+                            .text(&format!("LLM Model (default: {default_llm})"), None)?;
+                        if text.is_empty() {
+                            default_llm.to_string()
+                        } else {
+                            text
+                        }
+                    }
+                };
+                env.0.push(("GAH_GATEWAY_LLM_MODEL", llm_model));
+
+                let embed_model = match self.host.env("GAH_GATEWAY_EMBEDDING_MODEL") {
+                    Some(val) => val,
+                    None if self.options.yes => default_embed.to_string(),
+                    None => {
+                        let text = self
+                            .prompter
+                            .text(&format!("Embedding Model (default: {default_embed})"), None)?;
+                        if text.is_empty() {
+                            default_embed.to_string()
+                        } else {
+                            text
+                        }
+                    }
+                };
+                env.0.push(("GAH_GATEWAY_EMBEDDING_MODEL", embed_model));
+
+                if provider == "openai" {
+                    let llm_key = match self.host.env("GAH_GATEWAY_LLM_API_KEY") {
+                        Some(val) => val,
+                        None => {
+                            self.secret_from("GAH_GATEWAY_LLM_API_KEY", "LLM API key (hidden)")?
+                        }
+                    };
+                    env.0.push(("GAH_GATEWAY_LLM_API_KEY", llm_key));
+                    let embed_key = match self.host.env("GAH_GATEWAY_EMBEDDING_API_KEY") {
+                        Some(val) => val,
+                        None => self.secret_from(
+                            "GAH_GATEWAY_EMBEDDING_API_KEY",
+                            "Embedding API key (hidden)",
+                        )?,
+                    };
+                    env.0.push(("GAH_GATEWAY_EMBEDDING_API_KEY", embed_key));
+                } else {
+                    if let Some(key) = self.host.env("GAH_GATEWAY_LLM_API_KEY") {
+                        env.0.push(("GAH_GATEWAY_LLM_API_KEY", key));
+                    }
+                    if let Some(key) = self.host.env("GAH_GATEWAY_EMBEDDING_API_KEY") {
+                        env.0.push(("GAH_GATEWAY_EMBEDDING_API_KEY", key));
+                    }
                 }
-                self.prompter.say("Embedding and optional generation models are configured in MemoryCore's tdai-gateway.local.yaml; gateway access uses a separate TDAI_GATEWAY_API_KEY.");
+                self.prompter
+                    .say("Gateway access uses a separate TDAI_GATEWAY_API_KEY.");
             }
         }
         Ok(mode)
@@ -796,7 +895,11 @@ mod tests {
         let path = PathBuf::from("/memory");
         let host = ready_host()
             .with_path(path.join("src/gateway/server.ts"))
-            .with_path(path.join("node_modules"));
+            .with_path(path.join("node_modules"))
+            .with_env("GAH_GATEWAY_PROVIDER", "ollama")
+            .with_env("GAH_GATEWAY_ENDPOINT", "http://127.0.0.1:11434")
+            .with_env("GAH_GATEWAY_LLM_MODEL", "llama3")
+            .with_env("GAH_GATEWAY_EMBEDDING_MODEL", "nomic-embed-text");
         let mut prompter = Script::default();
         let mut effects = Recorder::default();
         let mut setup = Setup {
@@ -831,7 +934,12 @@ mod tests {
         let host = ready_host()
             .with_path(path.join("src/gateway/server.ts"))
             .with_path(path.join("node_modules"))
-            .with_env("GAH_GATEWAY_LLM_API_KEY", "generation-canary");
+            .with_env("GAH_GATEWAY_LLM_API_KEY", "generation-canary")
+            .with_env("GAH_GATEWAY_PROVIDER", "openai")
+            .with_env("GAH_GATEWAY_ENDPOINT", "https://api.openai.com/v1")
+            .with_env("GAH_GATEWAY_LLM_MODEL", "gpt-4o")
+            .with_env("GAH_GATEWAY_EMBEDDING_MODEL", "text-embedding-3-small")
+            .with_env("GAH_GATEWAY_EMBEDDING_API_KEY", "embedding-canary");
         let mut prompter = Script::default();
         let mut effects = Recorder::default();
         let mut setup = Setup {
