@@ -75,8 +75,8 @@ pub(crate) mod telemetry_tests {
     #[test]
     fn test_schema_version_in_record() {
         assert_eq!(
-            SCHEMA_VERSION, 11,
-            "#1341 re-sourced quota observation export onto the account quota store"
+            SCHEMA_VERSION, 12,
+            "remaining-only quota exports must be distinguishable from schema v11"
         );
         let base = TelemetryRecord {
             schema_version: SCHEMA_VERSION,
@@ -134,12 +134,7 @@ pub(crate) mod telemetry_tests {
             requests_count: None,
             estimated_cost_usd: None,
             actual_cost_usd: None,
-            quota_window: None,
-            quota_used_percent: None,
-            quota_remaining_percent: None,
-            quota_reset_at: None,
             token_usage_unknown_reason: None,
-            quota_unknown_reason: None,
             tool_calls: None,
             shell_calls: None,
             file_edits: None,
@@ -204,10 +199,11 @@ pub(crate) mod telemetry_tests {
             "requests_count": 1,
             "estimated_cost_usd": null,
             "actual_cost_usd": null,
-            "quota_window": null,
-            "quota_used_percent": null,
-            "quota_remaining_percent": null,
-            "quota_reset_at": null
+            "quota_window": "weekly",
+            "quota_used_percent": 25,
+            "quota_remaining_percent": 75,
+            "quota_reset_at": "2026-01-12T00:00:00Z",
+            "quota_unknown_reason": null
         }"#,
         )
         .unwrap();
@@ -215,7 +211,19 @@ pub(crate) mod telemetry_tests {
         let record: AttemptUsageRecord = serde_json::from_value(value).unwrap();
         assert_eq!(record.reasoning_tokens, None);
         assert_eq!(record.token_usage_unknown_reason, None);
-        assert_eq!(record.quota_unknown_reason, None);
+        let written = serde_json::to_value(record).unwrap();
+        for key in [
+            "quota_window",
+            "quota_used_percent",
+            "quota_remaining_percent",
+            "quota_reset_at",
+            "quota_unknown_reason",
+        ] {
+            assert!(
+                written.get(key).is_none(),
+                "retired attempt key {key} must not be exported"
+            );
+        }
     }
 
     #[test]
@@ -382,6 +390,7 @@ pub(crate) mod telemetry_tests {
             checkpoint_sha: None,
             cli_version: None,
             usage: LedgerUsage {
+                usage_unknown_reason: None,
                 usage_source: Some("attempt".to_string()),
                 behavior_metrics: None,
                 usage_classification: None,
@@ -407,12 +416,7 @@ pub(crate) mod telemetry_tests {
                 requests_count: Some(5),
                 estimated_cost_usd: Some(0.05),
                 actual_cost_usd: Some(0.06),
-                quota_window: None,
-                quota_used_percent: None,
-                quota_remaining_percent: None,
-                quota_reset_at: None,
                 token_usage_unknown_reason: None,
-                quota_unknown_reason: None,
             },
         };
 
@@ -433,6 +437,7 @@ pub(crate) mod telemetry_tests {
             checkpoint_sha: None,
             cli_version: None,
             usage: LedgerUsage {
+                usage_unknown_reason: None,
                 usage_source: Some("attempt".to_string()),
                 behavior_metrics: None,
                 usage_classification: None,
@@ -458,17 +463,13 @@ pub(crate) mod telemetry_tests {
                 requests_count: Some(5),
                 estimated_cost_usd: Some(0.05),
                 actual_cost_usd: Some(0.06),
-                quota_window: None,
-                quota_used_percent: None,
-                quota_remaining_percent: None,
-                quota_reset_at: None,
                 token_usage_unknown_reason: None,
-                quota_unknown_reason: None,
             },
         };
         entry.attempts = vec![attempt];
         // Update entry-level usage to be different from attempt
         entry.usage = LedgerUsage {
+            usage_unknown_reason: None,
             usage_source: Some("entry".to_string()),
             behavior_metrics: None,
             usage_classification: None,
@@ -494,12 +495,7 @@ pub(crate) mod telemetry_tests {
             requests_count: Some(10),
             estimated_cost_usd: Some(0.10),
             actual_cost_usd: Some(0.12),
-            quota_window: None,
-            quota_used_percent: None,
-            quota_remaining_percent: None,
-            quota_reset_at: None,
             token_usage_unknown_reason: None,
-            quota_unknown_reason: None,
         };
 
         let exported_at = "2026-07-10T13:00:00Z";
