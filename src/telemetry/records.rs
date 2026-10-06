@@ -34,7 +34,11 @@ use serde::{Deserialize, Serialize};
 /// ledger-derived fields (profile, repo, work id, effective_* mirrors,
 /// account scope) are gone; a store reading has no ledger entry to borrow
 /// them from. Consumers must read the new field set.
-pub const SCHEMA_VERSION: u32 = 11;
+/// Version 12 removes `quota_used_percent` from quota observation exports;
+/// `quota_remaining_percent` is the canonical percentage. Historical used-only
+/// records remain readable, with remaining derived as 100 minus used when an
+/// explicit remaining percentage is absent.
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// Record types for telemetry data (used for enum tags)
 #[allow(dead_code)]

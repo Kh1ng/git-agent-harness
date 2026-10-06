@@ -77,6 +77,10 @@ fn store_quota_observations_export_two_windows_and_reexport_is_idempotent() {
     assert_eq!(ids.len(), 2, "record ids must not collide across windows");
     for record in &records {
         assert_eq!(record.base.schema_version, SCHEMA_VERSION);
+        let payload = serde_json::to_value(record).unwrap();
+        assert_eq!(payload["schema_version"], 12);
+        assert!(payload.get("quota_remaining_percent").is_some());
+        assert!(payload.get("quota_used_percent").is_none());
         assert_eq!(record.backend, "claude");
         assert_eq!(record.backend_instance.as_deref(), Some("claude"));
     }
@@ -247,6 +251,7 @@ fn upgrade_preserves_store_quota_deduplication_in_existing_repository() {
                 observed_at.unwrap_or(""), percent(used), percent(remaining)
             ));
             legacy["data"]["quota_used_percent"] = raw["quota_used_percent"].clone();
+            legacy["data"]["schema_version"] = serde_json::json!(11);
             legacy["data"]["quota_remaining_percent"] = raw["quota_remaining_percent"].clone();
             if remaining.is_none() {
                 legacy["data"]
@@ -273,6 +278,7 @@ fn upgrade_preserves_store_quota_deduplication_in_existing_repository() {
             else {
                 panic!("expected historical quota observation");
             };
+            assert_eq!(historical.base.schema_version, 11);
             assert_eq!(
                 historical.quota_remaining_percent, expected_remaining,
                 "historical used-only readings must normalize; explicit remaining wins"
