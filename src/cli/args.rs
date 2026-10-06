@@ -1046,12 +1046,10 @@ pub enum ProfileCommands {
         /// Delivery mode for work results: pr | handoff.
         #[arg(long)]
         delivery_mode: Option<String>,
-        /// Automatic worker scaling from quota headroom: on | off. See
-        /// `WorkerScaling` for the rule the remaining flags tune.
+        /// Automatic worker scaling from quota headroom: on | off (see `WorkerScaling`).
         #[arg(long)]
         worker_scaling: Option<String>,
-        /// Most workers automatic scaling may reach (default: twice the
-        /// baseline). `--clear worker_scaling_max_workers` restores that.
+        /// Most workers automatic scaling may reach (default: twice the baseline).
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
         worker_scaling_max_workers: Option<u32>,
         /// Extra concurrent runs a model gets while it has quota headroom.
@@ -1060,8 +1058,7 @@ pub enum ProfileCommands {
         /// Percent every fresh quota window must still have for a model to scale.
         #[arg(long)]
         worker_scaling_min_remaining_percent: Option<f64>,
-        /// Add this many workers now, on top of the baseline and automatic
-        /// scaling. Replaces any earlier boost; `--clear worker_boost` ends it.
+        /// Add this many workers now; replaces an earlier boost (`--clear worker_boost` ends it).
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
         boost_workers: Option<u32>,
         /// Give the boost to one `backend/model` instead of every capped model.
