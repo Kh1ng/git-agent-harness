@@ -116,22 +116,25 @@ test('Live Activity starts remotely, rate-limits updates, and always ends', asyn
     await setup.service.deliverChatLifecycle({ ...base, phase: 'start' });
     await setup.service.deliverChatLifecycle({ ...base, phase: 'tool', tool: 'cargo test --token=secret-value' });
     await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', permissionId: 'permission-1', tool: 'shell' });
-    assert.equal(setup.requests.length, 3);
+    assert.equal(setup.requests.length, 2);
     assert.equal((setup.requests[1].payload as { aps: { 'content-state': { state: string } } }).aps['content-state'].state, 'running cargo');
-    assert.equal((setup.requests[2].payload as { aps: { 'content-state': { state: string } } }).aps['content-state'].state, 'waiting for permission');
     await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', permissionId: 'permission-1', tool: 'shell' });
     setup.advance(1_000);
     await setup.service.deliverChatLifecycle({ ...base, phase: 'tool', tool: 'cargo fmt' });
     await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', permissionId: 'permission-2', tool: 'shell' });
-    assert.equal(setup.requests.length, 4);
+    assert.equal(setup.requests.length, 2);
+    setup.advance(4_000);
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', permissionId: 'permission-2', tool: 'shell' });
+    assert.equal(setup.requests.length, 3);
+    assert.equal((setup.requests[2].payload as { aps: { 'content-state': { state: string } } }).aps['content-state'].state, 'waiting for permission');
     await setup.service.deliverChatLifecycle({ ...base, phase: 'end', outcome: 'complete' });
-    assert.equal(setup.requests.length, 5);
+    assert.equal(setup.requests.length, 4);
     assert.equal(setup.requests[0].token, token('b'));
     assert.equal((setup.requests[0].payload as { aps: { event: string } }).aps.event, 'start');
     assert.equal(setup.requests[0].headers['apns-topic'], 'com.kh1ng.gah.controller.push-type.liveactivity');
-    assert.deepEqual(setup.requests.slice(1).map((request) => (request.payload as { aps: { event: string } }).aps.event), ['update', 'update', 'update', 'end']);
+    assert.deepEqual(setup.requests.slice(1).map((request) => (request.payload as { aps: { event: string } }).aps.event), ['update', 'update', 'end']);
     const dismissal = (setup.requests.at(-1)!.payload as { aps: { 'dismissal-date': number } }).aps['dismissal-date'];
-    assert.equal(dismissal, Math.floor((Date.parse('2026-09-25T12:00:01Z') + 15 * 60_000) / 1_000));
+    assert.equal(dismissal, Math.floor((Date.parse('2026-09-25T12:00:05Z') + 15 * 60_000) / 1_000));
   } finally { rmSync(setup.directory, { recursive: true, force: true }); }
 });
 
@@ -189,6 +192,60 @@ test('APNs drops a silently dead session after a request timeout', async () => {
     assert.equal(created[0].destroyed, true);
     await setup.service.deliverActivity(activity('after-timeout'));
     assert.equal(created.length, 2);
+  } finally {
+    mock.timers.reset();
+    rmSync(setup.directory, { recursive: true, force: true });
+  }
+});
+
+test('Live Activity cancellation bypasses the update limit and dismisses immediately', async () => {
+  const setup = fixture();
+  try {
+    setup.service.register({ token: token('a'), pushToStartToken: token('b'),
+      liveActivity: { profile: 'gah', sessionId: 's1', token: token('c') } });
+    const base = { profile: 'gah', sessionId: 's1', turn: 1, occurredAt: '2026-09-25T12:00:00Z' } as const;
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'start' });
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'tool', tool: 'shell' });
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'end', outcome: 'cancelled' });
+    assert.equal(setup.requests.length, 3);
+    const aps = (setup.requests[2].payload as { aps: Record<string, unknown> }).aps;
+    assert.equal(aps.event, 'end');
+    assert.equal(aps['dismissal-date'], aps.timestamp);
+  } finally { rmSync(setup.directory, { recursive: true, force: true }); }
+});
+
+test('BadDeviceToken prunes the alert registration', async () => {
+  const setup = fixture(() => ({ status: 400, reason: 'BadDeviceToken' }));
+  try {
+    setup.service.register({ token: token('a') });
+    await setup.service.deliverActivity(activity('invalid-token'));
+    assert.equal(setup.service.list().count, 0);
+  } finally { rmSync(setup.directory, { recursive: true, force: true }); }
+});
+
+test('Live Activity delivers the latest throttled state after five seconds', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const setup = fixture();
+  try {
+    setup.service.register({ token: token('a'),
+      liveActivity: { profile: 'gah', sessionId: 's1', token: token('c') } });
+    const base = { profile: 'gah', sessionId: 's1', turn: 1, occurredAt: '2026-09-25T12:00:00Z' } as const;
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'tool', tool: 'shell' });
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'tool', tool: 'cargo' });
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'permission', permissionId: 'p1' });
+    assert.equal(setup.requests.length, 1);
+    setup.advance(4_999);
+    mock.timers.tick(4_999);
+    assert.equal(setup.requests.length, 1);
+    setup.advance(1);
+    mock.timers.tick(1);
+    assert.equal(setup.requests.length, 2);
+    assert.equal((setup.requests[1].payload as { aps: { 'content-state': { state: string } } }).aps['content-state'].state, 'waiting for permission');
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'tool', tool: 'shell' });
+    await setup.service.deliverChatLifecycle({ ...base, phase: 'end', outcome: 'cancelled' });
+    setup.advance(5_000);
+    mock.timers.tick(5_000);
+    assert.equal(setup.requests.length, 3);
   } finally {
     mock.timers.reset();
     rmSync(setup.directory, { recursive: true, force: true });

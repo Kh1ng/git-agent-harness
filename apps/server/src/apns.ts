@@ -20,7 +20,7 @@ export type ApnsRequest = { token: string; headers: Record<string, string>; payl
 type ApnsTransport = (host: string, request: ApnsRequest) => Promise<ApnsResponse>;
 type ApnsSessionFactory = (host: string) => ClientHttp2Session;
 type LiveActivityRegistration = { profile: string; sessionId: string; token: string };
-type LiveActivityDelivery = { startedAt: number; lastUpdate: number; lastIdentity: string };
+type LiveActivityDelivery = { startedAt: number; lastUpdate: number };
 type TokenSlot = 'device' | 'pushToStartToken' | { liveActivity: string };
 type StoredDevice = {
   id: string;
@@ -81,6 +81,7 @@ export class ApnsNotifications {
   private readonly key: crypto.KeyObject;
   private jwt: { value: string; issuedAt: number } | null = null;
   private activityDeliveries = new Map<string, LiveActivityDelivery>();
+  private pendingUpdates = new Map<string, { event: ChatLifecycleEvent; timer: ReturnType<typeof setTimeout> }>();
   private sessions = new Map<string, ClientHttp2Session>();
 
   constructor(
@@ -163,16 +164,15 @@ export class ApnsNotifications {
       : event.outcome === 'complete' ? 'done'
       : event.outcome === 'cancelled' ? 'cancelled' : 'failed';
     if (event.phase === 'start') {
+      this.clearPendingUpdate(key);
       this.activityDeliveries.set(key, {
         startedAt: Date.parse(event.occurredAt),
-        lastUpdate: 0,
-        lastIdentity: state
+        lastUpdate: 0
       });
     }
     const delivery = this.activityDeliveries.get(key) ?? {
       startedAt: Date.parse(event.occurredAt),
-      lastUpdate: 0,
-      lastIdentity: ''
+      lastUpdate: 0
     };
     const content = { state, backend: event.backend ?? '', model: event.model ?? '', startedAt: Math.floor(delivery.startedAt / 1_000) };
     if (event.phase === 'start') {
@@ -192,14 +192,28 @@ export class ApnsNotifications {
     }
     const end = event.phase === 'end';
     const now = this.now();
-    const identity = event.phase === 'permission'
-      ? `permission:${event.permissionId ?? event.occurredAt}`
-      : state;
-    const throttled = now - delivery.lastUpdate < UPDATE_INTERVAL_MS;
-    const newPermission = event.phase === 'permission' && delivery.lastIdentity !== identity;
-    if (!end && throttled && !newPermission) return;
+    // Permission changes share the same limit as tool updates. Terminal pushes
+    // bypass it so completion and cancellation always end the activity promptly.
+    const remaining = UPDATE_INTERVAL_MS - (now - delivery.lastUpdate);
+    if (!end && remaining > 0) {
+      const pending = this.pendingUpdates.get(key);
+      if (pending) {
+        pending.event = event;
+      } else {
+        const update = { event, timer: setTimeout(() => {
+          this.pendingUpdates.delete(key);
+          void this.deliverChatLifecycle(update.event).catch(() => {
+            console.error('[apns] Live Activity update failed');
+          });
+        }, remaining) };
+        update.timer.unref();
+        this.pendingUpdates.set(key, update);
+      }
+      return;
+    }
+    this.clearPendingUpdate(key);
     if (!end) {
-      this.activityDeliveries.set(key, { ...delivery, lastUpdate: now, lastIdentity: identity });
+      this.activityDeliveries.set(key, { ...delivery, lastUpdate: now });
     } else {
       this.activityDeliveries.delete(key);
     }
@@ -211,6 +225,12 @@ export class ApnsNotifications {
       const token = device.liveActivities[key];
       return token ? { token, headers: this.headers('liveactivity', `${this.config.bundleId}.push-type.liveactivity`), payload: { aps } } : null;
     }, { liveActivity: key });
+  }
+
+  private clearPendingUpdate(key: string): void {
+    const pending = this.pendingUpdates.get(key);
+    if (pending) clearTimeout(pending.timer);
+    this.pendingUpdates.delete(key);
   }
 
   private headers(pushType: 'alert' | 'liveactivity', topic: string, collapseId?: string): Record<string, string> {
