@@ -74,6 +74,7 @@ export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
 export REGISTRATION_FILE="$registration_file"
 export HEALTH_FILE="$health_file"
 export GAH_NODE_ROLE=worker
+export GAH_INSTALL_AGENT=opencode
 export GAH_INSTALL_CONFIRMED=1
 export COORDINATOR_TOKEN=ci-install-test-token
 # The hosted runner has no tailnet. Production workers keep the Tailscale default.
