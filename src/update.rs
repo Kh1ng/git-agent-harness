@@ -16,11 +16,13 @@ use std::process::Command;
 
 mod installation;
 mod launch_agent;
+mod reexec;
 mod release;
 mod units;
 pub use installation::installation_plan;
 #[cfg(test)]
 use installation::quota_refresh_selected;
+use installation::NPM_CI_ARGS;
 use installation::{agents_to_refresh, install_selected_agent_assets};
 use launch_agent::install_macos_launch_agent;
 
@@ -49,7 +51,10 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     }
 
     let repo = resolve_repo(args.repo.as_deref())?;
-    let _update_lock = acquire_update_lock(&repo)?;
+    let update_lock = acquire_update_lock(&repo)?;
+    // Set when this process is the newly installed CLI finishing an update
+    // the previous binary started; the plan was already accepted.
+    let resumed = env::var_os(reexec::ENV).is_some();
     let config_home = user_config_home()?;
     let agents = agents_to_refresh(&config_home, &args.agents);
 
@@ -69,40 +74,44 @@ pub fn run(args: UpdateArgs) -> Result<()> {
         });
     }
 
-    if args.pull {
+    if args.pull && !resumed {
         ensure_default_branch_checkout(&repo)?;
         ensure_clean(&repo)?;
     }
     let plan = installation_plan(args.role, &agents)?;
-    installation::confirm(&plan, &args, &repo)?;
+    if !resumed {
+        installation::confirm(&plan, &args, &repo)?;
+    }
     if args.restart_server {
         ensure_no_running_loop_before_server_restart()?;
     }
 
     println!("Updating GAH CLI/control plane from {}", repo.display());
-    if args.pull {
+    if args.pull && !resumed {
         run_command(&repo, "git", &["fetch", "origin", "--prune"])?;
         run_command(&repo, "git", &["pull", "--ff-only"])?;
     }
 
     // This is the authoritative CLI deployment step. It replaces the Cargo
     // executable selected by PATH, unlike a target/release-only build.
-    ensure_lockfile_current(&repo)?;
-    run_command(
-        &repo,
-        "cargo",
-        &[
-            "install",
-            "--path",
-            ".",
-            "--bin",
-            "gah",
-            "--bin",
-            "gah-mcp-server",
-            "--force",
-            "--locked",
-        ],
-    )?;
+    if !resumed {
+        ensure_lockfile_current(&repo)?;
+        run_command(
+            &repo,
+            "cargo",
+            &[
+                "install",
+                "--path",
+                ".",
+                "--bin",
+                "gah",
+                "--bin",
+                "gah-mcp-server",
+                "--force",
+                "--locked",
+            ],
+        )?;
+    }
 
     let binary = installed_binary_path()?;
     if !binary.is_file() {
@@ -113,6 +122,16 @@ pub fn run(args: UpdateArgs) -> Result<()> {
     }
     run_command(&repo, binary.to_string_lossy().as_ref(), &["--help"])?;
     println!("Installed CLI: {}", binary.display());
+    // Everything after this point (unit rendering, installers) is code that
+    // the pull may have changed. Finish with the binary just installed, not
+    // this older one: an old binary once installed an unrendered
+    // gah-server.service and the restart failed.
+    // The checkout may be newer than this binary whether or not --pull ran
+    // (`git pull && gah update` is the common case), so always hand over.
+    if !resumed {
+        drop(update_lock);
+        return reexec::continue_with(&binary, &args, &repo);
+    }
     // Both roles install user units below; keep them alive past logout. Done
     // early so a later failed step cannot skip it.
     enable_user_lingering(&repo, args.role);
@@ -279,19 +298,6 @@ fn finish_update(
     }
     Ok(())
 }
-
-/// `npm ci` arguments shared by the source build path and the release
-/// path's dependency-drift reinstall (issue #1416): the release bundle
-/// normally ships prebuilt `dist/` output, but when its lockfile differs
-/// from the checkout's the installed node_modules must be refreshed too.
-const NPM_CI_ARGS: &[&str] = &[
-    "ci",
-    "--include=dev",
-    "--legacy-peer-deps",
-    "--prefer-offline",
-    "--no-audit",
-    "--no-fund",
-];
 
 /// Best-effort probe, not a hard dependency check: a missing `systemctl`
 /// (e.g. macOS, containers without systemd) means unit installation is
