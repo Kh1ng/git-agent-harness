@@ -373,18 +373,6 @@ pub fn run_review_backend_for_identity(
                 // review-artifact writes), worktree changes (a reviewer editing
                 // source), or descendant CPU/I/O (e.g. reading a large diff or
                 // running tests).
-                let stdout_len = fs::metadata(&stdout_path).map(|m| m.len()).unwrap_or(0);
-                let stderr_len = fs::metadata(&stderr_path).map(|m| m.len()).unwrap_or(0);
-                let stream_grew = progress_rx.try_iter().last().is_some()
-                    || stdout_len > last_stdout_len
-                    || stderr_len > last_stderr_len;
-                if stream_grew {
-                    last_stdout_len = stdout_len;
-                    last_stderr_len = stderr_len;
-                    last_progress_at = Instant::now();
-                    last_progress_elapsed_secs = Some(start.elapsed().as_secs_f64());
-                    saw_progress = true;
-                }
                 if last_worktree_poll.elapsed() >= worktree_poll_interval {
                     if let Some(snapshot) = worktree_progress_snapshot(worktree) {
                         if last_worktree_snapshot.as_ref() != Some(&snapshot) {
@@ -407,6 +395,21 @@ pub fn run_review_backend_for_identity(
                     }
                     last_worktree_poll = Instant::now();
                 }
+                // The probes above can take longer than the idle budget under
+                // load. Observe stream activity after them, so output produced
+                // while probing cannot be mistaken for a silent reviewer.
+                let stdout_len = fs::metadata(&stdout_path).map(|m| m.len()).unwrap_or(0);
+                let stderr_len = fs::metadata(&stderr_path).map(|m| m.len()).unwrap_or(0);
+                let stream_grew = progress_rx.try_iter().last().is_some()
+                    || stdout_len > last_stdout_len
+                    || stderr_len > last_stderr_len;
+                if stream_grew {
+                    last_stdout_len = stdout_len;
+                    last_stderr_len = stderr_len;
+                    last_progress_at = Instant::now();
+                    last_progress_elapsed_secs = Some(start.elapsed().as_secs_f64());
+                    saw_progress = true;
+                }
                 // A silent reviewer is killed only after the idle budget elapses
                 // with no progress. A busy reviewer that keeps producing output
                 // completes regardless of how long it runs.
@@ -416,6 +419,12 @@ pub fn run_review_backend_for_identity(
                     start.elapsed() >= startup_grace
                 };
                 if stalled {
+                    // The reviewer may have completed while the probes ran.
+                    // try_wait caches the exit status; the next iteration will
+                    // classify it normally instead of killing a finished child.
+                    if matches!(child.try_wait(), Ok(Some(_))) {
+                        continue;
+                    }
                     cleanup_error = kill_process_group(&mut child);
                     let _ = child.wait();
                     break ReviewProcessOutcome::IdleTimeout;

@@ -479,7 +479,6 @@ impl<'a> Setup<'a> {
                     }
                     declined.push(id);
                 }
-                host::refresh_path();
             } else {
                 declined.push(next.id);
             }
@@ -630,7 +629,6 @@ impl<'a> Setup<'a> {
         if !self.effects.run(&command, Some(&source), &variables) {
             bail!("The install did not finish. Its output above says why; fix that and run `{}` again.", self.again());
         }
-        host::refresh_path();
         self.prompter.say("✓ Installed.");
         Ok(())
     }

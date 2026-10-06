@@ -112,10 +112,14 @@ impl wizard::Effects for SystemEffects {
         for (key, value) in env {
             process.env(key, value);
         }
-        process
+        let success = process
             .status()
             .map(|status| status.success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        // Only real commands can install programs. Fake wizard effects must
+        // not mutate the process-wide PATH during parallel tests.
+        host::refresh_path();
+        success
     }
 
     fn http(

@@ -401,8 +401,8 @@ pub fn capture_usage_via_pty(
             command.args(["-qec", &cmd]).arg(&typescript);
             command
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
+                .stderr(std::process::Stdio::piped())
+                .output()
         }
         None => {
             return Err(std::io::Error::new(
@@ -418,11 +418,15 @@ pub fn capture_usage_via_pty(
     // usage. We read the typescript regardless, but only when the session
     // actually ran.
     match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let transcript = std::fs::read_to_string(&typescript).unwrap_or_default();
             let _ = std::fs::remove_file(&typescript);
             return Err(std::io::Error::other(format!(
-                "`script` reported a failed `claude /usage` session: exit status {s}"
+                "`script` reported a failed `claude /usage` session: exit status {}; stderr: {:?}; transcript: {:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr),
+                transcript
             )));
         }
         Err(e) => {
@@ -568,6 +572,27 @@ Total cost:                $0.0123
     #[test]
     fn status_line_none_on_garbage() {
         assert!(parse_claude_status_line("not json").is_none());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn pty_failure_preserves_session_diagnostics() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("claude.sh");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho 'fake claude launch failed' >&2\nexit 42\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = capture_usage_via_pty(fake.to_str().unwrap(), None).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("42"), "{message}");
+        assert!(message.contains("fake claude launch failed"), "{message}");
     }
 
     // The PTY path is the novel/risky piece (issue #153). Back it with a fake
