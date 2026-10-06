@@ -173,10 +173,10 @@ mod tests {
     use super::*;
     use crate::runner::backends::test_util::*;
 
-    // Documented-shape fixture, not a live capture -- see
+    // Live capture -- see
     // tests/fixtures/cursor/PROVENANCE.md.
     const RESULT_FIXTURE: &str =
-        include_str!("../../../tests/fixtures/cursor/result_documented_shape.json");
+        include_str!("../../../tests/fixtures/cursor/capture_success.json");
 
     fn run_recorded(model: Option<&str>, extra_args: &[String]) -> Vec<String> {
         let _exec_guard = crate::test_support::ExecGuard::new();
@@ -378,20 +378,22 @@ mod tests {
     // ── result parsing ───────────────────────────────────────────────────
 
     #[test]
-    fn fixture_result_yields_final_text_and_unknown_usage() {
+    fn fixture_result_yields_final_text_and_known_usage() {
         let parsed = parse_output(RESULT_FIXTURE);
 
         assert_eq!(
             parsed.final_text.as_deref(),
             Some("The repository builds with `cargo build`.")
         );
-        // The documented result object carries no usage: every counter must
-        // stay unknown rather than become a recorded zero.
-        assert_eq!(parsed.usage.usage_source, None);
-        assert_eq!(parsed.usage.input_tokens, None);
-        assert_eq!(parsed.usage.output_tokens, None);
+        assert_eq!(
+            parsed.usage.usage_source.as_deref(),
+            Some("cursor_output_json")
+        );
+        assert_eq!(parsed.usage.input_tokens, Some(1042));
+        assert_eq!(parsed.usage.output_tokens, Some(14));
+        assert_eq!(parsed.usage.cache_read_tokens, Some(0));
         assert_eq!(parsed.usage.total_tokens, None);
-        assert_eq!(parsed.usage.requests_count, None);
+        assert_eq!(parsed.usage.requests_count, Some(1));
     }
 
     #[test]

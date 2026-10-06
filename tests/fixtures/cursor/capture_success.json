@@ -1,0 +1,1 @@
+{"type":"result","subtype":"success","is_error":false,"duration_ms":4213,"duration_api_ms":3987,"result":"The repository builds with `cargo build`.","session_id":"00000000-0000-0000-0000-000000000000","request_id":"00000000-0000-0000-0000-000000000000","usage":{"inputTokens":1042,"outputTokens":14,"cacheReadTokens":0}}
