@@ -197,8 +197,21 @@ pub(crate) fn experiment(
     let artifact_count = collect_artifacts(&wt, &artifacts_dir);
     println!("Artifacts collected: {}", artifact_count);
 
-    // Judge whether the task was answered
     let log_text = fs::read_to_string(&result.log_path).unwrap_or_default();
+    // Issue #1367: an experiment whose writes the backend refused answered
+    // nothing. Record the configuration error, as improve does, instead of
+    // ending as a quiet "not answered".
+    if let Some(detail) = crate::runner::backends::write_refusal::refusal_detail(&log_text) {
+        ledger.set_failure(
+            crate::ledger::FailureClass::EnvironmentError,
+            crate::ledger::FailureStage::AgentRun,
+        );
+        ledger.error_summary = Some(format!("backend writes refused: {detail}"));
+        worktree::cleanup(&wt, repo);
+        anyhow::bail!("experiment: writes were refused (configuration error): {detail}");
+    }
+
+    // Judge whether the task was answered
     let answered = judge_experiment(&args.target, &log_text, artifact_count);
     println!(
         "Judge: {}",

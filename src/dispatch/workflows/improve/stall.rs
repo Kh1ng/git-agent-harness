@@ -165,4 +165,61 @@ mod tests {
         assert_eq!(failure.failure_class, FailureClass::HarnessError);
         assert!(failure.config_error.is_none());
     }
+
+    /// The stop itself: the dispatch ends with an error naming the setting,
+    /// the attempt's uncommitted work is kept on its branch, and the worktree
+    /// is removed so nothing is left behind for a retry that will not come.
+    #[test]
+    fn refused_writes_end_the_dispatch_keep_the_work_and_remove_the_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        crate::dispatch::test_util::init_repo(&repo);
+        let worktree = tmp.path().join("wt");
+        let git = |args: &[&str], dir: &std::path::Path| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        git(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "gah/refused",
+                worktree.to_str().unwrap(),
+            ],
+            &repo,
+        );
+        std::fs::write(worktree.join("notes.txt"), "partial work\n").unwrap();
+        let profile = crate::dispatch::test_util::profile(&repo);
+        let mut ledger =
+            crate::ledger::LedgerEntry::new("test", &profile, "codex", "improve", "t", None, None);
+
+        let error = stop_on_refused_writes(
+            &mut ledger,
+            &worktree,
+            &repo,
+            &profile,
+            "codex improve attempt 1",
+            "fix profile codex_args",
+        )
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("not retrying"), "{message}");
+        assert!(message.contains("fix profile codex_args"), "{message}");
+        assert_eq!(
+            ledger.error_summary.as_deref(),
+            Some("backend writes refused: fix profile codex_args")
+        );
+        assert!(!worktree.exists(), "the worktree is removed");
+        assert_eq!(
+            git(&["log", "-1", "--format=%s", "gah/refused"], &repo).trim(),
+            "gah: WIP failed codex improve attempt 1"
+        );
+    }
 }
