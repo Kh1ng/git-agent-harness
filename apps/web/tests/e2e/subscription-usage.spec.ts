@@ -53,6 +53,14 @@ test('windows are named and sized from the provider names, and projected to rese
   expect(busySubscriptionIds({ subscriptions, sessions: [], controllerRuns: [], claims: [], recentLedger: { most_recent_work_id: '#1', most_recent_effective_backend: 'codex' } as never }).size).toBe(0);
   // A factory agent process is a subscription at work, whatever the ledger says.
   expect([...busySubscriptionIds({ subscriptions, sessions: [], controllerRuns: [], claims: [], recentLedger: null, factoryAgents: [{ pid: 1, tool: 'codex', cwd: '/w', started_at: null }] })]).toEqual(['codex']);
+  // Two subscriptions behind one CLI: the model the process runs picks the one that is busy.
+  const pools = [
+    { ...subscriptions[0], id: 'agy:google-native', backend: 'agy', model: 'Gemini Pro' },
+    { ...subscriptions[0], id: 'agy:external', backend: 'agy', model: 'Claude Sonnet' }
+  ];
+  const agyAgent = (model?: string) => ({ pid: 1, tool: 'agy', cwd: '/w', started_at: null, ...(model ? { model } : {}) });
+  expect([...busySubscriptionIds({ subscriptions: pools, sessions: [], controllerRuns: [], claims: [], recentLedger: null, factoryAgents: [agyAgent('Claude Sonnet')] })]).toEqual(['agy:external']);
+  expect([...busySubscriptionIds({ subscriptions: pools, sessions: [], controllerRuns: [], claims: [], recentLedger: null, factoryAgents: [agyAgent()] })]).toEqual(['agy:google-native']);
 });
 
 test('the navbar shows a ring per subscription and opens its windows; Quota lists collapsible cards', async ({ page }) => {
