@@ -445,15 +445,21 @@ export async function restoreSession(
     const branchExists = await git(profileInfo.local_path, 'rev-parse', '--verify', '--quiet', `refs/heads/${session.branch}`)
       .then(() => true)
       .catch(() => false);
+    const dir = join(profileDir(profile, opts), `session-${encodeURIComponent(sessionId)}`);
+    const patch = existsSync(dir)
+      ? readdirSync(dir).filter((name) => /^archive-\d+\.patch$/.test(name)).sort().at(-1)
+      : undefined;
+    // Checkout mode cannot carry saved work; refuse rather than drop it silently.
+    if (!branchExists && patch) {
+      throw new Error(
+        `Chat session '${sessionId}' branch ${session.branch} no longer exists; its saved work is in ${join(dir, patch)}`
+      );
+    }
     if (branchExists) {
       restoredPath = join(profileInfo.worktree_base, worktreeDirName(profileInfo.repo_id, sessionId));
       mkdirSync(profileInfo.worktree_base, { recursive: true });
       await git(profileInfo.local_path, 'worktree', 'add', restoredPath, session.branch);
       try {
-        const dir = join(profileDir(profile, opts), `session-${encodeURIComponent(sessionId)}`);
-        const patch = existsSync(dir)
-          ? readdirSync(dir).filter((name) => /^archive-\d+\.patch$/.test(name)).sort().at(-1)
-          : undefined;
         if (patch) await git(restoredPath, 'apply', join(dir, patch));
       } catch (error) {
         await git(profileInfo.local_path, 'worktree', 'remove', '--force', restoredPath).catch(() => undefined);

@@ -182,6 +182,15 @@ test('restoreSession degrades to checkout mode when the branch never existed', w
   assert.equal(restored.worktreePath, null, 'no worktree for a missing branch');
 }));
 
+test('restoreSession refuses to drop saved work when the branch is gone', withEnv(async (env) => {
+  const session = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'hermes' });
+  writeFileSync(join(session.worktreePath!, 'dirty.txt'), 'uncommitted work\n');
+  await archiveSession('p', session.id, env.profileInfo);
+  execFileSync('git', ['branch', '-D', session.branch], { cwd: env.checkout });
+
+  await assert.rejects(restoreSession('p', session.id, env.profileInfo), /saved work is in .*archive-\d+\.patch/);
+}));
+
 test('settled archive keeps the same patch and branch safety while recording a distinct outcome', withEnv(async (env) => {
   const session = await createSession({ profile: 'p', profileInfo: env.profileInfo, backend: 'codex' });
   writeFileSync(join(session.worktreePath!, 'delivered-but-local.txt'), 'recovery work\n');

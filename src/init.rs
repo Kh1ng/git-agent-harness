@@ -199,8 +199,13 @@ fn patch_worktree_base_line(existing: &str, default_base: &str) -> String {
     match existing_key {
         // An empty `worktree_base = ""` (or whitespace) inside the section:
         // replace it in place.
+        // The old value is empty, so a `#` on the line starts a comment: keep it.
         Some(offset) => {
-            out[header + 1 + offset] = key_line;
+            let line = &mut out[header + 1 + offset];
+            *line = match line.split_once('#') {
+                Some((_, comment)) => format!("{key_line} #{comment}"),
+                None => key_line,
+            };
         }
         // No key in the section: insert one directly under the header.
         None => {
@@ -279,6 +284,16 @@ mod tests {
         );
         let cfg: crate::config::GahConfig = toml::from_str(&patched).unwrap();
         assert_eq!(cfg.defaults.worktree_base, DEFAULT_BASE);
+    }
+
+    #[test]
+    fn append_keeps_trailing_comment_on_replaced_line() {
+        let existing = "[defaults]\nworktree_base = \"\" # shared base\n";
+        let patched = ensure_worktree_base_default(existing, DEFAULT_BASE);
+        assert_eq!(
+            patched,
+            format!("[defaults]\nworktree_base = \"{DEFAULT_BASE}\" # shared base\n")
+        );
     }
 
     #[test]
