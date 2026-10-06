@@ -324,6 +324,48 @@ fn doctor_json_reports_the_resolved_default_for_an_empty_worktree_base() {
     assert!(!home.join(".local").exists());
 }
 
+/// The write probe can land in a directory GAH does not own, so it must not
+/// touch a file that already has the old fixed probe name, nor write through
+/// a symlink with that name.
+#[cfg(unix)]
+#[test]
+fn doctor_worktree_base_probe_leaves_existing_files_alone() {
+    let tmp = test_tempdir();
+    let parent = tmp.path().join("parent");
+    fs::create_dir_all(&parent).unwrap();
+    let target = tmp.path().join("symlink-target");
+    fs::write(&target, "target contents").unwrap();
+    let cfg = tmp.path().join("gah-config-empty.toml");
+
+    for base in [parent.clone(), parent.join("not-created-yet")] {
+        let probe = parent.join(".gah-write-test");
+        let _ = fs::remove_file(&probe);
+        fs::write(&probe, "operator file").unwrap();
+        fs::write(
+            &cfg,
+            format!("[defaults]\nworktree_base = \"{}\"\n", base.display()),
+        )
+        .unwrap();
+        let doctor = || {
+            bin()
+                .args(["doctor", "--config-path", cfg.to_str().unwrap()])
+                .assert()
+                .success();
+        };
+
+        doctor();
+        assert_eq!(fs::read_to_string(&probe).unwrap(), "operator file");
+
+        fs::remove_file(&probe).unwrap();
+        std::os::unix::fs::symlink(&target, &probe).unwrap();
+        doctor();
+        assert!(fs::symlink_metadata(&probe).unwrap().is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "target contents");
+    }
+    // Only the operator's entry is left: the probe cleaned up after itself.
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+}
+
 /// A regular file above the worktree base blocks creating it, so doctor must
 /// fail instead of probing the directory that holds the file.
 #[test]

@@ -246,14 +246,14 @@ fn worktree_base_probe(path: &Path) -> Result<(), String> {
         }
         ancestor.to_path_buf()
     };
-    let probe = probe_dir.join(".gah-write-test");
-    match fs::write(&probe, b"ok") {
-        Ok(()) => {
-            let _ = fs::remove_file(&probe);
-            Ok(())
-        }
-        Err(err) => Err(format!("{err}")),
-    }
+    // The probe may land in a directory GAH does not own (`$HOME`), so it is
+    // an exclusively created, uniquely named file removed on drop: it never
+    // truncates an existing file or writes through a symlink.
+    tempfile::Builder::new()
+        .prefix(".gah-write-test-")
+        .tempfile_in(&probe_dir)
+        .map(drop)
+        .map_err(|err| format!("{err}"))
 }
 
 fn check_profile(defaults: &Defaults, profile: &Profile) -> bool {
