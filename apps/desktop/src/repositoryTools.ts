@@ -16,8 +16,11 @@ export function bindRepositoryTools(section: HTMLElement, invoke: Invoke) {
     status.before(environment);
   }
   let revision = 0;
+  const login = document.querySelector<HTMLButtonElement>('#setup-repository-login');
+  if (login) { login.disabled = true; login.dataset.setupUnavailable = 'true'; }
   async function refresh() {
     const request = ++revision;
+    if (login) { login.disabled = true; login.dataset.setupUnavailable = 'true'; }
     const program = provider.value;
     const tool = repositoryCli(program)!;
     status.textContent = `Checking ${tool.label} (${program})…`;
@@ -28,8 +31,9 @@ export function bindRepositoryTools(section: HTMLElement, invoke: Invoke) {
       const tools = await invoke<RepositoryTool[]>('repository_tools');
       if (request !== revision) return;
       const installed = tools.find(entry => entry.program === program)?.installed;
+      if (login) { login.disabled = !installed; login.dataset.setupUnavailable = String(!installed); }
       status.textContent = installed
-        ? `${tool.label} (${program}) is installed. Sign in next from the dashboard. Installation alone does not verify your login.`
+        ? `${tool.label} (${program}) is installed. Sign in using Repository access token below. Installation alone does not verify your login.`
         : `${tool.label} (${program}) is required to read issues and open pull requests for ${program === 'gh' ? 'GitHub' : 'GitLab'} repositories. Install it before signing in, then select Check installation.`;
       guide.hidden = !!installed;
     } catch {

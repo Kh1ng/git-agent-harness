@@ -8,7 +8,9 @@
     "start": "tauri dev",
     "typecheck": "tsc --noEmit",
     "build": "vite build && tauri build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "node tests/onboarding.mjs",
+    "pretest": "vite build"
   },
   "dependencies": {
     "@git-agent-harness/contracts": "*",
@@ -19,7 +21,8 @@
     "@tauri-apps/cli": "^2.0.0",
     "@types/node": "^20.0.0",
     "typescript": "^5.0.0",
-    "vite": "^6.4.3"
+    "vite": "^6.4.3",
+    "@playwright/test": "^1.48.0"
   },
   "productName": "Git Agent Harness Desktop",
   "engines": {

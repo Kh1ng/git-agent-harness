@@ -173,6 +173,10 @@ pub struct Args {
     /// Take every default and accept every offer, without prompting.
     #[arg(long)]
     yes: bool,
+    /// Stop on unmet prerequisites instead of installing packages or launching login.
+    /// Used by GUI callers that handle package guidance and authentication themselves.
+    #[arg(long)]
+    no_prerequisite_actions: bool,
     /// Only report what this machine has and lacks; change nothing.
     #[arg(long)]
     check: bool,
@@ -227,6 +231,7 @@ pub fn run(args: Args) -> Result<()> {
         memorycore: args.memorycore,
         source: wizard::find_source(args.source)?,
         yes: args.yes,
+        no_prerequisite_actions: args.no_prerequisite_actions,
     };
     if !options.yes && !std::io::stdin().is_terminal() {
         bail!("gah setup asks questions; run it in a terminal, or pass --yes with the choices as flags.");

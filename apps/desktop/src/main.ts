@@ -60,7 +60,15 @@ type SetupCheck = {
   terminal: boolean;
 };
 let nodeRole: 'central' | 'worker' = 'central';
-let standaloneStarted = false;
+function setupChoices() {
+  return {
+    role: document.querySelector<HTMLSelectElement>('#setup-mode')!.value,
+    agent: document.querySelector<HTMLSelectElement>('#setup-agent')!.value,
+    provider: document.querySelector<HTMLSelectElement>('#repository-provider')!.value === 'gh' ? 'github' : 'gitlab',
+    memory: document.querySelector<HTMLSelectElement>('#setup-memory')!.value,
+    gateway_url: document.querySelector<HTMLInputElement>('#setup-gateway')!.value.trim(),
+  };
+}
 
 function statusText(status: SetupStatus): string {
   switch (status.state) {
@@ -80,27 +88,26 @@ function checkUnresolved(status: SetupStatus): boolean {
   return status.state === 'status_unknown' || status.state === 'status_failed';
 }
 
-/** `gah setup --check` as a checklist; the work itself happens in Terminal. Resolves to readiness. */
+/** Check exactly the choices displayed in the onboarding form. */
 async function refreshSetup(): Promise<boolean> {
-  const result = await invoke<SetupCheck>('setup_check', { role: nodeRole });
+  const result = await invoke<SetupCheck>('setup_check', { role: nodeRole, choices: setupChoices() });
   const state = document.querySelector<HTMLElement>('#setup-state')!;
   const list = document.querySelector<HTMLElement>('#setup-list')!;
-  const button = document.querySelector<HTMLButtonElement>('#setup-terminal')!;
-  const commandLine = document.querySelector<HTMLElement>('#setup-command')!;
+  const button = document.querySelector<HTMLButtonElement>('#setup-standalone')!;
   list.replaceChildren();
   const pending = !result.installed || !result.report?.ready;
   if (!result.installed) {
-    state.textContent = 'GAH is not installed on this computer yet. Setup builds it, asks whether this computer is the central node, a worker, or command line only, and offers each missing tool before installing it.';
-    button.textContent = 'Install GAH in Terminal';
+    state.textContent = 'The GAH CLI is unavailable. Select Install GAH CLI to build it in this window, then retry. Git and Rust must be installed first. Complete bundled release installation is tracked in #1321.';
+    button.textContent = 'Install selected configuration';
   } else if (result.error || !result.report) {
     state.textContent = result.error ?? 'Setup could not check this computer.';
-    button.textContent = 'Finish setup in Terminal';
+    button.textContent = 'Install selected configuration';
   } else {
     const missing = result.report.requirements.filter((item) => item.status.state !== 'ok' && !item.optional).length;
     state.textContent = result.report.ready
       ? 'Everything this computer needs is in place.'
-      : `${missing} required ${missing === 1 ? 'item is' : 'items are'} missing. Setup offers each one before installing it.`;
-    button.textContent = 'Finish setup in Terminal';
+      : `${missing} required ${missing === 1 ? 'item is' : 'items are'} missing. Complete the prerequisites below, then retry installation.`;
+    button.textContent = 'Install selected configuration';
     for (const item of result.report.requirements) {
       const ok = item.status.state === 'ok';
       const row = document.createElement('li');
@@ -118,20 +125,18 @@ async function refreshSetup(): Promise<boolean> {
         row.append(how);
       } else if (!ok && item.action) {
         const how = document.createElement('small');
-        const code = document.createElement('code');
-        code.textContent = item.action.command;
-        how.append(code, item.action.sudo ? ' (asks for your password)' : '');
+        how.textContent = item.id.includes('login')
+          ? 'Sign in using the repository login or coding agent controls below, then check again.'
+          : 'Use the official installation guides below, then check again.';
         row.append(how);
       }
       list.append(row);
     }
   }
   list.hidden = list.childElementCount === 0;
-  button.hidden = !pending || !result.terminal;
-  document.querySelector<HTMLElement>('#setup-standalone')!.hidden = button.hidden;
-  document.querySelector<HTMLElement>('#standalone-note')!.hidden = button.hidden;
-  commandLine.hidden = !pending || result.terminal;
-  commandLine.querySelector('code')!.textContent = result.command;
+  button.hidden = false;
+  button.dataset.setupUnavailable = String(!result.installed);
+  button.disabled = !result.installed;
   return !pending;
 }
 
@@ -139,8 +144,23 @@ async function perform(action: () => Promise<void>) {
   error.textContent = '';
   const buttons = [...document.querySelectorAll('button')].filter(button => !button.closest('#provider-connections, #mistral-section'));
   buttons.forEach((button) => { button.disabled = true; });
+  const setupControls = [...document.querySelectorAll<HTMLInputElement | HTMLSelectElement>('#setup-section input, #setup-section select, #repository-provider')];
+  setupControls.forEach(control => { control.disabled = true; });
   try { await action(); } catch (err) { error.textContent = String(err); }
-  finally { buttons.forEach((button) => { button.disabled = false; }); }
+  finally {
+    buttons.forEach((button) => { button.disabled = button.dataset.setupUnavailable === 'true'; });
+    setupControls.forEach(control => { control.disabled = false; });
+  }
+}
+
+function performSetup(action: () => Promise<void>) {
+  return perform(async () => {
+    try { await action(); }
+    catch (err) {
+      document.querySelector('#setup-state')!.textContent = `${String(err)} Correct the failed step and retry using the same button. Your selections are preserved.`;
+      throw err;
+    }
+  });
 }
 
 async function refresh() {
@@ -216,27 +236,56 @@ dock.addEventListener('change', constrainPresence);
 tray.addEventListener('change', constrainPresence);
 document.querySelector('#refresh')!.addEventListener('click', () => { void perform(refresh); });
 document.querySelector('#setup-refresh')!.addEventListener('click', () => {
-  void perform(async () => {
-    if (await refreshSetup() && standaloneStarted) {
-      standaloneStarted = false;
-      await connect();
-    }
-  });
+  void performSetup(async () => { await refreshSetup(); });
 });
 document.querySelector('#setup-standalone')!.addEventListener('click', () => {
-  void perform(async () => {
-    central.value = await invoke<string>('open_setup_terminal', { standalone: true });
-    nodeRole = 'central';
-    standaloneStarted = true;
-    document.querySelector('#setup-state')!.textContent = 'Standalone setup is running in Terminal. Select Check again when it finishes to open the dashboard.';
+  void performSetup(async () => {
+    const state = document.querySelector('#setup-state')!;
+    state.textContent = 'Checking prerequisites and installing your selected configuration… Native permission dialogs may appear. The first build can take several minutes.';
+    const key = document.querySelector<HTMLInputElement>('#setup-gateway-key')!;
+    try {
+      central.value = await invoke<string>('onboarding_run', { choices: setupChoices(), gatewayKey: key.value });
+      state.textContent = 'Setup complete. Opening the local dashboard…';
+      await connect();
+    } catch (err) {
+      state.textContent = `${String(err)} Your choices are preserved; correct the failed step and select Install selected configuration to retry.`;
+    } finally { key.value = ''; }
   });
 });
-document.querySelector('#setup-terminal')!.addEventListener('click', () => {
-  void perform(async () => {
-    await invoke('open_setup_terminal');
-    document.querySelector('#setup-state')!.textContent = 'Setup is running in Terminal. Check again when it finishes.';
+document.querySelector('#setup-install-cli')!.addEventListener('click', () => {
+  void performSetup(async () => {
+    document.querySelector('#setup-state')!.textContent = 'Preparing the GAH CLI… Follow the build progress below. This can take several minutes.';
+    await invoke('onboarding_install_cli');
+    await refreshSetup();
   });
 });
+document.querySelector('#setup-agent-login')!.addEventListener('click', () => {
+  void performSetup(async () => {
+    document.querySelector('#setup-state')!.textContent = 'Signing in… Follow the browser or device-code instructions in the progress panel.';
+    await invoke('onboarding_agent_login', { agent: setupChoices().agent });
+    document.querySelector('#setup-progress')!.textContent = '';
+    await refreshSetup();
+  });
+});
+document.querySelector('#setup-repository-login')!.addEventListener('click', () => {
+  void performSetup(async () => {
+    const token = document.querySelector<HTMLInputElement>('#setup-repository-token')!;
+    try {
+      await invoke('onboarding_login', { provider: setupChoices().provider, token: token.value });
+      await refreshSetup();
+    } finally { token.value = ''; }
+  });
+});
+void listen<string>('gah:onboarding-progress', event => {
+  const progress = document.querySelector<HTMLElement>('#setup-progress')!;
+  progress.textContent = `${progress.textContent ?? ''}${event.payload}\n`.slice(-24000);
+}).catch(() => {});
+for (const id of ['setup-mode', 'setup-agent', 'setup-memory', 'repository-provider']) {
+  document.querySelector(`#${id}`)!.addEventListener('change', () => { void performSetup(async () => { await refreshSetup(); }); });
+}
+for (const link of document.querySelectorAll<HTMLAnchorElement>('#setup-section a')) {
+  link.addEventListener('click', event => { event.preventDefault(); void invoke('open_external_url', { url: link.href }).catch(err => { error.textContent = `Could not open the guide: ${String(err)}. Open ${link.href} in your browser.`; }); });
+}
 for (const [id, running] of [['start', true], ['stop', false]] as const) {
   document.querySelector(`#${id}`)!.addEventListener('click', () => {
     void perform(async () => { await invoke('set_worker_running', { running }); await refresh(); });

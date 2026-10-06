@@ -1,8 +1,5 @@
-//! First-run setup from the app (#1284): shows `gah setup --check --json`
-//! and hands the work to a terminal (Terminal.app on macOS, the first
-//! emulator found on Linux, a WSL console on Windows), where `gah setup` can ask questions and
-//! sudo can ask for a password. The checklist logic lives in gah; the app
-//! only displays it.
+//! First-run prerequisite reports for the bundled GUI. The legacy terminal
+//! command remains available to older clients; the current GUI uses onboarding.rs.
 
 use serde::Serialize;
 
@@ -45,7 +42,7 @@ fn shell(script: &str) -> Command {
     };
     #[cfg(not(windows))]
     let mut shell = {
-        let mut sh = command("sh");
+        let mut sh = super::onboarding::host_command("sh");
         sh.arg("-c");
         sh
     };
@@ -93,7 +90,7 @@ fn applescript_string(value: &str) -> String {
 }
 
 #[tauri::command]
-pub async fn setup_check(window: tauri::WebviewWindow, role: Option<String>) -> Result<SetupCheck, String> {
+pub async fn setup_check(window: tauri::WebviewWindow, role: Option<String>, choices: Option<super::onboarding::Choices>) -> Result<SetupCheck, String> {
     local_only(&window)?;
     let gah = installed_gah();
     let command_text = setup_command(gah.as_deref(), false);
@@ -105,8 +102,12 @@ pub async fn setup_check(window: tauri::WebviewWindow, role: Option<String>) -> 
         Some("worker") => "worker",
         _ => "central",
     };
+    let args = match choices {
+        Some(choices) => choices.args()?,
+        None => vec!["setup".into(), "--role".into(), role.into()],
+    };
     let output = shell(&format!("exec {gah} \"$@\""))
-        .args(["setup", "--check", "--json", "--role", role])
+        .args(args).args(["--check", "--json"])
         .output()
         .map_err(|error| format!("Cannot run gah: {error}"))?;
     let (report, error) = if output.status.success() {
@@ -232,7 +233,7 @@ fn open_terminal(line: &str) -> bool {
 /// mount; a host terminal that inherits them can fail to start. Returns the
 /// variables to rewrite (mount entries dropped) or remove (nothing left).
 #[cfg(any(all(unix, not(target_os = "macos")), test))]
-fn host_env(
+pub(crate) fn host_env(
     vars: impl IntoIterator<Item = (String, String)>,
     appdir: &str,
 ) -> Vec<(String, Option<String>)> {

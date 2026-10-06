@@ -16,6 +16,8 @@ mod credentials;
 mod mistral_login;
 mod open_project;
 mod setup_check;
+mod onboarding;
+mod onboarding_choices;
 mod repository_tools;
 
 const OWNER_CREDENTIAL_SERVICE: &str = "com.kh1ng.gah.owner";
@@ -907,6 +909,10 @@ fn main() {
             repository_tools::repository_tools,
             setup_check::setup_check,
             setup_check::open_setup_terminal,
+            onboarding::onboarding_login,
+            onboarding::onboarding_install_cli,
+            onboarding::onboarding_agent_login,
+            onboarding::onboarding_run,
             mistral_login::mistral_login_start,
             mistral_login::mistral_login_finish,
             credentials::credential_list,

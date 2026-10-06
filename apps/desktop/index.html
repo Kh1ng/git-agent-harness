@@ -90,11 +90,35 @@
         <h2 id="setup-heading">Set up this computer</h2>
         <p id="setup-state" role="status">Checking what this computer has…</p>
         <ul id="setup-list" class="checklist" hidden></ul>
-        <p id="standalone-note" hidden>Standalone runs the dashboard and agents on this computer only. It accepts every setup default and connects this app when setup finishes.</p>
-        <p id="setup-command" hidden>Run in a terminal: <code></code></p>
+        <label for="setup-mode">Operation</label>
+        <select id="setup-mode"><option value="standalone">Local standalone — no other node or Tailscale</option><option value="central">Networked central node</option></select>
+        <p>Network pairing and exposure are configured separately after installation. <a href="https://github.com/Kh1ng/git-agent-harness/issues/1318">Networking tracking #1318</a>.</p>
+        <label for="setup-agent">Coding agent</label>
+        <select id="setup-agent"><option value="claude">Claude Code</option><option value="codex">Codex</option></select>
+        <button id="setup-agent-login" type="button">Sign in to coding agent</button>
+        <p>Claude opens browser sign-in; Codex provides device-code sign-in. Follow the instructions in the progress panel.</p>
+        <label for="setup-repository-token">Repository access token (GitHub.com or GitLab.com)</label>
+        <input id="setup-repository-token" type="password" autocomplete="off" />
+        <button id="setup-repository-login" type="button">Sign in to selected repository provider</button>
+        <p>Package availability is checked before login. Tokens are sent through the CLI’s standard input and are never printed in progress.</p>
+        <label for="setup-memory">Shared memory (optional)</label>
+        <select id="setup-memory"><option value="off">Skip shared memory</option><option value="remote">Use an existing memory gateway</option></select>
+        <label for="setup-gateway">Memory gateway URL</label>
+        <input id="setup-gateway" type="url" placeholder="https://memory.example.com" />
+        <label for="setup-gateway-key">Memory gateway API key</label>
+        <input id="setup-gateway-key" type="password" autocomplete="off" />
+        <p>Local gateway and embedding-provider configuration: <a href="https://github.com/Kh1ng/git-agent-harness/issues/1319">#1319</a>. Factory modules are optional and configured from the dashboard after setup: <a href="https://github.com/Kh1ng/git-agent-harness/issues/1317">#1317</a>.</p>
+        <p>Official installation guides:
+          <a href="https://cli.github.com/">GitHub CLI</a> · <a href="https://gitlab.com/gitlab-org/cli#installation">GitLab CLI</a> ·
+          <a href="https://git-scm.com/downloads">Git</a> · <a href="https://rustup.rs/">Rust</a> · <a href="https://nodejs.org/en/download">Node.js</a> ·
+          <a href="https://code.claude.com/docs/en/setup">Claude Code</a> · <a href="https://developers.openai.com/codex/cli/">Codex</a> · <a href="https://opencode.ai/docs/">OpenCode</a> ·
+          <a href="https://github.com/Kh1ng/git-agent-harness/releases">GAH releases</a>
+        </p>
+        <p>Installation permissions use your desktop’s native PolicyKit dialog on Linux. This app never asks for a sudo password.</p>
+        <pre id="setup-progress" role="log" aria-live="polite" aria-label="Installation progress" style="white-space:pre-wrap;max-height:18rem;overflow:auto"></pre>
         <div class="actions">
-          <button id="setup-standalone" type="button" hidden aria-describedby="standalone-note">Set up standalone</button>
-          <button id="setup-terminal" type="button" hidden>Finish setup in Terminal</button>
+          <button id="setup-install-cli" type="button">Install GAH CLI</button>
+          <button id="setup-standalone" type="button">Install selected configuration</button>
           <button id="setup-refresh" type="button">Check again</button>
         </div>
       </section>

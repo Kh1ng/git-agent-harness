@@ -21,7 +21,7 @@ pub fn repository_tools(window: tauri::WebviewWindow) -> Result<Vec<RepositoryTo
 }
 
 // Check the environment where GAH runs, including the worker environment in WSL.
-fn repository_tool_installed(program: &str) -> bool {
+pub(crate) fn repository_tool_installed(program: &str) -> bool {
     #[cfg(windows)]
     let output = super::wsl_command(&super::read_settings())
         .args([

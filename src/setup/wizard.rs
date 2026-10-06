@@ -51,6 +51,7 @@ pub struct Options {
     pub memorycore: Option<PathBuf>,
     pub source: PathBuf,
     pub yes: bool,
+    pub no_prerequisite_actions: bool,
 }
 
 pub struct Setup<'a> {
@@ -227,7 +228,13 @@ impl<'a> Setup<'a> {
         };
 
         // 5. Every prerequisite, with an offer for each missing one.
-        self.provide_requirements(&selection)?;
+        if self.options.no_prerequisite_actions {
+            if !requirements::report(selection, self.host).ready {
+                bail!("Prerequisites changed or remain unresolved; check the GUI checklist and retry.");
+            }
+        } else {
+            self.provide_requirements(&selection)?;
+        }
 
         // 6. The service (or just the CLI), then the first project.
         self.install(&selection, env)?;
@@ -1023,6 +1030,48 @@ mod tests {
             .said
             .iter()
             .any(|line| line.contains("http://127.0.0.1:3773")));
+    }
+
+    #[test]
+    fn gui_setup_never_runs_package_or_login_actions_and_can_retry() {
+        let mut host = ready_host();
+        let mut prompter = Script::default();
+        let mut effects = Recorder::default();
+        let options = Options {
+            role: Some(Role::Standalone),
+            agent: Some(Agent::Claude),
+            provider: Some(Provider::Github),
+            memory: Some(MemoryMode::Off),
+            source: PathBuf::from("/src"),
+            yes: true,
+            no_prerequisite_actions: true,
+            ..Default::default()
+        };
+        host = host.with("gh auth status", false, "not logged in");
+        assert!(Setup {
+            host: &host,
+            prompter: &mut prompter,
+            effects: &mut effects,
+            options: options.clone()
+        }
+        .run()
+        .is_err());
+        assert!(
+            effects.commands.is_empty(),
+            "No packages, login or service install before readiness"
+        );
+        host = host.with("gh auth status", true, "Logged in to github.com");
+        Setup {
+            host: &host,
+            prompter: &mut prompter,
+            effects: &mut effects,
+            options,
+        }
+        .run()
+        .unwrap();
+        assert_eq!(effects.commands.len(), 1);
+        assert_eq!(effects.commands[0].0, "scripts/install.sh");
+        assert!(prompter.asked.is_empty());
     }
 
     #[test]
