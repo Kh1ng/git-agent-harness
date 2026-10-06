@@ -152,7 +152,6 @@ pub(crate) fn parse(input: &[u8], now: OffsetDateTime) -> Result<Vec<QuotaObserv
             model: None,
             quota_pool: None,
             quota_window: Some(window.into()),
-            quota_used_percent: Some(used),
             quota_remaining_percent: Some(100.0 - used),
             quota_reset_at: reading["resets_at"]
                 .as_str()

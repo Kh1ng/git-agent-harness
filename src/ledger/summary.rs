@@ -47,6 +47,8 @@ use time::{Duration, OffsetDateTime};
 pub struct GroupSummary {
     pub group_key: String,
     pub entries: usize,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub usage_unknown_reasons: BTreeMap<super::UsageUnknownReason, usize>,
     pub attempts: usize,
     /// Issue #240: attempt counters are `Option<u32>` on `LedgerEntry`, so
     /// an unknown (pre-tracking) entry is excluded from the sum rather than
@@ -109,6 +111,8 @@ pub struct GroupSummary {
 pub struct SummaryData {
     pub ledger_path: String,
     pub entries: usize,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub usage_unknown_reasons: BTreeMap<super::UsageUnknownReason, usize>,
     pub success: usize,
     pub failed: usize,
     pub by_mode: BTreeMap<String, usize>,
@@ -415,6 +419,7 @@ pub fn build_summary(
     // them keeps success-rate and cost-per-execution denominators honest.
     entries.retain(|entry| !is_capacity_deferral(entry));
 
+    let mut usage_unknown_reasons = BTreeMap::new();
     let mut by_mode: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_backend: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_requested_backend: BTreeMap<String, usize> = BTreeMap::new();
@@ -516,6 +521,9 @@ pub fn build_summary(
             None => attempts_completed_unknown += 1,
         }
         for observed in canonical_usage_observations(entry) {
+            if let Some(reason) = observed.usage.usage_unknown_reason {
+                *usage_unknown_reasons.entry(reason).or_default() += 1;
+            }
             if let Some(tokens) = observed.usage.input_tokens {
                 input_tokens += tokens;
                 input_tokens_seen = true;
@@ -639,6 +647,7 @@ pub fn build_summary(
     };
 
     Ok(SummaryData {
+        usage_unknown_reasons,
         ledger_path: cfg.defaults.ledger_path().display().to_string(),
         entries: entries.len(),
         success,
@@ -679,11 +688,9 @@ pub fn build_summary(
 
 /// TICKET-125: Build grouped summary data for a specific grouping key.
 ///
-/// #1339: group summaries carry only what the ledger itself observed
-/// (attempt-derived readings). Account-level quota comes from the durable
-/// quota store and is selected by its own callers via
-/// `quota_store::latest_windows_for_identity` — it is never merged into
-/// ledger groups.
+/// Group summaries carry attempt usage, not per-attempt quota state.
+/// Account quota comes from the durable quota store and is selected by
+/// report/snapshot callers via `quota_store::latest_windows_for_identity`.
 pub fn build_grouped_summary<F, U, A>(
     entries: &[super::LedgerEntry],
     entry_group_key_fn: F,
@@ -751,6 +758,7 @@ where
         .collect();
     for group_key in all_group_keys {
         let group_entries = groups.remove(&group_key).unwrap_or_default();
+        let mut usage_unknown_reasons = BTreeMap::new();
         let group_usage = usage_groups.remove(&group_key).unwrap_or_default();
         let group_entry_count = group_entries.len();
         let attempts = attempt_counts.remove(&group_key).unwrap_or(0);
@@ -799,14 +807,6 @@ where
         let mut cache_write_tokens_seen = false;
         let mut total_tokens_seen = false;
         let mut requests_count_seen = false;
-        // #1339: group quota observations carry only what the ledger itself
-        // observed (attempt-derived readings, e.g. AGY's per-attempt
-        // allowance). Account-level quota is selected from the durable
-        // store by the report/snapshot callers, never re-derived here.
-        let mut quota_observations: BTreeMap<
-            GroupQuotaKey,
-            crate::quota_store::QuotaObservationRecord,
-        > = BTreeMap::new();
         let mut entries_for_success_rate = 0usize;
 
         for entry in &group_entries {
@@ -917,6 +917,9 @@ where
         }
 
         for observed in group_usage {
+            if let Some(reason) = observed.usage.usage_unknown_reason {
+                *usage_unknown_reasons.entry(reason).or_default() += 1;
+            }
             if let Some(tokens) = observed.usage.input_tokens {
                 input_tokens += tokens;
                 input_tokens_seen = true;
@@ -958,45 +961,6 @@ where
                     cost_seen = true;
                 }
                 estimated_cost_seen = true;
-            }
-            if observed.usage.quota_window.is_some()
-                || observed.usage.quota_used_percent.is_some()
-                || observed.usage.quota_remaining_percent.is_some()
-                || observed.usage.quota_reset_at.is_some()
-            {
-                let key = (
-                    observed.backend.to_string(),
-                    observed.usage.backend_instance.clone(),
-                    observed.usage.quota_pool.clone(),
-                    observed.model.map(str::to_string),
-                    observed.usage.quota_window.clone(),
-                );
-                let candidate = crate::quota_store::QuotaObservationRecord {
-                    backend: observed.backend.to_string(),
-                    backend_instance: observed.usage.backend_instance.clone(),
-                    credential_id: None,
-                    model: observed.model.map(str::to_string),
-                    quota_pool: observed.usage.quota_pool.clone(),
-                    quota_window: observed.usage.quota_window.clone(),
-                    quota_used_percent: observed.usage.quota_used_percent,
-                    quota_remaining_percent: observed.usage.quota_remaining_percent,
-                    quota_reset_at: observed.usage.quota_reset_at.clone(),
-                    observed_at: observed.usage.observed_at.clone(),
-                    checked_at: None,
-                    check_error: None,
-                    usage_source: observed.usage.usage_source.clone(),
-                    mistral_admin: None,
-                    account_usage: None,
-                };
-                let replace = is_timestamp_earlier(
-                    &quota_observations
-                        .get(&key)
-                        .and_then(|e| e.observed_at.as_ref()),
-                    &candidate.observed_at.as_ref(),
-                );
-                if replace || !quota_observations.contains_key(&key) {
-                    quota_observations.insert(key, candidate);
-                }
             }
         }
 
@@ -1041,6 +1005,7 @@ where
             .then_some(predicted_difficulty_match as f64 / predicted_difficulty_compared as f64);
 
         summaries.push(GroupSummary {
+            usage_unknown_reasons,
             group_key,
             entries: group_entry_count,
             attempts,
@@ -1073,7 +1038,7 @@ where
             predicted_difficulty_match_rate,
             total_cpu_time_seconds: cpu_time_seen.then_some(cpu_time_total),
             peak_rss_bytes: peak_rss_seen.then_some(peak_rss_bytes),
-            quota_observations: quota_observations.into_values().collect(),
+            quota_observations: Vec::new(),
         });
     }
 
@@ -1088,39 +1053,9 @@ pub struct UsageObservation<'a> {
     pub usage: &'a LedgerUsage,
 }
 
-/// Dedup key for a group's attempt-derived quota observations: the source
-/// identity (backend, instance, pool, model) plus the window.
-type GroupQuotaKey = (
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
-
-/// Compare two RFC3339 timestamps, returning true if the first is earlier than the second.
-/// Handles different timezone offsets and missing timestamps properly.
-fn is_timestamp_earlier<T: AsRef<str>>(a: &Option<T>, b: &Option<T>) -> bool {
-    use time::format_description::well_known::Rfc3339;
-    match (a, b) {
-        (None, Some(_)) => true,  // Missing timestamp is considered earliest
-        (Some(_), None) => false, // Missing timestamp is considered latest
-        (None, None) => false,
-        (Some(a_str), Some(b_str)) => {
-            // Parse RFC3339 timestamps, falling back to string comparison if parsing fails
-            match (
-                OffsetDateTime::parse(a_str.as_ref(), &Rfc3339),
-                OffsetDateTime::parse(b_str.as_ref(), &Rfc3339),
-            ) {
-                (Ok(a_dt), Ok(b_dt)) => a_dt < b_dt,
-                _ => a_str.as_ref() < b_str.as_ref(), // Fallback to lexicographic comparison
-            }
-        }
-    }
-}
-
 fn usage_has_observation(usage: &LedgerUsage) -> bool {
-    usage.usage_source.is_some()
+    usage.usage_unknown_reason.is_some()
+        || usage.usage_source.is_some()
         || usage.input_tokens.is_some()
         || usage.output_tokens.is_some()
         || usage.reasoning_tokens.is_some()
@@ -1130,10 +1065,6 @@ fn usage_has_observation(usage: &LedgerUsage) -> bool {
         || usage.requests_count.is_some()
         || usage.estimated_cost_usd.is_some()
         || usage.actual_cost_usd.is_some()
-        || usage.quota_window.is_some()
-        || usage.quota_used_percent.is_some()
-        || usage.quota_remaining_percent.is_some()
-        || usage.quota_reset_at.is_some()
 }
 
 fn canonical_usage_observations(entry: &LedgerEntry) -> Vec<UsageObservation<'_>> {

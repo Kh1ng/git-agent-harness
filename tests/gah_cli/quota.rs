@@ -94,7 +94,7 @@ fn quota_list_json_preserves_valid_records_around_malformed_lines() {
     assert_eq!(
         records,
         serde_json::json!([
-            { "backend": "codex", "quota_used_percent": 25.0 },
+            { "backend": "codex", "quota_remaining_percent": 75.0 },
             { "backend": "claude" }
         ])
     );
