@@ -551,10 +551,54 @@ impl<'a> Setup<'a> {
             {
                 self.prompter.say(&format!("  - {change}"));
             }
+            self.prompter.say("  - Persist the selected node role and optional central URL in GAH configuration; write worker coordinator credentials to ~/.config/gah/gah-loop.env when supplied");
             if self.host.os() == Os::Linux {
-                self.prompter.say("  - Use sudo to configure /etc/gah/server.env and enable/start the server for central/standalone; configure Tailscale DNS for networked roles");
+                if matches!(selection.role, Role::Central | Role::Standalone) {
+                    self.prompter.say("  - Use sudo to create /etc/gah/server.env if absent; enable and start gah-server.service");
+                    if selection.role == Role::Standalone {
+                        self.prompter.say("  - Set HOST to GAH_SERVER_HOST (default 127.0.0.1) in /etc/gah/server.env and restart gah-server.service");
+                    } else {
+                        self.prompter.say("  - For a new server.env, set HOST to GAH_SERVER_HOST or the Tailscale IP (fallback 127.0.0.1); preserve existing central HOST settings");
+                    }
+                }
+                if selection.role != Role::Standalone {
+                    self.prompter
+                        .say("  - Enable Tailscale accept-dns when Tailscale is installed (sudo)");
+                }
+            } else {
+                self.prompter.say("  - Install npm dependencies and build the role server; replace old role LaunchAgents");
+                if selection.role == Role::Central {
+                    self.prompter.say("  - Build MCP and web UI in the checkout; start the central server LaunchAgent");
+                } else {
+                    self.prompter.say("  - Configure worker identity and desktop settings under ~/.local/share/gah/worker and ~/.config/gah; install the worker LaunchAgent stopped until a profile is configured");
+                }
+                self.prompter
+                    .say("  - Enable Tailscale accept-dns when Tailscale is installed");
             }
-            self.prompter.say("  - Configure the selected node role and selected memory gateway environment/service files");
+            if selection.memory != MemoryMode::Off {
+                if self.host.os() == Os::Linux {
+                    self.prompter.say("  - Configure gateway URL in ~/.config/gah/gah-loop.env and, for central/standalone, /etc/gah/server.env (sudo); store gateway credentials in ~/.config/gah/tdai-gateway.env");
+                } else {
+                    self.prompter.say("  - Store gateway credentials in ~/.config/gah/tdai-gateway.env and gateway URL in ~/.config/gah/server.env");
+                }
+                if selection.memory == MemoryMode::Colocated {
+                    let path = env
+                        .0
+                        .iter()
+                        .find(|(key, _)| *key == "GAH_GATEWAY_MEMORYCORE_PATH")
+                        .map(|(_, value)| value.as_str())
+                        .unwrap_or("<MemoryCore checkout>");
+                    self.prompter.say(&format!("  - Seed {path}/tdai-gateway.local.yaml from the standalone template if absent; preserve an existing config"));
+                    if self.host.os() == Os::Linux {
+                        self.prompter.say("  - Install and enable/start user tdai-memory-gateway.service; check gateway health");
+                    } else {
+                        self.prompter.say("  - Install and start the memory-gateway LaunchAgent; check gateway health");
+                    }
+                } else {
+                    self.prompter
+                        .say("  - Check remote gateway reachability and authentication");
+                }
+            }
         }
         self.prompter.say("");
         if !self.ask_confirm(
@@ -811,6 +855,63 @@ mod tests {
             .with_path(crate::setup::requirements::SYSTEMD_RUNNING)
             .with_path(crate::setup::requirements::linger_path("testuser"))
             .with("tailscale version", true, "1.76.0")
+    }
+
+    #[test]
+    fn installer_effects_are_disclosed_before_a_declined_confirmation() {
+        for os in [Os::Linux, Os::Macos] {
+            for memory in [MemoryMode::Off, MemoryMode::Remote, MemoryMode::Colocated] {
+                let host = FakeHost::new(os, None);
+                let mut prompter = Script {
+                    answers: ["n".to_string()].into(),
+                    ..Default::default()
+                };
+                let mut effects = Recorder::default();
+                let result = Setup {
+                    host: &host,
+                    prompter: &mut prompter,
+                    effects: &mut effects,
+                    options: Options::default(),
+                }
+                .install(
+                    &Selection {
+                        role: Role::Central,
+                        agent: Agent::Claude,
+                        provider: Provider::Github,
+                        memory,
+                    },
+                    InstallEnv(vec![
+                        ("GAH_GATEWAY_MEMORYCORE_PATH", "/chosen/MemoryCore".into()),
+                        ("GAH_GATEWAY_LLM_API_KEY", "secret-must-not-appear".into()),
+                    ]),
+                );
+                assert!(result.is_err());
+                assert!(effects.commands.is_empty());
+                assert_eq!(prompter.asked.len(), 1);
+                let plan = prompter.said.join("\n");
+                assert!(plan.contains("Persist the selected node role"));
+                assert_eq!(
+                    plan.contains("store gateway credentials")
+                        || plan.contains("Store gateway credentials"),
+                    memory != MemoryMode::Off
+                );
+                assert_eq!(
+                    plan.contains("Check remote gateway reachability"),
+                    memory == MemoryMode::Remote
+                );
+                assert_eq!(
+                    plan.contains("Seed /chosen/MemoryCore/tdai-gateway.local.yaml"),
+                    memory == MemoryMode::Colocated
+                );
+                let service = if os == Os::Linux {
+                    "Install and enable/start user tdai-memory-gateway.service"
+                } else {
+                    "Install and start the memory-gateway LaunchAgent"
+                };
+                assert_eq!(plan.contains(service), memory == MemoryMode::Colocated);
+                assert!(!plan.contains("secret-must-not-appear"));
+            }
+        }
     }
 
     #[test]
