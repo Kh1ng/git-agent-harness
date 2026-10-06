@@ -19,7 +19,7 @@ test('the Profile sidebar exposes validation timeout and persists profile update
     .locator('input');
   await page.getByRole('button', { name: /^Project:/ }).click();
   await page.getByRole('menuitemradio', { name: /^Fixture/ }).click();
-  await expect(page.getByText(/Per-profile loop behavior for/)).toBeVisible();
+  await expect(page.getByText(/Per-profile factory behavior for/)).toBeVisible();
 
   await expect(validationTimeoutInput).toBeVisible();
   await expect(validationTimeoutInput).toHaveValue('300');
@@ -90,4 +90,29 @@ test('Settings persists sections and saves memory configuration through the shar
   const skillSection = page.getByRole('button', { name: /Skill bank/ });
   await skillSection.click();
   await expect(page.getByText('gah-manager@1.0.0')).toBeVisible();
+});
+
+test('the routing editor sets the routine reviewer from an account picker', async ({ page, request }) => {
+  test.setTimeout(120_000);
+  await request.post(`${MOCK_BASE_URL}/api/mock/reset`);
+  const calls: Array<{ action: string; body: Record<string, unknown> }> = [];
+  await page.route('**/api/profiles/*/routing-candidates/*', async (route) => {
+    calls.push({ action: route.request().url().split('/').pop() ?? '', body: route.request().postDataJSON() });
+    await route.fulfill({ json: { success: true } });
+  });
+  await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await page.getByRole('button', { name: 'Profile', exact: true }).click();
+  await page.getByRole('button', { name: /^Project:/ }).click();
+  await page.getByRole('menuitemradio', { name: /^Fixture/ }).click();
+
+  await page.getByRole('button', { name: 'Set reviewer' }).click();
+  await page.getByLabel('Account').selectOption('backend:opencode');
+  await page.getByLabel('Model').fill('tak-mistral-vibe/zai-glm-5-3');
+  await page.getByRole('button', { name: 'Set reviewer' }).click();
+
+  await expect.poll(() => calls.length).toBe(1);
+  expect(calls[0]).toMatchObject({
+    action: 'add',
+    body: { list: 'routine', backend: 'opencode', model: 'tak-mistral-vibe/zai-glm-5-3', included_in_quota: true },
+  });
 });

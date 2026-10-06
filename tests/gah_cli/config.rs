@@ -700,3 +700,39 @@ fn prompt_policy_cli_versions_audits_and_hides_content_from_show() {
     }));
     assert!(!String::from_utf8_lossy(&shown.stdout).contains("POLICY-CANARY-182"));
 }
+
+#[test]
+fn routing_candidate_routine_list_holds_one_reviewer() {
+    let (tmp, config) = config_with_profile();
+    let config_path = config.to_str().unwrap();
+    let edit = |args: &[&str]| {
+        let mut full = vec![
+            "config",
+            "routing-candidate",
+            args[0],
+            "--config",
+            config_path,
+            "--profile",
+            "test",
+            "--list",
+            "routine",
+        ];
+        full.extend_from_slice(&args[1..]);
+        bin().args(full).assert().success();
+        std::fs::read_to_string(&config).unwrap()
+    };
+
+    let saved = edit(&["add", "--backend", "opencode", "--model", "tak/glm"]);
+    assert!(saved.contains("routing.routine_reviewer]"), "got: {saved}");
+    assert!(saved.contains("tak/glm"), "got: {saved}");
+
+    // A second add replaces the reviewer instead of appending.
+    let saved = edit(&["add", "--backend", "codex"]);
+    assert!(!saved.contains("tak/glm"), "got: {saved}");
+    assert!(saved.contains("routing.routine_reviewer]"), "got: {saved}");
+
+    let saved = edit(&["remove", "--index", "0"]);
+    assert!(!saved.contains("routing.routine_reviewer]"), "got: {saved}");
+
+    let _ = tmp;
+}
