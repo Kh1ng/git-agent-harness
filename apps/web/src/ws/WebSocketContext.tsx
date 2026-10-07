@@ -1,3 +1,4 @@
+import { useGahStore } from '../store/gahStore.js';
 import { coordinatorWebSocketProtocols, TOKEN_CHANGED_EVENT } from '../api/coordinatorToken.js';
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from 'react';
 import { useUiStore } from '../store/uiStore.js';
@@ -135,6 +136,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const refreshOnConnectRef = useRef(false);
   const nextMessageIdRef = useRef(0);
   const activityIdsRef = useRef(new Set<string>());
+  const activityCursorRef = useRef<string | null>(null);
 
   const activityProfile = profileOverride ?? profile ?? 'gah';
   const [activityRevision, setActivityRevision] = useState(0);
@@ -145,10 +147,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     setActivitySyncedAt(null);
     setActivityCursor(null);
   }, [profileOverride]);
-  useEffect(() => {
-    if (!activityCursor) return;
-    try { window.localStorage.setItem(`gah.activity.cursor.${profileOverride ?? 'gah'}`, activityCursor); } catch { /* Memory de-duplication still applies. */ }
-  }, [activityCursor, profileOverride]);
+  // The cursor lives only as long as the events before it: a reconnect resumes
+  // after it, a page load starts empty and asks for the bounded tail.
+  useEffect(() => { activityCursorRef.current = activityCursor; }, [activityCursor]);
   useEffect(() => {
     let cancelled = false;
     const refreshActivity = async () => {
@@ -191,13 +192,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
         refreshOnConnectRef.current = true;
 
-        let activityCursor: string | undefined;
-        try { activityCursor = window.localStorage.getItem(`gah.activity.cursor.${profileOverride ?? 'gah'}`) ?? undefined; } catch { /* Replay safely falls back to the bounded tail. */ }
         newSocket.send(JSON.stringify({
           type: 'client.hello' as const,
           clientVersion: '0.1.0',
           profile: profileOverride ?? undefined,
-          activityCursor,
+          activityCursor: activityCursorRef.current ?? undefined,
           capabilities: {
             supportsTerminal: true,
             supportsNotifications: true,
@@ -227,6 +226,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           setMessages(prev => [...prev.slice(-(MAX_INBOX_MESSAGES - 1)), entry]);
 
           switch (message.type) {
+            case 'workers.snapshot': {
+              const current = useGahStore.getState().status;
+              if (current.data?.profile.profile === message.profile) useGahStore.setState({ status: { ...current, data: { ...current.data, running_workers: message.workers } } });
+              break;
+            }
             case 'activity.replay': {
               setActivitySyncedAt(Date.now());
               const fresh = message.events.filter((item) => !activityIdsRef.current.has(item.id));

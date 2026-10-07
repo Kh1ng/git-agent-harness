@@ -42,6 +42,27 @@ export class AsyncTtlCache<K, V> {
       this.values.delete(key);
     }
 
+    return this.load(key, load);
+  }
+
+  /** Like get(), but an expired entry is returned at once while one loader
+   * refreshes it in the background: only a key never loaded waits. For
+   * observations where a slightly old answer beats a slow one. A failed
+   * refresh drops the entry, so the next call waits and sees the error. */
+  getStale(key: K, load: () => Promise<V>): Promise<V> {
+    const cached = this.values.get(key);
+    if (!cached) {
+      return this.load(key, load);
+    }
+    if (cached.expiresAt <= this.now() && !this.inFlight.has(key)) {
+      this.load(key, load).catch(() => {
+        if (this.values.get(key) === cached) this.values.delete(key);
+      });
+    }
+    return Promise.resolve(cached.value);
+  }
+
+  private load(key: K, load: () => Promise<V>): Promise<V> {
     const running = this.inFlight.get(key);
     if (running) {
       return running;

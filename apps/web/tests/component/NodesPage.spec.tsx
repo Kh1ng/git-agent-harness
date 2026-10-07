@@ -41,6 +41,7 @@ const node = (id: string) => ({ node_id: id, display_name: `Worker ${id}`, adver
   transport_mode: 'trusted_lan', profiles: ['gah'], version: '0.1.0', schema_digest: 'fixture' });
 const observation = (id: string, state = 'healthy', at = new Date().toISOString()) => ({ ...node(id), state, observed_at: at,
   last_seen_at: at, profile: 'gah', profiles: ['gah'], resource_pressure: { cpu_percent: 0, rss_bytes: null, disk_percent: 25 },
+  running_workers: [{ work_id: '#946', run_id: 'run', mode: 'improve', backend: 'codex', runner: 'codex', backend_instance: 'codex-work', model: 'routed', requested_model: 'requested', actual_model: null, node_id: id, branch: 'gah/946', started_at: at, last_activity_at: at, attempt: 1, stale_after_seconds: 900, state: state === 'healthy' ? 'running' : 'stale' }],
   active_claims: [{ work_id: '#946', scope: 'implement', pid: 123, claimed_at: at, age_seconds: 0 }], active_work: [],
   backend_configured: {}, backend_instances: [], availability: [], recent_ledger: null, event_cursor: null });
 
@@ -108,7 +109,8 @@ test('fleet lists unknown, stale and classified health; click checks health and 
   const detail = component.getByRole('region', { name: 'Node detail' });
   await expect(detail.getByText(/Last manual check: healthy/)).toBeVisible();
   await expect(detail.getByText('http://192.168.1.20:3773')).toBeVisible();
-  await expect(detail.getByText(/#946 · implement · PID 123/)).toBeVisible();
+  await expect(detail.getByText(/#946 · running · codex · routed/)).toBeVisible();
+  await expect(detail.getByRole('link', { name: '#946', exact: true })).toHaveAttribute('href', '?page=work&profile=gah#running-workers');
   await expect(detail.getByText(/gah \/ #946 · renewed/)).toBeVisible();
   expect(healthChecks).toBe(1);
   await expect.poll(() => requests).toBe(2);
@@ -118,8 +120,8 @@ test('fleet lists unknown, stale and classified health; click checks health and 
     socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type: 'fleet.changed' }) }));
   });
   await expect.poll(() => requests).toBe(3);
-  await expect(detail.getByText('Local claims are unknown until the node returns a status snapshot.')).toBeVisible();
-  await expect(detail.getByText(/#946 · implement · PID 123/)).toHaveCount(0);
+  await expect(detail.getByText(/#946 · stale · codex · routed/)).toBeVisible();
+  await expect(detail.getByText(/#946 · running · codex · routed/)).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath('nodes-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: testInfo.outputPath('nodes-mobile.png'), fullPage: true });

@@ -3,7 +3,7 @@
  * Inspired by t3code architecture but adapted for GAH needs
  */
 
-import type { MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary, DependencyBlocker } from './gah.js';
+import type { RunningWorker, MergeRequest, AvailabilityScope, Blocker, StatusError, RecentLedgerSummary, DependencyBlocker } from './gah.js';
 import type { ChatSessionSummary, ChatSessionView, ChatTranscriptTurn } from './chat-session.js';
 
 // Provider types
@@ -167,6 +167,7 @@ export interface Session {
 
 // WebSocket message types
 export type ServerMessage =
+  | { type: "workers.snapshot"; profile: string; workers: RunningWorker[] }
   // Invalidation only: fleet details require the authenticated REST endpoint.
   | { type: "fleet.changed" }
 

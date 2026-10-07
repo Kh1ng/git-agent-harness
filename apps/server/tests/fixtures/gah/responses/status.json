@@ -1610,6 +1610,7 @@
     }
   ],
   "active_claims": [],
+  "running_workers": [],
   "pm_parent_states": [],
   "pm_decomposition_attempt_counts": {},
   "pm_max_attempts": 2,

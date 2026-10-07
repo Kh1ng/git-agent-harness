@@ -1,4 +1,4 @@
-import type { ActiveClaim, AvailabilityScope, BackendInstanceSummary, RecentLedgerSummary, QuotaSnapshot } from './gah.js';
+import type { RunningWorker, ActiveClaim, AvailabilityScope, BackendInstanceSummary, RecentLedgerSummary, QuotaSnapshot } from './gah.js';
 import type { ClaimLease } from './claims.js';
 import coordinatorProtocol from './coordinator-protocol.json' with { type: 'json' };
 
@@ -156,6 +156,7 @@ export interface NodeObservationSnapshot {
   availability: AvailabilityScope[];
   recent_ledger: RecentLedgerSummary | null;
   active_claims: ActiveClaim[];
+  running_workers?: RunningWorker[];
   active_work: NodeQualifiedWorkIdentity[];
   event_cursor: string | null;
   resource_pressure: NodeResourcePressure;

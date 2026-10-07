@@ -369,6 +369,7 @@ pub fn run_review_backend_for_identity(
                     let _ = child.wait();
                     break ReviewProcessOutcome::SignalTermination(libc::SIGTERM);
                 }
+                let previous_progress_at = last_progress_at;
                 // Progress is any of: new stdout/stderr bytes (stream activity or
                 // review-artifact writes), worktree changes (a reviewer editing
                 // source), or descendant CPU/I/O (e.g. reading a large diff or
@@ -406,6 +407,9 @@ pub fn run_review_backend_for_identity(
                         last_process_activity = Some(activity);
                     }
                     last_worktree_poll = Instant::now();
+                }
+                if last_progress_at != previous_progress_at {
+                    crate::running_workers::heartbeat(session_dir);
                 }
                 // A silent reviewer is killed only after the idle budget elapses
                 // with no progress. A busy reviewer that keeps producing output
@@ -594,6 +598,44 @@ mod tests {
         assert!(result.duration_secs >= 1.0);
         assert!(result.last_progress_secs.is_some());
         assert_eq!(result.hard_timeout_seconds, None);
+    }
+
+    #[test]
+    fn run_review_backend_heartbeats_quiet_worktree_progress() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        make_fake_bin(
+            &f.bin_dir,
+            "claude",
+            "#!/bin/sh\nfor i in 1 2 3 4 5 6 7 8 9 10; do echo updated-$i > progress.txt; sleep 0.3; done\n",
+        );
+        let record_path = f.session_dir.join("running-worker.json");
+        fs::write(&record_path, "{}").unwrap();
+        let before = fs::metadata(&record_path).unwrap().modified().unwrap();
+        let mut profile = test_profile();
+        // This checks activity reporting, not timeout precision. Repeated edits
+        // also avoid racing the runner's initial worktree snapshot.
+        profile.review_timeout_seconds = Some(10);
+        let _guard = PathGuard::set(f.bin_dir.display().to_string());
+
+        let result = run_review_backend(
+            &profile,
+            "claude",
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+        );
+
+        assert_eq!(result.outcome, ReviewProcessOutcome::Success);
+        assert!(result.stdout.is_empty());
+        assert!(result.stderr.is_empty());
+        assert!(
+            fs::metadata(&record_path).unwrap().modified().unwrap() > before,
+            "quiet review progress must heartbeat the roster"
+        );
     }
 
     #[test]
