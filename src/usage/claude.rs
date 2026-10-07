@@ -101,14 +101,14 @@ pub(crate) fn refresh_directory(directory: &Path) -> Result<Vec<QuotaObservation
     refresh_token(&token)
 }
 
-fn refresh_token(token: &str) -> Result<Vec<QuotaObservationRecord>> {
+pub(crate) fn refresh_token(token: &str) -> Result<Vec<QuotaObservationRecord>> {
     let escaped = token.replace('\\', "\\\\").replace('"', "\\\"");
     let mut command = Command::new("curl");
     command
         .args([
             "--disable",
             "--silent",
-            "--fail",
+            "--fail-with-body",
             "--max-time",
             "15",
             "--max-filesize",
@@ -126,9 +126,23 @@ fn refresh_token(token: &str) -> Result<Vec<QuotaObservationRecord>> {
     ).as_bytes())?;
     let output = child.wait_with_output()?;
     if !output.status.success() {
+        if is_scope_rejection(&output.stdout) {
+            bail!("Claude usage endpoint rejected this token's scope (a `claude setup-token` token is inference-only); quota is unavailable for it");
+        }
         bail!("Claude OAuth usage request failed (check native login access)");
     }
     parse(&output.stdout, OffsetDateTime::now_utc())
+}
+
+/// The usage endpoint answers a token without `user:profile` scope with a
+/// `permission_error`; that is a property of the token kind, not a bad login.
+fn is_scope_rejection(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|body| {
+        body["error"]["type"] == "permission_error"
+            && body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("scope"))
+    })
 }
 
 /// Only unambiguous account-wide windows apply to the default Claude runner.
@@ -175,6 +189,17 @@ pub(crate) fn parse(input: &[u8], now: OffsetDateTime) -> Result<Vec<QuotaObserv
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scope_rejection_is_recognized() {
+        assert!(is_scope_rejection(
+            br#"{"type":"error","error":{"type":"permission_error","message":"OAuth token does not meet scope requirement user:profile"}}"#
+        ));
+        assert!(!is_scope_rejection(
+            br#"{"type":"error","error":{"type":"authentication_error","message":"invalid token"}}"#
+        ));
+        assert!(!is_scope_rejection(b"not json"));
+    }
     #[test]
     fn custom_config_keychain_service_matches_claude_and_never_the_default() {
         assert_eq!(keychain_service(None), "Claude Code-credentials");

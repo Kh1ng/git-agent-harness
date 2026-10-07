@@ -32,8 +32,13 @@ if [ -z "${GAH_INSTALL_CONFIRMED:-}" ]; then
   echo '  - Install gah-loop@.service and gah-watchdog.service/timer in the user systemd directory; enable user lingering via loginctl/sudo.'
   if [ "$role" != worker ]; then
     echo '  - Build server/MCP; use sudo to write /etc/systemd/system/gah-server.service; install and enable user gah-prune.service/timer.'
-    if [ -n "${GAH_WEB_DEPLOY_ROOT-/var/www/gah}" ]; then
-      echo "  - Build and deploy web UI to ${GAH_WEB_DEPLOY_ROOT-/var/www/gah} using sudo; replace index and prune stale assets."
+    # Unset copies only into a web root an earlier install created; otherwise
+    # gah-server serves the checkout's build and no sudo is needed for it.
+    web_deploy_root=${GAH_WEB_DEPLOY_ROOT-$([ ! -d /var/www/gah ] || echo /var/www/gah)}
+    if [ -n "$web_deploy_root" ]; then
+      echo "  - Build web UI and deploy it to $web_deploy_root using sudo; replace index and prune stale assets."
+    else
+      echo '  - Build web UI in the checkout; gah-server serves it.'
     fi
     echo '  - Use sudo to create /etc/gah/server.env if absent; enable and start gah-server.service.'
     if [ "$role" = central ]; then

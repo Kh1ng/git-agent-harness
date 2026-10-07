@@ -25,11 +25,13 @@ jobs:
           - os: macos-latest
             name: CLI — macOS (universal)
             artifact_name: gah-macos-universal
+            mcp_artifact_name: gah-mcp-server-macos-universal
             # Build arm64 natively and cross-compile x86_64, then lipo
             extra_targets: x86_64-apple-darwin
           - os: ubuntu-22.04
             name: CLI — Linux (x86_64)
             artifact_name: gah-linux-x86_64
+            mcp_artifact_name: gah-mcp-server-linux-x86_64
 
     steps:
       - uses: actions/checkout@v4
@@ -50,23 +52,28 @@ jobs:
       - name: Build CLI (macOS universal)
         if: runner.os == 'macOS'
         run: |
-          cargo build --release --bin gah --target aarch64-apple-darwin
-          cargo build --release --bin gah --target x86_64-apple-darwin
+          cargo build --release --bin gah --bin gah-mcp-server --target aarch64-apple-darwin
+          cargo build --release --bin gah --bin gah-mcp-server --target x86_64-apple-darwin
           lipo -create \
             target/aarch64-apple-darwin/release/gah \
             target/x86_64-apple-darwin/release/gah \
             -output gah-macos-universal
+          lipo -create \
+            target/aarch64-apple-darwin/release/gah-mcp-server \
+            target/x86_64-apple-darwin/release/gah-mcp-server \
+            -output gah-mcp-server-macos-universal
 
       - name: Build CLI (Linux)
         if: runner.os == 'Linux'
-        run: cargo build --release --bin gah
+        run: cargo build --release --bin gah --bin gah-mcp-server
 
       - name: Stage artifact
         run: |
           if [ "${{ runner.os }}" != "macOS" ]; then
             cp target/release/gah "${{ matrix.artifact_name }}"
+            cp target/release/gah-mcp-server "${{ matrix.mcp_artifact_name }}"
           fi
-          chmod +x "${{ matrix.artifact_name }}"
+          chmod +x "${{ matrix.artifact_name }}" "${{ matrix.mcp_artifact_name }}"
 
       - name: Publish GitHub Release
         shell: bash
@@ -80,9 +87,9 @@ jobs:
           if [ -z "$tag" ]; then
             tag="release-$(date -u +%Y%m%d-%H%M)-cli"
           fi
-          gh release create "$tag" "${{ matrix.artifact_name }}" \
+          gh release create "$tag" "${{ matrix.artifact_name }}" "${{ matrix.mcp_artifact_name }}" \
             --title "GAH CLI — $tag" \
-            --notes "GAH CLI binaries for macOS (universal arm64+x86_64) and Linux (x86_64). Built from ${{ github.ref }}." \
+            --notes "GAH CLI and MCP server binaries for macOS (universal arm64+x86_64) and Linux (x86_64). Built from ${{ github.ref }}." \
             --repo "${{ github.repository }}" || \
-          gh release upload "$tag" "${{ matrix.artifact_name }}" --clobber \
+          gh release upload "$tag" "${{ matrix.artifact_name }}" "${{ matrix.mcp_artifact_name }}" --clobber \
             --repo "${{ github.repository }}"

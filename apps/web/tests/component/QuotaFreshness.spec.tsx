@@ -144,6 +144,24 @@ test('billing provider failures are visible without opening diagnostics and unkn
   await expect(component.getByRole('progressbar')).toHaveCount(0);
 });
 
+/** #1336: the accounts ledger's alert banner names the condition -- needs
+ * login with how long it has been failing, or not configured -- instead of
+ * reporting every failed check the same way. */
+test('a needs-login quota source leads the accounts ledger with its remediation', async ({ mount, page }) => {
+  const quota = JSON.parse(readFileSync(new URL('../../../server/tests/fixtures/gah/responses/quota.json', import.meta.url), 'utf8')) as QuotaSnapshot;
+  const failingSince = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+  quota.candidates = [];
+  quota.quota_checks = [
+    { backend: 'claude', provider: 'anthropic', backend_instance: 'claude', checked_at: new Date().toISOString(), status: 'auth_required', failing_since: failingSince, error: 'auth_required: Claude OAuth login expired; run claude auth login' },
+    { backend: 'vibe', provider: 'mistral', status: 'not_configured', error: 'no Mistral Admin API allowance source on this node' }
+  ];
+  await page.route('**/api/cli-router', route => route.fulfill({ json: { settings: { url: null, hasApiKey: false, hasManagementKey: false }, status: 'unconfigured', strategy: 'round-robin', sessionAffinity: false, accounts: [], models: [] } }));
+  const component = await mount(<MockStoreProvider statusData={null} quotaData={quota}><WebSocketProvider><QuotaPage /></WebSocketProvider></MockStoreProvider>);
+  const alerts = component.getByRole('alert');
+  await expect(alerts.filter({ hasText: 'needs login' })).toContainText('Anthropic / claude · needs login (failing since 2d ago): auth_required: Claude OAuth login expired; run claude auth login');
+  await expect(alerts.filter({ hasText: 'not configured' })).toContainText('Mistral · not configured on this node: no Mistral Admin API allowance source on this node');
+});
+
 test('worker allowances keep node identity, independent instances and central usage separate', async ({ mount, page }) => {
   const central = JSON.parse(readFileSync(new URL('../../../server/tests/fixtures/gah/responses/quota.json', import.meta.url), 'utf8')) as QuotaSnapshot;
   central.usage.total_tokens = 1200;
@@ -281,3 +299,56 @@ for (const width of [390, 1440]) {
     await expect(dashboard.getByText(/Resets/)).toHaveCount(0);
   });
 }
+
+/** #1336: an expired provider login reads as "Needs login" with the
+ * provider's remediation and how long it has been failing; a configured
+ * source this node has no credential for reads as "Not configured". */
+test("auth_required and not_configured source checks surface as needs login and not configured", async ({
+  mount,
+}) => {
+  const checked = new Date().toISOString();
+  const failingSince = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+  const component = await mount(
+    <QuotaFreshnessPanel
+      generatedAt={checked}
+      freshness={{ quota_checked_at: checked }}
+      quotaChecks={[
+        {
+          backend: "claude",
+          provider: "anthropic",
+          backend_instance: "claude",
+          checked_at: checked,
+          status: "auth_required",
+          failing_since: failingSince,
+          error: "auth_required: Claude OAuth login expired; run claude auth login",
+        },
+        {
+          backend: "vibe",
+          provider: "mistral",
+          status: "not_configured",
+          error: "no Mistral Admin API allowance source on this node",
+        },
+      ]}
+    />,
+  );
+
+  await expect(component.getByTestId("quota-check-claude").getByText("Needs login")).toHaveClass(
+    /badge-critical/,
+  );
+  await expect(
+    component.getByTestId("quota-check-claude").getByText(
+      "auth_required: Claude OAuth login expired; run claude auth login",
+    ),
+  ).toBeVisible();
+  await expect(
+    component.getByTestId("quota-check-claude").getByText(/Failing since/),
+  ).toBeVisible();
+
+  await expect(component.getByTestId("quota-check-vibe").getByText("Not configured")).toHaveClass(
+    /badge-warning/,
+  );
+  await expect(
+    component.getByTestId("quota-check-vibe").getByText("Never checked on this node"),
+  ).toBeVisible();
+  await expect(component.getByTestId("quota-check-vibe").getByText("Stale")).toHaveCount(0);
+});

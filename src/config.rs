@@ -25,6 +25,8 @@ mod routing_policy;
 mod worker_scaling;
 use routing_policy::merge_routing_policy;
 pub use routing_policy::{CandidateConfig, RoutingPolicy, TaskRoutingRule};
+mod default_paths;
+pub use default_paths::{default_config_dir, default_data_root, effective_worktree_base};
 pub use worker_scaling::WorkerScaling;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -397,12 +399,6 @@ pub fn canonical_backend_name(name: &str) -> &str {
     }
 }
 
-pub fn default_config_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    home.map_or_else(|| PathBuf::from("/root"), PathBuf::from)
-        .join(".config/gah")
-}
-
 pub fn default_config_path() -> PathBuf {
     default_config_dir().join("config.toml")
 }
@@ -455,36 +451,13 @@ pub fn check_profile_candidate_model_consistency(
     profile: &Profile,
 ) -> Result<(), Vec<String>> {
     let routing = profile.effective_routing(defaults);
-    let mut candidates = Vec::new();
-    if let Some(ref c) = routing.routine_reviewer {
-        candidates.push(("routine_reviewer", c));
-    }
-    for c in &routing.escalatory_reviewers {
-        candidates.push(("escalatory_reviewer", c));
-    }
-    if let Some(ref list) = routing.pm_candidates {
-        for c in list {
-            candidates.push(("pm_candidate", c));
-        }
-    }
-    if let Some(ref list) = routing.improve_candidates {
-        for c in list {
-            candidates.push(("improve_candidate", c));
-        }
-    }
-    for rule in &routing.task_routing_rules {
-        for candidate in &rule.candidates {
-            candidates.push(("task_routing_rule", candidate));
-        }
-    }
-    if let Some(ref list) = routing.review_candidates {
-        for c in list {
-            candidates.push(("review_candidate", c));
-        }
-    }
-
-    let mut errors = Vec::new();
+    let candidates = routing.labeled_candidates();
+    let mut errors = routing.allowed_model_errors();
     for (label, candidate) in candidates {
+        // An allow-list entry without a model admits any model on its backend.
+        if label == "allowed_model" && candidate.model.is_none() {
+            continue;
+        }
         let args = match candidate.backend.as_str() {
             "codex" => &profile.codex_args,
             "opencode" => &profile.opencode_args,

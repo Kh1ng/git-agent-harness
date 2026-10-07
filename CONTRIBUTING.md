@@ -57,6 +57,29 @@ npm run test:server
 
 Run the platform build when a change affects the desktop or mobile application.
 
+### When a GAH profile works on this repository
+
+A dispatch validates its work with the profile's `validation_commands`, which
+live in the operator's `config.toml`, not in this repository, and are empty in
+the example configs. A profile pointed at this repository should run at least:
+
+```toml
+validation_commands = [
+  "cargo fmt --check",
+  "cargo test --test source_structure --test contracts_drift",
+  "npm ci",
+  "npm run typecheck",
+]
+```
+
+The second line is the one that is easy to leave out. It runs the source-size
+guard (no Rust file over 1,500 lines, tracked baselines never raised) and the
+contract fixture check. Both fail in CI's `test` job for changes that format
+and typecheck cleanly, so a profile without them opens pull requests that are
+already red. It needs the two test binaries built: about 35 seconds in a fresh
+worktree on a machine with a compiler cache, longer without one, and under a
+second once built.
+
 ## Pull request review
 
 A review must separate these questions:
