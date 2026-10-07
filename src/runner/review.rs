@@ -608,13 +608,15 @@ mod tests {
         make_fake_bin(
             &f.bin_dir,
             "claude",
-            "#!/bin/sh\nsleep 0.2\necho updated > progress.txt\nsleep 2\n",
+            "#!/bin/sh\nfor i in 1 2 3 4 5 6 7 8 9 10; do echo updated-$i > progress.txt; sleep 0.3; done\n",
         );
         let record_path = f.session_dir.join("running-worker.json");
         fs::write(&record_path, "{}").unwrap();
         let before = fs::metadata(&record_path).unwrap().modified().unwrap();
         let mut profile = test_profile();
-        profile.review_timeout_seconds = Some(2);
+        // This checks activity reporting, not timeout precision. Repeated edits
+        // also avoid racing the runner's initial worktree snapshot.
+        profile.review_timeout_seconds = Some(10);
         let _guard = PathGuard::set(f.bin_dir.display().to_string());
 
         let result = run_review_backend(
