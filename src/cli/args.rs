@@ -420,6 +420,9 @@ pub enum Commands {
         /// Native reasoning for this launch only; does not edit the saved profile.
         #[arg(long, requires = "manual_worker")]
         reasoning_effort: Option<String>,
+        /// Enforce scope and verification commands from a local Markdown job file.
+        #[arg(long, default_value_t = false)]
+        enforce_job_file: bool,
     },
     /// Validate or explicitly publish product-manager decomposition plans.
     Pm {

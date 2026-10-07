@@ -16,6 +16,7 @@ import { getSessionManager } from './sessions/SessionManager.js';
 import { createFleetDispatchCoordinator } from './fleetDispatch.js';
 import { RegistryService } from './registryService.js';
 import { getCoordinatorIdentity } from './coordinatorIdentity.js';
+import { assertIssueNotManaged } from './managedIssues.js';
 import * as gahCli from './gahCli.js';
 import { sendManagerChatMessage, steerManagerChatTurn, cancelManagerChatTurn, getSessionView as getManagerChatSessionView, setChunkPublisher, setChatEventPublishers, setPreviewPublisher, listChatSessions, createChatSession, archiveChatSession, updateChatSession, respondManagerChatPermission } from './managerChat/ManagerChatManager.js';
 import { generateRequestId, GAHError, createErrorResponse } from '@git-agent-harness/shared';
@@ -412,6 +413,8 @@ async function handleClientMessage(ws: WebSocket, message: ClientMessage) {
 
 async function handleStartSession(ws: WebSocket, message: Extract<ClientMessage, { type: 'session.start' }>, requestId: string) {
   try {
+    // A managed issue belongs to a manager: the Assign button may not start a worker on it.
+    await assertIssueNotManaged({ profile: message.profile, mode: message.mode, target: message.target });
     const session = await fleetDispatch.startSession({
       requestId: message.requestId,
       nodeId: message.nodeId,

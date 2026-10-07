@@ -66,6 +66,8 @@ import type {
   ChatSessionEvent
 } from '@git-agent-harness/contracts';
 import { getFleetDispatch, sessionStore } from './wsServer.js';
+import { GAHError } from '@git-agent-harness/shared';
+import { ISSUE_MANAGED_ERROR_CODE, assertIssueNotManaged } from './managedIssues.js';
 import { ActivityFeed, validateNotificationPreferences } from './activityFeed.js';
 import type { SessionOptions } from './sessions/SessionManager.js';
 import { deviceAgentsSnapshot } from './deviceAgents.js';
@@ -1608,6 +1610,8 @@ export function createServer(
       coordinatorNodeId: typeof body.coordinatorNodeId === 'string' ? body.coordinatorNodeId : undefined
     };
     try {
+      // A managed issue belongs to a manager: no implementation job starts on it from here.
+      await assertIssueNotManaged({ profile, mode, target: options.target });
       const fleetDispatch = getFleetDispatch();
       const session = await fleetDispatch.startSession(options);
       if (body.waitForCompletion === true) {
@@ -1621,6 +1625,10 @@ export function createServer(
       }
       res.status(202).json({ session });
     } catch (error) {
+      if (error instanceof GAHError && error.code === ISSUE_MANAGED_ERROR_CODE) {
+        res.status(409).json({ error: 'Issue is managed', code: error.code, message: error.message });
+        return;
+      }
       res.status(502).json({
         error: 'Failed to start dispatch session',
         message: error instanceof Error ? error.message : String(error)

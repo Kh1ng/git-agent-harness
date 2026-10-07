@@ -24,7 +24,7 @@ pub use external_credential_scopes::ExternalCredentialScope;
 mod routing_policy;
 mod worker_scaling;
 use routing_policy::merge_routing_policy;
-pub use routing_policy::{CandidateConfig, RoutingPolicy, TaskRoutingRule};
+pub use routing_policy::{CandidateConfig, IssueBudget, RoutingPolicy, TaskRoutingRule};
 mod default_paths;
 pub use default_paths::{default_config_dir, default_data_root, effective_worktree_base};
 pub use worker_scaling::WorkerScaling;

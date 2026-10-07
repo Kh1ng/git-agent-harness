@@ -254,6 +254,7 @@ pub fn run() -> Result<()> {
             skip_validation_gate,
             manual_worker,
             reasoning_effort,
+            enforce_job_file,
         } => commands::dispatch::run(commands::dispatch::Args {
             profile,
             mode,
@@ -277,6 +278,7 @@ pub fn run() -> Result<()> {
             skip_validation_gate,
             manual_worker,
             reasoning_effort,
+            enforce_job_file,
         })?,
 
         Commands::Pm { command } => commands::pm::run(command)?,

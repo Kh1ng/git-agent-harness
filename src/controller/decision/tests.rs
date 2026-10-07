@@ -4,6 +4,8 @@ use crate::status::{Blocker, ScopeStatusJson, StatusError, StatusSnapshot};
 
 #[path = "tests/backpressure.rs"]
 mod backpressure;
+#[path = "tests/issue_budget.rs"]
+mod issue_budget;
 #[path = "tests/lifecycle_priority.rs"]
 mod lifecycle_priority;
 #[path = "tests/pm.rs"]

@@ -621,6 +621,58 @@ pub fn changed_files(worktree: &Path, target_branch: &str) -> Result<Vec<String>
     Ok(files)
 }
 
+/// All paths relevant to job scope, including rename sources and untracked files.
+pub fn contract_changed_files(worktree: &Path, target_branch: &str) -> Result<Vec<String>> {
+    let origin_ref = format!("origin/{target_branch}");
+    // Disabling rename detection exposes both the deleted source and added destination.
+    let diff = git_raw(
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            &origin_ref,
+            "HEAD",
+        ],
+        worktree,
+    )?;
+    anyhow::ensure!(
+        diff.status.success(),
+        "job scope git diff failed: {}",
+        String::from_utf8_lossy(&diff.stderr)
+    );
+    let mut files: Vec<String> = diff
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect();
+    let status = git_raw(
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        worktree,
+    )?;
+    anyhow::ensure!(
+        status.status.success(),
+        "job scope git status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let mut records = status.stdout.split(|b| *b == 0).filter(|p| !p.is_empty());
+    while let Some(record) = records.next() {
+        if record.len() < 4 {
+            continue;
+        }
+        files.push(String::from_utf8_lossy(&record[3..]).into_owned());
+        if record[..2].iter().any(|b| *b == b'R' || *b == b'C') {
+            if let Some(source) = records.next() {
+                files.push(String::from_utf8_lossy(source).into_owned());
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
 pub fn diff_stats(worktree: &Path, target_branch: &str) -> Result<DiffStats> {
     let origin_ref = format!("origin/{}", target_branch);
     let out = git_raw(&["diff", "--numstat", &origin_ref, "HEAD"], worktree)?;

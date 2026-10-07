@@ -9,6 +9,8 @@ use std::fs;
 #[path = "tests/support.rs"]
 mod support;
 use support::{profile, ticket_cfg};
+#[path = "tests/managed.rs"]
+mod managed;
 
 #[test]
 fn parses_ticket_metadata_for_routing() {

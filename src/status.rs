@@ -16,6 +16,8 @@ pub use self::pm::PmParentStatus;
 
 mod gates;
 mod intake;
+mod issue_budget;
+pub use self::issue_budget::IssueBudgetStatus;
 
 fn effective_issue_intake_policy(profile: &Profile) -> crate::models::IssueIntakePolicy {
     // provider is matched case-insensitively here (unlike every other
@@ -169,6 +171,11 @@ pub struct WorkWaypointEvidence {
     pub first_commit_at: Option<String>,
     pub first_validation_at: Option<String>,
     pub first_pull_request_at: Option<String>,
+    /// Per-issue budget usage and remaining allowance, present only when
+    /// the profile's `routing.issue_budget` limits an axis and the issue
+    /// has recorded usage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_budget: Option<IssueBudgetStatus>,
 }
 
 fn project_work_waypoint_evidence(
@@ -469,8 +476,17 @@ fn build_snapshot_inner(
     // Ledger read is hoisted above the sync step so recently-merged MRs can be
     // enriched with their backend/model and review verdict (TICKET-198).
     let ledger_entries_by_work_id = ledger::index_entries_by_work_id(entries);
-    let work_waypoint_evidence =
+    let mut work_waypoint_evidence =
         project_work_waypoint_evidence(&ledger_entries_by_work_id, &profile.repo_id);
+    if effective_routing.issue_budget.is_enforced() {
+        issue_budget::project(
+            &effective_routing.issue_budget,
+            entries,
+            profile_name,
+            profile,
+            &mut work_waypoint_evidence,
+        );
+    }
     if !include_provider {
         sync_obs.status = "skipped";
     }
@@ -781,6 +797,26 @@ fn build_snapshot_inner(
         }
     }
 
+    // A spent issue budget (`routing.issue_budget`) holds the work item the
+    // same way a ledger gate does: ticket-scoped, refused dispatch, visible
+    // below, released by `gah clear-attempts`. A ledger gate already on the
+    // ticket keeps its own reason.
+    let budget_status = |work_id: Option<&str>| {
+        work_waypoint_evidence
+            .get(work_id?)?
+            .issue_budget
+            .as_ref()
+            .filter(|budget| budget.exhausted)
+    };
+    let budget_hold = |work_id: Option<&str>| budget_status(work_id)?.hold_reason.clone();
+    for ticket in &mut available_tickets {
+        if !ticket.human_required && budget_hold(ticket.work_id.as_deref()).is_some() {
+            ticket.human_required = true;
+            ticket.human_required_reason_code =
+                Some(HumanRequiredReason::RetryBudgetExhausted.as_str().into());
+        }
+    }
+
     // TICKET-human-required-scoping: after the per-ticket human_required is
     // derived (in scan_available_tickets via ledger_lookup_for_ticket), record
     // each blocked work item in `blocked_work_items` so it stays visible in
@@ -795,10 +831,15 @@ fn build_snapshot_inner(
                 continue;
             }
             let reason_code = ticket.human_required_reason_code.clone();
+            let message = reason_code
+                .as_deref()
+                .filter(|code| *code == HumanRequiredReason::RetryBudgetExhausted.as_str())
+                .and_then(|_| budget_hold(ticket.work_id.as_deref()))
+                .unwrap_or_else(|| "Ledger indicates human intervention required".into());
             blocked_work_items.push(Blocker {
                 kind: "human_required".into(),
                 reason: reason_code.clone().or(Some("ledger_human_required".into())),
-                message: Some("Ledger indicates human intervention required".into()),
+                message: Some(message),
                 backend: None,
                 model: None,
                 quota_pool: None,
@@ -843,6 +884,61 @@ fn build_snapshot_inner(
             source_reference: Some(dependency.work_id.clone()),
             reason_code: Some(dependency.reason_code.clone()),
             remediation_plan: None,
+        });
+    }
+
+    // An issue whose elapsed-time or manager-round budget is spent stops
+    // being reviewed and repaired as well: project the hold onto its open
+    // MR so `decide_next_action` returns HumanRequired for it instead of
+    // starting another round. A ready, green MR is not held: merging it
+    // costs no further rounds. An MR already holding a gate keeps that one.
+    for mr in &merge_requests {
+        if !matches!(
+            mr.classification.as_str(),
+            "NEEDS_REVIEW" | "CI_FAILED" | "NEEDS_FIX"
+        ) {
+            continue;
+        }
+        let Some(reason) = budget_status(mr.work_id.as_deref())
+            .filter(|budget| budget.lifecycle_hold)
+            .and_then(|budget| budget.hold_reason.clone())
+        else {
+            continue;
+        };
+        let already_gated = blocked_work_items.iter().any(|blocker| {
+            blocker.kind == "human_required"
+                && blocker
+                    .source_reference
+                    .as_deref()
+                    .is_some_and(|reference| {
+                        mr.work_id.as_deref() == Some(reference) || mr.branch == reference
+                    })
+        });
+        if already_gated {
+            continue;
+        }
+        blocked_work_items.push(Blocker {
+            kind: "human_required".into(),
+            reason: Some(HumanRequiredReason::RetryBudgetExhausted.as_str().into()),
+            message: Some(format!(
+                "MR on branch '{}' classified {} but {reason}",
+                mr.branch, mr.classification
+            )),
+            backend: None,
+            model: None,
+            quota_pool: None,
+            until: None,
+            source_reference: mr.work_id.clone(),
+            reason_code: Some(HumanRequiredReason::RetryBudgetExhausted.as_str().into()),
+            remediation_plan: remediation_plan_for_blocker(
+                profile_name,
+                profile,
+                "human_required",
+                mr.work_id.as_deref(),
+                Some(HumanRequiredReason::RetryBudgetExhausted.as_str()),
+                None,
+                None,
+            ),
         });
     }
 
@@ -1236,6 +1332,9 @@ pub fn run(cfg: &GahConfig, profile_name: &str, json: bool, light: bool) -> Resu
         }
 
         for line in blocked_work_item_lines(&snapshot.blocked_work_items) {
+            println!("{line}");
+        }
+        for line in issue_budget::status_lines(&snapshot.work_waypoint_evidence) {
             println!("{line}");
         }
 

@@ -179,6 +179,11 @@ pub(super) fn build_task(
     task
 }
 
+pub(in crate::dispatch) fn append_job_file(task: &mut String, text: &str) {
+    task.push_str("\n## Job file\n\nAllowed files and Verification commands sections are enforced before publishing.\n\n");
+    append_bounded_text(task, text, 16 * 1024, "Job file");
+}
+
 /// `research`/`audit` are read-only, investigation-only job kinds (#848):
 /// no worktree mutation, no commit, no PR. Findings are self-reported by the
 /// backend via its own `gh`/`glab` CLI access -- the same way improve/fix
