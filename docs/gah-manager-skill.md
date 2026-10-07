@@ -5,8 +5,9 @@ You own each issue you take: you research it, write the job that a worker will r
 what comes back, open the pull request, and see it through an independent review to merge. You do
 not write the fix yourself. One worker writes it, from your job file, in one bounded run.
 
-This is the method the 2026-10-07 trial ran (tier 2, below). It replaced the earlier ticket and
-`MANAGER_MEMORY.md` state machine; the pieces that have moved into the app are listed at the end.
+This is the method the 2026-10-07 trial ran (tier 2 of the ladder below). It replaced the earlier
+ticket and `MANAGER_MEMORY.md` state machine; the pieces that have moved into the app are listed at
+the end.
 
 ## What you may edit
 
@@ -22,18 +23,25 @@ If a fix needs a change you cannot delegate as a job, stop and say so. You do no
 
 One owner decides the next attempt, using recorded evidence and the issue's remaining budget.
 
-## Tiers
+## The ladder
 
-Decide the tier from the whole issue, not its title (a tier guessed from the first lines was wrong
-in the trial). Record it; it changes only with a reason in the log.
+Decide the starting tier from the whole issue, not its title (a tier guessed from the first lines
+was wrong in the trial). Record it. An issue moves up a tier only on a failure at its tier, and
+the failure output travels with it; nothing is retried at the same tier blind.
 
-- **Tier 1**: one file, obvious change, the loop can take it. Do not manage it; leave it to the loop.
-- **Tier 2**: bounded change you can specify as allowed files, an expected result and checks a
-  machine can read. This document.
-- **Tier 3**: a decision belongs to the owner (a safety check loosened, a product choice, several
-  valid designs). Label it `exec:owner-decision`, write the question with its options, and stop.
-  A multi-part issue may hold a tier-2 slice: cut the slice, say which part it is, and manage only
-  that ("Part of #n", never "Closes #n").
+- **Tier 1, very easy**: the headless loop takes it on its own. Do not manage it.
+- **Tier 2, normal**: you research, write a job file, and hand it to one headless worker. This
+  document.
+- **Tier 3, hard**: you run a live worker chat yourself, steering it turn by turn under the same
+  job contract and gate. Ambiguity that the issue cannot settle starts here, not at tier 2.
+- **Tier 4, very hard**: the owner, you and a live worker together.
+- **External action required** is a state, not a tier: an owner decision, a credential, a
+  machine someone else must touch. Label the issue `exec:owner-decision` (or say what is needed
+  on it), stop, and re-enter the ladder at the tier the issue left when the action is done.
+
+A multi-part issue may hold a tier-2 slice: cut the slice, say which part it is, and manage only
+that ("Part of #n", never "Closes #n"). The slice must say what the user gains from it; a worker
+that does exactly what a badly scoped job says is a manager error, not a worker error.
 
 ## The method, in order
 
@@ -64,7 +72,9 @@ One job per attempt, from the job template, with these parts. Each is a contract
   ones. Only checks a machine cannot misread: a compile, a test run, a typecheck. Never a text
   search for a phrase; an over-broad grep failed the same job twice in the trial.
 - **Stop condition**: when to stop. Every check passes; or N failed attempts at the same check;
-  or `BLOCKED: scope` / `BLOCKED: ambiguous` with the file or the question.
+  or `BLOCKED: scope` / `BLOCKED: ambiguous` with the file or the question. A `BLOCKED: scope`
+  reply means the job's scope needs revising; that is your work, back at step 2.
+- **What the user gains**: one sentence. The worker and the reviewer both read it.
 - **Standing constraints**: run only the listed checks (not the whole suite); do not commit, push
   or open a pull request; never report a check that was not run; report each check with its real
   result.
@@ -100,14 +110,24 @@ When the worker returns, you run every verification check yourself, in the worke
   `ambiguous_requirement`, `unknown`. The class does not pick a fix; it tells you what the next
   job must say.
 
-### 6. Repair, or hold
+### 6. Repair, move up, or hold
 
-One same-tier repair for a failed check: a new job file (`<job>-repair-N`), same allowed files,
-with the failing output pasted in and the one thing to change. Same budget rules as the first run.
+The class decides the next move; the gate never softens to make a move possible.
 
-A repeated failure signature (same check, same class, same key diagnostic line) is a hold. So is
-a `BLOCKED:` reply you cannot answer from the issue. On a hold: record it, comment on the issue
-with what is known, and stop. A budget override needs the owner's word, written.
+- `failed_check` with a clear error: one same-tier repair, a new job file (`<job>-repair-N`),
+  same allowed files, with the failing output pasted in and the one thing to change.
+- `setup_environment` or `credentials`: an environment fix (a login, disk, a package the worker's
+  sandbox could not install), then the same job again. Only named, authorized procedures run
+  automatically; anything else is yours by hand or the owner's.
+- `misunderstood_task`: the job was unclear. Rewrite it (step 2 and 3) at the same tier, once.
+- `ambiguous_requirement`: the issue does not settle it. Move up to a live chat (tier 3), or
+  mark external action required with the question.
+- `unknown`: a bounded look (one manager round), then a hold.
+
+A repeated failure signature is a hold: same check, same class, same key diagnostic line after
+stripping timestamps, temp paths and other run-local text. Byte-identical is not the test. On a
+hold: record it, comment on the issue with what is known, and stop. A budget override needs the
+owner's word, written.
 
 ### 7. Commit, push, draft pull request
 
@@ -127,21 +147,27 @@ the repository's rule allows it; otherwise it is the owner's call.
 
 ### 9. Record and release
 
-Every step writes one line to the event log (time, issue, tier, attempt, backend, phase,
-diagnosis, intervention, tokens, elapsed seconds, manager rounds, outcome, note) and updates the
-job sheet, so a manager that starts cold can continue from the sheet alone. When the pull request
-merges or the issue is handed back, remove the `managed` label.
+Log first, then act. Every step, including research you abandoned, writes one line to the event
+log (time, issue, initial tier, attempt, backend, phase, diagnosis, intervention, allowance used,
+tokens, elapsed seconds, manager rounds, outcome, note) and updates the job sheet, so a manager
+that starts cold can continue from the sheet alone. Durations are measured by a script or a
+timestamp, never typed from memory. When the pull request merges or the issue is handed back,
+remove the `managed` label.
 
 ## Budget per issue
 
-Two worker attempts, ninety minutes elapsed, three manager rounds. A round is one pass through
-steps 3 to 6. Spent budget is a hold, not a reason to try harder.
+Three counters, all cumulative across tiers: worker attempts, elapsed time, and manager rounds,
+where research, supervision and review all count as rounds. The trial's tier-2 allowance was two
+worker attempts, ninety minutes and three manager rounds. Each step up the ladder carries a
+reserve of about one third of the allowance; it is spent only when the gate measured progress at
+the lower tier (fewer failing checks, a smaller diff to go). Spent budget is a hold, not a reason
+to try harder.
 
 ## Escalation
 
-A hold goes to the owner with: the job file, the failing output, the failure class, what was
-tried, and the one question or decision that would unblock it. Do not re-dispatch with a stronger
-model on your own; that is a budget override.
+A hold goes to the owner with: the job file, the failing output and its class, what was tried at
+which tier, the budget used, and the one question or decision that would unblock it. Do not
+re-dispatch with a stronger model or more retries on your own; that is a budget override.
 
 ## Safety defaults
 
@@ -170,7 +196,7 @@ In the app today: the managed state (label or foreign assignee; loop intake, Ass
 dispatch API respect it), a dispatch that keeps its claim only until it has recorded how it ended,
 and a hold after the same setup failure three times in a row.
 
-Still yours to do by hand until they land: running a job file's own checks inside `gah dispatch`
-and refusing changes outside its allowed files; the per-issue budget; the repeated-failure
-signature on ordinary failures; and the event log as an app record. Until then the rules above are
-the enforcement.
+Still yours to do by hand until they land, in this order: running a job file's own checks inside
+`gah dispatch` and refusing changes outside its allowed files, with the event log as an app
+record; then failure classification and the cumulative budget; then the supervision protocol for
+tiers 3 and 4. Until then the rules above are the enforcement.
