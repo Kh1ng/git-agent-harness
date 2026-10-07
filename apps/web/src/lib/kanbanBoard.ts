@@ -60,6 +60,8 @@ export interface KanbanCard {
   skipped: KanbanSkip[];
   /** Why handing this card to an agent would not move it; null when it would. */
   assignHeldBy: string | null;
+  /** Set when a manager owns the issue (the managed label, or an assignee other than the loop): the reason, in a sentence. */
+  managed: string | null;
 }
 
 export interface KanbanAgent {
@@ -92,7 +94,7 @@ export interface KanbanBoard {
   agents: KanbanAgent[];
   gates: KanbanGate[];
   /** Issues the factory looked at and declined to take. */
-  notPickedUp: { workId: string | null; title: string; reason: string }[];
+  notPickedUp: { workId: string | null; title: string; reason: string; managed: boolean }[];
 }
 
 export interface KanbanInput {
@@ -201,6 +203,18 @@ const ASSIGN_HELD_BY: Record<string, string> = {
   fix_retry_cap_exceeded: 'Assign is off: this job is past the fix limit, and starting another fix by hand does not lift that',
   stuck_loop_gate: 'Assign is off: this job was stopped for repeating the same step, and starting a fix by hand does not lift that'
 };
+/** The intake reason code for an issue a manager owns (src/dispatch/issues.rs). */
+export const MANAGED_REASON_CODE = 'managed';
+const ASSIGN_HELD_BY_MANAGER = 'Assign is off: a manager owns this issue, so the factory leaves it alone';
+
+/** Managed issues by work key, with the status snapshot's reason for each. */
+export function managedIssues(status: Pick<StatusSnapshot, 'issue_intake_rejections'> | null): Map<string, string> {
+  const managed = new Map<string, string>();
+  for (const rejection of status?.issue_intake_rejections ?? []) {
+    if (rejection.reason_code === MANAGED_REASON_CODE && rejection.work_id) managed.set(workKey(rejection.work_id), sentence(rejection.reason));
+  }
+  return managed;
+}
 
 const latest = (...times: (string | null | undefined)[]) =>
   times.filter((time): time is string => !!time && Number.isFinite(Date.parse(time))).sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
@@ -266,6 +280,7 @@ export function buildKanban(input: KanbanInput): KanbanBoard {
   }
   const dependencyByKey = new Map((status?.dependency_blockers ?? []).map((blocker) => [workKey(blocker.work_id), blocker]));
   const held = new Set((status?.review_held_work_ids ?? []).map(workKey));
+  const managedByKey = managedIssues(status);
 
   // Which card a factory agent's worktree belongs to.
   const keyOfSlug = new Map<string, string>();
@@ -323,6 +338,8 @@ export function buildKanban(input: KanbanInput): KanbanBoard {
     const working = !mergeRequest?.merged && (runningRun !== undefined || claim !== undefined);
     const blocks: string[] = [];
     const gateCode = blocker?.reason_code ?? blocker?.reason ?? ticket?.human_required_reason_code ?? null;
+    const managed = managedByKey.get(key) ?? null;
+    if (managed) blocks.push(managed);
 
     let column: KanbanColumnKey;
     let reason: string;
@@ -454,7 +471,8 @@ export function buildKanban(input: KanbanInput): KanbanBoard {
       job,
       blocks,
       skipped,
-      assignHeldBy: column === 'needs_you' && gateCode ? ASSIGN_HELD_BY[gateCode] ?? null : null
+      assignHeldBy: managed ? ASSIGN_HELD_BY_MANAGER : column === 'needs_you' && gateCode ? ASSIGN_HELD_BY[gateCode] ?? null : null,
+      managed
     });
   }
   // Work in hand first, then whatever moved most recently; Ready keeps the queue's order.
@@ -466,7 +484,7 @@ export function buildKanban(input: KanbanInput): KanbanBoard {
     cards,
     agents: buildAgents(input, cards, factoryAgents, keyOfProcess, runningByKey),
     gates,
-    notPickedUp: (status?.issue_intake_rejections ?? []).map((rejection) => ({ workId: rejection.work_id, title: rejection.title ?? rejection.ticket_path, reason: sentence(rejection.reason) }))
+    notPickedUp: (status?.issue_intake_rejections ?? []).map((rejection) => ({ workId: rejection.work_id, title: rejection.title ?? rejection.ticket_path, reason: sentence(rejection.reason), managed: rejection.reason_code === MANAGED_REASON_CODE }))
   };
 }
 
