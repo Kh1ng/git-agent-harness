@@ -375,6 +375,53 @@ mod tests {
     }
 
     #[test]
+    fn two_factories_drain_one_mixed_queue_without_double_claims() {
+        use std::collections::BTreeMap;
+        // Issues need implement; PRs need review or fix. No item belongs to a fleet.
+        let queue = [
+            "issue:1", "pr:2", "issue:3", "pr:4", "pr:5", "issue:6", "pr:7",
+        ];
+        let owners = RefCell::new(BTreeMap::<&str, Vec<String>>::new());
+        let mut done = BTreeMap::<&str, String>::new();
+        let factories = [("fleet-a", 2usize), ("fleet-b", 3usize)];
+        while done.len() < queue.len() {
+            for (identity, parallelism) in factories {
+                let mut started = 0;
+                for item in queue {
+                    if started == parallelism {
+                        break;
+                    }
+                    if done.contains_key(item) {
+                        continue;
+                    }
+                    let read = || {
+                        Ok(Observation {
+                            assignees: owners.borrow().get(item).cloned().unwrap_or_default(),
+                            activity: Utc::now(),
+                            open: true,
+                        })
+                    };
+                    let assign = || {
+                        owners.borrow_mut().insert(item, vec![identity.into()]);
+                        Ok(())
+                    };
+                    if settle_claim(identity, read, assign, || {}, 900).unwrap() {
+                        started += 1;
+                        assert!(done.insert(item, identity.into()).is_none());
+                    }
+                }
+                assert!(started <= parallelism);
+            }
+        }
+        assert_eq!(done.len(), queue.len());
+        assert!(done.values().any(|owner| owner == "fleet-a"));
+        assert!(done.values().any(|owner| owner == "fleet-b"));
+        for item in queue {
+            assert_eq!(owners.borrow()[item], vec![done[item].clone()]);
+        }
+    }
+
+    #[test]
     fn lease_protects_progress_and_unknown_ownership_is_not_owned() {
         let now = Utc::now();
         let mut item = Observation {
