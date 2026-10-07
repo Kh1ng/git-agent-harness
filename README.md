@@ -778,9 +778,11 @@ dev runs; `--prod` also switches policy enforcement to `git-push-prod`.
 ## Manager Agent
 
 `docs/gah-manager-skill.md` is the system prompt / skill file for a manager
-agent that orchestrates GAH: decomposes work via PM mode, dispatches workers,
-tracks state in the target repo's `docs/MANAGER_MEMORY.md`, and escalates
-failed tickets to stronger models.
+agent that owns issues end to end: it marks an issue `managed`, writes a job
+file (allowed files, expected result, verification checks, stop condition),
+runs one bounded worker, gates the result itself, opens the draft pull
+request, and gets an independent review before anything merges. Budgets are
+fixed per issue and a repeated failure is a hold, not a retry.
 
 ### Project skill bindings
 
