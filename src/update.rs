@@ -276,6 +276,7 @@ fn finish_update(
         }
         None => println!("systemd not available on this host: skipping watchdog unit install."),
     }
+    crate::factory::keep_services_off_after_update();
 
     if restart_server && cfg!(target_os = "macos") {
         let script = repo.join("scripts/macos-launchd.sh");

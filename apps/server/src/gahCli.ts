@@ -1742,6 +1742,18 @@ export interface StartLoopResult {
 }
 
 export async function startLoop(profile: string): Promise<StartLoopResult> {
+  const config = getConfigPath(process.env.GAH_CONFIG ?? process.env.GAH_CONFIG_PATH);
+  const args = ['config', 'show', '--json', '--full'];
+  if (config) args.push('--config', config);
+  let module: ConfigShowFull | undefined;
+  try {
+    module = await runJsonCommand<ConfigShowFull>(args, config);
+  } catch (err) {
+    // Treat failures (like an older gah binary or invalid config) as legacy-enabled.
+  }
+  if (module && module.factory_enabled === false) {
+    return { started: false, error: 'Factory automation is disabled. Enable it in this computer’s Settings.' };
+  }
   const existing = getLoopStatus(profile);
   if (existing.running) {
     if (existing.owner === 'systemd') {

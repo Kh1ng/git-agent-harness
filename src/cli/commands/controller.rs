@@ -178,6 +178,7 @@ pub fn run_route_approval(command: RouteApprovalCommands) -> Result<()> {
 pub fn run_loop(args: LoopArgs) -> Result<()> {
     runner::install_shutdown_handler()?;
     let mut cfg = config::load(args.config_path.as_deref())?;
+    crate::factory::require_enabled(args.config_path.as_deref())?;
     // A bounded `--once` run honors scaling too; the recurring loop re-applies
     // it to each reloaded config.
     crate::routing::worker_scaling::apply(&mut cfg, &args.profile);
