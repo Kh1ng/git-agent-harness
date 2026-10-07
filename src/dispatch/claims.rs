@@ -340,6 +340,40 @@ pub(super) fn acquire_claim(
     Ok(None)
 }
 
+const REPEATED_SETUP_FAILURE_LIMIT: usize = 3;
+
+fn setup_failure_signature(entry: &LedgerEntry) -> (Option<String>, Option<String>, String) {
+    let summary = entry.error_summary.as_deref().unwrap_or_default();
+    let normalized = summary
+        .split_whitespace()
+        .map(|token| {
+            if token.starts_with('/') {
+                return "<path>".to_string();
+            }
+            let mut result = String::new();
+            let mut in_digits = false;
+            for ch in token.chars() {
+                if ch.is_ascii_digit() {
+                    if !in_digits {
+                        result.push('#');
+                    }
+                    in_digits = true;
+                } else {
+                    result.push(ch);
+                    in_digits = false;
+                }
+            }
+            result
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (
+        entry.failure_class.clone(),
+        entry.failure_stage.clone(),
+        normalized,
+    )
+}
+
 type TicketHistoryLookup = (
     usize,
     usize,
@@ -349,6 +383,39 @@ type TicketHistoryLookup = (
     bool,
     Option<String>,
 );
+
+impl AvailableTicket {
+    pub(crate) fn setup_failure_reason_for_ticket(
+        work_id: &str,
+        profile: &Profile,
+        index: &crate::ledger::LedgerEntriesByWorkId,
+    ) -> Option<String> {
+        let mut reason = None;
+        ledger_lookup_with_setup_reason(Some(work_id), profile, &[], index, &mut reason)?;
+        reason
+    }
+}
+
+fn repeated_setup_reason(attempts: &[&LedgerEntry]) -> Option<String> {
+    let start = attempts.len().checked_sub(REPEATED_SETUP_FAILURE_LIMIT)?;
+    let recent = &attempts[start..];
+    let last = *recent.last()?;
+    let signature = setup_failure_signature(last);
+    recent
+        .iter()
+        .all(|entry| {
+            matches!(
+                entry.failure_class.as_deref(),
+                Some("harness_error" | "environment_error")
+            ) && setup_failure_signature(entry) == signature
+        })
+        .then(|| {
+            format!(
+                "the same setup failure happened {REPEATED_SETUP_FAILURE_LIMIT} times in a row: {}",
+                last.error_summary.as_deref().unwrap_or_default()
+            )
+        })
+}
 
 /// TICKET-078: observation feed for `decide_next_action` -- one entry per
 /// ticket file in `docs/tickets/`. Reuses exactly the same active-MR
@@ -367,10 +434,27 @@ fn ledger_lookup_for_ticket(
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
 ) -> Option<TicketHistoryLookup> {
+    ledger_lookup_with_setup_reason(
+        work_id,
+        profile,
+        all_mrs,
+        ledger_entries_by_work_id,
+        &mut None,
+    )
+}
+
+fn ledger_lookup_with_setup_reason(
+    work_id: Option<&str>,
+    profile: &Profile,
+    all_mrs: &[crate::sync::SyncMr],
+    ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
+    setup_reason: &mut Option<String>,
+) -> Option<TicketHistoryLookup> {
     let Some(wid) = work_id else {
         return Some((0, 0, None, false, false, false, None));
     };
     let entries = ledger_entries_by_work_id.get(wid);
+    let mut setup_attempts = Vec::new();
     let mut count = 0usize;
     let mut agent_failure_count = 0usize;
     let mut last_failure_class = None;
@@ -401,6 +485,7 @@ fn ledger_lookup_for_ticket(
         // the latest tombstone count. The tombstone itself is not counted
         // as an attempt.
         if e.mode == "clear_attempts" {
+            setup_attempts.clear();
             count = 0;
             agent_failure_count = 0;
             last_failure_class = None;
@@ -448,6 +533,7 @@ fn ledger_lookup_for_ticket(
         if e.mode == "review_hold" || e.mode == "review_hold_release" {
             continue;
         }
+        setup_attempts.push(e);
         count += 1;
         // Issue #95: only genuine agent failures count toward the retry
         // cap. Infra-class failures (backend_error, environment_error,
@@ -528,8 +614,20 @@ fn ledger_lookup_for_ticket(
                 })
             })
     });
-    let human_required = effective_gate.is_some();
-    let human_required_reason_code = effective_gate.and_then(|gate| gate.reason_code);
+    let repeated_setup = repeated_setup_reason(&setup_attempts);
+    if effective_gate.is_none() {
+        *setup_reason = repeated_setup.clone();
+    }
+    let human_required = effective_gate.is_some() || repeated_setup.is_some();
+    let human_required_reason_code = if let Some(gate) = effective_gate {
+        gate.reason_code
+    } else {
+        repeated_setup.map(|_| {
+            crate::controller::HumanRequiredReason::RepeatedSetupFailure
+                .as_str()
+                .into()
+        })
+    };
     Some((
         count,
         agent_failure_count,

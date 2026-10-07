@@ -173,6 +173,16 @@ pub(super) fn project_effective_mr_gates(
     merge_requests: &[sync::SyncMrJson],
     blocked_work_items: &mut Vec<Blocker>,
 ) {
+    let index = ledger::index_entries_by_work_id(entries);
+    for blocker in blocked_work_items.iter_mut().filter(|blocker| {
+        blocker.reason_code.as_deref() == Some(HumanRequiredReason::RepeatedSetupFailure.as_str())
+    }) {
+        if let Some(work_id) = blocker.source_reference.as_deref() {
+            blocker.message = crate::models::AvailableTicket::setup_failure_reason_for_ticket(
+                work_id, profile, &index,
+            );
+        }
+    }
     for mr in merge_requests {
         let Some(work_id) = mr_work_id_from_ledger(mr, entries, profile_name, &profile.repo_id)
         else {
@@ -292,6 +302,44 @@ default_target_branch = "main"
             classification: "NEEDS_REVIEW".into(),
             recommended_action: sync::RecommendedAction::RunReview,
         }
+    }
+
+    #[test]
+    fn repeated_setup_blocker_gets_exact_derived_reason() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = make_test_cfg(&tmp);
+        let profile = &cfg.profiles["test"];
+        let mut entry = LedgerEntry::new("test", profile, "auto", "fix", "#1462", None, None);
+        entry.work_id = Some("#1462".into());
+        entry.failure_class = Some("harness_error".into());
+        entry.failure_stage = Some("dispatch".into());
+        entry.error_summary = Some("insufficient free space: 9 GiB available".into());
+        let mut blockers = vec![Blocker {
+            kind: "human_required".into(),
+            reason: Some("repeated_setup_failure".into()),
+            message: Some("Ledger indicates human intervention required".into()),
+            backend: None,
+            model: None,
+            quota_pool: None,
+            until: None,
+            source_reference: Some("#1462".into()),
+            reason_code: Some("repeated_setup_failure".into()),
+            remediation_plan: None,
+        }];
+        project_effective_mr_gates(
+            &cfg,
+            "test",
+            profile,
+            &[entry.clone(), entry.clone(), entry],
+            &[],
+            &mut blockers,
+        );
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(
+            blockers[0].reason_code.as_deref(),
+            Some("repeated_setup_failure")
+        );
+        assert_eq!(blockers[0].message.as_deref(), Some("the same setup failure happened 3 times in a row: insufficient free space: 9 GiB available"));
     }
 
     #[test]

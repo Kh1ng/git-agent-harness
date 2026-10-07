@@ -1479,3 +1479,5 @@ fn pr_past_fix_cap_does_not_block_eligible_ticket_dispatch() {
         other => panic!("expected DispatchTicket for TICKET-B, got {other:?}"),
     }
 }
+#[path = "tests/repeated_setup.rs"]
+mod repeated_setup;
