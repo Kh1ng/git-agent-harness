@@ -27,7 +27,7 @@ test('issueWorkId reads the issue forms a target can take', () => {
 
 test('managedHold names only managed rejections of that issue', () => {
   const snapshot = status(rejection('#7', 'managed'), rejection('#8', 'untrusted_author'), rejection(null, 'managed'));
-  assert.match(managedHold(snapshot, '#7') ?? '', /#7 is managed \(managed: assigned to colton/);
+  assert.equal(managedHold(snapshot, '#7'), '#7 is managed (assigned to colton, who is not this loop); a manager owns it, so it cannot be started from here');
   assert.equal(managedHold(snapshot, '#8'), null);
   assert.equal(managedHold(snapshot, '#9'), null);
   assert.equal(managedHold({ issue_intake_rejections: [] }, '#7'), null);
@@ -67,4 +67,18 @@ test('an unreadable status snapshot does not block a manual start', async () => 
   }
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /without the managed check: gah status timed out/);
+});
+
+test('a slow status snapshot is given up on after the timeout', async () => {
+  const warnings: string[] = [];
+  const original = console.warn;
+  console.warn = (message: string) => { warnings.push(message); };
+  const started = Date.now();
+  try {
+    await assertIssueNotManaged({ profile: 'gah', mode: 'fix', target: '#7' }, () => new Promise(() => {}), 20);
+  } finally {
+    console.warn = original;
+  }
+  assert.ok(Date.now() - started < 2_000);
+  assert.match(warnings[0], /status took longer than 20 ms/);
 });

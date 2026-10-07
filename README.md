@@ -543,6 +543,16 @@ labels conflict. Explicit dispatch of a trusted but held or unlabelled issue
 requires the visible `--issue-intake-override` flag; it never bypasses author
 trust.
 
+An issue a manager owns is **managed**: it carries the `managed` (or
+`gah:managed`) label, or, on a profile that keeps issue claims local, it is
+assigned to a login other than the one the loop acts as. Recurring discovery
+leaves it alone and `gah status` lists it under the intake rejections with the
+reason code `managed`; the dashboard's Assign button and `POST /api/dispatch`
+refuse to start a fix or improve job on it. Explicit
+`gah dispatch --target "#<n>"` still runs, since that is how the manager runs
+the issue it holds. With `issue_claim.mode = "github_assignee"` the assignee is
+a claim instead (next section), so only the label marks an issue managed.
+
 For backward compatibility, a GitHub profile without the new human list still
 uses `github_issue_author_allowlist`; if neither list is configured, only the
 repository owner is trusted. That compatibility field never grants GitLab

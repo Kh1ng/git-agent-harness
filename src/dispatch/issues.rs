@@ -67,6 +67,9 @@ struct IssueHolders<'a> {
 enum ManagedBy {
     Label,
     Assignee(String),
+    /// Someone is assigned and this loop could not read its own login, so it
+    /// cannot tell whether that someone is itself.
+    AssigneeUnknownSelf(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -141,6 +144,9 @@ impl IntakeRejection {
             Self::Managed(ManagedBy::Assignee(login)) => {
                 format!("managed: assigned to {login}, who is not this loop")
             }
+            Self::Managed(ManagedBy::AssigneeUnknownSelf(login)) => format!(
+                "managed: assigned to {login}; this loop's own login could not be read, so the issue counts as someone else's"
+            ),
             Self::Disposition(disposition) => disposition.reason().to_string(),
         }
     }
@@ -164,14 +170,16 @@ fn managed_rejection(labels: &[String], holders: IssueHolders<'_>) -> Option<Man
     if labels.iter().any(|label| issue_label_is_managed(label)) {
         return Some(ManagedBy::Label);
     }
+    let Some(me) = holders.own_login else {
+        return holders
+            .assignees
+            .first()
+            .map(|assignee| ManagedBy::AssigneeUnknownSelf(assignee.trim().to_string()));
+    };
     holders
         .assignees
         .iter()
-        .find(|assignee| {
-            !holders
-                .own_login
-                .is_some_and(|me| me.eq_ignore_ascii_case(assignee.trim()))
-        })
+        .find(|assignee| !me.eq_ignore_ascii_case(assignee.trim()))
         .map(|assignee| ManagedBy::Assignee(assignee.trim().to_string()))
 }
 
@@ -1391,6 +1399,9 @@ fn append_unique_strings(target: &mut Vec<String>, source: Vec<String>) {
     }
 }
 
+/// Labels that keep an issue out of the ticket scan. Discovery already rejects
+/// a managed issue before this runs; the managed label is kept here so a
+/// caller outside discovery gets the same answer.
 pub(super) fn issue_is_auto_dispatch_blocked(labels: &[String]) -> bool {
     labels.iter().any(|label| {
         issue_label_is_managed(label)

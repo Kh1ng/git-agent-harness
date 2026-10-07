@@ -143,7 +143,10 @@ fn an_unreadable_own_login_treats_every_assignee_as_someone_else() {
     assert!(discovery.allowed.is_empty());
     assert_eq!(discovery.rejected.len(), 1);
     assert_eq!(discovery.rejected[0].reason_code, MANAGED_REASON_CODE);
-    assert!(discovery.rejected[0].reason.contains("loop-bot"));
+    assert_eq!(
+        discovery.rejected[0].reason,
+        "managed: assigned to loop-bot; this loop's own login could not be read, so the issue counts as someone else's"
+    );
 }
 
 #[test]
@@ -213,4 +216,5 @@ fn with_github_assignee_claims_on_only_the_label_marks_an_issue_managed() {
             .collect::<Vec<_>>(),
         vec!["11"]
     );
+    assert!(discovery.claimed_elsewhere.contains("11"));
 }
