@@ -141,7 +141,7 @@ export function BlockedWorkItem({ blocker, onOpenWork }: { blocker: Blocker; onO
                 type="button"
                 onClick={clearAttempts}
                 disabled={clearing}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-accent text-white rounded-md text-xs font-medium hover:bg-accent/90 disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-accent-fill text-white rounded-md text-xs font-medium hover:bg-accent-fill/90 disabled:opacity-50"
               >
                 <Hammer size={12} aria-hidden="true" />
                 {clearing ? 'Clearing…' : 'Clear attempts & retry'}

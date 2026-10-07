@@ -175,7 +175,7 @@ function ChatUsageRollupCard({ profile }: { profile: string | undefined }) {
             <button
               key={d}
               onClick={() => setDays(d)}
-              className={`px-3 py-1.5 ${days === d ? 'bg-accent text-white' : 'text-secondary hover:bg-white/5'}`}
+              className={`px-3 py-1.5 ${days === d ? 'bg-accent-fill text-white' : 'text-secondary hover:bg-white/5'}`}
             >
               {d}d
             </button>
@@ -514,7 +514,7 @@ export function TelemetryPage() {
               <button
                 key={g}
                 onClick={() => setGroupBy(g)}
-                className={`px-3 py-1.5 capitalize ${groupBy === g ? 'bg-accent text-white' : 'text-secondary hover:bg-white/5'}`}
+                className={`px-3 py-1.5 capitalize ${groupBy === g ? 'bg-accent-fill text-white' : 'text-secondary hover:bg-white/5'}`}
               >
                 {g}
               </button>

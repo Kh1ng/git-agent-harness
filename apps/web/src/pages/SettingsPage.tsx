@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Sun, Moon, Info, Save, Loader2, Eye, EyeOff, Copy, Check, ChevronRight, Search } from 'lucide-react';
 import { useWebSocket } from '../ws/WebSocketContext.js';
 import { useUiStore } from '../store/uiStore.js';
@@ -185,14 +185,14 @@ export function SettingsPage() {
         <div className="flex rounded-md border border-subtle overflow-hidden w-fit text-sm">
           <button
             onClick={() => setTheme('dark')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 ${theme === 'dark' ? 'bg-accent text-white' : 'text-secondary hover:bg-white/5'}`}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 ${theme === 'dark' ? 'bg-accent-fill text-white' : 'text-secondary hover:bg-white/5'}`}
           >
             <Moon size={14} aria-hidden="true" />
             Dark
           </button>
           <button
             onClick={() => setTheme('light')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 ${theme === 'light' ? 'bg-accent text-white' : 'text-secondary hover:bg-white/5'}`}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 ${theme === 'light' ? 'bg-accent-fill text-white' : 'text-secondary hover:bg-white/5'}`}
           >
             <Sun size={14} aria-hidden="true" />
             Light
@@ -410,12 +410,13 @@ function NodeCapacitySection({ config, setConfig }: Pick<GlobalManagerSectionPro
       <button
         onClick={() => setConfig({ worker_memory_mib: workerValue, memory_floor_mib: floorValue, ...(cpuKnown ? { worker_cpu_cores: coresValue, cpu_ceiling_percent: ceilingValue } : {}) })}
         disabled={!valid || config.loading}
-        className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed">Save node capacity</button>
+        className="mt-3 btn-primary">Save node capacity</button>
     </section>
   );
 }
-function GlobalManagerSection({ config, setConfig, clearConfigErrors }: GlobalManagerSectionProps) {
+export function GlobalManagerSection({ config, setConfig, clearConfigErrors }: GlobalManagerSectionProps) {
   const [manager, setManager] = useState<string>('');
+  const managerId = useId();
 
   useEffect(() => {
     setManager(config.data?.current_manager ?? '');
@@ -434,10 +435,11 @@ function GlobalManagerSection({ config, setConfig, clearConfigErrors }: GlobalMa
         profiles/projects (the manager-wake "who's on call"). Global, not per-profile.
       </p>
 
-      <label className="block text-xs font-medium text-secondary mb-1">
+      <label htmlFor={managerId} className="block text-xs font-medium text-secondary mb-1">
         Current manager
       </label>
       <input
+        id={managerId}
         type="text"
         value={manager}
         onChange={(e) => setManager(e.target.value)}
@@ -455,7 +457,7 @@ function GlobalManagerSection({ config, setConfig, clearConfigErrors }: GlobalMa
       <button
         onClick={handleSave}
         disabled={config.loading}
-        className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
+        className="mt-3 btn-primary"
       >
         {config.loading ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}
         {config.loading ? 'Saving…' : 'Save global manager'}
@@ -474,10 +476,11 @@ const NOTIFICATION_CHANNELS: { value: 'none' | 'telegram' | 'discord'; label: st
  * external-approval requests, review verdicts) are delivered in addition to
  * any per-profile notify_command. Credentials live in the server environment
  * (TELEGRAM_BOT_TOKEN / DISCORD_WEBHOOK_URL) — never in config or this UI. */
-function NotificationChannelSection({ config, setConfig, clearConfigErrors }: GlobalManagerSectionProps) {
+export function NotificationChannelSection({ config, setConfig, clearConfigErrors }: GlobalManagerSectionProps) {
   const notifications = config.data?.notifications;
   const [channel, setChannel] = useState<'none' | 'telegram' | 'discord'>('none');
   const [chatId, setChatId] = useState('');
+  const fieldId = useId();
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -509,8 +512,9 @@ function NotificationChannelSection({ config, setConfig, clearConfigErrors }: Gl
         events page records; delivery failures are visible there and never block dispatch.
       </p>
 
-      <label className="block text-xs font-medium text-secondary mb-1">Channel</label>
+      <label htmlFor={`${fieldId}-channel`} className="block text-xs font-medium text-secondary mb-1">Channel</label>
       <select
+        id={`${fieldId}-channel`}
         value={channel}
         onChange={(e) => setChannel(e.target.value as 'none' | 'telegram' | 'discord')}
         className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
@@ -525,10 +529,11 @@ function NotificationChannelSection({ config, setConfig, clearConfigErrors }: Gl
 
       {channel === 'telegram' && (
         <>
-          <label className="block text-xs font-medium text-secondary mb-1 mt-3">
+          <label htmlFor={`${fieldId}-telegram-chat-id`} className="block text-xs font-medium text-secondary mb-1 mt-3">
             Telegram chat ID
           </label>
           <input
+            id={`${fieldId}-telegram-chat-id`}
             type="text"
             value={chatId}
             onChange={(e) => setChatId(e.target.value)}
@@ -552,7 +557,7 @@ function NotificationChannelSection({ config, setConfig, clearConfigErrors }: Gl
       <button
         onClick={handleSave}
         disabled={config.loading || saving}
-        className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
+        className="mt-3 btn-primary"
       >
         {saving || config.loading ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Save size={14} aria-hidden="true" />}
         {saving || config.loading ? 'Saving…' : 'Save notification channel'}
@@ -690,6 +695,7 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
   const [error, setError] = useState<string | null>(null);
   const [newOverrideProfile, setNewOverrideProfile] = useState('');
   const [newOverrideBackend, setNewOverrideBackend] = useState('');
+  const defaultBackendId = useId();
 
   const load = () => {
     gahApi
@@ -754,8 +760,9 @@ function ManagerChatSettingsSection({ configuredProfiles }: { configuredProfiles
         that one drives autonomous wake notifications, not chat.
       </p>
 
-      <label className="block text-xs font-medium text-secondary mb-1">Default backend</label>
+      <label htmlFor={defaultBackendId} className="block text-xs font-medium text-secondary mb-1">Default backend</label>
       <select
+        id={defaultBackendId}
         value={settings.defaultBackend}
         onChange={(e) => save({ defaultBackend: e.target.value })}
         disabled={loading}
