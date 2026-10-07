@@ -904,9 +904,8 @@ fn reviewer_tier_strong_for_any_review_candidates_entry_not_just_the_exact_stron
         priority: 0,
         included_in_quota: false,
         marginal_cost_usd: None,
-        quota_usage_percent: None,
-        quota_days_remaining: None,
         requires_approval: false,
+        ..Default::default()
     };
     prof.routing.review_candidates = Some(vec![
         candidate("agy", "Claude Sonnet 4.6 (Thinking)"),

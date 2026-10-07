@@ -1102,8 +1102,6 @@ export interface RoutingCandidateSummary {
   priority: number;
   included_in_quota: boolean;
   marginal_cost_usd: number | null;
-  quota_usage_percent: number | null;
-  quota_days_remaining: number | null;
   requires_approval: boolean;
 }
 

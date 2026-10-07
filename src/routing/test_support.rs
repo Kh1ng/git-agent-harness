@@ -148,9 +148,8 @@ pub(super) fn candidate_config(
         priority: 0,
         included_in_quota: false,
         marginal_cost_usd: None,
-        quota_usage_percent: None,
-        quota_days_remaining: None,
         requires_approval: false,
+        ..Default::default()
     }
 }
 
