@@ -9,8 +9,8 @@
 #     https://raw.githubusercontent.com/Kh1ng/git-agent-harness/main/scripts/bootstrap.sh \
 #     | GITHUB_TOKEN="$GITHUB_TOKEN" bash
 #
-# It needs only git and curl. It asks before installing Rust (needed to build
-# gah), clones this repository, builds gah, and hands the terminal to
+# It needs only git and curl, clones this repository, downloads the published
+# gah CLI, and hands the terminal to
 # `gah setup`, which asks what this machine is for, checks and offers
 # everything else, installs the service, and adds a first project.
 #
@@ -24,13 +24,19 @@
 #
 # GAH_INSTALL_DIR overrides the clone location (default: ~/git-agent-harness).
 # GAH_YES=1 accepts every default and offer without prompting.
+# GAH_FROM_SOURCE=1 builds the CLI with Rust, offering to install rustup.
+# GAH_VERSION selects a release tag (for example v0.2.0); default: latest.
 set -euo pipefail
 
 os="$(uname -s)"
 case "$os" in
   Linux|Darwin) ;;
   *)
-    echo "ERROR: this installer supports Linux and macOS. On Windows, use the GAH installer from the releases page." >&2
+    if [ "${GAH_FROM_SOURCE:-}" = 1 ]; then
+      echo "ERROR: this installer supports Linux and macOS. On Windows, use the GAH installer from the releases page." >&2
+    else
+      echo "ERROR: no published CLI for $os/$(uname -m). Run again with GAH_FROM_SOURCE=1." >&2
+    fi
     exit 1
     ;;
 esac
@@ -61,18 +67,20 @@ if ! command -v git >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v cargo >/dev/null 2>&1; then
-  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-fi
-if ! command -v cargo >/dev/null 2>&1; then
-  echo "GAH is built from source with Rust, which is not installed."
-  if ! ask "Install Rust for your user with rustup (no administrator password)?"; then
-    echo "Install Rust from https://rustup.rs, then run this installer again." >&2
-    exit 1
+if [ "${GAH_FROM_SOURCE:-}" = 1 ]; then
+  if ! command -v cargo >/dev/null 2>&1; then
+    [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
   fi
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-  # shellcheck disable=SC1091
-  . "$HOME/.cargo/env"
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "GAH is built from source with Rust, which is not installed."
+    if ! ask "Install Rust for your user with rustup (no administrator password)?"; then
+      echo "Install Rust from https://rustup.rs, then run this installer again." >&2
+      exit 1
+    fi
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    # shellcheck disable=SC1091
+    . "$HOME/.cargo/env"
+  fi
 fi
 
 # While the repository is private, GITHUB_TOKEN (read access) authenticates
@@ -96,8 +104,51 @@ else
 fi
 
 cd "$install_dir"
-echo "Building gah. The first build takes a few minutes."
-cargo build --locked --release --bin gah
+if [ "${GAH_FROM_SOURCE:-}" = 1 ]; then
+  echo "Building gah. The first build takes a few minutes."
+  cargo build --locked --release --bin gah
+  cli=target/release/gah
+else
+  arch="$(uname -m)"
+  case "$os/$arch" in
+    Linux/x86_64) asset=gah-linux-x86_64 ;;
+    Darwin/*) asset=gah-macos-universal ;;
+    *) echo "ERROR: no published CLI for $os/$arch. Run again with GAH_FROM_SOURCE=1." >&2; exit 1 ;;
+  esac
+  release_base=https://github.com/Kh1ng/git-agent-harness/releases
+  if [ -n "${GAH_VERSION:-}" ]; then
+    url="$release_base/download/$GAH_VERSION/$asset"
+  else
+    url="$release_base/latest/download/$asset"
+  fi
+  # Stage privately beside the destination so failed downloads cannot replace it.
+  mkdir -p "$HOME/.local/bin"
+  staging="$(mktemp -d "$HOME/.local/bin/.gah-download.XXXXXX")"
+  trap 'rm -rf "$staging"' EXIT
+  download_args=(-fsSL --output "$staging/gah")
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN" >"$staging/header"
+    download_args+=(--header "@$staging/header")
+  fi
+  if ! curl "${download_args[@]}" "$url"; then
+    echo "ERROR: failed to download $url. Run again with GAH_FROM_SOURCE=1." >&2
+    exit 1
+  fi
+  chmod +x "$staging/gah"
+  # No checksum is published; running --version is the only verification.
+  if ! reported_version="$("$staging/gah" --version)"; then
+    echo "ERROR: downloaded CLI failed --version verification." >&2
+    exit 1
+  fi
+  if [ -n "${GAH_VERSION:-}" ] && [ "$reported_version" != "gah ${GAH_VERSION#v}" ]; then
+    echo "ERROR: downloaded CLI version does not match $GAH_VERSION: $reported_version" >&2
+    exit 1
+  fi
+  cli="$HOME/.local/bin/gah"
+  mv "$staging/gah" "$cli"
+  rm -rf "$staging"
+  trap - EXIT
+fi
 
 args=(setup --source "$install_dir")
 case "${GAH_NODE_ROLE:-}" in
@@ -116,6 +167,6 @@ esac
 [ "${GAH_YES:-}" != 1 ] || args+=(--yes)
 
 if [ "${GAH_YES:-}" = 1 ]; then
-  exec target/release/gah "${args[@]}"
+  exec "$cli" "${args[@]}"
 fi
-exec target/release/gah "${args[@]}" </dev/tty
+exec "$cli" "${args[@]}" </dev/tty

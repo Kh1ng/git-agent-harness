@@ -506,8 +506,8 @@ Two things make this easier to actually do:
   clicks **Reveal setup command**, then offers the returned command for
   copying. Credential bytes are absent from ordinary Settings JSON and the
   initial page DOM.
-- **A machine with nothing installed yet**: `scripts/bootstrap.sh` asks
-  before installing Rust, clones this repo, builds `gah`, and runs
+- **A machine with nothing installed yet**: `scripts/bootstrap.sh` downloads
+  the published `gah` CLI (latest, or the `GAH_VERSION` tag), clones this repo, and runs
   `gah setup`, which checks and offers every other prerequisite before it
   runs `scripts/install.sh`. The same `GAH_GATEWAY_*` env vars preselect the
   memory choice, so the one-liner still works on a brand-new machine (see

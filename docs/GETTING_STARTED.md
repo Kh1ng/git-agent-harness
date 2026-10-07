@@ -21,9 +21,10 @@ curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
   | GITHUB_TOKEN="$GITHUB_TOKEN" bash
 ```
 
-The script needs git and curl. It asks before installing Rust, clones the
-repository to `~/git-agent-harness`, builds `gah` (a few minutes the first
-time), and hands the terminal to `gah setup`.
+The script needs git and curl. It downloads the published CLI (latest, or
+the `GAH_VERSION` tag), clones the repository to `~/git-agent-harness`, installs `gah` in `~/.local/bin`, and
+hands the terminal to `gah setup`. Set `GAH_FROM_SOURCE=1` to build the CLI
+from source instead, with an offer to install Rust if needed.
 
 `gah setup` then:
 

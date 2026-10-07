@@ -923,3 +923,168 @@ fn the_desktop_app_install_replaces_the_old_app_and_cleans_up() {
         "staging and backups are removed: {leftovers:?}"
     );
 }
+
+fn bootstrap_case(os: &str, arch: &str, extra: &[(&str, &str)]) -> (Output, String, bool) {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let bin = temp.path().join("bin");
+    let log = temp.path().join("commands.log");
+    std::fs::create_dir_all(&home).unwrap();
+    executable(
+        &bin.join("uname"),
+        r#"case "$1" in -s) echo "$TEST_OS";; -m) echo "$TEST_ARCH";; esac
+"#,
+    );
+    executable(
+        &bin.join("git"),
+        r#"echo "git $*" >> "$TEST_LOG"
+if [ "$1" = clone ]; then mkdir -p "$5/.git"; fi
+"#,
+    );
+    let fake_cli = r#"if [ "$1" = --version ]; then
+  [ "${TEST_BAD_VERSION:-}" != fail ] || exit 1
+  echo "gah ${TEST_BAD_VERSION:-0.2.0}"
+else
+  echo "setup $*" >> "$TEST_LOG"
+fi
+"#;
+    let fixture = temp.path().join("fake-gah");
+    executable(&fixture, fake_cli);
+    executable(
+        &bin.join("cargo"),
+        r#"echo "cargo $*" >> "$TEST_LOG"
+mkdir -p target/release
+cp "$TEST_CLI" target/release/gah
+"#,
+    );
+    executable(
+        &bin.join("rustup"),
+        "echo forbidden-rustup >> \"$TEST_LOG\"; exit 99\n",
+    );
+    executable(
+        &bin.join("curl"),
+        r#"echo "curl $*" >> "$TEST_LOG"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) destination="$2"; shift;;
+    --header) cat "${2#@}" >> "$TEST_LOG"; shift;;
+  esac
+  shift
+done
+if [ "${TEST_DOWNLOAD_FAIL:-}" = 1 ]; then echo partial > "$destination"; exit 22; fi
+cp "$TEST_CLI" "$destination"
+chmod 600 "$destination"
+"#,
+    );
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let mut envs = vec![
+        ("HOME", home.to_str().unwrap()),
+        ("PATH", &path),
+        ("GAH_YES", "1"),
+        ("TEST_OS", os),
+        ("TEST_ARCH", arch),
+        ("TEST_LOG", log.to_str().unwrap()),
+        ("TEST_CLI", fixture.to_str().unwrap()),
+    ];
+    envs.extend_from_slice(extra);
+    let output = bash(
+        &[repo().join("scripts/bootstrap.sh").to_str().unwrap()],
+        &envs,
+        true,
+    );
+    let calls = std::fs::read_to_string(log).unwrap_or_default();
+    let installed = home.join(".local/bin/gah");
+    let installed_executable = installed.exists() && mode(&installed) & 0o111 != 0;
+    if home.join(".local/bin").exists() {
+        assert!(std::fs::read_dir(home.join(".local/bin"))
+            .unwrap()
+            .all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".gah-download.")
+            }));
+    }
+    (output, calls, installed_executable)
+}
+
+#[test]
+fn bootstrap_downloads_platform_assets_without_cargo() {
+    for (os, arch, asset) in [
+        ("Linux", "x86_64", "gah-linux-x86_64"),
+        ("Darwin", "x86_64", "gah-macos-universal"),
+        ("Darwin", "arm64", "gah-macos-universal"),
+    ] {
+        let (output, calls, installed) = bootstrap_case(os, arch, &[]);
+        assert!(output.status.success(), "{}", text(&output));
+        assert!(installed);
+        assert!(calls.contains(&format!("releases/latest/download/{asset}")));
+        assert!(!calls.contains("cargo") && !calls.contains("rustup"));
+        assert!(calls.contains("setup setup --source ") && calls.contains(" --yes"));
+    }
+}
+
+#[test]
+fn bootstrap_source_opt_in_keeps_cargo_build() {
+    let (output, calls, installed) =
+        bootstrap_case("Linux", "aarch64", &[("GAH_FROM_SOURCE", "1")]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(calls.contains("cargo build --locked --release --bin gah"));
+    assert!(calls.contains("setup setup --source "));
+    assert!(!calls.contains("curl") && !installed);
+}
+
+#[test]
+fn bootstrap_unsupported_platform_requires_explicit_source_opt_in() {
+    let (output, calls, installed) = bootstrap_case("Linux", "aarch64", &[]);
+    assert!(!output.status.success());
+    assert!(text(&output).contains("Linux/aarch64"));
+    assert!(text(&output).contains("GAH_FROM_SOURCE=1"));
+    assert!(!calls.contains("cargo") && !calls.contains("curl") && !installed);
+}
+
+#[test]
+fn bootstrap_failed_download_leaves_no_executable() {
+    let (output, calls, installed) =
+        bootstrap_case("Linux", "x86_64", &[("TEST_DOWNLOAD_FAIL", "1")]);
+    assert!(!output.status.success());
+    assert!(text(&output).contains("releases/latest/download/gah-linux-x86_64"));
+    assert!(text(&output).contains("GAH_FROM_SOURCE=1"));
+    assert!(!installed && !calls.contains("setup setup") && !calls.contains("cargo"));
+}
+
+#[test]
+fn bootstrap_tagged_download_authenticates_without_printing_token() {
+    let (output, calls, installed) = bootstrap_case(
+        "Linux",
+        "x86_64",
+        &[
+            ("GAH_VERSION", "v0.2.0"),
+            ("GITHUB_TOKEN", "secret-test-token"),
+        ],
+    );
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(installed && calls.contains("releases/download/v0.2.0/gah-linux-x86_64"));
+    assert!(calls.contains("Authorization: Bearer secret-test-token"));
+    assert!(!text(&output).contains("secret-test-token"));
+    assert!(!calls
+        .lines()
+        .find(|line| line.starts_with("curl "))
+        .unwrap()
+        .contains("secret-test-token"));
+}
+
+#[test]
+fn bootstrap_rejects_failed_or_mismatched_version_before_installing() {
+    for version in ["fail", "0.1.0"] {
+        let (output, calls, installed) = bootstrap_case(
+            "Linux",
+            "x86_64",
+            &[("GAH_VERSION", "v0.2.0"), ("TEST_BAD_VERSION", version)],
+        );
+        assert!(!output.status.success(), "{}", text(&output));
+        assert!(!installed && !calls.contains("setup setup"));
+        assert!(text(&output).contains("version"));
+    }
+}
