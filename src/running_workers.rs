@@ -78,6 +78,23 @@ pub(crate) fn heartbeat(session: &Path) {
     }
 }
 
+/// Record which dispatch a session directory belongs to.
+pub(crate) fn initialize_dispatch(
+    session: &Path,
+    args: &crate::dispatch::DispatchArgs,
+    run_id: &str,
+) {
+    initialize(
+        session,
+        &DispatchContext {
+            profile: args.profile.clone(),
+            work_id: args.work_id.clone(),
+            run_id: run_id.to_string(),
+            mode: args.mode.clone(),
+        },
+    );
+}
+
 pub fn initialize(session: &Path, context: &DispatchContext) {
     if let Ok(bytes) = serde_json::to_vec(context) {
         let _ = fs::write(session.join("dispatch-context.json"), bytes);

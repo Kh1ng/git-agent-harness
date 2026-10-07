@@ -614,8 +614,7 @@ pub(in crate::dispatch) fn review(
             // The slot covers the backend invocation itself. Release it before
             // parsing/rerouting so another worker can use the reviewer as soon as
             // capacity is genuinely free.
-            drop(worker_observation);
-            drop(review_slot);
+            drop((worker_observation, review_slot));
             if !matches!(
                 &attempt.outcome,
                 runner::ReviewProcessOutcome::ExecutableUnavailable
