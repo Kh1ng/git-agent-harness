@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Plus, Pencil, Trash2, Check, X, AlertCircle, Info } from 'lucide-react';
 import { useGahStore } from '../store/gahStore.js';
 import { useUiStore } from '../store/uiStore.js';
@@ -140,7 +140,7 @@ export function ProfileEditor() {
             resetForm();
             setShowAddForm(!showAddForm);
           }}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90"
+          className="btn-primary"
         >
           <Plus size={14} aria-hidden="true" />
           Add Profile
@@ -203,6 +203,7 @@ interface ProfileFormProps {
 }
 
 function ProfileForm({ formData, editingProfile, isLoading, onChange, onSubmit, onCancel }: ProfileFormProps) {
+  const formId = useId();
   return (
     <form onSubmit={onSubmit} className="p-4 space-y-4 border border-subtle rounded-lg bg-raised">
       <h4 className="text-sm font-medium text-primary">
@@ -211,11 +212,12 @@ function ProfileForm({ formData, editingProfile, isLoading, onChange, onSubmit, 
       
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div>
-          <label className="block text-xs font-medium text-secondary mb-1">
+          <label htmlFor={`${formId}-display_name`} className="block text-xs font-medium text-secondary mb-1">
             Display Name *
           </label>
           <input
             type="text"
+            id={`${formId}-display_name`}
             value={formData.display_name}
             onChange={(e) => onChange('display_name', e.target.value)}
             className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
@@ -225,11 +227,12 @@ function ProfileForm({ formData, editingProfile, isLoading, onChange, onSubmit, 
         </div>
         
         <div>
-          <label className="block text-xs font-medium text-secondary mb-1">
+          <label htmlFor={`${formId}-repo_id`} className="block text-xs font-medium text-secondary mb-1">
             Profile Name (ID) *
           </label>
           <input
             type="text"
+            id={`${formId}-repo_id`}
             value={editingProfile ? editingProfile : formData.repo_id}
             onChange={(e) => onChange('repo_id', e.target.value)}
             className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
@@ -243,10 +246,11 @@ function ProfileForm({ formData, editingProfile, isLoading, onChange, onSubmit, 
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-secondary mb-1">
+          <label htmlFor={`${formId}-provider`} className="block text-xs font-medium text-secondary mb-1">
             Provider *
           </label>
           <select
+            id={`${formId}-provider`}
             value={formData.provider}
             onChange={(e) => onChange('provider', e.target.value)}
             className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
@@ -258,11 +262,12 @@ function ProfileForm({ formData, editingProfile, isLoading, onChange, onSubmit, 
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-secondary mb-1">
+          <label htmlFor={`${formId}-repo`} className="block text-xs font-medium text-secondary mb-1">
             Repository *
           </label>
           <input
             type="text"
+            id={`${formId}-repo`}
             value={formData.repo}
             onChange={(e) => onChange('repo', e.target.value)}
             className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
@@ -272,11 +277,12 @@ function ProfileForm({ formData, editingProfile, isLoading, onChange, onSubmit, 
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-secondary mb-1">
+          <label htmlFor={`${formId}-local_path`} className="block text-xs font-medium text-secondary mb-1">
             Local Path *
           </label>
           <input
             type="text"
+            id={`${formId}-local_path`}
             value={formData.local_path}
             onChange={(e) => onChange('local_path', e.target.value)}
             className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
@@ -286,11 +292,12 @@ function ProfileForm({ formData, editingProfile, isLoading, onChange, onSubmit, 
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-secondary mb-1">
+          <label htmlFor={`${formId}-artifact_root`} className="block text-xs font-medium text-secondary mb-1">
             Artifact Root *
           </label>
           <input
             type="text"
+            id={`${formId}-artifact_root`}
             value={formData.artifact_root}
             onChange={(e) => onChange('artifact_root', e.target.value)}
             className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
@@ -300,11 +307,12 @@ function ProfileForm({ formData, editingProfile, isLoading, onChange, onSubmit, 
         </div>
 
         <div className="md:col-span-2">
-          <label className="block text-xs font-medium text-secondary mb-1">
+          <label htmlFor={`${formId}-default_target_branch`} className="block text-xs font-medium text-secondary mb-1">
             Default Branch
           </label>
           <input
             type="text"
+            id={`${formId}-default_target_branch`}
             value={formData.default_target_branch}
             onChange={(e) => onChange('default_target_branch', e.target.value)}
             className="w-full bg-raised border border-subtle rounded-md px-3 py-1.5 text-sm text-primary"
@@ -322,7 +330,7 @@ function ProfileForm({ formData, editingProfile, isLoading, onChange, onSubmit, 
         <button
           type="submit"
           disabled={isLoading}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-accent text-white rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="btn-primary"
         >
           <Check size={14} aria-hidden="true" />
           {isLoading ? 'Saving...' : editingProfile ? 'Update Profile' : 'Add Profile'}
@@ -403,32 +411,45 @@ interface DeleteModalProps {
 }
 
 function DeleteModal({ profileName, isLoading, onCancel, onConfirm }: DeleteModalProps) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
+  useEffect(() => {
+    const element = dialog.current;
+    // No close() on cleanup: its close event would reach onCancel and take
+    // the dialog straight back down when React re-runs this effect.
+    if (element && !element.open) element.showModal();
+    cancelButton.current?.focus();
+  }, []);
+
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-raised border border-subtle rounded-lg p-6 max-w-md w-full">
-        <h3 className="text-lg font-semibold text-primary mb-2">Delete Profile</h3>
-        <p className="text-sm text-secondary mb-4">
-          Are you sure you want to delete the profile <strong>{profileName}</strong>?
-          This action cannot be undone.
-        </p>
-        <div className="flex gap-2 justify-end">
-          <button
-            onClick={onCancel}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-raised border border-subtle rounded-md text-sm text-secondary hover:bg-white/5"
-          >
-            <X size={14} aria-hidden="true" />
-            Cancel
-          </button>
-          <button
-            onClick={onConfirm}
-            disabled={isLoading}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-md text-sm font-medium hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <Trash2 size={14} aria-hidden="true" />
-            {isLoading ? 'Deleting...' : 'Delete Profile'}
-          </button>
-        </div>
+    <dialog ref={dialog} onClose={onCancel} aria-labelledby={titleId} aria-describedby={descriptionId}
+      className="session-dialog bg-raised border border-subtle rounded-lg p-6 max-w-md text-primary backdrop:bg-black/50">
+      <h3 id={titleId} className="text-lg font-semibold text-primary mb-2">Delete Profile</h3>
+      <p id={descriptionId} className="text-sm text-secondary mb-4">
+        Are you sure you want to delete the profile <strong>{profileName}</strong>?
+        This action cannot be undone.
+      </p>
+      <div className="flex gap-2 justify-end">
+        <button
+          ref={cancelButton}
+          // Closing the dialog itself returns focus to the button that opened it; onClose then runs onCancel.
+          onClick={() => dialog.current?.close()}
+          className="btn-secondary"
+        >
+          <X size={14} aria-hidden="true" />
+          Cancel
+        </button>
+        <button
+          onClick={onConfirm}
+          disabled={isLoading}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-md text-sm font-medium hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <Trash2 size={14} aria-hidden="true" />
+          {isLoading ? 'Deleting...' : 'Delete Profile'}
+        </button>
       </div>
-    </div>
+    </dialog>
   );
 }

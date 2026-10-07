@@ -155,6 +155,11 @@ pub fn run_loop(
             }
         };
 
+        if cfg.defaults.factory_enabled == Some(false) {
+            eprintln!("gah loop: factory module disabled; stopping before another iteration");
+            return shutdown_gracefully();
+        }
+
         // The explicit `--parallel` flag (parallel_arg > 0) wins; otherwise
         // derive the worker pool size from the freshly-reloaded profile.
         let parallel = if parallel_arg == 0 {
@@ -229,6 +234,29 @@ pub fn node_total_memory_bytes() -> Option<u64> {
     node_capacity::sample()
         .ok()
         .map(|pressure| pressure.memory_total_bytes)
+}
+
+/// What admission measures against on this node, for the Settings page to
+/// show beside the limits. `None` where the platform does not expose it.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct NodeResources {
+    pub memory_total_mib: u64,
+    pub memory_available_mib: u64,
+    pub logical_cpus: usize,
+    pub load_one: f64,
+    /// Inside WSL the totals are what Windows grants the VM, not the host's.
+    pub wsl: bool,
+}
+
+pub fn node_resources() -> Option<NodeResources> {
+    let pressure = node_capacity::sample().ok()?;
+    Some(NodeResources {
+        memory_total_mib: pressure.memory_total_bytes / (1024 * 1024),
+        memory_available_mib: pressure.memory_available_bytes / (1024 * 1024),
+        logical_cpus: pressure.logical_cpus,
+        load_one: pressure.load_one,
+        wsl: std::env::var_os("WSL_DISTRO_NAME").is_some(),
+    })
 }
 
 /// Announce node-capacity settings when they change, not on every ~30s
@@ -1156,27 +1184,16 @@ pub(crate) fn run_dispatch_and_record(
             } else {
                 None
             };
-            let details = format!("{label}: {e:#}");
-            if let Some(reason_code) = reason_code {
-                crate::events::record_with_run_id_and_reason_code(
-                    cfg,
-                    event_type,
-                    Some(args.profile.as_str()),
-                    work_id,
-                    args.run_id.as_deref(),
-                    details,
-                    Some(reason_code),
-                )?;
-            } else {
-                crate::events::record_with_run_id(
-                    cfg,
-                    event_type,
-                    Some(args.profile.as_str()),
-                    work_id,
-                    args.run_id.as_deref(),
-                    details,
-                )?;
-            }
+            crate::events::record_dispatch_error(
+                cfg,
+                event_type,
+                Some(args.profile.as_str()),
+                work_id,
+                args.run_id.as_deref(),
+                format!("{label}: {e:#}"),
+                reason_code,
+                &e,
+            )?;
             Err(e)
         }
     }

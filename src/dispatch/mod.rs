@@ -183,11 +183,11 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
     // The guard is kept alive for the rest of `run()` via this binding;
     // its `Drop` releases the claim on every exit path below, including
     // the many early returns.
-    let _central_claim_guard =
+    let (_central_claim_guard, claimed_work_id) =
         if JobKind::parse(&args.mode).map(|kind| kind.family()) == Ok(JobFamily::ImproveLike) {
             claims::acquire_claim(cfg, profile, args)?
         } else {
-            None
+            (None, None)
         };
 
     let ts = args
@@ -229,6 +229,7 @@ pub fn run(cfg: &GahConfig, args: &DispatchArgs) -> Result<()> {
         Err(_) => anyhow::bail!("unknown mode: {}", args.mode),
     };
     ledger.duration_seconds = Some(started.elapsed().as_secs_f64());
+    claims::stamp_claimed_work_id(&mut ledger, claimed_work_id);
     if !usage_has_observation(&ledger.usage) {
         ledger.usage = aggregate_attempt_usage(&ledger.attempts);
     }

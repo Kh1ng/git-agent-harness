@@ -1,4 +1,4 @@
-const pages = ['overview', 'agentpool', 'work', 'telemetry', 'quota', 'events', 'issues', 'agents', 'profile', 'settings', 'chat', 'git', 'nodes', 'planning'] as const;
+const pages = ['overview', 'agentpool', 'work', 'kanban', 'telemetry', 'quota', 'events', 'issues', 'agents', 'profile', 'settings', 'chat', 'git', 'nodes', 'planning'] as const;
 /** Pages that no longer exist, and where their links go now. */
 const LEGACY_PAGES: Record<string, Page> = { projects: 'git' };
 export type Page = typeof pages[number];

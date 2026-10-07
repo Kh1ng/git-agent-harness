@@ -565,6 +565,9 @@ pub enum ConfigCommands {
         /// across all profiles/projects (the manager-wake "who's on call").
         #[arg(long)]
         current_manager: Option<String>,
+        /// Enable factory automation; disabling stops factory loops and watchdog services.
+        #[arg(long, action = clap::ArgAction::Set)]
+        factory_enabled: Option<bool>,
         /// Persist this host's role. Restart an existing execution/control service to apply it.
         #[arg(long, value_enum)]
         node_role: Option<crate::node_role::NodeRole>,
@@ -592,6 +595,14 @@ pub enum ConfigCommands {
         /// an explicit floor must be at least 512.
         #[arg(long)]
         memory_floor_mib: Option<u64>,
+        /// CPU cores each implementation, fix, retry, or escalation worker
+        /// reserves (1 to 64; the default is 2).
+        #[arg(long)]
+        worker_cpu_cores: Option<u32>,
+        /// Percent of the node's logical CPUs that load plus reservations
+        /// may reach before another worker waits (10 to 400; default 90).
+        #[arg(long)]
+        cpu_ceiling_percent: Option<u32>,
     },
     /// Issue #149: ordered routing-candidate editing for a profile. The
     /// lists are `pm` / `improve` / `review` / `escalatory`. Every mutation

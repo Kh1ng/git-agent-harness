@@ -244,11 +244,14 @@ pub struct ConfigShowSummary {
 
 #[derive(serde::Serialize)]
 pub struct ConfigShowFull {
+    pub factory_enabled: bool,
     pub node: crate::node_role::NodeRoleStatus,
     pub schema_version: u32,
     pub config_path: String,
     pub current_manager: Option<String>,
     pub node_capacity: crate::config::NodeCapacitySettings,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_resources: Option<crate::controller::NodeResources>,
     /// Issue #653: notification channel settings (no secrets — tokens and
     /// webhook URLs live in the environment).
     pub notifications: NotificationSettingsSummary,
@@ -485,11 +488,17 @@ pub fn config_show_full(
     }
 
     Ok(ConfigShowFull {
+        factory_enabled: if !config_path.exists() {
+            false
+        } else {
+            cfg.defaults.factory_enabled.unwrap_or(true)
+        },
         node: crate::node_role::NodeRoleStatus::resolve(&cfg.defaults)?,
         schema_version: CONFIG_SHOW_SCHEMA_VERSION,
         config_path: config_path.to_string_lossy().into_owned(),
         current_manager: cfg.defaults.current_manager.clone(),
         node_capacity: cfg.defaults.node_capacity,
+        node_resources: crate::controller::node_resources(),
         notifications: NotificationSettingsSummary::from_defaults(&cfg.defaults),
         profiles,
     })

@@ -168,3 +168,34 @@ test('the routing editor sends the named account, and remove and reorder name th
     body: { list: 'improve', backend: 'opencode', instance: 'tak-vibe', model: 'zai-glm-5-3', priority: 210 },
   });
 });
+
+test('profile management names fields and safely contains delete confirmation focus', async ({ page, request }) => {
+  await request.post(`${MOCK_BASE_URL}/api/mock/reset`);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Profile', exact: true }).click();
+  await page.getByRole('button', { name: 'Add Profile', exact: true }).click();
+  for (const label of ['Display Name *', 'Profile Name (ID) *', 'Provider *', 'Repository *', 'Local Path *', 'Artifact Root *', 'Default Branch']) {
+    await expect(page.getByLabel(label, { exact: true })).toBeVisible();
+  }
+  await page.getByLabel('Display Name *', { exact: true }).fill('Keyboard project');
+  await expect(page.getByLabel('Display Name *', { exact: true })).toHaveValue('Keyboard project');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  const opener = page.getByRole('button', { name: 'Delete profile', exact: true }).first();
+  await opener.focus();
+  await page.keyboard.press('Enter');
+  const dialog = page.getByRole('dialog', { name: 'Delete Profile', exact: true });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  await expect(dialog).toHaveAccessibleDescription(/This action cannot be undone/);
+  await page.keyboard.press('Tab');
+  await expect(dialog.getByRole('button', { name: 'Delete Profile', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(opener).not.toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(opener).toBeFocused();
+  await opener.click();
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(opener).toBeFocused();
+});

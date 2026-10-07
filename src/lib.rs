@@ -21,6 +21,7 @@ pub mod dispatch;
 pub mod doctor;
 pub mod events;
 pub mod execution_identity;
+pub mod factory;
 pub mod fleet_preflight;
 pub mod generated_artifacts;
 mod github_ci;
