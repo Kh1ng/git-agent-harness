@@ -15,7 +15,7 @@ pub(crate) mod review_usage;
 #[allow(unused_imports)]
 pub use crate::runner::backend_runner::{
     for_kind, AgyRunner, BackendRunner, ClaudeRunner, CodexRunner, HermesRunner, OpencodeRunner,
-    OpenhandsRunner, ReviewArgContext, ReviewInvocation, RunContext, VibeRunner,
+    OpenhandsRunner, ReviewArgContext, ReviewInvocation, RunContext, VibeRunner, WriteIntent,
 };
 #[allow(unused_imports)]
 pub(crate) use crate::runner::backends::agy::log_delta;

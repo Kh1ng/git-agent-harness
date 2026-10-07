@@ -862,6 +862,7 @@ mod tests {
             review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             details: format!("{kind}: test"),
             remediation_plan: None,
+            skipped: Vec::new(),
         }
     }
 
@@ -883,6 +884,7 @@ mod tests {
             review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             details: details.into(),
             remediation_plan: None,
+            skipped: Vec::new(),
         }
     }
 
@@ -1009,6 +1011,7 @@ mod tests {
             review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             details: "fix_existing: deferred_capacity: claude/sonnet busy".into(),
             remediation_plan: None,
+            skipped: Vec::new(),
         });
 
         assert_eq!(
@@ -1046,6 +1049,7 @@ mod tests {
             review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             details: "branch 'gah/real-1' already attached to worktree /tmp/gah/real-1 (clean=true); deferring to next eligible item".into(),
             remediation_plan: None,
+            skipped: Vec::new(),
         });
 
         assert_eq!(
@@ -1153,6 +1157,7 @@ mod tests {
             review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             details: "fix_existing: deferred_capacity: claude/sonnet busy".into(),
             remediation_plan: None,
+            skipped: Vec::new(),
         }
     }
 
@@ -1441,6 +1446,7 @@ default_target_branch = "main"
             reason_code: None,
             review_contract_version: None, // Pre-bump event
             remediation_plan: None,
+            skipped: Vec::new(),
         };
 
         let events = vec![old_event.clone(), old_event.clone(), old_event.clone()];

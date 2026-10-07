@@ -5,10 +5,32 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::claude_monitor::find_claude_transcript;
+use crate::runner::backends::write_refusal;
 use crate::runner::output;
 use crate::runner::process::{spawn_with_idle_watch, write_redacted_task};
 use crate::runner::resolve::filtered_backend_args;
-use crate::runner::RunResult;
+use crate::runner::{RunResult, WriteIntent};
+
+const DEFAULT_PERMISSION_MODE: &str = "acceptEdits";
+const DEFAULT_EDIT_TOOLS: &str = "Edit,Write,MultiEdit,NotebookEdit";
+/// Shell commands an implementation run may start by default: version
+/// control, the common build and test tools, and read-only inspection.
+/// Claude Code has no sandbox, so plain `Bash` would let an unattended job
+/// run anything as the node user, network included. This is a reduction, not
+/// a sandbox: a build script or test can still run arbitrary code. A profile
+/// widens or replaces it with `claude_args = ["--allowedTools", "..."]`.
+const DEFAULT_SHELL_COMMANDS: &[&str] = &[
+    "git", "cargo", "npm", "npx", "node", "pnpm", "yarn", "make", "python", "python3", "pytest",
+    "go", "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "mkdir",
+];
+
+fn default_allowed_tools() -> String {
+    let mut tools = DEFAULT_EDIT_TOOLS.to_string();
+    for command in DEFAULT_SHELL_COMMANDS {
+        tools.push_str(&format!(",Bash({command}:*)"));
+    }
+    tools
+}
 
 /// Run Claude CLI non-interactively via `claude -p`.
 /// extra_args come from profile.claude_args (e.g. `--allowedTools Edit,Write,Bash`).
@@ -22,6 +44,7 @@ pub(crate) fn run_with_executable(
     extra_args: &[String],
     env_vars: &[(String, String)],
     idle_timeout_seconds: u64,
+    write_intent: WriteIntent,
 ) -> Result<RunResult> {
     let log_path = session_dir.join("backend-output.log");
     write_redacted_task(session_dir, task)?;
@@ -51,9 +74,33 @@ pub(crate) fn run_with_executable(
     if let Some(model) = effective_model {
         cmd.args(["--model", model]);
     }
-    cmd.args(filtered_backend_args("claude", extra_args));
+    // Issue #1367: an implementation run must be able to edit the worktree
+    // and run commands. Profile claude_args that set either flag win.
+    // Read-only job kinds run in the operator's real checkout and keep the
+    // CLI's own permission defaults.
+    let implementation = write_intent == WriteIntent::Implementation;
+    let filtered_extra = filtered_backend_args("claude", extra_args);
+    let has_flag = |names: &[&str]| {
+        filtered_extra.iter().any(|arg| {
+            names
+                .iter()
+                .any(|name| arg == name || arg.starts_with(&format!("{name}=")))
+        })
+    };
+    let profile_sets_permission_mode =
+        has_flag(&["--permission-mode", "--dangerously-skip-permissions"]);
+    let profile_sets_allowed_tools = has_flag(&["--allowedTools", "--allowed-tools"]);
+    if implementation && !profile_sets_permission_mode {
+        cmd.args(["--permission-mode", DEFAULT_PERMISSION_MODE]);
+    }
+    let default_tools = default_allowed_tools();
+    if implementation && !profile_sets_allowed_tools {
+        cmd.args(["--allowedTools", &default_tools]);
+    }
+    cmd.args(filtered_extra);
     crate::runner::apply_child_env(&mut cmd, env_vars);
 
+    let worktree_before = write_refusal::worktree_state(worktree);
     let (exit_code, duration_secs, resources) = spawn_with_idle_watch(
         cmd,
         &log_path,
@@ -68,10 +115,43 @@ pub(crate) fn run_with_executable(
         .as_ref()
         .and_then(|h| find_claude_transcript(h, worktree, &session_id))
         .map(|p| p.to_string_lossy().into_owned());
-    let final_summary = transcript_path
+    let transcript_text = transcript_path
         .as_deref()
-        .and_then(|path| fs::read_to_string(path).ok())
-        .and_then(|text| output::extract_claude_transcript_summary(&text));
+        .and_then(|path| fs::read_to_string(path).ok());
+    let final_summary = transcript_text
+        .as_deref()
+        .and_then(output::extract_claude_transcript_summary);
+
+    // Issue #1367: a run whose write tools were denied and that left the
+    // worktree untouched cannot succeed on retry. Runs GAH killed (negative
+    // exit) keep their own classification.
+    let refused_tools = transcript_text
+        .as_deref()
+        .map(write_refusal::claude_refused_write_tools)
+        .unwrap_or_default();
+    let exit_code = if implementation
+        && exit_code >= 0
+        && !refused_tools.is_empty()
+        && !write_refusal::worktree_changed_since(worktree_before.as_deref(), worktree)
+    {
+        let cause = if profile_sets_permission_mode || profile_sets_allowed_tools {
+            "profile claude_args overrides GAH's default --permission-mode/--allowedTools; make it grant these tools or remove the override".to_string()
+        } else {
+            format!(
+                "GAH's defaults (--permission-mode {DEFAULT_PERMISSION_MODE} --allowedTools {default_tools}) were not enough; check the Claude settings permissions (deny rules, managed policy) or set profile claude_args"
+            )
+        };
+        write_refusal::report(
+            &log_path,
+            exit_code,
+            &format!(
+                "claude denied {} and changed nothing. {cause}.",
+                refused_tools.join(", ")
+            ),
+        )
+    } else {
+        exit_code
+    };
 
     Ok(RunResult {
         exit_code,
@@ -110,6 +190,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -135,6 +216,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -157,6 +239,7 @@ mod tests {
             &["--allowedTools".to_string(), "Edit,Bash".to_string()],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -165,6 +248,300 @@ mod tests {
         assert!(argv.contains(&"the claude task".to_string()));
         assert!(argv.contains(&"--allowedTools".to_string()));
         assert!(argv.contains(&"Edit,Bash".to_string()));
+    }
+
+    #[test]
+    fn run_claude_grants_write_permissions_by_default() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        run_with_executable(
+            Path::new("claude"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &envs,
+            300,
+            WriteIntent::Implementation,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert!(argv
+            .windows(2)
+            .any(|args| args == ["--permission-mode", "acceptEdits"]));
+        let tools = argv
+            .windows(2)
+            .find_map(|args| (args[0] == "--allowedTools").then(|| args[1].clone()))
+            .expect("default --allowedTools");
+        let tools: Vec<&str> = tools.split(',').collect();
+        for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+            assert!(tools.contains(&tool), "got {tools:?}");
+        }
+        for command in ["Bash(git:*)", "Bash(cargo:*)", "Bash(npm:*)"] {
+            assert!(tools.contains(&command), "got {tools:?}");
+        }
+        // Unrestricted shell is never the default: Claude Code has no sandbox.
+        assert!(!tools.contains(&"Bash"), "got {tools:?}");
+        assert!(tools
+            .iter()
+            .all(|tool| !tool.starts_with("Bash(curl") && !tool.starts_with("Bash(ssh")));
+    }
+
+    #[test]
+    fn run_claude_profile_permission_args_replace_the_defaults() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        run_with_executable(
+            Path::new("claude"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[
+                "--permission-mode".to_string(),
+                "plan".to_string(),
+                "--allowed-tools=Read".to_string(),
+            ],
+            &envs,
+            300,
+            WriteIntent::Implementation,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert!(argv
+            .windows(2)
+            .any(|args| args == ["--permission-mode", "plan"]));
+        assert!(argv.contains(&"--allowed-tools=Read".to_string()));
+        assert!(!argv.contains(&"acceptEdits".to_string()));
+        assert!(!argv.contains(&"--allowedTools".to_string()));
+    }
+
+    #[test]
+    fn run_claude_read_only_dispatch_keeps_the_cli_permission_defaults() {
+        // research/audit/estimate/pm run in the operator's real checkout.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        make_recording_bin(&f.bin_dir, "claude", &f.record_dir, 0);
+        let envs = vec![("PATH".to_string(), f.bin_dir.to_str().unwrap().to_string())];
+
+        run_with_executable(
+            Path::new("claude"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &["--add-dir".to_string(), "/docs".to_string()],
+            &envs,
+            300,
+            WriteIntent::ReadOnly,
+        )
+        .unwrap();
+
+        let argv = recorded_argv(&f.record_dir);
+        assert!(
+            !argv.contains(&"--permission-mode".to_string()),
+            "got {argv:?}"
+        );
+        assert!(!argv.contains(&"acceptEdits".to_string()));
+        assert!(!argv.contains(&"--allowedTools".to_string()));
+        assert!(argv.contains(&"/docs".to_string()));
+    }
+
+    #[test]
+    fn run_claude_read_only_dispatch_does_not_report_denied_writes() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        make_transcript_bin(&f, "Edit", EDIT_DENIED, false);
+
+        let result = run_with_executable(
+            Path::new("claude"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &transcript_envs(&f),
+            300,
+            WriteIntent::ReadOnly,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(write_refusal::refusal_detail(&log).is_none());
+    }
+
+    /// A fake `claude` that prints refusal-sounding prose, optionally edits
+    /// the worktree, and writes a transcript for the pinned session id whose
+    /// single `tool` call ends in `tool_result`.
+    fn make_transcript_bin(f: &Fixture, tool: &str, tool_result: &str, edits_worktree: bool) {
+        let call = serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": tool, "input": {}}
+            ]}
+        });
+        let outcome = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "is_error": true, "content": tool_result}
+            ]}
+        });
+        let edit = if edits_worktree {
+            "echo changed > progress.txt\n"
+        } else {
+            ""
+        };
+        make_fake_bin(
+            &f.bin_dir,
+            "claude",
+            &format!(
+                "#!/bin/sh\nsid=''\nwhile [ $# -gt 0 ]; do [ \"$1\" = '--session-id' ] && sid=\"$2\"; shift; done\n\
+                 mkdir -p \"$HOME/.claude/projects/p\"\n\
+                 cat > \"$HOME/.claude/projects/p/$sid.jsonl\" <<'GAH_EOF'\n{call}\n{outcome}\nGAH_EOF\n\
+                 {edit}echo 'The ticket says the runner denies Edit and requires approval.'\n"
+            ),
+        );
+    }
+
+    fn transcript_envs(f: &Fixture) -> Vec<(String, String)> {
+        vec![
+            (
+                "PATH".to_string(),
+                format!(
+                    "{}:{}",
+                    f.bin_dir.to_str().unwrap(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            ),
+            (
+                "HOME".to_string(),
+                f.record_dir.to_str().unwrap().to_string(),
+            ),
+        ]
+    }
+
+    const EDIT_DENIED: &str =
+        "Claude requested permissions to write to /repo/src/lib.rs, but you haven't granted it yet.";
+
+    #[test]
+    fn run_claude_denied_write_without_changes_fails_as_configuration_error() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        make_transcript_bin(&f, "Edit", EDIT_DENIED, false);
+
+        let result = run_with_executable(
+            Path::new("claude"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &transcript_envs(&f),
+            300,
+            WriteIntent::Implementation,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        let detail = write_refusal::refusal_detail(&log).expect("marker line");
+        assert!(detail.contains("claude denied Edit"), "got: {detail}");
+        assert!(detail.contains("GAH's defaults"), "got: {detail}");
+        assert!(detail.contains("claude_args"), "got: {detail}");
+    }
+
+    #[test]
+    fn run_claude_denied_write_names_the_profile_override() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        make_transcript_bin(&f, "Edit", EDIT_DENIED, false);
+
+        let result = run_with_executable(
+            Path::new("claude"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &["--permission-mode".to_string(), "plan".to_string()],
+            &transcript_envs(&f),
+            300,
+            WriteIntent::Implementation,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 1);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        let detail = write_refusal::refusal_detail(&log).expect("marker line");
+        assert!(
+            detail.contains("profile claude_args overrides"),
+            "got: {detail}"
+        );
+    }
+
+    #[test]
+    fn run_claude_denied_write_does_not_fail_a_run_that_changed_the_worktree() {
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        make_transcript_bin(&f, "Edit", EDIT_DENIED, true);
+
+        let result = run_with_executable(
+            Path::new("claude"),
+            &f.worktree,
+            "task",
+            &f.session_dir,
+            None,
+            &[],
+            &transcript_envs(&f),
+            300,
+            WriteIntent::Implementation,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(write_refusal::refusal_detail(&log).is_none());
+    }
+
+    #[test]
+    fn run_claude_refusal_wording_in_output_does_not_fail_a_successful_run() {
+        // The log quotes "denies Edit" / "requires approval", and a tool
+        // failed for an ordinary reason: neither is a permission denial.
+        let _exec_guard = crate::test_support::ExecGuard::new();
+        let f = fixture();
+        initialize_git_worktree(&f.worktree);
+        make_transcript_bin(&f, "Edit", "String to replace not found in file.", false);
+
+        let result = run_with_executable(
+            Path::new("claude"),
+            &f.worktree,
+            "Fix #1367: the runner denies Edit and requires approval",
+            &f.session_dir,
+            None,
+            &[],
+            &transcript_envs(&f),
+            300,
+            WriteIntent::Implementation,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("denies Edit"));
+        assert!(write_refusal::refusal_detail(&log).is_none());
     }
 
     #[test]
@@ -183,6 +560,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -213,6 +591,7 @@ mod tests {
             ],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -244,6 +623,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap();
 
@@ -265,6 +645,7 @@ mod tests {
             &[],
             &envs,
             300,
+            WriteIntent::Implementation,
         )
         .unwrap_err();
 
@@ -303,6 +684,7 @@ mod tests {
             &[],
             &envs,
             3,
+            WriteIntent::Implementation,
         )
         .unwrap();
 

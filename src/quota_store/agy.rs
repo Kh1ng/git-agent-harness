@@ -105,7 +105,6 @@ fn probe_marker(account: &str, now: OffsetDateTime) -> QuotaObservationRecord {
         checked_at: now.format(&Rfc3339).ok(),
         check_error: None,
         usage_source: Some(crate::usage::agy::USAGE_SOURCE.into()),
-        mistral_admin: None,
         account_usage: None,
     }
 }

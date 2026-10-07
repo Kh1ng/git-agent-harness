@@ -42,6 +42,7 @@ pub trait Effects {
 #[derive(Debug, Default, Clone)]
 pub struct Options {
     pub role: Option<Role>,
+    pub factory_enabled: Option<bool>,
     pub agent: Option<Agent>,
     pub provider: Option<Provider>,
     pub memory: Option<MemoryMode>,
@@ -767,6 +768,9 @@ impl<'a> Setup<'a> {
             );
         }
         let mut variables = env.0;
+        if let Some(enabled) = self.options.factory_enabled {
+            variables.push(("GAH_FACTORY_ENABLED", enabled.to_string()));
+        }
         // Do not let inherited installer options expand this setup selection.
         if !variables.iter().any(|(key, _)| *key == "GAH_GATEWAY_MODE") {
             variables.push(("GAH_GATEWAY_MODE", String::new()));

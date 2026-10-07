@@ -36,7 +36,6 @@ fn store_record(
         checked_at: checked_at.map(str::to_string),
         check_error: check_error.map(str::to_string),
         usage_source: Some("claude_native".to_string()),
-        mistral_admin: None,
         account_usage: None,
     }
 }
