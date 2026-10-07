@@ -76,8 +76,9 @@ pub fn run(args: Args) -> Result<()> {
     }
     let run_id = Uuid::new_v4().to_string();
     let resolved_config_path = config::resolve_config_path(args.config_path.as_deref());
-    // The loop keeps its own profile lock. Explicit extra jobs coordinate via
-    // the same atomic per-work claims as loop workers, never reconcile or stop it.
+    // The loop keeps its own profile lock. An explicit extra job never waits
+    // for it, reconciles, or stops the loop; it takes the loop's per-work
+    // claim instead (see `ManualClaim`).
     let _lock = if args.manual_worker {
         None
     } else {
@@ -95,13 +96,32 @@ pub fn run(args: Args) -> Result<()> {
         )?;
     }
     let manual_worker = args.manual_worker;
-    let dispatch_reason = manual_worker.then(|| {
-        "Operator started an extra worker outside automatic capacity admission".to_string()
-    });
-    let dispatch_args = CliDispatchArgs {
+    let dispatch_reason = manual_worker
+        .then(|| "Operator started an extra worker outside the per-model job limit".to_string());
+    let mut dispatch_args = CliDispatchArgs {
         run_id: Some(run_id),
         dispatch_reason,
         ..args.into()
+    };
+    let _claim = if manual_worker && !dispatch_args.dry_run {
+        let claim = ManualClaim::take(&cfg, &dispatch_args)?;
+        // The same node admission a loop worker passes: free memory above the
+        // floor with this job's reservation, CPU and pressure. Only the
+        // per-model job limit and the loop's worker count are bypassed.
+        dispatch_args.route_admission =
+            Some(controller_runtime::RouteNodeAdmission::single_worker(
+                controller_runtime::NextAction::DispatchTicket {
+                    ticket_path: dispatch_args.target.clone(),
+                    work_id: claim.as_ref().map(|claim| claim.work_id.clone()),
+                    recommended_backend: Some(dispatch_args.backend.clone()),
+                    recommended_model: dispatch_args.model.clone(),
+                    reason: "manual worker".to_string(),
+                },
+                cfg.defaults.node_capacity,
+            ));
+        claim
+    } else {
+        None
     };
     let outcome =
         controller_runtime::run_dispatch_and_record(&cfg, "dispatch", None, &dispatch_args)?;
@@ -111,6 +131,44 @@ pub fn run(args: Args) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The loop's atomic per-work claim (`work_claim::try_claim_work`), held by a
+/// manual worker for its whole run. The loop takes the same claim before it
+/// starts a job, so neither can start work the other holds, and
+/// `work_claim::record_route` applies to manual runs too.
+struct ManualClaim {
+    scope: String,
+    work_id: String,
+}
+
+impl ManualClaim {
+    /// `None` when the target names no work id: there is nothing to claim.
+    fn take(cfg: &config::GahConfig, args: &CliDispatchArgs) -> Result<Option<Self>> {
+        let profile = config::get_profile(cfg, &args.profile)?;
+        let Some(work_id) = crate::dispatch::target_work_id(profile, args) else {
+            return Ok(None);
+        };
+        let work_id = crate::work_claim::normalize_work_identity(&work_id);
+        let scope = crate::work_claim::canonical_claim_scope(&args.profile, &profile.repo_id);
+        if !crate::work_claim::try_claim_work(&scope, &work_id)? {
+            anyhow::bail!(
+                "Manual worker did not start: {work_id} is already being worked on by the loop or another worker"
+            );
+        }
+        Ok(Some(Self { scope, work_id }))
+    }
+}
+
+impl Drop for ManualClaim {
+    fn drop(&mut self) {
+        if let Err(error) = crate::work_claim::release_work(&self.scope, &self.work_id) {
+            eprintln!(
+                "warning: could not release the claim on {}: {error:#}",
+                self.work_id
+            );
+        }
+    }
 }
 
 fn prepare_manual_worker(cfg: &mut config::GahConfig, args: &Args) -> Result<()> {
@@ -126,8 +184,8 @@ fn prepare_manual_worker(cfg: &mut config::GahConfig, args: &Args) -> Result<()>
     if let Some(effort) = &args.reasoning_effort {
         profile.set_agent_effort(&args.backend, effort)?;
     }
-    // Dispatch already has no loop node-admission channel. Removing only this
-    // run's model cap also prevents waiting silently on the automatic pool cap.
+    // Removing only this run's model cap keeps it from waiting silently on
+    // the automatic pool cap. Node admission still applies (see `run`).
     profile
         .max_concurrent_per_model
         .remove(&format!("{}/{model}", args.backend));

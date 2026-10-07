@@ -68,6 +68,65 @@ default_target_branch = "main"
 }
 
 #[test]
+fn manual_worker_refuses_work_the_loop_has_claimed_and_leaves_that_claim_alone() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let config = dir.path().join("gah.toml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+[profiles.repo]
+display_name = "Repo"
+repo_id = "repo"
+provider = "github"
+repo = "owner/repo"
+local_path = "/tmp/repo"
+artifact_root = "{}"
+default_target_branch = "main"
+"#,
+            dir.path().display()
+        ),
+    )
+    .unwrap();
+    let ticket = dir.path().join("TICKET-7-example.md");
+    std::fs::write(&ticket, "# Example\n").unwrap();
+    let claims = dir.path().join("work-claims.json");
+    // What the loop writes before it starts #7.
+    std::env::set_var("GAH_CLAIM_STATE_PATH", &claims);
+    assert!(git_agent_harness::work_claim::try_claim_work("repo@repo", "#7").unwrap());
+
+    let output = support::gah_command()
+        .env("GAH_CLAIM_STATE_PATH", &claims)
+        .args([
+            "dispatch",
+            "--profile",
+            "repo",
+            "--mode",
+            "improve",
+            "--backend",
+            "codex",
+            "--model",
+            "gpt-6.1-sol",
+            "--manual-worker",
+            "--target",
+        ])
+        .arg(&ticket)
+        .arg("--config-path")
+        .arg(&config)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("#7 is already being worked on by the loop or another worker"),
+        "{stderr}"
+    );
+    // The refused run did not release the loop's claim on its way out.
+    assert!(!git_agent_harness::work_claim::try_claim_work("repo@repo", "#7").unwrap());
+}
+
+#[test]
 fn task_reasoning_round_trips_through_profile_cli_without_changing_other_args() {
     let dir = tempfile::TempDir::new().unwrap();
     let config = dir.path().join("gah.toml");

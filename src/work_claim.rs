@@ -481,9 +481,8 @@ pub fn try_claim_work(profile: &str, work_id: &str) -> Result<bool> {
     })
 }
 
-/// Release all claims for a profile (useful for cleanup)
 /// Note which agent a claimed job is running on. A job with no claim in
-/// `profile` (a manual dispatch) is left alone.
+/// `profile` is left alone.
 pub fn record_route(profile: &str, work_id: &str, route: ClaimRoute) -> Result<()> {
     with_locked_state(|state| {
         state.set_route(profile, work_id, route);
@@ -491,6 +490,7 @@ pub fn record_route(profile: &str, work_id: &str, route: ClaimRoute) -> Result<(
     })
 }
 
+/// Release all claims for a profile (useful for cleanup)
 pub fn release_all_for_profile(profile: &str) -> Result<()> {
     with_locked_state(|state| {
         state.claims.remove(profile);

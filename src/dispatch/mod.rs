@@ -79,7 +79,7 @@ pub(crate) use self::attempts::{
     routing_runtime_state_from_entries,
 };
 
-pub(crate) use self::claims::duplicate_work_error;
+pub(crate) use self::claims::{duplicate_work_error, target_work_id};
 pub use self::claims::{merge_branch, MergeExecution};
 pub(crate) use self::claims::{scan_available_tickets_with_dependencies, TicketScan};
 pub(crate) use self::prior_attempts::prior_attempt_context;

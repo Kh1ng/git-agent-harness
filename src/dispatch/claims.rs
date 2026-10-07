@@ -145,6 +145,15 @@ pub(super) fn check_duplicate_work(
     args: &DispatchArgs,
     central_claims_active: bool,
 ) -> Result<Option<String>> {
+    let Some(work_id) = target_work_id(profile, args) else {
+        return Ok(None);
+    };
+    check_claimed_or_open(cfg, profile, work_id, central_claims_active)
+}
+
+/// The work id a dispatch target names: the first candidate of a candidates
+/// file, or a ticket file's own id. `None` when the target names no work.
+pub(crate) fn target_work_id(profile: &Profile, args: &DispatchArgs) -> Option<String> {
     let target = if args.target.is_empty() {
         if matches!(
             JobKind::parse(&args.mode),
@@ -166,11 +175,11 @@ pub(super) fn check_duplicate_work(
     };
 
     if target.is_empty() {
-        return Ok(None);
+        return None;
     }
 
     let p = Path::new(&target);
-    let work_id = if p.extension().is_some_and(|e| e == "json") && p.exists() {
+    if p.extension().is_some_and(|e| e == "json") && p.exists() {
         if let Ok(text) = fs::read_to_string(p) {
             if let Ok(artifact) = serde_json::from_str::<CandidateArtifact>(&text) {
                 artifact.candidates.first().map(|c| c.candidate_id.clone())
@@ -188,12 +197,17 @@ pub(super) fn check_duplicate_work(
         }
     } else {
         None
-    };
+    }
+}
 
-    let Some(work_id) = work_id else {
-        return Ok(None);
-    };
-
+/// Refuses `work_id` when another in-flight worker claimed it or an open
+/// PR/MR already carries it; otherwise hands it back for this run to claim.
+fn check_claimed_or_open(
+    cfg: &GahConfig,
+    profile: &Profile,
+    work_id: String,
+    central_claims_active: bool,
+) -> Result<Option<String>> {
     let matching_entries = match crate::ledger::entries_for_work_id(cfg, &work_id) {
         Ok(entries) => entries,
         Err(e) => {
