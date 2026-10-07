@@ -41,3 +41,15 @@ if ! mv "$next" "$target"; then
 fi
 rm -rf "$backup"
 echo "Installed desktop app: $target"
+
+# Release DMGs installed the same app system-wide as "GAH Worker.app". A
+# per-user install leaves that copy behind as a stale second app (#1409).
+legacy_dir="${GAH_LEGACY_APP_DIR:-/Applications}"
+legacy="$legacy_dir/GAH Worker.app"
+if [ "$legacy_dir" != "$app_dir" ] && [ -d "$legacy" ]; then
+  if rm -rf "$legacy" 2>/dev/null; then
+    echo "Removed the old app: $legacy"
+  else
+    echo "WARNING: could not remove $legacy; delete it by hand" >&2
+  fi
+fi

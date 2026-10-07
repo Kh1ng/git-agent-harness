@@ -53,6 +53,41 @@ Validation is layered so a bad value can never lock you out of the config:
 - The loop logs a warning at startup when the settings can never be admitted
   on this node, instead of leaving the fact buried in deferral logs.
 
+### Release channel and in-app updates (issue #1416)
+
+A green merge to `main` publishes a prerelease **edge** channel build
+(`.github/workflows/release-edge.yml`): the `gah` and `gah-mcp-server`
+binaries (Linux x86_64, macOS universal), the server bundle
+(`gah-server-bundle.tar.gz`: the prebuilt `apps/server` and `apps/web` dist
+outputs plus
+the OpenCode agent configs), and `edge-manifest.json` — the versioned
+manifest with a SHA-256 per artifact. When the `TAURI_SIGNING_PRIVATE_KEY`
+secret is configured, the same release carries a signed Tauri updater feed
+(`latest.json`) for the desktop app.
+
+Install from the channel instead of rebuilding from source — the checkout
+stays the deployment root, only the artifact source changes (no git pull,
+cargo, or npm build):
+
+```bash
+gah update --from-release            # edge channel, manifest auto-discovered from origin
+gah update --from-release --release-manifest /path/or/https://.../edge-manifest.json
+```
+
+Every surface shows "Update available" against the same feed: the web
+dashboard's top banner and Settings page (which offer *Update and restart*),
+the desktop app's Settings row (signed updater, restarts into the new
+bundle), and the Fleet page — where each worker reports its version, nodes
+behind the coordinator are flagged, *Update node* / *Update all nodes*
+push the release to workers, and per-node auto-update opts a node in to
+updating whenever central sees it behind. A worker that is mid-dispatch
+finishes its run before the update restarts anything. Workers older than
+the coordinator's minimum supported version
+(`packages/contracts/src/coordinator-protocol.json`) are flagged
+`unsupported` instead of failing silently. Source rebuilds remain the
+explicit developer mode (`gah update` without `--from-release`, or the
+Settings page's *Rebuild from source*).
+
 ### Deterministic CLI/control-plane update
 
 Do not assume a `cargo build --release` updates the `gah` command on PATH. A
