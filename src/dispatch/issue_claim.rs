@@ -25,7 +25,7 @@
 //! machine; this module only arbitrates between logins.
 //!
 //! A dispatch claims its issue only once it holds a backend and node slot
-//! (see [`admit_attempt`]), so a dispatch that is refused capacity never
+//! (see [`IssueClaimSlot::admit`]), so a dispatch that is refused capacity never
 //! announces work it will not do.
 
 use super::attempts::{reserve_backend_attempt, BackendAdmissionGuard};
@@ -36,6 +36,7 @@ use crate::ledger::LedgerEntry;
 use crate::provider::provider_command;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use time::format_description::well_known::Rfc3339;
@@ -75,28 +76,62 @@ pub(crate) fn issue_claim_lost(error: &anyhow::Error) -> Option<&IssueClaimLost>
     error.chain().find_map(|cause| cause.downcast_ref())
 }
 
-/// Reserve the backend and node slot for one attempt and, on a dispatch's
-/// first attempt, claim its issue and start renewing the claim in `lease`.
-/// Later attempts first confirm the lease is still held. A refused slot fails
-/// as a capacity deferral. Another login holding the issue fails with
-/// [`IssueClaimLost`]; the slot is released as that error returns.
-pub(super) fn admit_attempt(
-    profile: &Profile,
-    identity: &ExecutionIdentity,
-    args: &DispatchArgs,
-    attempt: u32,
-    ledger: &mut LedgerEntry,
-    lease: &mut Option<IssueLease>,
-) -> Result<BackendAdmissionGuard> {
-    if let Some(lease) = lease {
-        lease.ensure_held()?;
+/// One dispatch's provider claim on its issue, from its first attempt until
+/// the workflow returns. Empty for a profile that keeps claims local.
+#[derive(Debug, Default)]
+pub(super) struct IssueClaimSlot {
+    lease: Option<IssueLease>,
+}
+
+impl IssueClaimSlot {
+    /// Reserve the backend and node slot for one attempt and, on a dispatch's
+    /// first attempt, claim its issue and start renewing the claim. Later
+    /// attempts first confirm the lease is still held. A refused slot fails
+    /// as a capacity deferral. Another login holding the issue fails with
+    /// [`IssueClaimLost`]; the slot is released as that error returns.
+    pub(super) fn admit(
+        &mut self,
+        profile: &Profile,
+        identity: &ExecutionIdentity,
+        args: &DispatchArgs,
+        attempt: u32,
+        ledger: &mut LedgerEntry,
+    ) -> Result<BackendAdmissionGuard> {
+        self.ensure_held()?;
+        let guard = reserve_backend_attempt(profile, identity, args.route_admission.as_ref())
+            .map_err(|error| super::contextualize_capacity_deferral(error, attempt as usize))?;
+        if attempt == 0 {
+            self.lease = claim_or_lose(profile, &args.target, ledger)?;
+        }
+        Ok(guard)
     }
-    let guard = reserve_backend_attempt(profile, identity, args.route_admission.as_ref())
-        .map_err(|error| super::contextualize_capacity_deferral(error, attempt as usize))?;
-    if attempt == 0 {
-        *lease = claim_or_lose(profile, &args.target, ledger)?;
+
+    /// The last check before a dispatch publishes. If another loop took the
+    /// issue over while this one worked, keep the work on a local WIP commit,
+    /// remove the worktree, and fail with [`IssueClaimLost`]: nothing is
+    /// published.
+    pub(super) fn ensure_held_before_publish(
+        &self,
+        profile: &Profile,
+        mode: &str,
+        worktree: &Path,
+        repo: &Path,
+    ) -> Result<()> {
+        if let Err(lost) = self.ensure_held() {
+            crate::worktree::preserve_wip(
+                worktree,
+                &profile.default_target_branch,
+                &format!("gah: WIP claim lost {mode}"),
+            )?;
+            crate::worktree::cleanup(worktree, repo);
+            return Err(lost);
+        }
+        Ok(())
     }
-    Ok(guard)
+
+    fn ensure_held(&self) -> Result<()> {
+        self.lease.as_ref().map_or(Ok(()), IssueLease::ensure_held)
+    }
 }
 
 fn claim_or_lose(
@@ -179,7 +214,7 @@ impl IssueLease {
     /// Fails with [`IssueClaimLost`] once another loop has taken the issue
     /// or this loop's claim lapsed or was removed. The dispatch must stop:
     /// its work is no longer the work of record for the issue.
-    pub(super) fn ensure_held(&self) -> Result<()> {
+    fn ensure_held(&self) -> Result<()> {
         match self.lost.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             Some(reason) => Err(IssueClaimLost {
                 issue: self.issue.clone(),

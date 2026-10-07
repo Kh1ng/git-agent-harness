@@ -7,7 +7,7 @@ use super::super::attempts::{
 };
 use super::super::claims::ensure_dispatch_capacity;
 use super::super::identity::timestamp;
-use super::super::issue_claim::admit_attempt;
+use super::super::issue_claim::IssueClaimSlot;
 use super::super::issues::{
     parse_ticket_metadata, parse_ticket_metadata_from_issue, resolve_target_to_issue_or_string,
 };
@@ -369,8 +369,7 @@ pub(crate) fn improve(
     let mut prev_failure: Option<String> = None;
     let mut prior_phase_context: Option<String> = None;
     let mut backend_summary = String::new();
-    // Renews this dispatch's provider issue claim until the workflow returns.
-    let mut issue_lease = None;
+    let mut issue_claim = IssueClaimSlot::default();
     // Retry checkpoints are temporary recovery refs. They are deliberately
     // retained on any terminal failure, then removed only after a successful
     // publish so real partial work is never silently discarded.
@@ -443,14 +442,7 @@ pub(crate) fn improve(
             }
         };
         task = context;
-        let admission_guard = admit_attempt(
-            profile,
-            &route.identity,
-            args,
-            attempt,
-            ledger,
-            &mut issue_lease,
-        )?;
+        let admission_guard = issue_claim.admit(profile, &route.identity, args, attempt, ledger)?;
         record_route_attempt(ledger, &route)?;
         let result = run_backend_with_reserved_route(
             &route.identity,
@@ -1480,21 +1472,7 @@ pub(crate) fn improve(
         }
     }
 
-    // Another loop took the issue over while this one worked. Keep the work
-    // on a local WIP commit but publish nothing.
-    if let Err(lost) = issue_lease
-        .as_ref()
-        .map_or(Ok(()), |lease| lease.ensure_held())
-    {
-        worktree::preserve_wip(
-            &wt,
-            &profile.default_target_branch,
-            &format!("gah: WIP claim lost {}", args.mode),
-        )?;
-        worktree::cleanup(&wt, repo);
-        return Err(lost);
-    }
-
+    issue_claim.ensure_held_before_publish(profile, &args.mode, &wt, repo)?;
     finish_improve_workflow(
         cfg,
         profile,
