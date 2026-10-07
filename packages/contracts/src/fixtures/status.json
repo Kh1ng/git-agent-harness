@@ -1,5 +1,6 @@
 {
   "active_claims": [],
+  "running_workers": [],
   "availability": [],
   "available_tickets": [],
   "backend_configured": {

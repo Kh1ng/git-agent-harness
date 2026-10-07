@@ -393,6 +393,27 @@ export interface NodeRoleStatus {
   central_url: string | null;
 }
 
+/** Dispatch-runtime observation, separate from lock ownership. Null routing facts are unknown. */
+export interface RunningWorker {
+  profile?: string;
+  work_id: string | null;
+  run_id: string;
+  mode: string;
+  backend: string;
+  runner: string;
+  backend_instance: string;
+  requested_model: string | null;
+  model: string | null;
+  actual_model: string | null;
+  node_id: string | null;
+  branch: string | null;
+  started_at: string;
+  attempt: number;
+  last_activity_at: string;
+  stale_after_seconds: number;
+  state: 'running' | 'stale';
+}
+
 export interface StatusSnapshot {
   /** Host role added in #938; absent on older CLIs. */
   node?: NodeRoleStatus;
@@ -432,6 +453,8 @@ export interface StatusSnapshot {
   /** Ledger-derived lifecycle evidence keyed by native work ID aliases. */
   work_waypoint_evidence?: Record<string, WorkWaypointEvidence>;
   active_claims: ActiveClaim[];
+  /** Absent on older workers; never infer rows from claims or events. */
+  running_workers?: RunningWorker[];
   /** Published PM parents and the current provider-native state of their
    * exact child issue identities. */
   pm_parent_states: PmParentStatus[];
@@ -1079,8 +1102,6 @@ export interface RoutingCandidateSummary {
   priority: number;
   included_in_quota: boolean;
   marginal_cost_usd: number | null;
-  quota_usage_percent: number | null;
-  quota_days_remaining: number | null;
   requires_approval: boolean;
 }
 
@@ -1319,6 +1340,7 @@ export type HumanRequiredReasonCode =
   | 'configuration_infra'
   | 'fix_retry_cap_exceeded'
   | 'merge_retry_cap_exceeded'
+  | 'repeated_setup_failure'
   | 'stuck_loop_gate'
   | 'external_api_approval_required'
   | 'unknown';

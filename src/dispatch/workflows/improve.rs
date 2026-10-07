@@ -1,12 +1,13 @@
 use super::super::attempts::{
     apply_route_to_ledger, attempt_usage, classify_git_operation_result, classify_worktree_result,
     decide_route, failure_text_with_internal_log, preflight_identity,
-    record_external_approval_consumption_for_last_attempt, record_route_attempt,
-    reserve_backend_attempt, resolve_llm, route_after_backend_unavailable, route_identity,
-    route_label, run_backend_with_reserved_route, validation_retry_route, wip_checkpoint_branch,
+    record_external_approval_consumption_for_last_attempt, record_route_attempt, resolve_llm,
+    route_after_backend_unavailable, route_identity, route_label, run_backend_with_reserved_route,
+    validation_retry_route, wip_checkpoint_branch,
 };
 use super::super::claims::ensure_dispatch_capacity;
 use super::super::identity::timestamp;
+use super::super::issue_claim::IssueClaimSlot;
 use super::super::issues::{
     parse_ticket_metadata, parse_ticket_metadata_from_issue, resolve_target_to_issue_or_string,
 };
@@ -369,6 +370,7 @@ pub(crate) fn improve(
     let mut prev_failure: Option<String> = None;
     let mut prior_phase_context: Option<String> = None;
     let mut backend_summary = String::new();
+    let mut issue_claim = IssueClaimSlot::default();
     // Retry checkpoints are temporary recovery refs. They are deliberately
     // retained on any terminal failure, then removed only after a successful
     // publish so real partial work is never silently discarded.
@@ -441,11 +443,7 @@ pub(crate) fn improve(
             }
         };
         task = context;
-        let admission_guard =
-            reserve_backend_attempt(profile, &route.identity, args.route_admission.as_ref())
-                .map_err(|error| {
-                    super::super::contextualize_capacity_deferral(error, attempt as usize)
-                })?;
+        let admission_guard = issue_claim.admit(profile, &route.identity, args, attempt, ledger)?;
         record_route_attempt(ledger, &route)?;
         let result = run_backend_with_reserved_route(
             &route.identity,
@@ -1474,6 +1472,7 @@ pub(crate) fn improve(
         }
     }
 
+    issue_claim.ensure_held_before_publish(profile, &args.mode, &wt, repo)?;
     finish_improve_workflow(
         cfg,
         profile,

@@ -550,9 +550,11 @@ trust. GitLab project access-token users are recognized from the project-scoped
 `project_<project-id>_bot_*` username and must still be listed exactly in
 `trusted_issue_bot_authors`. Explicit empty lists deny that author class.
 
-### Shared GitHub claims
+### Pull request claims across fleets
 
-Configure each installation's authenticated bot login under its profile:
+Issues are claimed through `publishing.issue_claim` (below). Open PRs, which
+need review or repair rather than implementation, are claimed with the
+profile's own bot login:
 
 ```toml
 [profiles.my_profile.publishing]
@@ -563,23 +565,23 @@ github_claim_poll_seconds = 15
 managed_branch_prefix = "gah/"
 ```
 
-Both installations discover the same eligible open issues and PRs. Managed-branch
-PRs stay eligible because their source issue already passed intake; any other PR
-must pass the same trusted-author and unattended-label policy as issue discovery.
+Both installations discover the same eligible open PRs. Managed-branch PRs stay
+eligible because their source issue already passed intake; any other PR must
+pass the same trusted-author and unattended-label policy as issue discovery.
 Fleet-routing labels have no effect. Controller blockers, review holds, and
-retry budgets still run before dispatch and assignment. An issue dispatch claims
-its issue number; a review or repair claims the PR number (never the linked
-source issue). The selected action determines the role.
+retry budgets still run before dispatch and assignment. A review or repair
+claims the PR number (never the linked source issue); the selected action
+determines the role.
 
-The bot replaces the assignee list, waits the mandatory settle window, then
+The bot replaces the PR's assignee list, waits the mandatory settle window, then
 starts only if it is the sole assignee. A lost race skips to the next candidate.
-An assigned item is reclaimable only after the activity lease expires; assignment,
+An assigned PR is reclaimable only after the activity lease expires; assignment,
 comments, commits, and check/status activity protect it. Ownership monitoring
 stops the individual worker on a lost or unavailable claim. Completion removes
 only the worker's bot assignment. Distinct installations must use distinct bot
 logins, and their authenticated GitHub credentials must be allowed to assign
-those logins. Profiles without a claim identity retain legacy intake for
-compatibility; enable claims on each participating factory.
+those logins. Profiles without a claim identity keep managed-branch-only PR
+intake.
 
 Intake literal inventory (defaults retain existing values):
 
@@ -589,7 +591,8 @@ Intake literal inventory (defaults retain existing values):
 | Unattended eligibility, including runtime display fallback | `publishing.canonical_autonomous_label` | `exec:autonomous` |
 | Author trust | `publishing.trusted_issue_human_authors`, `publishing.trusted_issue_bot_authors` | repository owner / no bots |
 | Issue eligibility mode | `publishing.issue_intake_mode` | `legacy` |
-| Fleet identity and claim timing | `publishing.github_claim_*` | identity unset; 2s / 900s / 15s |
+| PR claim identity and timing | `publishing.github_claim_*` | identity unset; 2s / 900s / 15s |
+| Issue claim mode and timing | `publishing.issue_claim.*` | `local`; 60 min / 60s |
 | Factory concurrency | `max_parallel_workers` | 1 |
 | Implementation publication backpressure | `max_open_managed_mrs` | factory concurrency |
 | Repair budget | `routing.max_fix_attempts_per_mr` | 2 |
@@ -599,6 +602,43 @@ Intake literal inventory (defaults retain existing values):
 
 Review verdict labels remain fixed protocol outputs. They continue to select
 review, repair, or human handoff and are not fleet selectors.
+
+### Issue claims across loops
+
+When several loops work one GitHub repository under different logins, let each
+claim an issue on GitHub before it starts work:
+
+```toml
+[profiles.my_profile.publishing.issue_claim]
+mode = "github_assignee"   # default "local": nothing is written to GitHub
+ttl_minutes = 60
+verify_seconds = 60
+priority_logins = ["first-choice-login"]
+```
+
+A dispatch that has been granted a backend and node slot assigns the login
+`gh` is signed in as, posts a claim comment, waits `verify_seconds`, and
+re-reads the issue. A dispatch refused a slot claims nothing. If another loop
+claimed it at the same moment, the first login in `priority_logins` keeps it,
+otherwise the earliest claim comment; the other loop removes its own assignee
+and moves on. Intake leaves alone every issue that another login holds,
+including one a person assigned by hand, which is held until that assignee is
+removed.
+
+A claim is a lease of `ttl_minutes`. While the dispatch runs it renews the
+lease every third of that by editing its claim comment (an edit notifies
+nobody). A loop that crashes or stops stops renewing, and `ttl_minutes` after
+the last renewal another loop may remove the stale assignee and claim the
+issue, unless an open pull request for the issue exists. A dispatch that finds
+its lease taken over stops before it publishes: it keeps its work on a local
+WIP commit and the loop reports the issue as skipped.
+
+Every loop sharing the repository must use the same `ttl_minutes` and
+`priority_logins`, because each one decides a contested claim from its own
+copy. The mode is independent of `issue_intake_mode`: it adds no label
+requirement and removes none. It applies whenever an issue is dispatched for
+implementation, by the loop or by hand, and not to planning decomposition or
+pull request review.
 
 ### Generated-artifact publication guard
 

@@ -1,3 +1,4 @@
+import { useGahStore } from '../store/gahStore.js';
 import { Activity, AlertCircle, CheckCircle2, ChevronRight, Clock3 } from 'lucide-react';
 import type { ControllerActivity } from '@git-agent-harness/contracts';
 import { formatAge, formatLocalTime } from '../lib/format.js';
@@ -64,7 +65,8 @@ function Detail({ label, value, mono = false }: { label: string; value: string |
 }
 
 export function ControllerActivityCard({ activity }: { activity: ControllerActivity[] }) {
-  const active = activity.filter((run) => run.status === 'running');
+  const workers = useGahStore(state => state.status.data?.running_workers ?? []);
+  const active = workers;
   const recent = activity.filter((run) => run.status !== 'running').slice(0, 5);
   const failed = recent.filter((run) => run.status === 'failed').length;
   const finished = recent.length - failed;
@@ -79,13 +81,7 @@ export function ControllerActivityCard({ activity }: { activity: ControllerActiv
         <StatusBadge tone={active.length > 0 ? 'good' : 'unknown'} label={active.length > 0 ? `${active.length} running` : 'Idle'} />
       </div>
 
-      {active.length > 0 && (
-        <div className="card overflow-hidden">
-          <div className="divide-y divide-subtle">
-            {active.map((run) => <ActivityRow key={run.run_id} run={run} />)}
-          </div>
-        </div>
-      )}
+      {workers.length > 0 && <a href="#running-workers" className="text-sm text-accent">View worker roster</a>}
 
       {activity.length === 0 ? (
         <p className="text-sm text-muted">No controller runs in the last 24 hours.</p>

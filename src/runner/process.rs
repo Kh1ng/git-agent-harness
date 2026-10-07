@@ -740,6 +740,7 @@ fn spawn_with_idle_watch_with_shutdown(
                     killed_for_shutdown = true;
                     break -2;
                 }
+                let previous_progress_at = last_progress_at;
                 while progress_rx.try_recv().is_ok() {
                     let current_len = fs::metadata(log_path)
                         .map(|m| m.len())
@@ -779,6 +780,11 @@ fn spawn_with_idle_watch_with_shutdown(
                         last_process_activity = Some(activity);
                     }
                     last_worktree_poll = Instant::now();
+                }
+                if last_progress_at != previous_progress_at {
+                    if let Some(session) = log_path.parent() {
+                        crate::running_workers::heartbeat(session);
+                    }
                 }
                 let stalled = if saw_progress {
                     last_progress_at.elapsed() >= idle_timeout
@@ -1147,6 +1153,9 @@ mod tests {
                 "#!/bin/sh\n# Deterministic, quiet parent with active descendant.\n/bin/yes >/dev/null &\nbackend_descendant=$!\nsleep 3\n/bin/kill -TERM \"$backend_descendant\" >/dev/null 2>&1 || true\nwait \"$backend_descendant\" 2>/dev/null || true\n",
             );
             let log_path = f.session_dir.join("backend-output.log");
+            let record_path = f.session_dir.join("running-worker.json");
+            fs::write(&record_path, "{}").unwrap();
+            let before = fs::metadata(&record_path).unwrap().modified().unwrap();
             let shutdown = AtomicBool::new(false);
 
             let result = spawn_with_idle_watch_with_shutdown(
@@ -1160,6 +1169,10 @@ mod tests {
             )
             .unwrap();
 
+            assert!(
+                fs::metadata(&record_path).unwrap().modified().unwrap() > before,
+                "quiet descendant activity must heartbeat the roster"
+            );
             assert_eq!(result.0, 0, "attempt {attempt}");
             assert!(result.1 >= 1.0, "attempt {attempt} ended too quickly");
             let log = fs::read_to_string(log_path).unwrap_or_default();

@@ -53,6 +53,7 @@ const status = {
     mergeRequest('#6', 'MERGED', { merged: true, merged_at: '2026-10-05T17:30:00Z', title: 'Issue #6' })
   ],
   active_claims: [{ work_id: '#4', pid: 1, scope: 'gah', hostname: 'host', claimed_at: '2026-10-05T18:13:00Z', age_seconds: 1020 }],
+  running_workers: [{ work_id: '#4', run_id: 'fix', mode: 'fix', backend: 'claude', runner: 'claude', backend_instance: 'claude', model: 'opus[1m]', requested_model: 'opus[1m]', actual_model: null, node_id: 'node', branch: 'gah/job-4', started_at: '2026-10-05T18:13:00Z', last_activity_at: '2026-10-05T18:30:00Z', attempt: 1, stale_after_seconds: 900, state: 'running' }],
   blocked_work_items: [{ kind: 'human_required', reason_code: 'stuck_loop_gate', source_reference: '#5', message: "stuck-loop detected: 'merge_mr' selected 3 times in a row" }],
   blockers: [],
   constraints: [],
@@ -148,10 +149,16 @@ test('the navbar names the job in hand; hovering lists each agent with its exact
   await expect(rows.nth(3)).toContainText('Sign-in failed; it needs to be logged in again');
 });
 
-test('before the status snapshot loads, the navbar still names the running job and its agent', () => {
+test('before the status snapshot loads, the navbar does not infer workers from controller events', () => {
   const { jobs, agents } = workingNow({ ...input, status: null });
-  expect(jobs.map((job) => `${job.label} by ${job.agent}`)).toEqual(['#4 (fix) by Claude · opus[1m]']);
+  expect(jobs).toEqual([]);
   expect(agents.find((agent) => agent.backend === 'agy')?.reason).toBe('Idle');
+});
+
+test('navbar jobs and capacity use the roster despite conflicting claims and controller events', () => {
+  const snapshot = { ...status, running_workers: [] };
+  expect(workingNow({ ...input, status: snapshot }).jobs).toEqual([]);
+  expect(buildKanban({ ...input, status: snapshot }).gates.some(gate => gate.detail === '0 of 4 busy')).toBe(true);
 });
 
 test('the board has no agents panel: nothing sits beside it until a card is selected', async ({ mount }) => {

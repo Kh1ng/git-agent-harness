@@ -104,6 +104,7 @@ pub struct StatusSnapshot {
     pub work_waypoint_evidence: std::collections::BTreeMap<String, WorkWaypointEvidence>,
     /// Active durable claims keyed by canonical profile+repo scope.
     pub active_claims: Vec<ActiveClaimSnapshot>,
+    pub running_workers: Vec<crate::running_workers::RunningWorker>,
     /// Bounded PM orchestration history and provider-native child state.
     pub pm_parent_states: Vec<PmParentStatus>,
     pub pm_decomposition_attempt_counts: std::collections::HashMap<String, usize>,
@@ -783,6 +784,12 @@ fn build_snapshot_inner(
     // human_required state has since cleared are no longer shown as blocked.
     for ticket in &available_tickets {
         if ticket.human_required {
+            if ticket.has_active_mr
+                && ticket.human_required_reason_code.as_deref()
+                    == Some(HumanRequiredReason::RepeatedSetupFailure.as_str())
+            {
+                continue;
+            }
             let reason_code = ticket.human_required_reason_code.clone();
             blocked_work_items.push(Blocker {
                 kind: "human_required".into(),
@@ -1058,6 +1065,13 @@ fn build_snapshot_inner(
         errors,
         available_tickets,
         work_waypoint_evidence,
+        running_workers: crate::running_workers::observe(
+            std::path::Path::new(&profile.artifact_root),
+            now,
+        )
+        .into_iter()
+        .filter(|worker| worker.profile == profile_name)
+        .collect(),
         active_claims,
         pm_parent_states,
         pm_decomposition_attempt_counts,

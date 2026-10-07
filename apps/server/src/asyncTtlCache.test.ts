@@ -79,3 +79,41 @@ test('keys() snapshots the currently cached keys', async () => {
   cache.delete('gah');
   assert.deepEqual(cache.keys(), ['sportsball']);
 });
+
+test('getStale serves an expired value at once and refreshes it in the background', async () => {
+  let now = 1_000;
+  let loads = 0;
+  let release: (() => void) | undefined;
+  const cache = new AsyncTtlCache<string, number>(30_000, () => now);
+  const load = () => {
+    const value = ++loads;
+    return value === 1 ? Promise.resolve(value) : new Promise<number>((resolve) => { release = () => resolve(value); });
+  };
+
+  assert.equal(await cache.getStale('gah', load), 1);
+  now += 30_000;
+  assert.equal(await cache.getStale('gah', load), 1);
+  assert.equal(await cache.getStale('gah', load), 1);
+  await Promise.resolve();
+  assert.equal(loads, 2, 'one refresh for any number of stale reads');
+  release?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await cache.getStale('gah', load), 2);
+});
+
+test('getStale drops a value whose refresh failed, so the next caller sees the error', async () => {
+  let now = 1_000;
+  let loads = 0;
+  const cache = new AsyncTtlCache<string, number>(30_000, () => now);
+  const load = async () => {
+    loads += 1;
+    if (loads > 1) throw new Error('provider unavailable');
+    return 7;
+  };
+
+  assert.equal(await cache.getStale('gah', load), 7);
+  now += 30_000;
+  assert.equal(await cache.getStale('gah', load), 7);
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(cache.getStale('gah', load), /provider unavailable/);
+});

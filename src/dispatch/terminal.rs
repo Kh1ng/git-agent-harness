@@ -26,6 +26,7 @@ pub(super) fn append_ledger_entry(
 pub(super) fn should_notify_dispatch_failure(error: &anyhow::Error) -> bool {
     if super::review_budget_exhausted_error(error).is_some()
         || super::capacity_deferred_error(error)
+        || super::issue_claim_lost(error).is_some()
     {
         return false;
     }

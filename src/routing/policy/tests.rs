@@ -1075,9 +1075,8 @@ fn genuine_agent_failure_escalates_to_stronger_model() {
             priority: 0,
             included_in_quota: false,
             marginal_cost_usd: None,
-            quota_usage_percent: None,
-            quota_days_remaining: None,
             requires_approval: false,
+            ..Default::default()
         },
         crate::config::CandidateConfig {
             backend: "codex".into(),
@@ -1087,9 +1086,8 @@ fn genuine_agent_failure_escalates_to_stronger_model() {
             priority: 0,
             included_in_quota: false,
             marginal_cost_usd: None,
-            quota_usage_percent: None,
-            quota_days_remaining: None,
             requires_approval: false,
+            ..Default::default()
         },
     ]);
 
@@ -1134,9 +1132,8 @@ fn non_agent_failure_does_not_escalate() {
             priority: 0,
             included_in_quota: false,
             marginal_cost_usd: None,
-            quota_usage_percent: None,
-            quota_days_remaining: None,
             requires_approval: false,
+            ..Default::default()
         },
         crate::config::CandidateConfig {
             backend: "codex".into(),
@@ -1146,9 +1143,8 @@ fn non_agent_failure_does_not_escalate() {
             priority: 0,
             included_in_quota: false,
             marginal_cost_usd: None,
-            quota_usage_percent: None,
-            quota_days_remaining: None,
             requires_approval: false,
+            ..Default::default()
         },
     ]);
 
@@ -1182,6 +1178,7 @@ fn non_agent_failure_does_not_escalate() {
 
 #[test]
 fn cost_aware_ordering_prefers_underpace_included_quota() {
+    let (_quota_tmp, _quota_store_guard) = quota_wiring_tests::seed_weekly_quota(80.0);
     let tmp = TempDir::new().unwrap();
     let mut profile = profile();
     profile.routing.pm_candidates = Some(vec![
@@ -1193,9 +1190,8 @@ fn cost_aware_ordering_prefers_underpace_included_quota() {
             priority: 0,
             included_in_quota: false,
             marginal_cost_usd: Some(0.25),
-            quota_usage_percent: None,
-            quota_days_remaining: None,
             requires_approval: false,
+            ..Default::default()
         },
         crate::config::CandidateConfig {
             backend: "codex".into(),
@@ -1205,9 +1201,8 @@ fn cost_aware_ordering_prefers_underpace_included_quota() {
             priority: 0,
             included_in_quota: true,
             marginal_cost_usd: Some(0.0),
-            quota_usage_percent: Some(20.0),
-            quota_days_remaining: Some(5.0),
             requires_approval: false,
+            ..Default::default()
         },
     ]);
 
@@ -1258,6 +1253,7 @@ fn cost_aware_ordering_prefers_underpace_included_quota() {
 
 #[test]
 fn cost_aware_ordering_conserves_scarce_included_quota() {
+    let (_quota_tmp, _quota_store_guard) = quota_wiring_tests::seed_weekly_quota(15.0);
     let tmp = TempDir::new().unwrap();
     let mut profile = profile();
     profile.routing.pm_candidates = Some(vec![
@@ -1269,9 +1265,8 @@ fn cost_aware_ordering_conserves_scarce_included_quota() {
             priority: 0,
             included_in_quota: true,
             marginal_cost_usd: Some(0.0),
-            quota_usage_percent: Some(85.0),
-            quota_days_remaining: Some(5.0),
             requires_approval: false,
+            ..Default::default()
         },
         crate::config::CandidateConfig {
             backend: "openhands".into(),
@@ -1281,9 +1276,8 @@ fn cost_aware_ordering_conserves_scarce_included_quota() {
             priority: 0,
             included_in_quota: false,
             marginal_cost_usd: Some(0.25),
-            quota_usage_percent: None,
-            quota_days_remaining: None,
             requires_approval: false,
+            ..Default::default()
         },
     ]);
 
@@ -1316,6 +1310,7 @@ fn cost_aware_ordering_conserves_scarce_included_quota() {
 
 #[test]
 fn cost_aware_ordering_respects_explicit_priority_override() {
+    let (_quota_tmp, _quota_store_guard) = quota_wiring_tests::seed_weekly_quota(15.0);
     let tmp = TempDir::new().unwrap();
     let mut profile = profile();
     profile.routing.pm_candidates = Some(vec![
@@ -1327,9 +1322,8 @@ fn cost_aware_ordering_respects_explicit_priority_override() {
             priority: 10,
             included_in_quota: true,
             marginal_cost_usd: Some(0.0),
-            quota_usage_percent: Some(85.0),
-            quota_days_remaining: Some(5.0),
             requires_approval: false,
+            ..Default::default()
         },
         crate::config::CandidateConfig {
             backend: "openhands".into(),
@@ -1339,9 +1333,8 @@ fn cost_aware_ordering_respects_explicit_priority_override() {
             priority: 0,
             included_in_quota: false,
             marginal_cost_usd: Some(0.25),
-            quota_usage_percent: None,
-            quota_days_remaining: None,
             requires_approval: false,
+            ..Default::default()
         },
     ]);
 

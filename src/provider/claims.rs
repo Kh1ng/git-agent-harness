@@ -1,4 +1,5 @@
-//! GitHub assignees coordinate installations; local dispatch claims stay separate.
+//! GitHub assignees coordinate PR review and repair across installations.
+//! Issues use `dispatch::issue_claim`; local dispatch claims stay separate.
 use super::{github_find_pr_number_by_branch, github_json_api};
 use crate::config::Profile;
 use anyhow::{Context, Result};
@@ -59,7 +60,7 @@ fn settle_claim(
     Ok(read()?.owned_by(identity))
 }
 
-fn observe(profile: &Profile, number: &str, pr: bool) -> Result<Observation> {
+fn observe(profile: &Profile, number: &str) -> Result<Observation> {
     let value = github_json_api(
         profile,
         "GET",
@@ -70,8 +71,8 @@ fn observe(profile: &Profile, number: &str, pr: bool) -> Result<Observation> {
         .as_str()
         .context("missing claim activity")?
         .parse::<DateTime<Utc>>()?;
-    if pr {
-        // A push and a check/status transition need not update the issue timestamp.
+    // A push and a check/status transition need not update the issue timestamp.
+    {
         let pull = github_json_api(
             profile,
             "GET",
@@ -139,16 +140,11 @@ pub(crate) struct GithubClaim {
     lost: Arc<AtomicBool>,
     profile: Profile,
     number: String,
-    pr: bool,
     identity: String,
 }
 
 impl GithubClaim {
-    pub(crate) fn acquire(
-        profile: &Profile,
-        work_id: Option<&str>,
-        branch: Option<&str>,
-    ) -> Result<Option<Self>> {
+    pub(crate) fn acquire(profile: &Profile, branch: &str) -> Result<Option<Self>> {
         let identity = profile
             .publishing
             .github_claim_identity
@@ -164,22 +160,10 @@ impl GithubClaim {
                 && profile.publishing.github_claim_poll_seconds > 0,
             "GitHub claim timing must be positive"
         );
-        let pr = branch.is_some();
-        let number = match branch {
-            Some(branch) => github_find_pr_number_by_branch(profile, branch)?,
-            None => {
-                let key = crate::work_claim::normalize_work_identity(
-                    work_id.context("provider claim requires issue identity")?,
-                );
-                key.strip_prefix('#')
-                    .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-                    .context("provider claim requires numeric GitHub issue identity")?
-                    .to_string()
-            }
-        };
+        let number = github_find_pr_number_by_branch(profile, branch)?;
         let won = settle_claim(
             identity,
-            || observe(profile, &number, pr),
+            || observe(profile, &number),
             || {
                 github_json_api(
                     profile,
@@ -217,7 +201,7 @@ impl GithubClaim {
                 ))
                 .is_err()
             {
-                match observe(&monitor_profile, &monitor_number, pr) {
+                match observe(&monitor_profile, &monitor_number) {
                     Ok(item) if item.owned_by(&monitor_identity) => {}
                     _ => {
                         // Unavailable ownership is a stop condition, never presumed ownership.
@@ -233,14 +217,13 @@ impl GithubClaim {
             lost,
             profile: profile.clone(),
             number,
-            pr,
             identity: identity.to_owned(),
         }))
     }
     pub(crate) fn ensure_owned(&self) -> Result<()> {
         anyhow::ensure!(
             !self.lost.load(Ordering::SeqCst)
-                && observe(&self.profile, &self.number, self.pr)?.owned_by(&self.identity),
+                && observe(&self.profile, &self.number)?.owned_by(&self.identity),
             "GitHub claim lost; worker stopped"
         );
         Ok(())
