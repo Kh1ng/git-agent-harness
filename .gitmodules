@@ -1,0 +1,3 @@
+[submodule "enterprise"]
+	path = enterprise
+	url = https://github.com/Kh1ng/git-agent-harness-enterprise.git
