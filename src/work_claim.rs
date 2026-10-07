@@ -376,7 +376,29 @@ fn is_process_alive(pid: u32) -> bool {
             .unwrap_or(false)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        // Query the PID column rather than the localized image/status text.
+        // A killed manual worker must be reclaimable without an age timeout.
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                        line.split(',')
+                            .nth(1)
+                            .and_then(|column| column.trim_matches('"').parse::<u32>().ok())
+                            == Some(pid)
+                    })
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         // On non-Unix systems, we can't easily check process liveness
         // So we'll consider the claim not stale based on process check
@@ -692,6 +714,45 @@ mod tests {
             unreachable!();
         };
         claim.pid = 0;
+        assert!(state.is_claim_stale("repo@repo", "#7", 3600));
+        assert_eq!(state.reclaim_stale_claims("repo@repo", 3600), ["#7"]);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn manual_claim_is_reclaimable_after_its_worker_process_exits() {
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("60");
+            command
+        };
+        #[cfg(windows)]
+        let mut command = {
+            use std::os::windows::process::CommandExt;
+            let mut command = std::process::Command::new("powershell");
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 60",
+            ]);
+            command.creation_flags(0x08000000);
+            command
+        };
+        let mut worker = command.spawn().unwrap();
+        let mut state = WorkClaimState::new();
+        state.claim_with_mode("repo@repo", "#7", true);
+        let WorkClaimStateEntry::V2(claim) = &mut state.claims.get_mut("repo@repo").unwrap()[0]
+        else {
+            unreachable!();
+        };
+        claim.pid = worker.id();
+        claim.claimed_at = Utc::now() - chrono::Duration::hours(2);
+        let protected_while_alive = !state.is_claim_stale("repo@repo", "#7", 3600);
+        worker.kill().unwrap();
+        worker.wait().unwrap();
+        assert!(protected_while_alive);
         assert!(state.is_claim_stale("repo@repo", "#7", 3600));
         assert_eq!(state.reclaim_stale_claims("repo@repo", 3600), ["#7"]);
     }

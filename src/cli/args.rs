@@ -413,8 +413,8 @@ pub enum Commands {
         /// genuine `VALIDATION GATE FAILED` error.
         #[arg(long, default_value_t = false)]
         skip_validation_gate: bool,
-        /// Start one explicit job alongside the loop, outside automatic CPU,
-        /// memory and worker-count admission. Work claims and route policy still apply.
+        /// Start one explicit job alongside the loop, outside automatic worker
+        /// limits. Node CPU/memory admission, work claims and route policy still apply.
         #[arg(long)]
         manual_worker: bool,
         /// Native reasoning for this launch only; does not edit the saved profile.
