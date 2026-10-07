@@ -190,3 +190,19 @@ fn transient_dispatch_refusals_never_gate() {
         );
     }
 }
+
+/// Setup worked on the third attempt (the agent launched and then failed),
+/// so the setup failures are not three in a row.
+#[test]
+fn agent_failure_between_setup_failures_resets_the_streak() {
+    let setup = failure("insufficient free space on temporary filesystem (/tmp): 9 GiB available");
+    for class in ["backend_error", "harness_error"] {
+        let mut crashed = failure("backend exited with status 1");
+        crashed.failure_class = Some(class.into());
+        crashed.failure_stage = Some(crate::ledger::FailureStage::AgentRun.as_str().into());
+        assert!(
+            !lookup(&[setup.clone(), setup.clone(), crashed, setup.clone()]).4,
+            "{class}"
+        );
+    }
+}

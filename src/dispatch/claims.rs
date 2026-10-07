@@ -445,16 +445,19 @@ const TRANSIENT_DISPATCH_REFUSALS: [&str; 4] = [
 ];
 
 /// Entries the repeated-setup check skips: they neither count toward the
-/// streak nor reset it. Shutdown cancellations and agent-run failures are
-/// interrupted execution, and transient dispatch refusals need no human.
+/// streak nor reset it. A shutdown cancellation or an abandoned-run record
+/// says the run was interrupted, not how setup went, and a transient
+/// dispatch refusal never reached setup. Any other entry, including an
+/// ordinary agent failure, shows setup got further and so ends the streak.
 fn ignored_by_repeated_setup(entry: &LedgerEntry) -> bool {
-    entry.validation_result.as_deref() == Some("cancelled_shutdown")
-        || entry.failure_stage.as_deref() == Some(crate::ledger::FailureStage::AgentRun.as_str())
-        || entry.error_summary.as_deref().is_some_and(|summary| {
-            TRANSIENT_DISPATCH_REFUSALS
-                .iter()
-                .any(|marker| summary.contains(marker))
-        })
+    matches!(
+        entry.validation_result.as_deref(),
+        Some("cancelled_shutdown" | "not_run_abandoned")
+    ) || entry.error_summary.as_deref().is_some_and(|summary| {
+        TRANSIENT_DISPATCH_REFUSALS
+            .iter()
+            .any(|marker| summary.contains(marker))
+    })
 }
 
 fn repeated_setup_reason(attempts: &[&LedgerEntry]) -> Option<String> {
