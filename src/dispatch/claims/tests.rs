@@ -1475,5 +1475,12 @@ fn ticket_scan_capacity_deferral_resolves_claim_without_changing_attempt_history
 
 #[path = "tests/repeated_setup.rs"]
 mod repeated_setup;
+
 #[path = "tests/repository_scope.rs"]
 mod repository_scope;
+
+#[path = "tests/control_records.rs"]
+mod control_records;
+
+#[path = "tests/early_failure.rs"]
+mod early_failure;

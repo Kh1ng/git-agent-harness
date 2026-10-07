@@ -113,3 +113,182 @@ fn memory_setup_checks_authenticated_recall_and_names_the_key_file_on_401() {
                 .and(predicates::str::contains("tdai-gateway.env")),
         );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn factory_toggle_stops_only_factory_services_and_preserves_profiles() {
+    let home = test_tempdir();
+    let config = home.path().join("config.toml");
+    fs::write(&config, "[defaults]\nnode_role = 'standalone'\n").unwrap();
+    let log = home.path().join("services.log");
+    write_executable(
+        &home.path().join("systemctl"),
+        r#"#!/bin/sh
+case "$*" in
+  --version) echo systemd ;;
+  *list-units*) printf 'gah-loop@local.service loaded active running\ngah-watchdog.service loaded inactive dead\ngah-server.service loaded active running\n' ;;
+  *list-unit-files*) printf 'gah-loop@.service disabled\ngah-loop@local.service enabled\ngah-watchdog.timer enabled\ngah-prune.timer enabled\ngah-quota-refresh.timer enabled\n' ;;
+  *) printf '%s\n' "$*" >> "$GAH_FACTORY_TEST_LOG" ;;
+esac
+"#,
+    );
+    for enabled in ["false", "true", "false"] {
+        bin()
+            .args(["config", "set", "--config"])
+            .arg(&config)
+            .args(["--factory-enabled", enabled])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    home.path().display(),
+                    std::env::var("PATH").unwrap()
+                ),
+            )
+            .env("GAH_FACTORY_TEST_LOG", &log)
+            .assert()
+            .success();
+        let saved: toml::Value = toml::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            saved["defaults"]["factory_enabled"].as_bool(),
+            Some(enabled == "true")
+        );
+        assert_eq!(saved["defaults"]["node_role"].as_str(), Some("standalone"));
+        if enabled == "false" {
+            bin()
+                .args(["loop", "--profile", "local", "--config-path"])
+                .arg(&config)
+                .assert()
+                .failure()
+                .stderr(predicates::str::contains("Factory automation is disabled"));
+        }
+    }
+    let actions = fs::read_to_string(log).unwrap();
+    assert_eq!(
+        actions
+            .matches("disable --now gah-loop@local.service")
+            .count(),
+        2
+    );
+    assert!(actions.contains("disable --now gah-watchdog.timer"));
+    assert!(!actions.contains("gah-server"));
+    assert!(!actions.contains("gah-prune"));
+    assert!(!actions.contains("gah-quota-refresh"));
+    assert!(!actions.contains("enable"));
+}
+
+#[cfg(unix)]
+#[test]
+fn standalone_installer_defaults_off_but_preserves_existing_selection() {
+    let home = test_tempdir();
+    let config = home.path().join("config.toml");
+    let log = home.path().join("installer.log");
+    let cli = home.path().join("fake-gah");
+    write_executable(
+        &cli,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$GAH_FACTORY_TEST_LOG\"\n",
+    );
+    // The macOS desktop's standalone install is the central role with GAH_STANDALONE=1.
+    for (role, intent, contents, selection, expected) in [
+        ("standalone", None, None, None, "--factory-enabled false"),
+        (
+            "standalone",
+            None,
+            Some("[defaults]\n"),
+            None,
+            "config set --node-role standalone",
+        ),
+        (
+            "standalone",
+            None,
+            Some("[defaults]\nfactory_enabled = false\n"),
+            None,
+            "config set --node-role standalone",
+        ),
+        (
+            "standalone",
+            None,
+            Some("[defaults]\n"),
+            Some("true"),
+            "--factory-enabled true",
+        ),
+        ("central", Some("1"), None, None, "--factory-enabled false"),
+        (
+            "central",
+            Some("1"),
+            None,
+            Some("true"),
+            "--factory-enabled true",
+        ),
+        (
+            "central",
+            Some("1"),
+            Some("[defaults]\n"),
+            None,
+            "config set --node-role central",
+        ),
+        (
+            "central",
+            None,
+            None,
+            None,
+            "config set --node-role central",
+        ),
+    ] {
+        if let Some(contents) = contents {
+            fs::write(&config, contents).unwrap();
+        } else if config.exists() {
+            fs::remove_file(&config).unwrap();
+        }
+        let mut command = ProcessCommand::new("bash");
+        command
+            .arg("scripts/configure-node-role.sh")
+            .arg(role)
+            .arg(&cli)
+            .env("GAH_CONFIG", &config)
+            .env("GAH_FACTORY_TEST_LOG", &log)
+            .env_remove("GAH_CENTRAL_URL");
+        if let Some(intent) = intent {
+            command.env("GAH_STANDALONE", intent);
+        } else {
+            command.env_remove("GAH_STANDALONE");
+        }
+        if let Some(selection) = selection {
+            command.env("GAH_FACTORY_ENABLED", selection);
+        } else {
+            command.env_remove("GAH_FACTORY_ENABLED");
+        }
+        assert!(command.status().unwrap().success());
+        let invocation = fs::read_to_string(&log).unwrap();
+        assert!(invocation.trim().ends_with(expected), "{invocation}");
+        if contents.is_some() && selection.is_none() {
+            assert!(!invocation.contains("factory-enabled"));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn factory_disable_failure_still_persists_the_dispatch_guard() {
+    let home = test_tempdir();
+    let config = home.path().join("config.toml");
+    fs::write(&config, "[defaults]\nfactory_enabled = true\n").unwrap();
+    write_executable(&home.path().join("systemctl"), "#!/bin/sh\nif [ \"$1\" = --version ]; then echo systemd; exit 0; fi\necho 'Service bus unavailable' >&2\nexit 1\n");
+    bin()
+        .args(["config", "set", "--config"])
+        .arg(&config)
+        .args(["--factory-enabled", "false"])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                home.path().display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Service bus unavailable"));
+    let saved: toml::Value = toml::from_str(&fs::read_to_string(config).unwrap()).unwrap();
+    assert_eq!(saved["defaults"]["factory_enabled"].as_bool(), Some(false));
+}

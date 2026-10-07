@@ -167,7 +167,6 @@ pub(super) fn build_quota_checks(
         if record.backend == "vibe"
             && record.credential_id.is_none()
             && record.account_usage.is_none()
-            && record.mistral_admin.is_none()
             && record.quota_window.is_none()
             && record.quota_remaining_percent.is_none()
             && record.quota_reset_at.is_none()
@@ -239,7 +238,6 @@ pub(super) fn build_quota_checks(
             let has_data = record.quota_window.is_some()
                 || record.quota_remaining_percent.is_some()
                 || record.quota_reset_at.is_some()
-                || record.mistral_admin.is_some()
                 || record.account_usage.is_some();
             let status = if is_auth_required(record.check_error.as_deref()) {
                 QuotaCheckStatus::AuthRequired
@@ -488,6 +486,24 @@ mod tests {
         assert!(statuses.contains(&("vibe", QuotaCheckStatus::NotConfigured)));
     }
 
+    #[test]
+    fn admin_refresh_without_spend_limit_has_no_data() {
+        let mut refresh = record(
+            "vibe",
+            Some("2026-10-03T04:00:00Z"),
+            Some("2026-10-03T04:00:00Z"),
+            QuotaCheckStatus::NoData,
+        );
+        refresh.usage_source = Some("mistral_admin_refresh".into());
+        let checks = build_quota_checks(&[refresh.clone()], &[]);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, QuotaCheckStatus::NoData);
+
+        refresh.check_error = Some("spend limit unavailable".into());
+        let checks = build_quota_checks(&[refresh], &[]);
+        assert_eq!(checks[0].status, QuotaCheckStatus::Failed);
+    }
+
     fn auth_marker(backend: &str, checked_at: &str) -> QuotaObservationRecord {
         let mut record = record(backend, None, None, QuotaCheckStatus::Failed);
         record.checked_at = Some(checked_at.into());
@@ -526,7 +542,6 @@ mod tests {
             check_error: (status == QuotaCheckStatus::Failed)
                 .then(|| format!("{backend} check failed")),
             usage_source: None,
-            mistral_admin: None,
             account_usage: None,
             credential_id: None,
         }
@@ -566,7 +581,6 @@ mod tests {
                 observed_at: Some("2026-08-22T19:47:14Z".to_string()),
                 checked_at: None,
                 check_error: None,
-                mistral_admin: None,
                 usage_source: None,
                 account_usage: None,
                 credential_id: None,

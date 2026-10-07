@@ -1,14 +1,9 @@
 use super::*;
 
-fn duplicate_work_has_active_claim(claim_for_this_repo: bool) -> bool {
-    let _exec_guard = crate::test_support::ExecGuard::new();
-    let tmp = tempfile::tempdir().unwrap();
-    let bin_dir = tmp.path().join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
-    setup_fake_gh(&bin_dir, "[]");
-    let _guard = PathGuard::set(&bin_dir);
-
-    let ticket_dir = tmp.path().join("docs/tickets");
+pub(super) fn claim_fixture(
+    root: &Path,
+) -> (crate::config::GahConfig, Profile, super::DispatchArgs) {
+    let ticket_dir = root.join("docs/tickets");
     fs::create_dir_all(&ticket_dir).unwrap();
     let ticket_path = ticket_dir.join("TICKET-500-test.md");
     fs::write(
@@ -21,8 +16,8 @@ fn duplicate_work_has_active_claim(claim_for_this_repo: bool) -> bool {
         context: Default::default(),
         defaults: crate::config::Defaults {
             current_manager: None,
-            artifact_root: tmp.path().to_string_lossy().into_owned(),
-            worktree_base: tmp.path().to_string_lossy().into_owned(),
+            artifact_root: root.to_string_lossy().into_owned(),
+            worktree_base: root.to_string_lossy().into_owned(),
             llm_base_url: String::new(),
             llm_model_local: String::new(),
             llm_model_cloud: String::new(),
@@ -32,7 +27,7 @@ fn duplicate_work_has_active_claim(claim_for_this_repo: bool) -> bool {
         },
         profiles: std::collections::HashMap::new(),
     };
-    let mut prof = profile(tmp.path());
+    let mut prof = profile(root);
     prof.provider = "github".to_string();
     prof.repo = "owner/repo".to_string();
 
@@ -62,6 +57,19 @@ fn duplicate_work_has_active_claim(claim_for_this_repo: bool) -> bool {
         run_id: None,
         route_admission: None,
     };
+
+    (cfg, prof, args)
+}
+
+fn duplicate_work_has_active_claim(claim_for_this_repo: bool) -> bool {
+    let _exec_guard = crate::test_support::ExecGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    setup_fake_gh(&bin_dir, "[]");
+    let _guard = PathGuard::set(&bin_dir);
+
+    let (cfg, prof, args) = claim_fixture(tmp.path());
 
     let mut other_prof = prof.clone();
     other_prof.repo_id = format!("{}-other", prof.repo_id);

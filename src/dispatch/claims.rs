@@ -75,6 +75,22 @@ fn is_claim_stale(entry: &LedgerEntry) -> bool {
     now - entry_time > time::Duration::hours(CLAIM_STALE_AFTER_HOURS)
 }
 
+fn is_control_record(mode: &str) -> bool {
+    matches!(
+        mode,
+        "paid_route_approval_grant"
+            | "paid_route_approval_revoke"
+            | "external_approval_grant"
+            | "external_approval_request"
+            | "external_approval_consume"
+            | "external_approval_revoke"
+            | "external_approval_expire"
+            | "external_approval_deny"
+            | "review_hold"
+            | "review_hold_release"
+    )
+}
+
 /// Fold one work item's ledger history in append order. Control records leave
 /// the lease alone; dispatch outcomes and attempt resets resolve it.
 fn has_active_claim<'a>(entries: impl IntoIterator<Item = &'a LedgerEntry>) -> bool {
@@ -85,16 +101,7 @@ fn has_active_claim<'a>(entries: impl IntoIterator<Item = &'a LedgerEntry>) -> b
         }
         match entry.mode.as_str() {
             "claim" => active = !is_claim_stale(entry),
-            "paid_route_approval_grant"
-            | "paid_route_approval_revoke"
-            | "external_approval_grant"
-            | "external_approval_request"
-            | "external_approval_consume"
-            | "external_approval_revoke"
-            | "external_approval_expire"
-            | "external_approval_deny"
-            | "review_hold"
-            | "review_hold_release" => {}
+            mode if is_control_record(mode) => {}
             // Every remaining entry is an execution attempt, a capacity
             // deferral, or clear_attempts, all of which end the prior claim.
             _ => active = false,
@@ -315,10 +322,10 @@ pub(super) fn acquire_claim(
     cfg: &GahConfig,
     profile: &Profile,
     args: &DispatchArgs,
-) -> Result<Option<crate::central_claims::ClaimGuard>> {
+) -> Result<(Option<crate::central_claims::ClaimGuard>, Option<String>)> {
     let central_url = cfg.defaults.registry_central_url.clone();
     let Some(work_id) = check_duplicate_work(cfg, profile, args, central_url.is_some())? else {
-        return Ok(None);
+        return Ok((None, None));
     };
 
     if let Some(central_url) = &central_url {
@@ -332,7 +339,7 @@ pub(super) fn acquire_claim(
             &work_id,
             token.as_deref(),
         )?;
-        return Ok(Some(guard));
+        return Ok((Some(guard), Some(work_id)));
     }
 
     // Parallel workers: claim this work_id immediately, before any backend
@@ -343,7 +350,17 @@ pub(super) fn acquire_claim(
     if let Err(e) = ledger::append(cfg, &claim) {
         eprintln!("warning: failed to append claim ledger entry: {e:#}");
     }
-    Ok(None)
+    Ok((None, Some(work_id)))
+}
+
+/// Issue #1460: a direct dispatch that fails before the workflow resolves
+/// its work identity would write a terminal entry with no work id, so the
+/// claim taken for it could never be resolved. Give that entry the claimed
+/// work id. An entry that already has a work id is left alone.
+pub(super) fn stamp_claimed_work_id(ledger: &mut LedgerEntry, claimed_work_id: Option<String>) {
+    if ledger.work_id.is_none() {
+        ledger.work_id = claimed_work_id;
+    }
 }
 
 const REPEATED_SETUP_FAILURE_LIMIT: usize = 3;
@@ -521,22 +538,17 @@ fn ledger_lookup_with_setup_reason(
         // Paid-route approvals are operator control records, not execution
         // attempts. Granting one releases the work-item human gate that asked
         // for approval; neither grant nor revoke consumes retry budget.
-        if e.mode == "paid_route_approval_grant"
-            || e.mode == "external_approval_grant"
-            || e.mode == "external_approval_request"
-            || e.mode == "external_approval_consume"
-            || e.mode == "external_approval_revoke"
-            || e.mode == "external_approval_expire"
-            || e.mode == "external_approval_deny"
-        {
-            last_failure_class = Some(
-                crate::ledger::FailureClass::AgentNoProgress
-                    .as_str()
-                    .to_string(),
-            );
-            continue;
-        }
-        if e.mode == "paid_route_approval_revoke" {
+        if is_control_record(&e.mode) {
+            if e.mode != "paid_route_approval_revoke"
+                && e.mode != "review_hold"
+                && e.mode != "review_hold_release"
+            {
+                last_failure_class = Some(
+                    crate::ledger::FailureClass::AgentNoProgress
+                        .as_str()
+                        .to_string(),
+                );
+            }
             continue;
         }
         // A sibling worker already owns the only configured backend/model
@@ -544,12 +556,6 @@ fn ledger_lookup_with_setup_reason(
         // attempt, so keep it auditable in the ledger without poisoning
         // ticket attempt counts or retry/stuck-loop policy.
         if e.validation_result.as_deref() == Some("deferred_capacity") {
-            continue;
-        }
-        // Review holds are manager-control records, not execution attempts.
-        // They control auto-review/merge but must not affect attempt counts,
-        // retry budgets, success rates, or cost-per-attempt metrics.
-        if e.mode == "review_hold" || e.mode == "review_hold_release" {
             continue;
         }
         setup_attempts.push(e);

@@ -43,6 +43,7 @@ fn ctx(a: CtxArgs<'_>) -> RunContext<'_> {
         env_vars: a.env_vars,
         idle_timeout_seconds: a.idle_timeout_seconds,
         print_timeout_seconds: None,
+        write_intent: super::WriteIntent::Implementation,
     }
 }
 
