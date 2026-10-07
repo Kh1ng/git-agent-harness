@@ -79,7 +79,13 @@ export function findGahBinary(isExecutable: ExecutableProbe = executableOnDisk):
 }
 const STATUS_CACHE_TTL_MS = 30_000;
 const MAX_JSON_OUTPUT_BYTES = 2 * 1024 * 1024;
+/** The event stream grows with every loop pass: a busy day alone nears the
+ * general cap, and the activity feed reads thirty. */
+const MAX_EVENTS_OUTPUT_BYTES = 64 * 1024 * 1024;
+/** Several dashboard views poll the same window seconds apart. */
+const EVENTS_CACHE_TTL_MS = 5_000;
 const statusCache = new AsyncTtlCache<string, StatusSnapshot>(STATUS_CACHE_TTL_MS);
+const eventsCache = new AsyncTtlCache<string, ControllerEvent[]>(EVENTS_CACHE_TTL_MS);
 
 /**
  * Get the path to the GAH config file
@@ -144,7 +150,9 @@ export function getSpawnOptions(config?: string, detached?: boolean): SpawnOptio
  */
 export async function runStatus(profile: string, config?: string, light = false): Promise<StatusSnapshot> {
   const key = JSON.stringify([profile, config ?? null, light]);
-  return statusCache.get(key, () => runStatusUncached(profile, config, light));
+  // The forge calls behind a full status take many seconds; a dashboard load
+  // gets the last snapshot while the next one is fetched.
+  return statusCache.getStale(key, () => runStatusUncached(profile, config, light));
 }
 
 /** `light` skips the forge calls (open MRs, ticket queue); see #1275. */
@@ -178,14 +186,15 @@ export async function runQuota(
 /**
  * Shared plumbing for the `--json` subcommands -- same spawn/parse/error
  * shape, factored out so callers don't duplicate it. Fail closed: stdout
- * above MAX_JSON_OUTPUT_BYTES rejects immediately and kills the child, and
+ * above `maxOutputBytes` rejects immediately and kills the child, and
  * stderr is bounded so a spamming backend cannot balloon memory.
  */
 function runJsonCommand<T>(
   args: string[],
   config?: string,
   acceptStructuredFailure = false,
-  input?: string
+  input?: string,
+  maxOutputBytes = MAX_JSON_OUTPUT_BYTES
 ): Promise<T> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(findGahBinary(), args, { ...getSpawnOptions(config), ...(input !== undefined ? { stdio: ['pipe', 'pipe', 'pipe'] as const } : {}) });
@@ -200,10 +209,10 @@ function runJsonCommand<T>(
     child.stdout?.on('data', (data) => {
       if (overCap) return;
       stdoutBytes += data.length;
-      if (stdoutBytes > MAX_JSON_OUTPUT_BYTES) {
+      if (stdoutBytes > maxOutputBytes) {
         overCap = true;
         reject(new Error(
-          `gah ${args[0]} output exceeded ${MAX_JSON_OUTPUT_BYTES} bytes (observed ${stdoutBytes})`
+          `gah ${args[0]} output exceeded ${maxOutputBytes} bytes (observed ${stdoutBytes})`
         ));
         child.kill();
         return;
@@ -765,7 +774,8 @@ export function runEvents(profile: string, sinceIso: string, config?: string): P
     args.push('--config-path', config);
   }
 
-  return runJsonCommand<ControllerEvent[]>(args, config);
+  return eventsCache.get(JSON.stringify([profile, sinceIso, config ?? null]),
+    () => runJsonCommand<ControllerEvent[]>(args, config, false, undefined, MAX_EVENTS_OUTPUT_BYTES));
 }
 
 /**

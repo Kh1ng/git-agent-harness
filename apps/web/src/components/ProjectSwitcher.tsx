@@ -12,7 +12,7 @@ import { updateNavigation } from '../lib/navigationState.js';
  * Profile sidebar's add form).
  */
 export function ProjectSwitcher({ onImport, onCreate }: { onImport: () => void; onCreate: () => void }) {
-  const { profile: wsProfile } = useWebSocket();
+  const { profile: wsProfile, serverVersion } = useWebSocket();
   const profileOverride = useUiStore((state) => state.profileOverride);
   const setProfileOverride = useUiStore((state) => state.setProfileOverride);
   const profiles = useGahStore((state) => state.profiles);
@@ -35,7 +35,8 @@ export function ProjectSwitcher({ onImport, onCreate }: { onImport: () => void; 
   const configured = profiles.data ?? [];
   const selectedName = profileOverride ?? wsProfile ?? '';
   const selected = configured.find((candidate) => candidate.name === selectedName);
-  const label = selected?.display_name || selectedName || 'none';
+  // Until the server's welcome arrives the project is unknown, not absent.
+  const label = selected?.display_name || selectedName || (serverVersion === null ? 'loading…' : 'none');
 
   const choose = (name: string) => {
     setProfileOverride(name);
