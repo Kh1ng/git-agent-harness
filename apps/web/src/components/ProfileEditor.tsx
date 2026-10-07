@@ -417,9 +417,10 @@ function DeleteModal({ profileName, isLoading, onCancel, onConfirm }: DeleteModa
   const descriptionId = useId();
   useEffect(() => {
     const element = dialog.current;
-    element?.showModal();
+    // No close() on cleanup: its close event would reach onCancel and take
+    // the dialog straight back down when React re-runs this effect.
+    if (element && !element.open) element.showModal();
     cancelButton.current?.focus();
-    return () => element?.close();
   }, []);
 
   return (
@@ -433,7 +434,8 @@ function DeleteModal({ profileName, isLoading, onCancel, onConfirm }: DeleteModa
       <div className="flex gap-2 justify-end">
         <button
           ref={cancelButton}
-          onClick={onCancel}
+          // Closing the dialog itself returns focus to the button that opened it; onClose then runs onCancel.
+          onClick={() => dialog.current?.close()}
           className="btn-secondary"
         >
           <X size={14} aria-hidden="true" />
