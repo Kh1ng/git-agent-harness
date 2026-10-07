@@ -22,8 +22,12 @@ pub use autonomy::WakeAutonomy;
 mod external_credential_scopes;
 pub use external_credential_scopes::ExternalCredentialScope;
 mod routing_policy;
+mod worker_scaling;
 use routing_policy::merge_routing_policy;
 pub use routing_policy::{CandidateConfig, RoutingPolicy, TaskRoutingRule};
+mod default_paths;
+pub use default_paths::{default_config_dir, default_data_root, effective_worktree_base};
+pub use worker_scaling::WorkerScaling;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GahConfig {
@@ -38,6 +42,9 @@ pub struct GahConfig {
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct Defaults {
+    /// None retains factory behavior for configurations predating module selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub factory_enabled: Option<bool>,
     pub artifact_root: String,
     pub worktree_base: String,
     pub llm_base_url: String,
@@ -45,12 +52,9 @@ pub struct Defaults {
     pub llm_model_cloud: String,
     pub routing: RoutingPolicy,
     pub node_capacity: NodeCapacitySettings,
-    /// Which agent CLI ("claude" | "codex" | "hermes") is currently acting
-    /// as the operator's manager across all profiles/projects. Read by the
-    /// manager-wake feature (`Profile::manager_wake_autonomy`) to decide
-    /// who to invoke when a notify-worthy event fires. Global, not per-profile:
-    /// "who's on call" is a cross-project fact. `None`/unrecognized means no wake
-    /// even if a profile has autonomy enabled.
+    /// Global manager CLI ("claude" | "codex" | "hermes") across all projects.
+    /// `Profile::manager_wake_autonomy` uses it for notify-worthy events;
+    /// `None`/unrecognized means no wake, even when profile autonomy is enabled.
     pub current_manager: Option<String>,
     /// See `crate::network_exposure` module docs (issue #879).
     pub network_exposure: crate::network_exposure::NetworkExposureLevel,
@@ -254,6 +258,9 @@ pub struct Profile {
     /// implementation intake pauses. Defaults to `max_parallel_workers`.
     #[serde(default)]
     pub max_open_managed_mrs: Option<u32>,
+    /// Automatic and manual growth past the two limits above.
+    #[serde(default, skip_serializing_if = "WorkerScaling::is_default")]
+    pub worker_scaling: WorkerScaling,
     /// HOME override for the `agy-second` backend name only -- a distinct
     /// authenticated Antigravity account/quota pool from the default `agy`
     /// backend, which otherwise runs under the process's real $HOME. Same
@@ -392,12 +399,6 @@ pub fn canonical_backend_name(name: &str) -> &str {
     }
 }
 
-pub fn default_config_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    home.map_or_else(|| PathBuf::from("/root"), PathBuf::from)
-        .join(".config/gah")
-}
-
 pub fn default_config_path() -> PathBuf {
     default_config_dir().join("config.toml")
 }
@@ -450,36 +451,13 @@ pub fn check_profile_candidate_model_consistency(
     profile: &Profile,
 ) -> Result<(), Vec<String>> {
     let routing = profile.effective_routing(defaults);
-    let mut candidates = Vec::new();
-    if let Some(ref c) = routing.routine_reviewer {
-        candidates.push(("routine_reviewer", c));
-    }
-    for c in &routing.escalatory_reviewers {
-        candidates.push(("escalatory_reviewer", c));
-    }
-    if let Some(ref list) = routing.pm_candidates {
-        for c in list {
-            candidates.push(("pm_candidate", c));
-        }
-    }
-    if let Some(ref list) = routing.improve_candidates {
-        for c in list {
-            candidates.push(("improve_candidate", c));
-        }
-    }
-    for rule in &routing.task_routing_rules {
-        for candidate in &rule.candidates {
-            candidates.push(("task_routing_rule", candidate));
-        }
-    }
-    if let Some(ref list) = routing.review_candidates {
-        for c in list {
-            candidates.push(("review_candidate", c));
-        }
-    }
-
-    let mut errors = Vec::new();
+    let candidates = routing.labeled_candidates();
+    let mut errors = routing.allowed_model_errors();
     for (label, candidate) in candidates {
+        // An allow-list entry without a model admits any model on its backend.
+        if label == "allowed_model" && candidate.model.is_none() {
+            continue;
+        }
         let args = match candidate.backend.as_str() {
             "codex" => &profile.codex_args,
             "opencode" => &profile.opencode_args,
@@ -653,6 +631,7 @@ pub mod tests {
             hermes_idle_timeout_seconds: None,
             max_parallel_workers: None,
             max_open_managed_mrs: None,
+            worker_scaling: Default::default(),
             notify_command: None,
             policy_path: None,
             env_file: None,
@@ -676,63 +655,13 @@ pub mod tests {
 
     fn gitlab_profile(api_base: Option<&str>) -> Profile {
         Profile {
-            manager_wake_autonomy: crate::config::WakeAutonomy::default(),
-            delivery_mode: crate::config::DeliveryMode::default(),
-            prune_older_than_days: None,
-            chat_session_idle_days: None,
             display_name: "Test".into(),
             repo_id: "test".into(),
             provider: "gitlab".into(),
             repo: "group/repo".into(),
-            local_path: "/tmp/repo".into(),
-            artifact_root: "/tmp/artifacts".into(),
-            default_target_branch: "main".into(),
             provider_api_base: api_base.map(str::to_string),
             provider_project_id: Some("42".into()),
-            oh_profile: None,
-            openhands_args: vec![],
-            codex_args: vec![],
-            codex_path: None,
-            claude_args: vec![],
-            claude_path: None,
-            agy_path: None,
-            vibe_args: vec![],
-            vibe_path: None,
-            opencode_args: vec![],
-            opencode_path: None,
-            hermes_args: vec![],
-            hermes_path: None,
-            agy_second_home: None,
-            agy_print_timeout_seconds: std::collections::HashMap::new(),
-            agy_idle_timeout_seconds: None,
-            opencode_idle_timeout_seconds: None,
-            opencode_idle_timeout_seconds_by_model: std::collections::HashMap::new(),
-            max_concurrent_per_model: std::collections::HashMap::new(),
-            openhands_idle_timeout_seconds: None,
-            vibe_idle_timeout_seconds: None,
-            codex_idle_timeout_seconds: None,
-            claude_idle_timeout_seconds: None,
-            hermes_idle_timeout_seconds: None,
-            max_parallel_workers: None,
-            max_open_managed_mrs: None,
-            notify_command: None,
-            policy_path: None,
-            env_file: None,
-            env_file_prod: None,
-            validation_commands: vec![],
-            auto_fix_commands: vec![],
-            test_file_patterns: vec![],
-            known_baseline_failure_markers: vec![],
-            model_improve: None,
-            model_pm: None,
-            model_review: None,
-            review_timeout_seconds: None,
-            review_hard_timeout_seconds: None,
-            validation_timeout_seconds: None,
-            routing: RoutingPolicy::default(),
-            publishing: Default::default(),
-            external_credential_scopes: std::collections::HashMap::new(),
-            pacing: Default::default(),
+            ..test_profile_for_notifications()
         }
     }
 

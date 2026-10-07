@@ -25,20 +25,28 @@ a summary.
 `gah loop` reserves 4096 MiB for each implementation, fix, retry, or escalation
 worker and keeps a free-memory floor of `max(2048 MiB, total memory / 6)`.
 The critical-memory and memory PSI checks always apply. Operators can set
-these global defaults in Settings → Node memory capacity or in TOML:
+these global defaults in Settings → Machine capacity or in TOML:
 
 ```toml
 [defaults.node_capacity]
 worker_memory_mib = 4096
 memory_floor_mib = 0
+worker_cpu_cores = 2
+cpu_ceiling_percent = 90
 ```
+
+`worker_cpu_cores` (1 to 64) is the CPU reserved for each implementation, fix,
+retry, or escalation worker. `cpu_ceiling_percent` (10 to 400) is how much of
+the node's logical CPUs running workers may reserve in total; above 100
+overcommits. The first worker is always admitted. If `worker_cpu_cores` is
+larger than the ceiling allows, the node runs one such worker at a time.
 
 `memory_floor_mib = 0` (or an omitted value) keeps the adaptive floor. An
 explicit floor must be at least 512 MiB; the worker reservation must also be
 at least 512 MiB. Lowering either value raises the risk of running out of
 memory. The loop reloads these settings each iteration and announces them
-when they change; `gah status` reports them. CPU, review, and PM reservations
-are unchanged.
+when they change; `gah status` reports the memory values. Review and PM
+reservations are fixed fractions and are not configurable.
 
 Validation is layered so a bad value can never lock you out of the config:
 
@@ -53,6 +61,41 @@ Validation is layered so a bad value can never lock you out of the config:
 - The loop logs a warning at startup when the settings can never be admitted
   on this node, instead of leaving the fact buried in deferral logs.
 
+### Release channel and in-app updates (issue #1416)
+
+A green merge to `main` publishes a prerelease **edge** channel build
+(`.github/workflows/release-edge.yml`): the `gah` and `gah-mcp-server`
+binaries (Linux x86_64, macOS universal), the server bundle
+(`gah-server-bundle.tar.gz`: the prebuilt `apps/server` and `apps/web` dist
+outputs plus
+the OpenCode agent configs), and `edge-manifest.json` — the versioned
+manifest with a SHA-256 per artifact. When the `TAURI_SIGNING_PRIVATE_KEY`
+secret is configured, the same release carries a signed Tauri updater feed
+(`latest.json`) for the desktop app.
+
+Install from the channel instead of rebuilding from source — the checkout
+stays the deployment root, only the artifact source changes (no git pull,
+cargo, or npm build):
+
+```bash
+gah update --from-release            # edge channel, manifest auto-discovered from origin
+gah update --from-release --release-manifest /path/or/https://.../edge-manifest.json
+```
+
+Every surface shows "Update available" against the same feed: the web
+dashboard's top banner and Settings page (which offer *Update and restart*),
+the desktop app's Settings row (signed updater, restarts into the new
+bundle), and the Fleet page — where each worker reports its version, nodes
+behind the coordinator are flagged, *Update node* / *Update all nodes*
+push the release to workers, and per-node auto-update opts a node in to
+updating whenever central sees it behind. A worker that is mid-dispatch
+finishes its run before the update restarts anything. Workers older than
+the coordinator's minimum supported version
+(`packages/contracts/src/coordinator-protocol.json`) are flagged
+`unsupported` instead of failing silently. Source rebuilds remain the
+explicit developer mode (`gah update` without `--from-release`, or the
+Settings page's *Rebuild from source*).
+
 ### Deterministic CLI/control-plane update
 
 Do not assume a `cargo build --release` updates the `gah` command on PATH. A
@@ -61,25 +104,52 @@ host can have a stale Cargo-installed binary at `$CARGO_HOME/bin/gah` while
 control plane:
 
 ```bash
-gah update --repo /path/to/git-agent-harness --restart-server
+gah update --pull --repo /path/to/git-agent-harness --restart-server
 ```
 
-It refuses a dirty or non-default-branch checkout, pulls with `--ff-only`,
-replaces the actual Cargo-installed CLI with `cargo install --path . --force`,
+`--pull` fetches and fast-forwards before installation. The command prints an
+installation plan and asks for confirmation; pass `--yes` for unattended
+updates. Omit `--pull` when reinstalling the current checkout, such as after
+changing the node role.
+Without `--pull`, it builds the current branch and working tree, including
+uncommitted changes.
+
+For unattended first installs, run `GAH_INSTALL_CONFIRMED=1 scripts/install.sh`
+with the desired role and configuration environment variables. This accepts
+the installer confirmation before it writes configuration or installs services.
+For unattended updates, use `gah update --pull --yes --repo /path/to/git-agent-harness`.
+Updates refresh existing GAH OpenCode agent files and quota-refresh units even
+when `--agent` is omitted; use `--agent` to install additional integrations.
+
+With `--pull`, it refuses a dirty or non-default-branch checkout and pulls
+with `--ff-only`. It replaces the actual Cargo-installed CLI with
+`cargo install --path . --bin gah --force --locked`,
 installs the lockfile-pinned Node dependencies, builds `apps/server`, and
 installs/reloads the `gah-loop@.service` user-unit template. On a central
 node it also reinstalls the system-level `gah-server.service` unit from the
 tracked template (issue #894, so the installed unit can't drift from
-`packaging/systemd/`), builds the web dashboard and deploys its `dist` to the
-web root (issue #896), and optionally restarts `gah-server.service`. It does
-not build or deploy desktop, TUI, mobile, or other client packages.
+`packaging/systemd/`), builds the web dashboard, and optionally restarts
+`gah-server.service`. It does not build or deploy desktop, TUI, mobile, or
+other client packages.
 
-The web deploy root defaults to `/var/www/gah`, a conventional static-site
-root. It is **not** something this repo ships or documents as a server
-layout — set `GAH_WEB_DEPLOY_ROOT` to wherever the web server on this host
-actually serves the dashboard from (the deploy prints the chosen root so a
-mismatch is visible). Set it to an empty string to skip web deploy entirely
-on hosts that serve the dashboard from elsewhere.
+**Who serves the dashboard.** `gah-server` serves the built web app itself
+(`apps/web/dist` in the checkout), so a fresh install needs no separate web
+server and no root to deploy the dashboard (issue #1327). `GAH_WEB_ROOT` in
+`/etc/gah/server.env` overrides the directory; set it to an empty value when
+another web server serves the dashboard and `gah-server` should serve only the
+API.
+
+**Hosts with their own web server.** `gah update` also copies the build into a
+web root for Caddy or similar (issue #896), using `sudo`:
+
+- `GAH_WEB_DEPLOY_ROOT` unset: copy to `/var/www/gah` if that directory already
+  exists, as on a host set up before #1327. Otherwise nothing is copied.
+- `GAH_WEB_DEPLOY_ROOT=/some/root`: copy there. The update prints the root.
+- `GAH_WEB_DEPLOY_ROOT=` (empty): never copy.
+
+An existing Caddy install therefore keeps working unchanged. To move it to
+`gah-server`, remove the dashboard site from Caddy, delete `/var/www/gah`, and
+restart `gah-server.service`.
 
 `--restart-server` refuses to run while any `gah loop --profile …` process is
 active. The loop has its own systemd user cgroup and must be stopped cleanly
@@ -104,7 +174,7 @@ scripts/install.sh
 ### Upgrade procedure
 
 ```bash
-gah update --repo /path/to/git-agent-harness --restart-server
+gah update --pull --repo /path/to/git-agent-harness --restart-server
 ```
 
 The updater never starts or restarts a recurring `gah loop`; with
@@ -200,7 +270,7 @@ system service. The user units (`gah-loop@`, `gah-prune`,
 verbatim. Then enable the service:
 
 ```bash
-gah update --role central
+gah update --pull --role central
 sudo systemctl enable --now gah-server
 ```
 
@@ -290,7 +360,7 @@ Start/Stop buttons manage `gah-loop@<profile>` rather than creating a detached
 process:
 
 ```bash
-gah update --repo /path/to/git-agent-harness
+gah update --pull --repo /path/to/git-agent-harness
 systemctl --user start gah-loop@gah
 ```
 
@@ -325,10 +395,38 @@ source checkout alone does not change an already-installed loop service.
 After upgrading, rebuild/install and restart the affected user units:
 
 ```bash
-gah update --repo /path/to/git-agent-harness
+gah update --pull --repo /path/to/git-agent-harness
 systemctl --user restart gah-loop@gah gah-loop@sportsball
 journalctl --user -u gah-loop@gah -u gah-loop@sportsball -n 100 --no-pager
 ```
+
+### Scaling workers past the baseline
+
+`max_parallel_workers` and `max_concurrent_per_model` are the baseline. A
+profile's `[profiles.<name>.worker_scaling]` section lets the loop grow past
+both, and the dashboard exposes it under Settings, Factory, Worker scaling.
+
+Automatic scaling (`enabled = true`) gives a capped model `extra_per_model`
+more concurrent runs (default 1) while every fresh quota window of its
+subscription, the five-hour one included, has at least
+`min_remaining_percent` left (default 50). A model with no fresh quota
+reading is never scaled, and the highest-priority candidate is scaled first.
+The total stops at `max_workers`, which defaults to twice the baseline.
+
+A manual boost adds workers outright, for one model or for every capped
+model, until an optional expiry:
+
+```bash
+gah profile set gah --worker-scaling on --worker-scaling-max-workers 6
+gah profile set gah --boost-workers 2 --boost-model codex/gpt-5 --boost-hours 3
+gah profile set gah --clear worker_boost
+```
+
+A boost is explicit, so `max_workers` does not limit it. Neither source
+bypasses the pressure gate above: memory and CPU still decide whether an
+extra worker starts. The loop applies changes on its next iteration and logs
+the worker count when it changes; `gah status --json` reports the result and
+the reason for each grant or refusal as `worker_limits`.
 
 Set `max_open_managed_mrs` per profile to bound implementation intake. It
 defaults to `max_parallel_workers`; at the limit GAH keeps reviewing, fixing,
@@ -764,11 +862,27 @@ Each backend authenticates through its own CLI, not through GAH:
   `codex doctor` (websocket connect + auth). Account-level quota is subscription,
   not API-metered.
 - **claude** — `claude` CLI login; configured executable path allowed via
-  profile `claude_path`.
+  profile `claude_path`. A saved subscription token (`claude setup-token`,
+  credential kind `claude_subscription_token`) can be bound to an instance
+  instead of a browser login; see "Claude subscription token" below.
 - **agy / agy-main / agy-second** — `agy` and the `agy-main` wrapper share the
   default `HOME` and therefore one authenticated account/quota pool;
   `agy-second` is isolated by `agy_second_home` as a distinct account.
 - **vibe**, **opencode**, **openhands** — their own respective CLI auth.
+
+### Runner permissions
+
+By default, `gah` injects necessary flags so implementation dispatches (`improve`, `experiment`), which run in a GAH worktree, can make progress. Read-only dispatches (`research`, `audit`, `estimate`, `pm`) run in the profile's real checkout and, like review dispatches, receive none of these flags: they keep the backend CLI's own default permissions plus whatever the profile's `codex_args`/`claude_args` set.
+
+- **codex** — Implementation dispatches run with `--sandbox workspace-write --add-dir <CARGO_TARGET_DIR>`: the worktree plus that dispatch's own build target directory, and nothing above it. A profile `codex_args` that chooses its own sandbox (`--sandbox`/`-s`, `--full-auto`, `--dangerously-bypass-approvals-and-sandbox`) replaces the default sandbox mode.
+- **claude** — Implementation dispatches run with `--permission-mode acceptEdits` and an `--allowedTools` list of the edit tools (`Edit,Write,MultiEdit,NotebookEdit`) plus a fixed set of shell commands: `git`, `cargo`, `npm`, `npx`, `node`, `pnpm`, `yarn`, `make`, `python`, `python3`, `pytest`, `go`, and the read-only `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, plus `mkdir`. Each is passed as `Bash(<command>:*)`. Unrestricted `Bash` is not the default, because Claude Code has no sandbox: it would let an unattended job run any command as the node user, network included. The list is a reduction, not a sandbox — a build script or a test can still run arbitrary code. A project that needs another command (its own validation command, for example) sets `claude_args = ["--allowedTools", "Edit,Write,MultiEdit,NotebookEdit,Bash(git:*),Bash(<command>:*)"]`, or plain `Bash` to accept unrestricted shell. A profile `claude_args` that sets `--permission-mode` (or `--dangerously-skip-permissions`) or `--allowedTools` replaces the matching default.
+- **Other runners** — Depend on their own CLI defaults.
+
+If the backend CLI still refuses an implementation run's writes and the attempt
+changes nothing, GAH appends a `GAH: backend writes refused (configuration error): …`
+line to `backend-output.log` naming the setting to fix, records the attempt as
+`environment_error`, and ends the dispatch without spending the remaining
+retries.
 
 Validate that a profile's declared backends and tokens are actually present
 before trusting an unattended run:
@@ -1030,6 +1144,37 @@ The CLI supports the same storage through `gah credentials list --json`,
 The save command reads the secret from stdin. Its `--id`, `--provider`,
 `--kind`, and `--account-label` arguments contain metadata only.
 `gah quota refresh --credential NAME` checks only that connection.
+
+### Claude subscription token
+
+GAH runs Claude under isolated per-attempt state, so the interactive OAuth
+login in `~/.claude` is invisible to dispatched runs. `claude setup-token`
+prints one long-lived token for the subscription; save it once per account
+and bind it to a Claude instance (issue #1352). The runner receives it only
+as `CLAUDE_CODE_OAUTH_TOKEN`, never as an API key:
+
+```sh
+claude setup-token            # prints the token; do not paste it into shell history
+read -rs TOKEN; printf '%s' "$TOKEN" | \
+  gah credentials save --id claude-work --provider claude \
+    --kind claude_subscription_token --account-label work
+```
+
+The token counts as subscription quota: candidates on a bound instance are
+`included_in_quota` and never require paid-route approval. An
+`external_credential_scopes` entry for `ANTHROPIC_API_KEY` does not cover the
+token; list `CLAUDE_CODE_OAUTH_TOKEN` in a scope if runs with it should need
+work-scoped approval. `gah auth-health`
+reports each instance independently; a saved token reads as unknown there
+because a login check cannot verify it. `gah quota refresh --credential
+claude-work` (also run by auto-refresh) asks the subscription usage endpoint
+for the 5-hour and weekly windows. That endpoint needs the `user:profile`
+scope, and `claude setup-token` tokens are reported to be inference-only; when
+the endpoint rejects the scope, the check records "quota unavailable" for the
+credential and the instance's windows stay unknown. That is not a token fault.
+Save one credential per account and give each instance its own `state_root`,
+so concurrent instances never rewrite shared login state. The token is
+stored owner-only and never appears in argv, logs, ledger, or telemetry.
 
 ### Mistral dashboard usage
 
@@ -1353,3 +1498,42 @@ During extraction, remove or lower legacy entries:
 
 Stale baseline entries for deleted/moved paths are reported explicitly by the
 test without blocking the run, so they can be cleaned up in the extraction PR.
+
+## Optional factory automation
+
+The factory module is separate from the local application. The desktop's
+**Set up this computer** section appears during onboarding and in **Settings →
+This computer**. Select **Enable factory automation** before installation, or
+use **Save factory module** afterward. The dashboard, chats, agent execution,
+repository workflows, and local worker API do not depend on this selection.
+
+Fresh standalone installs default to off. Existing configuration files without
+`defaults.factory_enabled` retain the previous enabled behavior. Updates preserve
+explicit true/false values. Fresh networked central/worker installations retain
+legacy behavior. `GAH_FACTORY_ENABLED=true|false` overrides installer selection;
+`gah setup --factory-enabled true|false` forwards that choice. No configuration
+file means the read-only setup check reports the module off.
+
+`gah config set --factory-enabled false` disables and stops all installed or
+loaded systemd `gah-loop@<profile>.service` instances and the factory watchdog
+service/timer. It leaves the loop template available for later enablement.
+`gah loop` rejects starts while disabled; an unmanaged loop also exits when its
+next iteration reloads the disabled setting. Managed loops stop immediately.
+The dashboard checks module policy before enabling a loop unit. Enabling the module does not start loops or restore
+previous boot enablement: start each desired project loop explicitly. This avoids
+unexpected ticket dispatch on a later enable. Service-control errors are reported,
+not treated as successful transitions. The disabled policy is saved first, so
+new dispatch is prevented even if service cleanup fails; retry disabling to
+complete cleanup.
+
+Shared services remain active: `gah-server`/`gah-worker` serve application and
+execution APIs; `gah-prune` performs storage and chat maintenance;
+`gah-quota-refresh` collects account telemetry used by both chats and dispatch;
+the optional memory gateway serves both workflows. Only dispatch loops and their
+watchdog are factory services. macOS uses application/worker LaunchAgents rather
+than the Linux factory units; these shared agents remain available.
+
+Read-only setup JSON retains `ready` for compatibility and exposes
+`application_ready`, `factory_enabled`, and `factory_ready` separately.
+Factory readiness means the module is enabled and setup prerequisites are ready;
+project/backend dispatch readiness still comes from the existing doctor checks.

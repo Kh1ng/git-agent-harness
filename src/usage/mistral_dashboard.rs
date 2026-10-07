@@ -194,19 +194,16 @@ fn refresh_and_store_with(
                     model: None,
                     quota_pool: Some("mistral-dashboard".into()),
                     quota_window: None,
-                    quota_used_percent: None,
                     quota_remaining_percent: None,
                     quota_reset_at: None,
                     observed_at: None,
                     checked_at: None,
                     check_error: None,
                     usage_source: Some("mistral_dashboard".into()),
-                    mistral_admin: None,
                     account_usage: None,
                     credential_id: None,
                 });
             previous.quota_window = None;
-            previous.quota_used_percent = None;
             previous.quota_remaining_percent = None;
             previous.quota_reset_at = None;
             previous.account_usage = None;

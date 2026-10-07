@@ -449,6 +449,9 @@ export interface StatusSnapshot {
    * before commit/push. */
   generated_artifact_deny_patterns: string[];
   max_parallel_workers: number;
+  /** How `max_parallel_workers` was reached from the configured baseline.
+   * Absent on CLIs without worker scaling. */
+  worker_limits?: WorkerLimits;
   open_managed_mr_count: number;
   inflight_implementation_count: number;
   implementation_intake_paused: boolean;
@@ -471,6 +474,7 @@ export interface StatusSnapshot {
 // ---------------------------------------------------------------------------
 
 export interface QuotaUsageSummary {
+  usage_unknown_reasons?: Partial<Record<UsageUnknownReason, number>>;
   entries: number;
   attempts: number;
   validation_pass: number;
@@ -501,6 +505,16 @@ export interface QuotaCandidateStatus {
   quota_observations?: QuotaObservation[];
 }
 
+export type QuotaCheckStatus =
+  | 'data'
+  | 'no_data'
+  | 'failed'
+  /** #1336: the source's latest check says it needs a login or key. */
+  | 'auth_required'
+  /** #1336: a configured candidate expects this allowance source, but the
+   * node holds no credential for it, so no check can ever run there. */
+  | 'not_configured';
+
 export interface QuotaCheck {
   credential_id?: string | null;
   backend: string;
@@ -508,13 +522,21 @@ export interface QuotaCheck {
   backend_instance?: string | null;
   model?: string | null;
   quota_pool?: string | null;
-  checked_at: string;
-  status: 'data' | 'no_data' | 'failed';
+  /** When the check last ran. Absent only for a `not_configured` source,
+   * which has never been checked on that node (#1336). */
+  checked_at?: string | null;
+  status: QuotaCheckStatus;
   quota_observations?: QuotaObservation[];
   error?: string | null;
+  /** #1336: start of the current run of consecutive auth_required
+   * failures; repeat refresh markers keep this one timestamp so the whole
+   * run stays a single "how long has it been failing". */
+  failing_since?: string | null;
 }
 
 export interface QuotaSnapshot {
+  /** v3 adds auth_required/not_configured checks and optional checked_at;
+   * central also accepts legacy v2 worker snapshots. */
   schema_version: number;
   generated_at: string;
   freshness: {
@@ -580,6 +602,7 @@ export interface AccountUsageObservation {
   models: AccountUsageModel[];
 }
 
+/** Shared quota store record used by quota list and snapshot observations. */
 export interface QuotaObservation {
   credential_id?: string | null;
   backend_instance?: string | null;
@@ -587,17 +610,18 @@ export interface QuotaObservation {
   backend: string;
   model?: string | null;
   quota_window?: string | null;
-  quota_used_percent?: number | null;
   quota_remaining_percent?: number | null;
   quota_reset_at?: string | null;
   observed_at?: string | null;
   /** When the check ran, on store-derived report rows (#1339). */
   checked_at?: string | null;
+  check_error?: string | null;
   usage_source?: string | null;
   account_usage?: AccountUsageObservation | null;
 }
 
 export interface BackendModelComparison {
+  usage_unknown_reasons?: Partial<Record<UsageUnknownReason, number>>;
   backend_or_model: string;
   is_model: boolean;
   entries: number;
@@ -754,6 +778,29 @@ export interface ReportSeriesData {
  * `WakeAutonomy` in src/config.rs (serde snake_case). */
 export type WakeAutonomyValue = 'off' | 'review_only' | 'full';
 
+/** Growth past a profile's baseline worker count: automatic while a
+ * subscription has quota headroom, and manual through a boost. */
+export interface WorkerScalingSettings {
+  enabled: boolean;
+  /** Ceiling for automatic scaling; unset means twice the baseline. */
+  max_workers?: number;
+  extra_per_model: number;
+  min_remaining_percent: number;
+  boost_workers?: number;
+  /** `backend/model`; unset boosts every capped model. */
+  boost_model?: string;
+  /** RFC 3339 expiry; unset lasts until cleared. */
+  boost_until?: string;
+}
+
+export interface WorkerLimits {
+  baseline_workers: number;
+  workers: number;
+  extra_per_model?: Record<string, number>;
+  /** One operator-readable line per grant or refusal. */
+  notes?: string[];
+}
+
 export interface ProfileSummary {
   name: string;
   display_name: string;
@@ -778,6 +825,8 @@ export interface ProfileSummary {
   max_parallel_workers: number | null;
   /** Effective maximum open managed PRs/MRs for the profile. */
   max_open_managed_mrs: number;
+  /** Absent on CLIs without worker scaling. */
+  worker_scaling?: WorkerScalingSettings;
   /** Manager-wake autonomy for this profile (null = unset -> off). */
   manager_wake_autonomy: WakeAutonomyValue | null;
   /** Delivery mode for work results ('pr' | 'handoff'). Defaults to 'pr' if omitted. */
@@ -934,24 +983,6 @@ export interface WorkClaimDetail {
   is_stale: boolean;
 }
 
-/** Issue #519: one row of `gah quota list --json` (HTTP adapter
- * GET /api/quota/list). Persisted observations, distinct from the computed
- * snapshot GET /api/quota returns. */
-export interface QuotaListRecord {
-  backend: string;
-  backend_instance?: string | null;
-  model?: string | null;
-  quota_pool?: string | null;
-  quota_window?: string | null;
-  quota_used_percent?: number | null;
-  quota_remaining_percent?: number | null;
-  quota_reset_at?: string | null;
-  observed_at?: string | null;
-  checked_at?: string | null;
-  check_error?: string | null;
-  usage_source?: string | null;
-}
-
 /** Issue #519: the remote projection of `gah external-approval inspect --json`.
  * The CLI's local `ledger_path` field is deliberately dropped at the server
  * boundary — remote callers never learn local filesystem layout. */
@@ -987,6 +1018,7 @@ export interface ConfigSummary {
    * all profiles/projects (null = unset, so no manager wake happens). */
   current_manager: string | null;
   node_capacity?: NodeCapacitySettings;
+  node_resources?: NodeResources;
   /** Issue #653: notification channel settings (no secrets — credentials
    * live in the environment). Optional while schema-v1 clients may still
    * be connected to an older server. */
@@ -996,6 +1028,22 @@ export interface ConfigSummary {
 export interface NodeCapacitySettings {
   worker_memory_mib: number;
   memory_floor_mib: number;
+  /** CPU cores one implementation-class worker reserves. Absent on CLIs
+   * that only know the memory settings. */
+  worker_cpu_cores?: number;
+  /** Percent of the node's logical CPUs that load plus reservations may
+   * reach before another worker waits. */
+  cpu_ceiling_percent?: number;
+}
+
+/** What admission measures against on the node, shown beside the limits. */
+export interface NodeResources {
+  memory_total_mib: number;
+  memory_available_mib: number;
+  logical_cpus: number;
+  load_one: number;
+  /** Inside WSL the totals are what Windows grants the VM, not the host's. */
+  wsl: boolean;
 }
 
 /** Issue #1380: smallest accepted value for both node-capacity settings, in
@@ -1005,10 +1053,15 @@ export const NODE_CAPACITY_MIN_MIB = 512;
 
 /** Issue #1380: default node-capacity settings. A `memory_floor_mib` of 0
  * keeps the adaptive floor of max(2048 MiB, total memory / 6). */
-export const NODE_CAPACITY_DEFAULTS: NodeCapacitySettings = {
+export const NODE_CAPACITY_DEFAULTS: Required<NodeCapacitySettings> = {
   worker_memory_mib: 4096,
   memory_floor_mib: 0,
+  worker_cpu_cores: 2,
+  cpu_ceiling_percent: 90,
 };
+
+/** Accepted ranges for the CPU settings; the Rust side enforces the same. */
+export const NODE_CAPACITY_CPU_LIMITS = { cores: [1, 64], ceiling_percent: [10, 400] } as const;
 
 /** Issue #653: notification channel settings projection. */
 export interface NotificationSettingsSummary {
@@ -1137,6 +1190,8 @@ export interface ConfigProfileSummary {
   improve_candidates: RoutingCandidateSummary[];
   review_candidates: RoutingCandidateSummary[];
   task_routing_rules: TaskRoutingRuleSummary[];
+  /** Strict allow-lists by job kind (for example `review`); a kind without an entry is open. */
+  allowed_models?: Record<string, RoutingCandidateSummary[]>;
   routine_reviewer: RoutingCandidateSummary | null;
   escalatory_reviewers: RoutingCandidateSummary[];
   context: ConfigProfileContextSummary;
@@ -1188,6 +1243,8 @@ export type SettingsConfigProfileSummary = Omit<ConfigProfileSummary, 'notificat
 
 /** Versioned allowlisted response from `gah config show --json --full`. */
 export interface ConfigShowFull {
+  /** Absent on older hosts, which retain factory automation behavior. */
+  factory_enabled?: boolean;
   node?: NodeRoleStatus;
   schema_version: number;
   config_path: string;
@@ -1202,6 +1259,8 @@ export interface ConfigSetData {
   current_manager?: string | null;
   worker_memory_mib?: number;
   memory_floor_mib?: number;
+  worker_cpu_cores?: number;
+  cpu_ceiling_percent?: number;
   /** Issue #653: none | telegram | discord. Credentials come from the
    * environment (TELEGRAM_BOT_TOKEN / DISCORD_WEBHOOK_URL), never config. */
   notification_channel?: 'none' | 'telegram' | 'discord';
@@ -1234,6 +1293,18 @@ export interface ControllerEvent {
   reason_code?: string | null;
   details: string;
   remediation_plan?: RemediationPlan | null;
+  /** Routes the router passed over, when the dispatch ended because none could take it. */
+  skipped?: SkippedRoute[];
+}
+
+/** One backend and model the router considered and passed over (src/events.rs SkippedRoute). */
+export interface SkippedRoute {
+  backend: string;
+  backend_instance?: string | null;
+  model?: string | null;
+  /** The router's reason code: `max_concurrent_reached`, `authentication_error`… */
+  reason: string;
+  unavailable_until?: string | null;
 }
 
 // TICKET-505: HumanRequired reason codes
@@ -1273,14 +1344,23 @@ export interface ControllerActivity {
   action: string;
   status: ControllerActivityStatus;
   outcome: string | null;
+  /** Routes the router passed over, when the run ended because none could take it. */
+  skipped?: SkippedRoute[];
 }
 
 // ---------------------------------------------------------------------------
 // gah ledger work <id> --json (src/ledger.rs LedgerEntry, full shape)
 // ---------------------------------------------------------------------------
 
+export type UsageUnknownReason =
+  | 'no_attempt_started'
+  | 'backend_not_invoked'
+  | 'usage_artifact_missing'
+  | 'usage_artifact_unparsed';
+
 export interface LedgerUsage {
   usage_source: string | null;
+  usage_unknown_reason?: UsageUnknownReason | null;
   usage_classification?: 'quota_backed' | 'api_key_backed' | 'local_unmetered' | 'unknown' | 'mixed' | 'mixed_or_unknown' | null;
   /** Safe logical execution instance, optionally qualified by quota pool. */
   backend_instance?: string | null;
@@ -1470,6 +1550,7 @@ export interface LedgerEntry {
 // ---------------------------------------------------------------------------
 
 export interface LedgerSummary {
+  usage_unknown_reasons?: Partial<Record<UsageUnknownReason, number>>;
   ledger_path: string;
   entries: number;
   success: number;
@@ -1509,6 +1590,7 @@ export interface LedgerSummary {
 
 /** `ledger::summary::GroupSummary`; unknown observations remain null. */
 export interface LedgerGroupSummary {
+  usage_unknown_reasons?: Partial<Record<UsageUnknownReason, number>>;
   group_key: string;
   entries: number;
   attempts: number;
@@ -1848,6 +1930,30 @@ export interface AdminUpdateState {
   exitCode: number | null;
   pid: number | null;
   output: string;
+  /** Issue #1416: which install path this run used -- `release` (download
+   * published artifacts, no rebuild) or `source` (git pull + rebuild).
+   * Absent on states written by pre-#1416 servers. */
+  mode?: 'release' | 'source' | null;
+}
+
+// ---------------------------------------------------------------------------
+// Release channel (issue #1416): a green merge to main publishes a
+// prerelease "edge" build; central compares its own version against the
+// channel's latest so the dashboard can show "Update available · vX → vY"
+// without rebuilding from source.
+// ---------------------------------------------------------------------------
+
+export type ReleaseChannel = 'edge' | 'stable';
+
+export interface ReleaseChannelStatus {
+  channel: ReleaseChannel;
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  release_url: string | null;
+  published_at: string | null;
+  /** The release's own notes/changelog body, bounded by the server. */
+  notes: string;
 }
 
 /** Exact work-item scope of a paid-route request or existing operator grant. */

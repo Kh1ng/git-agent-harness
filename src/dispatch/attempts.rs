@@ -341,6 +341,7 @@ pub(super) fn run_backend(
         work_id,
         false,
         hard_timeout_seconds,
+        runner::WriteIntent::Implementation,
     )
 }
 
@@ -358,6 +359,7 @@ pub(super) fn run_backend_for_identity(
     env_path: Option<&str>,
     work_id: Option<&str>,
     hard_timeout_seconds: Option<u64>,
+    write_intent: runner::WriteIntent,
 ) -> Result<runner::RunResult> {
     run_backend_with_reserved_route(
         identity,
@@ -373,6 +375,7 @@ pub(super) fn run_backend_for_identity(
         work_id,
         false,
         hard_timeout_seconds,
+        write_intent,
     )
 }
 
@@ -391,6 +394,7 @@ pub(super) fn run_backend_with_reserved_route(
     work_id: Option<&str>,
     route_slot_already_reserved: bool,
     hard_timeout_seconds: Option<u64>,
+    write_intent: runner::WriteIntent,
 ) -> Result<runner::RunResult> {
     // Live incident (2026-07-11): concurrent dispatches landing on the same
     // shared free-tier backend+model (opencode/hy3-free) silently rate-limit.
@@ -568,6 +572,7 @@ pub(super) fn run_backend_with_reserved_route(
         env_vars: &env_vars,
         idle_timeout_seconds: shape.idle_timeout_seconds,
         print_timeout_seconds: shape.print_timeout_seconds,
+        write_intent,
     });
     if let Some(origin_before) = origin_before {
         let origin_after = worktree::git(&["remote", "get-url", "origin"], wt)
@@ -599,18 +604,26 @@ pub(super) fn attempt_usage(
     transcript_path: Option<&str>,
     claude_path: Option<&str>,
 ) -> crate::ledger::LedgerUsage {
-    let text = match fs::read_to_string(log_path) {
-        Ok(t) => t,
-        Err(_) => {
-            return normalize_attempt_usage(
-                crate::ledger::LedgerUsage::default(),
-                attribution,
-                true,
-            );
-        }
-    };
+    let text = fs::read_to_string(log_path).unwrap_or_default();
     let behavior_metrics = crate::telemetry::extractor::parse_structured_behavior_events(&text);
+    // A selected artifact that exists but yields no usage is different from
+    // an absent run-scoped artifact. Do not consult cumulative Vibe sessions.
+    let backend_kind = crate::usage_attribution::backend_kind_of(attribution.backend);
+    let has_structured_artifact = matches!(
+        backend_kind,
+        Some(BackendKind::Claude | BackendKind::Vibe | BackendKind::Opencode)
+    );
+    let artifact_exists = transcript_path.is_some_and(|path| std::path::Path::new(path).exists())
+        || (!has_structured_artifact && std::path::Path::new(log_path).exists());
+    let artifact_reason = if artifact_exists {
+        crate::ledger::UsageUnknownReason::UsageArtifactUnparsed
+    } else {
+        crate::ledger::UsageUnknownReason::UsageArtifactMissing
+    };
     let finalize = |mut usage: crate::ledger::LedgerUsage| {
+        if usage.usage_source.is_none() {
+            usage.usage_unknown_reason = Some(artifact_reason);
+        }
         if let Some(metrics) = &behavior_metrics {
             usage = usage::merge_usage(
                 usage,
@@ -620,9 +633,13 @@ pub(super) fn attempt_usage(
                 },
             );
         }
-        normalize_attempt_usage(usage, attribution, true)
+        let missing_vibe = backend_kind == Some(BackendKind::Vibe) && usage.usage_source.is_none();
+        let mut usage = normalize_attempt_usage(usage, attribution, true);
+        if missing_vibe {
+            usage.requests_count = None;
+        }
+        usage
     };
-    let backend_kind = crate::usage_attribution::backend_kind_of(attribution.backend);
 
     // Claude Code: prefer the structured session transcript for real
     // per-attempt token/cost usage (issue #153). Never scrape stdout text.
@@ -685,6 +702,7 @@ pub(super) fn attempt_usage(
                 }
             }
         }
+        return finalize(crate::ledger::LedgerUsage::default());
     }
 
     // OpenCode persists exact per-session model and token counters in its
@@ -1365,6 +1383,14 @@ fn mark_backend_unavailable_from_output_for_identity_at(
     // model, so we must NOT mark it as unavailable.
     if parsed.kind == crate::quota_parser::FailureKind::ContextLimitExceeded {
         return Ok(Some(parsed));
+    }
+    // Output also carries the agent's own work, which can quote login-failure
+    // text from the repository it is editing, and a login block never
+    // expires. The backend's own login check overrules such a match.
+    if parsed.kind == crate::quota_parser::FailureKind::AuthenticationError
+        && crate::auth_health::login_confirmed(identity)
+    {
+        return Ok(None);
     }
 
     let parsed_unavailable_until = if let Some(reset_at) = parsed.reset_at.as_deref() {

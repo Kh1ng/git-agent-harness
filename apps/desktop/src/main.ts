@@ -8,6 +8,42 @@ type Presence = { dock: boolean; launch_window: boolean; tray: boolean };
 type Settings = { central_url: string; wsl_distribution: string; presence: Presence };
 type WorkerStatus = { running: boolean; note: string; tools: { name: string; environment: string; installed: boolean }[] };
 type RoleStatus = { role: 'central' | 'worker'; running: boolean; supported: boolean };
+type DesktopUpdateStatus = { available: boolean; currentVersion: string; version: string | null; notes: string | null; error: string | null };
+
+/** Issue #1416: the signed release feed's verdict, shown as a non-blocking
+ * Settings row. A missing signing key or unreachable feed reads as "not
+ * configured" -- never an error dialog. */
+function showDesktopUpdate(status: DesktopUpdateStatus): void {
+  const text = document.querySelector<HTMLElement>('#desktop-update-status')!;
+  const apply = document.querySelector<HTMLButtonElement>('#desktop-update-apply')!;
+  if (status.available && status.version) {
+    text.textContent = `Update available · v${status.currentVersion} → v${status.version} — Restart to update.`;
+    apply.hidden = false;
+  } else if (status.error) {
+    text.textContent = status.error.includes('not configured')
+      ? 'Automatic updates are not configured on this computer; the app still updates via setup.'
+      : `Cannot check for updates: ${status.error}`;
+    apply.hidden = true;
+  } else {
+    text.textContent = `This app is up to date (v${status.currentVersion}).`;
+    apply.hidden = true;
+  }
+}
+
+async function loadDesktopUpdate(): Promise<void> {
+  showDesktopUpdate(await invoke<DesktopUpdateStatus>('desktop_update_status'));
+}
+
+document.querySelector('#desktop-update-apply')!.addEventListener('click', () => {
+  const apply = document.querySelector<HTMLButtonElement>('#desktop-update-apply')!;
+  apply.disabled = true;
+  document.querySelector<HTMLElement>('#desktop-update-status')!.textContent = 'Downloading and installing the update…';
+  void invoke('desktop_apply_update').catch((error: unknown) => {
+    apply.disabled = false;
+    document.querySelector<HTMLElement>('#desktop-update-status')!.textContent =
+      `The update failed: ${error instanceof Error ? error.message : String(error)}`;
+  });
+});
 bindRepositoryTools(document.querySelector<HTMLElement>('#repository-tools')!, invoke);
 const central = document.querySelector<HTMLInputElement>('#central-url')!;
 const distribution = document.querySelector<HTMLInputElement>('#wsl-distribution')!;
@@ -25,6 +61,11 @@ const showProviderConnection = bindProviderConnections(document.querySelector<HT
 void listen<MistralLoginResult>('gah:mistral-login', event => {
   showMistralLogin(event.payload);
   showProviderConnection(event.payload);
+}).catch(() => {});
+// The launch and periodic update checks (issue #1416) push the same status
+// the Settings row loads on demand.
+void listen<DesktopUpdateStatus>('gah:desktop-update', event => {
+  showDesktopUpdate(event.payload);
 }).catch(() => {});
 
 function showPresence(presence: Presence) {
@@ -54,13 +95,17 @@ type SetupStatus = { state: 'ok' | 'missing' | 'outdated' | 'not_logged_in' | 'c
 type SetupRequirement = { id: string; label: string; why: string; optional: boolean; status: SetupStatus; action: { command: string; sudo: boolean } | null };
 type SetupCheck = {
   installed: boolean;
-  report: { ready: boolean; requirements: SetupRequirement[] } | null;
+  report: { ready: boolean; application_ready: boolean; factory_enabled: boolean; factory_ready: boolean; requirements: SetupRequirement[] } | null;
   error: string | null;
   command: string;
   terminal: boolean;
 };
 let nodeRole: 'central' | 'worker' = 'central';
 let standaloneStarted = false;
+let factoryLoaded = false;
+/** True once the checkbox reflects the host or the user; until then setup must not send a factory choice. */
+let factoryChosen = false;
+const factory = document.querySelector<HTMLInputElement>('#factory-enabled')!;
 
 function statusText(status: SetupStatus): string {
   switch (status.state) {
@@ -82,13 +127,20 @@ function checkUnresolved(status: SetupStatus): boolean {
 
 /** `gah setup --check` as a checklist; the work itself happens in Terminal. Resolves to readiness. */
 async function refreshSetup(): Promise<boolean> {
-  const result = await invoke<SetupCheck>('setup_check', { role: nodeRole });
+  const result = await invoke<SetupCheck>('setup_check', { role: nodeRole === 'central' && !isMac && (!central.value || /^http:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/.test(central.value)) ? 'standalone' : nodeRole });
   const state = document.querySelector<HTMLElement>('#setup-state')!;
   const list = document.querySelector<HTMLElement>('#setup-list')!;
   const button = document.querySelector<HTMLButtonElement>('#setup-terminal')!;
   const commandLine = document.querySelector<HTMLElement>('#setup-command')!;
   list.replaceChildren();
-  const pending = !result.installed || !result.report?.ready;
+  const pending = !result.installed || !(result.report?.application_ready ?? result.report?.ready);
+  document.querySelector<HTMLElement>('#factory-save')!.hidden = !result.installed;
+  if (result.report && typeof result.report.factory_enabled === 'boolean') {
+    if (!factoryLoaded) { factory.checked = result.report.factory_enabled; factoryLoaded = true; factoryChosen = true; }
+    document.querySelector('#factory-state')!.textContent = result.report.factory_enabled
+      ? `Factory module enabled · ${result.report.factory_ready ? 'prerequisites ready' : 'prerequisites missing'}. Start each project loop explicitly from the dashboard.`
+      : 'Factory module disabled · local application remains available.';
+  }
   if (!result.installed) {
     state.textContent = 'GAH is not installed on this computer yet. Setup builds it, asks whether this computer is the central node, a worker, or command line only, and offers each missing tool before installing it.';
     button.textContent = 'Install GAH in Terminal';
@@ -225,15 +277,24 @@ document.querySelector('#setup-refresh')!.addEventListener('click', () => {
 });
 document.querySelector('#setup-standalone')!.addEventListener('click', () => {
   void perform(async () => {
-    central.value = await invoke<string>('open_setup_terminal', { standalone: true });
+    // An unloaded checkbox is not a choice: omit it so the installer preserves an existing configuration.
+    central.value = await invoke<string>('open_setup_terminal', factoryChosen ? { standalone: true, factoryEnabled: factory.checked } : { standalone: true });
     nodeRole = 'central';
     standaloneStarted = true;
     document.querySelector('#setup-state')!.textContent = 'Standalone setup is running in Terminal. Select Check again when it finishes to open the dashboard.';
   });
 });
+factory.addEventListener('change', () => { factoryChosen = true; });
+document.querySelector('#factory-save')!.addEventListener('click', () => {
+  void perform(async () => {
+    await invoke('set_factory_enabled', { enabled: factory.checked });
+    factoryLoaded = false;
+    await refreshSetup();
+  });
+});
 document.querySelector('#setup-terminal')!.addEventListener('click', () => {
   void perform(async () => {
-    await invoke('open_setup_terminal');
+    await invoke('open_setup_terminal', {});
     document.querySelector('#setup-state')!.textContent = 'Setup is running in Terminal. Check again when it finishes.';
   });
 });
@@ -265,4 +326,5 @@ void perform(async () => {
   nodeRole = role.role;
   // On Windows, setup and gah live in the selected WSL distribution.
   await refreshSetup();
+  await loadDesktopUpdate();
 });

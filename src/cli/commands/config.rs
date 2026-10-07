@@ -5,6 +5,21 @@ use anyhow::Result;
 use crate::cli::args::ConfigCommands;
 use crate::{config, config_show};
 
+/// Secret-safe source label for a credential binding. A Claude subscription
+/// token is subscription quota, so it gets its own label instead of the
+/// generic named-API-key one (#1352).
+fn credential_auth_source_label(runner_kind: &str, credential_id: &str) -> String {
+    if runner_kind == "claude"
+        && crate::credentials::get(credential_id).is_ok_and(|info| {
+            info.kind == crate::credentials::CredentialKind::ClaudeSubscriptionToken
+        })
+    {
+        "claude-subscription-token".into()
+    } else {
+        format!("{runner_kind}-named-api-key")
+    }
+}
+
 pub fn run(command: ConfigCommands) -> Result<()> {
     match command {
         ConfigCommands::Show {
@@ -40,6 +55,7 @@ pub fn run(command: ConfigCommands) -> Result<()> {
         ConfigCommands::Set {
             config_path,
             current_manager,
+            factory_enabled,
             node_role,
             registry_central_url,
             clear,
@@ -47,6 +63,8 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             telegram_chat_id,
             worker_memory_mib,
             memory_floor_mib,
+            worker_cpu_cores,
+            cpu_ceiling_percent,
         } => {
             let mut cfg = if config::resolve_config_path(config_path.as_deref()).exists() {
                 config::load(config_path.as_deref())?
@@ -101,6 +119,12 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             if let Some(value) = memory_floor_mib {
                 cfg.defaults.node_capacity.memory_floor_mib = value;
             }
+            if let Some(value) = worker_cpu_cores {
+                cfg.defaults.node_capacity.worker_cpu_cores = value;
+            }
+            if let Some(value) = cpu_ceiling_percent {
+                cfg.defaults.node_capacity.cpu_ceiling_percent = value;
+            }
             if cfg.defaults.node_capacity != previous_capacity {
                 if let Some(total) = crate::controller::node_total_memory_bytes() {
                     cfg.defaults
@@ -109,7 +133,15 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                 }
             }
             crate::node_role::NodeRoleStatus::with_override(&cfg.defaults, None)?;
+            if let Some(enabled) = factory_enabled {
+                cfg.defaults.factory_enabled = Some(enabled);
+            }
             config::save(&cfg, config_path.as_deref())?;
+            if let Some(enabled) = factory_enabled {
+                // Persist the guard first so concurrent/restarting loops cannot dispatch
+                // while service control is stopping the previously enumerated instances.
+                crate::factory::apply_services(enabled)?;
+            }
             println!("Updated global config");
         }
         ConfigCommands::RoutingCandidate { command } => {
@@ -207,10 +239,9 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                 resolve_from_path: Some(true),
                 state_root: Some(state_root.to_string_lossy().into_owned()),
                 account_label: Some(account_label),
-                auth_source_label: Some(if credential_id.is_some() {
-                    format!("{runner_kind}-named-api-key")
-                } else {
-                    format!("{runner_kind}-cli-login")
+                auth_source_label: Some(match credential_id.as_deref() {
+                    Some(id) => credential_auth_source_label(&runner_kind, id),
+                    None => format!("{runner_kind}-cli-login"),
                 }),
                 credential_id,
                 ..Default::default()
@@ -285,7 +316,11 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                 .get(&instance)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("backend instance is not declared"))?;
-            entry.credential_id = Some(credential_id);
+            entry.credential_id = Some(credential_id.clone());
+            entry.auth_source_label = Some(credential_auth_source_label(
+                &entry.runner_kind,
+                &credential_id,
+            ));
             profile_config
                 .routing
                 .backend_instances

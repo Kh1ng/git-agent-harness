@@ -962,6 +962,15 @@ export interface ProfileSetOptions {
   manager_wake_autonomy?: string | null;
   /** Validation command timeout in seconds. */
   validation_timeout_seconds?: number | null;
+  /** Automatic worker scaling: 'on' | 'off'. */
+  worker_scaling?: string | null;
+  worker_scaling_max_workers?: number | null;
+  worker_scaling_extra_per_model?: number | null;
+  worker_scaling_min_remaining_percent?: number | null;
+  /** Replaces any earlier boost; `clear: ['worker_boost']` ends it. */
+  boost_workers?: number | null;
+  boost_model?: string | null;
+  boost_hours?: number | null;
   /** Hold approved schema/API contract changes for human review (#1405). */
   hold_contract_changes?: boolean | null;
   clear?: string[];
@@ -1064,6 +1073,18 @@ export function buildProfileSetArgs(options: ProfileSetOptions): string[] {
   } else if (options.clear?.includes('manager_wake_autonomy')) {
     args.push('--clear', 'manager_wake_autonomy');
   }
+  const scalingFlags = [
+    ['--worker-scaling', options.worker_scaling],
+    ['--worker-scaling-max-workers', options.worker_scaling_max_workers],
+    ['--worker-scaling-extra-per-model', options.worker_scaling_extra_per_model],
+    ['--worker-scaling-min-remaining-percent', options.worker_scaling_min_remaining_percent],
+    ['--boost-workers', options.boost_workers],
+    ['--boost-model', options.boost_model],
+    ['--boost-hours', options.boost_hours],
+  ] as const;
+  for (const [flag, value] of scalingFlags) {
+    if (value !== undefined && value !== null && value !== '') args.push(flag, String(value));
+  }
   if (typeof options.hold_contract_changes === 'boolean') {
     args.push('--hold-contract-changes', String(options.hold_contract_changes));
   } else if (options.clear?.includes('hold_contract_changes')) {
@@ -1163,6 +1184,8 @@ export interface ConfigSetOptions {
   current_manager?: string | null;
   worker_memory_mib?: number;
   memory_floor_mib?: number;
+  worker_cpu_cores?: number;
+  cpu_ceiling_percent?: number;
   /** Issue #653: none | telegram | discord. */
   notification_channel?: string;
   telegram_chat_id?: string | null;
@@ -1174,6 +1197,8 @@ export function buildConfigSetArgs(options: ConfigSetOptions): string[] {
   const args = ['config', 'set'];
   if (options.worker_memory_mib !== undefined) args.push('--worker-memory-mib', String(options.worker_memory_mib));
   if (options.memory_floor_mib !== undefined) args.push('--memory-floor-mib', String(options.memory_floor_mib));
+  if (options.worker_cpu_cores !== undefined) args.push('--worker-cpu-cores', String(options.worker_cpu_cores));
+  if (options.cpu_ceiling_percent !== undefined) args.push('--cpu-ceiling-percent', String(options.cpu_ceiling_percent));
 
   if (options.current_manager !== undefined && options.current_manager !== null) {
     args.push('--current-manager', options.current_manager);
@@ -1301,7 +1326,7 @@ export async function runClaimsList(
 
 export async function runQuotaList(
   config?: string
-): Promise<import('@git-agent-harness/contracts').QuotaListRecord[]> {
+): Promise<import('@git-agent-harness/contracts').QuotaObservation[]> {
   // No --store from clients: the server reads its own configured store.
   // (`quota list` has no --config flag; the store path resolves from the
   // server's own environment.)
@@ -1370,7 +1395,7 @@ export async function changeExternalApproval(
 
 export async function runConfigShow(
   config?: string
-): Promise<{ current_manager: string | null; node_capacity?: import('@git-agent-harness/contracts').NodeCapacitySettings; notifications?: import('@git-agent-harness/contracts').NotificationSettingsSummary }> {
+): Promise<{ current_manager: string | null; node_capacity?: import('@git-agent-harness/contracts').NodeCapacitySettings; node_resources?: import('@git-agent-harness/contracts').NodeResources; notifications?: import('@git-agent-harness/contracts').NotificationSettingsSummary }> {
   // The bare `config show --json` response is a locked one-field
   // compatibility shape, so notification settings come from the versioned
   // full projection instead.
@@ -1381,9 +1406,10 @@ export async function runConfigShow(
   const full = await runJsonCommand<{
     current_manager: string | null;
     node_capacity?: import('@git-agent-harness/contracts').NodeCapacitySettings;
+    node_resources?: import('@git-agent-harness/contracts').NodeResources;
     notifications?: import('@git-agent-harness/contracts').NotificationSettingsSummary;
   }>(args, config);
-  return { current_manager: full.current_manager, node_capacity: full.node_capacity, notifications: full.notifications };
+  return { current_manager: full.current_manager, node_capacity: full.node_capacity, node_resources: full.node_resources, notifications: full.notifications };
 }
 
 /** Issue #149: ordered routing-candidate editing. The CLI owns config
@@ -1716,6 +1742,18 @@ export interface StartLoopResult {
 }
 
 export async function startLoop(profile: string): Promise<StartLoopResult> {
+  const config = getConfigPath(process.env.GAH_CONFIG ?? process.env.GAH_CONFIG_PATH);
+  const args = ['config', 'show', '--json', '--full'];
+  if (config) args.push('--config', config);
+  let module: ConfigShowFull | undefined;
+  try {
+    module = await runJsonCommand<ConfigShowFull>(args, config);
+  } catch (err) {
+    // Treat failures (like an older gah binary or invalid config) as legacy-enabled.
+  }
+  if (module && module.factory_enabled === false) {
+    return { started: false, error: 'Factory automation is disabled. Enable it in this computer’s Settings.' };
+  }
   const existing = getLoopStatus(profile);
   if (existing.running) {
     if (existing.owner === 'systemd') {

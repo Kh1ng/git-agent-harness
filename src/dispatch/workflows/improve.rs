@@ -32,7 +32,7 @@ use crate::validation_runner::{validate_with_exit_code, VALIDATION_COMMAND_TIMEO
 use crate::{runner, worktree};
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 mod attempt_bookkeeping;
 mod bounded_validation;
 pub(crate) use bounded_validation::bounded_validation_failure;
@@ -161,13 +161,11 @@ pub(crate) fn improve(
     let branch = if let Some(ref existing_branch) = manual_fix.existing_branch {
         existing_branch.clone()
     } else {
-        format!(
-            "{}{}-{}",
-            profile.publishing.managed_branch_prefix, profile.repo_id, ts
-        )
+        let prefix = &profile.publishing.managed_branch_prefix;
+        format!("{prefix}{}-{ts}", profile.repo_id)
     };
     apply_manual_fix_context_to_ledger(ledger, ticket_meta.as_ref(), &branch, &manual_fix);
-    let worktree_base = PathBuf::from(&cfg.defaults.worktree_base);
+    let worktree_base = crate::config::effective_worktree_base(&cfg.defaults);
     let repo = Path::new(&profile.local_path);
     ensure_dispatch_capacity(profile, &worktree_base)?;
 
@@ -463,6 +461,7 @@ pub(crate) fn improve(
             ledger.work_id.as_deref(),
             true,
             None,
+            crate::runner::WriteIntent::Implementation,
         );
         drop(admission_guard);
         let result = match result {
@@ -616,6 +615,7 @@ pub(crate) fn improve(
                     },
                 );
             }
+            let n = attempt + 1;
             if cleanup_failed {
                 // Set the durable gate before fallible cleanup; the outer boundary persists it.
                 ledger.human_required = true;
@@ -624,17 +624,14 @@ pub(crate) fn improve(
                         .as_str()
                         .to_string(),
                 );
-                worktree::preserve_wip(
-                    &wt,
-                    &profile.default_target_branch,
-                    &format!(
-                        "gah: WIP cleanup-failed {} attempt {}",
-                        args.mode,
-                        attempt + 1
-                    ),
-                )?;
+                let message = format!("gah: WIP cleanup-failed {} attempt {n}", args.mode);
+                worktree::preserve_wip(&wt, &profile.default_target_branch, &message)?;
                 worktree::cleanup(&wt, repo);
                 anyhow::bail!("backend descendant cleanup failed; refusing to retry");
+            }
+            if let Some(detail) = exit_failure.config_error.as_deref() {
+                let who = format!("{} {} attempt {n}", route.effective_backend, args.mode);
+                return stall::stop_on_refused_writes(ledger, &wt, repo, profile, &who, detail);
             }
             if stalled_before_changes {
                 let availability_result =

@@ -90,6 +90,10 @@
         <h2 id="setup-heading">Set up this computer</h2>
         <p id="setup-state" role="status">Checking what this computer has…</p>
         <ul id="setup-list" class="checklist" hidden></ul>
+        <label class="preference"><input id="factory-enabled" type="checkbox" />Enable factory automation</label>
+        <p>Factory automation runs ticket dispatch loops and their watchdog. Dashboard, chats, agents, repository workflows, quota collection, and daily storage maintenance are available with this module off.</p>
+        <p id="factory-state" role="status">Factory automation is optional; fresh standalone installs default to off.</p>
+        <button id="factory-save" type="button" hidden>Save factory module</button>
         <p id="standalone-note" hidden>Standalone runs the dashboard and agents on this computer only. It accepts every setup default and connects this app when setup finishes.</p>
         <p id="setup-command" hidden>Run in a terminal: <code></code></p>
         <div class="actions">
@@ -97,6 +101,11 @@
           <button id="setup-terminal" type="button" hidden>Finish setup in Terminal</button>
           <button id="setup-refresh" type="button">Check again</button>
         </div>
+      </section>
+      <section id="desktop-update-section" aria-labelledby="desktop-update-heading">
+        <h2 id="desktop-update-heading">Desktop update</h2>
+        <p id="desktop-update-status" role="status">Checking for a desktop update…</p>
+        <button id="desktop-update-apply" type="button" hidden>Restart to update</button>
       </section>
       <h2>Connection</h2>
       <form id="connection">

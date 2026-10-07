@@ -13,6 +13,7 @@ pub fn run(command: CredentialCommands) -> Result<()> {
                 for record in records {
                     let kind = match record.kind {
                         CredentialKind::ApiKey => "api_key",
+                        CredentialKind::ClaudeSubscriptionToken => "claude_subscription_token",
                         CredentialKind::MistralDashboard => "mistral_dashboard",
                         CredentialKind::MistralLogin => "mistral_login",
                     };

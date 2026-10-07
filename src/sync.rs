@@ -260,13 +260,13 @@ pub fn classify(mr: &SyncMr) -> &'static str {
     {
         return "NEEDS_REVIEW";
     }
+    if is_stale(mr.updated_at.as_deref()) {
+        return "STALE";
+    }
     if mr.state.as_deref().is_some_and(|state| {
         state.eq_ignore_ascii_case("open") || state.eq_ignore_ascii_case("opened")
     }) {
         return "NEEDS_REVIEW";
-    }
-    if is_stale(mr.updated_at.as_deref()) {
-        return "STALE";
     }
     "UNKNOWN"
 }
@@ -1285,6 +1285,7 @@ mod tests {
             hermes_idle_timeout_seconds: None,
             max_parallel_workers: None,
             max_open_managed_mrs: None,
+            worker_scaling: Default::default(),
             notify_command: None,
             policy_path: None,
             env_file: None,

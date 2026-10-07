@@ -76,6 +76,23 @@ pub(super) fn retain_unclaimed_work(
         .retain(|mr| eligible(mr.work_id.as_deref()));
 }
 
+/// Work a re-decision must skip: recently capacity-deferred, claimed by any
+/// process, or already started in this batch. Re-deciding from a rebuilt
+/// snapshot without these lands on a running sibling's work, which spends
+/// the free slot's fill attempt and starts nothing.
+pub(super) fn unavailable_work_ids(
+    capacity_deferred_work_ids: &HashSet<String>,
+    claimed_work_ids: &[String],
+    executed_work_ids: &HashSet<String>,
+) -> HashSet<String> {
+    capacity_deferred_work_ids
+        .iter()
+        .chain(claimed_work_ids)
+        .chain(executed_work_ids)
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

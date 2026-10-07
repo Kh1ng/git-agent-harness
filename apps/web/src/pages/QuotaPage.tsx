@@ -50,27 +50,39 @@ function formatQuotaMetadata(q: {
 }
 
 function quotaPercentages(q: {
-  quota_used_percent?: number | null;
   quota_remaining_percent?: number | null;
 }): { used: number; remaining: number } | null {
-  const used = Number.isFinite(q.quota_used_percent) ? q.quota_used_percent : null;
-  const remaining = Number.isFinite(q.quota_remaining_percent) ? q.quota_remaining_percent : null;
-  if (used === null || used === undefined) {
-    if (remaining === null || remaining === undefined) return null;
-    const boundedRemaining = Math.min(100, Math.max(0, remaining));
-    return { used: 100 - boundedRemaining, remaining: boundedRemaining };
-  }
-  const boundedUsed = Math.min(100, Math.max(0, used));
-  return {
-    used: boundedUsed,
-    remaining: remaining === null || remaining === undefined
-      ? 100 - boundedUsed
-      : Math.min(100, Math.max(0, remaining))
-  };
+  const remaining = Number.isFinite(q.quota_remaining_percent) ? q.quota_remaining_percent! : null;
+  if (remaining === null) return null;
+  const boundedRemaining = Math.min(100, Math.max(0, remaining));
+  return { used: 100 - boundedRemaining, remaining: boundedRemaining };
 }
 
 function formatQuotaPercent(value: number): string {
   return formatPercent(value / 100, Number.isInteger(value) ? 0 : 1);
+}
+
+/** #1336: one label per quota source check status, as the operator reads it. */
+function checkStatusLabel(status: QuotaCheck['status']): string {
+  switch (status) {
+    case 'failed': return 'Check failed';
+    case 'auth_required': return 'Needs login';
+    case 'not_configured': return 'Not configured';
+    case 'no_data': return 'No quota data recorded';
+    default: return 'Quota data received';
+  }
+}
+
+/** #1336: a source that needs a login is as urgent as a failed check; a
+ * missing source is a known gap, not a failure. */
+function checkStatusTone(status: QuotaCheck['status']): 'good' | 'warning' | 'critical' | 'unknown' {
+  switch (status) {
+    case 'failed': return 'critical';
+    case 'auth_required': return 'critical';
+    case 'not_configured': return 'warning';
+    case 'no_data': return 'unknown';
+    default: return 'good';
+  }
 }
 
 export function QuotaFreshnessPanel({
@@ -113,26 +125,24 @@ export function QuotaFreshnessPanel({
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {quotaChecks.map((check) => {
-              const label = check.status === 'failed'
-                ? 'Check failed'
-                : check.status === 'no_data'
-                  ? 'No quota data recorded'
-                  : 'Quota data received';
-              const tone = check.status === 'failed'
-                ? 'critical'
-                : check.status === 'no_data'
-                  ? 'unknown'
-                  : 'good';
+              const label = checkStatusLabel(check.status);
+              const tone = checkStatusTone(check.status);
               return (
                 <div key={scopeIdentity(check)} data-testid={`quota-check-${check.backend}`} className="text-xs text-secondary">
                   <div className="flex items-center justify-between gap-2">
                     <span>{scopeIdentity(check)}</span>
                     <span className="inline-flex items-center gap-2">
-                      {isStale(check.checked_at) && <StatusBadge tone="serious" label="Stale" />}
+                      {check.checked_at && isStale(check.checked_at) && <StatusBadge tone="serious" label="Stale" />}
                       <StatusBadge tone={tone} label={label} />
                     </span>
                   </div>
-                  <p className="text-muted mt-1">Checked {formatAge(check.checked_at) ?? check.checked_at}</p>
+                  <p className="text-muted mt-1">
+                    {check.status === 'auth_required' && check.failing_since
+                      ? `Failing since ${formatLocalTime(check.failing_since) ?? check.failing_since} (${formatAge(check.failing_since) ?? 'unknown age'})`
+                      : check.checked_at
+                        ? `Checked ${formatAge(check.checked_at) ?? check.checked_at}`
+                        : 'Never checked on this node'}
+                  </p>
                   {check.error && <p className="text-critical mt-1">{check.error}</p>}
                 </div>
               );
@@ -383,11 +393,18 @@ function QuotaCandidateLedger({ candidates: configuredCandidates, quotaChecks }:
   return (
     <section className="quota-candidates">
       <h3 className="text-base font-semibold text-primary mb-3">Accounts and routing candidates</h3>
-      {quotaChecks.filter(check => check.status === 'failed').map((check, index) => (
-        <p key={index} role="alert" className="text-xs text-critical mb-3">
-          {scopeIdentity(check)} · Quota check failed{check.error ? `: ${check.error}` : '. Refresh the account quota check.'}
-        </p>
-      ))}
+      {quotaChecks.filter(check => check.status === 'failed' || check.status === 'auth_required' || check.status === 'not_configured').map((check, index) => {
+        const condition = check.status === 'auth_required'
+          ? `needs login${check.failing_since ? ` (failing since ${formatAge(check.failing_since) ?? check.failing_since})` : ''}`
+          : check.status === 'not_configured'
+            ? 'not configured on this node'
+            : 'Quota check failed';
+        return (
+          <p key={index} role="alert" className="text-xs text-critical mb-3">
+            {scopeIdentity(check)} · {condition}{check.error ? `: ${check.error}` : '. Refresh the account quota check.'}
+          </p>
+        );
+      })}
       {candidates.length === 0 ? (
         <EmptyState icon={Gauge} title="No canonical candidates recorded" description="Add routing candidates to the profile to see availability and quota state here." />
       ) : (

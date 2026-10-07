@@ -143,8 +143,12 @@ import {
   type AdminUpdateState,
   type StartAdminUpdateResult
 } from './adminUpdate.js';
+import { getReleaseStatus } from './releaseFeed.js';
+import { WorkerUpdateService } from './workerUpdate.js';
+import { WorkerUpdateBroker, WorkerUpdateError } from './workerUpdateBroker.js';
 import type { WebPushNotifications } from './webPush.js';
 import type { ApnsNotifications } from './apns.js';
+import type { FleetUpdateResult, WorkerUpdateStatus } from '@git-agent-harness/contracts';
 
 const SERVER_VERSION = COORDINATOR_VERSION;
 
@@ -176,6 +180,12 @@ type CreateServerOptions = Partial<ConfigEffectiveDeps> & {
   /** This node's login repairs (#1272); central reaches a worker's through its route. */
   loginRepairs?: LoginRepairs;
   loginRepairBroker?: LoginRepairBroker;
+  /** Issue #1416: the release channel feed behind "Update available". */
+  getReleaseStatus?: typeof getReleaseStatus;
+  /** This worker's release update service (#1416); central drives it through the broker. */
+  workerUpdates?: WorkerUpdateService;
+  /** Central's coordinator-driven worker update broker (#1416). */
+  workerUpdateBroker?: WorkerUpdateBroker;
   cliRouterQuotaObserver?: ReturnType<typeof createCliRouterQuotaObserver>;
 };
 
@@ -321,6 +331,7 @@ export function createServer(
   const getPendingCommitsFn = configDeps.getPendingCommits ?? getPendingCommits;
   const startAdminUpdateFn = configDeps.startAdminUpdate ?? startAdminUpdate;
   const readAdminUpdateStateFn = configDeps.readAdminUpdateState ?? readAdminUpdateState;
+  const getReleaseStatusFn = configDeps.getReleaseStatus ?? getReleaseStatus;
   const detectTailscaleIPv4Fn = configDeps.detectTailscaleIPv4 ?? detectTailscaleIPv4;
   const gatewaySettingsSummary = async () => {
     const apiKey = gatewayApiKey();
@@ -934,6 +945,28 @@ export function createServer(
     });
   }
 
+  // A worker runs its own release updates on central's instruction (#1416).
+  // `start` arms the update; the service itself waits for the last active
+  // dispatch to finish before launching anything, so this endpoint can never
+  // restart a worker mid-run. `status` mirrors the state file central polls.
+  if (node.role === 'worker' && configDeps.workerUpdates) {
+    const updates = configDeps.workerUpdates;
+    app.post('/api/worker-update', requireOwner, async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const body = req.body ?? {};
+      try {
+        if (body.action === 'start') return res.json(await updates.start());
+        if (body.action === 'status') return res.json({ started: true, status: updates.status() });
+        if (body.action === 'cancel') return res.json({ cancelled: updates.cancel() });
+        return res.status(400).json({ message: 'Unknown worker update action.' });
+      } catch (error) {
+        return res.status(500).json({
+          message: error instanceof Error ? error.message : 'The worker update failed.'
+        });
+      }
+    });
+  }
+
   app.get('/api/registry/fleet/snapshot', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
@@ -967,6 +1000,65 @@ export function createServer(
         success: true,
         message: 'Secret rotated successfully'
       });
+    } catch (error) {
+      res.status(400).json({
+        error: 'Bad Request',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // Issue #1416: coordinator-driven worker updates. Central asks a worker
+  // to pull the same release artifacts it installs itself; the worker
+  // decides when it is safe (a mid-dispatch worker finishes first).
+  app.post('/api/registry/nodes/:nodeId/update', requireOwner, async (req, res) => {
+    if (!configDeps.workerUpdateBroker) {
+      return res.status(503).json({ error: 'Worker updates unavailable', message: 'This server does not run the fleet update broker.' });
+    }
+    try {
+      const result = await configDeps.workerUpdateBroker.start(req.params.nodeId);
+      return res.status(result.started ? 202 : 409).json(result.status);
+    } catch (error) {
+      if (error instanceof WorkerUpdateError) {
+        return res.status(error.status).json({ error: 'Worker update failed', message: error.message });
+      }
+      return res.status(500).json({ error: 'Worker update failed', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get('/api/registry/nodes/:nodeId/update', requireOwner, async (req, res) => {
+    if (!configDeps.workerUpdateBroker) {
+      return res.status(503).json({ error: 'Worker updates unavailable', message: 'This server does not run the fleet update broker.' });
+    }
+    try {
+      const status: WorkerUpdateStatus = await configDeps.workerUpdateBroker.status(req.params.nodeId);
+      return res.json(status);
+    } catch (error) {
+      if (error instanceof WorkerUpdateError) {
+        return res.status(error.status).json({ error: 'Worker update status failed', message: error.message });
+      }
+      return res.status(500).json({ error: 'Worker update status failed', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post('/api/registry/fleet/update-all', requireOwner, async (_req, res) => {
+    if (!configDeps.workerUpdateBroker) {
+      return res.status(503).json({ error: 'Worker updates unavailable', message: 'This server does not run the fleet update broker.' });
+    }
+    try {
+      const results: FleetUpdateResult[] = await configDeps.workerUpdateBroker.updateAll();
+      return res.json({ results });
+    } catch (error) {
+      return res.status(500).json({ error: 'Fleet update failed', message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post('/api/registry/nodes/:nodeId/auto-update', requireOwner, (req, res) => {
+    try {
+      const enabled = req.body?.enabled === true;
+      registryService.setAutoUpdate(req.params.nodeId, enabled);
+      const node = registryService.getNodesSummary().find((summary) => summary.node_id === req.params.nodeId);
+      res.json({ node_id: req.params.nodeId, auto_update: enabled, update: node?.update ?? null });
     } catch (error) {
       res.status(400).json({
         error: 'Bad Request',
@@ -1809,7 +1901,7 @@ export function createServer(
     try {
       // Node-capacity values go straight into argv; a non-integer would
       // surface as a CLI failure (502) instead of the caller's mistake.
-      for (const field of ['worker_memory_mib', 'memory_floor_mib'] as const) {
+      for (const field of ['worker_memory_mib', 'memory_floor_mib', 'worker_cpu_cores', 'cpu_ceiling_percent'] as const) {
         const value = req.body?.[field];
         if (value !== undefined && (typeof value !== 'number' || !Number.isSafeInteger(value))) {
           return res.status(400).json({ error: 'invalid_request', message: `${field} must be an integer.` });
@@ -1819,6 +1911,8 @@ export function createServer(
         current_manager: req.body.current_manager,
         worker_memory_mib: req.body.worker_memory_mib,
         memory_floor_mib: req.body.memory_floor_mib,
+        worker_cpu_cores: req.body.worker_cpu_cores,
+        cpu_ceiling_percent: req.body.cpu_ceiling_percent,
         notification_channel: req.body.notification_channel,
         telegram_chat_id: req.body.telegram_chat_id,
         clear: req.body.clear,
@@ -2732,7 +2826,10 @@ export function createServer(
   });
 
   app.post('/api/admin/update', requireOwner, (req, res) => {
-    const result: StartAdminUpdateResult = startAdminUpdateFn();
+    // Issue #1416: `release` installs published artifacts (--from-release,
+    // no rebuild); `source` (default) keeps the git pull + rebuild path.
+    const mode = req.body?.mode === 'release' ? 'release' : 'source';
+    const result: StartAdminUpdateResult = startAdminUpdateFn({ mode });
     res.status(result.started ? 202 : 409).json(result.state);
   });
 
@@ -2741,9 +2838,24 @@ export function createServer(
     res.json(state);
   });
 
-  // macOS central mode serves the same built web app as every other control
-  // surface. Linux keeps using its configured Caddy/static root unless this
-  // explicit path is set by the service owner.
+  // Issue #1416: the release channel feed behind "Update available · vX →
+  // vY". Same operator gate as the update itself (GAH_ENABLE_ADMIN_UPDATE):
+  // knowing an update exists is already operational information.
+  app.get('/api/admin/release/status', async (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      res.json(await getReleaseStatusFn());
+    } catch (error) {
+      res.status(502).json({
+        error: 'Release channel unavailable',
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  // The server serves the built web app itself. The entry point (bin.ts)
+  // resolves the root: the service owner's GAH_WEB_ROOT, else the checkout's
+  // build; empty means another web server serves the dashboard.
   const webRoot = process.env.GAH_WEB_ROOT;
   if (webRoot) {
     const absoluteWebRoot = resolve(webRoot);

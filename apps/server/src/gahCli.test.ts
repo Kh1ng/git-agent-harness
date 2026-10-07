@@ -126,6 +126,9 @@ test('config set args deduplicate clear values and use the CLI config flag', () 
 });
 
 test('node capacity fields travel through config set arguments', () => {
+  assert.deepEqual(buildConfigSetArgs({ worker_cpu_cores: 1, cpu_ceiling_percent: 150 }), [
+    'config', 'set', '--worker-cpu-cores', '1', '--cpu-ceiling-percent', '150',
+  ]);
   assert.deepEqual(buildConfigSetArgs({ worker_memory_mib: 1536, memory_floor_mib: 768 }), [
     'config', 'set', '--worker-memory-mib', '1536', '--memory-floor-mib', '768',
   ]);
@@ -226,6 +229,45 @@ test('profile set args map fields and emit each clear key once', () => {
   );
 });
 
+test('profile set args carry worker scaling, a boost, and their clear keys', () => {
+  assert.deepEqual(
+    buildProfileSetArgs({
+      name: 'api-worker',
+      worker_scaling: 'on',
+      worker_scaling_max_workers: 6,
+      worker_scaling_extra_per_model: 0,
+      worker_scaling_min_remaining_percent: 40,
+      boost_workers: 2,
+      boost_model: 'codex/gpt-5',
+      boost_hours: 1.5,
+      clear: ['worker_boost', 'worker_scaling_max_workers'],
+    }),
+    [
+      'profile',
+      'set',
+      'api-worker',
+      '--worker-scaling',
+      'on',
+      '--worker-scaling-max-workers',
+      '6',
+      '--worker-scaling-extra-per-model',
+      '0',
+      '--worker-scaling-min-remaining-percent',
+      '40',
+      '--boost-workers',
+      '2',
+      '--boost-model',
+      'codex/gpt-5',
+      '--boost-hours',
+      '1.5',
+      '--clear',
+      'worker_boost',
+      '--clear',
+      'worker_scaling_max_workers',
+    ],
+  );
+});
+
 test('profile set emits validation timeout clear exactly once', () => {
   assert.deepEqual(
     buildProfileSetArgs({
@@ -291,6 +333,7 @@ printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
  * regression this branch exists to fix. The fake systemctl reports prior
  * enablement via FAKE_IS_ENABLED and always fails the enable --now activation. */
 async function assertStartRollbackBehavior(wasEnabled: string, expectDisableInLog: boolean) {
+  const restoreGah = pinFakeGah(`echo '{"factory_enabled":true}'`);
   const dir = mkdtempSync(join(tmpdir(), 'gah-start-loop-'));
   const log = join(dir, 'systemctl.log');
   const originalPath = process.env.PATH;
@@ -336,6 +379,7 @@ esac
     else process.env.PATH = originalPath;
     delete process.env.SYSTEMCTL_LOG;
     delete process.env.FAKE_IS_ENABLED;
+    restoreGah();
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -578,6 +622,28 @@ test('cancel() is idempotent: concurrent callers settle on one shared result', a
   } finally {
     if (original === undefined) delete process.env.GAH_BINARY;
     else process.env.GAH_BINARY = original;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('factory module disabled rejects loop starts before touching systemd', async () => {
+  const restore = pinFakeGah(`echo '{"factory_enabled":false}'`);
+  const dir = mkdtempSync(join(tmpdir(), 'gah-disabled-factory-'));
+  const marker = join(dir, 'systemctl-called');
+  const originalPath = process.env.PATH;
+  writeFileSync(join(dir, 'systemctl'), `#!/bin/sh\ntouch '${marker}'\n`);
+  chmodSync(join(dir, 'systemctl'), 0o755);
+  process.env.PATH = `${dir}:${originalPath ?? ''}`;
+  try {
+    assert.deepEqual(await startLoop('fixture'), {
+      started: false,
+      error: 'Factory automation is disabled. Enable it in this computer’s Settings.',
+    });
+    assert.equal(existsSync(marker), false, 'disabled module must not enable or probe a loop unit');
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    restore();
     rmSync(dir, { recursive: true, force: true });
   }
 });

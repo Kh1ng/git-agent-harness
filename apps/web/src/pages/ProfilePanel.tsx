@@ -9,6 +9,7 @@ import { useWsReconnectRefresh } from '../hooks/useWsReconnectRefresh.js';
 import { PageHeader } from '../components/ui/PageHeader.js';
 import { ProviderStatusCard } from '../components/ProviderStatusCard.js';
 import { ProfileEditor } from '../components/ProfileEditor.js';
+import { WorkerScalingSection } from '../components/WorkerScalingSection.js';
 import { oldestFetchedAt } from '../lib/format.js';
 import { backendInstancesApi, promptPoliciesApi, routingCandidatesApi, GahApiError, type BackendRunnerKind } from '../api/client.js';
 import type { WakeAutonomyValue, SettingsConfigProfileSummary, RoutingCandidateSummary } from '@git-agent-harness/contracts';
@@ -110,6 +111,7 @@ export function ProfilePanel() {
         profileLoading={profiles.loading}
         profileError={profiles.error}
       />
+      {selected && <WorkerScalingSection selectedName={selectedName} selected={selected} />}
       <ProfileConfigViewerSection
         selectedName={selectedName}
         profileConfig={profileConfig}

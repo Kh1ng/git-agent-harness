@@ -3,6 +3,7 @@ use regex::Regex;
 use serde_json::Value;
 
 pub mod account_usage;
+pub mod agy;
 pub mod claude;
 pub mod nous;
 mod vibe;
@@ -338,6 +339,7 @@ fn agy_usage_from_result(value: &Value) -> LedgerUsage {
 /// Returns a new `LedgerUsage`.
 pub fn merge_usage(base: LedgerUsage, other: LedgerUsage) -> LedgerUsage {
     LedgerUsage {
+        usage_unknown_reason: base.usage_unknown_reason.or(other.usage_unknown_reason),
         usage_classification: base.usage_classification.or(other.usage_classification),
         backend_instance: base.backend_instance.or(other.backend_instance),
         provider: base.provider.or(other.provider),
@@ -601,14 +603,12 @@ pub fn codex_rate_limit_windows(
                 model: model.map(str::to_string),
                 quota_pool: None,
                 quota_window,
-                quota_used_percent: used,
                 quota_remaining_percent: used.map(|used| 100.0 - used),
                 quota_reset_at,
                 observed_at: observed_at.clone(),
                 checked_at: observed_at.clone(),
                 check_error: None,
                 usage_source: Some("codex_app_server".into()),
-                mistral_admin: None,
                 account_usage: None,
             })
         })
@@ -776,20 +776,11 @@ mod tests {
         let windows = codex_windows(CODEX_RATE_LIMITS_JSON);
         let summary: Vec<_> = windows
             .iter()
-            .map(|w| {
-                (
-                    w.quota_window.as_deref(),
-                    w.quota_used_percent,
-                    w.quota_remaining_percent,
-                )
-            })
+            .map(|w| (w.quota_window.as_deref(), w.quota_remaining_percent))
             .collect();
         assert_eq!(
             summary,
-            [
-                (Some("300m"), Some(25.0), Some(75.0)),
-                (Some("10080m"), Some(18.0), Some(82.0)),
-            ]
+            [(Some("300m"), Some(75.0)), (Some("10080m"), Some(82.0)),]
         );
         for window in &windows {
             assert_eq!(window.backend, "codex");
@@ -806,7 +797,7 @@ mod tests {
             r#"{"rateLimits":{"primary":{"usedPercent":80,"windowDurationMins":300}},"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":7,"windowDurationMins":10080}},"codex_bengalfox":{"primary":{"usedPercent":99,"windowDurationMins":300}}}}"#,
         );
         assert_eq!(windows.len(), 1, "a missing secondary is not fabricated");
-        assert_eq!(windows[0].quota_used_percent, Some(7.0));
+        assert_eq!(windows[0].quota_remaining_percent, Some(93.0));
         assert_eq!(windows[0].quota_window.as_deref(), Some("10080m"));
     }
 

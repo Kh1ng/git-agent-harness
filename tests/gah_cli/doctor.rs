@@ -257,6 +257,139 @@ fn doctor_validate_fails_on_missing_backend_executable_but_plain_doctor_still_pa
         );
 }
 
+/// Issue #1366: the worktree-base check is a defaults-level check that must
+/// run even when the config has no profiles, so an unwritable base fails
+/// doctor instead of reporting an overall "ok".
+#[test]
+fn doctor_json_reports_unwritable_worktree_base_with_no_profiles() {
+    let tmp = test_tempdir();
+    let unwritable = tmp.path().join("worktree-base-is-a-file");
+    fs::write(&unwritable, "regular file, not a directory").unwrap();
+    let cfg = tmp.path().join("gah-config-empty.toml");
+    fs::write(
+        &cfg,
+        format!("[defaults]\nworktree_base = \"{}\"\n", unwritable.display()),
+    )
+    .unwrap();
+
+    let output = bin()
+        .args(["doctor", "--config-path", cfg.to_str().unwrap(), "--json"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let snapshot: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(snapshot["overall_status"], "fail");
+    assert!(snapshot["checks"].as_array().is_some_and(|checks| {
+        checks.iter().any(|check| {
+            check["name"] == "worktree_base"
+                && check["status"] == "fail"
+                && check.get("profile").is_none()
+        })
+    }));
+}
+
+/// Issue #1366: an empty `worktree_base` passes doctor, which reports the
+/// default that dispatch will use, and the check creates nothing under HOME.
+#[test]
+fn doctor_json_reports_the_resolved_default_for_an_empty_worktree_base() {
+    let tmp = test_tempdir();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let cfg = tmp.path().join("gah-config-empty.toml");
+    fs::write(&cfg, "[defaults]\nworktree_base = \"\"\n").unwrap();
+
+    let output = bin()
+        .args(["doctor", "--config-path", cfg.to_str().unwrap(), "--json"])
+        .env("HOME", &home)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let snapshot: Value = serde_json::from_slice(&output).unwrap();
+
+    let resolved = home.join(".local/share/gah/worktrees");
+    assert!(snapshot["checks"].as_array().is_some_and(|checks| {
+        checks.iter().any(|check| {
+            check["name"] == "worktree_base"
+                && check["status"] == "ok"
+                && check["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(resolved.to_str().unwrap()))
+        })
+    }));
+    assert!(!home.join(".local").exists());
+}
+
+/// The write probe can land in a directory GAH does not own, so it must not
+/// touch a file that already has the old fixed probe name, nor write through
+/// a symlink with that name.
+#[cfg(unix)]
+#[test]
+fn doctor_worktree_base_probe_leaves_existing_files_alone() {
+    let tmp = test_tempdir();
+    let parent = tmp.path().join("parent");
+    fs::create_dir_all(&parent).unwrap();
+    let target = tmp.path().join("symlink-target");
+    fs::write(&target, "target contents").unwrap();
+    let cfg = tmp.path().join("gah-config-empty.toml");
+
+    for base in [parent.clone(), parent.join("not-created-yet")] {
+        let probe = parent.join(".gah-write-test");
+        let _ = fs::remove_file(&probe);
+        fs::write(&probe, "operator file").unwrap();
+        fs::write(
+            &cfg,
+            format!("[defaults]\nworktree_base = \"{}\"\n", base.display()),
+        )
+        .unwrap();
+        let doctor = || {
+            bin()
+                .args(["doctor", "--config-path", cfg.to_str().unwrap()])
+                .assert()
+                .success();
+        };
+
+        doctor();
+        assert_eq!(fs::read_to_string(&probe).unwrap(), "operator file");
+
+        fs::remove_file(&probe).unwrap();
+        std::os::unix::fs::symlink(&target, &probe).unwrap();
+        doctor();
+        assert!(fs::symlink_metadata(&probe).unwrap().is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "target contents");
+    }
+    // Only the operator's entry is left: the probe cleaned up after itself.
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+}
+
+/// A regular file above the worktree base blocks creating it, so doctor must
+/// fail instead of probing the directory that holds the file.
+#[test]
+fn doctor_fails_for_a_worktree_base_below_a_regular_file() {
+    let tmp = test_tempdir();
+    let file = tmp.path().join("not-a-directory");
+    fs::write(&file, "regular file").unwrap();
+    let cfg = tmp.path().join("gah-config-empty.toml");
+    fs::write(
+        &cfg,
+        format!(
+            "[defaults]\nworktree_base = \"{}\"\n",
+            file.join("worktrees").display()
+        ),
+    )
+    .unwrap();
+
+    bin()
+        .args(["doctor", "--config-path", cfg.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("[FAIL]").and(predicate::str::contains("worktree_base")));
+}
+
 /// TICKET-105: `gah doctor --validate` reuses the exact same
 /// `review_preflight` check as the real review invocation.
 #[test]

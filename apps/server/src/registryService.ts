@@ -7,6 +7,7 @@ import type {
   DoctorSnapshot,
   RegisteredNode,
   NodeSummary,
+  NodeUpdateInfo,
   NodeHealthCheckResult,
   NodeObservationSnapshot,
   NodeObservationState,
@@ -14,7 +15,7 @@ import type {
   NodeQuotaRelay,
   FleetQuotaSnapshot
 } from '@git-agent-harness/contracts';
-import { COORDINATOR_VERSION } from '@git-agent-harness/contracts';
+import { COORDINATOR_MINIMUM_WORKER_VERSION, COORDINATOR_VERSION, compareVersions } from '@git-agent-harness/contracts';
 import { COORDINATOR_SCHEMA_DIGEST } from './coordinatorIdentity.js';
 
 export function isLoopback(urlStr: string): boolean {
@@ -133,6 +134,23 @@ function majorMinor(version: string): string | null {
   const parts = version.split('.');
   if (parts.length < 2) return null;
   return `${parts[0]}.${parts[1]}`;
+}
+
+/** Issue #1416: how a node's version relates to this coordinator. Computed
+ * coordinator-side so dashboards never re-derive it: `behind` is older than
+ * the coordinator (an update is available), `unsupported` is older than the
+ * coordinator's minimum supported worker version (update before it breaks).
+ * The observation-time major.minor equality check is unchanged and still
+ * the hard gate. Exported for the fleet contracts' own tests. */
+export function nodeVersionStatus(nodeVersion: string): NodeUpdateInfo {
+  const behind = compareVersions(nodeVersion, COORDINATOR_VERSION) < 0;
+  const unsupported = compareVersions(nodeVersion, COORDINATOR_MINIMUM_WORKER_VERSION) < 0;
+  return {
+    status: unsupported ? 'unsupported' : behind ? 'behind' : 'current',
+    node_version: nodeVersion,
+    coordinator_version: COORDINATOR_VERSION,
+    minimum_worker_version: COORDINATOR_MINIMUM_WORKER_VERSION
+  };
 }
 
 function normalizeResourcePressure(value: unknown): NodeObservationSnapshot['resource_pressure'] {
@@ -275,16 +293,19 @@ function isQuotaSnapshot(value: unknown, profile: string, since: string): value 
       && [observation.credential_id, observation.backend_instance, observation.model, observation.quota_pool, observation.quota_window,
         observation.quota_reset_at, observation.observed_at, observation.usage_source].every(optionalText)
       && accountUsageValid(observation.account_usage)
-      && [observation.quota_used_percent, observation.quota_remaining_percent].every(percent => percent == null
+      && [observation.quota_remaining_percent].every(percent => percent == null
         || (typeof percent === 'number' && Number.isFinite(percent) && percent >= 0 && percent <= 100))));
-  return snapshot.schema_version === 2 && typeof snapshot.generated_at === 'string'
+  // v3 adds auth_required/not_configured checks and allows absent checked_at.
+  // Keep accepting v2 snapshots from workers that have not been upgraded.
+  return (snapshot.schema_version === 2 || snapshot.schema_version === 3) && typeof snapshot.generated_at === 'string'
     && Number.isFinite(Date.parse(snapshot.generated_at)) && snapshot.profile?.profile === profile
     && snapshot.since === since && !!snapshot.freshness && typeof snapshot.freshness === 'object'
     && !!snapshot.usage && typeof snapshot.usage === 'object' && Array.isArray(snapshot.quota_checks)
     && snapshot.quota_checks.every(check => check && typeof check.backend === 'string'
-      && typeof check.checked_at === 'string' && Number.isFinite(Date.parse(check.checked_at))
-      && ['data', 'no_data', 'failed'].includes(check.status)
-      && [check.credential_id, check.backend_instance, check.model, check.quota_pool, check.provider, check.error].every(optionalText)
+      && (check.checked_at == null || (typeof check.checked_at === 'string' && Number.isFinite(Date.parse(check.checked_at))))
+      && ['data', 'no_data', 'failed', 'auth_required', 'not_configured'].includes(check.status)
+      && [check.credential_id, check.backend_instance, check.model, check.quota_pool, check.provider, check.error, check.failing_since].every(optionalText)
+      && (check.failing_since == null || Number.isFinite(Date.parse(check.failing_since)))
       && observationsValid(check.quota_observations))
     && Array.isArray(snapshot.candidates) && snapshot.candidates.every(candidate => candidate
       && typeof candidate.backend === 'string' && (candidate.model === null || typeof candidate.model === 'string')
@@ -453,7 +474,22 @@ export class RegistryService {
   }
 
   getNodesSummary(): NodeSummary[] {
-    return this.getNodes().map(({ secret_ref, ...summary }) => summary);
+    return this.getNodes().map(({ secret_ref, ...summary }) => ({
+      ...summary,
+      update: nodeVersionStatus(summary.version)
+    }));
+  }
+
+  /** Issue #1416: opt a node in or out of coordinator-driven automatic
+   * updates. Persisted with the registration, like the profiles list. */
+  setAutoUpdate(nodeId: string, enabled: boolean): void {
+    const node = this.nodes.get(nodeId);
+    if (!node) {
+      throw new Error(`Node ${nodeId} not found`);
+    }
+    this.nodes.set(nodeId, { ...node, auto_update: enabled });
+    this.save();
+    this.changed();
   }
 
   /** Notify dashboards to refetch authenticated data, without publishing node details. */

@@ -4,6 +4,33 @@ import coordinatorProtocol from './coordinator-protocol.json' with { type: 'json
 
 export const COORDINATOR_VERSION = coordinatorProtocol.version;
 export const COORDINATOR_SCHEMA_SEED = coordinatorProtocol.schema_seed;
+/** Issue #1416: the oldest worker version this coordinator still supports.
+ * A worker below this is flagged `unsupported` in the fleet view instead of
+ * failing silently; the hard major.minor compatibility rule is unchanged. */
+export const COORDINATOR_MINIMUM_WORKER_VERSION = coordinatorProtocol.minimum_worker_version;
+
+/** Numeric `major[.minor[.patch]]` comparison shared by the release feed,
+ * the fleet version-skew check, and the release install path: -1 when `a`
+ * sorts before `b`, 0 when equal, 1 when after. Non-numeric parts are
+ * compared lexically as a final tiebreaker (edge build metadata). */
+export function compareVersions(a: string, b: string): number {
+  const parse = (value: string) => value
+    .replace(/^v/i, '')
+    .split(/[.+-]/)
+    .map((part) => (/^\d+$/.test(part) ? Number(part) : part));
+  const left = parse(a);
+  const right = parse(b);
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const l = left[i];
+    const r = right[i];
+    if (l === r) continue;
+    if (l === undefined) return -1;
+    if (r === undefined) return 1;
+    if (typeof l === 'number' && typeof r === 'number') return l < r ? -1 : 1;
+    return String(l) < String(r) ? -1 : 1;
+  }
+  return 0;
+}
 
 /** Worker observations stay scoped to their source node; mirrored ledgers are not additive. */
 export interface NodeQuotaRelay {
@@ -38,6 +65,21 @@ export interface RegisteredNode {
   last_observed_at?: string | null;
   last_error_kind?: HealthCheckFailureKind | null;
   last_error_message?: string | null;
+  /** Issue #1416: coordinator-driven release updates opt this node in to
+   * automatic updates whenever the fleet sees it behind the coordinator. */
+  auto_update?: boolean;
+}
+
+/** Issue #1416: how a registered node's version relates to this
+ * coordinator. Computed coordinator-side so every client sees the same
+ * verdict instead of re-deriving it from raw versions. */
+export type NodeVersionStatus = 'current' | 'behind' | 'unsupported';
+
+export interface NodeUpdateInfo {
+  status: NodeVersionStatus;
+  node_version: string;
+  coordinator_version: string;
+  minimum_worker_version: string;
 }
 
 export interface NodeSummary {
@@ -54,6 +96,8 @@ export interface NodeSummary {
   last_observed_at?: string | null;
   last_error_kind?: HealthCheckFailureKind | null;
   last_error_message?: string | null;
+  auto_update?: boolean;
+  update?: NodeUpdateInfo | null;
 }
 
 export type NodeObservationState =
@@ -125,6 +169,9 @@ export type AuthState = 'ok' | 'expired' | 'missing' | 'unknown' | 'error';
 /** One login on one node: a backend, or a provider behind it. */
 export interface AuthProbe {
   backend: string;
+  /** Declared backend instance this login belongs to (#1352), or null for
+   * the node's shared default login. */
+  backend_instance?: string | null;
   provider: string | null;
   state: AuthState;
   /** Repository CLI package presence, independent of authentication. */
@@ -170,6 +217,43 @@ export interface FleetSnapshot {
   nodes: NodeSummary[];
   observations: NodeObservationSnapshot[];
   leases: ClaimLease[];
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1416: coordinator-driven worker updates. The coordinator asks a
+// worker to update (the worker pulls the same release artifact the central
+// installs); a worker that is mid-dispatch finishes its run before the
+// update restarts anything, which is why `waiting` exists between `armed`
+// and `running`.
+// ---------------------------------------------------------------------------
+
+export type WorkerUpdateState =
+  | 'idle'
+  | 'waiting'
+  | 'running'
+  | 'success'
+  | 'inferred_restart'
+  | 'failed';
+
+export interface WorkerUpdateStatus {
+  status: WorkerUpdateState;
+  current_version: string;
+  target_version: string | null;
+  armed_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  /** Live claim count while `waiting`; null once the update is running. */
+  active_dispatches: number | null;
+  output: string;
+}
+
+/** One node's outcome from POST /api/registry/fleet/update-all. */
+export interface FleetUpdateResult {
+  node_id: string;
+  display_name: string;
+  started: boolean;
+  status: WorkerUpdateStatus | null;
+  error: string | null;
 }
 
 /** How a broken login is repaired from another device (#1272). */

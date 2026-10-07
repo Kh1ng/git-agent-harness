@@ -71,6 +71,7 @@ fn empty_snapshot() -> crate::status::StatusSnapshot {
         publishing_allow_pr: true,
         generated_artifact_deny_patterns: vec![],
         max_parallel_workers: 1,
+        worker_limits: Default::default(),
         open_managed_mr_count: 0,
         inflight_implementation_count: 0,
         implementation_intake_paused: false,
@@ -159,6 +160,7 @@ fn capacity_event(work_id: &str, details: &str) -> crate::events::ControllerEven
         review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
         details: details.into(),
         remediation_plan: None,
+        skipped: Vec::new(),
     }
 }
 
@@ -227,6 +229,84 @@ fn capacity_deferral_survives_stuck_action_redispatch() {
     retain_snapshot_candidates(&mut rebuilt, &inherited_exclusions, &HashSet::new());
 
     assert_eq!(super::decide_next_action(&rebuilt).work_id(), Some("#200"));
+}
+
+#[test]
+fn attached_branch_redispatch_skips_work_a_sibling_slot_is_running() {
+    // #155's repair branch is attached to a leftover worktree, so the free
+    // slot defers it and re-decides from a rebuilt snapshot. #64 is being
+    // reviewed in a sibling slot and still appears in that snapshot.
+    let rebuilt = || {
+        let mut snapshot = empty_snapshot();
+        snapshot.merge_requests = vec![needs_review_mr("#64"), needs_fix_mr("#155")];
+        snapshot.available_tickets = vec![available_ticket("#200")];
+        snapshot
+    };
+    let deferred = HashSet::from(["#155".to_string()]);
+
+    // Excluding only the deferred repair re-selects the running review: the
+    // slot's fill attempt is spent and nothing starts (issue #1369).
+    let mut without_claims = rebuilt();
+    retain_snapshot_candidates(&mut without_claims, &deferred, &HashSet::new());
+    assert_eq!(
+        super::decide_next_action(&without_claims).work_id(),
+        Some("#64")
+    );
+
+    let unavailable = super::intake::unavailable_work_ids(
+        &HashSet::new(),
+        &["#64".to_string()],
+        &HashSet::from(["#64".to_string()]),
+    );
+    let mut with_claims = rebuilt();
+    retain_snapshot_candidates(
+        &mut with_claims,
+        &unavailable.union(&deferred).cloned().collect(),
+        &HashSet::new(),
+    );
+    assert_eq!(
+        super::decide_next_action(&with_claims).work_id(),
+        Some("#200")
+    );
+}
+
+#[test]
+fn only_finished_agent_work_can_be_picked_again_in_the_same_batch() {
+    let review = super::NextAction::ReviewMr {
+        work_id: Some("#64".into()),
+        branch: "gah/64".into(),
+        mr_url: None,
+        reason: "test".into(),
+    };
+    let merge = super::NextAction::MergeMr {
+        work_id: Some("#64".into()),
+        branch: "gah/64".into(),
+        mr_url: None,
+        review_generation: None,
+        reason: "test".into(),
+    };
+    assert!(super::has_follow_up_in_batch(
+        &review,
+        "Dispatched review for branch 'gah/64'"
+    ));
+    assert!(!super::has_follow_up_in_batch(
+        &review,
+        "Error: review preflight failed"
+    ));
+    assert!(!super::has_follow_up_in_batch(
+        &review,
+        "Deferred review because configured route capacity is busy; no backend launched"
+    ));
+    // A lost GitHub claim moves this worker to the next item instead of retrying it.
+    assert!(!super::has_follow_up_in_batch(
+        &review,
+        "Skipped GitHub-claimed work '#64'"
+    ));
+    // A refused merge reports an ordinary outcome; releasing it would retry at once.
+    assert!(!super::has_follow_up_in_batch(
+        &merge,
+        "Merge failed for branch 'gah/64': gh pr merge failed"
+    ));
 }
 
 #[test]

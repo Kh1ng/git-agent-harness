@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   LayoutDashboard,
   ListChecks,
+  KanbanSquare,
   BarChart3,
   Gauge,
   Radio,
@@ -49,6 +50,7 @@ export const FRONTEND_BUILD = `v${__GAH_VERSION__} (${__GAH_COMMIT__})`;
 const mainItems: NavGroup[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'work', label: 'Factory', icon: ListChecks },
+  { id: 'kanban', label: 'Kanban', icon: KanbanSquare },
   { id: 'git', label: 'Projects', icon: FolderGit2, tabs: [
     { id: 'git', label: 'Git', icon: GitBranch },
     { id: 'planning', label: 'Planning', icon: Orbit }

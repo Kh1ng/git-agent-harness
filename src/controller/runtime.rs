@@ -38,6 +38,7 @@ use dispatch_state::{
 mod intake;
 use intake::{
     action_creates_managed_mr, action_intake_key, apply_parallel_projection, retain_unclaimed_work,
+    unavailable_work_ids,
 };
 #[path = "runtime/admission.rs"]
 mod admission;
@@ -81,6 +82,31 @@ pub(crate) fn loop_parallel_argument(
     }
 }
 
+/// Say once, on each change, how many workers scaling allows and why.
+fn report_worker_limits(
+    last: &mut Option<crate::routing::worker_scaling::WorkerLimits>,
+    current: Option<crate::routing::worker_scaling::WorkerLimits>,
+) {
+    if *last == current {
+        return;
+    }
+    if let Some(limits) = &current {
+        if limits.workers != limits.baseline_workers || last.is_some() {
+            eprintln!(
+                "gah loop: {} workers (baseline {}){}",
+                limits.workers,
+                limits.baseline_workers,
+                limits
+                    .notes
+                    .iter()
+                    .map(|note| format!("; {note}"))
+                    .collect::<String>()
+            );
+        }
+    }
+    *last = current;
+}
+
 /// Run the controller continuously in one process. The process lock is held
 /// for the lifetime of the loop so a second manager for the same profile
 /// cannot create a competing worker pool.
@@ -99,6 +125,7 @@ pub fn run_loop(
     // so changes apply without a restart. Falls back to the last-good config
     // on a transient read failure (e.g. mid-write) rather than killing the loop.
     let mut last_cfg: Option<crate::config::GahConfig> = Some(initial_cfg.clone());
+    let mut last_limits = None;
 
     loop {
         if crate::runner::shutdown_requested() {
@@ -109,7 +136,9 @@ pub fn run_loop(
             config_path,
             profile_name,
         ) {
-            Ok(loaded) => {
+            Ok(mut loaded) => {
+                let limits = crate::routing::worker_scaling::apply(&mut loaded, profile_name);
+                report_worker_limits(&mut last_limits, limits);
                 last_cfg = Some(loaded);
                 last_cfg.as_ref().expect("just assigned")
             }
@@ -125,6 +154,11 @@ pub fn run_loop(
                 }
             }
         };
+
+        if cfg.defaults.factory_enabled == Some(false) {
+            eprintln!("gah loop: factory module disabled; stopping before another iteration");
+            return shutdown_gracefully();
+        }
 
         // The explicit `--parallel` flag (parallel_arg > 0) wins; otherwise
         // derive the worker pool size from the freshly-reloaded profile.
@@ -200,6 +234,29 @@ pub fn node_total_memory_bytes() -> Option<u64> {
     node_capacity::sample()
         .ok()
         .map(|pressure| pressure.memory_total_bytes)
+}
+
+/// What admission measures against on this node, for the Settings page to
+/// show beside the limits. `None` where the platform does not expose it.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct NodeResources {
+    pub memory_total_mib: u64,
+    pub memory_available_mib: u64,
+    pub logical_cpus: usize,
+    pub load_one: f64,
+    /// Inside WSL the totals are what Windows grants the VM, not the host's.
+    pub wsl: bool,
+}
+
+pub fn node_resources() -> Option<NodeResources> {
+    let pressure = node_capacity::sample().ok()?;
+    Some(NodeResources {
+        memory_total_mib: pressure.memory_total_bytes / (1024 * 1024),
+        memory_available_mib: pressure.memory_available_bytes / (1024 * 1024),
+        logical_cpus: pressure.logical_cpus,
+        load_one: pressure.load_one,
+        wsl: std::env::var_os("WSL_DISTRO_NAME").is_some(),
+    })
 }
 
 /// Announce node-capacity settings when they change, not on every ~30s
@@ -662,7 +719,11 @@ fn run_parallel_once(
                     cfg,
                     profile_name,
                     &action,
-                    &capacity_deferred_work_ids,
+                    &unavailable_work_ids(
+                        &capacity_deferred_work_ids,
+                        &claimed_work_ids,
+                        &executed_work_ids,
+                    ),
                 )? {
                     action = redispatch;
                 }
@@ -908,6 +969,14 @@ fn run_parallel_once(
             };
             admission_coordinator.complete_worker(sequence);
             active -= 1;
+            // A finished item's next step (the review of a new PR, the merge
+            // after a review) may run in this batch rather than wait for the
+            // slowest sibling.
+            if has_follow_up_in_batch(&result.action, &result.outcome) {
+                if let Some(work_id) = result.action.work_id() {
+                    executed_work_ids.remove(&crate::work_claim::normalize_work_identity(work_id));
+                }
+            }
             if action_creates_managed_mr(&result.action) {
                 if let Some(key) = action_intake_key(&result.action) {
                     active_intake_keys.remove(&key);
@@ -1022,6 +1091,24 @@ fn update_parallel_refill_budget(
     failed
 }
 
+/// Whether a finished worker's item may be selected again in this batch.
+/// Only agent work that ran to the end qualifies: it changes what the item
+/// needs next. A merge or other bookkeeping step has no follow-up, and its
+/// failures are reported in an ordinary outcome, so releasing it would retry
+/// a refused merge at once. Errors and capacity deferrals stay excluded too.
+fn has_follow_up_in_batch(action: &NextAction, outcome: &str) -> bool {
+    matches!(
+        action,
+        NextAction::DispatchTicket { .. }
+            | NextAction::FixMr { .. }
+            | NextAction::Retry { .. }
+            | NextAction::Escalate { .. }
+            | NextAction::ReviewMr { .. }
+    ) && !outcome.starts_with("Error:")
+        && !outcome.starts_with("Deferred ")
+        && !outcome.starts_with("Skipped ")
+}
+
 fn parallel_outcome_is_failure(outcome: &str) -> bool {
     outcome.starts_with("Error:") && !outcome.contains("shutdown requested")
 }
@@ -1052,9 +1139,10 @@ pub(crate) fn run_dispatch_and_record(
             match crate::provider::claims::GithubClaim::acquire(profile, work_id, branch)? {
                 Some(claim) => Some(claim),
                 None => {
-                    return Ok(Some(
-                        "GitHub claim unavailable; moving to next eligible item".into(),
-                    ))
+                    return Ok(Some(format!(
+                        "Skipped GitHub-claimed work '{}'",
+                        work_id.or(branch).unwrap_or("unknown")
+                    )))
                 }
             }
         } else {
@@ -1118,27 +1206,16 @@ pub(crate) fn run_dispatch_and_record(
             } else {
                 None
             };
-            let details = format!("{label}: {e:#}");
-            if let Some(reason_code) = reason_code {
-                crate::events::record_with_run_id_and_reason_code(
-                    cfg,
-                    event_type,
-                    Some(args.profile.as_str()),
-                    work_id,
-                    args.run_id.as_deref(),
-                    details,
-                    Some(reason_code),
-                )?;
-            } else {
-                crate::events::record_with_run_id(
-                    cfg,
-                    event_type,
-                    Some(args.profile.as_str()),
-                    work_id,
-                    args.run_id.as_deref(),
-                    details,
-                )?;
-            }
+            crate::events::record_dispatch_error(
+                cfg,
+                event_type,
+                Some(args.profile.as_str()),
+                work_id,
+                args.run_id.as_deref(),
+                format!("{label}: {e:#}"),
+                reason_code,
+                &e,
+            )?;
             Err(e)
         }
     }

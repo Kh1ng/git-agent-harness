@@ -227,6 +227,8 @@ pub struct ConfigProfileSummary {
     pub improve_candidates: Vec<RoutingCandidateSummary>,
     pub review_candidates: Vec<RoutingCandidateSummary>,
     pub task_routing_rules: Vec<TaskRoutingRuleSummary>,
+    /// Strict allow-lists by job kind; a kind without an entry is open.
+    pub allowed_models: BTreeMap<String, Vec<RoutingCandidateSummary>>,
     pub routine_reviewer: Option<RoutingCandidateSummary>,
     pub escalatory_reviewers: Vec<RoutingCandidateSummary>,
     pub context: ConfigProfileContextSummary,
@@ -242,11 +244,14 @@ pub struct ConfigShowSummary {
 
 #[derive(serde::Serialize)]
 pub struct ConfigShowFull {
+    pub factory_enabled: bool,
     pub node: crate::node_role::NodeRoleStatus,
     pub schema_version: u32,
     pub config_path: String,
     pub current_manager: Option<String>,
     pub node_capacity: crate::config::NodeCapacitySettings,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_resources: Option<crate::controller::NodeResources>,
     /// Issue #653: notification channel settings (no secrets — tokens and
     /// webhook URLs live in the environment).
     pub notifications: NotificationSettingsSummary,
@@ -378,20 +383,9 @@ fn build_profile_summary(
         .collect();
 
     let mut routed_backends: Vec<&str> = routing
-        .pm_candidates
-        .iter()
-        .flatten()
-        .chain(routing.improve_candidates.iter().flatten())
-        .chain(routing.review_candidates.iter().flatten())
-        .chain(
-            routing
-                .task_routing_rules
-                .iter()
-                .flat_map(|rule| rule.candidates.iter()),
-        )
-        .map(|candidate| candidate.backend.as_str())
-        .chain(routine_reviewer.iter().map(|c| c.backend.as_str()))
-        .chain(escalatory_reviewers.iter().map(|c| c.backend.as_str()))
+        .labeled_candidates()
+        .into_iter()
+        .map(|(_, candidate)| candidate.backend.as_str())
         .collect();
     routed_backends.sort_unstable();
     routed_backends.dedup();
@@ -422,6 +416,11 @@ fn build_profile_summary(
         improve_candidates,
         review_candidates,
         task_routing_rules,
+        allowed_models: routing
+            .allowed_models
+            .iter()
+            .map(|(kind, list)| (kind.clone(), list.iter().map(to_summary).collect()))
+            .collect(),
         routine_reviewer: routine_reviewer.as_ref().map(to_summary),
         escalatory_reviewers: escalatory_reviewers
             .iter()
@@ -489,11 +488,17 @@ pub fn config_show_full(
     }
 
     Ok(ConfigShowFull {
+        factory_enabled: if !config_path.exists() {
+            false
+        } else {
+            cfg.defaults.factory_enabled.unwrap_or(true)
+        },
         node: crate::node_role::NodeRoleStatus::resolve(&cfg.defaults)?,
         schema_version: CONFIG_SHOW_SCHEMA_VERSION,
         config_path: config_path.to_string_lossy().into_owned(),
         current_manager: cfg.defaults.current_manager.clone(),
         node_capacity: cfg.defaults.node_capacity,
+        node_resources: crate::controller::node_resources(),
         notifications: NotificationSettingsSummary::from_defaults(&cfg.defaults),
         profiles,
     })
