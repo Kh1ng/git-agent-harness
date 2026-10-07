@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import { previewProxy, detectDevPort, PreviewTargetRefusedError } from './previewProxy.js';
 import { authMiddleware } from '../authMiddleware.js';
 
@@ -112,7 +113,7 @@ test('a preview never inherits the control plane\'s loopback owner trust', async
   // remote preview visitor as the local owner.
   previewProxy.configure({ basePort: 44_900, maxPort: 44_949, advertiseHost: '127.0.0.1', bindHost: '127.0.0.1', protectedPorts: [] });
   const app = express();
-  app.use(authMiddleware);
+  app.use(rateLimit({ windowMs: 60_000, limit: 200, validate: false }), authMiddleware);
   app.get('/api/whoami', (_req, res) => { res.json({ principal: res.locals.authPrincipal }); });
   const api = http.createServer(app);
   await new Promise<void>((done) => api.listen(0, '127.0.0.1', done));
