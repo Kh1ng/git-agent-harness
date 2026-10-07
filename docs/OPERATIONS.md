@@ -1694,10 +1694,17 @@ and `--mode improve`. Without `--enforce-job-file`, nothing is enforced and job
 commands are not run or added to the prompt. The flag requires a local `.md` file
 with at least one contract section; otherwise dispatch fails before the agent runs. Each section
 must contain top-level Markdown bullets (`-`, `*`, or `+`). Indented bullets
-are errors; fenced code blocks and explanatory sentences are ignored. Headings
-are case-insensitive and may end with a colon. Dispatch takes the first
+are errors; fenced code blocks and explanatory sentences are ignored. A fence
+closes only on a bare marker (no info string) at least as long as the one that
+opened it, and an unclosed fence is an error. Headings are case-insensitive and
+may end with a colon. A section ends at the next heading of the same or a higher
+level; a deeper sub-heading inside a contract section, or a second section with
+the same name, is an error. `#123` is prose, not a heading. Dispatch takes the first
 backtick-delimited value in each bullet, or the trimmed bullet text before
-` (` (a note). Empty items and sections without bullets are errors.
+` (` (a note). Empty items, task-list checkboxes (`- [ ] cmd`), bullets that are
+only a note (`- (note)`) and sections without bullets are errors.
+The agent sees the first 16 KiB of the job file; anything beyond that is still
+enforced.
 Allowed files are repository-relative paths or globs: `*` matches within a
 segment, and a trailing `/` or `/**` allows all files beneath a directory.
 Absolute paths and `..` are rejected. After profile validation, dispatch checks
