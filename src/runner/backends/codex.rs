@@ -38,12 +38,7 @@ pub(crate) fn run_with_executable(
     // CLI's own sandbox default.
     let implementation = write_intent == WriteIntent::Implementation;
     let filtered_extra = filtered_codex_args(extra_args);
-    let profile_sets_sandbox = filtered_extra.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "-s" | "--sandbox" | "--full-auto" | "--dangerously-bypass-approvals-and-sandbox"
-        ) || arg.starts_with("--sandbox=")
-    });
+    let profile_sets_sandbox = profile_chooses_sandbox(&filtered_extra);
     if implementation && !profile_sets_sandbox {
         cmd.arg("--sandbox").arg("workspace-write");
     }
@@ -113,6 +108,32 @@ pub(crate) fn run_with_executable(
         transcript_path,
         agy_version: None,
         resources,
+    })
+}
+
+/// True when profile codex_args already decide the sandbox, in any form the
+/// CLI accepts: the sandbox flags, a `sandbox_mode` config override, or a
+/// named Codex profile (which may set one). A `--sandbox` flag from GAH
+/// would silently beat the last two, so GAH adds none.
+fn profile_chooses_sandbox(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let config_value = arg
+            .strip_prefix("--config=")
+            .or_else(|| arg.strip_prefix("-c="))
+            .unwrap_or(arg);
+        matches!(
+            arg.as_str(),
+            "-s" | "--sandbox"
+                | "--full-auto"
+                | "--yolo"
+                | "--dangerously-bypass-approvals-and-sandbox"
+                | "-p"
+                | "--profile"
+        ) || arg.starts_with("--sandbox=")
+            || arg.starts_with("-s=")
+            || arg.starts_with("--profile=")
+            || arg.starts_with("-p=")
+            || config_value.trim_start().starts_with("sandbox_mode")
     })
 }
 
@@ -292,6 +313,12 @@ mod tests {
             vec!["--sandbox=danger-full-access"],
             vec!["--full-auto"],
             vec!["--dangerously-bypass-approvals-and-sandbox"],
+            vec!["--yolo"],
+            vec!["-s=read-only"],
+            vec!["-c", "sandbox_mode=\"read-only\""],
+            vec!["--config=sandbox_mode=\"danger-full-access\""],
+            vec!["-p", "locked-down"],
+            vec!["--profile=locked-down"],
         ] {
             let _exec_guard = crate::test_support::ExecGuard::new();
             let f = fixture();
@@ -318,6 +345,18 @@ mod tests {
                 "{profile_args:?} got {argv:?}"
             );
             assert!(argv.contains(&profile_args[0].to_string()));
+        }
+    }
+
+    #[test]
+    fn unrelated_profile_args_keep_the_default_sandbox() {
+        for profile_args in [
+            vec!["-c", "model=gpt"],
+            vec!["--config=model_reasoning_effort=\"high\""],
+            vec!["--trace"],
+        ] {
+            let extra: Vec<String> = profile_args.iter().map(|arg| arg.to_string()).collect();
+            assert!(!profile_chooses_sandbox(&extra), "{profile_args:?}");
         }
     }
 
