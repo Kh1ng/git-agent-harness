@@ -1,4 +1,4 @@
-import type { ActiveClaim, ControllerActivity, DeviceAgent, QuotaCandidateStatus, QuotaObservation, QuotaSnapshot, RecentLedgerSummary, Session } from '@git-agent-harness/contracts';
+import type { ActiveClaim, ControllerActivity, DeviceAgent, QuotaCandidateStatus, QuotaCheck, QuotaObservation, QuotaSnapshot, RecentLedgerSummary, Session } from '@git-agent-harness/contracts';
 
 /** One rate-limit window of a subscription, as the provider reports it. */
 export interface UsageWindow {
@@ -12,10 +12,13 @@ export interface UsageWindow {
   observedAt: string | null;
   /** The model this window is for, when the provider splits by model. */
   model: string | null;
+  /** The account's quota pool this window belongs to (Gemini, External models, Vibe…). */
+  pool: string | null;
 }
 
 /** A subscription: everything the quota snapshot knows about one account. */
 export interface SubscriptionUsage {
+  /** The account: its named credential, or the backend instance without its pool suffix. */
   id: string;
   backend: string;
   /** Subscription provider: openai, anthropic, antigravity, z-ai… */
@@ -53,7 +56,7 @@ export function parseWindow(name: string | null | undefined): { label: string; w
   if (!raw) return { label: 'Usage', windowMs: null };
   if (/^(weekly|7 ?d(ays?)?|10080 ?m(in)?)$/.test(lower)) return { label: 'Weekly', windowMs: 7 * DAY };
   if (/^(daily|1 ?d(ay)?|24 ?h(ours?)?|1440 ?m(in)?)$/.test(lower)) return { label: 'Daily', windowMs: DAY };
-  if (/^monthly$/.test(lower)) return { label: 'Monthly', windowMs: 30 * DAY };
+  if (/(^|[-_ ])monthly$/.test(lower)) return { label: 'Monthly', windowMs: 30 * DAY };
   const hours = /^(\d+)[ -]?h(ours?)?$/.exec(lower);
   if (hours) return { label: `Session (${hours[1]}h)`, windowMs: Number(hours[1]) * HOUR };
   const minutes = /^(\d+) ?m(in(utes?)?)?$/.exec(lower);
@@ -67,59 +70,103 @@ export function parseWindow(name: string | null | undefined): { label: string; w
 }
 
 function usedPercent(observation: QuotaObservation): number | null {
-  const used = observation.quota_used_percent;
   const remaining = observation.quota_remaining_percent;
-  if (typeof used === 'number' && Number.isFinite(used)) return Math.min(100, Math.max(0, used));
   if (typeof remaining === 'number' && Number.isFinite(remaining)) return 100 - Math.min(100, Math.max(0, remaining));
   return null;
 }
 
-function toWindow(observation: QuotaObservation, index: number): UsageWindow {
+/** `agy-second:external` -> `agy-second`; a named credential wins. */
+export function accountId(source: { backend: string; backend_instance?: string | null; credential_id?: string | null }): string {
+  return source.credential_id ?? (source.backend_instance ?? source.backend).split(':')[0];
+}
+
+const POOL_LABELS: Record<string, string> = {
+  external: 'External models', 'google-native': 'Gemini', gemini: 'Gemini',
+  vibe: 'Vibe', 'vibe-monthly': 'Vibe', 'vibe-code-included-monthly': 'Vibe', api: 'API', admin: 'API'
+};
+
+/** `agy-second:external` -> `External models`; null when the scope names no pool. */
+function poolLabel(source: { backend_instance?: string | null; quota_pool?: string | null }, account: string): string | null {
+  const raw = [source.quota_pool, source.backend_instance]
+    .map((value) => value?.split(':').slice(1).join(':') || (value && value !== account ? value : null))
+    .find(Boolean);
+  if (!raw) return null;
+  return POOL_LABELS[raw.toLowerCase()] ?? raw.replace(/[-_]+/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+}
+
+function toWindow(observation: QuotaObservation, index: number, pool: string | null): UsageWindow {
   const { label, windowMs } = parseWindow(observation.quota_window);
+  const base = observation.model && observation.model !== label ? `${label} · ${observation.model}` : label;
   return {
-    key: `${observation.quota_window ?? 'usage'}-${observation.model ?? ''}-${index}`,
-    label: observation.model && observation.model !== label ? `${label} · ${observation.model}` : label,
+    key: `${pool ?? ''}-${observation.quota_window ?? 'usage'}-${observation.model ?? ''}-${index}`,
+    label: pool ? `${pool} · ${base}` : base,
     usedPercent: usedPercent(observation),
     resetAt: observation.quota_reset_at ?? null,
     windowMs,
     observedAt: observation.observed_at ?? null,
-    model: observation.model ?? null
+    model: observation.model ?? null,
+    pool
   };
 }
 
-function fromCandidate(candidate: QuotaCandidateStatus): SubscriptionUsage {
-  const windows = (candidate.quota_observations ?? []).map(toWindow)
-    // Short windows first, then by name, so the ring's outer arc is the session.
-    .sort((a, b) => (a.windowMs ?? Infinity) - (b.windowMs ?? Infinity) || a.label.localeCompare(b.label));
-  const measured = windows.filter((window) => window.usedPercent !== null);
-  const tightest = measured.length ? measured.reduce((max, window) => (window.usedPercent! > max.usedPercent! ? window : max)) : null;
-  const id = candidate.backend_instance ?? candidate.backend;
-  return {
-    id,
-    backend: candidate.backend,
-    provider: candidate.provider ?? null,
-    providerLabel: providerLabel(candidate.provider, candidate.backend),
-    model: candidate.model,
-    windows,
-    tightest,
-    eligible: candidate.eligible_now,
-    reason: candidate.reason ?? null,
-    unavailableUntil: candidate.unavailable_until ?? null,
-    costUsd: candidate.usage?.actual_cost_usd ?? null,
-    observedAt: windows.map((window) => window.observedAt).filter((value): value is string => !!value).sort().at(-1) ?? candidate.observed_at ?? null
-  };
-}
+type Scope = Pick<QuotaCheck, 'backend' | 'provider' | 'backend_instance' | 'credential_id' | 'quota_pool' | 'quota_observations'>;
 
-/** One entry per routing candidate; an instance shared by several candidates appears once. */
-export function subscriptionUsage(snapshot: Pick<QuotaSnapshot, 'candidates'> | null | undefined): SubscriptionUsage[] {
-  const seen = new Map<string, SubscriptionUsage>();
-  for (const candidate of snapshot?.candidates ?? []) {
-    const usage = fromCandidate(candidate);
-    const existing = seen.get(usage.id);
-    if (!existing) { seen.set(usage.id, usage); continue; }
-    if (existing.windows.length === 0 && usage.windows.length > 0) seen.set(usage.id, { ...usage, model: existing.model });
+/**
+ * One entry per account, not per routing candidate or model (#1411): an
+ * account's pools (Antigravity's Gemini and external-model pools, Mistral's
+ * API and Vibe pools) are windows of the same ring. Router aliases
+ * (`cli-router…`) route onto those accounts and are not accounts themselves.
+ */
+export function subscriptionUsage(snapshot: Partial<Pick<QuotaSnapshot, 'candidates' | 'quota_checks'>> | null | undefined): SubscriptionUsage[] {
+  const candidates = snapshot?.candidates ?? [];
+  const scopes: Scope[] = [...candidates, ...(snapshot?.quota_checks ?? [])];
+  const accounts = new Map<string, { scopes: Scope[]; candidates: QuotaCandidateStatus[] }>();
+  for (const scope of scopes) {
+    const id = accountId(scope);
+    if (id.startsWith('cli-router')) continue;
+    const entry = accounts.get(id) ?? { scopes: [], candidates: [] };
+    entry.scopes.push(scope);
+    if (candidates.includes(scope as QuotaCandidateStatus)) entry.candidates.push(scope as QuotaCandidateStatus);
+    accounts.set(id, entry);
   }
-  return [...seen.values()];
+  return [...accounts.entries()].map(([id, account]) => {
+    const pools = new Set(account.scopes.map((scope) => poolLabel(scope, id)).filter(Boolean));
+    const byWindow = new Map<string, UsageWindow>();
+    account.scopes.forEach((scope) => (scope.quota_observations ?? []).forEach((observation, index) => {
+      const window = toWindow(observation, index, pools.size > 1 ? poolLabel(scope, id) : null);
+      const key = `${window.pool}|${observation.quota_window}|${window.model}`;
+      const previous = byWindow.get(key);
+      // A candidate and its account check report the same reading; keep the newest.
+      if (!previous || (window.observedAt ?? '') > (previous.observedAt ?? '')) byWindow.set(key, window);
+    }));
+    // An account-wide reading repeated under each pool is shown once, per pool.
+    const pooled = new Set([...byWindow.values()].filter((window) => window.pool).map((window) => window.windowMs ?? window.label));
+    const windows = [...byWindow.values()].filter((window) => window.pool || !pooled.has(window.windowMs ?? window.label))
+      // Short windows first, then by name, so the ring's outer arc is the session.
+      .sort((a, b) => (a.windowMs ?? Infinity) - (b.windowMs ?? Infinity) || a.label.localeCompare(b.label));
+    const measured = windows.filter((window) => window.usedPercent !== null);
+    const tightest = measured.length ? measured.reduce((max, window) => (window.usedPercent! > max.usedPercent! ? window : max)) : null;
+    const routed = account.candidates;
+    const blocked = routed.length > 0 && routed.every((candidate) => !candidate.eligible_now) ? routed[0] : null;
+    const first = account.scopes[0];
+    const provider = account.scopes.map((scope) => scope.provider).find(Boolean) ?? null;
+    const costs = routed.map((candidate) => candidate.usage?.actual_cost_usd).filter((cost): cost is number => typeof cost === 'number');
+    return {
+      id,
+      backend: first.backend,
+      provider,
+      providerLabel: providerLabel(provider, first.backend),
+      model: null,
+      windows,
+      tightest,
+      eligible: !blocked,
+      reason: blocked?.reason ?? null,
+      unavailableUntil: blocked?.unavailable_until ?? null,
+      costUsd: costs.length ? costs.reduce((sum, cost) => sum + cost, 0) : null,
+      observedAt: windows.map((window) => window.observedAt).filter((value): value is string => !!value).sort().at(-1)
+        ?? routed.map((candidate) => candidate.observed_at).filter((value): value is string => !!value).sort().at(-1) ?? null
+    };
+  }).sort((a, b) => a.providerLabel.localeCompare(b.providerLabel) || a.id.localeCompare(b.id));
 }
 
 /**
@@ -137,7 +184,8 @@ export function busySubscriptionIds(input: {
   factoryAgents?: DeviceAgent[];
 }): Set<string> {
   const byBackend = (backend: string | null | undefined, instance?: string | null) =>
-    input.subscriptions.find((usage) => instance && usage.id === instance) ?? input.subscriptions.find((usage) => usage.backend === backend);
+    input.subscriptions.find((usage) => instance && usage.id === accountId({ backend: backend ?? '', backend_instance: instance }))
+      ?? input.subscriptions.find((usage) => usage.backend === backend);
   const busy = new Set<string>();
   for (const session of input.sessions) {
     if (!['starting', 'running', 'stopping'].includes(session.status)) continue;
@@ -145,7 +193,10 @@ export function busySubscriptionIds(input: {
     if (match) busy.add(match.id);
   }
   for (const agent of input.factoryAgents ?? []) {
-    const match = byBackend(agent.tool);
+    // One CLI can draw on several subscriptions: Antigravity bills Gemini and Claude
+    // models to separate allowances. The model the process was started with says which.
+    const match = input.subscriptions.find((usage) => usage.backend === agent.tool && !!agent.model && usage.model === agent.model)
+      ?? byBackend(agent.tool);
     if (match) busy.add(match.id);
   }
   const recent = input.recentLedger;

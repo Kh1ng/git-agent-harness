@@ -5,6 +5,21 @@ use anyhow::Result;
 use crate::cli::args::ConfigCommands;
 use crate::{config, config_show};
 
+/// Secret-safe source label for a credential binding. A Claude subscription
+/// token is subscription quota, so it gets its own label instead of the
+/// generic named-API-key one (#1352).
+fn credential_auth_source_label(runner_kind: &str, credential_id: &str) -> String {
+    if runner_kind == "claude"
+        && crate::credentials::get(credential_id).is_ok_and(|info| {
+            info.kind == crate::credentials::CredentialKind::ClaudeSubscriptionToken
+        })
+    {
+        "claude-subscription-token".into()
+    } else {
+        format!("{runner_kind}-named-api-key")
+    }
+}
+
 pub fn run(command: ConfigCommands) -> Result<()> {
     match command {
         ConfigCommands::Show {
@@ -45,6 +60,8 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             clear,
             notification_channel,
             telegram_chat_id,
+            worker_memory_mib,
+            memory_floor_mib,
         } => {
             let mut cfg = if config::resolve_config_path(config_path.as_deref()).exists() {
                 config::load(config_path.as_deref())?
@@ -84,6 +101,26 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                     cfg.defaults.telegram_chat_id = None;
                 } else {
                     cfg.defaults.telegram_chat_id = Some(trimmed.to_string());
+                }
+            }
+            // Node-capacity values (issue #1380): lower-bound validation
+            // runs once, inside config::save. Review of #1383: also
+            // reject values this node can never admit -- but only when
+            // this command is what set them, so a pre-existing value
+            // (e.g. written for a larger machine) cannot lock up every
+            // unrelated `config set` repair.
+            let previous_capacity = cfg.defaults.node_capacity;
+            if let Some(value) = worker_memory_mib {
+                cfg.defaults.node_capacity.worker_memory_mib = value;
+            }
+            if let Some(value) = memory_floor_mib {
+                cfg.defaults.node_capacity.memory_floor_mib = value;
+            }
+            if cfg.defaults.node_capacity != previous_capacity {
+                if let Some(total) = crate::controller::node_total_memory_bytes() {
+                    cfg.defaults
+                        .node_capacity
+                        .validate_against_node_total(total)?;
                 }
             }
             crate::node_role::NodeRoleStatus::with_override(&cfg.defaults, None)?;
@@ -185,10 +222,9 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                 resolve_from_path: Some(true),
                 state_root: Some(state_root.to_string_lossy().into_owned()),
                 account_label: Some(account_label),
-                auth_source_label: Some(if credential_id.is_some() {
-                    format!("{runner_kind}-named-api-key")
-                } else {
-                    format!("{runner_kind}-cli-login")
+                auth_source_label: Some(match credential_id.as_deref() {
+                    Some(id) => credential_auth_source_label(&runner_kind, id),
+                    None => format!("{runner_kind}-cli-login"),
                 }),
                 credential_id,
                 ..Default::default()
@@ -263,7 +299,11 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                 .get(&instance)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("backend instance is not declared"))?;
-            entry.credential_id = Some(credential_id);
+            entry.credential_id = Some(credential_id.clone());
+            entry.auth_source_label = Some(credential_auth_source_label(
+                &entry.runner_kind,
+                &credential_id,
+            ));
             profile_config
                 .routing
                 .backend_instances

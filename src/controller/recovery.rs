@@ -122,6 +122,34 @@ pub(super) fn recently_capacity_deferred_work_ids(
     deferred
 }
 
+/// Record each trusted reviewer's outstanding request for changes as a
+/// structured review, so the next decision repairs the PR instead of trying
+/// a merge the provider will refuse. A provider failure here must not stop
+/// the loop: the request is picked up on a later pass.
+pub(crate) fn import_requested_changes(
+    cfg: &crate::config::GahConfig,
+    profile_name: &str,
+    entries: &mut Vec<crate::ledger::LedgerEntry>,
+) -> Result<()> {
+    let profile = crate::config::get_profile(cfg, profile_name)?;
+    let pending = match crate::sync::requested_changes::pending_review_entries(
+        profile_name,
+        profile,
+        entries,
+    ) {
+        Ok(pending) => pending,
+        Err(error) => {
+            eprintln!("gah loop: could not read reviewer change requests: {error:#}");
+            return Ok(());
+        }
+    };
+    for entry in pending {
+        crate::ledger::append(cfg, &entry)?;
+        entries.push(entry);
+    }
+    Ok(())
+}
+
 /// Finish runs left behind by a killed controller with both durable surfaces:
 /// the event stream used for live activity and the normalized ledger used for
 /// routing/usage reports. `run_once` calls this after acquiring the profile

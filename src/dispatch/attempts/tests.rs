@@ -1,3 +1,4 @@
+mod login_check;
 mod routing_record;
 use super::*;
 use crate::availability::{availability_for, availability_for_identity, load_state, Reason};
@@ -44,7 +45,7 @@ fn attempt_usage_parses_real_log_file() {
     let usage = attempt_usage(
         path.to_str().unwrap(),
         None,
-        UsageAttribution::backend(Some("vibe"), None),
+        UsageAttribution::backend(Some("hermes"), None),
         None,
         None,
     );
@@ -62,6 +63,10 @@ fn attempt_usage_attributes_missing_artifact_without_fabricating_tokens() {
         None,
     );
     assert_eq!(usage.input_tokens, None);
+    assert_eq!(
+        usage.usage_unknown_reason,
+        Some(crate::ledger::UsageUnknownReason::UsageArtifactMissing)
+    );
     assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
     assert_eq!(usage.provider.as_deref(), Some("openai"));
     assert_eq!(usage.usage_classification.as_deref(), Some("quota_backed"));
@@ -82,7 +87,11 @@ fn attempt_usage_is_empty_when_log_has_no_usage_info() {
     );
     assert_eq!(usage.input_tokens, None);
     assert_eq!(usage.usage_source.as_deref(), Some("execution_observed"));
-    assert_eq!(usage.requests_count, Some(1));
+    assert_eq!(usage.requests_count, None);
+    assert_eq!(
+        usage.usage_unknown_reason,
+        Some(crate::ledger::UsageUnknownReason::UsageArtifactMissing)
+    );
     assert_eq!(usage.usage_classification, Some("quota_backed".to_string()));
 }
 #[test]
@@ -155,7 +164,6 @@ fn attempt_usage_records_the_bound_agy_model_when_cli_logs_only_quota_state() {
         Some("Gemini 3.5 Flash (Medium)")
     );
     assert_eq!(usage.requests_count, Some(1));
-    assert_eq!(usage.quota_window.as_deref(), Some("AGY individual quota"));
 }
 #[test]
 fn review_usage_records_an_agy_review_without_token_counters() {
@@ -182,7 +190,6 @@ fn review_usage_records_an_agy_review_without_token_counters() {
     assert_eq!(usage.requests_count, Some(1));
     assert!(usage.token_usage_unknown_reason.is_some());
     assert_eq!(usage.input_tokens, None);
-    assert_eq!(usage.quota_window.as_deref(), Some("AGY individual quota"));
 }
 #[test]
 fn review_usage_consumes_each_backends_run_scoped_artifact() {
@@ -287,11 +294,7 @@ fn review_usage_consumes_each_backends_run_scoped_artifact() {
         agy.backend_instance.as_deref(),
         Some("agy-second:agy-account-2")
     );
-    assert!(agy
-        .usage_source
-        .as_deref()
-        .is_some_and(|source| source.contains("agy_cli_log_delta")));
-    assert!(agy.quota_reset_at.is_some());
+    assert_eq!(agy.usage_source.as_deref(), Some("execution_observed"));
 }
 #[test]
 fn attempt_usage_does_not_scrape_codex_tool_output_as_usage() {
@@ -1397,3 +1400,64 @@ mod build_cache_tests;
 #[cfg(test)]
 #[path = "external_env_tests.rs"]
 mod external_env_tests;
+#[cfg(test)]
+#[path = "usage_unknown_tests.rs"]
+mod usage_unknown_tests;
+
+#[test]
+fn agy_individual_quota_fixture_persists_identity_cooldown_with_eta_ceiling() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_path = tmp.path().join("availability.json");
+    let identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        "agy-second",
+        Some("Gemini 3.5"),
+        Some("agy-account-2"),
+    );
+    let before = OffsetDateTime::now_utc();
+    let parsed = mark_backend_unavailable_from_output_for_identity_at(
+        &state_path,
+        &identity,
+        include_str!("../../../tests/fixtures/quota-logs/agy_individual_quota_reached.txt"),
+        "/tmp/backend-output.log",
+    )
+    .unwrap()
+    .unwrap();
+    let after = OffsetDateTime::now_utc();
+    assert_eq!(
+        parsed.kind,
+        crate::quota_parser::FailureKind::QuotaExhausted
+    );
+    let state = load_state(&state_path).unwrap();
+    assert_eq!(state.records.len(), 1);
+    let record = &state.records[0];
+    assert_eq!(record.reason, Reason::QuotaExhausted);
+    assert_eq!(
+        record.backend_instance.as_deref(),
+        Some(identity.backend_instance.as_str())
+    );
+    assert_eq!(record.model, identity.effective_model);
+    assert_eq!(record.quota_pool, identity.quota_pool);
+    let until =
+        OffsetDateTime::parse(record.unavailable_until.as_deref().unwrap(), &Rfc3339).unwrap();
+    let ceiling = time::Duration::seconds(crate::availability::UNAVAILABLE_UNTIL_CEILING_SECONDS);
+    assert!(until >= before + ceiling - time::Duration::seconds(1));
+    assert!(until <= after + ceiling);
+    let decision = availability_for_identity(&state_path, &identity, after).unwrap();
+    assert!(!decision.eligible);
+    assert_eq!(decision.reason, Some(Reason::QuotaExhausted));
+    assert!(
+        availability_for_identity(&state_path, &identity, until + time::Duration::seconds(1))
+            .unwrap()
+            .eligible
+    );
+    let sibling = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+        "agy-other",
+        Some("Gemini 3.5"),
+        Some("agy-account-3"),
+    );
+    assert!(
+        availability_for_identity(&state_path, &sibling, after)
+            .unwrap()
+            .eligible
+    );
+}

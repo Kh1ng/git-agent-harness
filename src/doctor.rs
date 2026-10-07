@@ -79,7 +79,7 @@ pub fn run(
     }
     print_check(CheckStatus::Pass, "config", "loaded successfully");
 
-    let mut failed = false;
+    let mut failed = !check_worktree_base(&cfg.defaults);
     for (name, profile) in profiles {
         if json {
             CHECK_CAPTURE.with(|capture| {
@@ -92,6 +92,7 @@ pub fn run(
         }
         failed |= !check_profile(&cfg.defaults, profile);
         if validate {
+            failed |= !check_candidate_models(&cfg.defaults, profile);
             failed |= !check_validation_commands(profile);
             failed |= !check_env_files(profile);
             failed |= !check_backend_executables(&cfg.defaults, profile);
@@ -149,6 +150,112 @@ fn selected_profiles<'a>(
     Ok(profiles)
 }
 
+/// Default-level check that runs once per doctor invocation, outside the
+/// per-profile loop, so an unusable worktree base is reported even when the
+/// config has no profiles (issue #1366).
+///
+/// An empty value is tolerated: work GAH itself plans resolves the default
+/// at the point of use (`config::effective_worktree_base`), the stored value
+/// is never rewritten on the operator's behalf, and chat sessions keep
+/// checkout mode for unconfigured profiles. Doctor reports where the work
+/// will go instead of failing.
+fn check_worktree_base(defaults: &Defaults) -> bool {
+    if defaults.worktree_base.trim().is_empty() {
+        let resolved = config::effective_worktree_base(defaults);
+        return match worktree_base_probe(&resolved) {
+            Ok(()) => {
+                print_check(
+                    CheckStatus::Pass,
+                    "worktree_base",
+                    &format!("empty; worktrees resolve to {}", resolved.display()),
+                );
+                true
+            }
+            Err(reason) => {
+                print_check(
+                    CheckStatus::Fail,
+                    "worktree_base",
+                    &format!(
+                        "default {} not writable: {}; set defaults.worktree_base to a writable absolute directory",
+                        resolved.display(),
+                        reason
+                    ),
+                );
+                false
+            }
+        };
+    }
+    let configured = Path::new(defaults.worktree_base.trim());
+    if !configured.is_absolute() {
+        // A relative or `~` path resolves against a different cwd during
+        // dispatch than during doctor; require an absolute path so the
+        // planned base is unambiguous.
+        print_check(
+            CheckStatus::Fail,
+            "worktree_base",
+            &format!(
+                "not an absolute path: {}; set defaults.worktree_base to an absolute directory",
+                configured.display()
+            ),
+        );
+        return false;
+    }
+    match worktree_base_probe(configured) {
+        Ok(()) => {
+            print_check(
+                CheckStatus::Pass,
+                "worktree_base",
+                &configured.display().to_string(),
+            );
+            true
+        }
+        Err(reason) => {
+            print_check(
+                CheckStatus::Fail,
+                "worktree_base",
+                &format!("not writable {}: {}", configured.display(), reason),
+            );
+            false
+        }
+    }
+}
+
+/// Probes that GAH could write under `path` without creating any directory
+/// itself: the probe lands inside `path` when it exists, otherwise inside
+/// the nearest existing ancestor. A polled `doctor --json` must not grow
+/// directories under `$HOME` (or `/root` when `HOME` is unset) on every
+/// run, so this never `create_dir_all`s the configured base.
+fn worktree_base_probe(path: &Path) -> Result<(), String> {
+    let probe_dir = if path.exists() {
+        // The configured base must be a directory: a regular file here is a
+        // hard failure, never something the ancestor probe papers over.
+        if !path.is_dir() {
+            return Err(format!("{} exists and is not a directory", path.display()));
+        }
+        path.to_path_buf()
+    } else {
+        // A regular file anywhere above the base blocks creating it, so the
+        // nearest existing ancestor must itself be a directory.
+        let ancestor = path
+            .ancestors()
+            .skip(1)
+            .find(|ancestor| ancestor.exists())
+            .ok_or_else(|| format!("no existing ancestor for {}", path.display()))?;
+        if !ancestor.is_dir() {
+            return Err(format!("{} is not a directory", ancestor.display()));
+        }
+        ancestor.to_path_buf()
+    };
+    // The probe may land in a directory GAH does not own (`$HOME`), so it is
+    // an exclusively created, uniquely named file removed on drop: it never
+    // truncates an existing file or writes through a symlink.
+    tempfile::Builder::new()
+        .prefix(".gah-write-test-")
+        .tempfile_in(&probe_dir)
+        .map(drop)
+        .map_err(|err| format!("{err}"))
+}
+
 fn check_profile(defaults: &Defaults, profile: &Profile) -> bool {
     let mut failed = false;
     failed |= !check_repo(profile);
@@ -156,9 +263,6 @@ fn check_profile(defaults: &Defaults, profile: &Profile) -> bool {
     failed |= !check_provider_auth(profile);
     failed |= !check_push_url(profile);
     failed |= !check_writable_path("artifact_root", Path::new(&profile.artifact_root));
-    if !defaults.worktree_base.trim().is_empty() {
-        failed |= !check_writable_path("worktree_base", Path::new(&defaults.worktree_base));
-    }
     failed |= !check_manager_memory(defaults, profile);
     failed |= !check_candidate_model_consistency(defaults, profile);
     failed |= !check_backend_instance_config(defaults, profile);
@@ -640,7 +744,7 @@ fn check_manager_memory(defaults: &Defaults, profile: &Profile) -> bool {
 /// validation commands and backend executables actually resolve, and
 /// whether declared env files exist. Deliberately does not re-check repo
 /// path, provider CLI/token, push URL, or writable roots -- `check_profile`
-/// already covers those.
+/// and `check_worktree_base` already cover those.
 fn check_validation_commands(profile: &Profile) -> bool {
     if profile.validation_commands.is_empty() {
         print_check(CheckStatus::Warn, "validation commands", "none configured");
@@ -871,21 +975,8 @@ fn configured_backends(defaults: &Defaults, profile: &Profile) -> Vec<String> {
         {
             backends.insert(b.clone());
         }
-        if let Some(r) = &routing.routine_reviewer {
-            backends.insert(r.backend.clone());
-        }
-        for list in [
-            &routing.pm_candidates,
-            &routing.improve_candidates,
-            &routing.review_candidates,
-            &Some(routing.escalatory_reviewers.clone()),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            for c in list {
-                backends.insert(c.backend.clone());
-            }
+        for (_, c) in routing.labeled_candidates() {
+            backends.insert(c.backend.clone());
         }
     }
     backends.into_iter().collect()
@@ -910,6 +1001,122 @@ fn check_candidate_model_consistency(defaults: &Defaults, profile: &Profile) -> 
             !failed
         }
     }
+}
+
+fn parse_agy_models(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            // `agy models` prints the selectable label after the tab.
+            let label = line.split_once('\t')?.1.trim();
+            (!label.is_empty()).then(|| label.to_string())
+        })
+        .collect()
+}
+
+fn check_candidate_models(defaults: &Defaults, profile: &Profile) -> bool {
+    let routing = profile.effective_routing(defaults);
+    let candidates = routing
+        .labeled_candidates()
+        .into_iter()
+        .map(|(_, candidate)| candidate);
+    let mut cache = std::collections::HashMap::new();
+    let mut valid = true;
+    for candidate in candidates {
+        let Some(model) = candidate.model.as_deref() else {
+            continue;
+        };
+        let instance = candidate
+            .instance
+            .as_deref()
+            .and_then(|name| routing.backend_instances.get(name));
+        let runner_kind = instance
+            .map(|entry| entry.runner_kind.as_str())
+            .unwrap_or(&candidate.backend);
+        if runner_kind != "agy" {
+            continue;
+        }
+        let resolution = if let Some(instance) = instance {
+            crate::runner::resolve_backend_instance_executable(instance)
+        } else {
+            crate::runner::resolve_backend_executable(profile, &candidate.backend)
+        };
+        let crate::runner::ExecutableResolution::Found(path) = resolution else {
+            // The executable check reports this separately.
+            continue;
+        };
+        // Dispatch launches each instance with its isolated account state, so
+        // the model list must come from that same account.
+        let mut identity = crate::execution_identity::ExecutionIdentity::legacy_candidate(
+            runner_kind,
+            None::<String>,
+            None::<String>,
+        );
+        identity.state_root = instance
+            .and_then(|entry| entry.state_root.as_deref())
+            .filter(|root| !root.is_empty())
+            .map(std::path::PathBuf::from);
+        let mut state_env = Vec::new();
+        identity.apply_instance_state_env(&mut state_env);
+        let cache_key = (path.clone(), identity.state_root.clone());
+        let models = cache.entry(cache_key).or_insert_with(|| {
+            Command::new(&path)
+                .arg("models")
+                .envs(state_env)
+                .output()
+                .map(|result| {
+                    if !result.status.success() {
+                        return Err(format!(
+                            "agy models exited {}: {}",
+                            result.status,
+                            String::from_utf8_lossy(&result.stderr).trim()
+                        ));
+                    }
+                    let models = parse_agy_models(&String::from_utf8_lossy(&result.stdout));
+                    if models.is_empty() {
+                        Err("agy models returned no selectable models".to_string())
+                    } else {
+                        Ok(models)
+                    }
+                })
+                .unwrap_or_else(|error| Err(format!("cannot run agy models: {error}")))
+        });
+        let label = format!(
+            "{}/{}",
+            candidate.instance.as_deref().unwrap_or(&candidate.backend),
+            model
+        );
+        match models {
+            Ok(models) if models.iter().any(|available| available == model) => {
+                print_check(
+                    CheckStatus::Pass,
+                    "candidate model",
+                    &format!("{label}: accepted by agy"),
+                );
+            }
+            Ok(models) => {
+                print_check(
+                    CheckStatus::Fail,
+                    "candidate model",
+                    &format!(
+                        "{label}: invalid model; available models: {}",
+                        models.join(", ")
+                    ),
+                );
+                valid = false;
+            }
+            Err(error) => {
+                print_check(
+                    CheckStatus::Fail,
+                    "candidate model",
+                    &format!("{label}: {error}"),
+                );
+                valid = false;
+            }
+        }
+    }
+    valid
 }
 
 fn which(bin: &str) -> bool {
@@ -969,6 +1176,96 @@ mod tests {
     use super::{check_push_url, gitlab_provider_auth, ProviderAuthFailure, ProviderAuthResult};
     use crate::config::{Profile, RoutingPolicy};
 
+    #[test]
+    fn agy_model_list_rejects_unknown_candidate() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("agy");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'gemini-id\\tGemini 3.7 Flash (High)\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let mut profile = gitlab_profile(None);
+        profile.agy_path = Some(executable.display().to_string());
+        profile.routing.pm_candidates = Some(vec![crate::config::CandidateConfig {
+            backend: "agy".into(),
+            model: Some("default".into()),
+            ..Default::default()
+        }]);
+        assert!(!super::check_candidate_models(
+            &crate::config::Defaults::default(),
+            &profile
+        ));
+        profile.routing.pm_candidates.as_mut().unwrap()[0].model =
+            Some("Gemini 3.7 Flash (High)".into());
+        assert!(super::check_candidate_models(
+            &crate::config::Defaults::default(),
+            &profile
+        ));
+    }
+
+    #[test]
+    fn agy_model_list_uses_each_instance_state_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("agy");
+        // Each isolated account exposes only the model named in its HOME.
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'id\\t%s\\n' \"$(cat \"$HOME/model\")\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let mut profile = gitlab_profile(None);
+        for (name, model) in [("agy-a", "Model A"), ("agy-b", "Model B")] {
+            let root = temp.path().join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("model"), model).unwrap();
+            profile.routing.backend_instances.insert(
+                name.into(),
+                crate::config::BackendInstanceConfig {
+                    runner_kind: "agy".into(),
+                    enabled: None,
+                    logical_backend: None,
+                    executable: Some(executable.display().to_string()),
+                    resolve_from_path: None,
+                    state_root: Some(root.display().to_string()),
+                    account_label: None,
+                    auth_source_label: None,
+                    credential_id: None,
+                    quota_pool: None,
+                    supported_models: Vec::new(),
+                },
+            );
+        }
+        let candidate = |instance: &str, model: &str| crate::config::CandidateConfig {
+            backend: "agy".into(),
+            instance: Some(instance.into()),
+            model: Some(model.into()),
+            ..Default::default()
+        };
+        profile.routing.pm_candidates = Some(vec![
+            candidate("agy-a", "Model A"),
+            candidate("agy-b", "Model B"),
+        ]);
+        assert!(super::check_candidate_models(
+            &crate::config::Defaults::default(),
+            &profile
+        ));
+        // A model only the other account offers must not be accepted.
+        profile.routing.pm_candidates = Some(vec![candidate("agy-b", "Model A")]);
+        assert!(!super::check_candidate_models(
+            &crate::config::Defaults::default(),
+            &profile
+        ));
+    }
+
     fn gitlab_profile(api_base: Option<&str>) -> Profile {
         Profile {
             delivery_mode: crate::config::DeliveryMode::default(),
@@ -1010,6 +1307,7 @@ mod tests {
             hermes_idle_timeout_seconds: None,
             max_parallel_workers: None,
             max_open_managed_mrs: None,
+            worker_scaling: Default::default(),
             policy_path: None,
             env_file: None,
             env_file_prod: None,
@@ -1038,6 +1336,56 @@ mod tests {
         ))));
     }
 
+    // Issue #1366: the worktree base is a defaults-level concern, so doctor
+    // must validate it even with no profiles. An empty value is tolerated
+    // (work GAH plans resolves the default at the point of use) and must
+    // resolve instead of failing; doctor must still reject an unwritable,
+    // non-absolute, or file-valued base, and must never create the base.
+    // The empty-value case depends on $HOME, so it is covered through the CLI
+    // with HOME pointed at a tempdir (tests/gah_cli/doctor.rs).
+    #[test]
+    fn doctor_worktree_base_check_fails_when_unwritable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_directory = tmp.path().join("worktree-base-is-a-file");
+        std::fs::write(&not_a_directory, "regular file").unwrap();
+        let defaults = crate::config::Defaults {
+            worktree_base: not_a_directory.display().to_string(),
+            ..Default::default()
+        };
+
+        assert!(!super::check_worktree_base(&defaults));
+    }
+
+    #[test]
+    fn doctor_worktree_base_check_fails_when_relative() {
+        let defaults = crate::config::Defaults {
+            worktree_base: "worktrees/relative".to_string(),
+            ..Default::default()
+        };
+
+        assert!(!super::check_worktree_base(&defaults));
+        let tilde = crate::config::Defaults {
+            worktree_base: "~/worktrees".to_string(),
+            ..Default::default()
+        };
+        assert!(!super::check_worktree_base(&tilde));
+    }
+
+    #[test]
+    fn doctor_worktree_base_probe_creates_no_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("a/b/c");
+        let defaults = crate::config::Defaults {
+            worktree_base: base.display().to_string(),
+            ..Default::default()
+        };
+
+        assert!(super::check_worktree_base(&defaults));
+        // The probe must verify writability without materializing the base:
+        // a polled doctor would otherwise grow directories on every run.
+        assert!(!base.exists());
+        assert!(!tmp.path().join("a").exists());
+    }
     #[test]
     fn doctor_gitlab_preflight_requires_provider_project_id() {
         let mut profile = gitlab_profile(Some("https://gitlab.example.internal/api/v4"));

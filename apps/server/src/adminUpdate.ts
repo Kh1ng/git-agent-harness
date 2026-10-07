@@ -27,7 +27,8 @@ const IDLE_STATE: AdminUpdateState = {
   finishedAt: null,
   exitCode: null,
   pid: null,
-  output: ''
+  output: '',
+  mode: null
 };
 
 /** Bound the persisted output so a long build can't grow the state file
@@ -58,7 +59,8 @@ function parseState(data: unknown): AdminUpdateState {
     finishedAt: typeof record.finishedAt === 'string' ? record.finishedAt : null,
     exitCode: typeof record.exitCode === 'number' ? record.exitCode : null,
     pid: typeof record.pid === 'number' ? record.pid : null,
-    output: typeof record.output === 'string' ? record.output : ''
+    output: typeof record.output === 'string' ? record.output : '',
+    mode: record.mode === 'release' || record.mode === 'source' ? record.mode : null
   };
 }
 
@@ -122,6 +124,10 @@ function pidAlive(pid: number): boolean {
 
 export interface StartAdminUpdateOptions {
   spawnFn?: typeof spawn;
+  /** Issue #1416: `release` runs `gah update --from-release` (download
+   * published artifacts, no rebuild); `source` (the default) keeps the
+   * git pull + cargo/npm rebuild developer path. */
+  mode?: 'release' | 'source';
 }
 
 export interface StartAdminUpdateResult {
@@ -143,12 +149,15 @@ export function adminUpdateEnvironment(
   };
 }
 
-/** Launches `gah update --repo <cwd> --role central --restart-server`
+/** Launches `gah update --repo <cwd> --role central --restart-server --pull --yes`
  * detached (so it outlives this HTTP request, and survives this process
  * being the one that gets restarted) and streams its combined output into
  * the state file. `--repo` pins it to this server's own checkout
  * (`process.cwd()`, i.e. `gah-server.service`'s `WorkingDirectory`) rather
- * than whatever `gah update` would otherwise infer. */
+ * than whatever `gah update` would otherwise infer. Release mode appends
+ * `--from-release` so the install downloads published artifacts instead
+ * of rebuilding (issue #1416); both modes share the state file and the
+ * restart-safe reconciliation. */
 export function startAdminUpdate(options: StartAdminUpdateOptions = {}): StartAdminUpdateResult {
   const existing = readAdminUpdateState();
   if (existing.status === 'running' && existing.pid !== null && pidAlive(existing.pid)) {
@@ -156,17 +165,17 @@ export function startAdminUpdate(options: StartAdminUpdateOptions = {}): StartAd
   }
 
   const spawnFn = options.spawnFn ?? spawn;
+  const mode = options.mode === 'release' ? 'release' : 'source';
+  const args = ['update', '--repo', process.cwd(), '--role', 'central', '--restart-server'];
+  // Source mode pulls and accepts the plan: nobody can answer a prompt here.
+  args.push(...(mode === 'release' ? ['--from-release'] : ['--pull', '--yes']));
   const uid = process.platform === 'linux' && typeof process.getuid === 'function' ? process.getuid() : undefined;
-  const child: ChildProcess = spawnFn(
-    findGahBinary(),
-    ['update', '--repo', process.cwd(), '--role', 'central', '--restart-server'],
-    {
-      cwd: process.cwd(),
-      env: adminUpdateEnvironment(process.env, process.platform, uid),
-      detached: true,
-      stdio: ['ignore', 'pipe', 'pipe']
-    }
-  );
+  const child: ChildProcess = spawnFn(findGahBinary(), args, {
+    cwd: process.cwd(),
+    env: adminUpdateEnvironment(process.env, process.platform, uid),
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
   child.unref();
 
   let state: AdminUpdateState = {
@@ -175,7 +184,8 @@ export function startAdminUpdate(options: StartAdminUpdateOptions = {}): StartAd
     finishedAt: null,
     exitCode: null,
     pid: child.pid ?? null,
-    output: ''
+    output: '',
+    mode
   };
   writeAdminUpdateState(state);
 

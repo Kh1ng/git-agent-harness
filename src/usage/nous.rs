@@ -225,7 +225,6 @@ pub(crate) fn parse(input: &[u8], now: OffsetDateTime) -> Result<QuotaObservatio
         model: None,
         quota_pool: Some("nous-portal-api".into()),
         quota_window: remaining_percent.map(|_| "subscription-monthly".into()),
-        quota_used_percent: remaining_percent.map(|v| 100.0 - v),
         quota_remaining_percent: remaining_percent,
         quota_reset_at: reset,
         observed_at: Some(timestamp.clone()),

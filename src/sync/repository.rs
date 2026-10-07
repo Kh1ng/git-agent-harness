@@ -88,14 +88,26 @@ pub(super) fn fetch_active_github_mrs(
     profile: &config::Profile,
     filter_gah_branches: bool,
 ) -> Result<Vec<SyncMr>> {
-    let open_prs = github_open_prs_rest(profile, "active observation")?;
     let mut rows = Vec::new();
-    for pr in open_prs
+    for mut mr in active_github_mrs_without_ci(profile, filter_gah_branches)? {
+        let checks = github_check_runs_rest(profile, mr.source_sha.as_deref())?;
+        mr.ci_failed = github_ci_failed(Some(&checks));
+        mr.ci_passed = github_ci_passed(Some(&checks));
+        rows.push(mr);
+    }
+    Ok(rows)
+}
+
+/// Open PRs with their CI fields left unset: one request for the whole list,
+/// for callers that only need identity, source and metadata.
+pub(super) fn active_github_mrs_without_ci(
+    profile: &config::Profile,
+    filter_gah_branches: bool,
+) -> Result<Vec<SyncMr>> {
+    Ok(github_open_prs_rest(profile, "active observation")?
         .into_iter()
         .filter(|pr| !filter_gah_branches || pr.head.branch.starts_with("gah/"))
-    {
-        let checks = github_check_runs_rest(profile, pr.head.sha.as_deref())?;
-        rows.push(SyncMr {
+        .map(|pr| SyncMr {
             work_id: extract_work_id_from_title(&pr.title),
             title: pr.title,
             body: pr.body,
@@ -111,12 +123,11 @@ pub(super) fn fetch_active_github_mrs(
             merged: false,
             updated_at: pr.updated_at,
             merged_at: None,
-            ci_failed: github_ci_failed(Some(&checks)),
-            ci_passed: github_ci_passed(Some(&checks)),
+            ci_failed: false,
+            ci_passed: false,
             ci_pending: false,
-        });
-    }
-    Ok(rows)
+        })
+        .collect())
 }
 
 pub(super) fn fetch_historical_github_mrs(

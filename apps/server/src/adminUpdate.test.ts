@@ -43,7 +43,8 @@ test('readAdminUpdateState returns idle when no state file exists', () => {
       finishedAt: null,
       exitCode: null,
       pid: null,
-      output: ''
+      output: '',
+      mode: null
     });
   });
 });
@@ -96,7 +97,7 @@ test('readAdminUpdateState leaves a running state alone while its pid is still a
   });
 });
 
-test('startAdminUpdate launches gah update pinned to this checkout via --repo and records output/exit', () => {
+test('startAdminUpdate pulls and confirms the update with ignored stdin, pins the checkout, and records output/exit', () => {
   withStatePath((statePath) => {
     let capturedBin = '';
     let capturedArgs: string[] = [];
@@ -114,7 +115,8 @@ test('startAdminUpdate launches gah update pinned to this checkout via --repo an
     assert.equal(result.state.status, 'running');
     assert.equal(result.state.pid, 4242);
     assert.ok(capturedBin);
-    assert.deepEqual(capturedArgs, ['update', '--repo', process.cwd(), '--role', 'central', '--restart-server']);
+    assert.deepEqual(capturedOptions?.stdio, ['ignore', 'pipe', 'pipe']);
+    assert.deepEqual(capturedArgs, ['update', '--repo', process.cwd(), '--role', 'central', '--restart-server', '--pull', '--yes']);
     if (process.platform === 'linux' && typeof process.getuid === 'function') {
       const runtimeDir = `/run/user/${process.getuid()}`;
       assert.equal(capturedOptions?.env?.XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR ?? runtimeDir);
@@ -182,6 +184,35 @@ test('startAdminUpdate records failure on a non-zero exit code', () => {
     (child as unknown as EventEmitter).emit('close', 1);
     assert.equal(readAdminUpdateState().status, 'failed');
     assert.equal(readAdminUpdateState().exitCode, 1);
+  });
+});
+
+test('startAdminUpdate release mode appends --from-release and records the mode (issue #1416)', () => {
+  withStatePath(() => {
+    let capturedArgs: string[] = [];
+    const child = fakeChildProcess(4343);
+    const spawnFn = ((_bin: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as typeof spawn;
+
+    const result = startAdminUpdate({ spawnFn, mode: 'release' });
+    assert.equal(result.started, true);
+    assert.deepEqual(capturedArgs, [
+      'update',
+      '--repo',
+      process.cwd(),
+      '--role',
+      'central',
+      '--restart-server',
+      '--from-release'
+    ]);
+    assert.equal(result.state.mode, 'release');
+
+    (child as unknown as EventEmitter).emit('close', 0);
+    const finalState = readAdminUpdateState();
+    assert.equal(finalState.status, 'success');
+    assert.equal(finalState.mode, 'release');
   });
 });
 

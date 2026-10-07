@@ -20,6 +20,7 @@ use crate::availability;
 use crate::config::{self, GahConfig, Profile};
 use crate::context;
 use crate::controller::HumanRequiredReason;
+use crate::dispatch::issues::strip_markdown_section;
 use crate::job_kind::JobKind;
 use crate::ledger::LedgerEntry;
 use crate::notifications::{notify_event, NotifyEvent};
@@ -149,12 +150,17 @@ fn build_review_project_brief_section(
         );
     }
 
+    let source_hash = format!("{:x}", Sha256::digest(brief.as_bytes()));
+    // #1379: design rules guide implementation and fix work only, so the
+    // reviewer-facing brief never carries them -- neither as blocking
+    // grounds nor as bytes against the review budget.
+    let brief = strip_markdown_section(&brief, "Design rules");
     let normalized = render_untrusted_review_text(&brief, 10_000);
     let mut bounded = utf8_safe_prefix(&normalized, REVIEW_PROJECT_BRIEF_MAX_BYTES);
     let truncation_note =
         "[Project Brief truncated at 4096 bytes; retrieve the remaining context from docs/PROJECT_BRIEF.md if needed.]\n";
     let truncated =
-        source_bytes > REVIEW_PROJECT_BRIEF_MAX_BYTES as u64 || bounded.len() < normalized.len();
+        brief.len() > REVIEW_PROJECT_BRIEF_MAX_BYTES || bounded.len() < normalized.len();
     if truncated && bounded.len() + truncation_note.len() > REVIEW_PROJECT_BRIEF_MAX_BYTES {
         bounded = utf8_safe_prefix(
             bounded,
@@ -176,7 +182,7 @@ fn build_review_project_brief_section(
         section,
         Some(context::ReviewProjectBriefContext {
             included: true,
-            source_hash: Some(format!("{:x}", Sha256::digest(brief.as_bytes()))),
+            source_hash: Some(source_hash),
             source_bytes,
             sent_bytes,
             truncated,
@@ -731,6 +737,33 @@ pub(in crate::dispatch) fn review(
                 profile,
                 ledger,
             );
+            // Only a reviewer that exited on its own can have rejected the
+            // model. Each stream is checked alone so reviewer stdout cannot
+            // push the runner's stderr diagnostic out of the leading lines.
+            if matches!(
+                attempt.outcome,
+                runner::ReviewProcessOutcome::NonZeroExit(_)
+            ) {
+                let label = route_label(&route.effective_backend, route.effective_model.as_deref());
+                if let Some(message) =
+                    crate::model_validation::invalid_model_message(&attempt.stderr, &label).or_else(
+                        || crate::model_validation::invalid_model_message(&attempt.stdout, &label),
+                    )
+                {
+                    ledger.set_failure(
+                        crate::ledger::FailureClass::ConfigError,
+                        crate::ledger::FailureStage::Review,
+                    );
+                    ledger.error_summary = Some(message.clone());
+                    ledger.human_required = true;
+                    ledger.human_required_reason_code =
+                        Some(HumanRequiredReason::ConfigurationInfra.as_str().into());
+                    if let Some(record) = ledger.attempts.last_mut() {
+                        record.failure_class = Some("config_error".into());
+                    }
+                    anyhow::bail!("{message}");
+                }
+            }
             if !fresh_context && !attempt.stdout.trim().is_empty() {
                 prior_review_context = utf8_safe_suffix(&attempt.stdout, 20_000).to_string();
             }
@@ -1320,7 +1353,7 @@ fn record_review_output_invalid(
     if profile.publishing.allow_issue_comments {
         let body = format!(
             "GAH rejected this reviewer response as unsafe repair context: `{reason}`. No FixMr was dispatched. The next configured reviewer will be tried within the bounded review budget.\n\nSession: `{}`",
-            session_dir.display()
+            session_dir.file_name().and_then(|name| name.to_str()).unwrap_or("unknown")
         );
         provider::post_review_comment(
             profile,

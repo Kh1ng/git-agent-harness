@@ -11,6 +11,7 @@ pub(crate) fn backend(info: &CredentialInfo) -> &str {
         (CredentialKind::MistralDashboard | CredentialKind::MistralLogin, _, _) => {
             "mistral-dashboard"
         }
+        (CredentialKind::ClaudeSubscriptionToken, _, _) => "claude",
         (CredentialKind::ApiKey, "nous", _) => "opencode",
         (CredentialKind::ApiKey, "mistral", Some("MISTRAL_ADMIN_API_KEY")) => "vibe",
         _ => &info.provider,
@@ -25,13 +26,16 @@ fn unknown(info: &CredentialInfo, now: OffsetDateTime) -> QuotaObservationRecord
         model: None,
         quota_pool: None,
         quota_window: None,
-        quota_used_percent: None,
         quota_remaining_percent: None,
         quota_reset_at: None,
         observed_at: None,
         checked_at: now.format(&Rfc3339).ok(),
         check_error: None,
-        usage_source: Some(format!("credential_api:{}", info.provider)),
+        usage_source: Some(if info.kind == CredentialKind::ClaudeSubscriptionToken {
+            "claude_oauth_usage".into()
+        } else {
+            format!("credential_api:{}", info.provider)
+        }),
         mistral_admin: None,
         account_usage: None,
     }
@@ -41,20 +45,22 @@ pub(crate) fn refresh(id: &str, path: &Path) -> Result<QuotaObservationRecord> {
     let root = super::root()?;
     refresh_selected_at(&root, id, path, |selected| {
         let (info, secret) = (&selected.info, selected.secret.as_str());
+        let one = |record: Result<QuotaObservationRecord>| record.map(|record| vec![record]);
         match (info.kind, info.provider.as_str(), info.env_var.as_deref()) {
-            (CredentialKind::MistralLogin, _, _) => {
-                refresh_mistral_login(&root, selected).map(Some)
+            // One check returns the 5-hour and weekly windows together.
+            (CredentialKind::ClaudeSubscriptionToken, _, _) => {
+                crate::usage::claude::refresh_token(secret)
             }
+            (CredentialKind::MistralLogin, _, _) => one(refresh_mistral_login(&root, selected)),
             (CredentialKind::MistralDashboard, _, _) => {
-                crate::usage::mistral_dashboard::refresh_cookie(secret).map(Some)
+                one(crate::usage::mistral_dashboard::refresh_cookie(secret))
             }
-            (CredentialKind::ApiKey, "nous", _) => {
-                crate::usage::nous::refresh_key(secret).map(Some)
-            }
+            (CredentialKind::ApiKey, "nous", _) => one(crate::usage::nous::refresh_key(secret)),
             (CredentialKind::ApiKey, "mistral", Some("MISTRAL_ADMIN_API_KEY")) => {
                 quota_store::refresh_vibe_admin_record(secret, None)
+                    .map(|record| record.into_iter().collect())
             }
-            _ => Ok(None),
+            _ => Ok(Vec::new()),
         }
     })
 }
@@ -63,7 +69,7 @@ fn refresh_selected_at(
     root: &Path,
     id: &str,
     path: &Path,
-    collect: impl FnOnce(&super::StoredCredential) -> Result<Option<QuotaObservationRecord>>,
+    collect: impl FnOnce(&super::StoredCredential) -> Result<Vec<QuotaObservationRecord>>,
 ) -> Result<QuotaObservationRecord> {
     // Secret and generation come from one atomic record. Network calls hold no
     // source lock; rotation/deletion and publication share only a short lock.
@@ -75,7 +81,7 @@ fn refresh_selected_at(
     if current.revision != selected.revision {
         anyhow::bail!("credential changed during quota check");
     }
-    refresh_with(&selected.info, path, OffsetDateTime::now_utc(), || result)
+    publish(&selected.info, path, OffsetDateTime::now_utc(), result)
 }
 
 /// Reuse the cached dashboard session; sign in again only when Mistral rejects
@@ -138,13 +144,35 @@ pub(crate) fn removed(info: &CredentialInfo, path: &Path) -> Result<()> {
     quota_store::append(path, &record)
 }
 
-fn refresh_with(
+/// Store one check's outcome and return its first record. Every window of
+/// the check is written together; no windows means the source reported no
+/// quota, and an error becomes a failed observation for the source.
+fn publish(
     info: &CredentialInfo,
     path: &Path,
     now: OffsetDateTime,
-    collect: impl FnOnce() -> Result<Option<QuotaObservationRecord>>,
+    result: Result<Vec<QuotaObservationRecord>>,
 ) -> Result<QuotaObservationRecord> {
-    let mut record = match collect() {
+    let outcomes = match result {
+        Ok(records) if records.is_empty() => vec![Ok(None)],
+        Ok(records) => records.into_iter().map(|record| Ok(Some(record))).collect(),
+        Err(error) => vec![Err(error)],
+    };
+    let mut records = outcomes
+        .into_iter()
+        .map(|outcome| observation(info, path, now, outcome))
+        .collect::<Result<Vec<_>>>()?;
+    quota_store::append_all(path, &records)?;
+    Ok(records.swap_remove(0))
+}
+
+fn observation(
+    info: &CredentialInfo,
+    path: &Path,
+    now: OffsetDateTime,
+    outcome: Result<Option<QuotaObservationRecord>>,
+) -> Result<QuotaObservationRecord> {
+    let mut record = match outcome {
         Ok(Some(mut record)) => {
             // Mistral dashboard returns a verified customer/workspace pool.
             // Legacy collectors with a fixed ambient pool cannot identify a
@@ -176,7 +204,6 @@ fn refresh_with(
                 })
                 .unwrap_or_else(|| unknown(info, now));
             failed.quota_window = None;
-            failed.quota_used_percent = None;
             failed.quota_remaining_percent = None;
             failed.quota_reset_at = None;
             failed.observed_at = None;
@@ -188,7 +215,6 @@ fn refresh_with(
         }
     };
     record.credential_id = Some(info.id.clone());
-    quota_store::append(path, &record)?;
     Ok(record)
 }
 
@@ -196,6 +222,45 @@ fn refresh_with(
 mod tests {
     use super::*;
     use crate::execution_identity::ExecutionIdentity;
+    fn refresh_with(
+        info: &CredentialInfo,
+        path: &Path,
+        now: OffsetDateTime,
+        collect: impl FnOnce() -> Result<Option<QuotaObservationRecord>>,
+    ) -> Result<QuotaObservationRecord> {
+        let result = collect().map(|record| record.into_iter().collect());
+        publish(info, path, now, result)
+    }
+    #[test]
+    fn claude_subscription_windows_are_source_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quota.jsonl");
+        let source = CredentialInfo {
+            id: "claude-sub".into(),
+            provider: "anthropic".into(),
+            kind: CredentialKind::ClaudeSubscriptionToken,
+            account_label: "Subscription".into(),
+            env_var: None,
+        };
+        let records = crate::usage::claude::parse(
+            br#"{"five_hour":{"utilization":20},"seven_day":{"utilization":40}}"#,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        let first = records[0].quota_window.clone();
+        let saved = publish(&source, &path, OffsetDateTime::now_utc(), Ok(records)).unwrap();
+        assert_eq!(saved.quota_window, first);
+        let stored = quota_store::load(&path).unwrap();
+        assert_eq!(stored.len(), 2);
+        let mut identity =
+            ExecutionIdentity::legacy_candidate("claude", None::<String>, None::<String>);
+        identity.credential_id = Some(source.id);
+        let windows = quota_store::latest_windows_for_identity(&stored, &identity);
+        assert_eq!(windows.len(), 2);
+        assert!(windows.iter().all(|record| record.backend == "claude"
+            && record.credential_id.as_deref() == Some("claude-sub")
+            && record.quota_pool.is_none()));
+    }
     fn info(id: &str) -> CredentialInfo {
         CredentialInfo {
             id: id.into(),
@@ -401,7 +466,7 @@ mod tests {
                     )
                     .unwrap();
                 }
-                Ok(Some(reading(selected, OffsetDateTime::now_utc())))
+                Ok(vec![reading(selected, OffsetDateTime::now_utc())])
             });
             assert!(result.is_err());
             let records = quota_store::load(&path).unwrap();

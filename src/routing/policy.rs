@@ -569,7 +569,14 @@ pub(super) fn configured_route_requires_approval(
             .any(|candidate| matches(candidate) && candidate.requires_approval)
     });
 
+    // The entry that admits the route decides its approval, including an
+    // entry that admits every model of the backend.
+    let allowed_models_require_approval = routing
+        .allowed_entry(mode, backend, model)
+        .is_some_and(|entry| entry.requires_approval);
+
     mode_candidates_require_approval
+        || allowed_models_require_approval
         || (is_review_mode(mode)
             && routing
                 .escalatory_reviewers
@@ -618,7 +625,7 @@ fn task_rule_dimension_matches(values: &[String], value: Option<&str>) -> bool {
         || value.is_some_and(|value| values.iter().any(|item| item.eq_ignore_ascii_case(value)))
 }
 
-fn route_candidates(
+pub(super) fn route_candidates(
     routing: &RoutingPolicy,
     raw: &[crate::config::CandidateConfig],
 ) -> Vec<RouteCandidate> {
@@ -661,9 +668,8 @@ fn route_candidates(
 }
 
 /// Derives quota_pace()'s two inputs from the latest quota_store observation
-/// for this exact identity. `quota_used_percent` is preferred; falls back to
-/// deriving it from `quota_remaining_percent` when only that was recorded
-/// (vibe's Mistral Admin spend-limit reading uses remaining, not used).
+/// for this exact identity. The used percentage is derived from
+/// `quota_remaining_percent` to compute the pacing budget.
 /// `quota_days_remaining` is quota_pace()'s "days until the quota window
 /// resets", derived from `quota_reset_at` relative to `now`. Only fresh,
 /// current weekly budgets belong in the weekly pacing formula.
@@ -712,11 +718,9 @@ fn live_quota_pacing_inputs(
     else {
         return (None, None);
     };
-    let usage_percent = record.quota_used_percent.or_else(|| {
-        record
-            .quota_remaining_percent
-            .map(|remaining| (100.0 - remaining).clamp(0.0, 100.0))
-    });
+    let usage_percent = record
+        .quota_remaining_percent
+        .map(|remaining| (100.0 - remaining).clamp(0.0, 100.0));
     let days_remaining = record
         .quota_reset_at
         .as_deref()
@@ -751,6 +755,17 @@ pub(super) fn configured_route_candidate(
         _ => None,
     };
 
+    // For an allow-listed kind the allow-list IS that kind's candidate pool,
+    // so the entry that admits the route supplies its approval, billing and
+    // instance on the explicit route too. An entry for every model of the
+    // backend runs the model that was asked for.
+    if let Some(entry) = routing.allowed_entry(mode, backend, model) {
+        let entry = crate::config::CandidateConfig {
+            model: model.map(str::to_string),
+            ..entry.clone()
+        };
+        return route_candidates(routing, std::slice::from_ref(&entry)).pop();
+    }
     let configured = mode_candidates
         .into_iter()
         .flatten()

@@ -16,6 +16,8 @@ pub use checks::{QuotaCheck, QuotaCheckStatus};
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UsageSummary {
     pub entries: usize,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty", default)]
+    pub usage_unknown_reasons: std::collections::BTreeMap<ledger::UsageUnknownReason, usize>,
     pub attempts: usize,
     pub validation_pass: usize,
     pub success_rate: Option<f64>,
@@ -23,33 +25,6 @@ pub struct UsageSummary {
     pub requests_count: Option<u64>,
     pub actual_cost_usd: Option<f64>,
     pub estimated_cost_usd: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct QuotaObservation {
-    pub backend: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub credential_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend_instance: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_pool: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_window: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_used_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_remaining_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_reset_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub observed_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub account_usage: Option<crate::usage::account_usage::AccountUsageObservation>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,7 +53,7 @@ pub struct QuotaCandidateStatus {
     pub observed_at: Option<String>,
     pub usage: UsageSummary,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub quota_observations: Vec<QuotaObservation>,
+    pub quota_observations: Vec<crate::quota_store::QuotaObservationRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +81,69 @@ pub struct QuotaFreshness {
     pub quota_checked_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_observed_at: Option<String>,
+}
+
+/// #1336: one human-readable status word per quota source check.
+fn check_status_label(status: QuotaCheckStatus) -> &'static str {
+    match status {
+        QuotaCheckStatus::Data => "ok",
+        QuotaCheckStatus::NoData => "no data",
+        QuotaCheckStatus::Failed => "check failed",
+        QuotaCheckStatus::AuthRequired => "needs login",
+        QuotaCheckStatus::NotConfigured => "not configured",
+    }
+}
+
+/// Source identity of one quota check, mirroring the dashboard's
+/// scope-identity rule: backend, credential, instance, pool and model stay
+/// distinct facts and are never collapsed into one label. Repeated labels
+/// (a default instance named after its backend) collapse, exactly like the
+/// web's `scopeIdentity`.
+fn check_source_label(check: &QuotaCheck) -> String {
+    let mut parts = vec![check.backend.clone()];
+    if let Some(credential) = &check.credential_id {
+        parts.push(format!("credential {credential}"));
+    }
+    if let Some(instance) = &check.backend_instance {
+        parts.push(instance.clone());
+    }
+    if let Some(pool) = &check.quota_pool {
+        parts.push(format!("pool {pool}"));
+    }
+    if let Some(model) = &check.model {
+        parts.push(format!("model {model}"));
+    }
+    let mut label = String::new();
+    for part in parts {
+        if label.contains(&part) {
+            continue;
+        }
+        if !label.is_empty() {
+            label.push_str(" / ");
+        }
+        label.push_str(&part);
+    }
+    label
+}
+
+/// #1336: the `gah quota snapshot` line for one account quota source check:
+/// status first, then how long an expired login has been failing, then the
+/// provider's own (already redacted) remediation text from the record.
+fn format_check_line(check: &QuotaCheck) -> String {
+    let mut line = format!(
+        "  - {}: {}",
+        check_source_label(check),
+        check_status_label(check.status)
+    );
+    if let Some(failing_since) = &check.failing_since {
+        line.push_str(&format!(" (failing since {failing_since})"));
+    } else if let Some(checked_at) = &check.checked_at {
+        line.push_str(&format!(" (checked {checked_at})"));
+    }
+    if let Some(error) = &check.error {
+        line.push_str(&format!(": {error}"));
+    }
+    line
 }
 
 pub fn run(cfg: &GahConfig, profile_name: &str, since: &str, json: bool) -> Result<()> {
@@ -167,6 +205,12 @@ pub fn run(cfg: &GahConfig, profile_name: &str, since: &str, json: bool) -> Resu
                     .map(|w| format!(" (window: {w})"))
                     .unwrap_or_default()
             );
+        }
+        if !snapshot.quota_checks.is_empty() {
+            println!("Quota source checks:");
+            for check in &snapshot.quota_checks {
+                println!("{}", format_check_line(check));
+            }
         }
     }
 
@@ -258,10 +302,21 @@ pub fn build_snapshot(
     );
 
     let freshness = build_freshness(ledger_observed_at, &candidates, &account_quota);
-    let quota_checks = build_quota_checks(&account_quota);
+    // #1336: sources a configured candidate expects but this node has no
+    // credential for are never refreshed, so nothing else would report
+    // them; their absence is a fact the snapshot must carry, not a gap.
+    let expected_sources = expected_quota_sources(
+        &resolved_routing,
+        &checks::SourceConfiguration {
+            vibe_admin: crate::usage::admin_api_key().is_some(),
+            mistral_dashboard: crate::usage::mistral_dashboard::configured(),
+            nous_portal: crate::usage::nous::configured(),
+        },
+    );
+    let quota_checks = build_quota_checks(&account_quota, &expected_sources);
 
     Ok(QuotaSnapshot {
-        schema_version: 2,
+        schema_version: 3,
         generated_at,
         freshness,
         quota_checks,
@@ -343,6 +398,112 @@ fn latest_timestamp(values: impl Iterator<Item = String>) -> Option<String> {
         .map(|(_, value)| value)
 }
 
+/// Every routing candidate in declaration order with the mode that
+/// configured it. The default backend stands in only when no candidate is
+/// declared at all, matching routing's own fallback rule.
+fn configured_candidates(routing: &RoutingPolicy) -> Vec<(&str, CandidateConfig)> {
+    let mut out = Vec::new();
+    for (mode, list) in [
+        ("pm", &routing.pm_candidates),
+        ("improve", &routing.improve_candidates),
+        ("review", &routing.review_candidates),
+    ] {
+        for candidate in list.iter().flatten() {
+            out.push((mode, candidate.clone()));
+        }
+    }
+    if let Some(candidate) = &routing.routine_reviewer {
+        out.push(("routine_review", candidate.clone()));
+    }
+    for candidate in &routing.escalatory_reviewers {
+        out.push(("escalatory_review", candidate.clone()));
+    }
+    // Per-kind allow-lists (#1386) are candidates too.
+    let mut allowed: Vec<_> = routing.allowed_models.iter().collect();
+    allowed.sort_by_key(|(kind, _)| kind.as_str());
+    for (kind, list) in allowed {
+        for candidate in list {
+            out.push((kind.as_str(), candidate.clone()));
+        }
+    }
+    if out.is_empty() {
+        if let Some(backend) = routing.default_backend.clone() {
+            out.push((
+                "default",
+                CandidateConfig {
+                    backend,
+                    model: routing.default_model.clone(),
+                    quota_pool: None,
+                    ..CandidateConfig::default()
+                },
+            ));
+        }
+    }
+    out
+}
+
+/// #1336: allowance sources configured candidates expect readings from,
+/// restricted to the sources this node has no credential for. A source with
+/// a credential gets checked on schedule and its check row already reports
+/// the outcome; only a credential-less source can silently disappear.
+fn expected_quota_sources(
+    routing: &RoutingPolicy,
+    configuration: &checks::SourceConfiguration,
+) -> Vec<checks::ExpectedQuotaSource> {
+    let mut sources = Vec::new();
+    for (_mode, candidate) in configured_candidates(routing) {
+        if !candidate.included_in_quota || candidate.instance.is_some() {
+            continue;
+        }
+        let identity = routing.execution_identity_for_candidate(&candidate);
+        // A named source owns this candidate's readings and is refreshed
+        // through its own credential lifecycle.
+        if identity.credential_id.is_some() || identity.quota_source.is_some() {
+            continue;
+        }
+        let expected = match identity.logical_backend.as_str() {
+            "vibe" if !configuration.vibe_admin => Some(checks::ExpectedQuotaSource {
+                backend: "vibe".into(),
+                credential_id: None,
+                backend_instance: None,
+                provider: quota_provider("vibe", identity.effective_model.as_deref()),
+                detail: "no Mistral Admin API allowance source on this node; set MISTRAL_ADMIN_API_KEY to read the Vibe allowance".into(),
+            }),
+            "mistral-dashboard" if !configuration.mistral_dashboard => {
+                Some(checks::ExpectedQuotaSource {
+                    backend: "mistral-dashboard".into(),
+                    credential_id: None,
+                    backend_instance: None,
+                    provider: Some("mistral".into()),
+                    detail: "no Mistral dashboard cookie on this node; set MISTRAL_DASHBOARD_COOKIE_FILE to read the dashboard allowance".into(),
+                })
+            }
+            "opencode"
+                if !configuration.nous_portal
+                    && identity
+                        .effective_model
+                        .as_deref()
+                        .is_some_and(|model| model.starts_with("nous-portal/")) =>
+            {
+                Some(checks::ExpectedQuotaSource {
+                    backend: "opencode".into(),
+                    credential_id: None,
+                    backend_instance: Some("opencode:nous-portal-api".into()),
+                    provider: Some("nous".into()),
+                    detail: "no Nous Portal allowance source on this node; set NOUS_API_KEY or sign in to Nous through Hermes".into(),
+                })
+            }
+            _ => None,
+        };
+        if let Some(source) = expected {
+            if !sources.contains(&source) {
+                sources.push(source);
+            }
+        }
+    }
+    sources
+}
+
 fn build_candidates(
     routing: &RoutingPolicy,
     profile: &config::Profile,
@@ -354,73 +515,8 @@ fn build_candidates(
     let mut aggregates: Vec<(CandidateKey, CandidateAggregate)> = Vec::new();
     let mut index: HashMap<CandidateKey, usize> = HashMap::new();
 
-    if let Some(list) = &routing.pm_candidates {
-        for candidate in list {
-            add_candidate(
-                routing,
-                &mut aggregates,
-                &mut index,
-                "pm",
-                candidate.clone(),
-            );
-        }
-    }
-    if let Some(list) = &routing.improve_candidates {
-        for candidate in list {
-            add_candidate(
-                routing,
-                &mut aggregates,
-                &mut index,
-                "improve",
-                candidate.clone(),
-            );
-        }
-    }
-    if let Some(list) = &routing.review_candidates {
-        for candidate in list {
-            add_candidate(
-                routing,
-                &mut aggregates,
-                &mut index,
-                "review",
-                candidate.clone(),
-            );
-        }
-    }
-    if let Some(candidate) = &routing.routine_reviewer {
-        add_candidate(
-            routing,
-            &mut aggregates,
-            &mut index,
-            "routine_review",
-            candidate.clone(),
-        );
-    }
-    for candidate in &routing.escalatory_reviewers {
-        add_candidate(
-            routing,
-            &mut aggregates,
-            &mut index,
-            "escalatory_review",
-            candidate.clone(),
-        );
-    }
-
-    if aggregates.is_empty() {
-        if let Some(backend) = routing.default_backend.clone() {
-            add_candidate(
-                routing,
-                &mut aggregates,
-                &mut index,
-                "default",
-                CandidateConfig {
-                    backend,
-                    model: routing.default_model.clone(),
-                    quota_pool: None,
-                    ..CandidateConfig::default()
-                },
-            );
-        }
+    for (mode, candidate) in configured_candidates(routing) {
+        add_candidate(routing, &mut aggregates, &mut index, mode, candidate);
     }
 
     aggregates
@@ -564,6 +660,7 @@ fn aggregate_usage(
     group
         .map(|g| UsageSummary {
             entries: g.entries,
+            usage_unknown_reasons: g.usage_unknown_reasons.clone(),
             attempts: g.attempts,
             validation_pass: g.validation_pass,
             success_rate: g.success_rate,
@@ -580,7 +677,7 @@ fn aggregate_observations(
     model_group: Option<&ledger::summary::GroupSummary>,
     account_quota: &[quota_store::QuotaObservationRecord],
     identity: &crate::execution_identity::ExecutionIdentity,
-) -> Vec<QuotaObservation> {
+) -> Vec<crate::quota_store::QuotaObservationRecord> {
     let mut out = Vec::new();
     if let Some(group) = backend_group {
         out.extend(
@@ -599,20 +696,7 @@ fn aggregate_observations(
         );
     }
     for account in quota_store::latest_windows_for_identity(account_quota, identity) {
-        out.push(QuotaObservation {
-            backend: account.backend.clone(),
-            backend_instance: account.backend_instance.clone(),
-            model: account.model.clone(),
-            quota_pool: account.quota_pool.clone(),
-            quota_window: account.quota_window.clone(),
-            quota_used_percent: account.quota_used_percent,
-            quota_remaining_percent: account.quota_remaining_percent,
-            quota_reset_at: account.quota_reset_at.clone(),
-            observed_at: account.observed_at.clone(),
-            usage_source: account.usage_source.clone(),
-            account_usage: account.account_usage.clone(),
-            credential_id: account.credential_id.clone(),
-        });
+        out.push((*account).clone());
     }
 
     // A bound source may report a provider account distinct from its runner
@@ -653,7 +737,6 @@ fn aggregate_observations(
             obs.model.clone(),
             obs.quota_pool.clone(),
             obs.quota_window.clone(),
-            obs.quota_used_percent.map(f64::to_bits),
             obs.quota_remaining_percent.map(f64::to_bits),
             obs.quota_reset_at.clone(),
             obs.observed_at.clone(),
@@ -669,27 +752,24 @@ fn aggregate_observations(
 /// pool and credential are `None`) exactly as the former ledger summary
 /// type did: a broad ledger aggregate has no verified source identity and
 /// must not present itself as one account's balance.
-fn convert_group_observation(obs: &crate::quota_store::QuotaObservationRecord) -> QuotaObservation {
-    QuotaObservation {
-        backend: obs.backend.clone(),
-        backend_instance: None,
-        model: obs.model.clone(),
-        quota_pool: None,
-        quota_window: obs.quota_window.clone(),
-        quota_used_percent: obs.quota_used_percent,
-        quota_remaining_percent: obs.quota_remaining_percent,
-        quota_reset_at: obs.quota_reset_at.clone(),
-        observed_at: obs.observed_at.clone(),
-        usage_source: obs.usage_source.clone(),
-        account_usage: None,
-        credential_id: None,
-    }
+fn convert_group_observation(
+    observation: &quota_store::QuotaObservationRecord,
+) -> quota_store::QuotaObservationRecord {
+    let mut observation = observation.clone();
+    observation.backend_instance = None;
+    observation.quota_pool = None;
+    observation.credential_id = None;
+    observation.account_usage = None;
+    observation
 }
 
 fn summarize_groups(groups: Vec<ledger::summary::GroupSummary>) -> UsageSummary {
     let mut summary = UsageSummary::default();
     for group in groups {
         summary.entries += group.entries;
+        for (reason, count) in group.usage_unknown_reasons {
+            *summary.usage_unknown_reasons.entry(reason).or_default() += count;
+        }
         summary.attempts += group.attempts;
         summary.validation_pass += group.validation_pass;
         if let Some(tokens) = group.total_tokens {
