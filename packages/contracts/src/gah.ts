@@ -1340,6 +1340,7 @@ export type HumanRequiredReasonCode =
   | 'configuration_infra'
   | 'fix_retry_cap_exceeded'
   | 'merge_retry_cap_exceeded'
+  | 'repeated_setup_failure'
   | 'stuck_loop_gate'
   | 'external_api_approval_required'
   | 'unknown';
