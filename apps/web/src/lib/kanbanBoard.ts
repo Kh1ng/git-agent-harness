@@ -294,7 +294,7 @@ export function buildKanban(input: KanbanInput): KanbanBoard {
     if (key) agentsOnCard.set(key, [...(agentsOnCard.get(key) ?? []), agent]);
   }
 
-  const busyWorkers = Math.max(claims.length, runs.filter((run) => run.status === 'running').length);
+  const busyWorkers = status?.running_workers?.length ?? 0;
   const gates = buildGates(input, busyWorkers);
   const candidates = input.quota?.candidates ?? [];
   const anyAgentFree = candidates.length === 0 || candidates.some((candidate) => candidate.eligible_now);
@@ -600,7 +600,7 @@ export interface WorkingJob {
   /** `#1367 (fix)` */
   label: string;
   workId: string | null;
-  /** Subscription and model, once its process is visible. */
+  /** Backend and routed model reported by the dispatch runtime. */
   agent: string | null;
   since: string;
 }
@@ -608,11 +608,10 @@ export interface WorkingJob {
 /** What the factory is doing right now, for the navbar: each running job, and each agent with why it is or is not working. */
 export function workingNow(input: KanbanInput): { jobs: WorkingJob[]; agents: KanbanAgent[] } {
   const board = buildKanban(input);
-  const jobs = input.controllerRuns.filter((run) => run.status === 'running').map((run) => {
-    const job = runJob(run);
-    const workId = run.work_id ? workKey(run.work_id) : null;
-    const label = `${workId ?? runBranch(run) ?? run.action}${job ? ` (${JOB_NOUN[job]})` : ''}`;
-    return { runId: run.run_id, label, workId, agent: board.agents.find((agent) => agent.jobs.some((item) => item.label === label))?.name ?? null, since: run.started_at };
+  const jobs = (input.status?.running_workers ?? []).map((worker) => {
+    const workId = worker.work_id ? workKey(worker.work_id) : null;
+    const label = `${workId ?? worker.branch ?? worker.run_id} (${worker.mode})${worker.state === 'stale' ? ' · stale' : ''}`;
+    return { runId: `${worker.node_id}:${worker.run_id}:${worker.attempt}`, label, workId, agent: agentLabel(worker.backend, worker.model), since: worker.started_at };
   });
   return { jobs, agents: board.agents };
 }

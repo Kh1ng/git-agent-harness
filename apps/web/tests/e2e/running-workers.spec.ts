@@ -23,6 +23,11 @@ test('all factory counters follow the roster despite conflicting claims, events 
   const activeWork = page.locator('.stat-tile').filter({ hasText: 'Active work' });
   await expect(activeWork.locator('.stat-tile-value')).toHaveText('2');
   await expect(page.getByRole('region', { name: 'Factory Agents Status' })).toContainText('2 busy');
+  const workingMenu = page.getByRole('button', { name: /Working on.*2 jobs running/ });
+  await expect(workingMenu).toBeVisible();
+  await workingMenu.click();
+  await expect(page.getByRole('dialog', { name: 'What the factory is doing now' }).getByRole('list').first().getByRole('listitem')).toHaveCount(2);
+  await page.keyboard.press('Escape');
   await page.goto('/?page=work&profile=fixture');
   await expect(page.getByRole('region', { name: 'Running workers' }).getByTestId('worker-row')).toHaveCount(2);
   await expect(page.getByText('2 running', { exact: true })).toBeVisible();

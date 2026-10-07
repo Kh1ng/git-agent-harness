@@ -107,7 +107,7 @@ export function App() {
   const busySubscriptions = useMemo(() => busySubscriptionIds({ subscriptions, sessions, controllerRuns: controllerActivity, claims: statusSnapshot?.active_claims ?? [], recentLedger: statusSnapshot?.recent_ledger, factoryAgents: deviceAgents.data?.factory_agents }),
     [subscriptions, sessions, controllerActivity, statusSnapshot, deviceAgents.data]);
 
-  // The navbar's "Working on #…": live from controller runs, with whatever status and quota are already loaded.
+  // The navbar uses the same worker roster as the page counters.
   const loopRunning = useGahStore((state) => state.loopStatus.data?.running ?? null);
   const working = useMemo(() => workingNow({ status: statusSnapshot, quota: quota.data, controllerRuns: controllerActivity, factoryAgents: deviceAgents.data?.factory_agents ?? [], loopRunning, now: Date.now() }),
     [statusSnapshot, quota.data, controllerActivity, deviceAgents.data, loopRunning]);
