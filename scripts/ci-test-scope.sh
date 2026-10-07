@@ -12,6 +12,12 @@ while IFS= read -r -d '' path; do
     Cargo.toml|Cargo.lock|build.rs|.cargo/*|src/*|tests/*|scripts/*)
       has_rust_changes=true
       ;;
+    # Rust builds and tests read these: contract fixtures and manifests
+    # (include_str!, contracts_drift, mcp_server), packaged unit and agent
+    # templates, and the TypeScript test that only paid_route_http runs.
+    packages/contracts/*|packaging/*|config/*|apps/server/src/paidRouteApprovals*)
+      has_rust_changes=true
+      ;;
     apps/desktop/*)
       has_desktop_changes=true
       ;;
