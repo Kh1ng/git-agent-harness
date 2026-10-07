@@ -862,6 +862,20 @@ Each backend authenticates through its own CLI, not through GAH:
   `agy-second` is isolated by `agy_second_home` as a distinct account.
 - **vibe**, **opencode**, **openhands** — their own respective CLI auth.
 
+### Runner permissions
+
+By default, `gah` injects necessary flags so implementation dispatches (`improve`, `experiment`), which run in a GAH worktree, can make progress. Read-only dispatches (`research`, `audit`, `estimate`, `pm`) run in the profile's real checkout and, like review dispatches, receive none of these flags: they keep the backend CLI's own default permissions plus whatever the profile's `codex_args`/`claude_args` set.
+
+- **codex** — Implementation dispatches run with `--sandbox workspace-write --add-dir <CARGO_TARGET_DIR>`: the worktree plus that dispatch's own build target directory, and nothing above it. A profile `codex_args` that chooses its own sandbox (`--sandbox`/`-s`, `--full-auto`, `--dangerously-bypass-approvals-and-sandbox`) replaces the default sandbox mode.
+- **claude** — Implementation dispatches run with `--permission-mode acceptEdits` and an `--allowedTools` list of the edit tools (`Edit,Write,MultiEdit,NotebookEdit`) plus a fixed set of shell commands: `git`, `cargo`, `npm`, `npx`, `node`, `pnpm`, `yarn`, `make`, `python`, `python3`, `pytest`, `go`, and the read-only `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, plus `mkdir`. Each is passed as `Bash(<command>:*)`. Unrestricted `Bash` is not the default, because Claude Code has no sandbox: it would let an unattended job run any command as the node user, network included. The list is a reduction, not a sandbox — a build script or a test can still run arbitrary code. A project that needs another command (its own validation command, for example) sets `claude_args = ["--allowedTools", "Edit,Write,MultiEdit,NotebookEdit,Bash(git:*),Bash(<command>:*)"]`, or plain `Bash` to accept unrestricted shell. A profile `claude_args` that sets `--permission-mode` (or `--dangerously-skip-permissions`) or `--allowedTools` replaces the matching default.
+- **Other runners** — Depend on their own CLI defaults.
+
+If the backend CLI still refuses an implementation run's writes and the attempt
+changes nothing, GAH appends a `GAH: backend writes refused (configuration error): …`
+line to `backend-output.log` naming the setting to fix, records the attempt as
+`environment_error`, and ends the dispatch without spending the remaining
+retries.
+
 Validate that a profile's declared backends and tokens are actually present
 before trusting an unattended run:
 

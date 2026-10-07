@@ -73,6 +73,16 @@ pub struct ReviewInvocation {
     pub env: Vec<(String, String)>,
 }
 
+/// Issue #1367: whether a dispatch is expected to change files. Only
+/// `Implementation` runs get GAH's write-enabling backend defaults;
+/// `ReadOnly` job kinds (research, audit, estimate, pm) run in the profile's
+/// real checkout and keep each CLI's own default permissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteIntent {
+    ReadOnly,
+    Implementation,
+}
+
 pub struct RunContext<'a> {
     pub executable: &'a Path,
     pub worktree: &'a Path,
@@ -84,6 +94,7 @@ pub struct RunContext<'a> {
     pub env_vars: &'a [(String, String)],
     pub idle_timeout_seconds: u64,
     pub print_timeout_seconds: Option<u64>,
+    pub write_intent: WriteIntent,
 }
 
 pub trait BackendRunner {
@@ -157,6 +168,7 @@ impl BackendRunner for CodexRunner {
             ctx.extra_args,
             ctx.env_vars,
             ctx.idle_timeout_seconds,
+            ctx.write_intent,
         )
     }
 }
@@ -199,6 +211,7 @@ impl BackendRunner for ClaudeRunner {
             ctx.extra_args,
             ctx.env_vars,
             ctx.idle_timeout_seconds,
+            ctx.write_intent,
         )
     }
 }
@@ -463,6 +476,7 @@ mod tests {
             env_vars: &envs,
             idle_timeout_seconds: 300,
             print_timeout_seconds: None,
+            write_intent: WriteIntent::Implementation,
         };
 
         let result = CodexRunner.run(&ctx).unwrap();
@@ -505,6 +519,7 @@ mod tests {
             env_vars: &envs,
             idle_timeout_seconds: 300,
             print_timeout_seconds: None,
+            write_intent: WriteIntent::Implementation,
         };
 
         let result = HermesRunner.run(&ctx).unwrap();
@@ -545,6 +560,7 @@ mod tests {
             env_vars: &envs,
             idle_timeout_seconds: 300,
             print_timeout_seconds: None,
+            write_intent: WriteIntent::Implementation,
         };
 
         let result = ClaudeRunner.run(&ctx).unwrap();
@@ -583,6 +599,7 @@ mod tests {
             env_vars: &envs,
             idle_timeout_seconds: 300,
             print_timeout_seconds: None,
+            write_intent: WriteIntent::Implementation,
         };
 
         let result = VibeRunner.run(&ctx).unwrap();
@@ -622,6 +639,7 @@ mod tests {
             env_vars: &envs,
             idle_timeout_seconds: 300,
             print_timeout_seconds: None,
+            write_intent: WriteIntent::Implementation,
         };
 
         let result = OpencodeRunner.run(&ctx).unwrap();
@@ -655,6 +673,7 @@ mod tests {
             env_vars: &[],
             idle_timeout_seconds: 300,
             print_timeout_seconds: None,
+            write_intent: WriteIntent::Implementation,
         };
 
         let err = OpenhandsRunner.run(&ctx).unwrap_err();
@@ -686,6 +705,7 @@ mod tests {
             env_vars: &envs,
             idle_timeout_seconds: 300,
             print_timeout_seconds: None,
+            write_intent: WriteIntent::Implementation,
         };
 
         let result = OpenhandsRunner.run(&ctx).unwrap();
@@ -719,6 +739,7 @@ mod tests {
             env_vars: &[],
             idle_timeout_seconds: 300,
             print_timeout_seconds: None,
+            write_intent: WriteIntent::Implementation,
         };
 
         let err = AgyRunner.run(&ctx).unwrap_err();
@@ -749,6 +770,7 @@ mod tests {
             env_vars: &envs,
             idle_timeout_seconds: 300,
             print_timeout_seconds: Some(900),
+            write_intent: WriteIntent::Implementation,
         };
 
         let result = AgyRunner.run(&ctx).unwrap();
