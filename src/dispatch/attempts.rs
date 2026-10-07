@@ -1328,20 +1328,6 @@ pub(super) fn mark_backend_unavailable_from_output_for_identity(
     )
 }
 
-#[cfg(test)]
-fn mark_backend_unavailable_from_output_at(
-    state_path: &Path,
-    backend: &str,
-    model: Option<&str>,
-    quota_pool: Option<&str>,
-    log_text: &str,
-    log_path: &str,
-) -> Result<Option<crate::quota_parser::ParsedFailure>> {
-    let identity =
-        crate::execution_identity::ExecutionIdentity::legacy_candidate(backend, model, quota_pool);
-    mark_backend_unavailable_from_output_for_identity_at(state_path, &identity, log_text, log_path)
-}
-
 fn mark_backend_unavailable_from_output_for_identity_at(
     state_path: &Path,
     identity: &crate::execution_identity::ExecutionIdentity,

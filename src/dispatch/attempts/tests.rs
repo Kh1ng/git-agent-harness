@@ -11,6 +11,19 @@ use std::fs;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+fn mark_backend_unavailable_from_output_at(
+    state_path: &Path,
+    backend: &str,
+    model: Option<&str>,
+    quota_pool: Option<&str>,
+    log_text: &str,
+    log_path: &str,
+) -> Result<Option<crate::quota_parser::ParsedFailure>> {
+    let identity =
+        crate::execution_identity::ExecutionIdentity::legacy_candidate(backend, model, quota_pool);
+    mark_backend_unavailable_from_output_for_identity_at(state_path, &identity, log_text, log_path)
+}
+
 const CODEX_FULL_RESET: &str =
     include_str!("../../../tests/fixtures/quota-logs/codex_usage_exhausted_full_reset.txt");
 const CODEX_SELECTED_MODEL_CAPACITY: &str =
