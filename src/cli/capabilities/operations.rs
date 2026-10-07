@@ -1371,3 +1371,27 @@ pub(super) fn add_planning_operations(manifest: &mut CapabilityManifest) {
         is_stable: true,
     });
 }
+
+pub(super) fn add_manager_log_operations(manifest: &mut CapabilityManifest) {
+    for (action, class, idempotency) in [
+        ("add", OperationClass::Mutation, Idempotency::NonIdempotent),
+        ("show", OperationClass::Read, Idempotency::Idempotent),
+    ] {
+        manifest.add_operation(OperationDefinition {
+            operation_id: format!("manager-log.{action}"),
+            display_name: format!("Manager Log {action}"),
+            class,
+            profile_scope: ProfileScope::Global,
+            request_schema: None,
+            response_schema: None,
+            streaming: StreamingBehavior::None,
+            idempotency,
+            secret_fields: vec![],
+            remote_disposition: RemoteDisposition::LocalOnly,
+            local_only_reason: Some(LocalOnlyReason::FilesystemAccessRequired),
+            documentation: Some("Append or inspect the local manager observation log".into()),
+            cli_command_path: format!("gah manager-log {action}"),
+            is_stable: true,
+        });
+    }
+}

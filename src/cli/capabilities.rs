@@ -330,6 +330,7 @@ pub fn generate_manifest() -> CapabilityManifest {
     add_prune_operations(&mut manifest);
     add_ledger_operations(&mut manifest);
     add_hold_operations(&mut manifest);
+    add_manager_log_operations(&mut manifest);
     add_route_approval_operations(&mut manifest);
     add_backend_instance_operations(&mut manifest);
     add_routing_candidate_operations(&mut manifest);

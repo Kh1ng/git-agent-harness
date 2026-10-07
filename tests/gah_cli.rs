@@ -30,6 +30,8 @@ mod init;
 mod ledger;
 #[path = "gah_cli/maintenance.rs"]
 mod maintenance;
+#[path = "gah_cli/manager_log.rs"]
+mod manager_log;
 #[path = "gah_cli/pm.rs"]
 mod pm;
 #[path = "gah_cli/profile.rs"]

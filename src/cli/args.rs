@@ -7,6 +7,8 @@
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+mod manager_log;
+pub use manager_log::ManagerLogCommands;
 mod quota;
 mod routing_candidates;
 mod update;
@@ -469,6 +471,11 @@ pub enum Commands {
     Telemetry {
         #[command(subcommand)]
         command: TelemetryCommands,
+    },
+    /// Append or inspect local manager observations.
+    ManagerLog {
+        #[command(subcommand)]
+        command: ManagerLogCommands,
     },
     /// Manage persisted account-level quota observations (issue #151 / #166)
     Quota {

@@ -1564,3 +1564,16 @@ directly. They never apply to a provider issue, and never to a ticket the loop
 selected on its own, even if that ticket file has the same headings: there the
 sections stay hints. With `--mr` or `--existing-branch`, the scope check also
 counts changes already on the branch.
+
+## Manager log
+
+Manager observations are appended to `manager-log.jsonl` beside the ledger;
+`GAH_LEDGER_PATH` also isolates this log. Nothing reads it to make decisions yet.
+
+Append an event with `gah manager-log add --work-id TICKET-1475 --phase verify --attempt 1 --tokens 200 --outcome passed`.
+Inspect events with `gah manager-log show --work-id TICKET-1475 --json`;
+add `--summary` for per-item totals and maxima. Both commands accept `--config-path`.
+
+Phases: `research`, `implement`, `repair`, `supervise`, `verify`, `merge`.
+Diagnoses: `setup_environment`, `credentials`, `failed_check`, `misunderstood_task`,
+`ambiguous_requirement`, `unknown`.

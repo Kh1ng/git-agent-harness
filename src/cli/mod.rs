@@ -313,6 +313,7 @@ pub fn run() -> Result<()> {
             commands::server::run(commands::server::Args { port, host })?
         }
         Commands::Telemetry { command } => commands::telemetry::run(command)?,
+        Commands::ManagerLog { command } => commands::manager_log::run(command)?,
         Commands::Quota { command } => commands::quota::run(command)?,
         Commands::Credentials { command } => commands::credentials::run(command)?,
         Commands::Skills { command } => commands::skills::run(command)?,

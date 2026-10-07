@@ -14,6 +14,7 @@ pub mod doctor;
 pub mod external_approval;
 pub mod init;
 pub mod ledger;
+pub mod manager_log;
 pub mod network;
 pub mod node;
 pub mod pm;

@@ -30,6 +30,7 @@ pub mod installer;
 pub mod job_kind;
 pub mod ledger;
 pub mod manager;
+pub mod manager_log;
 pub mod mcp;
 pub mod memory_gateway;
 mod model_validation;
