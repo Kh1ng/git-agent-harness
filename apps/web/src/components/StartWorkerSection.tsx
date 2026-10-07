@@ -53,7 +53,7 @@ export function StartWorkerSection({ profile, agents, tickets, sessions, onActiv
   };
   return <section className="card-padded" aria-labelledby="start-worker-title">
     <h3 id="start-worker-title" className="text-sm font-semibold text-primary">Start an extra worker</h3>
-    <p className="mt-1 mb-4 text-xs text-muted">Launch a queued job now with the subscriber and model you choose. Manual starts skip automatic CPU, memory, and worker limits.</p>
+    <p className="mt-1 mb-4 text-xs text-muted">Launch a queued job now with the subscriber and model you choose. This worker runs outside automatic worker limits. CPU and memory checks still apply.</p>
     <div className="space-y-3">
       <label className="block space-y-1 text-xs text-secondary">Subscriber
         <select aria-label="Worker subscriber" className={INPUT} value={backend} onChange={(event) => setSubscriber(event.target.value)}>
