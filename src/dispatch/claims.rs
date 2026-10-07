@@ -237,7 +237,13 @@ pub(super) fn check_duplicate_work(
     // Try to fetch MRs/PRs from provider
     let mrs = crate::sync::fetch_active_mrs(profile)?;
 
-    if !central_claims_active && has_active_claim(&matching_entries) {
+    if !central_claims_active
+        && has_active_claim(
+            matching_entries
+                .iter()
+                .filter(|entry| entry.repo_id == profile.repo_id),
+        )
+    {
         return Err(anyhow::Error::new(ActiveClaimError {
             work_id: work_id.clone(),
         }));
