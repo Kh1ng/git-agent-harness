@@ -75,6 +75,22 @@ fn is_claim_stale(entry: &LedgerEntry) -> bool {
     now - entry_time > time::Duration::hours(CLAIM_STALE_AFTER_HOURS)
 }
 
+fn is_control_record(mode: &str) -> bool {
+    matches!(
+        mode,
+        "paid_route_approval_grant"
+            | "paid_route_approval_revoke"
+            | "external_approval_grant"
+            | "external_approval_request"
+            | "external_approval_consume"
+            | "external_approval_revoke"
+            | "external_approval_expire"
+            | "external_approval_deny"
+            | "review_hold"
+            | "review_hold_release"
+    )
+}
+
 /// Fold one work item's ledger history in append order. Control records leave
 /// the lease alone; dispatch outcomes and attempt resets resolve it.
 fn has_active_claim<'a>(entries: impl IntoIterator<Item = &'a LedgerEntry>) -> bool {
@@ -85,16 +101,7 @@ fn has_active_claim<'a>(entries: impl IntoIterator<Item = &'a LedgerEntry>) -> b
         }
         match entry.mode.as_str() {
             "claim" => active = !is_claim_stale(entry),
-            "paid_route_approval_grant"
-            | "paid_route_approval_revoke"
-            | "external_approval_grant"
-            | "external_approval_request"
-            | "external_approval_consume"
-            | "external_approval_revoke"
-            | "external_approval_expire"
-            | "external_approval_deny"
-            | "review_hold"
-            | "review_hold_release" => {}
+            mode if is_control_record(mode) => {}
             // Every remaining entry is an execution attempt, a capacity
             // deferral, or clear_attempts, all of which end the prior claim.
             _ => active = false,
@@ -423,22 +430,17 @@ fn ledger_lookup_for_ticket(
         // Paid-route approvals are operator control records, not execution
         // attempts. Granting one releases the work-item human gate that asked
         // for approval; neither grant nor revoke consumes retry budget.
-        if e.mode == "paid_route_approval_grant"
-            || e.mode == "external_approval_grant"
-            || e.mode == "external_approval_request"
-            || e.mode == "external_approval_consume"
-            || e.mode == "external_approval_revoke"
-            || e.mode == "external_approval_expire"
-            || e.mode == "external_approval_deny"
-        {
-            last_failure_class = Some(
-                crate::ledger::FailureClass::AgentNoProgress
-                    .as_str()
-                    .to_string(),
-            );
-            continue;
-        }
-        if e.mode == "paid_route_approval_revoke" {
+        if is_control_record(&e.mode) {
+            if e.mode != "paid_route_approval_revoke"
+                && e.mode != "review_hold"
+                && e.mode != "review_hold_release"
+            {
+                last_failure_class = Some(
+                    crate::ledger::FailureClass::AgentNoProgress
+                        .as_str()
+                        .to_string(),
+                );
+            }
             continue;
         }
         // A sibling worker already owns the only configured backend/model
@@ -446,12 +448,6 @@ fn ledger_lookup_for_ticket(
         // attempt, so keep it auditable in the ledger without poisoning
         // ticket attempt counts or retry/stuck-loop policy.
         if e.validation_result.as_deref() == Some("deferred_capacity") {
-            continue;
-        }
-        // Review holds are manager-control records, not execution attempts.
-        // They control auto-review/merge but must not affect attempt counts,
-        // retry budgets, success rates, or cost-per-attempt metrics.
-        if e.mode == "review_hold" || e.mode == "review_hold_release" {
             continue;
         }
         count += 1;
