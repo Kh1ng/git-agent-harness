@@ -2,6 +2,10 @@ import { expect, test } from '@playwright/test';
 
 const MOCK_BASE_URL = process.env.GAH_MOCK_BASE_URL ?? 'http://127.0.0.1:3774';
 
+// Profile saves refresh intercepted reads; dispose of routes before the page
+// closes so a response in flight cannot fail this or the following test.
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); });
+
 test('the Profile sidebar exposes validation timeout and persists profile updates in the shared mock', async ({ page, request }) => {
   test.setTimeout(120_000);
   await request.post(`${MOCK_BASE_URL}/api/mock/reset`);

@@ -37,7 +37,14 @@ test('the GitHub dropdown opens the repository pages', async ({ page }) => {
   // Navbar order: Project, then Overview … Fleet, then GitHub.
   const left = async (name: string | RegExp) => (await page.getByRole('banner').getByRole('button', { name, exact: typeof name === 'string' }).first().boundingBox())!.x;
   expect(await left(/^Project:/)).toBeLessThan(await left('Overview'));
-  expect(await left('Fleet')).toBeLessThan(await left('GitHub'));
+  // Primary navigation scrolls on compact desktops. Bring the last item
+  // into view before checking its position against the fixed provider menu.
+  const fleet = page.getByRole('banner').getByRole('button', { name: 'Fleet', exact: true });
+  await expect.poll(async () => {
+    await fleet.scrollIntoViewIfNeeded();
+    const bounds = (await fleet.boundingBox())!;
+    return bounds.x + bounds.width <= await left('GitHub');
+  }).toBe(true);
   await page.getByRole('button', { name: 'GitHub', exact: true }).click();
   const menu = page.getByRole('menu', { name: 'GitHub pages' });
   await expect(menu.getByRole('menuitem', { name: 'Issues' })).toHaveAttribute('href', /\/issues$/);
