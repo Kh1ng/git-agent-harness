@@ -223,7 +223,7 @@ export function buildLiveRows(input: {
       job.model = agent.model ?? (exact ? null : job.model);
     });
   } else {
-    jobs.push(...input.workers.map(worker => ({ stale: worker.state === 'stale', instance: worker.backend_instance, key: `${worker.node_id}:${worker.run_id}:${worker.attempt}`, workId: worker.work_id, mode: worker.mode, since: worker.started_at, backend: worker.backend, model: worker.model, action: null, runId: worker.run_id })));
+    jobs.push(...input.workers.map(worker => ({ routed: true, stale: worker.state === 'stale', instance: worker.backend_instance, key: `${worker.node_id}:${worker.run_id}:${worker.attempt}`, workId: worker.work_id, mode: worker.mode, since: worker.started_at, backend: worker.backend, model: worker.model, action: null, runId: worker.run_id })));
   }
   const claimAge = (workId: string | null) => (workId ? input.claims.find((claim) => claim.work_id === workId)?.age_seconds ?? null : null);
   const state = (job: LiveJob): LiveState => job.stale ? 'stale' : (job.mode && GATE_MODES.has(job.mode) ? 'gates' : 'working');
