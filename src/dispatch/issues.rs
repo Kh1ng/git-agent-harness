@@ -1,3 +1,4 @@
+use super::issue_claim::issues_held_by_others;
 use super::text::utf8_safe_suffix;
 use super::text::{first_markdown_heading, normalize_match};
 use crate::config::Profile;
@@ -46,12 +47,16 @@ struct IssueAuthorIdentity {
 struct IssueRecord {
     details: IssueDetails,
     author: Option<IssueAuthorIdentity>,
+    assignees: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct IssueIntakeDiscovery {
     pub(crate) allowed: Vec<IssueDetails>,
     pub(crate) rejected: Vec<crate::models::IssueIntakeRejection>,
+    /// Numbers of `allowed` issues another login holds on the provider (see
+    /// `issue_claim`). Always empty for a profile that keeps claims local.
+    pub(crate) claimed_elsewhere: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -606,6 +611,15 @@ fn issue_record_from_github_value(resp: &serde_json::Value) -> IssueRecord {
             state,
         },
         author: parse_github_author(resp),
+        assignees: resp["assignees"]
+            .as_array()
+            .map(|assignees| {
+                assignees
+                    .iter()
+                    .filter_map(|assignee| assignee["login"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -635,6 +649,7 @@ fn issue_record_from_gitlab_value(profile: &Profile, resp: &serde_json::Value) -
             state,
         },
         author: parse_gitlab_author(profile, resp),
+        assignees: Vec::new(),
     }
 }
 
@@ -703,16 +718,29 @@ fn discover_open_github_issues(profile: &Profile) -> Result<IssueIntakeDiscovery
             &record.details.labels,
             false,
         ) {
-            Ok(()) => allowed.push(record.details),
+            Ok(()) => allowed.push(record),
             Err(rejection) => rejected.push(issue_rejection_snapshot(profile, &record, rejection)),
         }
     }
+    let claimed_elsewhere = issues_held_by_others(
+        profile,
+        allowed
+            .iter()
+            .map(|record| (record.details.number.as_str(), record.assignees.as_slice())),
+    )?;
 
-    Ok(IssueIntakeDiscovery { allowed, rejected })
+    Ok(IssueIntakeDiscovery {
+        allowed: allowed.into_iter().map(|record| record.details).collect(),
+        rejected,
+        claimed_elsewhere,
+    })
 }
 
 fn discover_open_gitlab_issues(profile: &Profile) -> Result<IssueIntakeDiscovery> {
     const PAGE_SIZE: usize = 100;
+    // Refuses a GitLab profile configured for GitHub assignee claims rather
+    // than running it with no cross-loop claim at all.
+    let claimed_elsewhere = issues_held_by_others(profile, [])?;
     let project_id = gitlab_project_id(profile)?;
     let mut allowed = Vec::new();
     let mut rejected = Vec::new();
@@ -753,7 +781,11 @@ fn discover_open_gitlab_issues(profile: &Profile) -> Result<IssueIntakeDiscovery
         }
         page += 1;
     }
-    Ok(IssueIntakeDiscovery { allowed, rejected })
+    Ok(IssueIntakeDiscovery {
+        allowed,
+        rejected,
+        claimed_elsewhere,
+    })
 }
 
 #[cfg(test)]
@@ -761,22 +793,13 @@ pub(crate) fn discover_open_issues(profile: &Profile) -> IssueIntakeDiscovery {
     match profile.provider_cli() {
         Some("gh") => discover_open_github_issues(profile).unwrap_or_else(|e| {
             eprintln!("warning: failed to list open issues for ticket scan: {e:#}");
-            IssueIntakeDiscovery {
-                allowed: vec![],
-                rejected: vec![],
-            }
+            IssueIntakeDiscovery::default()
         }),
         Some("glab") => discover_open_gitlab_issues(profile).unwrap_or_else(|e| {
             eprintln!("warning: failed to list open issues for ticket scan: {e:#}");
-            IssueIntakeDiscovery {
-                allowed: vec![],
-                rejected: vec![],
-            }
+            IssueIntakeDiscovery::default()
         }),
-        _ => IssueIntakeDiscovery {
-            allowed: vec![],
-            rejected: vec![],
-        },
+        _ => IssueIntakeDiscovery::default(),
     }
 }
 

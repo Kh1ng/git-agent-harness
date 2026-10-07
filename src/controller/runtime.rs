@@ -1168,6 +1168,18 @@ pub(crate) fn run_dispatch_and_record(
         Err(e) if crate::dispatch::capacity_deferred_error(&e) => {
             record_capacity_deferral(cfg, args, label, work_id, &e)
         }
+        // Another loop holds the issue. That is a skip, not a failed dispatch.
+        Err(e) if crate::dispatch::issue_claim_lost(&e).is_some() => {
+            crate::events::record_with_run_id(
+                cfg,
+                crate::events::EventType::DispatchFinished,
+                Some(args.profile.as_str()),
+                work_id,
+                args.run_id.as_deref(),
+                format!("{label}: claim_lost: {e:#}"),
+            )?;
+            Ok(Some(format!("Skipped {e:#}")))
+        }
         Err(e) => {
             let event_type = if crate::dispatch::duplicate_work_error(&e).is_some() {
                 crate::events::EventType::DuplicateGuardTriggered

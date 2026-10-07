@@ -550,6 +550,43 @@ trust. GitLab project access-token users are recognized from the project-scoped
 `project_<project-id>_bot_*` username and must still be listed exactly in
 `trusted_issue_bot_authors`. Explicit empty lists deny that author class.
 
+### Issue claims across loops
+
+When several loops work one GitHub repository under different logins, let each
+claim an issue on GitHub before it starts work:
+
+```toml
+[profiles.my_profile.publishing.issue_claim]
+mode = "github_assignee"   # default "local": nothing is written to GitHub
+ttl_minutes = 60
+verify_seconds = 60
+priority_logins = ["first-choice-login"]
+```
+
+A dispatch that has been granted a backend and node slot assigns the login
+`gh` is signed in as, posts a claim comment, waits `verify_seconds`, and
+re-reads the issue. A dispatch refused a slot claims nothing. If another loop
+claimed it at the same moment, the first login in `priority_logins` keeps it,
+otherwise the earliest claim comment; the other loop removes its own assignee
+and moves on. Intake leaves alone every issue that another login holds,
+including one a person assigned by hand, which is held until that assignee is
+removed.
+
+A claim is a lease of `ttl_minutes`. While the dispatch runs it renews the
+lease every third of that by editing its claim comment (an edit notifies
+nobody). A loop that crashes or stops stops renewing, and `ttl_minutes` after
+the last renewal another loop may remove the stale assignee and claim the
+issue, unless an open pull request for the issue exists. A dispatch that finds
+its lease taken over stops before it publishes: it keeps its work on a local
+WIP commit and the loop reports the issue as skipped.
+
+Every loop sharing the repository must use the same `ttl_minutes` and
+`priority_logins`, because each one decides a contested claim from its own
+copy. The mode is independent of `issue_intake_mode`: it adds no label
+requirement and removes none. It applies whenever an issue is dispatched for
+implementation, by the loop or by hand, and not to planning decomposition or
+pull request review.
+
 ### Generated-artifact publication guard
 
 Before GAH creates or pushes a commit, it rejects newly tracked files matching

@@ -2,6 +2,9 @@ use super::{issue_intake, IssueIntakeMode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod issue_claim;
+pub use issue_claim::{IssueClaimMode, IssueClaimPolicy};
+
 /// Per-profile policy for human-facing repository messaging and safe
 /// publication boundaries. This remains independent from reviewer routing
 /// and merge authorization.
@@ -25,6 +28,9 @@ pub struct PublishingPolicy {
     pub issue_intake_mode: IssueIntakeMode,
     #[serde(default = "issue_intake::default_canonical_autonomous_label")]
     pub canonical_autonomous_label: String,
+    /// How this profile claims an issue before working on it.
+    #[serde(default)]
+    pub issue_claim: IssueClaimPolicy,
     /// Existing provider labels to apply to PM-published children. Values are
     /// label names, keyed by the planner's normalized value (for example
     /// `easy = "difficulty:easy"`). GAH never creates missing labels.
@@ -71,6 +77,7 @@ impl Default for PublishingPolicy {
             trusted_issue_bot_authors: None,
             issue_intake_mode: issue_intake::default_issue_intake_mode(),
             canonical_autonomous_label: issue_intake::default_canonical_autonomous_label(),
+            issue_claim: IssueClaimPolicy::default(),
             pm_difficulty_labels: BTreeMap::new(),
             pm_risk_labels: BTreeMap::new(),
             pm_execution_labels: BTreeMap::new(),

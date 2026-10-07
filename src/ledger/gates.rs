@@ -174,7 +174,7 @@ fn effective_human_gate_for_scope(
                 }
                 continue;
             }
-            _ if entry.validation_result.as_deref() == Some("deferred_capacity") => continue,
+            _ if launched_no_backend(entry) => continue,
             "review" if !entry.human_required => {
                 // Only a real terminal review supersedes a prior review gate.
                 // Duplicate/no-op and failed publication records carry no
@@ -247,6 +247,21 @@ pub fn effective_human_gate_from_index(
     entries
         .get(work_id)
         .and_then(|entries| effective_human_gate_for_scope(entries, None, repo_id, work_id))
+}
+
+/// `validation_result` of a dispatch that lost its provider issue claim to
+/// another loop after it had been granted a slot.
+pub const CLAIM_LOST: &str = "claim_lost";
+
+/// True for a dispatch that ended before any backend ran: it was refused
+/// capacity, or another loop held the issue. Such an entry stays in the
+/// ledger for audit but is not an attempt, so it must not count toward
+/// attempt totals, retry caps, human gates, or usage summaries.
+pub fn launched_no_backend(entry: &LedgerEntry) -> bool {
+    matches!(
+        entry.validation_result.as_deref(),
+        Some("deferred_capacity") | Some(CLAIM_LOST)
+    )
 }
 
 /// Native tracker issues use their provider-visible `#123` identity. Older
