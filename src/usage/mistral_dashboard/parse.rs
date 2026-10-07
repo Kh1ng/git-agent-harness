@@ -309,7 +309,6 @@ pub(super) fn parse(
         checked_at: Some(checked),
         check_error: None,
         usage_source: Some("mistral_dashboard".into()),
-        mistral_admin: None,
         account_usage: Some(usage),
         credential_id: None,
     })

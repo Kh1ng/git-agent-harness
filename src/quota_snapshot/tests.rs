@@ -249,7 +249,6 @@ fn group_obs(
         checked_at: None,
         check_error: None,
         usage_source: None,
-        mistral_admin: None,
         account_usage: None,
     }
 }
@@ -273,7 +272,6 @@ fn account_record(
         checked_at: None,
         check_error: None,
         usage_source: None,
-        mistral_admin: None,
         account_usage: None,
         credential_id: None,
     }

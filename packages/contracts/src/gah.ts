@@ -618,18 +618,6 @@ export interface QuotaObservation {
   check_error?: string | null;
   usage_source?: string | null;
   account_usage?: AccountUsageObservation | null;
-  mistral_admin?: {
-    workspace_usage?: LedgerUsage | null;
-    billing?: LedgerUsage | null;
-    rate_limits?: {
-      requests_per_second: number | null;
-      model_limits: {
-        model: string;
-        tokens_per_minute: number | null;
-        tokens_per_month: number | null;
-      }[];
-    } | null;
-  } | null;
 }
 
 export interface BackendModelComparison {

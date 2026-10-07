@@ -59,8 +59,6 @@ pub struct QuotaObservationRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mistral_admin: Option<MistralAdminObservationRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_usage: Option<crate::usage::account_usage::AccountUsageObservation>,
 }
 
@@ -79,7 +77,6 @@ struct QuotaObservationRecordRaw {
     pub checked_at: Option<String>,
     pub check_error: Option<String>,
     pub usage_source: Option<String>,
-    pub mistral_admin: Option<MistralAdminObservationRecord>,
     pub account_usage: Option<crate::usage::account_usage::AccountUsageObservation>,
 }
 
@@ -105,23 +102,9 @@ impl From<QuotaObservationRecordRaw> for QuotaObservationRecord {
             checked_at: raw.checked_at,
             check_error: raw.check_error,
             usage_source: raw.usage_source,
-            mistral_admin: raw.mistral_admin,
             account_usage: raw.account_usage,
         }
     }
-}
-
-/// Persisted Mistral Admin API payloads associated with a single refresh.
-/// These stay optional so a refresh with only one successful endpoint never
-/// fabricates the others.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MistralAdminObservationRecord {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_usage: Option<crate::ledger::LedgerUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub billing: Option<crate::ledger::LedgerUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rate_limits: Option<crate::usage::AdminRateLimits>,
 }
 
 /// Global, not per-profile (like `availability.rs`): Codex/Claude/AGY
@@ -291,27 +274,11 @@ fn has_ledger_usage_data(usage: &crate::ledger::LedgerUsage) -> bool {
         || usage.actual_cost_usd.is_some()
 }
 
-fn has_admin_rate_limits_data(limits: &crate::usage::AdminRateLimits) -> bool {
-    limits.requests_per_second.is_some() || !limits.model_limits.is_empty()
-}
-
-fn mistral_admin_observation(
-    refresh: &crate::usage::AdminRefresh,
-) -> Option<MistralAdminObservationRecord> {
-    let workspace_usage =
-        has_ledger_usage_data(&refresh.workspace_usage).then_some(refresh.workspace_usage.clone());
-    let billing = has_ledger_usage_data(&refresh.billing).then_some(refresh.billing.clone());
-    let rate_limits =
-        has_admin_rate_limits_data(&refresh.rate_limits).then_some(refresh.rate_limits.clone());
-    if workspace_usage.is_none() && billing.is_none() && rate_limits.is_none() {
-        None
-    } else {
-        Some(MistralAdminObservationRecord {
-            workspace_usage,
-            billing,
-            rate_limits,
-        })
-    }
+fn has_admin_refresh_data(refresh: &crate::usage::AdminRefresh) -> bool {
+    has_ledger_usage_data(&refresh.workspace_usage)
+        || has_ledger_usage_data(&refresh.billing)
+        || refresh.rate_limits.requests_per_second.is_some()
+        || !refresh.rate_limits.model_limits.is_empty()
 }
 
 /// Append one record under an exclusive lock. Missing parent dirs are created.
@@ -442,9 +409,9 @@ pub(crate) fn refresh_vibe_admin_record(
         "vibe",
         model,
     );
-    let admin_refresh = mistral_admin_observation(&refresh);
+    let has_admin_data = has_admin_refresh_data(&refresh);
     let Some(obs) = refresh.spend_limit else {
-        if let Some(admin_refresh) = admin_refresh {
+        if has_admin_data {
             let rec = QuotaObservationRecord {
                 backend: "vibe".to_string(),
                 backend_instance: None,
@@ -459,7 +426,6 @@ pub(crate) fn refresh_vibe_admin_record(
                 checked_at: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
                 check_error: refresh.spend_limit_error,
                 usage_source: Some("mistral_admin_refresh".to_string()),
-                mistral_admin: Some(admin_refresh),
                 account_usage: None,
                 credential_id: None,
             };
@@ -472,7 +438,6 @@ pub(crate) fn refresh_vibe_admin_record(
     };
     let rec = QuotaObservationRecord {
         checked_at: OffsetDateTime::now_utc().format(&Rfc3339).ok(),
-        mistral_admin: admin_refresh,
         ..obs
     };
     Ok(Some(rec))
@@ -734,7 +699,6 @@ fn maybe_refresh_source(
                     .err()
                     .map(|error| crate::redact::redact(&error.to_string())),
                 usage_source: None,
-                mistral_admin: None,
                 account_usage: None,
                 credential_id,
             };
