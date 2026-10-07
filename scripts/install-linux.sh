@@ -228,7 +228,6 @@ case "${GAH_GATEWAY_MODE:-}" in
     ;;
   colocated)
     : "${GAH_GATEWAY_MEMORYCORE_PATH:?GAH_GATEWAY_MODE=colocated requires GAH_GATEWAY_MEMORYCORE_PATH (path to a TencentDB-Agent-Memory/MemoryCore checkout)}"
-    : "${GAH_GATEWAY_LLM_API_KEY:?GAH_GATEWAY_MODE=colocated requires GAH_GATEWAY_LLM_API_KEY (an OpenAI-compatible API key for the gateways own LLM calls)}"
     if [ ! -f "$GAH_GATEWAY_MEMORYCORE_PATH/src/gateway/server.ts" ]; then
       echo "ERROR: $GAH_GATEWAY_MEMORYCORE_PATH doesn't look like a TencentDB-Agent-Memory/MemoryCore checkout (missing src/gateway/server.ts)." >&2
       exit 1
@@ -237,26 +236,55 @@ case "${GAH_GATEWAY_MODE:-}" in
     gateway_local_config="$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.local.yaml"
     if [ ! -f "$gateway_local_config" ]; then
       cp "$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.standalone.yaml" "$gateway_local_config"
-      echo "Seeded $gateway_local_config from the tracked standalone template (OpenAI-compatible LLM, embedding off / BM25-only -- edit directly for a different backend)"
+      echo "Seeded $gateway_local_config from the tracked standalone template (keyword recall, no model calls -- set GAH_GATEWAY_PROVIDER=ollama or openai to add a model provider)"
     else
       echo "Preserving existing $gateway_local_config"
     fi
 
+    # gateway-yaml-mutation:start
     gateway_env_file="$HOME/.config/gah/tdai-gateway.env"
+    gateway_provider_changes=""
+    if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
+      gateway_embedding_key_stored=""
+      if "$(command -v gah || echo "$HOME/.cargo/bin/gah")" installer env-has --file "$gateway_env_file" TDAI_EMBEDDING_API_KEY >/dev/null 2>&1; then
+        gateway_embedding_key_stored=stored
+      fi
+      # Prints what changed; it never sees a credential, only whether one exists.
+      gateway_provider_changes="$(node "$repo_root/scripts/gateway-provider.mjs" "$GAH_GATEWAY_MEMORYCORE_PATH" "$gateway_local_config" "$GAH_GATEWAY_PROVIDER" "${GAH_GATEWAY_ENDPOINT:-}" "${GAH_GATEWAY_LLM_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_DIMENSIONS:-}" "${GAH_GATEWAY_EMBEDDING_API_KEY:+given}" "${GAH_GATEWAY_LLM_API_KEY:+given}" "$gateway_embedding_key_stored")"
+    fi
+    # gateway-yaml-mutation:end
+
+    # gateway-env-setup:start
     install -d -m 0700 "$(dirname "$gateway_env_file")"
-    gateway_api_key="${GAH_GATEWAY_API_KEY:-}"
-    if [ -z "$gateway_api_key" ] && [ -f "$gateway_env_file" ]; then
-      gateway_api_key="$(sed -n 's/^TDAI_GATEWAY_API_KEY=//p' "$gateway_env_file" | head -1)"
+    # Gateway access authentication is separate from any model credential.
+    if [ -n "${GAH_GATEWAY_API_KEY:-}" ]; then
+      upsert_env_line "$gateway_env_file" TDAI_GATEWAY_API_KEY "$GAH_GATEWAY_API_KEY" ""
+      echo "Wrote the given gateway API key to $gateway_env_file"
+    elif ! "$(command -v gah || echo "$HOME/.cargo/bin/gah")" installer env-has --file "$gateway_env_file" TDAI_GATEWAY_API_KEY >/dev/null 2>&1; then
+      upsert_env_line "$gateway_env_file" TDAI_GATEWAY_API_KEY "$(openssl rand -hex 24)" ""
+      echo "Generated a gateway API key in $gateway_env_file"
+    else
+      echo "Kept the existing gateway API key in $gateway_env_file"
     fi
-    if [ -z "$gateway_api_key" ]; then
-      gateway_api_key="$(openssl rand -hex 24)"
+    # Model credentials are optional. A given key replaces only its own line. A
+    # stored key is kept unless its endpoint changed, so a key is never sent to
+    # a backend it was not issued for.
+    if [ -n "${GAH_GATEWAY_LLM_API_KEY:-}" ]; then
+      upsert_env_line "$gateway_env_file" TDAI_LLM_API_KEY "$GAH_GATEWAY_LLM_API_KEY" ""
+      echo "Wrote the given generation API key to $gateway_env_file"
+    elif [[ "$gateway_provider_changes" == *llm-endpoint-changed* ]] && "$(command -v gah || echo "$HOME/.cargo/bin/gah")" installer env-has --file "$gateway_env_file" TDAI_LLM_API_KEY >/dev/null 2>&1; then
+      upsert_env_line "$gateway_env_file" TDAI_LLM_API_KEY "" ""
+      echo "Cleared the stored generation API key because the endpoint changed"
     fi
-    {
-      printf 'TDAI_GATEWAY_API_KEY=%s\n' "$gateway_api_key"
-      printf 'TDAI_LLM_API_KEY=%s\n' "$GAH_GATEWAY_LLM_API_KEY"
-    } > "$gateway_env_file"
+    if [ -n "${GAH_GATEWAY_EMBEDDING_API_KEY:-}" ]; then
+      upsert_env_line "$gateway_env_file" TDAI_EMBEDDING_API_KEY "$GAH_GATEWAY_EMBEDDING_API_KEY" ""
+      echo "Wrote the given embedding API key to $gateway_env_file"
+    elif [[ "$gateway_provider_changes" == *embedding-endpoint-changed* ]] && "$(command -v gah || echo "$HOME/.cargo/bin/gah")" installer env-has --file "$gateway_env_file" TDAI_EMBEDDING_API_KEY >/dev/null 2>&1; then
+      upsert_env_line "$gateway_env_file" TDAI_EMBEDDING_API_KEY "" ""
+      echo "Cleared the stored embedding API key because the endpoint changed"
+    fi
     chmod 0600 "$gateway_env_file"
-    echo "Wrote $gateway_env_file"
+    # gateway-env-setup:end
 
     node_dir="$(dirname "$(command -v node)")"
     gateway_unit_dst="$HOME/.config/systemd/user/tdai-memory-gateway.service"
@@ -280,12 +308,16 @@ writeFileSync(process.argv[4], template);
 JAVASCRIPT
     # gateway-unit-render:end
     systemctl --user daemon-reload
+    # A gateway that is already running keeps its old provider until restarted.
+    if systemctl --user is-active --quiet tdai-memory-gateway.service; then
+      systemctl --user restart tdai-memory-gateway.service
+    fi
     systemctl --user enable --now tdai-memory-gateway.service
 
     echo "Waiting for co-located gateway to come up..."
     gateway_ready=0
     for _ in $(seq 1 15); do
-      if curl -fsS -m 2 -H "Authorization: Bearer $gateway_api_key" http://127.0.0.1:8420/health >/dev/null 2>&1; then
+      if curl -fsS -m 2 http://127.0.0.1:8420/health >/dev/null 2>&1; then
         gateway_ready=1
         break
       fi
@@ -294,6 +326,13 @@ JAVASCRIPT
     if [ "$gateway_ready" != "1" ]; then
       echo "ERROR: tdai-memory-gateway.service did not become healthy. Check: journalctl --user -u tdai-memory-gateway.service -n 50" >&2
       exit 1
+    fi
+
+    if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
+      if ! curl -fsS http://127.0.0.1:8420/health | grep -q '"embeddingService":true'; then
+        echo "ERROR: the gateway started with embedding disabled, so its provider configuration is incomplete. Read: journalctl --user -u tdai-memory-gateway.service" >&2
+        exit 1
+      fi
     fi
 
     upsert_gateway_env_line TDAI_GATEWAY_URL "http://127.0.0.1:8420"

@@ -107,7 +107,7 @@ impl Provider {
 #[serde(rename_all = "snake_case")]
 pub enum MemoryMode {
     Off,
-    /// Run the gateway on this machine (needs a MemoryCore checkout and an LLM key).
+    /// Run the gateway on this machine (needs a MemoryCore checkout; a model provider is optional).
     Colocated,
     /// Use a gateway already running elsewhere.
     Remote,
@@ -750,6 +750,7 @@ pub(crate) mod tests {
         pub manager: Option<PackageManager>,
         pub programs: HashMap<String, Probe>,
         pub paths: Vec<PathBuf>,
+        pub env: HashMap<String, String>,
     }
 
     impl FakeHost {
@@ -759,7 +760,12 @@ pub(crate) mod tests {
                 manager,
                 programs: HashMap::new(),
                 paths: Vec::new(),
+                env: HashMap::new(),
             }
+        }
+        pub(crate) fn with_env(mut self, key: &str, value: &str) -> Self {
+            self.env.insert(key.into(), value.into());
+            self
         }
         pub(crate) fn with(self, invocation: &str, success: bool, stdout: &str) -> Self {
             self.with_streams(invocation, success, stdout, "")
@@ -802,8 +808,8 @@ pub(crate) mod tests {
         fn exists(&self, path: &Path) -> bool {
             self.paths.iter().any(|known| known == path)
         }
-        fn env(&self, _key: &str) -> Option<String> {
-            None
+        fn env(&self, key: &str) -> Option<String> {
+            self.env.get(key).cloned()
         }
     }
 

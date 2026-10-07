@@ -251,6 +251,7 @@ export function SettingsPage() {
         {openSections.has('memory') && <SettingsSectionPanel id="memory">
           <GatewaySettingsSection configuredProfiles={configuredProfiles} />
           <GatewaySetupSection />
+          <ColocatedProviderSection />
         </SettingsSectionPanel>}
 
       </div>
@@ -1149,6 +1150,12 @@ export function AddNodeSection() {
   const [os, setOs] = useState<'windows' | 'linux' | 'macos'>('windows');
   const [role, setRole] = useState<'desktop' | 'worker' | 'both' | 'central' | 'standalone'>('both');
   const [gatewayUrl, setGatewayUrl] = useState('');
+  const [provider, setProvider] = useState<'none' | 'openai' | 'ollama'>('none');
+  const [providerEndpoint, setProviderEndpoint] = useState('');
+  const [llmModel, setLlmModel] = useState('');
+  const [embeddingModel, setEmbeddingModel] = useState('');
+  const [embeddingDimensions, setEmbeddingDimensions] = useState('');
+  const [memoryCorePath, setMemoryCorePath] = useState('~/TencentDB-Agent-Memory/MemoryCore');
   const osName = { windows: 'Windows', linux: 'Linux', macos: 'macOS' }[os];
   const [command, setCommand] = useState('');
   const [error, setError] = useState('');
@@ -1157,7 +1164,10 @@ export function AddNodeSection() {
   const reveal = async () => {
     setBusy(true); setError(''); setCommand(''); setCopied(false);
     try {
-      setCommand((await gahApi.getNodeSetupCommand({ os, centralUrl, role, ...((role === 'central' || role === 'standalone') && gatewayUrl ? { gatewayUrl } : {}) })).command);
+      const gatewayOpts = (role === 'central' || role === 'standalone') 
+        ? (gatewayUrl ? { gatewayUrl } : (provider === 'none' ? {} : { provider, providerEndpoint, llmModel, embeddingModel, embeddingDimensions, memoryCorePath }))
+        : {};
+      setCommand((await gahApi.getNodeSetupCommand({ os, centralUrl, role, ...gatewayOpts })).command);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setBusy(false); }
   };
@@ -1188,9 +1198,40 @@ export function AddNodeSection() {
           </>}
         </select>
       </label>
-      {(role === 'central' || role === 'standalone') && <label className="block text-xs text-secondary mb-3">Remote memory gateway (optional)
-        <input disabled={busy} type="url" className="input w-full mt-1 min-h-11" value={gatewayUrl} onChange={(event) => { setGatewayUrl(event.target.value); setCommand(''); }} placeholder="https://memory.example.com" />
-      </label>}
+      {(role === 'central' || role === 'standalone') && <>
+        <label className="block text-xs text-secondary mb-3">Remote memory gateway (optional)
+          <input disabled={busy} type="url" className="input w-full mt-1 min-h-11" value={gatewayUrl} onChange={(event) => { setGatewayUrl(event.target.value); setCommand(''); }} placeholder="https://memory.example.com" />
+        </label>
+        {!gatewayUrl && (
+          <div className="pl-4 border-l-2 border-subtle mb-3">
+            <p className="text-xs font-semibold text-primary mb-2">Colocated Gateway Provider</p>
+            <label className="block text-xs text-secondary mb-2">Provider
+              <select disabled={busy} className="input w-full mt-1 min-h-11" value={provider} onChange={(event) => { setProvider(event.target.value as 'none' | 'openai' | 'ollama'); setCommand(''); }}>
+                <option value="none">None (skip memory gateway)</option>
+                <option value="openai">OpenAI / Compatible</option>
+                <option value="ollama">Ollama (local, unmetered)</option>
+              </select>
+            </label>
+            {provider !== 'none' && <>
+              <label className="block text-xs text-secondary mb-2">MemoryCore Path
+                <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={memoryCorePath} onChange={(event) => { setMemoryCorePath(event.target.value); setCommand(''); }} placeholder="~/TencentDB-Agent-Memory/MemoryCore" />
+              </label>
+              <label className="block text-xs text-secondary mb-2">API Endpoint
+                <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={providerEndpoint} onChange={(event) => { setProviderEndpoint(event.target.value); setCommand(''); }} placeholder={provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : 'https://api.openai.com/v1'} />
+              </label>
+              <label className="block text-xs text-secondary mb-2">LLM Model
+                <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={llmModel} onChange={(event) => { setLlmModel(event.target.value); setCommand(''); }} placeholder={provider === 'ollama' ? 'llama3' : 'gpt-4o'} />
+              </label>
+              <label className="block text-xs text-secondary mb-2">Embedding Model
+                <input disabled={busy} type="text" className="input w-full mt-1 min-h-11" value={embeddingModel} onChange={(event) => { setEmbeddingModel(event.target.value); setCommand(''); }} placeholder={provider === 'ollama' ? 'nomic-embed-text' : 'text-embedding-3-small'} />
+              </label>
+              <label className="block text-xs text-secondary mb-2">Embedding Dimensions
+                <input disabled={busy} type="number" className="input w-full mt-1 min-h-11" value={embeddingDimensions} onChange={(event) => { setEmbeddingDimensions(event.target.value); setCommand(''); }} placeholder="e.g. 768 (leave empty for known models)" />
+              </label>
+            </>}
+          </div>
+        )}
+      </>}
       {os === 'windows' ? <p className="text-xs text-muted mb-3">For remote access, save your token in Central access token above first. The generated command contains that token; use it only on a computer you trust.</p>
         : <p className="text-xs text-muted mb-3">Run in Terminal. The command installs from GitHub and prompts privately for any required token. First installation compiles GAH and can take several minutes.</p>}
       {os === 'macos' && <p className="text-xs text-muted mb-3">macOS installs the worker CLI. Run its loop in Terminal; automatic startup and central server installation are not available yet.</p>}
@@ -1452,6 +1493,115 @@ export function AdminUpdateSection() {
         </div>
       )}
       {error && <p className="text-xs text-critical">{error}</p>}
+    </section>
+  );
+}
+
+export function ColocatedProviderSection() {
+  // The page cannot tell a standalone node from a central one, and the
+  // installer persists the role it is given, so the user states it.
+  const [nodeRole, setNodeRole] = useState<'' | 'standalone' | 'central'>('');
+  const [provider, setProvider] = useState<'none' | 'openai' | 'ollama'>('none');
+  const [providerEndpoint, setProviderEndpoint] = useState('');
+  const [llmModel, setLlmModel] = useState('');
+  const [embeddingModel, setEmbeddingModel] = useState('');
+  const [embeddingDimensions, setEmbeddingDimensions] = useState('');
+  const [memoryCorePath, setMemoryCorePath] = useState('~/TencentDB-Agent-Memory/MemoryCore');
+  const [copied, setCopied] = useState(false);
+  const [command, setCommand] = useState<string | null>(null);
+  const [revealing, setRevealing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const revealCommand = async () => {
+    if (!nodeRole) return;
+    setRevealing(true);
+    setError(null);
+    try {
+      const revealed = await gahApi.getNodeSetupCommand({
+        os: 'linux',
+        centralUrl: window.location.origin,
+        role: nodeRole,
+        provider,
+        providerEndpoint,
+        llmModel,
+        embeddingModel,
+        embeddingDimensions,
+        memoryCorePath,
+      });
+      setCommand(revealed.command);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRevealing(false);
+    }
+  };
+
+  const copyCommand = () => {
+    if (!command) return;
+    navigator.clipboard.writeText(command).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  return (
+    <section className="card-padded max-w-2xl mt-5">
+      <h3 className="text-sm font-semibold text-primary mb-1">Colocated Gateway Provider</h3>
+      <p className="text-xs text-muted mb-3">
+        Generate a command that sets the model provider of the memory gateway on this computer. Run it in a terminal here. Ollama and other local endpoints need no API key.
+      </p>
+      <label className="block text-xs text-secondary mb-2">Node role
+        <select className="input w-full mt-1 min-h-11" value={nodeRole} onChange={(e) => { setNodeRole(e.target.value as '' | 'standalone' | 'central'); setCommand(null); }}>
+          <option value="">Choose how this computer is set up</option>
+          <option value="standalone">Standalone (local only)</option>
+          <option value="central">Central (other computers connect to it)</option>
+        </select>
+      </label>
+      <label className="block text-xs text-secondary mb-2">MemoryCore Path
+        <input type="text" className="input w-full mt-1 min-h-11" value={memoryCorePath} onChange={(e) => { setMemoryCorePath(e.target.value); setCommand(null); }} />
+      </label>
+      <label className="block text-xs text-secondary mb-2">Provider
+        <select className="input w-full mt-1 min-h-11" value={provider} onChange={(e) => { setProvider(e.target.value as 'none' | 'openai' | 'ollama'); setCommand(null); }}>
+          <option value="none">None (keep current)</option>
+          <option value="openai">OpenAI / Compatible</option>
+          <option value="ollama">Ollama (local, unmetered)</option>
+        </select>
+      </label>
+      {provider !== 'none' && <>
+        <label className="block text-xs text-secondary mb-2">API Endpoint
+          <input type="text" className="input w-full mt-1 min-h-11" value={providerEndpoint} onChange={(e) => { setProviderEndpoint(e.target.value); setCommand(null); }} placeholder={provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : 'https://api.openai.com/v1'} />
+        </label>
+        <label className="block text-xs text-secondary mb-2">LLM Model
+          <input type="text" className="input w-full mt-1 min-h-11" value={llmModel} onChange={(e) => { setLlmModel(e.target.value); setCommand(null); }} placeholder={provider === 'ollama' ? 'llama3' : 'gpt-4o'} />
+        </label>
+        <label className="block text-xs text-secondary mb-2">Embedding Model
+          <input type="text" className="input w-full mt-1 min-h-11" value={embeddingModel} onChange={(e) => { setEmbeddingModel(e.target.value); setCommand(null); }} placeholder={provider === 'ollama' ? 'nomic-embed-text' : 'text-embedding-3-small'} />
+        </label>
+        <label className="block text-xs text-secondary mb-2">Embedding Dimensions
+          <input type="number" className="input w-full mt-1 min-h-11" value={embeddingDimensions} onChange={(e) => { setEmbeddingDimensions(e.target.value); setCommand(null); }} placeholder="e.g. 768 (leave empty for known models)" />
+        </label>
+      </>}
+      {provider !== 'none' && !command && (
+        <button
+          type="button"
+          onClick={revealCommand}
+          disabled={revealing || !nodeRole}
+          className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50 mt-3"
+        >
+          {revealing ? 'Revealing…' : 'Reveal setup command'}
+        </button>
+      )}
+      {provider !== 'none' && command && (
+        <div className="flex items-start gap-2 mt-3">
+          <pre className="flex-1 bg-raised border border-subtle rounded-md px-3 py-2 text-xs text-primary font-mono whitespace-pre-wrap break-all">
+            {command}
+          </pre>
+          <button onClick={copyCommand} className="text-muted hover:text-primary mt-1 shrink-0" title="Copy">
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+          </button>
+        </div>
+      )}
+      {error && <p className="mt-3 text-xs text-critical">Error: {error}</p>}
     </section>
   );
 }

@@ -923,3 +923,344 @@ fn the_desktop_app_install_replaces_the_old_app_and_cleans_up() {
         "staging and backups are removed: {leftovers:?}"
     );
 }
+
+#[test]
+fn colocated_installers_preserve_credentials_without_a_generation_key() {
+    for platform in ["linux", "macos"] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let bin = temp.path().join("bin");
+        executable(&bin.join("gah"), "exec \"$GAH_TEST_BIN\" \"$@\"\n");
+        executable(
+            &bin.join("cargo"),
+            "while [ \"$1\" != -- ]; do shift; done; shift\nexec \"$GAH_TEST_BIN\" \"$@\"\n",
+        );
+        let file = home.join(".config/gah/tdai-gateway.env");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        // Credential canaries are fixtures, never supplied to a provider.
+        let before = "TDAI_GATEWAY_API_KEY=\"access-canary\"\nTDAI_LLM_API_KEY=\"generation-canary\"\nTDAI_EMBEDDING_API_KEY=\"embedding-canary\"\n";
+        std::fs::write(&file, before).unwrap();
+        let source = script(&format!("install-{platform}.sh"));
+        // The provider step, tested below, reports endpoint changes.
+        let preamble = "gateway_env_file=\"$HOME/.config/gah/tdai-gateway.env\"\ngateway_provider_changes=\"${GAH_TEST_CHANGES:-}\"\n";
+        let start = source.find("# gateway-env-setup:start\n").unwrap();
+        let end = source[start..].find("# gateway-env-setup:end").unwrap() + start;
+        let block = if platform == "linux" {
+            format!(
+                "{}\n{preamble}{}",
+                &source[source.find("upsert_env_line() {").unwrap()
+                    ..source.find("# Used by both").unwrap()],
+                &source[start..end]
+            )
+        } else {
+            format!(
+                "gah_cli=(cargo run --locked -q --bin gah --)\n{preamble}{}",
+                &source[start..end]
+            )
+        };
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        let run = |given: &[(&str, &str)]| {
+            let mut envs = vec![
+                ("HOME", home.to_str().unwrap()),
+                ("PATH", path.as_str()),
+                ("GAH_TEST_BIN", GAH),
+            ];
+            envs.extend(given);
+            let output = bash(&["-euc", &block], &envs, true);
+            assert!(output.status.success(), "{platform}: {}", text(&output));
+            assert_eq!(mode(&file), 0o600);
+        };
+        run(&[]);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+
+        // The previous Linux installer wrote bare, unquoted values.
+        let bare = "TDAI_GATEWAY_API_KEY=access-canary\nTDAI_LLM_API_KEY=generation-canary\n";
+        std::fs::write(&file, bare).unwrap();
+        run(&[]);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), bare);
+
+        // Given keys replace only their own lines.
+        std::fs::write(&file, before).unwrap();
+        run(&[
+            ("GAH_GATEWAY_API_KEY", "new-access"),
+            ("GAH_GATEWAY_LLM_API_KEY", "new-generation"),
+        ]);
+        assert_eq!(sourced(&file, "TDAI_GATEWAY_API_KEY"), "new-access");
+        assert_eq!(sourced(&file, "TDAI_LLM_API_KEY"), "new-generation");
+        assert_eq!(sourced(&file, "TDAI_EMBEDDING_API_KEY"), "embedding-canary");
+
+        // A stored model key is cleared when its endpoint changed, so it is
+        // never sent to a different backend. Gateway access is untouched.
+        std::fs::write(&file, before).unwrap();
+        run(&[("GAH_TEST_CHANGES", "llm-endpoint-changed")]);
+        assert!(sourced(&file, "TDAI_LLM_API_KEY").is_empty());
+        assert_eq!(sourced(&file, "TDAI_EMBEDDING_API_KEY"), "embedding-canary");
+        std::fs::write(&file, before).unwrap();
+        run(&[(
+            "GAH_TEST_CHANGES",
+            "llm-endpoint-changed\nembedding-endpoint-changed",
+        )]);
+        assert_eq!(sourced(&file, "TDAI_GATEWAY_API_KEY"), "access-canary");
+        assert!(sourced(&file, "TDAI_LLM_API_KEY").is_empty());
+        assert!(sourced(&file, "TDAI_EMBEDDING_API_KEY").is_empty());
+
+        std::fs::remove_file(&file).unwrap();
+        run(&[]);
+        assert!(!sourced(&file, "TDAI_GATEWAY_API_KEY").is_empty());
+        assert!(sourced(&file, "TDAI_LLM_API_KEY").is_empty());
+    }
+}
+#[test]
+fn colocated_installers_mutate_provider_yaml_safely() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let memory_core = home.join("MemoryCore");
+    std::fs::create_dir_all(&memory_core).unwrap();
+    std::fs::write(
+        memory_core.join("package.json"),
+        "{\"name\":\"MemoryCore\"}",
+    )
+    .unwrap();
+    // The installer resolves `yaml` from the MemoryCore checkout; pin the
+    // version the supported MemoryCore fork declares (^2.8.3).
+    let npm_output = Command::new("npm")
+        .args([
+            "install",
+            "--no-audit",
+            "--no-fund",
+            "--no-save",
+            "yaml@2.8.3",
+        ])
+        .current_dir(&memory_core)
+        .output()
+        .unwrap();
+    assert!(
+        npm_output.status.success(),
+        "npm install yaml failed: {}",
+        text(&npm_output)
+    );
+    let memory_core_path = memory_core.to_string_lossy().into_owned();
+    let bin = temp.path().join("bin");
+    executable(&bin.join("gah"), "exec \"$GAH_TEST_BIN\" \"$@\"\n");
+    let path_env = format!(
+        "{}:/usr/bin:/bin:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let repo_root = repo();
+    let env_file = home.join(".config/gah/tdai-gateway.env");
+    std::fs::create_dir_all(env_file.parent().unwrap()).unwrap();
+
+    for platform in ["linux", "macos"] {
+        let source = script(&format!("install-{platform}.sh"));
+        let start = source.find("# gateway-yaml-mutation:start\n").unwrap();
+        let end = source[start..].find("# gateway-yaml-mutation:end").unwrap() + start;
+        // Print what the provider step reports to the credential step.
+        let block = format!(
+            "gah_cli=(gah)\n{}\nprintf '%s' \"$gateway_provider_changes\"",
+            &source[start..end]
+        );
+        let config_path = home.join("tdai-gateway.local.yaml");
+
+        let run_with = |initial: &str, given: &[(&str, &str)]| {
+            std::fs::write(&config_path, initial).unwrap();
+            let mut envs = vec![
+                ("HOME", home.to_str().unwrap()),
+                ("PATH", path_env.as_str()),
+                ("GAH_TEST_BIN", GAH),
+                ("repo_root", repo_root.to_str().unwrap()),
+                ("GAH_GATEWAY_MEMORYCORE_PATH", memory_core_path.as_str()),
+                ("gateway_local_config", config_path.to_str().unwrap()),
+                ("gateway_config", config_path.to_str().unwrap()),
+            ];
+            envs.extend(given);
+            let output = bash(&["-euc", &block], &envs, true);
+            if !output.status.success() {
+                return Err(text(&output));
+            }
+            let changes = String::from_utf8_lossy(&output.stdout).into_owned();
+            let print_json = r#"
+const yaml = require('yaml');
+const fs = require('fs');
+console.log(JSON.stringify(yaml.parse(fs.readFileSync(process.argv[1], 'utf8'))));
+"#;
+            let check_output = Command::new("node")
+                .arg("-e")
+                .arg(print_json)
+                .arg(&config_path)
+                .current_dir(&memory_core)
+                .output()
+                .unwrap();
+            assert!(check_output.status.success(), "failed to parse yaml");
+            let json = serde_json::from_slice::<serde_json::Value>(&check_output.stdout).unwrap();
+            Ok((json, changes))
+        };
+        let run = |given: &[(&str, &str)]| {
+            run_with("{\"llm\":{}, \"memory\":{}}", given).map(|(json, _)| json)
+        };
+        std::fs::write(&env_file, "").unwrap();
+
+        // The supported MemoryCore contract disables a remote embedding
+        // provider unless apiKey, baseUrl, model, and dimensions are all set.
+        let complete = |json: &serde_json::Value| {
+            let embedding = &json["memory"]["embedding"];
+            for field in ["apiKey", "baseUrl", "model"] {
+                assert!(
+                    embedding[field].as_str().is_some_and(|v| !v.is_empty()),
+                    "{platform}: embedding.{field} missing: {json}"
+                );
+            }
+            assert!(embedding["dimensions"].as_u64().is_some_and(|d| d > 0));
+        };
+
+        // Ollama defaults use its OpenAI-compatible /v1 API and a
+        // non-secret placeholder key, because Ollama ignores credentials.
+        let ollama = run(&[("GAH_GATEWAY_PROVIDER", "ollama")]).unwrap();
+        complete(&ollama);
+        assert_eq!(ollama["llm"]["baseUrl"], "http://127.0.0.1:11434/v1");
+        assert_eq!(ollama["llm"]["model"], "llama3");
+        assert_eq!(ollama["llm"]["apiKey"], "ollama");
+        assert_eq!(ollama["memory"]["embedding"]["provider"], "ollama");
+        assert_eq!(
+            ollama["memory"]["embedding"]["baseUrl"],
+            "http://127.0.0.1:11434/v1"
+        );
+        assert_eq!(ollama["memory"]["embedding"]["model"], "nomic-embed-text");
+        assert_eq!(ollama["memory"]["embedding"]["dimensions"], 768);
+        assert_eq!(ollama["memory"]["embedding"]["sendDimensions"], false);
+        assert_eq!(ollama["memory"]["embedding"]["apiKey"], "ollama");
+
+        // Explicit values, a custom model with explicit dimensions, and a
+        // given embedding key, which the gateway reads from its env file.
+        let custom = run(&[
+            ("GAH_GATEWAY_PROVIDER", "ollama"),
+            ("GAH_GATEWAY_ENDPOINT", "http://test:11434/v1"),
+            ("GAH_GATEWAY_LLM_MODEL", "my-llama"),
+            ("GAH_GATEWAY_EMBEDDING_MODEL", "my-embed"),
+            ("GAH_GATEWAY_EMBEDDING_DIMENSIONS", "512"),
+            ("GAH_GATEWAY_EMBEDDING_API_KEY", "embedding-canary"),
+        ])
+        .unwrap();
+        complete(&custom);
+        assert_eq!(custom["llm"]["baseUrl"], "http://test:11434/v1");
+        assert_eq!(custom["llm"]["model"], "my-llama");
+        assert_eq!(custom["memory"]["embedding"]["model"], "my-embed");
+        assert_eq!(custom["memory"]["embedding"]["dimensions"], 512);
+        assert_eq!(custom["memory"]["embedding"]["sendDimensions"], false);
+        assert_eq!(
+            custom["memory"]["embedding"]["apiKey"],
+            "${TDAI_EMBEDDING_API_KEY}"
+        );
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !written.contains("embedding-canary"),
+            "{platform}: {written}"
+        );
+
+        // An unknown model without dimensions fails instead of guessing.
+        let unknown = run(&[
+            ("GAH_GATEWAY_PROVIDER", "ollama"),
+            ("GAH_GATEWAY_EMBEDDING_MODEL", "my-embed"),
+        ])
+        .unwrap_err();
+        assert!(
+            unknown.contains("GAH_GATEWAY_EMBEDDING_DIMENSIONS"),
+            "{platform}: {unknown}"
+        );
+        let invalid = run(&[("GAH_GATEWAY_PROVIDER", "constructor")]).unwrap_err();
+        assert!(
+            invalid.contains("openai or ollama"),
+            "{platform}: {invalid}"
+        );
+
+        // An authenticated provider with no embedding key, given or stored,
+        // stops before the configuration is touched.
+        let untouched = "{\"llm\":{}, \"memory\":{}}";
+        let keyless = run(&[("GAH_GATEWAY_PROVIDER", "openai")]).unwrap_err();
+        assert!(
+            keyless.contains("GAH_GATEWAY_EMBEDDING_API_KEY"),
+            "{platform}: {keyless}"
+        );
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), untouched);
+
+        // OpenAI reads both keys from the gateway env file, never from
+        // literals. Generation stays off until TDAI_LLM_API_KEY is set.
+        let openai = run(&[
+            ("GAH_GATEWAY_PROVIDER", "openai"),
+            ("GAH_GATEWAY_EMBEDDING_API_KEY", "embedding-canary"),
+        ])
+        .unwrap();
+        complete(&openai);
+        assert_eq!(openai["llm"]["baseUrl"], "https://api.openai.com/v1");
+        assert_eq!(openai["llm"]["model"], "gpt-4o");
+        assert_eq!(openai["llm"]["apiKey"], "${TDAI_LLM_API_KEY}");
+        assert_eq!(openai["memory"]["embedding"]["provider"], "openai");
+        assert_eq!(
+            openai["memory"]["embedding"]["baseUrl"],
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            openai["memory"]["embedding"]["model"],
+            "text-embedding-3-small"
+        );
+        assert_eq!(openai["memory"]["embedding"]["dimensions"], 1536);
+        assert_eq!(openai["memory"]["embedding"]["sendDimensions"], true);
+        assert_eq!(
+            openai["memory"]["embedding"]["apiKey"],
+            "${TDAI_EMBEDDING_API_KEY}"
+        );
+
+        // When the LLM endpoint is unchanged (e.g. from template BM25 moving to openai), the LLM key is preserved.
+        // A stored embedding key is enough; nothing is reported as changed.
+        std::fs::write(&env_file, "TDAI_EMBEDDING_API_KEY=\"embedding-canary\"\n").unwrap();
+        let bm25 = r#"{"llm":{"baseUrl":"https://api.openai.com/v1","apiKey":"my-llm-key"},"memory":{"embedding":{"provider":"none"}}}"#;
+        let (preserved, changes) = run_with(bm25, &[("GAH_GATEWAY_PROVIDER", "openai")]).unwrap();
+        assert_eq!(preserved["llm"]["apiKey"], "my-llm-key");
+        assert_eq!(preserved["memory"]["embedding"]["provider"], "openai");
+        assert_eq!(changes, "", "{platform}");
+
+        // Moving to Ollama reports the generation endpoint change, so the
+        // installer clears the stored key, and drops the YAML literal.
+        let (to_ollama, changes) = run_with(bm25, &[("GAH_GATEWAY_PROVIDER", "ollama")]).unwrap();
+        assert_eq!(to_ollama["llm"]["apiKey"], "ollama");
+        assert_eq!(changes, "llm-endpoint-changed", "{platform}");
+
+        // Moving from Ollama to an authenticated endpoint never keeps the
+        // placeholder, and a key stored for the old endpoint does not count.
+        let on_ollama = r#"{"llm":{"baseUrl":"http://127.0.0.1:11434/v1","apiKey":"ollama"},"memory":{"embedding":{"provider":"ollama","baseUrl":"http://127.0.0.1:11434/v1","apiKey":"ollama"}}}"#;
+        let moved = run_with(on_ollama, &[("GAH_GATEWAY_PROVIDER", "openai")]).unwrap_err();
+        assert!(
+            moved.contains("GAH_GATEWAY_EMBEDDING_API_KEY"),
+            "{platform}: {moved}"
+        );
+        let (to_openai, changes) = run_with(
+            on_ollama,
+            &[
+                ("GAH_GATEWAY_PROVIDER", "openai"),
+                ("GAH_GATEWAY_EMBEDDING_API_KEY", "embedding-canary"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(to_openai["llm"]["apiKey"], "${TDAI_LLM_API_KEY}");
+        assert_eq!(
+            to_openai["memory"]["embedding"]["apiKey"],
+            "${TDAI_EMBEDDING_API_KEY}"
+        );
+        assert_eq!(
+            changes, "llm-endpoint-changed\nembedding-endpoint-changed",
+            "{platform}"
+        );
+        std::fs::write(&env_file, "").unwrap();
+
+        // Shell metacharacters in an endpoint reach the YAML verbatim.
+        let injection = run(&[
+            ("GAH_GATEWAY_PROVIDER", "ollama"),
+            ("GAH_GATEWAY_ENDPOINT", "https://example.test/v1?a=1&b=2"),
+        ])
+        .unwrap();
+        assert_eq!(
+            injection["llm"]["baseUrl"],
+            "https://example.test/v1?a=1&b=2"
+        );
+    }
+}

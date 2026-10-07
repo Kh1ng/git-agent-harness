@@ -70,18 +70,56 @@ if [ "$role" = central ]; then
   case "${GAH_GATEWAY_MODE:-}" in
     colocated)
       : "${GAH_GATEWAY_MEMORYCORE_PATH:?GAH_GATEWAY_MODE=colocated requires GAH_GATEWAY_MEMORYCORE_PATH}"
-      : "${GAH_GATEWAY_LLM_API_KEY:?GAH_GATEWAY_MODE=colocated requires GAH_GATEWAY_LLM_API_KEY}"
       [ -f "$GAH_GATEWAY_MEMORYCORE_PATH/src/gateway/server.ts" ] || { echo 'ERROR: GAH_GATEWAY_MEMORYCORE_PATH is not a MemoryCore checkout.' >&2; exit 1; }
       gateway_config="$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.local.yaml"
       if [ ! -f "$gateway_config" ]; then
         cp "$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.standalone.yaml" "$gateway_config"
       fi
-      gateway_api_key="${GAH_GATEWAY_API_KEY:-$(openssl rand -hex 24)}"
-      export GAH_MACOS_GATEWAY_URL=http://127.0.0.1:8420 GAH_MACOS_GATEWAY_KEY="$gateway_api_key"
-      # Values travel on stdin; the file is written with mode 0600.
-      gateway_env="$HOME/.config/gah/tdai-gateway.env"
-      printf '%s' "$GAH_MACOS_GATEWAY_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_GATEWAY_API_KEY
-      printf '%s' "$GAH_GATEWAY_LLM_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_LLM_API_KEY
+      # gateway-yaml-mutation:start
+      gateway_env_file="$HOME/.config/gah/tdai-gateway.env"
+      gateway_provider_changes=""
+      if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
+        gateway_embedding_key_stored=""
+        if "${gah_cli[@]}" installer env-has --file "$gateway_env_file" TDAI_EMBEDDING_API_KEY >/dev/null 2>&1; then
+          gateway_embedding_key_stored=stored
+        fi
+        # Prints what changed; it never sees a credential, only whether one exists.
+        gateway_provider_changes="$(node "$repo_root/scripts/gateway-provider.mjs" "$GAH_GATEWAY_MEMORYCORE_PATH" "$gateway_config" "$GAH_GATEWAY_PROVIDER" "${GAH_GATEWAY_ENDPOINT:-}" "${GAH_GATEWAY_LLM_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_DIMENSIONS:-}" "${GAH_GATEWAY_EMBEDDING_API_KEY:+given}" "${GAH_GATEWAY_LLM_API_KEY:+given}" "$gateway_embedding_key_stored")"
+      fi
+      # gateway-yaml-mutation:end
+
+      # gateway-env-setup:start
+      install -d -m 0700 "$(dirname "$gateway_env_file")"
+      # Gateway access authentication is separate from any model credential.
+      if [ -n "${GAH_GATEWAY_API_KEY:-}" ]; then
+        printf '%s' "$GAH_GATEWAY_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env_file" TDAI_GATEWAY_API_KEY
+        echo "Wrote the given gateway API key to $gateway_env_file"
+      elif ! "${gah_cli[@]}" installer env-has --file "$gateway_env_file" TDAI_GATEWAY_API_KEY >/dev/null 2>&1; then
+        printf '%s' "$(openssl rand -hex 24)" | "${gah_cli[@]}" installer env-set --file "$gateway_env_file" TDAI_GATEWAY_API_KEY
+        echo "Generated a gateway API key in $gateway_env_file"
+      else
+        echo "Kept the existing gateway API key in $gateway_env_file"
+      fi
+      # Model credentials are optional. A given key replaces only its own line. A
+      # stored key is kept unless its endpoint changed, so a key is never sent to
+      # a backend it was not issued for.
+      if [ -n "${GAH_GATEWAY_LLM_API_KEY:-}" ]; then
+        printf '%s' "$GAH_GATEWAY_LLM_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env_file" TDAI_LLM_API_KEY
+        echo "Wrote the given generation API key to $gateway_env_file"
+      elif [[ "$gateway_provider_changes" == *llm-endpoint-changed* ]] && "${gah_cli[@]}" installer env-has --file "$gateway_env_file" TDAI_LLM_API_KEY >/dev/null 2>&1; then
+        printf '%s' "" | "${gah_cli[@]}" installer env-set --file "$gateway_env_file" TDAI_LLM_API_KEY
+        echo "Cleared the stored generation API key because the endpoint changed"
+      fi
+      if [ -n "${GAH_GATEWAY_EMBEDDING_API_KEY:-}" ]; then
+        printf '%s' "$GAH_GATEWAY_EMBEDDING_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env_file" TDAI_EMBEDDING_API_KEY
+        echo "Wrote the given embedding API key to $gateway_env_file"
+      elif [[ "$gateway_provider_changes" == *embedding-endpoint-changed* ]] && "${gah_cli[@]}" installer env-has --file "$gateway_env_file" TDAI_EMBEDDING_API_KEY >/dev/null 2>&1; then
+        printf '%s' "" | "${gah_cli[@]}" installer env-set --file "$gateway_env_file" TDAI_EMBEDDING_API_KEY
+        echo "Cleared the stored embedding API key because the endpoint changed"
+      fi
+      chmod 0600 "$gateway_env_file"
+      export GAH_MACOS_GATEWAY_URL=http://127.0.0.1:8420
+      # gateway-env-setup:end
       ;;
     remote)
       : "${GAH_GATEWAY_URL:?GAH_GATEWAY_MODE=remote requires GAH_GATEWAY_URL on macOS}"
@@ -109,13 +147,17 @@ cargo run --locked --bin gah -- update --repo "$repo_root" --role "$role" --yes 
 if [ "$role" = central ] && [ "${GAH_GATEWAY_MODE:-}" = colocated ]; then
   gateway_ready=0
   for _ in $(seq 1 15); do
-    if curl -fsS -m 2 -H "Authorization: Bearer $GAH_MACOS_GATEWAY_KEY" http://127.0.0.1:8420/health >/dev/null 2>&1; then
+    if curl -fsS -m 2 http://127.0.0.1:8420/health >/dev/null 2>&1; then
       gateway_ready=1
       break
     fi
     sleep 2
   done
   [ "$gateway_ready" = 1 ] || { echo 'ERROR: the macOS memory-gateway LaunchAgent did not become healthy. Read ~/.local/state/gah/memory-gateway.log.' >&2; exit 1; }
+
+  if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
+    curl -fsS http://127.0.0.1:8420/health | grep -q '"embeddingService":true' || { echo 'ERROR: the gateway started with embedding disabled, so its provider configuration is incomplete. Read ~/.local/state/gah/memory-gateway.log.' >&2; exit 1; }
+  fi
 fi
 
 if command -v tailscale >/dev/null 2>&1; then
