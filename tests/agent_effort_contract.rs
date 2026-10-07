@@ -3,9 +3,12 @@ mod support;
 #[test]
 fn manual_worker_refuses_below_memory_floor_without_starting_backend_or_saving_effort() {
     use support::scenario::ScenarioHarness;
+    let disk = support::test_tempdir();
     let mut harness = ScenarioHarness::new("github")
         .github_scenario("empty")
         .worker_scenario("success")
+        .with_worktree_base(disk.path().join("worktrees"))
+        .with_temp_dir(disk.path().to_path_buf())
         .with_config_append("\n[defaults.node_capacity]\nmemory_floor_mib = 2048\n");
     let ticket = harness.artifacts_dir.join("TICKET-7-memory.md");
     std::fs::write(
