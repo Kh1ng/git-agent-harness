@@ -7,6 +7,18 @@ fn run_job(
     succeeds: bool,
     profile_commands: &str,
 ) -> (Value, String, String) {
+    run_job_options(body, script, draft, succeeds, profile_commands, true, true)
+}
+
+fn run_job_options(
+    body: &str,
+    script: &str,
+    draft: bool,
+    succeeds: bool,
+    profile_commands: &str,
+    enforce: bool,
+    local_md: bool,
+) -> (Value, String, String) {
     let tmp = test_tempdir();
     let (_repo, home, cfg) = setup_fix_dispatch_repo(&tmp, profile_commands);
     let job = tmp.path().join(if body.starts_with("# TICKET-1469:") {
@@ -38,7 +50,11 @@ fn run_job(
             "--config-path",
             cfg.to_str().unwrap(),
             "--target",
-            job.to_str().unwrap(),
+            if local_md {
+                job.to_str().unwrap()
+            } else {
+                "ordinary-target"
+            },
             "--skip-validation-gate",
             "--retries",
             "2",
@@ -47,6 +63,9 @@ fn run_job(
         .env("HOME", &home)
         .env("GITHUB_TOKEN", "token")
         .env("GAH_LEDGER_PATH", &ledger);
+    if enforce {
+        command.arg("--enforce-job-file");
+    }
     if draft {
         command.arg("--allow-draft-fail");
     }
@@ -83,9 +102,10 @@ fn run_job(
         assert!(!succeeds, "successful dispatch must record its branch");
     }
     let prompt_text = fs::read_to_string(prompt).unwrap_or_default();
-    if body.contains("paragraph") {
+    if enforce && (body.contains("paragraph") || !local_md || !body.contains("## ")) {
         assert!(!marker.exists());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("Verification commands"));
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("Verification commands") || error.contains("--enforce-job-file"));
     }
     (entry, prompt_text, gh)
 }
@@ -172,12 +192,14 @@ fn job_contract_paragraph_fails_before_agent() {
 
 #[test]
 fn job_contract_missing_sections_preserves_title() {
-    let (_, _, gh) = run_job(
+    let (_, _, gh) = run_job_options(
         "# TICKET-1469: Job Title\n\nOrdinary job",
         "echo change >> README.md",
         false,
         true,
         PASS,
+        false,
+        true,
     );
     assert!(gh.contains("TICKET-1469 Job Title"));
 }
@@ -213,4 +235,46 @@ fn job_contract_draft_cannot_bypass_commands() {
         PASS,
     );
     assert_eq!(entry["failure_stage"], "post_validation");
+}
+
+#[test]
+fn job_contract_without_flag_preserves_publication_and_prompt() {
+    let body = "# Distinctive unflagged instructions\n## Allowed files\n- only.txt\n## Verification commands\n- false";
+    let (_, prompt, _) = run_job_options(
+        body,
+        "echo change >> README.md",
+        false,
+        true,
+        PASS,
+        false,
+        true,
+    );
+    assert!(!prompt.contains("Distinctive unflagged instructions"));
+    assert!(!prompt.contains("## Job file"));
+}
+
+#[test]
+fn job_contract_flag_requires_sections_before_agent() {
+    run_job_options(
+        "# No contract",
+        "echo change >> README.md",
+        false,
+        false,
+        PASS,
+        true,
+        true,
+    );
+}
+
+#[test]
+fn job_contract_flag_requires_local_markdown_before_agent() {
+    run_job_options(
+        "# No contract",
+        "echo change >> README.md",
+        false,
+        false,
+        PASS,
+        true,
+        false,
+    );
 }

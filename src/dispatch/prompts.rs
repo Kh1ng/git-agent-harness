@@ -175,13 +175,13 @@ pub(super) fn build_task(
     if !target.is_empty() {
         task.push_str(&format!("\n## Focus\n\n{}\n", target));
     }
-    if Path::new(target).extension().is_some_and(|ext| ext == "md") {
-        if let Ok(text) = fs::read_to_string(target) {
-            task.push_str(&format!("\n## Job file\n\nWhen this file was handed to `gah dispatch` directly, its Allowed files and Verification commands sections are enforced before anything is published.\n\n{text}\n"));
-        }
-    }
     append_protected_worker_policy(&mut task);
     task
+}
+
+pub(in crate::dispatch) fn append_job_file(task: &mut String, text: &str) {
+    task.push_str("\n## Job file\n\nAllowed files and Verification commands sections are enforced before publishing.\n\n");
+    append_bounded_text(task, text, 16 * 1024, "Job file");
 }
 
 /// `research`/`audit` are read-only, investigation-only job kinds (#848):

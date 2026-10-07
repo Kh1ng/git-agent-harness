@@ -9,6 +9,7 @@ use std::{path::Path, time::Duration};
 
 pub(super) struct JobContract {
     file: String,
+    text: String,
     allowed: Option<Vec<String>>,
     commands: Vec<String>,
 }
@@ -46,6 +47,7 @@ impl JobContract {
         }
         Ok(Some(Self {
             file: target.into(),
+            text,
             allowed,
             commands: commands.unwrap_or_default(),
         }))
@@ -71,30 +73,72 @@ impl JobContract {
     }
 }
 
-/// The contract for this dispatch, if any. Only a direct `gah dispatch` of a
-/// local file gets one. The controller sets `dispatch_reason` on every
-/// dispatch it starts (`initial`, `retry`, `review`, ...) and the CLI leaves
-/// it unset, so a ticket file the loop picked is never enforced: existing
-/// tickets already carry a "Verification Commands" section as a hint, and
-/// some are written by a planning agent.
+/// Thin environment wrapper; the decision itself is independently testable.
 pub(super) fn for_dispatch(
     args: &crate::dispatch::DispatchArgs,
     has_issue: bool,
 ) -> Result<Option<JobContract>> {
-    JobContract::load(&args.target, has_issue || args.dispatch_reason.is_some())
+    decide(
+        args,
+        has_issue,
+        std::env::var("GAH_ENFORCE_JOB_FILE").as_deref() == Ok("1"),
+    )
+}
+
+fn decide(
+    args: &crate::dispatch::DispatchArgs,
+    has_issue: bool,
+    enforce: bool,
+) -> Result<Option<JobContract>> {
+    // The controller sets a reason on every dispatch it starts. Those are
+    // never enforced, and never fail either: an opt-in inherited from the
+    // shell that started `gah loop` must not stop the loop's own work.
+    if !enforce || args.dispatch_reason.is_some() {
+        return Ok(None);
+    }
+    if has_issue {
+        bail!("--enforce-job-file requires a local .md job file, not a provider issue");
+    }
+    let contract = JobContract::load(&args.target, false)?;
+    if contract.is_none() {
+        bail!("--enforce-job-file requires a local .md file with Allowed files or Verification commands");
+    }
+    Ok(contract)
+}
+
+pub(super) fn append_prompt(contract: Option<&JobContract>, task: &mut String) {
+    if let Some(contract) = contract {
+        super::super::super::prompts::append_job_file(task, &contract.text);
+    }
 }
 
 fn section(text: &str, heading: &str, file: &str) -> Result<Option<Vec<String>>> {
     let mut found = false;
     let mut items = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
+    let mut fence = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        let marker = ["```", "~~~"]
+            .into_iter()
+            .find(|marker| line.starts_with(marker));
+        if let Some(open) = fence {
+            if marker == Some(open) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(marker) = marker {
+            fence = Some(marker);
+            continue;
+        }
         if line.starts_with('#') {
             if found {
                 break;
             }
-            found = line
-                .trim_start_matches('#')
+            let name = line.trim_matches('#').trim();
+            found = name
+                .strip_suffix(':')
+                .unwrap_or(name)
                 .trim()
                 .eq_ignore_ascii_case(heading);
             continue;
@@ -109,6 +153,9 @@ fn section(text: &str, heading: &str, file: &str) -> Result<Option<Vec<String>>>
         let Some(bullet) = bullet else {
             continue;
         };
+        if raw.starts_with(char::is_whitespace) {
+            bail!("Job file {file}: {heading} contains an indented bullet");
+        }
         let bullet = bullet.trim();
         let quoted = bullet
             .split_once('`')

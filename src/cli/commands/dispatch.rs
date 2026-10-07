@@ -27,6 +27,7 @@ pub struct Args {
     pub escalate: bool,
     pub existing_branch: Option<String>,
     pub skip_validation_gate: bool,
+    pub enforce_job_file: bool,
 }
 
 impl From<Args> for CliDispatchArgs {
@@ -61,6 +62,14 @@ impl From<Args> for CliDispatchArgs {
 }
 
 pub fn run(args: Args) -> Result<()> {
+    // Override inherited opt-in: only this CLI flag authorizes job commands.
+    std::env::set_var(
+        "GAH_ENFORCE_JOB_FILE",
+        if args.enforce_job_file { "1" } else { "0" },
+    );
+    if args.enforce_job_file && !matches!(args.mode.as_str(), "fix" | "improve") {
+        anyhow::bail!("--enforce-job-file requires --mode fix or --mode improve");
+    }
     runner::install_shutdown_handler()?;
     let cfg = config::load(args.config_path.as_deref())?;
     let run_id = Uuid::new_v4().to_string();

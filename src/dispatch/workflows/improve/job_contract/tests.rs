@@ -99,31 +99,71 @@ fn dispatch_args(target: &str, dispatch_reason: Option<&str>) -> crate::dispatch
     }
 }
 
-/// A ticket file the loop selected is not a job the operator handed over.
 #[test]
-fn only_a_direct_dispatch_gets_a_contract() {
+fn decision_requires_explicit_eligible_opt_in() {
     let temp = tempfile::tempdir().unwrap();
-    let file = temp.path().join("TICKET-1-test.md");
-    std::fs::write(
-        &file,
-        "# TICKET-1: Test\n\n## Verification Commands\n- `false`\n",
-    )
-    .unwrap();
-    let target = file.to_str().unwrap();
-    assert!(for_dispatch(&dispatch_args(target, None), false)
-        .unwrap()
-        .is_some());
-    for reason in ["initial", "retry", "escalate", "post_review_repair"] {
-        assert!(
-            for_dispatch(&dispatch_args(target, Some(reason)), false)
-                .unwrap()
-                .is_none(),
-            "{reason}"
+    let file = temp.path().join("job.md");
+    std::fs::write(&file, "## Verification commands\n- false").unwrap();
+    for flag in [false, true] {
+        for reason in [None, Some("initial")] {
+            for issue in [false, true] {
+                let result = decide(&dispatch_args(file.to_str().unwrap(), reason), issue, flag);
+                // A controller dispatch is never enforced and never refused,
+                // even with the opt-in inherited from its environment.
+                if !flag || reason.is_some() {
+                    assert!(result.unwrap().is_none());
+                } else if issue {
+                    assert!(result.is_err());
+                } else {
+                    assert!(result.unwrap().is_some());
+                }
+            }
+        }
+    }
+    for target in ["not-a-file", temp.path().to_str().unwrap()] {
+        assert!(decide(&dispatch_args(target, None), false, true).is_err());
+    }
+    std::fs::write(&file, "# No contract").unwrap();
+    assert!(decide(&dispatch_args(file.to_str().unwrap(), None), false, true).is_err());
+}
+
+#[test]
+fn section_ignores_fences_and_prose_but_rejects_nested_bullets() {
+    for fence in ["```", "~~~"] {
+        let text = format!("## aLlOwEd FiLeS:  \nExplanation\n{fence}\n# comment\n- not a bullet\n  - nested in fence\n{fence}\n- README.md\n## Other\n- outside");
+        assert_eq!(
+            section(&text, "Allowed files", "job.md").unwrap().unwrap(),
+            vec!["README.md"]
         );
     }
-    assert!(for_dispatch(&dispatch_args(target, None), true)
-        .unwrap()
-        .is_none());
+    for indent in [" ", "\t"] {
+        assert!(section(
+            &format!("## Allowed files\n- a\n{indent}- nested"),
+            "Allowed files",
+            "job.md"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("indented bullet"));
+    }
+}
+
+#[test]
+fn contract_prompt_is_capped_and_uses_loaded_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("job.md");
+    let text = format!("## Allowed files\n- README.md\n{}", "é".repeat(20_000));
+    std::fs::write(&file, text).unwrap();
+    let contract = decide(&dispatch_args(file.to_str().unwrap(), None), false, true).unwrap();
+    std::fs::remove_file(file).unwrap();
+    let mut prompt = String::new();
+    append_prompt(contract.as_ref(), &mut prompt);
+    assert!(prompt.contains("Job file truncated at 16384 bytes"));
+    assert!(prompt.len() < 17_000);
+    assert!(prompt.contains("README.md"));
+    let mut absent = String::new();
+    append_prompt(None, &mut absent);
+    assert!(absent.is_empty());
 }
 
 #[test]

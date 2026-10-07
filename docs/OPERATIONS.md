@@ -1542,9 +1542,14 @@ project/backend dispatch readiness still comes from the existing doctor checks.
 
 ### Local job file contracts
 
-A local Markdown file passed with `gah dispatch --mode fix --target path/to/job.md`
-can define `Allowed files` and `Verification commands` sections. Each section
-must contain Markdown bullets (`-`, `*`, or `+`). Dispatch takes the first
+A local Markdown file passed with `gah dispatch --enforce-job-file --mode fix --target path/to/job.md`
+can define `Allowed files` and `Verification commands` sections in both `--mode fix`
+and `--mode improve`. Without `--enforce-job-file`, nothing is enforced and job
+commands are not run or added to the prompt. The flag requires a local `.md` file
+with at least one contract section; otherwise dispatch fails before the agent runs. Each section
+must contain top-level Markdown bullets (`-`, `*`, or `+`). Indented bullets
+are errors; fenced code blocks and explanatory sentences are ignored. Headings
+are case-insensitive and may end with a colon. Dispatch takes the first
 backtick-delimited value in each bullet, or the trimmed bullet text before
 ` (` (a note). Empty items and sections without bullets are errors.
 Allowed files are repository-relative paths or globs: `*` matches within a

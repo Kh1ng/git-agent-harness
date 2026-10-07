@@ -279,6 +279,7 @@ pub(crate) fn improve(
     let validation_environment = cargo_target.environment();
 
     let mut base_task = build_redispatch_task(profile, &wt, args, &target, issue_details.as_ref());
+    job_contract::append_prompt(job_contract.as_ref(), &mut base_task);
     if let Some(repair_context) = repair_context.as_ref() {
         repair_context::append_to_prompt(&mut base_task, repair_context);
     }
