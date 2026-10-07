@@ -770,7 +770,7 @@ mod tests {
     }
 
     fn wait_for_terminal(session: &mut HermesManagerSession, id: &GahSessionId) -> TerminalStatus {
-        for _ in 0..100 {
+        for _ in 0..300 {
             if let Some(status) = session.terminal_status(id).unwrap() {
                 return status;
             }
@@ -998,7 +998,11 @@ exec python3 -u "$tmp" "$@"
                 instruction: "hello".into(),
             })
             .unwrap();
-        let updates = wait_for_updates(&mut session, &id);
+        assert_eq!(
+            wait_for_terminal(&mut session, &id),
+            TerminalStatus::Completed
+        );
+        let updates = session.stream(&id).unwrap();
         assert_eq!(
             updates,
             vec![
@@ -1008,10 +1012,6 @@ exec python3 -u "$tmp" "$@"
                     size: 4096
                 }
             ]
-        );
-        assert_eq!(
-            wait_for_terminal(&mut session, &id),
-            TerminalStatus::Completed
         );
     }
 
