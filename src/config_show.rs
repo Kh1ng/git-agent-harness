@@ -16,8 +16,6 @@ pub struct RoutingCandidateSummary {
     pub priority: i32,
     pub included_in_quota: bool,
     pub marginal_cost_usd: Option<f64>,
-    pub quota_usage_percent: Option<f64>,
-    pub quota_days_remaining: Option<f64>,
     pub requires_approval: bool,
 }
 
@@ -287,8 +285,6 @@ fn to_summary(candidate: &config::CandidateConfig) -> RoutingCandidateSummary {
         priority: candidate.priority,
         included_in_quota: candidate.included_in_quota,
         marginal_cost_usd: candidate.marginal_cost_usd,
-        quota_usage_percent: candidate.quota_usage_percent,
-        quota_days_remaining: candidate.quota_days_remaining,
         requires_approval: candidate.requires_approval,
     }
 }
@@ -528,9 +524,8 @@ mod tests {
             priority: 10,
             included_in_quota: true,
             marginal_cost_usd: Some(0.5),
-            quota_usage_percent: Some(7.5),
-            quota_days_remaining: Some(9.25),
             requires_approval: true,
+            ..Default::default()
         }]);
         profile.routing.improve_candidates = Some(vec![CandidateConfig {
             backend: "vibe".into(),
@@ -540,9 +535,8 @@ mod tests {
             priority: 20,
             included_in_quota: false,
             marginal_cost_usd: None,
-            quota_usage_percent: None,
-            quota_days_remaining: None,
             requires_approval: false,
+            ..Default::default()
         }]);
         profile.routing.review_candidates = Some(vec![CandidateConfig {
             backend: "openhands".into(),
@@ -552,9 +546,8 @@ mod tests {
             priority: 30,
             included_in_quota: true,
             marginal_cost_usd: Some(1.25),
-            quota_usage_percent: Some(11.0),
-            quota_days_remaining: Some(2.0),
             requires_approval: true,
+            ..Default::default()
         }]);
         profile.routing.routine_reviewer = Some(CandidateConfig {
             backend: "codex".into(),
@@ -564,9 +557,8 @@ mod tests {
             priority: 5,
             included_in_quota: true,
             marginal_cost_usd: Some(0.12),
-            quota_usage_percent: None,
-            quota_days_remaining: None,
             requires_approval: false,
+            ..Default::default()
         });
         profile.routing.escalatory_reviewers = vec![CandidateConfig {
             backend: "ogy".into(),
@@ -576,9 +568,8 @@ mod tests {
             priority: 15,
             included_in_quota: true,
             marginal_cost_usd: None,
-            quota_usage_percent: None,
-            quota_days_remaining: None,
             requires_approval: false,
+            ..Default::default()
         }];
         profile.routing.task_routing_rules = vec![TaskRoutingRule {
             difficulties: vec!["easy".into()],
@@ -642,9 +633,8 @@ mod tests {
             priority: 12,
             included_in_quota: true,
             marginal_cost_usd: Some(1.5),
-            quota_usage_percent: Some(8.25),
-            quota_days_remaining: Some(3.75),
             requires_approval: true,
+            ..Default::default()
         };
 
         let summary = to_summary(&candidate);
@@ -655,8 +645,6 @@ mod tests {
         assert_eq!(summary.priority, 12);
         assert!(summary.included_in_quota);
         assert_eq!(summary.marginal_cost_usd, Some(1.5));
-        assert_eq!(summary.quota_usage_percent, Some(8.25));
-        assert_eq!(summary.quota_days_remaining, Some(3.75));
         assert!(summary.requires_approval);
     }
 

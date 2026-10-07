@@ -187,8 +187,8 @@ pub(crate) fn run(command: RoutingCandidateCommands) -> Result<()> {
                 priority,
                 included_in_quota,
                 marginal_cost_usd,
-                quota_usage_percent: None,
-                quota_days_remaining: None,
+                removed_usage: (),
+                removed_days: (),
                 requires_approval,
             };
             apply(
