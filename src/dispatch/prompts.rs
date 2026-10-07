@@ -175,6 +175,11 @@ pub(super) fn build_task(
     if !target.is_empty() {
         task.push_str(&format!("\n## Focus\n\n{}\n", target));
     }
+    if Path::new(target).extension().is_some_and(|ext| ext == "md") {
+        if let Ok(text) = fs::read_to_string(target) {
+            task.push_str(&format!("\n## Job file\n\nWhen this file was handed to `gah dispatch` directly, its Allowed files and Verification commands sections are enforced before anything is published.\n\n{text}\n"));
+        }
+    }
     append_protected_worker_policy(&mut task);
     task
 }

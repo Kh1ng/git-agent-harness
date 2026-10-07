@@ -37,6 +37,9 @@ pub(super) fn finish_improve_workflow(
     route_effective_backend: &str,
     route_effective_model: Option<&str>,
     llm_model: &str,
+    job_contract: Option<&super::job_contract::JobContract>,
+    validation_environment: &[(String, String)],
+    timeout: std::time::Duration,
 ) -> Result<()> {
     if profile.validation_commands.is_empty() && ledger.validation_result.is_none() {
         ledger.validation_result = Some("not_run".into());
@@ -83,6 +86,14 @@ pub(super) fn finish_improve_workflow(
         commit_msg.push_str(backend_summary);
     }
 
+    super::job_contract::publish_guard(
+        job_contract,
+        profile,
+        ledger,
+        wt,
+        validation_environment,
+        timeout,
+    )?;
     enforce_generated_artifact_policy(profile, ledger, wt)?;
 
     if super::handoff::maybe_perform_handoff(

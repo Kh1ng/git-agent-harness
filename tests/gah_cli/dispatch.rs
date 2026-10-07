@@ -1,3 +1,5 @@
+#[path = "dispatch/job_contract.rs"]
+mod job_contract;
 #[path = "dispatch/operator_pins.rs"]
 mod operator_pins;
 #[path = "dispatch/planning_and_review.rs"]
