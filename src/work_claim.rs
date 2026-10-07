@@ -733,7 +733,7 @@ mod tests {
     #[test]
     fn manual_claim_and_loop_cleanup_share_the_locked_state() {
         let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::ClaimStateEnvGuard::set(&dir.path().join("claims.json"));
+        let _guard = crate::test_support::ClaimStateEnvGuard::set(dir.path().join("claims.json"));
         assert!(try_claim_manual_work("repo@repo", "7").unwrap());
         assert!(!try_claim_work("repo@repo", "TICKET-007").unwrap());
         release_owned_work("repo@repo", "#7").unwrap();
