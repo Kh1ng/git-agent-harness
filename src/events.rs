@@ -110,6 +110,47 @@ pub struct ControllerEvent {
     pub review_contract_version: Option<u32>,
     #[serde(default)]
     pub remediation_plan: Option<RemediationPlan>,
+    /// Routes the router passed over, set when a dispatch ended because
+    /// routing found none that could take it. The same list is rendered into
+    /// `details` for people; readers that need it use this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedRoute>,
+}
+
+/// One backend and model the router considered and passed over.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct SkippedRoute {
+    pub backend: String,
+    #[serde(default)]
+    pub backend_instance: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The router's reason code: `max_concurrent_reached`, `authentication_error`...
+    pub reason: String,
+    #[serde(default)]
+    pub unavailable_until: Option<String>,
+}
+
+/// The routes the router passed over, when a routing error is why `error`
+/// happened; empty for every other failure.
+pub(crate) fn skipped_routes(error: &anyhow::Error) -> Vec<SkippedRoute> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::routing::RouteError>())
+        .map(|route_error| match route_error {
+            crate::routing::RouteError::NoEligibleBackend { skipped, .. }
+            | crate::routing::RouteError::ApprovalRequired { skipped, .. } => skipped
+                .iter()
+                .map(|skip| SkippedRoute {
+                    backend: skip.backend.clone(),
+                    backend_instance: skip.backend_instance.clone(),
+                    model: skip.model.clone(),
+                    reason: skip.reason.clone(),
+                    unavailable_until: skip.unavailable_until.clone(),
+                })
+                .collect(),
+        })
+        .unwrap_or_default()
 }
 
 pub fn append(cfg: &GahConfig, event: &ControllerEvent) -> Result<()> {
@@ -206,6 +247,7 @@ pub fn record_with_reason_code_and_plan(
             reason_code: reason_code.map(str::to_string),
             review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             remediation_plan: remediation_plan.cloned(),
+            skipped: Vec::new(),
         },
     )
 }
@@ -233,6 +275,39 @@ pub fn record_with_run_id_and_reason_code(
             reason_code: reason_code.map(str::to_string),
             review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
             remediation_plan: None,
+            skipped: Vec::new(),
+        },
+    )
+}
+
+/// Record how a dispatch ended after `error`, carrying the routes the router
+/// passed over when routing is what stopped it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_dispatch_error(
+    cfg: &GahConfig,
+    event_type: EventType,
+    profile: Option<&str>,
+    work_id: Option<&str>,
+    run_id: Option<&str>,
+    details: impl Into<String>,
+    reason_code: Option<&str>,
+    error: &anyhow::Error,
+) -> Result<()> {
+    append(
+        cfg,
+        &ControllerEvent {
+            timestamp: OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .unwrap_or_default(),
+            event_type: event_type.as_str().to_string(),
+            profile: profile.map(str::to_string),
+            work_id: work_id.map(str::to_string),
+            run_id: run_id.map(str::to_string),
+            details: details.into(),
+            reason_code: reason_code.map(str::to_string),
+            review_contract_version: Some(crate::ledger::CURRENT_REVIEW_CONTRACT_VERSION),
+            remediation_plan: None,
+            skipped: skipped_routes(error),
         },
     )
 }
@@ -456,6 +531,62 @@ mod tests {
     }
 
     #[test]
+    fn a_routing_failure_records_the_routes_it_passed_over() {
+        let (_tmp, cfg) = test_config();
+        let routing = anyhow::Error::new(crate::routing::RouteError::NoEligibleBackend {
+            preferred_backend: "claude".into(),
+            preferred_model: Some("opus".into()),
+            skipped: vec![crate::routing::SkippedBackend {
+                backend: "agy".into(),
+                backend_instance: Some("agy:google-native".into()),
+                model: Some("Gemini 3.1 Pro (High)".into()),
+                reason: "max_concurrent_reached".into(),
+                unavailable_until: None,
+            }],
+            earliest_reset: None,
+        })
+        .context("routing review");
+        super::record_dispatch_error(
+            &cfg,
+            EventType::DispatchFinished,
+            Some("real"),
+            Some("#7"),
+            Some("run-1"),
+            format!("review: {routing:#}"),
+            None,
+            &routing,
+        )
+        .unwrap();
+        // Any other failure carries no list, and the key is left out.
+        super::record_dispatch_error(
+            &cfg,
+            EventType::DispatchFinished,
+            Some("real"),
+            Some("#8"),
+            Some("run-2"),
+            "retry: worktree missing",
+            None,
+            &anyhow::anyhow!("worktree missing"),
+        )
+        .unwrap();
+
+        let events = read_events(&cfg).unwrap();
+        assert_eq!(
+            events[0].skipped,
+            vec![super::SkippedRoute {
+                backend: "agy".into(),
+                backend_instance: Some("agy:google-native".into()),
+                model: Some("Gemini 3.1 Pro (High)".into()),
+                reason: "max_concurrent_reached".into(),
+                unavailable_until: None,
+            }]
+        );
+        assert!(events[1].skipped.is_empty());
+        let text = std::fs::read_to_string(cfg.defaults.events_path()).unwrap();
+        assert!(!text.lines().nth(1).unwrap().contains("\"skipped\""));
+    }
+
+    #[test]
     fn malformed_line_fails_loudly() {
         let (tmp, cfg) = test_config();
         std::fs::write(tmp.path().join("events.jsonl"), "not valid json\n").unwrap();
@@ -475,6 +606,7 @@ mod tests {
             review_contract_version: None,
             details: String::new(),
             remediation_plan: None,
+            skipped: Vec::new(),
         };
         append(&cfg, &event).unwrap();
         append(&cfg, &event).unwrap();

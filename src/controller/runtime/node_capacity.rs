@@ -74,7 +74,7 @@ fn reservation_for(
         | NextAction::Retry { .. }
         | NextAction::Escalate { .. } => WorkerReservation {
             memory_bytes: settings.worker_memory_mib * 1024 * 1024,
-            cpu_units: 2.0,
+            cpu_units: f64::from(settings.worker_cpu_cores),
         },
         NextAction::DecomposeIssue { .. } => WorkerReservation {
             memory_bytes: 2 * GIB,
@@ -167,7 +167,7 @@ pub(crate) fn admission_for_settings(
     // busy shared machine making progress, while additional workers must fit
     // below both the CPU headroom and PSI thresholds.
     if active_workers > 0 {
-        let cpu_ceiling = (pressure.logical_cpus.max(1) as f64 * 0.90).max(1.0);
+        let cpu_ceiling = settings.cpu_ceiling(pressure.logical_cpus);
         // Load already includes CPU consumed by active GAH workers. Compare
         // the larger of live load and projected commitments to the ceiling,
         // rather than adding both representations of the same work.
@@ -547,11 +547,42 @@ mod tests {
     }
 
     #[test]
+    fn cpu_settings_decide_how_many_workers_a_loaded_node_admits() {
+        // 8 CPUs at load 6: the defaults (2 cores a worker, 90% ceiling = 7.2)
+        // refuse a second worker, since 6 + 2 > 7.2.
+        let node = pressure(14, 8, 6.0);
+        let admit = |settings| {
+            matches!(
+                admission_for_settings(
+                    &implementation(),
+                    1,
+                    WorkerReservation::default(),
+                    node,
+                    settings
+                ),
+                Admission::Admit(_)
+            )
+        };
+        assert!(!admit(crate::config::NodeCapacitySettings::default()));
+        // A lighter reservation fits under the same ceiling: 6 + 1 <= 7.2.
+        assert!(admit(crate::config::NodeCapacitySettings {
+            worker_cpu_cores: 1,
+            ..Default::default()
+        }));
+        // So does a higher ceiling: 6 + 2 <= 12.
+        assert!(admit(crate::config::NodeCapacitySettings {
+            cpu_ceiling_percent: 150,
+            ..Default::default()
+        }));
+    }
+
+    #[test]
     fn lower_reservation_admits_second_worker_with_same_pressure() {
         let node = pressure(6, 10, 0.5);
         let settings = crate::config::NodeCapacitySettings {
             worker_memory_mib: 1536,
             memory_floor_mib: 0,
+            ..Default::default()
         };
         let first = match admission_for_settings(
             &implementation(),
@@ -606,6 +637,7 @@ mod tests {
         let settings = crate::config::NodeCapacitySettings {
             worker_memory_mib: 1024,
             memory_floor_mib: 512,
+            ..Default::default()
         };
         let node = pressure(2, 10, 0.0);
         assert!(matches!(

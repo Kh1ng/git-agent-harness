@@ -414,7 +414,6 @@ pub fn admin_spend_limit_to_quota_observation(
         checked_at: None,
         check_error: None,
         usage_source: Some("mistral_admin_spend_limit".to_string()),
-        mistral_admin: None,
         account_usage: None,
     })
 }

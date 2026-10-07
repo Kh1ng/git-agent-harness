@@ -55,6 +55,7 @@ pub fn run(command: ConfigCommands) -> Result<()> {
         ConfigCommands::Set {
             config_path,
             current_manager,
+            factory_enabled,
             node_role,
             registry_central_url,
             clear,
@@ -62,6 +63,8 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             telegram_chat_id,
             worker_memory_mib,
             memory_floor_mib,
+            worker_cpu_cores,
+            cpu_ceiling_percent,
         } => {
             let mut cfg = if config::resolve_config_path(config_path.as_deref()).exists() {
                 config::load(config_path.as_deref())?
@@ -116,6 +119,12 @@ pub fn run(command: ConfigCommands) -> Result<()> {
             if let Some(value) = memory_floor_mib {
                 cfg.defaults.node_capacity.memory_floor_mib = value;
             }
+            if let Some(value) = worker_cpu_cores {
+                cfg.defaults.node_capacity.worker_cpu_cores = value;
+            }
+            if let Some(value) = cpu_ceiling_percent {
+                cfg.defaults.node_capacity.cpu_ceiling_percent = value;
+            }
             if cfg.defaults.node_capacity != previous_capacity {
                 if let Some(total) = crate::controller::node_total_memory_bytes() {
                     cfg.defaults
@@ -124,7 +133,15 @@ pub fn run(command: ConfigCommands) -> Result<()> {
                 }
             }
             crate::node_role::NodeRoleStatus::with_override(&cfg.defaults, None)?;
+            if let Some(enabled) = factory_enabled {
+                cfg.defaults.factory_enabled = Some(enabled);
+            }
             config::save(&cfg, config_path.as_deref())?;
+            if let Some(enabled) = factory_enabled {
+                // Persist the guard first so concurrent/restarting loops cannot dispatch
+                // while service control is stopping the previously enumerated instances.
+                crate::factory::apply_services(enabled)?;
+            }
             println!("Updated global config");
         }
         ConfigCommands::RoutingCandidate { command } => {

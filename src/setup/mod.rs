@@ -148,6 +148,9 @@ pub struct Args {
     /// What this machine is for: central runs the dashboard.
     #[arg(long, value_enum)]
     role: Option<requirements::Role>,
+    /// Factory automation module (fresh standalone default: false; upgrades preserve state).
+    #[arg(long, action = clap::ArgAction::Set)]
+    factory_enabled: Option<bool>,
     #[arg(long, value_enum)]
     agent: Option<requirements::Agent>,
     #[arg(long, value_enum)]
@@ -191,7 +194,11 @@ pub fn run(args: Args) -> Result<()> {
             provider: args.provider.unwrap_or(requirements::Provider::Github),
             memory: args.memory.unwrap_or(requirements::MemoryMode::Off),
         };
-        let report = requirements::report(selection, &host);
+        let mut report = requirements::report(selection, &host);
+        // A config that does not load must not fail this read-only check: the
+        // requirements are still worth reporting, with the factory shown off.
+        report.factory_enabled = crate::factory::enabled(None).unwrap_or(false);
+        report.factory_ready = report.factory_enabled && report.ready;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
@@ -218,6 +225,7 @@ pub fn run(args: Args) -> Result<()> {
     }
     let options = wizard::Options {
         role: args.role,
+        factory_enabled: args.factory_enabled,
         agent: args.agent,
         provider: args.provider,
         memory: args.memory,

@@ -35,13 +35,15 @@ pub(super) fn record_capacity_deferral(
         .ok()
         .map(|fingerprint| format!(" route_state={fingerprint}"))
         .unwrap_or_default();
-    crate::events::record_with_run_id(
+    crate::events::record_dispatch_error(
         cfg,
         crate::events::EventType::DispatchFinished,
         Some(args.profile.as_str()),
         work_id,
         args.run_id.as_deref(),
         format!("{label}: deferred_capacity: {error:#}{route_state}"),
+        None,
+        error,
     )?;
     Ok(Some(capacity_deferral_outcome(label, error)))
 }

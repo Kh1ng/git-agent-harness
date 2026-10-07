@@ -18,7 +18,13 @@ const BOOTSTRAP: &str = "t=\"$(gh auth token 2>/dev/null || true)\"; curl -fsSL 
 /// default accepted. bootstrap.sh turns GAH_NODE_ROLE/GAH_YES into
 /// `gah setup` flags; install-linux.sh binds the dashboard to GAH_SERVER_HOST
 /// on first install instead of the tailnet address.
-const STANDALONE_ENV: &str = "GAH_NODE_ROLE=central GAH_YES=1 GAH_SERVER_HOST=127.0.0.1";
+#[cfg(not(target_os = "macos"))]
+const STANDALONE_ENV: &str = "GAH_NODE_ROLE=standalone GAH_YES=1 GAH_SERVER_HOST=127.0.0.1";
+
+/// macOS has no standalone role, so GAH_STANDALONE=1 carries the intent to
+/// configure-node-role.sh, which defaults a fresh install's factory module off.
+#[cfg(target_os = "macos")]
+const STANDALONE_ENV: &str = "GAH_NODE_ROLE=central GAH_STANDALONE=1 GAH_YES=1 GAH_SERVER_HOST=127.0.0.1";
 
 #[derive(Serialize)]
 pub struct SetupCheck {
@@ -67,7 +73,7 @@ fn installed_gah() -> Option<String> {
 fn setup_command(gah: Option<&str>, standalone: bool) -> String {
     match (gah, standalone) {
         (Some(gah), false) => format!("{gah} setup"),
-        (Some(gah), true) => format!("{STANDALONE_ENV} {gah} setup --role central --yes"),
+        (Some(gah), true) => format!("{STANDALONE_ENV} {gah} setup --role {} --yes", if cfg!(target_os = "macos") { "central" } else { "standalone" }),
         (None, false) => BOOTSTRAP.to_string(),
         (None, true) => BOOTSTRAP.replacen(" bash", &format!(" {STANDALONE_ENV} bash"), 1),
     }
@@ -103,6 +109,7 @@ pub async fn setup_check(window: tauri::WebviewWindow, role: Option<String>) -> 
     };
     let role = match role.as_deref() {
         Some("worker") => "worker",
+        Some("standalone") => "standalone",
         _ => "central",
     };
     let output = shell(&format!("exec {gah} \"$@\""))
@@ -122,10 +129,17 @@ pub async fn setup_check(window: tauri::WebviewWindow, role: Option<String>) -> 
 
 #[tauri::command]
 /// Returns the dashboard address saved for a standalone setup, else "".
-pub fn open_setup_terminal(window: tauri::WebviewWindow, standalone: Option<bool>) -> Result<String, String> {
+pub fn open_setup_terminal(window: tauri::WebviewWindow, standalone: Option<bool>, factory_enabled: Option<bool>) -> Result<String, String> {
     local_only(&window)?;
     let standalone = standalone.unwrap_or(false);
-    let line = setup_command(installed_gah().as_deref(), standalone);
+    let mut line = setup_command(installed_gah().as_deref(), standalone);
+    if let Some(enabled) = factory_enabled {
+        line = if line.contains("scripts/bootstrap.sh") {
+            line.replacen(" bash", &format!(" GAH_FACTORY_ENABLED={enabled} bash"), 1)
+        } else {
+            format!("GAH_FACTORY_ENABLED={enabled} {line}")
+        };
+    }
     if !open_terminal(&line) {
         return Err(format!("No terminal opened. Run this in a terminal: {line}"));
     }
@@ -136,6 +150,20 @@ pub fn open_setup_terminal(window: tauri::WebviewWindow, standalone: Option<bool
     settings.central_url = standalone_url();
     write_settings(&settings)?;
     Ok(settings.central_url)
+}
+
+/// Change only the factory module; the local dashboard and shared services stay active.
+#[tauri::command]
+pub async fn set_factory_enabled(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
+    local_only(&window)?;
+    let gah = installed_gah().ok_or("Install GAH before changing the factory module.")?;
+    let output = shell(&format!("exec {gah} \"$@\""))
+        .args(["config", "set", "--factory-enabled", if enabled { "true" } else { "false" }])
+        .output().map_err(|error| format!("Cannot change factory module: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -261,8 +289,10 @@ mod tests {
         assert!(setup_command(None, true).ends_with(&format!("GITHUB_TOKEN=\"$t\" {STANDALONE_ENV} bash")));
         assert_eq!(
             setup_command(Some("~/.cargo/bin/gah"), true),
-            format!("{STANDALONE_ENV} ~/.cargo/bin/gah setup --role central --yes")
+            format!("{STANDALONE_ENV} ~/.cargo/bin/gah setup --role {} --yes", if cfg!(target_os = "macos") { "central" } else { "standalone" })
         );
+        // The central role alone would leave a fresh macOS standalone install's factory module on.
+        assert!(STANDALONE_ENV.contains(if cfg!(target_os = "macos") { "GAH_STANDALONE=1" } else { "GAH_NODE_ROLE=standalone" }));
     }
 
     #[test]

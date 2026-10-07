@@ -95,13 +95,17 @@ type SetupStatus = { state: 'ok' | 'missing' | 'outdated' | 'not_logged_in' | 'c
 type SetupRequirement = { id: string; label: string; why: string; optional: boolean; status: SetupStatus; action: { command: string; sudo: boolean } | null };
 type SetupCheck = {
   installed: boolean;
-  report: { ready: boolean; requirements: SetupRequirement[] } | null;
+  report: { ready: boolean; application_ready: boolean; factory_enabled: boolean; factory_ready: boolean; requirements: SetupRequirement[] } | null;
   error: string | null;
   command: string;
   terminal: boolean;
 };
 let nodeRole: 'central' | 'worker' = 'central';
 let standaloneStarted = false;
+let factoryLoaded = false;
+/** True once the checkbox reflects the host or the user; until then setup must not send a factory choice. */
+let factoryChosen = false;
+const factory = document.querySelector<HTMLInputElement>('#factory-enabled')!;
 
 function statusText(status: SetupStatus): string {
   switch (status.state) {
@@ -123,13 +127,20 @@ function checkUnresolved(status: SetupStatus): boolean {
 
 /** `gah setup --check` as a checklist; the work itself happens in Terminal. Resolves to readiness. */
 async function refreshSetup(): Promise<boolean> {
-  const result = await invoke<SetupCheck>('setup_check', { role: nodeRole });
+  const result = await invoke<SetupCheck>('setup_check', { role: nodeRole === 'central' && !isMac && (!central.value || /^http:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/.test(central.value)) ? 'standalone' : nodeRole });
   const state = document.querySelector<HTMLElement>('#setup-state')!;
   const list = document.querySelector<HTMLElement>('#setup-list')!;
   const button = document.querySelector<HTMLButtonElement>('#setup-terminal')!;
   const commandLine = document.querySelector<HTMLElement>('#setup-command')!;
   list.replaceChildren();
-  const pending = !result.installed || !result.report?.ready;
+  const pending = !result.installed || !(result.report?.application_ready ?? result.report?.ready);
+  document.querySelector<HTMLElement>('#factory-save')!.hidden = !result.installed;
+  if (result.report && typeof result.report.factory_enabled === 'boolean') {
+    if (!factoryLoaded) { factory.checked = result.report.factory_enabled; factoryLoaded = true; factoryChosen = true; }
+    document.querySelector('#factory-state')!.textContent = result.report.factory_enabled
+      ? `Factory module enabled · ${result.report.factory_ready ? 'prerequisites ready' : 'prerequisites missing'}. Start each project loop explicitly from the dashboard.`
+      : 'Factory module disabled · local application remains available.';
+  }
   if (!result.installed) {
     state.textContent = 'GAH is not installed on this computer yet. Setup builds it, asks whether this computer is the central node, a worker, or command line only, and offers each missing tool before installing it.';
     button.textContent = 'Install GAH in Terminal';
@@ -266,15 +277,24 @@ document.querySelector('#setup-refresh')!.addEventListener('click', () => {
 });
 document.querySelector('#setup-standalone')!.addEventListener('click', () => {
   void perform(async () => {
-    central.value = await invoke<string>('open_setup_terminal', { standalone: true });
+    // An unloaded checkbox is not a choice: omit it so the installer preserves an existing configuration.
+    central.value = await invoke<string>('open_setup_terminal', factoryChosen ? { standalone: true, factoryEnabled: factory.checked } : { standalone: true });
     nodeRole = 'central';
     standaloneStarted = true;
     document.querySelector('#setup-state')!.textContent = 'Standalone setup is running in Terminal. Select Check again when it finishes to open the dashboard.';
   });
 });
+factory.addEventListener('change', () => { factoryChosen = true; });
+document.querySelector('#factory-save')!.addEventListener('click', () => {
+  void perform(async () => {
+    await invoke('set_factory_enabled', { enabled: factory.checked });
+    factoryLoaded = false;
+    await refreshSetup();
+  });
+});
 document.querySelector('#setup-terminal')!.addEventListener('click', () => {
   void perform(async () => {
-    await invoke('open_setup_terminal');
+    await invoke('open_setup_terminal', {});
     document.querySelector('#setup-state')!.textContent = 'Setup is running in Terminal. Check again when it finishes.';
   });
 });
