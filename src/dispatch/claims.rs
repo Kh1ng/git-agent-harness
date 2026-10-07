@@ -75,6 +75,34 @@ fn is_claim_stale(entry: &LedgerEntry) -> bool {
     now - entry_time > time::Duration::hours(CLAIM_STALE_AFTER_HOURS)
 }
 
+/// Fold one work item's ledger history in append order. Control records leave
+/// the lease alone; dispatch outcomes and attempt resets resolve it.
+fn has_active_claim<'a>(entries: impl IntoIterator<Item = &'a LedgerEntry>) -> bool {
+    let mut active = false;
+    for entry in entries {
+        if crate::ledger::is_entry_stale(entry) {
+            continue;
+        }
+        match entry.mode.as_str() {
+            "claim" => active = !is_claim_stale(entry),
+            "paid_route_approval_grant"
+            | "paid_route_approval_revoke"
+            | "external_approval_grant"
+            | "external_approval_request"
+            | "external_approval_consume"
+            | "external_approval_revoke"
+            | "external_approval_expire"
+            | "external_approval_deny"
+            | "review_hold"
+            | "review_hold_release" => {}
+            // Every remaining entry is an execution attempt, a capacity
+            // deferral, or clear_attempts, all of which end the prior claim.
+            _ => active = false,
+        }
+    }
+    active
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuplicateWorkError {
     pub work_id: String,
@@ -209,19 +237,15 @@ pub(super) fn check_duplicate_work(
     // Try to fetch MRs/PRs from provider
     let mrs = crate::sync::fetch_active_mrs(profile)?;
 
+    if !central_claims_active && has_active_claim(&matching_entries) {
+        return Err(anyhow::Error::new(ActiveClaimError {
+            work_id: work_id.clone(),
+        }));
+    }
+
     for entry in matching_entries {
         if crate::ledger::is_entry_stale(&entry) {
             continue;
-        }
-
-        // Parallel workers: another concurrent dispatch already claimed
-        // this work_id and hasn't finished (or been abandoned long enough
-        // to ignore) yet. Skipped when the central claims API is the
-        // authoritative gate instead (see doc comment above).
-        if !central_claims_active && entry.mode == "claim" && !is_claim_stale(&entry) {
-            return Err(anyhow::Error::new(ActiveClaimError {
-                work_id: work_id.clone(),
-            }));
         }
 
         // Check if there is a matching MR
@@ -352,7 +376,12 @@ fn ledger_lookup_for_ticket(
     let mut last_failure_class = None;
     let mut has_active_mr = false;
     let mut has_merged_mr = false;
-    let mut has_active_claim = false;
+    let has_active_claim = has_active_claim(
+        entries
+            .into_iter()
+            .flatten()
+            .filter(|e| e.repo_id == profile.repo_id),
+    );
     for e in entries.into_iter().flatten() {
         // The ledger is a single global file shared by every profile
         // (Defaults::ledger_path, not per-profile), and work_id is
@@ -375,7 +404,6 @@ fn ledger_lookup_for_ticket(
             count = 0;
             agent_failure_count = 0;
             last_failure_class = None;
-            has_active_claim = false;
             continue;
         }
         // Parallel workers: a claim marks the ticket as currently in-flight
@@ -384,7 +412,6 @@ fn ledger_lookup_for_ticket(
         // does need to block re-selection until it either resolves (a real
         // completion entry follows) or goes stale (abandoned worker).
         if e.mode == "claim" {
-            has_active_claim = !is_claim_stale(e);
             continue;
         }
         // Paid-route approvals are operator control records, not execution
@@ -422,10 +449,6 @@ fn ledger_lookup_for_ticket(
             continue;
         }
         count += 1;
-        // A real completion entry (of any outcome) means whatever claim
-        // preceded this attempt has resolved -- this ticket is no longer
-        // in-flight from that worker's perspective.
-        has_active_claim = false;
         // Issue #95: only genuine agent failures count toward the retry
         // cap. Infra-class failures (backend_error, environment_error,
         // harness_error, unknown) still record in the ledger and appear
