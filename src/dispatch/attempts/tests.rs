@@ -996,7 +996,7 @@ fn decide_route_classifies_no_eligible_backend_as_backend_error() {
         backend: "not-a-real-backend".into(),
         ..Default::default()
     }]);
-    let cfg = gah_config(RoutingPolicy::default());
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
     let mut ledger = LedgerEntry::new("test", &prof, "codex", "pm", "target", None, None);
 
     let req = RouteRequest {
@@ -1039,7 +1039,7 @@ fn decide_route_classifies_no_eligible_backend_as_backend_error() {
 fn exact_route_deferral_preserves_requested_identity_in_ledger_diagnostics() {
     let tmp = tempfile::tempdir().unwrap();
     let prof = profile(tmp.path());
-    let cfg = gah_config(RoutingPolicy::default());
+    let cfg = gah_config_with_ledger(tmp.path(), RoutingPolicy::default());
     let mut ledger = LedgerEntry::new("test", &prof, "codex", "review", "target", None, None);
     let req = RouteRequest {
         mode: "review",

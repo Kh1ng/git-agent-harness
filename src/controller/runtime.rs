@@ -174,7 +174,7 @@ pub fn run_loop(
         #[rustfmt::skip]
         let iteration = run_once(cfg, profile_name, json, parallel, skip_validation_gate, true);
         match iteration {
-            Ok(()) if !wait_for_loop_interval(Duration::from_secs(30)) => {
+            Ok(()) if !wait_for_loop_interval(pass_interval(cfg, profile_name)) => {
                 return shutdown_gracefully();
             }
             Ok(()) => {}
@@ -205,6 +205,13 @@ fn shutdown_gracefully() -> Result<()> {
     eprintln!("gah loop: shutdown requested; stopping after terminal cleanup");
     crate::runner::process::kill_all_supervised_children();
     Ok(())
+}
+
+/// The profile's configured rest between passes (`pacing.loop_interval_seconds`).
+fn pass_interval(cfg: &crate::config::GahConfig, profile_name: &str) -> Duration {
+    crate::config::get_profile(cfg, profile_name)
+        .map(|profile| profile.pacing.loop_interval())
+        .unwrap_or_else(|_| crate::quota::PacingConfig::default().loop_interval())
 }
 
 fn wait_for_loop_interval(delay: Duration) -> bool {
@@ -1160,6 +1167,18 @@ pub(crate) fn run_dispatch_and_record(
         }
         Err(e) if crate::dispatch::capacity_deferred_error(&e) => {
             record_capacity_deferral(cfg, args, label, work_id, &e)
+        }
+        // Another loop holds the issue. That is a skip, not a failed dispatch.
+        Err(e) if crate::dispatch::issue_claim_lost(&e).is_some() => {
+            crate::events::record_with_run_id(
+                cfg,
+                crate::events::EventType::DispatchFinished,
+                Some(args.profile.as_str()),
+                work_id,
+                args.run_id.as_deref(),
+                format!("{label}: claim_lost: {e:#}"),
+            )?;
+            Ok(Some(format!("Skipped {e:#}")))
         }
         Err(e) => {
             let event_type = if crate::dispatch::duplicate_work_error(&e).is_some() {

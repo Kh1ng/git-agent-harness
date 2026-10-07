@@ -153,28 +153,54 @@ fn light_snapshot_never_calls_the_provider() {
     use std::os::unix::fs::PermissionsExt;
 
     let _exec_guard = ExecGuard::new();
+    struct ProviderPathGuard;
+    impl Drop for ProviderPathGuard {
+        fn drop(&mut self) {
+            crate::provider::clear_test_provider_path();
+        }
+    }
+
     let tmp = TempDir::new().unwrap();
     let cfg = make_test_cfg(&tmp);
     let _availability_guard =
         crate::test_support::AvailabilityEnvGuard::set(tmp.path().join("avail.json"));
+    let _claim_guard = ClaimStateEnvGuard::set(tmp.path().join("claims.json"));
     let bin = tmp.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
     let marker = tmp.path().join("gh-called");
     let gh = bin.join("gh");
     fs::write(
         &gh,
-        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
     )
     .unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
-    let _path = PathGuard::set(&bin);
+    let output = std::process::Command::new("gh")
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "mock gh self-check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "mock gh must work with only its own bin directory on PATH: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(marker.exists(), "mock gh must record its invocation");
+    fs::remove_file(&marker).unwrap();
+    crate::provider::set_test_provider_path(bin.to_str().unwrap());
+    let _path = ProviderPathGuard;
 
     let snap = build_snapshot_with(&cfg, "test", OffsetDateTime::now_utc(), false).unwrap();
 
     assert!(!marker.exists(), "light status must not invoke gh");
     assert_eq!(snap.observations.sync.status, "skipped");
     assert!(snap.available_tickets.is_empty());
-    assert!(snap.errors.is_empty());
+    assert!(snap.errors.is_empty(), "{:?}", snap.errors);
 }
 
 #[test]

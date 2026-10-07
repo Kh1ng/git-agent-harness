@@ -377,6 +377,53 @@ pub(super) fn stamp_claimed_work_id(ledger: &mut LedgerEntry, claimed_work_id: O
     }
 }
 
+const REPEATED_SETUP_FAILURE_LIMIT: usize = 3;
+
+fn setup_failure_signature(entry: &LedgerEntry) -> (Option<String>, Option<String>, String) {
+    let summary = entry.error_summary.as_deref().unwrap_or_default();
+    let normalized = summary
+        .split_whitespace()
+        .map(|token| {
+            let is_word_char = |ch: char| ch.is_alphanumeric() || matches!(ch, '.' | '_' | '-');
+            let mut result = String::new();
+            let mut in_digits = false;
+            let mut previous = None;
+            let mut chars = token.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if ch == '/' && !previous.is_some_and(is_word_char) {
+                    result.push_str("<path>");
+                    previous = Some(ch);
+                    while chars
+                        .peek()
+                        .is_some_and(|&next| is_word_char(next) || next == '/')
+                    {
+                        previous = chars.next();
+                    }
+                    in_digits = false;
+                    continue;
+                }
+                if ch.is_ascii_digit() {
+                    if !in_digits {
+                        result.push('#');
+                    }
+                    in_digits = true;
+                } else {
+                    result.push(ch);
+                    in_digits = false;
+                }
+                previous = Some(ch);
+            }
+            result
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (
+        entry.failure_class.clone(),
+        entry.failure_stage.clone(),
+        normalized,
+    )
+}
+
 type TicketHistoryLookup = (
     usize,
     usize,
@@ -386,6 +433,72 @@ type TicketHistoryLookup = (
     bool,
     Option<String>,
 );
+
+impl AvailableTicket {
+    pub(crate) fn setup_failure_reason_for_ticket(
+        work_id: &str,
+        profile: &Profile,
+        index: &crate::ledger::LedgerEntriesByWorkId,
+    ) -> Option<String> {
+        let mut reason = None;
+        ledger_lookup_with_setup_reason(Some(work_id), profile, &[], index, &mut reason)?;
+        reason
+    }
+}
+
+/// Dispatch refusals that clear on their own: the node was busy, every
+/// backend was out of quota, or the loop was stopping. They are recorded as
+/// `harness_error` at the dispatch stage like a real setup failure, and the
+/// ledger carries no structured marker for them, so they are recognised by
+/// the text the controller writes.
+const TRANSIENT_DISPATCH_REFUSALS: [&str; 4] = [
+    "node admission deferred",
+    "capacity deferred",
+    "no eligible backend available",
+    "shutdown requested",
+];
+
+/// Entries the repeated-setup check skips: they neither count toward the
+/// streak nor reset it. A shutdown cancellation or an abandoned-run record
+/// says the run was interrupted, not how setup went, and a transient
+/// dispatch refusal never reached setup. Any other entry, including an
+/// ordinary agent failure, shows setup got further and so ends the streak.
+fn ignored_by_repeated_setup(entry: &LedgerEntry) -> bool {
+    matches!(
+        entry.validation_result.as_deref(),
+        Some("cancelled_shutdown" | "not_run_abandoned")
+    ) || entry.error_summary.as_deref().is_some_and(|summary| {
+        TRANSIENT_DISPATCH_REFUSALS
+            .iter()
+            .any(|marker| summary.contains(marker))
+    })
+}
+
+fn repeated_setup_reason(attempts: &[&LedgerEntry]) -> Option<String> {
+    let attempts: Vec<_> = attempts
+        .iter()
+        .copied()
+        .filter(|entry| !ignored_by_repeated_setup(entry))
+        .collect();
+    let start = attempts.len().checked_sub(REPEATED_SETUP_FAILURE_LIMIT)?;
+    let recent = &attempts[start..];
+    let last = *recent.last()?;
+    let signature = setup_failure_signature(last);
+    recent
+        .iter()
+        .all(|entry| {
+            matches!(
+                entry.failure_class.as_deref(),
+                Some("harness_error" | "environment_error")
+            ) && setup_failure_signature(entry) == signature
+        })
+        .then(|| {
+            format!(
+                "the same setup failure happened {REPEATED_SETUP_FAILURE_LIMIT} times in a row: {}",
+                last.error_summary.as_deref().unwrap_or_default()
+            )
+        })
+}
 
 /// TICKET-078: observation feed for `decide_next_action` -- one entry per
 /// ticket file in `docs/tickets/`. Reuses exactly the same active-MR
@@ -404,10 +517,27 @@ fn ledger_lookup_for_ticket(
     all_mrs: &[crate::sync::SyncMr],
     ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
 ) -> Option<TicketHistoryLookup> {
+    ledger_lookup_with_setup_reason(
+        work_id,
+        profile,
+        all_mrs,
+        ledger_entries_by_work_id,
+        &mut None,
+    )
+}
+
+fn ledger_lookup_with_setup_reason(
+    work_id: Option<&str>,
+    profile: &Profile,
+    all_mrs: &[crate::sync::SyncMr],
+    ledger_entries_by_work_id: &crate::ledger::LedgerEntriesByWorkId,
+    setup_reason: &mut Option<String>,
+) -> Option<TicketHistoryLookup> {
     let Some(wid) = work_id else {
         return Some((0, 0, None, false, false, false, None));
     };
     let entries = ledger_entries_by_work_id.get(wid);
+    let mut setup_attempts = Vec::new();
     let mut count = 0usize;
     let mut agent_failure_count = 0usize;
     let mut last_failure_class = None;
@@ -438,6 +568,7 @@ fn ledger_lookup_for_ticket(
         // the latest tombstone count. The tombstone itself is not counted
         // as an attempt.
         if e.mode == "clear_attempts" {
+            setup_attempts.clear();
             count = 0;
             agent_failure_count = 0;
             last_failure_class = None;
@@ -468,12 +599,14 @@ fn ledger_lookup_for_ticket(
             continue;
         }
         // A sibling worker already owns the only configured backend/model
-        // slot. The dispatch reached no backend and consumed no execution
-        // attempt, so keep it auditable in the ledger without poisoning
-        // ticket attempt counts or retry/stuck-loop policy.
-        if e.validation_result.as_deref() == Some("deferred_capacity") {
+        // slot, or another loop holds the issue. The dispatch reached no
+        // backend and consumed no execution attempt, so keep it auditable in
+        // the ledger without poisoning ticket attempt counts or
+        // retry/stuck-loop policy.
+        if crate::ledger::gates::launched_no_backend(e) {
             continue;
         }
+        setup_attempts.push(e);
         count += 1;
         // Issue #95: only genuine agent failures count toward the retry
         // cap. Infra-class failures (backend_error, environment_error,
@@ -554,8 +687,20 @@ fn ledger_lookup_for_ticket(
                 })
             })
     });
-    let human_required = effective_gate.is_some();
-    let human_required_reason_code = effective_gate.and_then(|gate| gate.reason_code);
+    let repeated_setup = repeated_setup_reason(&setup_attempts);
+    if effective_gate.is_none() {
+        *setup_reason = repeated_setup.clone();
+    }
+    let human_required = effective_gate.is_some() || repeated_setup.is_some();
+    let human_required_reason_code = if let Some(gate) = effective_gate {
+        gate.reason_code
+    } else {
+        repeated_setup.map(|_| {
+            crate::controller::HumanRequiredReason::RepeatedSetupFailure
+                .as_str()
+                .into()
+        })
+    };
     Some((
         count,
         agent_failure_count,
@@ -703,19 +848,25 @@ pub(crate) fn scan_available_tickets_with_dependencies(
         }
     }
 
-    let (issues, issue_intake_rejections, provider_error) = match try_discover_open_issues(profile)
-    {
-        Ok(discovery) => (
-            discovery
-                .allowed
-                .into_iter()
-                .filter(|issue| !issue_is_auto_dispatch_blocked(&issue.labels))
-                .collect::<Vec<_>>(),
-            discovery.rejected,
-            None,
-        ),
-        Err(error) => (Vec::new(), Vec::new(), Some(format!("{error:#}"))),
-    };
+    let (issues, issue_intake_rejections, claimed_elsewhere, provider_error) =
+        match try_discover_open_issues(profile) {
+            Ok(discovery) => (
+                discovery
+                    .allowed
+                    .into_iter()
+                    .filter(|issue| !issue_is_auto_dispatch_blocked(&issue.labels))
+                    .collect::<Vec<_>>(),
+                discovery.rejected,
+                discovery.claimed_elsewhere,
+                None,
+            ),
+            Err(error) => (
+                Vec::new(),
+                Vec::new(),
+                Default::default(),
+                Some(format!("{error:#}")),
+            ),
+        };
     let dependency_blockers = evaluate_issue_dependencies(profile, &issues);
     let dependency_blocked_ids: std::collections::HashSet<&str> = dependency_blockers
         .iter()
@@ -823,7 +974,9 @@ pub(crate) fn scan_available_tickets_with_dependencies(
             has_active_mr,
             human_required,
             human_required_reason_code,
-            has_active_claim,
+            // A claim another login holds on the provider blocks selection
+            // the same way a sibling worker's local claim does.
+            has_active_claim: has_active_claim || claimed_elsewhere.contains(&issue.number),
         });
     }
 

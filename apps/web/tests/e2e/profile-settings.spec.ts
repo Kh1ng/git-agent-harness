@@ -126,7 +126,7 @@ test('the routing editor sends the named account, and remove and reorder name th
   await request.post(`${MOCK_BASE_URL}/api/mock/reset`);
   const candidate = (model: string, priority: number) => ({
     backend: 'opencode', instance: null, model, quota_pool: null, priority, included_in_quota: true,
-    marginal_cost_usd: null, quota_usage_percent: null, quota_days_remaining: null, requires_approval: false,
+    marginal_cost_usd: null, requires_approval: false,
   });
   await page.route('**/api/config/effective?*', async (route) => {
     const response = await route.fetch();

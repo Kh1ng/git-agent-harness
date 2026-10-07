@@ -1318,7 +1318,7 @@ fn install_linux_defaults_gateway_url_to_central_host() {
 
     let run = |extra: &str| {
         let probe = format!(
-            "PATH={}:$PATH\nHOME={}\n{extra}\n{block}\nprintf '%s' \"$GAH_GATEWAY_URL\"\n",
+            "PATH=\"{}:$PATH\"\nHOME=\"{}\"\n{extra}\n{block}\nprintf '%s' \"$GAH_GATEWAY_URL\"\n",
             tmp.display(),
             home.display()
         );

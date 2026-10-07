@@ -60,6 +60,8 @@ pub enum HumanRequiredReason {
     /// observing a state transition. The durable gate prevents an infinite
     /// retry loop until an operator inspects and releases the item.
     StuckLoopGate,
+    /// Three consecutive attempts failed with the same setup error.
+    RepeatedSetupFailure,
     /// A dispatch reached a terminal harness refusal -- the workflow itself
     /// decided not to retry (e.g. "backend descendant cleanup failed;
     /// refusing to retry"). Recorded as a durable gate so the loop stops
@@ -93,6 +95,7 @@ impl HumanRequiredReason {
             Self::ConfigurationInfra => "configuration_infra",
             Self::FixRetryCapExceeded => "fix_retry_cap_exceeded",
             Self::MergeRetryCapExceeded => "merge_retry_cap_exceeded",
+            Self::RepeatedSetupFailure => "repeated_setup_failure",
             Self::StuckLoopGate => "stuck_loop_gate",
             Self::TerminalHarnessFailure => "terminal_harness_failure",
             Self::ExternalApiApprovalRequired => "external_api_approval_required",
@@ -115,6 +118,7 @@ impl HumanRequiredReason {
             "configuration_infra" => Self::ConfigurationInfra,
             "fix_retry_cap_exceeded" => Self::FixRetryCapExceeded,
             "merge_retry_cap_exceeded" => Self::MergeRetryCapExceeded,
+            "repeated_setup_failure" => Self::RepeatedSetupFailure,
             "stuck_loop_gate" => Self::StuckLoopGate,
             "terminal_harness_failure" => Self::TerminalHarnessFailure,
             "external_api_approval_required" => Self::ExternalApiApprovalRequired,
@@ -136,6 +140,7 @@ impl HumanRequiredReason {
             Self::ConfigurationInfra,
             Self::FixRetryCapExceeded,
             Self::MergeRetryCapExceeded,
+            Self::RepeatedSetupFailure,
             Self::StuckLoopGate,
             Self::TerminalHarnessFailure,
             Self::ExternalApiApprovalRequired,

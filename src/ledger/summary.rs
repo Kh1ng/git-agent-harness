@@ -399,7 +399,7 @@ fn is_auto_routing_failure(entry: &LedgerEntry) -> bool {
 }
 
 fn is_capacity_deferral(entry: &LedgerEntry) -> bool {
-    entry.validation_result.as_deref() == Some("deferred_capacity")
+    super::gates::launched_no_backend(entry)
 }
 
 pub fn build_summary(
