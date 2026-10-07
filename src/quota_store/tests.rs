@@ -313,16 +313,18 @@ fn refresh_vibe_admin_and_store_persists_spend_limit_observation() {
         rec.usage_source.as_deref(),
         Some("mistral_admin_spend_limit")
     );
-    assert!(rec.mistral_admin.is_some());
-    let admin = rec.mistral_admin.as_ref().unwrap();
-    assert!(admin.workspace_usage.is_some());
-    assert!(admin.billing.is_some());
-    assert!(admin.rate_limits.is_some());
+    assert!(serde_json::to_value(&rec)
+        .unwrap()
+        .get("mistral_admin")
+        .is_none());
 
     let records = load(&path).unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].backend, "vibe");
-    assert!(records[0].mistral_admin.is_some());
+    assert!(serde_json::to_value(&records[0])
+        .unwrap()
+        .get("mistral_admin")
+        .is_none());
 }
 
 #[test]
@@ -390,12 +392,20 @@ fn refresh_vibe_admin_and_store_persists_admin_refresh_without_spend_limit() {
     assert_eq!(rec.backend, "vibe");
     assert!(rec.quota_remaining_percent.is_none());
     assert_eq!(rec.usage_source.as_deref(), Some("mistral_admin_refresh"));
-    let admin = rec.mistral_admin.as_ref().expect("admin payload persisted");
-    assert!(admin.workspace_usage.is_some());
-    assert!(admin.billing.is_some());
-    assert!(admin.rate_limits.is_some());
+    assert!(rec.observed_at.is_some());
+    assert!(rec.checked_at.is_some());
     assert_eq!(records[0].backend, "vibe");
-    assert!(records[0].mistral_admin.is_some());
+    assert_eq!(
+        records[0].usage_source.as_deref(),
+        Some("mistral_admin_refresh")
+    );
+    assert!(serde_json::to_value(&rec)
+        .unwrap()
+        .get("mistral_admin")
+        .is_none());
+    let stored: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
+    assert!(stored.get("mistral_admin").is_none());
 }
 
 #[test]
@@ -422,7 +432,6 @@ fn append_then_load_round_trips() {
             checked_at: None,
             check_error: None,
             usage_source: Some("codex_status_json".into()),
-            mistral_admin: None,
             account_usage: None,
             credential_id: None,
         },
@@ -453,14 +462,12 @@ fn load_skips_malformed_line_and_keeps_valid_records() {
         checked_at: None,
         check_error: None,
         usage_source: Some("codex_status_json".into()),
-        mistral_admin: None,
         account_usage: None,
         credential_id: None,
     };
     let good2 = QuotaObservationRecord {
         quota_remaining_percent: Some(100.0 - 20.0),
         observed_at: Some("2026-04-29T10:00:00Z".into()),
-        mistral_admin: None,
         account_usage: None,
         credential_id: None,
         ..good1.clone()
@@ -499,7 +506,6 @@ fn scoped_record(
         checked_at: None,
         check_error: None,
         usage_source: Some("test".into()),
-        mistral_admin: None,
         account_usage: None,
         credential_id: None,
     }
@@ -637,7 +643,6 @@ fn latest_windows_for_backend_returns_every_identity() {
         checked_at: Some("2026-10-04T08:00:00Z".into()),
         check_error: None,
         usage_source: Some("claude_native".into()),
-        mistral_admin: None,
         account_usage: None,
         credential_id: None,
     };
@@ -656,7 +661,6 @@ fn latest_windows_for_backend_returns_every_identity() {
         checked_at: Some("2026-10-04T08:30:00Z".into()),
         check_error: None,
         usage_source: Some("cli_router".into()),
-        mistral_admin: None,
         account_usage: None,
         credential_id: None,
     };
@@ -691,7 +695,6 @@ fn latest_windows_for_backend_failed_check_scopes_to_its_source() {
         checked_at: Some("2026-10-04T08:00:00Z".into()),
         check_error: None,
         usage_source: Some("claude_native".into()),
-        mistral_admin: None,
         account_usage: None,
         credential_id: None,
     };
@@ -747,4 +750,23 @@ fn loading_legacy_jsonl_is_idempotent_and_keeps_instance_unknown() {
     }
 
     assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[test]
+fn load_legacy_mistral_admin_payload_preserves_other_fields() {
+    let (_dir, path) = tmp_store();
+    std::fs::write(&path, r#"{"backend":"vibe","model":"mistral-vibe-cli-latest","quota_remaining_percent":42.0,"observed_at":"2026-10-03T04:00:00Z","checked_at":"2026-10-03T04:00:01Z","usage_source":"mistral_admin_spend_limit","mistral_admin":{"workspace_usage":{"total_tokens":100},"billing":{},"rate_limits":{"requests_per_second":5,"model_limits":[]}}}
+"#).unwrap();
+    let records = load(&path).unwrap();
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.backend, "vibe");
+    assert_eq!(record.model.as_deref(), Some("mistral-vibe-cli-latest"));
+    assert_eq!(record.quota_remaining_percent, Some(42.0));
+    assert_eq!(record.observed_at.as_deref(), Some("2026-10-03T04:00:00Z"));
+    assert_eq!(record.checked_at.as_deref(), Some("2026-10-03T04:00:01Z"));
+    assert_eq!(
+        record.usage_source.as_deref(),
+        Some("mistral_admin_spend_limit")
+    );
 }

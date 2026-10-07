@@ -356,6 +356,7 @@ fn blocked_pr_human_required_is_reported_once() {
         reason_code: Some("fix_retry_cap_exceeded".into()),
         review_contract_version: None,
         remediation_plan: None,
+        skipped: Vec::new(),
     });
     assert!(human_required_already_reported(&history, "real", &action));
     assert!(!human_required_already_reported(&history, "other", &action));

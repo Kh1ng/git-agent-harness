@@ -93,6 +93,12 @@ central service uses port 3774 by default so it can coexist with T3 Code on
 Each macOS update also replaces `~/Applications/GAH.app` after a successful
 native build. A failed replacement restores the previous app.
 
+Factory automation is optional in desktop onboarding and **Settings → This
+computer**. Fresh standalone installs default to off; upgrades preserve existing
+configuration. Disabling factory loops and their watchdog leaves the dashboard,
+chats, agents, repository workflows, and shared maintenance available. See
+[Optional factory automation](docs/OPERATIONS.md#optional-factory-automation).
+
 The installer asks for confirmation before making changes. For unattended
 installs, use `GAH_INSTALL_CONFIRMED=1 scripts/install.sh` to accept the
 installation plan. Supply the desired role and other settings through the

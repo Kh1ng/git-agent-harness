@@ -113,6 +113,11 @@ case "${GAH_GATEWAY_MODE:-}" in
 esac
 [ -z "${GAH_GATEWAY_URL:-}" ] || args+=(--gateway-url "$GAH_GATEWAY_URL")
 [ -z "${GAH_GATEWAY_MEMORYCORE_PATH:-}" ] || args+=(--memorycore "$GAH_GATEWAY_MEMORYCORE_PATH")
+case "${GAH_FACTORY_ENABLED:-}" in
+  true|false) args+=(--factory-enabled "$GAH_FACTORY_ENABLED") ;;
+  "") ;;
+  *) echo "ERROR: GAH_FACTORY_ENABLED must be true or false." >&2; exit 1 ;;
+esac
 [ "${GAH_YES:-}" != 1 ] || args+=(--yes)
 
 if [ "${GAH_YES:-}" = 1 ]; then

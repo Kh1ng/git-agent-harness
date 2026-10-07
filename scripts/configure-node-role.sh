@@ -25,5 +25,14 @@ if [ "$role" = worker ]; then
   fi
 fi
 args=(config set --node-role "$role")
+# Existing configs retain legacy factory behavior. Fresh standalone apps opt out.
+# macOS has no standalone role: its desktop installs central with GAH_STANDALONE=1.
+factory="${GAH_FACTORY_ENABLED:-}"
+standalone="${GAH_STANDALONE:-}"
+[ "$role" != standalone ] || standalone=1
+if [ -z "$factory" ] && [ "$standalone" = 1 ] && [ ! -f "${GAH_CONFIG:-$HOME/.config/gah/config.toml}" ]; then
+  factory=false
+fi
+if [ -n "$factory" ]; then args+=(--factory-enabled "$factory"); fi
 if [ -n "${GAH_CENTRAL_URL:-}" ]; then args+=(--registry-central-url "$GAH_CENTRAL_URL"); fi
 "$@" "${args[@]}"

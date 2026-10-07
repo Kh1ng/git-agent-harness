@@ -341,6 +341,7 @@ pub(super) fn run_backend(
         work_id,
         false,
         hard_timeout_seconds,
+        runner::WriteIntent::Implementation,
     )
 }
 
@@ -358,6 +359,7 @@ pub(super) fn run_backend_for_identity(
     env_path: Option<&str>,
     work_id: Option<&str>,
     hard_timeout_seconds: Option<u64>,
+    write_intent: runner::WriteIntent,
 ) -> Result<runner::RunResult> {
     run_backend_with_reserved_route(
         identity,
@@ -373,6 +375,7 @@ pub(super) fn run_backend_for_identity(
         work_id,
         false,
         hard_timeout_seconds,
+        write_intent,
     )
 }
 
@@ -391,6 +394,7 @@ pub(super) fn run_backend_with_reserved_route(
     work_id: Option<&str>,
     route_slot_already_reserved: bool,
     hard_timeout_seconds: Option<u64>,
+    write_intent: runner::WriteIntent,
 ) -> Result<runner::RunResult> {
     // Live incident (2026-07-11): concurrent dispatches landing on the same
     // shared free-tier backend+model (opencode/hy3-free) silently rate-limit.
@@ -577,6 +581,7 @@ pub(super) fn run_backend_with_reserved_route(
         env_vars: &env_vars,
         idle_timeout_seconds: shape.idle_timeout_seconds,
         print_timeout_seconds: shape.print_timeout_seconds,
+        write_intent,
     });
     if let Some(origin_before) = origin_before {
         let origin_after = worktree::git(&["remote", "get-url", "origin"], wt)

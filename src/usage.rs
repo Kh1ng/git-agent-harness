@@ -609,7 +609,6 @@ pub fn codex_rate_limit_windows(
                 checked_at: observed_at.clone(),
                 check_error: None,
                 usage_source: Some("codex_app_server".into()),
-                mistral_admin: None,
                 account_usage: None,
             })
         })

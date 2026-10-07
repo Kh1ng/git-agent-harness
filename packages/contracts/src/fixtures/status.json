@@ -90,7 +90,9 @@
     "role": "central"
   },
   "node_capacity": {
+    "cpu_ceiling_percent": 90,
     "memory_floor_mib": 0,
+    "worker_cpu_cores": 2,
     "worker_memory_mib": 4096
   },
   "observations": {
