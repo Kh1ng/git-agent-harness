@@ -123,7 +123,9 @@ fn active_claim<'a>(entries: impl IntoIterator<Item = &'a LedgerEntry>) -> Optio
 /// Both entries do carry the dispatch's session directory, which is unique
 /// per run: any non-stale execution or outcome entry written for the
 /// claim's session shows the run ended. A claim without a session directory
-/// (written before #1466) stays active until it goes stale.
+/// (written before #1466) stays active until it goes stale. The full ledger
+/// read here happens only once `active_claim` has found a non-stale claim,
+/// not on every dispatch.
 fn claim_run_has_ended(cfg: &GahConfig, claim: &LedgerEntry) -> bool {
     let Some(session_dir) = claim.session_dir.as_deref() else {
         return false;
