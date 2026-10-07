@@ -138,6 +138,87 @@ fn colocated_memory_preserves_backend_configuration_without_model_key_prompt() {
         .any(|(key, _)| *key == "GAH_GATEWAY_LLM_API_KEY"));
 }
 
+/// Issue #1319: colocated memory needs no model provider and no key.
+#[test]
+fn colocated_memory_needs_no_provider_or_key() {
+    let path = PathBuf::from("/memory");
+    let host = ready_host()
+        .with_path(path.join("src/gateway/server.ts"))
+        .with_path(path.join("node_modules"));
+    let model_settings = |env: &InstallEnv| {
+        env.0
+            .iter()
+            .filter(|(key, _)| {
+                key.starts_with("GAH_GATEWAY_")
+                    && !matches!(*key, "GAH_GATEWAY_MODE" | "GAH_GATEWAY_MEMORYCORE_PATH")
+            })
+            .count()
+    };
+    let options = |yes: bool| Options {
+        memory: Some(MemoryMode::Colocated),
+        memorycore: Some(path.clone()),
+        yes,
+        ..Default::default()
+    };
+    let mut effects = Recorder::default();
+
+    // Unattended, with nothing in the environment.
+    let mut prompter = Script::default();
+    let mut env = InstallEnv::default();
+    Setup {
+        host: &host,
+        prompter: &mut prompter,
+        effects: &mut effects,
+        options: options(true),
+    }
+    .memory_settings(&mut env)
+    .unwrap();
+    assert!(prompter.asked.is_empty(), "--yes never prompts");
+    assert_eq!(model_settings(&env), 0, "{:?}", env.0);
+
+    // Interactive: the default answer is no provider, and nothing more is asked.
+    let mut prompter = Script {
+        answers: ["0".to_string()].into(),
+        ..Default::default()
+    };
+    let mut env = InstallEnv::default();
+    Setup {
+        host: &host,
+        prompter: &mut prompter,
+        effects: &mut effects,
+        options: options(false),
+    }
+    .memory_settings(&mut env)
+    .unwrap();
+    assert_eq!(prompter.asked.len(), 1, "{:?}", prompter.asked);
+    assert_eq!(model_settings(&env), 0, "{:?}", env.0);
+
+    // Interactive Ollama: endpoint, models and dimensions, but no secret.
+    let mut prompter = Script {
+        answers: ["1", "", "", "", ""].map(String::from).into(),
+        ..Default::default()
+    };
+    let mut env = InstallEnv::default();
+    Setup {
+        host: &host,
+        prompter: &mut prompter,
+        effects: &mut effects,
+        options: options(false),
+    }
+    .memory_settings(&mut env)
+    .unwrap();
+    assert!(env.0.contains(&("GAH_GATEWAY_PROVIDER", "ollama".into())));
+    assert!(env
+        .0
+        .contains(&("GAH_GATEWAY_ENDPOINT", "http://127.0.0.1:11434/v1".into())));
+    assert!(
+        !prompter.asked.iter().any(|q| q.contains("key")),
+        "{:?}",
+        prompter.asked
+    );
+    assert!(!env.0.iter().any(|(key, _)| key.ends_with("_API_KEY")));
+}
+
 #[test]
 fn colocated_memory_forwards_a_generation_key_from_the_environment() {
     let path = PathBuf::from("/memory");

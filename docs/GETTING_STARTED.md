@@ -129,9 +129,10 @@ For the standalone desktop app, open **Settings > This computer > Repository too
 Shared memory lets chats and dispatched work recall a project's earlier
 context. It costs more than anything else on this list: running it on the
 central node needs a checkout of the MemoryCore gateway, its npm packages,
-and backend-specific embedding and optional generation configuration.
-A generation API key is not an installer prerequisite. Gateway access
-authentication is separate from model credentials. Skip it
+and nothing else: no model provider and no API key. Setup then offers
+Ollama (or another local endpoint that needs no key) or an OpenAI-compatible
+API for vector recall and memory extraction; unattended, set
+`GAH_GATEWAY_PROVIDER` to `ollama` or `openai` to pick one. Skip it
 at first; add it later with:
 
 ```bash
@@ -175,8 +176,8 @@ they stay out of shell history and process lists.
 | --- | --- |
 | `COORDINATOR_TOKEN` | a worker's access token for its central node |
 | `GAH_GATEWAY_API_KEY` | a remote memory gateway's key |
-| `GAH_GATEWAY_LLM_API_KEY` | optional generation credential for the colocated gateway |
-| `GAH_GATEWAY_EMBEDDING_API_KEY` | the colocated gateway's embedding credential (required for `openai`) |
+| `GAH_GATEWAY_LLM_API_KEY` | the colocated gateway's generation key (always optional) |
+| `GAH_GATEWAY_EMBEDDING_API_KEY` | the colocated gateway's embedding key (only for `GAH_GATEWAY_PROVIDER=openai`) |
 
 With the paste line, set `GAH_YES=1` and the `GAH_NODE_ROLE`,
 `GAH_CENTRAL_URL`, and `GAH_GATEWAY_*` variables on the `bash` side of the

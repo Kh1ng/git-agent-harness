@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Validate the installer's provider YAML against a MemoryCore gateway checkout.
 # Seeds tdai-gateway.local.yaml from the checkout's tracked standalone template
-# (as the installers do), applies install-linux.sh's gateway-yaml-mutation
-# block for GAH_GATEWAY_PROVIDER=ollama, starts the real gateway on scratch
-# ports with scratch data, and exercises /health, /capture, and /recall.
+# (as the installers do), applies the installers' provider step
+# (scripts/gateway-provider.mjs) for GAH_GATEWAY_PROVIDER=ollama, starts the
+# real gateway on a scratch port with scratch data, and exercises /health,
+# /capture, /recall, and /search/conversations.
 #
 #   scripts/validate-gateway-provider.sh <memorycore-checkout>
 #
 # By default the backend is scripts/ollama-api-stub.mjs. Set
-# VALIDATION_ENDPOINT=http://127.0.0.1:11434/v1 to validate a live Ollama.
+# VALIDATION_ENDPOINT=http://127.0.0.1:11434/v1 to validate a live Ollama
+# (pull its models first; VALIDATION_LLM_MODEL, VALIDATION_EMBEDDING_MODEL and
+# VALIDATION_EMBEDDING_DIMENSIONS override the installer defaults).
 # Output is sanitized: no credentials, only request shapes and status fields.
 # Requires node, npx (MemoryCore dependencies installed), and curl.
 set -euo pipefail
@@ -39,11 +42,8 @@ else
 fi
 
 cp "$mc/tdai-gateway.standalone.yaml" "$work/tdai-gateway.local.yaml"
-block="$(awk '/# gateway-yaml-mutation:start/{f=1} /# gateway-yaml-mutation:end/{f=0} f' "$gah/scripts/install-linux.sh")"
-env -i PATH="$PATH" HOME="$work" \
-  GAH_GATEWAY_MEMORYCORE_PATH="$mc" gateway_local_config="$work/tdai-gateway.local.yaml" \
-  GAH_GATEWAY_PROVIDER=ollama GAH_GATEWAY_ENDPOINT="$endpoint" \
-  bash -euc "$block"
+# The same provider step both installers run.
+node "$gah/scripts/gateway-provider.mjs" "$mc" "$work/tdai-gateway.local.yaml" ollama "$endpoint"   "${VALIDATION_LLM_MODEL:-}" "${VALIDATION_EMBEDDING_MODEL:-}" "${VALIDATION_EMBEDDING_DIMENSIONS:-}" >/dev/null
 
 json() { (cd "$mc" && node -e "$1" "${@:2}"); }
 echo "== installer-written provider configuration"
@@ -74,7 +74,16 @@ echo "== POST /recall"
 curl -fsS "${auth[@]}" -d '{"query":"Where does lighthouse deploy?","session_key":"gah:validation"}' \
   "http://127.0.0.1:$gw_port/recall" >"$work/recall.json"
 json "const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));console.log(JSON.stringify({code:r.code,message:r.message,strategy:r.strategy,memory_count:r.memory_count}))" "$work/recall.json"
-sleep 2
+# The query shares no keyword with the captured turn, so a hit comes from
+# the vector index: the gateway embedded the query through the backend.
+echo "== POST /search/conversations"
+curl -fsS "${auth[@]}" -d '{"query":"Which environment receives the beacon tower release?","session_key":"gah:validation","limit":3}'   "http://127.0.0.1:$gw_port/search/conversations" >"$work/search.json"
+json "const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));console.log(JSON.stringify({total:r.total,found_captured_turn:String(r.results).includes('staging-west')}))" "$work/search.json"
+# Ending the session flushes it to memory extraction, the generation model's job.
+echo "== POST /session/end"
+curl -fsS "${auth[@]}" -d '{"session_key":"gah:validation"}' "http://127.0.0.1:$gw_port/session/end" >"$work/end.json"
+json "const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));console.log(JSON.stringify(r))" "$work/end.json"
+sleep "${VALIDATION_EXTRACTION_WAIT:-20}"
 if [ -f "$work/stub.log" ]; then
   echo "== backend requests observed by the stub"
   sort "$work/stub.log" | uniq -c

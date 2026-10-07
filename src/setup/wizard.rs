@@ -412,40 +412,31 @@ impl<'a> Setup<'a> {
                     ("GAH_GATEWAY_MODE", "colocated".to_string()),
                     ("GAH_GATEWAY_MEMORYCORE_PATH", path.display().to_string()),
                 ]);
+                // No provider is a complete answer: the gateway then keeps its
+                // existing configuration, or starts from the template with
+                // keyword recall and no model calls.
                 let existing_config = self.host.exists(&path.join("tdai-gateway.local.yaml"));
                 let provider = match self.host.env("GAH_GATEWAY_PROVIDER") {
                     Some(val) => Some(val),
-                    None if existing_config && self.options.yes => None,
-                    None if self.options.yes => bail!("GAH_GATEWAY_PROVIDER must be set when running non-interactively without an existing tdai-gateway.local.yaml"),
+                    None if self.options.yes => None,
                     None => {
-                        if existing_config {
-                            let opts = [
-                                "Keep existing configuration".to_string(),
-                                "Ollama (local, unmetered)".to_string(),
-                                "OpenAI / Compatible".to_string(),
-                            ];
-                            match self.ask_choice(
-                                "Select the model provider for MemoryCore",
-                                &opts,
-                                0,
-                            )? {
-                                0 => None,
-                                2 => Some("openai".to_string()),
-                                _ => Some("ollama".to_string()),
-                            }
-                        } else {
-                            let opts = [
-                                "Ollama (local, unmetered)".to_string(),
-                                "OpenAI / Compatible".to_string(),
-                            ];
-                            match self.ask_choice(
-                                "Select the model provider for MemoryCore",
-                                &opts,
-                                0,
-                            )? {
-                                1 => Some("openai".to_string()),
-                                _ => Some("ollama".to_string()),
-                            }
+                        let opts = [
+                            if existing_config {
+                                "Keep the existing configuration".to_string()
+                            } else {
+                                "None (keyword recall only, no model calls)".to_string()
+                            },
+                            "Ollama or another local endpoint that needs no key".to_string(),
+                            "OpenAI-compatible API (needs an embedding key)".to_string(),
+                        ];
+                        match self.ask_choice(
+                            "Select the model provider for shared memory",
+                            &opts,
+                            0,
+                        )? {
+                            1 => Some("ollama".to_string()),
+                            2 => Some("openai".to_string()),
+                            _ => None,
                         }
                     }
                 };

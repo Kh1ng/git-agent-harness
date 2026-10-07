@@ -82,7 +82,6 @@ test('ColocatedProviderSection generates a setup command based on user inputs', 
   await providerSelect.selectOption('ollama');
   await component.getByRole('button', { name: 'Reveal setup command' }).click();
   await expect(commandPre).not.toContainText('read -rsp');
-  await expect(commandPre).toContainText("GAH_GATEWAY_MEMORYCORE_PATH='/srv/it'\\''s here'");
   expect(runCommand((await commandPre.textContent()) ?? '')).toContain("path=/srv/it's here\n");
 
   let clipboardText = '';

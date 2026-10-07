@@ -538,13 +538,11 @@ scripts/install.sh
 
 This seeds `tdai-gateway.local.yaml` from the checkout's tracked
 `tdai-gateway.standalone.yaml` template if one doesn't already exist
-(OpenAI-compatible LLM, embedding off / BM25-only recall — edit that file
-directly for a different LLM/embedding backend, e.g. a local LiteLLM
-proxy). Model keys are not required by the installer; configure them only
-when the selected backend requires credentials. `GAH_GATEWAY_LLM_API_KEY`
-optionally updates the generation credential. The installer preserves existing
-provider credentials and gateway authentication, generates a
-`TDAI_GATEWAY_API_KEY` only if none exists, and stores credentials
+(embedding off, keyword recall only). No model key is required; see
+[Model provider for the colocated gateway](#model-provider-for-the-colocated-gateway-issue-1319)
+to select Ollama or an OpenAI-compatible API. The installer keeps existing
+model credentials and gateway authentication, generates a
+`TDAI_GATEWAY_API_KEY` only if none exists, stores credentials
 in `~/.config/gah/tdai-gateway.env` (`chmod 600`), installs
 the platform service, and enables it. Linux installs the tracked systemd
 unit. macOS generates a launchd agent from the same settings. The installer
@@ -558,46 +556,150 @@ Re-running `scripts/install.sh` with different `GAH_GATEWAY_*` values updates
 only the gateway keys. The installer does not change an existing `HOST`
 value.
 
-### Provider configuration and validation (issue #1319)
+### Model provider for the colocated gateway (issue #1319)
 
-`GAH_GATEWAY_PROVIDER=openai|ollama` makes the installer write the selected
-backend into `tdai-gateway.local.yaml`. Optional overrides:
-`GAH_GATEWAY_ENDPOINT`, `GAH_GATEWAY_LLM_MODEL`, `GAH_GATEWAY_EMBEDDING_MODEL`,
-and `GAH_GATEWAY_EMBEDDING_DIMENSIONS`.
+Shared memory needs no model provider and no API key. With
+`GAH_GATEWAY_PROVIDER` unset, the installer leaves an existing
+`tdai-gateway.local.yaml` alone, or seeds the template: keyword (BM25)
+recall, no embedding, no generation calls.
 
-**Supported gateway contract.** Validated against
+The gateway has three separate settings, which setup used to treat as one:
+
+| Setting | Variable | Needed |
+| --- | --- | --- |
+| Gateway access authentication | `GAH_GATEWAY_API_KEY`, stored as `TDAI_GATEWAY_API_KEY` | Always; generated when not given |
+| Embedding model (vector recall) | `GAH_GATEWAY_EMBEDDING_MODEL`, `GAH_GATEWAY_EMBEDDING_DIMENSIONS`, `GAH_GATEWAY_EMBEDDING_API_KEY` | Only with a provider; the key only for `openai` |
+| Generation model (memory extraction) | `GAH_GATEWAY_LLM_MODEL`, `GAH_GATEWAY_LLM_API_KEY` | Optional with every provider |
+
+`GAH_GATEWAY_PROVIDER` selects the backend for both models, and
+`GAH_GATEWAY_ENDPOINT` overrides its address:
+
+- `ollama`: Ollama, or any local OpenAI-compatible server that needs no key
+  (LM Studio, a LiteLLM proxy, vLLM). No credential is asked for or stored.
+- `openai`: any authenticated OpenAI-compatible API. The embedding key is
+  required; the generation key is optional, and without it the gateway makes
+  no generation calls.
+
+`gah setup`, Settings > Memory > Colocated Gateway Provider, and Add a Node
+(for a central or standalone node) all collect these same values and pass
+them to the installer. `gah setup --yes` selects a provider only when
+`GAH_GATEWAY_PROVIDER` is set.
+
+**Gateway contract.** Read from
 [`Kh1ng/TencentDB-Agent-Memory`](https://github.com/Kh1ng/TencentDB-Agent-Memory)
-`main` at `a0f993ba1eeda16243a8267ba9d1929074b806f9` (validation was stub-only; live Ollama validation was not performed). That revision has no
-Ollama-specific embedding code. `MemoryCore/src/config.ts` treats every
+`main` at `a0f993ba1eeda16243a8267ba9d1929074b806f9`. That revision has no
+Ollama-specific code. `MemoryCore/src/config.ts` treats every
 `memory.embedding.provider` other than `none`, `local`, and `qclaw` as a
-remote OpenAI-compatible service. The service is disabled, with only a log
-line, unless `apiKey`, `baseUrl`, `model`, and `dimensions` are all set.
-`src/core/store/embedding.ts` posts to `${baseUrl}/embeddings`. The
-generation LLM is enabled only with a non-empty `llm.apiKey`;
-`TDAI_LLM_API_KEY` overrides it. String values of the form
-`"${VAR}"` expand from the gateway environment, which the service loads from
-`~/.config/gah/tdai-gateway.env`. `GET /health` reports
-`stores.embeddingService` (`true` only when embedding is enabled).
+remote OpenAI-compatible service, and disables it, with only a log line,
+unless `apiKey`, `baseUrl`, `model`, and `dimensions` are all set.
+`src/core/store/embedding.ts` posts to `${baseUrl}/embeddings`.
+`src/gateway/config.ts` uses the generation model only with a non-empty
+`llm.apiKey`; a non-empty `TDAI_LLM_API_KEY` in the gateway environment
+overrides the file, and an empty one is ignored. A string of the form
+`"${VAR}"` expands from the gateway environment, which the service loads
+from `~/.config/gah/tdai-gateway.env`. `GET /health` needs no
+authentication and reports `stores.embeddingService`.
 
-To meet that contract, the installer writes:
+Because that gateway calls a backend only with a non-empty key, the `ollama`
+provider writes the literal `ollama` as the key. It is not a credential:
+Ollama ignores it, and it is the value Ollama's own OpenAI-compatibility
+guide uses. `scripts/gateway-provider.mjs`, which both installers run,
+writes:
 
 | Field | `ollama` | `openai` |
 | --- | --- | --- |
-| `llm.baseUrl`, `memory.embedding.baseUrl` | endpoint, default `http://127.0.0.1:11434/v1` (Ollama's OpenAI-compatible API) | endpoint, default `https://api.openai.com/v1` |
+| `llm.baseUrl`, `memory.embedding.baseUrl` | endpoint, default `http://127.0.0.1:11434/v1` | endpoint, default `https://api.openai.com/v1` |
 | `llm.model` | default `llama3` | default `gpt-4o` |
-| `llm.apiKey` | `ollama`, or `${TDAI_LLM_API_KEY}` when `GAH_GATEWAY_LLM_API_KEY` is given | `${TDAI_LLM_API_KEY}` when `GAH_GATEWAY_LLM_API_KEY` is given, otherwise empty string or existing value |
 | `memory.embedding.model` | default `nomic-embed-text` | default `text-embedding-3-small` |
-| `memory.embedding.dimensions` | `GAH_GATEWAY_EMBEDDING_DIMENSIONS`, or the known size of the model (`nomic-embed-text` 768) | the same (`text-embedding-3-small` 1536) |
-| `memory.embedding.sendDimensions` | `false` | `true` |
-| `memory.embedding.apiKey` | `ollama`, or `${TDAI_EMBEDDING_API_KEY}` when `GAH_GATEWAY_EMBEDDING_API_KEY` is given | `${TDAI_EMBEDDING_API_KEY}` |
+| `memory.embedding.dimensions` | `GAH_GATEWAY_EMBEDDING_DIMENSIONS`, or the known size of the model | the same |
+| `memory.embedding.sendDimensions` | `false` (Ollama rejects the field) | `true` |
+| `llm.apiKey` | `ollama`, or `${TDAI_LLM_API_KEY}` when a generation key is given | `${TDAI_LLM_API_KEY}` |
+| `memory.embedding.apiKey` | `ollama`, or `${TDAI_EMBEDDING_API_KEY}` when an embedding key is given | `${TDAI_EMBEDDING_API_KEY}` |
 
-If the embedding model's size is unknown and
-`GAH_GATEWAY_EMBEDDING_DIMENSIONS` is unset, the installer stops. It does not
-guess. Credentials go only to `tdai-gateway.env`, never into the YAML. The
-OpenAI commands that Settings generates prompt privately for an optional
-generation key and the required embedding key. Ollama commands do not
-prompt.
+Rules the installers keep:
 
+- A given key is stored only in `tdai-gateway.env`, never in the YAML.
+- Without a new key, a key already in the YAML or the env file is kept while
+  its endpoint is unchanged. When the endpoint changes, the stored key is
+  cleared, so it is never sent to a backend it was not issued for.
+- `openai` with no embedding key, given or stored, stops before anything is
+  written.
+- An embedding model of unknown size stops the install until
+  `GAH_GATEWAY_EMBEDDING_DIMENSIONS` is set. The installer does not guess.
+- Linux restarts a gateway that was already running, so it picks up the new
+  provider. The install then fails unless `/health` reports
+  `embeddingService: true`. That shows the configuration is complete; it
+  does not show that the model is pulled or the endpoint reachable.
+
+**Validation.** `scripts/validate-gateway-provider.sh <MemoryCore>` seeds
+the template, applies the installers' provider step, starts the real
+gateway on a scratch port with scratch data, and calls it. Run on
+2026-10-07 on Linux (WSL2, Node 22.22.1) against a live Ollama 0.40.0 with
+`nomic-embed-text` and `qwen2.5:0.5b` pulled, and no API key anywhere:
+
+```console
+$ VALIDATION_ENDPOINT=http://127.0.0.1:11434/v1 VALIDATION_LLM_MODEL=qwen2.5:0.5b \
+    scripts/validate-gateway-provider.sh ~/TencentDB-Agent-Memory/MemoryCore
+== MemoryCore revision: a0f993ba1eeda16243a8267ba9d1929074b806f9
+== backend: http://127.0.0.1:11434/v1
+== installer-written provider configuration
+{
+  "llm": {
+    "baseUrl": "http://127.0.0.1:11434/v1",
+    "model": "qwen2.5:0.5b",
+    "apiKey": "ollama"
+  },
+  "embedding": {
+    "provider": "ollama",
+    "baseUrl": "http://127.0.0.1:11434/v1",
+    "model": "nomic-embed-text",
+    "dimensions": 768,
+    "sendDimensions": false,
+    "apiKey": "ollama"
+  }
+}
+== GET /health
+{"status":"ok","stores":{"vectorStore":true,"embeddingService":true}}
+== POST /capture
+{"l0_recorded":2,"scheduler_notified":true}
+== POST /recall
+{"code":0,"message":"ok","memory_count":0}
+== POST /search/conversations
+{"total":2,"found_captured_turn":true}
+== POST /session/end
+{"flushed":true}
+== gateway embedding log lines
+      1 Background embedding complete: 2/2 vectors updated
+      2 Using remote embedding (provider=ollama, model=nomic-embed-text)
+      1 [hybrid-embedding] Embedding OK, dims=768
+```
+
+Ollama's own request log for that run:
+
+```text
+      1  200  POST "/v1/chat/completions"
+      3  200  POST "/v1/embeddings"
+```
+
+What this shows: the installer-written configuration starts the gateway
+with embedding enabled, captured turns are embedded by Ollama, a query with
+no keyword in common with the captured turn finds it through the vector
+index, and ending the session sends one generation request to Ollama.
+
+What it does not show:
+
+- `/recall` returned `memory_count: 0`. Recall reads extracted memories,
+  and a two-turn session produced none in the time the script waits. On a
+  CPU-only machine, a `/recall` that overlaps a generation request can also
+  exceed the gateway's five-second recall timeout.
+- The `openai` provider was not run against a hosted API; no key was used
+  for this work. Its configuration is covered by `tests/installer_scripts.rs`.
+- `install-linux.sh` and `install-macos.sh` were not run end to end on a
+  host. Their provider and credential steps run in
+  `tests/installer_scripts.rs`, and the provider step ran live as above.
+
+Without `VALIDATION_ENDPOINT` the script uses `scripts/ollama-api-stub.mjs`,
+a stand-in that records request shapes, for machines with no Ollama.
 
 ### Network exposure (issue #879)
 

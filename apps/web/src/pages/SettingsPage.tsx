@@ -1206,7 +1206,7 @@ export function AddNodeSection() {
           <div className="pl-4 border-l-2 border-subtle mb-3">
             <p className="text-xs font-semibold text-primary mb-2">Colocated Gateway Provider</p>
             <label className="block text-xs text-secondary mb-2">Provider
-              <select disabled={busy} className="input w-full mt-1 min-h-11" value={provider} onChange={(event) => { setProvider(event.target.value as any); setCommand(''); }}>
+              <select disabled={busy} className="input w-full mt-1 min-h-11" value={provider} onChange={(event) => { setProvider(event.target.value as 'none' | 'openai' | 'ollama'); setCommand(''); }}>
                 <option value="none">None (skip memory gateway)</option>
                 <option value="openai">OpenAI / Compatible</option>
                 <option value="ollama">Ollama (local, unmetered)</option>
@@ -1550,7 +1550,7 @@ export function ColocatedProviderSection() {
         <input type="text" className="input w-full mt-1 min-h-11" value={memoryCorePath} onChange={(e) => { setMemoryCorePath(e.target.value); setCommand(null); }} />
       </label>
       <label className="block text-xs text-secondary mb-2">Provider
-        <select className="input w-full mt-1 min-h-11" value={provider} onChange={(e) => { setProvider(e.target.value as any); setCommand(null); }}>
+        <select className="input w-full mt-1 min-h-11" value={provider} onChange={(e) => { setProvider(e.target.value as 'none' | 'openai' | 'ollama'); setCommand(null); }}>
           <option value="none">None (keep current)</option>
           <option value="openai">OpenAI / Compatible</option>
           <option value="ollama">Ollama (local, unmetered)</option>

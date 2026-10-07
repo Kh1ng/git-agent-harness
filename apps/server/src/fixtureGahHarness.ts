@@ -61,7 +61,7 @@ export async function withFixtureServer(
 
   const app = createServer();
   const server = http.createServer(app);
-  await new Promise<void>((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  await new Promise<void>((resolvePromise) => server.listen(0, resolvePromise));
   const { port } = server.address() as AddressInfo;
 
   try {

@@ -76,100 +76,49 @@ if [ "$role" = central ]; then
         cp "$GAH_GATEWAY_MEMORYCORE_PATH/tdai-gateway.standalone.yaml" "$gateway_config"
       fi
       # gateway-yaml-mutation:start
+      gateway_env_file="$HOME/.config/gah/tdai-gateway.env"
+      gateway_provider_changes=""
       if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
-          node --input-type=module - "$GAH_GATEWAY_MEMORYCORE_PATH" "$gateway_config" "$GAH_GATEWAY_PROVIDER" "${GAH_GATEWAY_ENDPOINT:-}" "${GAH_GATEWAY_LLM_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_DIMENSIONS:-}" "${GAH_GATEWAY_EMBEDDING_API_KEY:+given}" "${GAH_GATEWAY_LLM_API_KEY:+given}" <<'JAVASCRIPT'
-import { readFileSync, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
-const require = createRequire(resolve(process.argv[2], 'package.json'));
-const yaml = require('yaml');
-const [configPath, provider, endpoint, llmModel, embedModel, dimensionsArg, embeddingKeyGiven, llmKeyGiven] = process.argv.slice(3);
-// Supported contract (Kh1ng/TencentDB-Agent-Memory MemoryCore src/config.ts):
-// every embedding provider except none/local/qclaw is an OpenAI-compatible
-// service that requests `${baseUrl}/embeddings` and is disabled unless
-// apiKey, baseUrl, model, and dimensions are all set.
-const providers = {
-  ollama: { baseUrl: 'http://127.0.0.1:11434/v1', llmModel: 'llama3', embedModel: 'nomic-embed-text' },
-  openai: { baseUrl: 'https://api.openai.com/v1', llmModel: 'gpt-4o', embedModel: 'text-embedding-3-small' },
-};
-const defaults = Object.hasOwn(providers, provider) ? providers[provider] : undefined;
-if (!defaults) {
-  console.error(`ERROR: GAH_GATEWAY_PROVIDER must be openai or ollama, not '${provider}'.`);
-  process.exit(1);
-}
-const knownDimensions = new Map([
-  ['nomic-embed-text', 768], ['mxbai-embed-large', 1024], ['all-minilm', 384],
-  ['text-embedding-3-small', 1536], ['text-embedding-3-large', 3072], ['text-embedding-ada-002', 1536],
-]);
-const baseUrl = endpoint || defaults.baseUrl;
-const model = embedModel || defaults.embedModel;
-const dimensions = dimensionsArg ? Number(dimensionsArg) : knownDimensions.get(model);
-if (!Number.isInteger(dimensions) || dimensions <= 0) {
-  console.error(`ERROR: set GAH_GATEWAY_EMBEDDING_DIMENSIONS to the vector size of embedding model '${model}'.`);
-  process.exit(1);
-}
-const doc = yaml.parseDocument(readFileSync(configPath, 'utf8'));
-const existingProvider = doc.getIn(['memory', 'embedding', 'provider']);
-const existingLlmBaseUrl = doc.getIn(['llm', 'baseUrl']);
-const isLlmChanged = existingLlmBaseUrl && existingLlmBaseUrl !== baseUrl;
-const existingEmbedBaseUrl = doc.getIn(['memory', 'embedding', 'baseUrl']);
-const isEmbedChanged = existingProvider && (existingProvider !== provider || (existingEmbedBaseUrl && existingEmbedBaseUrl !== baseUrl));
-
-if (isLlmChanged) {
-  writeFileSync(configPath + '.llm.changed', '1');
-}
-if (isEmbedChanged) {
-  writeFileSync(configPath + '.embed.changed', '1');
-}
-const existingLlmKey = isLlmChanged ? '' : doc.getIn(['llm', 'apiKey']);
-doc.setIn(['llm', 'baseUrl'], baseUrl);
-doc.setIn(['llm', 'model'], llmModel || defaults.llmModel);
-// Ollama ignores bearer credentials, but the gateway enables generation and
-// embedding only with a non-empty key. The literal placeholder is not a
-// secret; TDAI_LLM_API_KEY still overrides llm.apiKey when it is set.
-doc.setIn(['llm', 'apiKey'], provider === 'ollama' && !llmKeyGiven ? 'ollama' : (llmKeyGiven ? '${TDAI_LLM_API_KEY}' : (existingLlmKey || '')));
-doc.setIn(['memory', 'embedding', 'provider'], provider);
-doc.setIn(['memory', 'embedding', 'baseUrl'], baseUrl);
-doc.setIn(['memory', 'embedding', 'model'], model);
-doc.setIn(['memory', 'embedding', 'dimensions'], dimensions);
-doc.setIn(['memory', 'embedding', 'sendDimensions'], provider !== 'ollama');
-doc.setIn(['memory', 'embedding', 'apiKey'], provider === 'ollama' && !embeddingKeyGiven ? 'ollama' : '${TDAI_EMBEDDING_API_KEY}');
-writeFileSync(configPath, String(doc));
-JAVASCRIPT
+        gateway_embedding_key_stored=""
+        if "${gah_cli[@]}" installer env-has --file "$gateway_env_file" TDAI_EMBEDDING_API_KEY >/dev/null 2>&1; then
+          gateway_embedding_key_stored=stored
+        fi
+        # Prints what changed; it never sees a credential, only whether one exists.
+        gateway_provider_changes="$(node "$repo_root/scripts/gateway-provider.mjs" "$GAH_GATEWAY_MEMORYCORE_PATH" "$gateway_config" "$GAH_GATEWAY_PROVIDER" "${GAH_GATEWAY_ENDPOINT:-}" "${GAH_GATEWAY_LLM_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_MODEL:-}" "${GAH_GATEWAY_EMBEDDING_DIMENSIONS:-}" "${GAH_GATEWAY_EMBEDDING_API_KEY:+given}" "${GAH_GATEWAY_LLM_API_KEY:+given}" "$gateway_embedding_key_stored")"
       fi
       # gateway-yaml-mutation:end
-      # gateway-env-setup:start
-      gateway_env="$HOME/.config/gah/tdai-gateway.env"
-      export GAH_MACOS_GATEWAY_URL=http://127.0.0.1:8420
-      
-      llm_changed=0
-      if [ -f "${gateway_config:-}.llm.changed" ]; then
-        llm_changed=1
-        rm -f "${gateway_config:-}.llm.changed"
-      fi
-      embed_changed=0
-      if [ -f "${gateway_config:-}.embed.changed" ]; then
-        embed_changed=1
-        rm -f "${gateway_config:-}.embed.changed"
-      fi
 
-      # Values travel on stdin; preserve existing provider and access credentials.
+      # gateway-env-setup:start
+      install -d -m 0700 "$(dirname "$gateway_env_file")"
+      # Gateway access authentication is separate from any model credential.
       if [ -n "${GAH_GATEWAY_API_KEY:-}" ]; then
-        printf '%s' "$GAH_GATEWAY_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_GATEWAY_API_KEY
-      elif ! "${gah_cli[@]}" installer env-has --file "$gateway_env" TDAI_GATEWAY_API_KEY >/dev/null 2>&1; then
-        openssl rand -hex 24 | tr -d '\n' | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_GATEWAY_API_KEY
+        printf '%s' "$GAH_GATEWAY_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env_file" TDAI_GATEWAY_API_KEY
+        echo "Wrote the given gateway API key to $gateway_env_file"
+      elif ! "${gah_cli[@]}" installer env-has --file "$gateway_env_file" TDAI_GATEWAY_API_KEY >/dev/null 2>&1; then
+        printf '%s' "$(openssl rand -hex 24)" | "${gah_cli[@]}" installer env-set --file "$gateway_env_file" TDAI_GATEWAY_API_KEY
+        echo "Generated a gateway API key in $gateway_env_file"
+      else
+        echo "Kept the existing gateway API key in $gateway_env_file"
       fi
+      # Model credentials are optional. A given key replaces only its own line. A
+      # stored key is kept unless its endpoint changed, so a key is never sent to
+      # a backend it was not issued for.
       if [ -n "${GAH_GATEWAY_LLM_API_KEY:-}" ]; then
-        printf '%s' "$GAH_GATEWAY_LLM_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_LLM_API_KEY
-      elif [ "$llm_changed" = "1" ]; then
-        printf "" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_LLM_API_KEY
+        printf '%s' "$GAH_GATEWAY_LLM_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env_file" TDAI_LLM_API_KEY
+        echo "Wrote the given generation API key to $gateway_env_file"
+      elif [[ "$gateway_provider_changes" == *llm-endpoint-changed* ]] && "${gah_cli[@]}" installer env-has --file "$gateway_env_file" TDAI_LLM_API_KEY >/dev/null 2>&1; then
+        printf '%s' "" | "${gah_cli[@]}" installer env-set --file "$gateway_env_file" TDAI_LLM_API_KEY
+        echo "Cleared the stored generation API key because the endpoint changed"
       fi
       if [ -n "${GAH_GATEWAY_EMBEDDING_API_KEY:-}" ]; then
-        printf "%s" "$GAH_GATEWAY_EMBEDDING_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_EMBEDDING_API_KEY
-      elif [ "$embed_changed" = "1" ]; then
-        printf "" | "${gah_cli[@]}" installer env-set --file "$gateway_env" TDAI_EMBEDDING_API_KEY
+        printf '%s' "$GAH_GATEWAY_EMBEDDING_API_KEY" | "${gah_cli[@]}" installer env-set --file "$gateway_env_file" TDAI_EMBEDDING_API_KEY
+        echo "Wrote the given embedding API key to $gateway_env_file"
+      elif [[ "$gateway_provider_changes" == *embedding-endpoint-changed* ]] && "${gah_cli[@]}" installer env-has --file "$gateway_env_file" TDAI_EMBEDDING_API_KEY >/dev/null 2>&1; then
+        printf '%s' "" | "${gah_cli[@]}" installer env-set --file "$gateway_env_file" TDAI_EMBEDDING_API_KEY
+        echo "Cleared the stored embedding API key because the endpoint changed"
       fi
-      chmod 0600 "$gateway_env"
+      chmod 0600 "$gateway_env_file"
+      export GAH_MACOS_GATEWAY_URL=http://127.0.0.1:8420
       # gateway-env-setup:end
       ;;
     remote)
@@ -207,7 +156,7 @@ if [ "$role" = central ] && [ "${GAH_GATEWAY_MODE:-}" = colocated ]; then
   [ "$gateway_ready" = 1 ] || { echo 'ERROR: the macOS memory-gateway LaunchAgent did not become healthy. Read ~/.local/state/gah/memory-gateway.log.' >&2; exit 1; }
 
   if [ -n "${GAH_GATEWAY_PROVIDER:-}" ]; then
-    curl -fsS http://127.0.0.1:8420/health | grep -q '"embeddingService":true' || { echo 'ERROR: Gateway started but embedding service is disabled. Check that a valid embedding API key is provided and stored.' >&2; exit 1; }
+    curl -fsS http://127.0.0.1:8420/health | grep -q '"embeddingService":true' || { echo 'ERROR: the gateway started with embedding disabled, so its provider configuration is incomplete. Read ~/.local/state/gah/memory-gateway.log.' >&2; exit 1; }
   fi
 fi
 
