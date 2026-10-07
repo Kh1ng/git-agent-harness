@@ -136,6 +136,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const refreshOnConnectRef = useRef(false);
   const nextMessageIdRef = useRef(0);
   const activityIdsRef = useRef(new Set<string>());
+  const activityCursorRef = useRef<string | null>(null);
 
   const activityProfile = profileOverride ?? profile ?? 'gah';
   const [activityRevision, setActivityRevision] = useState(0);
@@ -146,10 +147,9 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     setActivitySyncedAt(null);
     setActivityCursor(null);
   }, [profileOverride]);
-  useEffect(() => {
-    if (!activityCursor) return;
-    try { window.localStorage.setItem(`gah.activity.cursor.${profileOverride ?? 'gah'}`, activityCursor); } catch { /* Memory de-duplication still applies. */ }
-  }, [activityCursor, profileOverride]);
+  // The cursor lives only as long as the events before it: a reconnect resumes
+  // after it, a page load starts empty and asks for the bounded tail.
+  useEffect(() => { activityCursorRef.current = activityCursor; }, [activityCursor]);
   useEffect(() => {
     let cancelled = false;
     const refreshActivity = async () => {
@@ -192,13 +192,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
         refreshOnConnectRef.current = true;
 
-        let activityCursor: string | undefined;
-        try { activityCursor = window.localStorage.getItem(`gah.activity.cursor.${profileOverride ?? 'gah'}`) ?? undefined; } catch { /* Replay safely falls back to the bounded tail. */ }
         newSocket.send(JSON.stringify({
           type: 'client.hello' as const,
           clientVersion: '0.1.0',
           profile: profileOverride ?? undefined,
-          activityCursor,
+          activityCursor: activityCursorRef.current ?? undefined,
           capabilities: {
             supportsTerminal: true,
             supportsNotifications: true,
