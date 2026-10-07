@@ -16,8 +16,10 @@ const IMPLEMENTATION_MODES = new Set(['fix', 'improve']);
 
 /** `#123`, `123` or `TICKET-123` as `#123`; anything else is not an issue. */
 export function issueWorkId(target: string | undefined): string | null {
-  const match = target?.trim().match(/^(?:#|ticket-)?0*(\d+)$/i);
-  return match ? `#${Number.parseInt(match[1], 10)}` : null;
+  const trimmed = target?.trim().toLowerCase() ?? '';
+  const digits = trimmed.startsWith('#') ? trimmed.slice(1) : trimmed.startsWith('ticket-') ? trimmed.slice('ticket-'.length) : trimmed;
+  if (digits.length === 0 || digits.length > 12 || !/^\d+$/.test(digits)) return null;
+  return `#${Number.parseInt(digits, 10)}`;
 }
 
 /** Why `workId` may not be started here, from the status snapshot; null when it may. */
