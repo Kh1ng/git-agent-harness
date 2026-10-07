@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { previewProxy, detectDevPort } from './previewProxy.js';
+import express from 'express';
+import { previewProxy, detectDevPort, PreviewTargetRefusedError } from './previewProxy.js';
+import { authMiddleware } from '../authMiddleware.js';
 
 /** A fake dev server that records the Host header it was served with. */
 async function fakeDevServer(handler: http.RequestListener): Promise<{ server: http.Server; port: number; close: () => Promise<void> }> {
@@ -102,4 +104,34 @@ test('preview proxy re-points a session to a new dev port (stable URL) and repor
     await first.close();
     await second.close();
   }
+});
+
+test('a preview never inherits the control plane\'s loopback owner trust', async () => {
+  // The proxy connects upstream from loopback with Host rewritten to
+  // localhost. Without a forwarding marker, authMiddleware would treat a
+  // remote preview visitor as the local owner.
+  previewProxy.configure({ basePort: 44_900, maxPort: 44_949, advertiseHost: '127.0.0.1', bindHost: '127.0.0.1', protectedPorts: [] });
+  const app = express();
+  app.use(authMiddleware);
+  app.get('/api/whoami', (_req, res) => { res.json({ principal: res.locals.authPrincipal }); });
+  const api = http.createServer(app);
+  await new Promise<void>((done) => api.listen(0, '127.0.0.1', done));
+  const apiPort = (api.address() as AddressInfo).port;
+  try {
+    const direct = await fetchUrl(`http://127.0.0.1:${apiPort}/api/whoami`);
+    assert.equal(direct.status, 200, 'a direct loopback request is the local owner');
+    const preview = await previewProxy.set('p', 'trust', apiPort);
+    const proxied = await fetchUrl(`${preview.url}/api/whoami`);
+    assert.notEqual(proxied.status, 200, 'a request through the preview port must not be the owner');
+  } finally {
+    await previewProxy.clear('p', 'trust');
+    await new Promise<void>((done) => api.close(() => done()));
+  }
+});
+
+test('a preview refuses the control-plane port and its own listener range', async () => {
+  previewProxy.configure({ basePort: 44_900, maxPort: 44_949, advertiseHost: '127.0.0.1', protectedPorts: [3773] });
+  await assert.rejects(previewProxy.set('p', 'cp', 3773), PreviewTargetRefusedError);
+  await assert.rejects(previewProxy.set('p', 'loop', 44_910), PreviewTargetRefusedError);
+  assert.equal(previewProxy.get('p', 'cp'), null);
 });
